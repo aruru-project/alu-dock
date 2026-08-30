@@ -64,7 +64,9 @@ npm run package:windows
 
 产物位于 `dist/AluDock-<version>-windows-x86_64.zip`。组装脚本读取 [`windows-runtime.json`](windows-runtime.json) 固定 Node/npm release 与 checksum，构建 `x86_64-pc-windows-msvc` Desktop，安装 Dock production tree 与 bundled Pi，复制 DLL sidecars，并使用 `dumpbin.exe` 检查随包 PE 架构及依赖后才写 ZIP。也可通过 `ALUDOCK_WINDOWS_NODE_ARCHIVE` 指定已经下载的同一 checksum archive；它不会放宽固定版本。
 
-最终用户完整解压后运行一次 `Setup.cmd`；唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常入口是其中的 `AluDock.exe`，随包 TUI/CLI 是 `aludock.cmd`。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**停止 Alu Dock** 在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
+最终用户完整解压后运行一次 `Setup.cmd`；唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常 Desktop 入口同时登记到 Start Menu，TUI/CLI 可在新终端直接运行 `aludock`。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**停止 Alu Dock** 在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
+
+Windows Apps 和安装目录中的 `Uninstall.cmd` 只移除应用包、Host setup、登录启动、Start Menu 与全局 launcher；Dock/Pi 配置、身份、凭据和 Session 一律保留。Windows checkout 的 `npm run install:local` 构建同一个 ZIP 并调用同一个 Setup，不创建第二套开发安装布局。
 
 普通开发仍可运行：
 

@@ -105,7 +105,7 @@ npm run client:package:linux   # x86_64 Linux
 npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 包固定携带 Node/npm、Dock 与 bundled Pi；完整解压后运行一次 `Setup.cmd`，之后日常入口是 `%LOCALAPPDATA%\Alu Dock\app\AluDock.exe`。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 包固定携带 Node/npm、Dock 与 bundled Pi；完整解压后运行一次 `Setup.cmd`，之后从 Start Menu 打开 Desktop，或在新终端运行全局 `aludock`。Windows Apps 中的卸载入口只移除程序和系统集成，保留 Dock/Pi 状态。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 

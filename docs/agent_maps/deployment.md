@@ -2,7 +2,7 @@
 
 ## 这部分负责什么
 
-Linux 安装形态使用长期 `systemd --user` Host Service。Windows 官方发行包使用随包 Node 在当前用户 session 中启动隐藏、detached 的同一个 Host；Tauri Desktop 只负责窗口、托盘、单实例与可选登录启动，私有 lifecycle pipe 仍是 CLI、Desktop 与一次性 `Setup.cmd` 共用的唯一 start/stop/ready authority。Windows 不创建 Windows Service 或 Scheduled Task，也不依赖长期 PowerShell/cmd 窗口。`install:local` 只服务 Linux checkout 安装；Windows 安装和更新只走官方 ZIP 的 `Setup.cmd`。每个 active instance 的 Agent runtime 仍运行在独立 Worker 进程中。
+Linux 安装形态使用长期 `systemd --user` Host Service。Windows 官方发行包使用随包 Node 在当前用户 session 中启动隐藏、detached 的同一个 Host；Tauri Desktop 只负责窗口、托盘、单实例与可选登录启动，私有 lifecycle pipe 仍是 CLI、Desktop 与一次性 `Setup.cmd` 共用的唯一 start/stop/ready authority。Windows 不创建 Windows Service 或 Scheduled Task，也不依赖长期 PowerShell/cmd 窗口。拿到 ZIP 的用户运行 `Setup.cmd`；Windows checkout 的 `install:local` 构建同一个 ZIP 并调用同一 Setup 流程，不产生第二套安装布局或 Host 生命周期。每个 active instance 的 Agent runtime 仍运行在独立 Worker 进程中。
 
 ```text
 systemd --user / hidden Windows user-session Host
@@ -106,7 +106,7 @@ aludock service uninstall
 
 ## 本地安装与 Windows 发行
 
-Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 发行由 `package:windows` 固定组装 `AluDock.exe`、Node/npm、Dock、bundled Pi、DLL sidecars、`aludock.cmd` 与一次性 `Setup.cmd`；Setup 把唯一安装目录切换到 `%LOCALAPPDATA%\Alu Dock\app`，不调用系统 Node/npm/Pi，也不保留 checkout installer 或旧 PowerShell launcher 作为第二条稳态路径。安装与测试是两件事；安装器和包组装 gate 不替代真实 Windows 验收。
+Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 发行由 `package:windows` 固定组装 `AluDock.exe`、Node/npm、Dock、bundled Pi、DLL sidecars、`aludock.cmd`、`Setup.cmd` 与 `Uninstall.cmd`；Setup 把唯一安装目录切换到 `%LOCALAPPDATA%\Alu Dock\app`，并维护 Start Menu、Windows Apps 卸载项和用户 PATH 中的全局 `aludock` launcher。卸载只移除安装包及这些系统集成，不删除 Dock 或 Pi 的配置、身份、凭据和 Session。Setup 运行时不调用系统 Node/npm/Pi；checkout `install:local` 使用开发机工具链构建同一个自包含包，再进入 Setup。两者都不保留旧 PowerShell launcher 作为第二条稳态路径。安装与测试是两件事；安装器和包组装 gate 不替代真实 Windows 验收。
 
 存在未完成 run、Queue、interaction 或 stopping instance 时，Linux 更新和 Windows stop/update 默认拒绝。Windows Desktop 的 X 只隐藏窗口，`Exit Desktop` 只退出 GUI，只有独立的 `Stop Alu Dock` 会请求 Host 正常停止；关闭或更新 GUI 不停止 Host 或 Work。
 
@@ -115,8 +115,8 @@ Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user
 ## 代码范围
 
 - `src/deployment/`：安装布局和 user service 管理。
-- `scripts/install-local.ts`：Linux checkout 本地打包、更新与 ready 验证入口。
-- `clients/official/scripts/package-windows.mjs`、`windows-runtime.json`：Windows x64 固定 runtime、统一发行目录、架构/DLL 检查与 ZIP 组装。
+- `scripts/install-local.ts`：Linux checkout 本地包更新入口；Windows checkout 构建官方 ZIP 并进入同一 Setup 流程。
+- `clients/official/scripts/package-windows.mjs`、`windows-package.ps1`、`windows-runtime.json`：Windows x64 固定 runtime、统一发行目录、安装/卸载、架构/DLL 检查与 ZIP 组装。
 - `src/deployment/windows-host-lifecycle.ts`、`windows-user-host.ts`：Windows 用户 session 隐藏 Host、持久日志与私有生命周期；不承载 Dock 客户端协议。
 - `clients/official/src-tauri/src/desktop_shell.rs`：Windows Desktop bootstrap、tray、single-instance 与 login startup；不复制 Host/Worker/Catalog 语义。
 - `src/control/dock-host.ts`：Host socket 与 shutdown。

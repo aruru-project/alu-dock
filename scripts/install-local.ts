@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -21,12 +21,12 @@ async function main(): Promise<void> {
   if (process.env.ALU_DOCK_MANAGED === "1") {
     throw new Error("Leave Work with Ctrl+D, then run `npm run install:local` from the shell.");
   }
-  if (process.platform === "win32") {
-    throw new Error("Install or update Alu Dock on Windows with Setup.cmd from the Windows package.");
-  }
-
   const options = parseLocalInstallArguments(process.argv.slice(2));
   const projectRoot = resolve(process.cwd());
+  if (process.platform === "win32") {
+    await installWindowsPackage(projectRoot, options.replaceActive);
+    return;
+  }
   await requireInstallAllowed(options.replaceActive);
 
   const home = resolve(homedir());
@@ -55,6 +55,30 @@ async function main(): Promise<void> {
     const service = run(process.execPath, [layout.cliPath, "service", "install", "--now", "--json"], projectRoot);
     parseServiceStatus(service.stdout);
     process.stdout.write("Alu Dock is installed and ready. Run `aludock` to open the Hub.\n");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function installWindowsPackage(projectRoot: string, replaceActive: boolean): Promise<void> {
+  if (replaceActive) {
+    throw new Error("Windows installation waits for active Work to finish. Stop or finish that work, then run `npm run install:local` again.");
+  }
+  await requireInstallAllowed(false);
+  const temporary = await mkdtemp(join(tmpdir(), "alu-dock-windows-install-"));
+  try {
+    const archive = join(temporary, "AluDock-windows-x86_64.zip");
+    process.stdout.write("Building the Windows package…\n");
+    runNpmInteractive(["run", "package:windows"], projectRoot, { ALUDOCK_WINDOWS_OUTPUT: archive });
+
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+    if (!systemRoot || !isAbsolute(systemRoot)) throw new Error("Windows did not provide its system directory.");
+    runInteractive(join(systemRoot, "System32", "tar.exe"), ["-x", "-f", archive, "-C", temporary], projectRoot);
+    const releaseDirectories = (await readdir(temporary, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+    if (releaseDirectories.length !== 1) throw new Error("The Windows package did not contain one release directory.");
+    const setup = join(temporary, releaseDirectories[0]!.name, "Setup.cmd");
+    process.stdout.write("Installing the Windows package…\n");
+    runInteractive(join(systemRoot, "System32", "cmd.exe"), ["/D", "/S", "/C", `call "${setup}"`], projectRoot);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -127,6 +151,19 @@ function runNpm(args: string[], cwd: string): CommandResult {
   return npmCli && isAbsolute(npmCli)
     ? run(process.execPath, [npmCli, ...args], cwd)
     : run("npm", args, cwd);
+}
+
+function runNpmInteractive(args: string[], cwd: string, additions: NodeJS.ProcessEnv = {}): void {
+  const npmCli = process.env.npm_execpath;
+  const environment = { ...process.env, ...additions };
+  if (npmCli && isAbsolute(npmCli)) runInteractive(process.execPath, [npmCli, ...args], cwd, environment);
+  else runInteractive("npm", args, cwd, environment);
+}
+
+function runInteractive(executable: string, args: string[], cwd: string, environment: NodeJS.ProcessEnv = process.env): void {
+  const result = spawnSync(executable, args, { cwd, stdio: "inherit", env: environment });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`${executable} did not finish successfully (${result.status ?? 1}).`);
 }
 
 function run(executable: string, args: string[], cwd: string): CommandResult {

@@ -60,8 +60,9 @@ validateRuntimeManifest(runtimeManifest);
 const target = runtimeManifest.target;
 const systemTar = windowsSystemExecutable("tar.exe");
 const releaseName = `AluDock-${version}-windows-x86_64`;
-const outputDirectory = join(clientRoot, "dist");
-const output = join(outputDirectory, `${releaseName}.zip`);
+const defaultOutputDirectory = join(clientRoot, "dist");
+const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
+const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}.zip`);
 const temporary = mkdtempSync(join(tmpdir(), "aludock-windows-package-"));
 const releaseRoot = join(temporary, releaseName);
 
@@ -80,8 +81,12 @@ try {
   copyDesktop(releaseRoot, target);
   pruneNonTargetNativePrebuilds(releaseRoot);
   copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(releaseRoot, "LICENSE-APACHE"));
+  const supportRoot = join(releaseRoot, "support");
+  mkdirSync(supportRoot, { recursive: true });
+  copyFileSync(join(clientRoot, "scripts", "windows-package.ps1"), join(supportRoot, "windows-package.ps1"));
   writeFileSync(join(releaseRoot, "aludock.cmd"), renderLauncher(), "utf8");
   writeFileSync(join(releaseRoot, "Setup.cmd"), renderSetup(), "utf8");
+  writeFileSync(join(releaseRoot, "Uninstall.cmd"), renderUninstall(), "utf8");
   writeFileSync(join(releaseRoot, "release-manifest.json"), `${JSON.stringify({
     schemaVersion: 1,
     productVersion: version,
@@ -93,10 +98,10 @@ try {
   }, null, 2)}\n`, "utf8");
 
   inspectRelease(releaseRoot);
-  mkdirSync(outputDirectory, { recursive: true });
+  mkdirSync(dirname(output), { recursive: true });
   rmSync(output, { force: true });
   run(systemTar, ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
-  const requiredFiles = ["AluDock.exe", "Setup.cmd", "aludock.cmd", "runtime/node.exe", "runtime/npm.cmd", "dock/dist/src/cli.js"];
+  const requiredFiles = ["AluDock.exe", "Setup.cmd", "Uninstall.cmd", "aludock.cmd", "runtime/node.exe", "runtime/npm.cmd", "dock/dist/src/cli.js", "support/windows-package.ps1"];
   const requiredPaths = requiredFiles.map((path) => `${releaseName}/${path}`);
   const listing = run(systemTar, ["-t", "-f", output, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/");
   const listedPaths = new Set(listing.split(/\r?\n/u).map((path) => path.trim()).filter(Boolean));
@@ -267,28 +272,23 @@ function renderLauncher() {
 function renderSetup() {
   return `@ECHO OFF\r
 @SETLOCAL\r
-@SET "SOURCE=%~dp0"\r
 @IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& EXIT /B 1)\r
-@SET "DEST=%LOCALAPPDATA%\\Alu Dock\\app"\r
-@SET "NEXT=%LOCALAPPDATA%\\Alu Dock\\app.next"\r
-@SET "PREVIOUS=%LOCALAPPDATA%\\Alu Dock\\app.previous"\r
-@CALL "%SOURCE%aludock.cmd" service stop --json >NUL\r
-@IF ERRORLEVEL 1 (ECHO Finish or stop active Work, then run Setup.cmd again.& EXIT /B 1)\r
-@IF /I "%SOURCE%"=="%DEST%\\" GOTO INSTALL\r
-@IF EXIST "%NEXT%" RMDIR /S /Q "%NEXT%"\r
-@MKDIR "%NEXT%"\r
-@ROBOCOPY "%SOURCE%" "%NEXT%" /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >NUL\r
-@IF ERRORLEVEL 8 (ECHO Alu Dock could not copy the package. Keep the extracted files and try again.& EXIT /B 1)\r
-@IF EXIST "%PREVIOUS%" RMDIR /S /Q "%PREVIOUS%"\r
-@IF EXIST "%DEST%" (MOVE "%DEST%" "%PREVIOUS%" >NUL& IF ERRORLEVEL 1 (ECHO Exit the existing Desktop, then run Setup.cmd again.& EXIT /B 1))\r
-@MOVE "%NEXT%" "%DEST%" >NUL\r
-@IF ERRORLEVEL 1 (IF EXIST "%PREVIOUS%" MOVE "%PREVIOUS%" "%DEST%" >NUL& ECHO Alu Dock could not activate the new package. Try again.& EXIT /B 1)\r
-:INSTALL\r
-@CALL "%DEST%\\aludock.cmd" service install --now --json >NUL\r
-@IF ERRORLEVEL 1 (ECHO Alu Dock was copied, but it did not finish starting. Open the Host log and try again.& EXIT /B 1)\r
-@START "" "%DEST%\\AluDock.exe"\r
-@ECHO Alu Dock is ready.\r
-@EXIT /B 0\r
+@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0support\\windows-package.ps1" -Action Install -Source "%~dp0"\r
+@EXIT /B %ERRORLEVEL%\r
+`;
+}
+
+function renderUninstall() {
+  return `@ECHO OFF\r
+@SETLOCAL\r
+@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& EXIT /B 1)\r
+@SET "SCRIPT=%TEMP%\\AluDock-Uninstall-%RANDOM%-%RANDOM%.ps1"\r
+@COPY /Y "%~dp0support\\windows-package.ps1" "%SCRIPT%" >NUL\r
+@IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& EXIT /B 1)\r
+@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%" -Action Uninstall -InstallRoot "%~dp0"\r
+@SET "RESULT=%ERRORLEVEL%"\r
+@IF NOT "%RESULT%"=="0" DEL /F /Q "%SCRIPT%" >NUL 2>NUL\r
+@EXIT /B %RESULT%\r
 `;
 }
 
