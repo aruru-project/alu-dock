@@ -8,6 +8,15 @@ export interface ClientPreferences {
   windowsAwaySupported: boolean
 }
 
+export interface DesktopShellStatus {
+  supported: boolean
+  hostReady: boolean
+  role?: 'main' | 'subhost'
+  startupError?: string
+  logsPath?: string
+  loginStartEnabled: boolean
+}
+
 export interface ModelIdentity {
   provider: string
   id: string

@@ -52,6 +52,8 @@ export interface UserServiceStatus {
   mainPid: number;
   ready: boolean;
   hostEpoch?: string;
+  role?: "main" | "subhost";
+  logsPath?: string;
   linger: "yes" | "no" | "unknown";
   diagnostics: string[];
 }

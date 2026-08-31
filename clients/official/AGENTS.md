@@ -52,9 +52,9 @@ Do not put SDK, NDK, or JDK installation paths in tracked files or documentation
 
 ## Local signing materials
 
-- `.release-secrets/android/` is ignored, owner-provisioned local storage. Its files and values are opaque credentials, not Agent context.
-- Never read, print, parse, grep, hash, diff, copy, upload, attach, or source their contents. Safe inspection is limited to filenames, existence, ownership/mode, and Git ignore/tracking status. Keep the files mode `0600`; do not move, replace, or delete them without explicit owner authorization.
-- Explicit authorization to create a locally signed Android test package means using `corepack pnpm android stg` as the opaque credential consumer. It does not authorize exposing values, adding credential logging, substituting an ad-hoc signing command, changing tags, or publishing a release.
+- `.release-secrets/android/` is ignored, owner-provisioned local storage. Its files and values are opaque credentials, not Agent context. The signing environment is fixed at `.release-secrets/android/signing.env`.
+- Never inspect, print, parse, grep, hash, diff, copy, upload, or attach credential contents. Safe inspection is limited to filenames, existence, ownership/mode, and Git ignore/tracking status. Keep the files mode `0600`; do not move, replace, or delete them without explicit owner authorization.
+- Explicit authorization to create a locally signed Android test package permits sourcing `signing.env` without output into the same short-lived subshell that runs `corepack pnpm android stg`. Do not source it into a long-lived interactive shell. The authorization does not permit exposing values, adding credential logging, substituting an ad-hoc signing command, changing tags, or publishing a release.
 
 ## Windows artifact delivery
 

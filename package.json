@@ -23,8 +23,6 @@
     "test:sdk-upgrade": "npm run build && node --test dist/test/pi-sdk-compat/**/*.compat.js",
     "cli": "npm run build && node dist/src/cli.js",
     "serve": "npm run build && ALU_DOCK_SOCKET=${ALU_DOCK_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.alu-dock/run}/alu-dock-dev.sock} node dist/src/cli.js serve --dev",
-    "host:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-AluDockHost.ps1",
-    "open:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Open-AluDock.ps1",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
     "bench:tui": "npm run build && node --expose-gc dist/scripts/tui-render-benchmark.js",
     "client:install": "cd clients/official && corepack pnpm install --frozen-lockfile",
@@ -32,6 +30,7 @@
     "client:build": "cd clients/official && corepack pnpm build",
     "client:test": "cd clients/official && corepack pnpm test",
     "client:package:linux": "cd clients/official && corepack pnpm package:linux",
+    "package:windows": "cd clients/official && corepack pnpm package:windows",
     "prepack": "npm run build",
     "install:local": "npm run build && node dist/scripts/install-local.js"
   },

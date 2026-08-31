@@ -1,6 +1,6 @@
 # 本地安装与服务
 
-Alu Dock 使用同一个本机 npm 安装入口。Linux 由 `systemd --user` 托管安装后的 Host；Windows 在当前用户 session 中打开一个长期 Host 窗口，不创建 Windows Service、Scheduled Task 或开机启动。
+Linux checkout 使用 npm 本地安装入口，并由 `systemd --user` 托管 Host。Windows 使用官方 x64 ZIP 与一次性 `Setup.cmd`，由随包 Node 在当前用户 session 中运行隐藏 Host；Windows checkout 的同名 npm 本地安装入口先生成该 ZIP，再调用同一 Setup。Desktop 提供托盘与可选登录启动，不创建 Windows Service、Scheduled Task 或长期终端窗口。
 
 ## 位置
 
@@ -16,7 +16,7 @@ Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PA
 
 Attachment directory 设置保存在同一 private state 下的 `attachment-storage.json`。默认 bytes 位于 `~/.local/share/alu-dock/attachments/`（或 `$XDG_DATA_HOME/alu-dock/attachments/`），也可以在本机 Hub Settings 改为其他绝对永久路径。备份或迁移必须整体保存 `files/` 和 hidden `.alu-dock/` manifests；只备份其中一边会使 opaque `fileId` 无法恢复。Successful attachments 不随 update、service uninstall/restart、catalog forget/prune、remote disable 或 device revocation 删除。
 
-## 安装或更新
+## Linux 安装或更新
 
 从要安装的工作区执行：
 
@@ -79,51 +79,53 @@ aludock list --all
 
 未经明确授权，不执行安装、替换 active Host 或 service restart。
 
-## Windows 本地安装
+## Windows 官方发行
 
-从要安装或更新的 checkout 执行与 Linux 相同的入口：
+在原生 x86_64 Windows 的 Visual Studio Developer terminal 中组装验收包：
 
 ```powershell
-npm run install:local
+npm run package:windows
 ```
 
-安装器检查未完成 Work，正常关闭正在运行的 Windows Host，安装当前 checkout，打开新的 `Alu Dock Host` 窗口并等待 Named Pipe ready。成功返回后，稳定入口位于当前用户 npm 命令目录，直接运行：
+脚本固定下载并校验 `windows-runtime.json` 声明的 Node/npm，构建 MSVC Tauri Desktop，安装 Dock production dependencies（其中包含 bundled Pi），检查所有随包 PE 文件的 x64 架构和非系统 DLL 依赖，再生成：
+
+```text
+clients/official/dist/AluDock-<version>-windows-x86_64.zip
+```
+
+最终用户完整解压 ZIP 后运行一次 `Setup.cmd`。Setup 正常停止旧 Host、拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready：
+
+```text
+%LOCALAPPDATA%\Alu Dock\app\AluDock.exe
+%LOCALAPPDATA%\Alu Dock\app\aludock.cmd
+%LOCALAPPDATA%\Alu Dock\app\Uninstall.cmd
+%LOCALAPPDATA%\Alu Dock\app\runtime\node.exe
+%LOCALAPPDATA%\Alu Dock\app\dock\
+%LOCALAPPDATA%\Alu Dock\bin\aludock.cmd
+%LOCALAPPDATA%\Alu Dock\logs\host.log
+```
+
+Setup 不需要管理员权限、系统 Node/npm 或系统 Pi。它维护 Start Menu 中的 Desktop 入口、Windows Apps 中的卸载项，以及由 `%LOCALAPPDATA%\Alu Dock\bin` 提供的全局 `aludock` 命令；旧 npm local-install launcher 只在确认由 Alu Dock 生成后才会移除。若旧 Desktop 仍占用安装目录，Setup 会要求先从托盘选择 **退出 Desktop** 后重试；它不会为了更新强杀 GUI 或 active Work。当前包不签名、不发布、不自动更新。
+
+完成 Setup 后，`AluDock.exe` 是日常 Desktop 入口。它使用同一 Windows lifecycle authority 确保隐藏 Host ready，然后通过 `\\.\pipe\alu-dock` 连接 Protocol V2；首次无既有 Client 选择的 Main 会自动选择本机，不走设备配对。重复启动唤起已有 Desktop，不创建第二个 Host。
+
+- X 隐藏 Desktop 到托盘；Host、Worker 和 Work 不停止。
+- **退出 Desktop** 只退出 GUI。
+- **停止 Alu Dock** 单独请求 Host 正常停止，active Work 存在时拒绝。
+- **随 Windows 登录启动** 默认关闭；启用后以 `--background` 静默进入托盘并确保 Host ready。
+- **打开终端设置** 启动随包 `aludock.cmd`；Main/SubHost 角色及连接继续由同一个 TUI Settings 和 Host private state 管理。
+- Host 启动或停止失败时 Desktop 显示可执行的恢复提示；托盘和界面都可以打开持久 Host log。
+
+新开的 PowerShell 或 cmd 可以直接进入同一个 TUI 或 service authority：
 
 ```powershell
 aludock
+aludock service status
+aludock service logs --lines 200
 ```
 
-Host 窗口在 RDP disconnect 后继续运行；Windows logoff 或重启会结束它。再次登录后运行 `aludock service start`，或在前台运行 `aludock host`。`aludock service stop/restart/status` 使用同一用户 session Host lifecycle，不创建 Windows 后台服务。更新不删除 `%LOCALAPPDATA%\Alu Dock\` 中的 catalog、Machine 设置、enrollment、session 或 attachments。
+Windows logoff 或重启会结束当前用户 Host；启用登录启动后，下一次登录由 Desktop 恢复。更新不删除 `%LOCALAPPDATA%\Alu Dock\` 中的 catalog、Machine 设置、enrollment、attachments、Host identity/trust 或日志，也不改变 Pi 原生配置和 Session 位置。
 
-## Windows 源码临时运行
+从 Windows Apps 或安装目录运行 `Uninstall.cmd` 会先要求退出 Desktop，并在 active Work 存在时拒绝停止 Host；随后移除应用目录、上一版本、登录启动、Start Menu、卸载登记和全局 `aludock` launcher。它保留上述 Dock 状态和全部 Pi 原生状态，之后重新安装可继续使用。
 
-需要直接验证当前 checkout 而不安装时，继续使用两个 PowerShell 窗口。第一个窗口启动并保持源码 Host；`Ctrl+C` 进入正常关闭：
-
-```powershell
-npm ci
-npm run host:windows
-# 或直接运行 .\scripts\Start-AluDockHost.ps1
-```
-
-第二个窗口按需打开人使用的界面；离开界面不会停止第一个窗口中的 Host：
-
-```powershell
-npm run open:windows
-# 或直接运行 .\scripts\Open-AluDock.ps1
-```
-
-Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` 不重复构建或启动 Host；首次使用时先运行源码 Host 入口。这两个脚本只属于临时源码运行，不是 `install:local` 的安装产物。
-
-默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。本地 Named Pipe 不使用远程设备配对。
-
-没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。Main Hub 的 Machines 可以实时打开或关闭连接、选择端口、保存一次供新 SubHost 使用的 Main 地址并创建 join file。地址只在第一次连接 SubHost 时输入，端口直接使用 Machines 当前设置；两者随 join file 交给另一台电脑。
-
-角色只由保存的 Settings 决定，没有进程级角色覆盖。将 Windows 配置为 SubHost 时，在人的界面中选择 Settings → Dock role，导入 Main 创建的 join file，然后确认系统机器名和文件中携带的 Main 连接。只有明确选择 Edit Details 才需要修改地址、端口或名称。界面会同时保存待完成的 enrollment 和下次启动角色；按照确认页提示，在十分钟有效期内停止当前 Main，并直接使用普通无参数入口：
-
-```powershell
-.\scripts\Start-AluDockHost.ps1
-```
-
-切回 Main 不会删除原来的 Main enrollment 或连接资料；以后再次选择同一个 SubHost 角色只需确认 Use Saved Connection。只有选择 Connect to a Different Main 才需要新的 join file。
-
-Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前范围不包括 Windows Service、Scheduled Task、开机启动、独立安装包和自动更新。
+源码调试仍可显式运行 `node dist/src/cli.js host` 与 Tauri dev，但它们不定义正式 Windows 生命周期。Windows checkout 中的 `npm run install:local` 会构建当前官方 ZIP、解压到临时目录并调用其中的 Setup，因此与最终用户安装保持同一布局和生命周期。Windows Remote Access 继续使用普通 TLS 设备配对；它与免配对本机 Named Pipe 是两个入口。

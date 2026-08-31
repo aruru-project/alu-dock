@@ -12,6 +12,8 @@ export interface WindowsHostLifecycleStatus {
   blockingWork: number;
 }
 
+export type WindowsHostLifecycleStopResult = WindowsHostLifecycleStatus & { stopAccepted: boolean };
+
 export interface WindowsHostLifecycleServerOptions {
   platform?: NodeJS.Platform;
   endpoint?: string;
@@ -19,7 +21,12 @@ export interface WindowsHostLifecycleServerOptions {
 
 export class WindowsHostLifecycleServer {
   private readonly server: Server;
-  private ready: { hostEpoch: string; role: "main" | "subhost"; blockingWork: () => number } | undefined;
+  private ready: {
+    hostEpoch: string;
+    role: "main" | "subhost";
+    blockingWork: () => number;
+    beginStop: () => void;
+  } | undefined;
   private readonly stopPromise: Promise<void>;
   private requestStop!: () => void;
 
@@ -39,8 +46,8 @@ export class WindowsHostLifecycleServer {
     });
   }
 
-  markReady(hostEpoch: string, role: "main" | "subhost", blockingWork: () => number): void {
-    this.ready = { hostEpoch, role, blockingWork };
+  markReady(hostEpoch: string, role: "main" | "subhost", blockingWork: () => number, beginStop: () => void): void {
+    this.ready = { hostEpoch, role, blockingWork, beginStop };
   }
 
   waitForStop(): Promise<void> { return this.stopPromise; }
@@ -62,12 +69,18 @@ export class WindowsHostLifecycleServer {
       if (newline !== bytes.length - 1) { fail(); return; }
       try {
         const request = parseRequest(JSON.parse(bytes.subarray(0, newline).toString("utf8")) as unknown);
-        if (request === "stop") this.requestStop();
-        const response: WindowsHostLifecycleStatus = {
+        const blockingWork = this.ready?.blockingWork() ?? 0;
+        const stopAccepted = request === "stop" ? blockingWork === 0 : undefined;
+        if (stopAccepted) {
+          this.ready?.beginStop();
+          this.requestStop();
+        }
+        const response = {
           ready: this.ready !== undefined,
           pid: process.pid,
-          blockingWork: this.ready?.blockingWork() ?? 0,
+          blockingWork,
           ...(this.ready === undefined ? {} : { hostEpoch: this.ready.hostEpoch, role: this.ready.role }),
+          ...(stopAccepted === undefined ? {} : { stopAccepted }),
         };
         socket.end(`${JSON.stringify(response)}\n`);
       } catch { fail(); }
@@ -85,8 +98,8 @@ export async function readWindowsHostLifecycleStatus(timeoutMs = LIFECYCLE_TIMEO
   }
 }
 
-export async function requestWindowsHostStop(timeoutMs = LIFECYCLE_TIMEOUT_MS, endpoint = WINDOWS_HOST_LIFECYCLE_PIPE): Promise<WindowsHostLifecycleStatus | undefined> {
-  try { return await request("stop", timeoutMs, endpoint); }
+export async function requestWindowsHostStop(timeoutMs = LIFECYCLE_TIMEOUT_MS, endpoint = WINDOWS_HOST_LIFECYCLE_PIPE): Promise<WindowsHostLifecycleStopResult | undefined> {
+  try { return await request("stop", timeoutMs, endpoint) as WindowsHostLifecycleStopResult; }
   catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"].includes(code ?? "")) return undefined;
@@ -115,7 +128,7 @@ async function request(action: "status" | "stop", timeoutMs: number, endpoint: s
       const newline = bytes.indexOf(0x0a);
       if (newline < 0) return;
       if (newline !== bytes.length - 1) { finish(new Error("Windows Host lifecycle response has trailing data")); return; }
-      try { finish(undefined, parseStatus(JSON.parse(bytes.subarray(0, newline).toString("utf8")) as unknown)); }
+      try { finish(undefined, parseStatus(JSON.parse(bytes.subarray(0, newline).toString("utf8")) as unknown, action)); }
       catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
     });
     socket.once("error", (error) => finish(error));
@@ -128,11 +141,12 @@ function parseRequest(input: unknown): "status" | "stop" {
   return input.action;
 }
 
-function parseStatus(input: unknown): WindowsHostLifecycleStatus {
+function parseStatus(input: unknown, action: "status" | "stop"): WindowsHostLifecycleStatus | WindowsHostLifecycleStopResult {
   if (!isRecord(input)) throw new Error("Windows Host lifecycle response is invalid");
   const keys = Object.keys(input);
-  if (keys.some((key) => !["ready", "pid", "hostEpoch", "role", "blockingWork"].includes(key))) throw new Error("Windows Host lifecycle response is invalid");
+  if (keys.some((key) => !["ready", "pid", "hostEpoch", "role", "blockingWork", "stopAccepted"].includes(key))) throw new Error("Windows Host lifecycle response is invalid");
   if (typeof input.ready !== "boolean" || !Number.isSafeInteger(input.pid) || Number(input.pid) < 1 || !Number.isSafeInteger(input.blockingWork) || Number(input.blockingWork) < 0) throw new Error("Windows Host lifecycle response is invalid");
+  if ((action === "stop") !== (typeof input.stopAccepted === "boolean")) throw new Error("Windows Host lifecycle stop result is invalid");
   if (input.hostEpoch !== undefined && (typeof input.hostEpoch !== "string" || input.hostEpoch.length < 1 || input.hostEpoch.length > 128)) throw new Error("Windows Host lifecycle response is invalid");
   if (input.role !== undefined && input.role !== "main" && input.role !== "subhost") throw new Error("Windows Host lifecycle response is invalid");
   if (input.ready !== (input.hostEpoch !== undefined && input.role !== undefined)) throw new Error("Windows Host lifecycle readiness is inconsistent");
@@ -142,6 +156,7 @@ function parseStatus(input: unknown): WindowsHostLifecycleStatus {
     blockingWork: Number(input.blockingWork),
     ...(input.hostEpoch === undefined ? {} : { hostEpoch: input.hostEpoch }),
     ...(input.role === undefined ? {} : { role: input.role }),
+    ...(input.stopAccepted === undefined ? {} : { stopAccepted: input.stopAccepted }),
   };
 }
 

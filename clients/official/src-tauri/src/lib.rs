@@ -1,5 +1,6 @@
 #[cfg(target_os = "android")]
 mod android_documents;
+mod desktop_shell;
 
 #[cfg(any(target_os = "windows", test))]
 use std::time::Duration;
@@ -48,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
     Emitter, Manager,
-    ipc::{InvokeBody, Request, Response},
+    ipc::{Channel, InvokeBody, Request, Response},
 };
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_fs::{FsExt, OpenOptions as PluginOpenOptions};
@@ -59,6 +60,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Notify;
 
 const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
+const RENDER_IMAGE_IPC_CHUNK_BYTES: usize = 256 * 1_024;
 const WORKSPACE_LARGE_FILE_CONFIRM_BYTES: u64 = 10 * 1_024 * 1_024;
 #[cfg(target_os = "windows")]
 const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -1150,7 +1152,7 @@ impl RuntimeLifecycle {
 }
 
 impl ConnectionRuntimeState {
-    fn open(application_data_dir: Option<PathBuf>) -> Result<Self, ClientError> {
+    fn open(application_data_dir: Option<PathBuf>, prefer_local: bool) -> Result<Self, ClientError> {
         let registry = if let Some(path) = std::env::var_os("ALUDOCK_CLIENT_IDENTITY_DIR") {
             HostRegistry::open(PathBuf::from(path))?
         } else if let Some(path) = application_data_dir {
@@ -1160,7 +1162,10 @@ impl ConnectionRuntimeState {
         };
         let preferences = ClientPreferencesStore::open(registry.root().join("client-preferences"))?;
         let local_identity = IdentityStore::new(registry.root().join("local-client-identity"));
-        let snapshot = registry.snapshot()?;
+        let mut snapshot = registry.snapshot()?;
+        if prefer_local && snapshot.active_host_id.is_none() && !snapshot.local_selected && snapshot.hosts.is_empty() {
+            snapshot = registry.select_local(snapshot.revision)?;
+        }
         let active_target = if snapshot.local_selected {
             Some(ConnectionTarget::Local)
         } else {
@@ -2978,7 +2983,8 @@ async fn conversation_image(
     expected_host_epoch: String,
     content_ref: String,
     mime_type: String,
-) -> Result<Response, CommandError> {
+    on_chunk: Channel<Response>,
+) -> Result<usize, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let image = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .read_conversation_image(&instance_id, &content_ref, &mime_type)
@@ -2991,7 +2997,10 @@ async fn conversation_image(
         )));
     }
     validate_renderable_image(&image.bytes, Some(&mime_type))?;
-    Ok(Response::new(image.bytes))
+    send_render_image_chunks(&image.bytes, |chunk| {
+        on_chunk.send(Response::new(chunk.to_vec()))
+    })
+    .map_err(|_| image_error("image_transfer_failed", "图片传输中断，请重试。"))
 }
 
 #[tauri::command]
@@ -3003,7 +3012,8 @@ async fn published_image(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     file: PublishedFileDto,
-) -> Result<Response, CommandError> {
+    on_chunk: Channel<Response>,
+) -> Result<usize, CommandError> {
     if file.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
         return Err(image_error(
             "image_too_large",
@@ -3025,7 +3035,20 @@ async fn published_image(
         )));
     }
     validate_renderable_image(&image.bytes, file.media_type.as_deref())?;
-    Ok(Response::new(image.bytes))
+    send_render_image_chunks(&image.bytes, |chunk| {
+        on_chunk.send(Response::new(chunk.to_vec()))
+    })
+    .map_err(|_| image_error("image_transfer_failed", "图片传输中断，请重试。"))
+}
+
+fn send_render_image_chunks<E>(
+    bytes: &[u8],
+    mut send: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<usize, E> {
+    for chunk in bytes.chunks(RENDER_IMAGE_IPC_CHUNK_BYTES) {
+        send(chunk)?;
+    }
+    Ok(bytes.len())
 }
 
 fn validate_renderable_image(
@@ -7638,6 +7661,17 @@ fn parse_trust_decision(value: &str) -> Result<ProjectTrustDecision, CommandErro
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().manage(AwayMonitorState::default());
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if args.iter().any(|argument| argument == "--background") {
+            return;
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
     #[cfg(target_os = "android")]
     let builder = builder.plugin(android_documents::init());
     let builder = builder
@@ -7647,7 +7681,9 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let builder = builder
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::Builder::new().args(["--background"]).build())
         .on_window_event(|window, event| {
+            desktop_shell::handle_window_event(window, event);
             if window.label() == "main"
                 && let tauri::WindowEvent::Focused(focused) = event
             {
@@ -7665,10 +7701,14 @@ pub fn run() {
             let application_data_dir = Some(app.path().app_local_data_dir()?);
             #[cfg(not(mobile))]
             let application_data_dir = None;
-            app.manage(ConnectionRuntimeState::open(application_data_dir)?);
+            let desktop_shell = desktop_shell::DesktopShellState::initialize(app);
+            let prefer_local = desktop_shell.prefer_local_connection();
+            app.manage(desktop_shell);
+            app.manage(ConnectionRuntimeState::open(application_data_dir, prefer_local)?);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);
+            desktop_shell::finish_setup(app)?;
             Ok(())
         })
         .manage(FollowState::default())
@@ -7680,6 +7720,10 @@ pub fn run() {
         .manage(CommandReferenceState::default())
         .invoke_handler(tauri::generate_handler![
             system_device_name,
+            desktop_shell::desktop_shell_status,
+            desktop_shell::start_desktop_host,
+            desktop_shell::open_desktop_host_log,
+            desktop_shell::open_desktop_tui,
             get_client_preferences,
             update_client_preferences,
             begin_windows_away,
@@ -7975,6 +8019,23 @@ mod tests {
     }
 
     #[test]
+    fn render_image_ipc_reassembles_images_larger_than_the_reported_failure() {
+        let bytes = vec![42_u8; 6 * 1_024 * 1_024 + 17];
+        let mut received = Vec::new();
+        let mut chunks = 0;
+        let size = send_render_image_chunks(&bytes, |chunk| {
+            assert!(chunk.len() <= RENDER_IMAGE_IPC_CHUNK_BYTES);
+            received.extend_from_slice(chunk);
+            chunks += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert!(chunks > 1);
+        assert_eq!(size, bytes.len());
+        assert_eq!(received, bytes);
+    }
+
+    #[test]
     fn saving_a_preview_uses_its_visible_name_and_actual_image_format() {
         let decoded = decode_image_name("%E7%BB%93%E6%9E%9C%20%E5%9B%BE.png").unwrap();
         assert_eq!(
@@ -8040,6 +8101,29 @@ mod tests {
 
         assert!(second.router().snapshot().closed);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn first_packaged_main_launch_selects_the_local_dock_without_pairing() {
+        let root = std::env::temp_dir().join(format!(
+            "aludock-desktop-first-main-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let runtime = ConnectionRuntimeState::open(Some(root.clone()), true).unwrap();
+        let snapshot = runtime.registry.snapshot().unwrap();
+
+        assert!(snapshot.local_selected);
+        assert!(snapshot.active_host_id.is_none());
+        assert_eq!(
+            runtime
+                .lifecycle
+                .lock()
+                .unwrap()
+                .active_target,
+            Some(ConnectionTarget::Local)
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

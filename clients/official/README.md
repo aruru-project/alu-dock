@@ -54,14 +54,28 @@ npm run client:package:linux
 
 ## Windows Desktop
 
-在原生 x86_64 Windows 开发机安装 Tauri 2 所需的 Microsoft C++ Build Tools 与 WebView2 后，使用与上文相同的入口：
+在原生 x86_64 Windows 开发机安装 Tauri 2 所需的 Microsoft C++ Build Tools、WebView2、Rust MSVC target 与 Corepack 后，从 monorepo 根目录生成统一验收包：
 
-```bash
+```powershell
+npm install
+npm run client:install
+npm run package:windows
+```
+
+产物位于 `dist/AluDock-<version>-windows-x86_64.zip`。源码 checkout 默认使用当前分支可达的最新 `vMAJOR.MINOR.PATCH` Client tag；`ALUDOCK_RELEASE_VERSION` 可为正式流水线显式指定版本，无 Git 元数据的源码包才回退到 manifest 版本。组装脚本读取 [`windows-runtime.json`](windows-runtime.json) 固定 Node/npm release 与 checksum，构建 `x86_64-pc-windows-msvc` Desktop，安装 Dock production tree 与 bundled Pi，复制 DLL sidecars，并使用 `dumpbin.exe` 检查随包 PE 架构及依赖后才写 ZIP。也可通过 `ALUDOCK_WINDOWS_NODE_ARCHIVE` 指定已经下载的同一 checksum archive；它不会放宽固定版本。
+
+最终用户完整解压后运行一次 `Setup.cmd`；唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常 Desktop 入口同时登记到 Start Menu，TUI/CLI 可在新终端直接运行 `aludock`。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**停止 Alu Dock** 在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
+
+Windows Apps 和安装目录中的 `Uninstall.cmd` 只移除应用包、Host setup、登录启动、Start Menu 与全局 launcher；Dock/Pi 配置、身份、凭据和 Session 一律保留。Windows checkout 的 `npm run install:local` 构建同一个 ZIP 并调用同一个 Setup，不创建第二套开发安装布局。
+
+普通开发仍可运行：
+
+```powershell
 corepack pnpm tauri dev
 corepack pnpm tauri build --no-bundle --ci
 ```
 
-当前产物是 `src-tauri/target/release/aludock-client-app.exe` 的 Client-only native build；仓库尚无 `package:windows`，它也不是统一的 Host+Client 安装包。交付前必须按 [`AGENTS.md`](AGENTS.md) 检查 DLL sidecars、目标架构，并在 Windows 上完成启动 smoke；Linux cross-build 只能作为编译证据。
+这些是源码调试/Client build，不是第二套安装形态。Linux cross-check 可以证明 Windows Rust 分支可编译，但不能替代 [`AGENTS.md`](AGENTS.md) 要求的原生 DLL、隐藏窗口、tray、login startup、bundled Node/npm/Pi 与完整启动 smoke。当前验收包不签名、不发布、不自动更新。
 
 ## Android
 
@@ -77,13 +91,18 @@ corepack pnpm android build --debug --apk --target aarch64 --ci
 
 Debug APK 位于 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。
 
-本机正式签名材料位于 ignored 的 `.release-secrets/android/`，并按 [`AGENTS.md`](AGENTS.md) 作为 opaque credentials 处理。只有主人明确授权本机签名构建后，才运行：
+本机正式签名环境固定为 ignored 的 `.release-secrets/android/signing.env`，并按 [`AGENTS.md`](AGENTS.md) 作为 opaque credentials 处理：只检查文件是否存在及是否被 Git 忽略，不查看或输出其中的密码。只有主人明确授权本机签名构建后，才在短期子 shell 中加载它并立即构建：
 
 ```bash
-corepack pnpm android stg
+(
+  set -a
+  source .release-secrets/android/signing.env
+  set +a
+  corepack pnpm android stg
+)
 ```
 
-该命令不发布 Release 或修改 tag，产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
+`android stg` 只消费已经加载的签名环境变量，不读取 `signing.env`。该命令不发布 Release 或修改 tag，产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
 
 ## 验证入口
 

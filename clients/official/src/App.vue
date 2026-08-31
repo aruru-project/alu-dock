@@ -34,6 +34,7 @@ import {
   isTauri,
   getClientPreferences,
   getCommandCompletions,
+  getDesktopShellStatus,
   getSettings,
   getSystemDeviceName,
   listDeliverables,
@@ -49,6 +50,8 @@ import {
   loadConversationImageBytes,
   loadPublishedImageBytes,
   openSavedDeliverable,
+  openDesktopHostLog,
+  openDesktopTui,
   pickAttachments,
   renameHostProfile,
   removeAttachment,
@@ -58,6 +61,7 @@ import {
   discardPairing,
   stageClipboardImage,
   startConversationFollow,
+  startDesktopHost,
   startPairing,
   stopConversationFollow,
   stopWork,
@@ -111,7 +115,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, ConnectionContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, DesktopShellStatus, HostConnectionProfile, ConnectionContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -160,6 +164,8 @@ const appSettingsOpen = ref(false)
 const appSettings = ref<ClientPreferences | null>(null)
 const appSettingsSaving = ref(false)
 const appSettingsError = ref('')
+const desktopShell = ref<DesktopShellStatus | null>(null)
+const desktopShellBusy = ref(false)
 const hostSettingsOpen = ref(false)
 const addingHost = ref(false)
 const output = ref<HTMLElement | null>(null)
@@ -871,6 +877,32 @@ watch(
   { immediate: true },
 )
 
+async function retryDesktopHost() {
+  if (desktopShellBusy.value) return
+  desktopShellBusy.value = true
+  try {
+    desktopShell.value = await startDesktopHost()
+    if (desktopShell.value.hostReady && desktopShell.value.role === 'main') await app.load()
+  } catch (cause) {
+    desktopShell.value = {
+      supported: true,
+      hostReady: false,
+      startupError: errorMessage(cause),
+      loginStartEnabled: desktopShell.value?.loginStartEnabled ?? false,
+    }
+  } finally {
+    desktopShellBusy.value = false
+  }
+}
+
+async function runDesktopShellAction(action: () => Promise<void>) {
+  try {
+    await action()
+  } catch (cause) {
+    if (desktopShell.value) desktopShell.value = { ...desktopShell.value, startupError: errorMessage(cause) }
+  }
+}
+
 onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
@@ -883,8 +915,15 @@ onMounted(async () => {
     console.error('Failed to read App settings.', cause)
   }
   if (isTauri) {
+    desktopShell.value = await getDesktopShellStatus()
     const appWindow = getCurrentWindow()
-    unlisteners.push(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
+    unlisteners.push(
+      await listen<DesktopShellStatus>('desktop-shell-changed', ({ payload }) => {
+        desktopShell.value = payload
+        if (payload.hostReady && payload.role === 'main') void app.load()
+      }),
+      await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }),
+    )
     windowFocused.value = initialWindowFocused(
       await appWindow.isFocused(),
       document.hasFocus(),
@@ -3711,9 +3750,40 @@ async function toggleAllToolDetails() {
       </div>
       <div v-if="conversationSwitching && selected" class="alu-conversation-switching" role="status">正在打开 {{ selected.displayName }}…</div>
 
-      <div v-if="app.loading" class="center-state" aria-live="polite">
+      <div v-if="app.loading && !(desktopShell?.supported && (desktopShell.startupError || desktopShell.role === 'subhost' || !desktopShell.hostReady))" class="center-state" aria-live="polite">
         <span class="alu-spinner" />
         <p>正在连接 AluDock…</p>
+      </div>
+
+      <div v-else-if="desktopShell?.supported && desktopShell.startupError" class="center-state error-state offline-host-state">
+        <WifiOff :size="28" />
+        <h1>Alu Dock 需要你的操作</h1>
+        <p>{{ desktopShell.startupError }}</p>
+        <div class="pairing-actions">
+          <button class="button primary" :disabled="desktopShellBusy" @click="retryDesktopHost"><RefreshCw :size="16" />{{ desktopShellBusy ? '正在启动…' : '重新启动' }}</button>
+          <button v-if="desktopShell.logsPath" class="button secondary" @click="runDesktopShellAction(openDesktopHostLog)"><FileText :size="16" />打开日志</button>
+          <button class="button secondary" @click="runDesktopShellAction(openDesktopTui)"><Settings :size="16" />打开终端设置</button>
+        </div>
+      </div>
+
+      <div v-else-if="desktopShell?.supported && desktopShell.role === 'subhost'" class="center-state offline-host-state">
+        <Monitor :size="28" />
+        <h1>这台电脑正在作为 SubHost 运行</h1>
+        <p>它会继续连接 Main 并承载已有 Work。需要切换角色或修改连接时，请打开终端设置。</p>
+        <div class="pairing-actions">
+          <button class="button primary" @click="runDesktopShellAction(openDesktopTui)"><Settings :size="16" />打开终端设置</button>
+          <button v-if="desktopShell.logsPath" class="button secondary" @click="runDesktopShellAction(openDesktopHostLog)"><FileText :size="16" />打开日志</button>
+        </div>
+      </div>
+
+      <div v-else-if="desktopShell?.supported && !desktopShell.hostReady" class="center-state offline-host-state">
+        <Monitor :size="28" />
+        <h1>Alu Dock 已停止</h1>
+        <p>启动后即可继续这台电脑上的 Work。</p>
+        <div class="pairing-actions">
+          <button class="button primary" :disabled="desktopShellBusy" @click="retryDesktopHost"><RefreshCw :size="16" />{{ desktopShellBusy ? '正在启动…' : '启动 Alu Dock' }}</button>
+          <button v-if="desktopShell.logsPath" class="button secondary" @click="runDesktopShellAction(openDesktopHostLog)"><FileText :size="16" />打开日志</button>
+        </div>
       </div>
 
       <div v-else-if="app.needsPairing" class="pairing-onboarding">

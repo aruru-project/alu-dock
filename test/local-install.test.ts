@@ -6,7 +6,6 @@ import test from "node:test";
 
 import {
   ALU_DOCK_GENERATED_MARKER,
-  ALU_DOCK_WINDOWS_GENERATED_MARKER,
   assertLocalInstallAllowed,
   isAluDockGeneratedContent,
   localInstallBlockingInstances,
@@ -14,7 +13,6 @@ import {
   localInstallLayout,
   parseLocalInstallArguments,
   renderAluDockUnit,
-  renderWindowsAluDockLauncher,
 } from "../src/deployment/local-install.js";
 
 test("package exposes the installed Alu Dock runtime and its operator/client documentation", async () => {
@@ -27,6 +25,27 @@ test("package exposes the installed Alu Dock runtime and its operator/client doc
   assert.deepEqual(manifest.files, ["dist/src", "docs", "skills", "README.md"]);
   assert.equal(manifest.scripts?.["install:local"], "npm run build && node dist/scripts/install-local.js");
   assert.doesNotMatch(manifest.scripts?.["install:local"] ?? "", /\btest\b/u);
+});
+
+test("Windows release has one package entry and a pinned bundled runtime", async () => {
+  const rootManifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { scripts?: Record<string, string> };
+  const clientManifest = JSON.parse(await readFile(join(process.cwd(), "clients", "official", "package.json"), "utf8")) as { scripts?: Record<string, string> };
+  const runtime = JSON.parse(await readFile(join(process.cwd(), "clients", "official", "windows-runtime.json"), "utf8")) as {
+    schemaVersion?: unknown;
+    target?: unknown;
+    node?: { version?: unknown; npmVersion?: unknown; archive?: unknown; sha256?: unknown };
+  };
+
+  assert.equal(rootManifest.scripts?.["package:windows"], "cd clients/official && corepack pnpm package:windows");
+  assert.equal(clientManifest.scripts?.["package:windows"], "node scripts/package-windows.mjs");
+  assert.equal(rootManifest.scripts?.["host:windows"], undefined);
+  assert.equal(rootManifest.scripts?.["open:windows"], undefined);
+  assert.equal(runtime.schemaVersion, 1);
+  assert.equal(runtime.target, "x86_64-pc-windows-msvc");
+  assert.match(String(runtime.node?.version), /^\d+\.\d+\.\d+$/u);
+  assert.match(String(runtime.node?.npmVersion), /^\d+\.\d+\.\d+$/u);
+  assert.equal(runtime.node?.archive, `node-v${String(runtime.node?.version)}-win-x64.zip`);
+  assert.match(String(runtime.node?.sha256), /^[a-f0-9]{64}$/u);
 });
 
 test("npm package excludes tests, fixtures, and development scripts", () => {
@@ -56,26 +75,19 @@ test("local install uses one stable npm prefix and launcher", () => {
   });
 });
 
-test("Windows local install uses one stable app directory and npm user launcher", () => {
+test("Windows package uses one stable app directory and bundled terminal entry", () => {
   assert.deepEqual(localInstallLayout("C:\\Users\\artist", undefined, {
     platform: "win32",
     localAppData: "C:\\Users\\artist\\AppData\\Local",
-    appData: "C:\\Users\\artist\\AppData\\Roaming",
   }), {
     root: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app",
-    packageDirectory: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\node_modules\\alu-dock",
-    cliPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\node_modules\\alu-dock\\dist\\src\\cli.js",
-    packageExecutable: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\node_modules\\.bin\\aludock.cmd",
-    userExecutable: "C:\\Users\\artist\\AppData\\Roaming\\npm\\aludock.cmd",
-    unitFile: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\.windows-foreground-host",
+    packageDirectory: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\dock",
+    cliPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\dock\\dist\\src\\cli.js",
+    packageExecutable: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\aludock.cmd",
+    userExecutable: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\aludock.cmd",
+    unitFile: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\.windows-host",
+    windowsHostLogPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\logs\\host.log",
   });
-  const launcher = renderWindowsAluDockLauncher({
-    nodePath: "C:\\Program Files\\nodejs\\node.exe",
-    cliPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\cli.js",
-  });
-  assert.ok(launcher.includes(ALU_DOCK_WINDOWS_GENERATED_MARKER));
-  assert.match(launcher, /"C:\\Program Files\\nodejs\\node\.exe".*"C:\\Users\\artist.*cli\.js" %\*/u);
-  assert.equal(isAluDockGeneratedContent(launcher), true);
 });
 
 test("local install ignores quiescent instances and identifies only active work", () => {

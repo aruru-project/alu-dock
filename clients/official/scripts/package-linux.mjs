@@ -13,20 +13,21 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveReleaseVersion } from "./release-version.mjs";
 
 const clientRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(
   readFileSync(join(clientRoot, "package.json"), "utf8"),
 );
-const version = (process.env.ALUDOCK_RELEASE_VERSION || packageJson.version).trim();
+const version = resolveReleaseVersion({
+  cwd: clientRoot,
+  explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
+  fallbackVersion: packageJson.version,
+});
 
 if (process.platform !== "linux" || process.arch !== "x64") {
   throw new Error("Linux 打包入口当前用于 x86_64 Linux。请在对应平台运行。");
 }
-if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(version)) {
-  throw new Error(`发行版本必须使用 MAJOR.MINOR.PATCH：${version}`);
-}
-
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: clientRoot,

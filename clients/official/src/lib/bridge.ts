@@ -1,4 +1,5 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
+import { BinaryChunkCollector } from './binaryChunkCollector'
 import type {
   AttachmentUploadResult,
   BootstrapPayload,
@@ -12,6 +13,7 @@ import type {
   ConversationHistoryPage,
   DeliverableDto,
   DeliverableSaveResult,
+  DesktopShellStatus,
   EndpointTestResult,
   ExtensionControllerBinding,
   HostCatalog,
@@ -87,6 +89,28 @@ export async function beginWindowsAway(runningInstanceIds: string[]): Promise<st
 
 export async function cancelWindowsAway(awayId?: string | null): Promise<boolean> {
   return isTauri ? invoke<boolean>('cancel_windows_away', { awayId: awayId ?? null }) : false
+}
+
+const previewDesktopShell: DesktopShellStatus = {
+  supported: false,
+  hostReady: false,
+  loginStartEnabled: false,
+}
+
+export async function getDesktopShellStatus(): Promise<DesktopShellStatus> {
+  return isTauri ? invoke<DesktopShellStatus>('desktop_shell_status') : { ...previewDesktopShell }
+}
+
+export async function startDesktopHost(): Promise<DesktopShellStatus> {
+  return isTauri ? invoke<DesktopShellStatus>('start_desktop_host') : { ...previewDesktopShell }
+}
+
+export async function openDesktopHostLog(): Promise<void> {
+  if (isTauri) await invoke('open_desktop_host_log')
+}
+
+export async function openDesktopTui(): Promise<void> {
+  if (isTauri) await invoke('open_desktop_tui')
 }
 
 export async function getHostCatalog(): Promise<HostCatalog> {
@@ -481,10 +505,9 @@ export async function loadConversationImageBytes(
   context: ConnectionContext,
 ): Promise<Uint8Array> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
-  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('conversation_image', {
+  return invokeChunkedBinary('conversation_image', {
     ...context, instanceId, expectedHostEpoch, contentRef, mimeType,
   })
-  return binaryBytes(value)
 }
 
 export async function loadPublishedImageBytes(
@@ -495,10 +518,9 @@ export async function loadPublishedImageBytes(
   context: ConnectionContext,
 ): Promise<Uint8Array> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
-  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('published_image', {
+  return invokeChunkedBinary('published_image', {
     ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, file,
   })
-  return binaryBytes(value)
 }
 
 export async function listDeliverables(instanceId: string, context: ConnectionContext): Promise<DeliverableDto[]> {
@@ -521,6 +543,25 @@ export async function downloadDeliverable(
 export async function openSavedDeliverable(location: SavedDeliverableLocation): Promise<void> {
   if (isTauri) return invoke<void>('open_saved_deliverable', { location })
   throw new Error('浏览器预览无法打开设备上的文件。请在 AluDock 客户端中操作。')
+}
+
+async function invokeChunkedBinary(command: string, args: Record<string, unknown>): Promise<Uint8Array> {
+  const collector = new BinaryChunkCollector()
+  const onChunk = new Channel<ArrayBuffer | Uint8Array | number[]>((value) => {
+    try {
+      collector.push(binaryBytes(value))
+    } catch (cause) {
+      collector.abort(cause)
+    }
+  })
+  let sizeBytes: number
+  try {
+    sizeBytes = await invoke<number>(command, { ...args, onChunk })
+  } catch (cause) {
+    collector.abort(cause)
+    throw cause
+  }
+  return collector.finish(sizeBytes)
 }
 
 function binaryBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {

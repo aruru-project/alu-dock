@@ -345,7 +345,12 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       await host.stop().catch(() => {});
       throw error;
     }
-    windowsLifecycle.markReady(host.hostEpoch, options.role, () => localInstallBlockingInstances(registry.list()).length);
+    windowsLifecycle.markReady(
+      host.hostEpoch,
+      options.role,
+      () => localInstallBlockingInstances(registry.list()).length,
+      () => { void host.stop().catch(() => {}); },
+    );
   }
   writeJson({ kind: "host.ready", role: options.role, pid: process.pid, ...(options.role === "subhost" ? {} : { socketPath: host.socketPath }) });
   const outcome = await Promise.race([
@@ -372,18 +377,24 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
   if (socketExplicit || process.env.ALU_DOCK_SOCKET) throw new Error("service commands reject socket overrides");
   const entryPath = process.argv[1];
   if (!entryPath) throw new Error("Cannot locate the Alu Dock CLI entry point");
-  const serviceMachineSettings = new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath()));
   const layout = localInstallLayout(process.env.HOME ?? process.env.USERPROFILE ?? "", undefined, {
     localAppData: process.env.LOCALAPPDATA,
-    appData: process.env.APPDATA,
   });
+  const windowsHostLogPath = layout.windowsHostLogPath;
+  if (process.platform === "win32" && !windowsHostLogPath) throw new Error("Alu Dock could not determine where to store Windows Host logs.");
   const manager = process.platform === "win32"
-    ? new WindowsUserHostManager({ nodePath: process.execPath, cliPath: resolve(entryPath), setupPath: layout.unitFile })
+    ? new WindowsUserHostManager({
+      nodePath: process.execPath,
+      cliPath: resolve(entryPath),
+      setupPath: layout.unitFile,
+      logPath: windowsHostLogPath as string,
+    })
     : new UserServiceManager({
       nodePath: process.execPath,
       cliPath: resolve(entryPath),
       socketPath,
       subHostProbe: async () => {
+        const serviceMachineSettings = new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath()));
         const status = await serviceMachineSettings.readSubHostStatus();
         if (status.processId !== undefined) {
           return { role: "subhost", processId: status.processId, ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };
@@ -436,7 +447,7 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
           lines = value;
         } else throw new Error(`Unknown service logs argument: ${String(argument)}`);
       }
-      const result = manager.logs(lines, follow);
+      const result = await manager.logs(lines, follow);
       if (result.status !== 0) process.exitCode = result.status;
       return;
     }

@@ -19,6 +19,7 @@ import {
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
+import { resolveReleaseVersion } from "./release-version.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localEnvironmentPath = join(repositoryRoot, ".env.android.local");
@@ -279,7 +280,6 @@ function stagingSigningEnvironment() {
   if (!existsSync(stagingSigningEnvironmentPath)) {
     throw new Error(`缺少本机签名配置：${stagingSigningEnvironmentPath}`);
   }
-  const configured = parseEnv(readFileSync(stagingSigningEnvironmentPath, "utf8"));
   const names = [
     "ALUDOCK_ANDROID_KEYSTORE_PATH",
     "ALUDOCK_ANDROID_KEYSTORE_PASSWORD",
@@ -288,9 +288,9 @@ function stagingSigningEnvironment() {
   ];
   const values = {};
   for (const name of names) {
-    const value = process.env[name]?.trim() || configured[name]?.trim();
+    const value = process.env[name]?.trim();
     if (!value) {
-      throw new Error(`本机签名配置缺少 ${name}：${stagingSigningEnvironmentPath}`);
+      throw new Error(`签名环境缺少 ${name}。请先在临时 shell 中 source ${stagingSigningEnvironmentPath}`);
     }
     values[name] = value;
   }
@@ -308,9 +308,14 @@ function stagingSigningEnvironment() {
 
 function buildStagingApk(androidEnvironment) {
   const signingEnvironment = stagingSigningEnvironment();
+  const version = resolveReleaseVersion({
+    cwd: repositoryRoot,
+    explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
+    fallbackVersion: JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version,
+  });
   rmSync(androidJniLibrariesPath, { recursive: true, force: true });
   runTauriAndroid(
-    ["build", "--apk", "--target", "aarch64", "--ci"],
+    ["build", "--apk", "--target", "aarch64", "--ci", "--config", JSON.stringify({ version })],
     {
       ...androidEnvironment,
       environment: {
@@ -336,7 +341,6 @@ function buildStagingApk(androidEnvironment) {
   if (!existsSync(source)) {
     throw new Error("Android staging 构建完成，但没有找到 Release APK。");
   }
-  const version = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version;
   const outputDirectory = join(repositoryRoot, "dist");
   const output = join(outputDirectory, `AluDock-${version}-android-arm64-stg.apk`);
   mkdirSync(outputDirectory, { recursive: true });
