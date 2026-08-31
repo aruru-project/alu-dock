@@ -49,6 +49,15 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
   }
   if (event.sequence !== state.sequence + 1) return { kind: 'rebuild', state, reason: 'sequence_gap' }
 
+  if (event.eventType === 'message.delta') {
+    return {
+      kind: 'applied',
+      state: { ...state, sequence: event.sequence },
+      conversationChanged: true,
+      configChanged: false,
+    }
+  }
+
   const instance: Work = {
     ...state.instance,
     pending: { ...state.instance.pending },

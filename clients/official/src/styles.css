@@ -172,6 +172,7 @@ body::before {
 
 .conversation { position: relative; min-height: 0; padding: 24px clamp(18px, 4vw, 56px) 38px; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
 .conversation-flow { width: 100%; }
+.conversation-row { content-visibility: auto; contain-intrinsic-block-size: auto 120px; }
 .inline-notice { max-width: calc(100% - 55px); margin: 7px 0 7px 55px; padding: 7px 10px; color: var(--c-text-2); font: 11px/1.55 var(--font-reading); border-left: 2px solid var(--c-ice); background: rgb(126 200 224 / .04); border-radius: 0 7px 7px 0; }
 .inline-notice[data-tone='error'] { color: #f8a0a0; border-left-color: var(--c-danger); background: rgb(248 113 113 / .05); }
 .inline-notice[data-tone='warning'] { color: #f6cf79; border-left-color: var(--c-amber); background: rgb(251 191 36 / .05); }
