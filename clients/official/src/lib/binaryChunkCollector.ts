@@ -21,7 +21,7 @@ export class BinaryChunkCollector {
       this.abort(new Error('图片内容传输超出预期大小，请重新读取。'))
       return
     }
-    this.chunks.push(chunk.slice())
+    this.chunks.push(chunk)
     this.receivedBytes += chunk.byteLength
     this.completeIfReady()
   }

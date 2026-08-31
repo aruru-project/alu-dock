@@ -187,7 +187,10 @@ type ImagePreview =
   | { kind: 'conversation'; imageKey: string; url: string; name: string }
   | { kind: 'attachment'; attachmentKey: string; url: string; name: string }
 type AttachmentPreviewResource = { url: string; mediaType: string }
-const imageResources = ref<Record<string, ConversationImageResource>>({})
+type CachedConversationImageResource = ConversationImageResource & { sizeBytes?: number; lastAccessed?: number }
+// A unified 128 MiB cap leaves room for the rest of the UI on memory-constrained Android devices.
+const CONVERSATION_IMAGE_CACHE_BUDGET_BYTES = 128 * 1024 * 1024
+const imageResources = ref<Record<string, CachedConversationImageResource>>({})
 const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
 const imagePreview = ref<ImagePreview | null>(null)
 const messageTextView = ref<{ title: string; text: string; markdown: boolean } | null>(null)
@@ -195,6 +198,7 @@ const imageSaving = ref(false)
 const imageSaveStatus = ref<{ tone: 'success' | 'error'; text: string } | null>(null)
 let imageDomainKey = ''
 let imageLoadEpoch = 0
+let imageAccessSequence = 0
 const conversationLoading = ref(false)
 const conversationError = ref<string | null>(null)
 const historyTruncated = ref(false)
@@ -213,8 +217,13 @@ interface HistoryHydrationDomain {
   active: number
   queue: HistoryHydrationJob[]
 }
+interface HistoryHydrationBatch {
+  remaining: number
+  records: ConversationHistoryPage['records']
+}
 interface HistoryHydrationJob {
   domain: HistoryHydrationDomain
+  batch: HistoryHydrationBatch
   context: ConnectionContext
   state: ConversationBootstrap
   conversationEpoch: number
@@ -1311,7 +1320,9 @@ function closeModal() {
   appSettingsOpen.value = false
   hostSettingsOpen.value = false
   composerExpanded.value = false
+  const closedConversationPreview = imagePreview.value?.kind === 'conversation'
   imagePreview.value = null
+  if (closedConversationPreview) enforceConversationImageCacheBudget()
   messageTextView.value = null
   imageSaving.value = false
   imageSaveStatus.value = null
@@ -2391,10 +2402,39 @@ function imageResource(part: ConversationImagePart): ConversationImageResource {
   return idleImageResource
 }
 
-function setImageResource(imageKey: string, resource: ConversationImageResource) {
+function setImageResource(imageKey: string, resource: CachedConversationImageResource) {
   const previous = imageResources.value[imageKey]
   if (previous?.url && previous.url !== resource.url) URL.revokeObjectURL(previous.url)
   imageResources.value = { ...imageResources.value, [imageKey]: resource }
+}
+
+function touchConversationImage(imageKey: string) {
+  const resource = imageResources.value[imageKey]
+  if (resource?.state === 'ready' && resource.url) resource.lastAccessed = ++imageAccessSequence
+}
+
+function enforceConversationImageCacheBudget() {
+  let retainedBytes = 0
+  const protectedImageKey = imagePreview.value?.kind === 'conversation' ? imagePreview.value.imageKey : ''
+  const candidates: Array<{ imageKey: string; resource: CachedConversationImageResource; sizeBytes: number }> = []
+  for (const [imageKey, resource] of Object.entries(imageResources.value)) {
+    if (resource.state !== 'ready' || !resource.url || !resource.sizeBytes) continue
+    retainedBytes += resource.sizeBytes
+    if (imageKey !== protectedImageKey) candidates.push({ imageKey, resource, sizeBytes: resource.sizeBytes })
+  }
+  if (retainedBytes <= CONVERSATION_IMAGE_CACHE_BUDGET_BYTES) return
+  candidates.sort((left, right) => (left.resource.lastAccessed ?? 0) - (right.resource.lastAccessed ?? 0))
+  const next = { ...imageResources.value }
+  let changed = false
+  for (const { imageKey, resource, sizeBytes } of candidates) {
+    if (retainedBytes <= CONVERSATION_IMAGE_CACHE_BUDGET_BYTES) break
+    if (next[imageKey] !== resource) continue
+    URL.revokeObjectURL(resource.url!)
+    delete next[imageKey]
+    retainedBytes -= sizeBytes
+    changed = true
+  }
+  if (changed) imageResources.value = next
 }
 
 function resetConversationImages() {
@@ -2505,7 +2545,13 @@ async function requestConversationImage(part: ConversationImagePart) {
   }
   const state = conversationState.value
   const work = selected.value
-  if (!state || !work || imageResource(part).state === 'loading' || imageResource(part).state === 'ready') return
+  const cachedResource = imageResources.value[part.imageKey]
+  if (cachedResource?.state === 'ready' && cachedResource.url) {
+    touchConversationImage(part.imageKey)
+    return
+  }
+  const displayedResource = imageResource(part)
+  if (!state || !work || displayedResource.state === 'loading' || displayedResource.state === 'ready') return
   const capturedHost = requireConnectionContext(app)
   const expectedEpoch = state.cursor.hostEpoch
   const expectedGeneration = state.cursor.runtimeGeneration
@@ -2533,10 +2579,14 @@ async function requestConversationImage(part: ConversationImagePart) {
     const detectedMediaType = rasterImageMimeType(bytes)
     if (!detectedMediaType || (mediaType && mediaType !== detectedMediaType)) throw new Error('图片内容无法解码，请重新读取。')
     mediaType = detectedMediaType
-    const blobBytes = new Uint8Array(bytes.byteLength)
-    blobBytes.set(bytes)
-    const url = URL.createObjectURL(new Blob([blobBytes.buffer], { type: mediaType }))
-    setImageResource(part.imageKey, { state: 'ready', url })
+    const url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mediaType }))
+    setImageResource(part.imageKey, {
+      state: 'ready',
+      url,
+      sizeBytes: bytes.byteLength,
+      lastAccessed: ++imageAccessSequence,
+    })
+    enforceConversationImageCacheBudget()
   } catch (cause) {
     if (loadEpoch !== imageLoadEpoch || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || !conversationHasImage(part.imageKey)) return
     setImageResource(part.imageKey, { state: 'error', message: imageLoadMessage(cause) })
@@ -2587,6 +2637,7 @@ function imageLoadMessage(cause: unknown) {
 function openImagePreview(part: ConversationImagePart) {
   const resource = imageResource(part)
   if (resource.state !== 'ready' || !resource.url) return
+  touchConversationImage(part.imageKey)
   showImagePreview({
     kind: 'conversation',
     imageKey: part.imageKey,
@@ -2695,10 +2746,12 @@ async function applyFollowEvent(payload: { connectionId: string; selectionGenera
     void loadSelectedConversation(payload.instanceId, true)
     return
   }
-  state.instance = reduced.state.instance
-  state.queue = reduced.state.queue
+  if (reduced.state.instance !== state.instance) {
+    state.instance = reduced.state.instance
+    app.applyWorkSnapshot(state.instance, payload)
+  }
+  if (reduced.state.queue !== state.queue) state.queue = reduced.state.queue
   state.cursor.sequence = reduced.state.sequence
-  app.applyWorkSnapshot(state.instance, payload)
   if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') {
     setCompactionError(payload.connectionId, payload.instanceId)
   }
@@ -3185,13 +3238,9 @@ async function runHistoryHydration(job: HistoryHydrationJob) {
       reloadConversationForHistory(job.workId)
       return
     }
-    const anchor = captureOutputAnchor()
-    const stickToBottom = autoFollowOutput
-    job.state.records = mergeHydratedConversationRecords(job.state.records, [completed.record])
+    job.batch.records.push(completed.record)
     failedHistoryHydrations.delete(job.entryId)
     setHistoryEntryError(job.entryId)
-    applyConversationProjection(job.state)
-    await restoreOutputAnchor(anchor, stickToBottom)
   } catch (cause) {
     if (!historyJobIsCurrent(job)) return
     const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
@@ -3202,9 +3251,17 @@ async function runHistoryHydration(job: HistoryHydrationJob) {
     failedHistoryHydrations.set(job.entryId, job)
     setHistoryEntryError(job.entryId, '这部分内容暂时没有读取成功，请重试。')
   } finally {
+    job.batch.remaining -= 1
     if (historyJobIsCurrent(job)) {
       setHistoryEntryActive(job.entryId, false)
       setHistoryEntryPending(job.entryId, false)
+      if (job.batch.remaining === 0 && job.batch.records.length) {
+        const anchor = captureOutputAnchor()
+        const stickToBottom = autoFollowOutput
+        job.state.records = mergeHydratedConversationRecords(job.state.records, job.batch.records)
+        applyConversationProjection(job.state)
+        await restoreOutputAnchor(anchor, stickToBottom)
+      }
     }
   }
 }
@@ -3216,10 +3273,14 @@ function scheduleHistoryPageHydration(
   pageCursor: string | undefined,
   page: ConversationHistoryPage,
 ) {
-  for (const entryId of page.incompleteEntryIds) {
-    if (!state.records.some((record) => record.entryId === entryId)) continue
+  const entryIds = page.incompleteEntryIds.filter((entryId) =>
+    state.records.some((record) => record.entryId === entryId)
+    && !historyHydrationPending.value.has(entryId))
+  const batch: HistoryHydrationBatch = { remaining: entryIds.length, records: [] }
+  for (const entryId of entryIds) {
     queueHistoryHydration({
       domain: historyHydrationDomain,
+      batch,
       context,
       state,
       conversationEpoch,
@@ -3314,7 +3375,9 @@ async function reconcileExtensionInteraction(): Promise<boolean> {
 
 function retryHistoryEntry(entryId: string) {
   const job = failedHistoryHydrations.get(entryId)
-  if (job && historyJobIsCurrent(job)) queueHistoryHydration(job)
+  if (job && historyJobIsCurrent(job)) {
+    queueHistoryHydration({ ...job, batch: { remaining: 1, records: [] } })
+  }
 }
 
 function retryConversationHydration() {
@@ -3896,7 +3959,7 @@ async function toggleAllToolDetails() {
             <span v-if="historyError">{{ historyError }}</span>
           </div>
           <template v-for="row in conversationRows" :key="row.id">
-            <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
+            <article v-if="row.kind === 'user'" class="conversation-row msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
               <div class="msg-user-bubble">
                 <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
                 <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
@@ -3905,7 +3968,7 @@ async function toggleAllToolDetails() {
               </div>
             </article>
 
-            <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :class="{ 'is-compact-empty': !hasCompactConversationContent(row.parts) }" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
+            <article v-else-if="row.kind === 'assistant-group'" class="conversation-row alu-msg-assistant-row" :class="{ 'is-compact-empty': !hasCompactConversationContent(row.parts) }" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
               <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
                 <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
@@ -3913,16 +3976,16 @@ async function toggleAllToolDetails() {
               </div>
             </article>
 
-            <article v-else-if="row.kind === 'activity'" class="alu-msg-assistant-row is-agent-active" :data-conversation-id="row.id">
+            <article v-else-if="row.kind === 'activity'" class="conversation-row alu-msg-assistant-row is-agent-active" :data-conversation-id="row.id">
               <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
             </article>
 
-            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
+            <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
 
-            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
+            <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
 
-            <div v-else class="alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
+            <div v-else class="conversation-row alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
           </template>
         </div>
       </template>
