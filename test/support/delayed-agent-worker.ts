@@ -723,7 +723,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return text;
   }
 
-  settle(text = "done", stopReason = "stop"): void {
+  settle(text = "done", stopReason = "stop", error?: string): void {
     if (!this.currentRun || !this.isStreaming) return;
     const run = this.currentRun;
     const messageId = this.fixtureAssistantMessageId();
@@ -732,6 +732,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       role: "assistant",
       content: [{ type: "text", text }],
       stopReason,
+      ...(error === undefined ? {} : { error }),
     } }));
     this.conversationAssistantMessageId = undefined;
     const parentId = this.history.at(-1)?.entryId;
@@ -746,6 +747,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       visibility: "conversation",
       content: [{ type: "text", text }],
       stopReason,
+      ...(error === undefined ? {} : { error }),
     });
     this.isStreaming = false;
     this.emit({ type: "agent_end", messages: [], willRetry: false });
@@ -759,7 +761,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       this.emit({ type: "compaction_start", reason: "manual" });
       continuation.compactionStarted.resolve();
     }
-    this.emit({ type: "agent_settled", stopReason, ...(this.currentRunOperationId === undefined ? {} : { operationId: this.currentRunOperationId }) });
+    this.emit({ type: "agent_settled", stopReason, ...(error === undefined ? {} : { error }), ...(this.currentRunOperationId === undefined ? {} : { operationId: this.currentRunOperationId }) });
     this.currentRunOperationId = undefined;
     this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
     run.resolve();

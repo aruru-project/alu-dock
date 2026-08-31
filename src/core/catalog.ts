@@ -34,6 +34,8 @@ export interface CatalogInterruption {
   at: string;
 }
 
+export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
+
 export interface CatalogInstanceRecord {
   id: string;
   creationOperationId: string;
@@ -66,6 +68,7 @@ export interface CatalogInstanceRecord {
   stopRequestedAt?: string;
   shutdownRequestedAt?: string;
   ownerReleaseUnconfirmed?: true;
+  /** Bounded Agent/runtime error content. Rendering surfaces own presentation escaping. */
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -232,7 +235,7 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.ownerReleaseUnconfirmed !== undefined && (record.ownerReleaseUnconfirmed !== true || record.lifecycle !== "runtime_error")) {
     throw new Error("Unconfirmed owner release requires a runtime-error lifecycle");
   }
-  if (record.lastError !== undefined) requiredBoundedText(record.lastError, 2_048, "Catalog last error");
+  if (record.lastError !== undefined) requiredBoundedContent(record.lastError, MAX_CATALOG_LAST_ERROR_CHARS, "Catalog last error");
 }
 
 export const MAX_CATALOG_INSTANCES = 10_000;
@@ -266,6 +269,12 @@ export function validateInstanceKey(value: string): void {
 function requiredBoundedText(value: string, limit: number, label: string): void {
   if (typeof value !== "string" || value.length < 1 || value.length > limit || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
     throw new Error(`${label} must be a bounded terminal-safe string`);
+  }
+}
+
+function requiredBoundedContent(value: string, limit: number, label: string): void {
+  if (typeof value !== "string" || value.length < 1 || value.length > limit) {
+    throw new Error(`${label} must be bounded non-empty text`);
   }
 }
 

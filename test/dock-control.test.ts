@@ -3098,6 +3098,32 @@ test("a failed catalog write rejects create without a ghost instance and the nex
 
 
 
+test("one Work's Agent error remains local while sibling Work continues", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const failed = await client.create(harness.directory, "failed-work", "create-failed-work");
+  const sibling = await client.create(harness.directory, "sibling-work", "create-sibling-work");
+
+  await client.prompt(failed.id, "run until the provider stops", "prompt", "failed-run");
+  harness.sessions.get(failed.id)!.settle("", "error", "provider request failed\nretry next cycle");
+  await harness.registry.get(failed.id).waitForIdle();
+
+  const observed = await client.read(failed.id);
+  assert.equal(observed.instance.lifecycle, "active");
+  assert.equal(observed.instance.execution, "failed");
+  assert.equal(observed.instance.lastRun, "failed");
+  assert.equal(observed.instance.lastError, "provider request failed\nretry next cycle");
+  const settled = observed.page.events.find((event) => event.type === "run.settled");
+  assert.equal(settled?.type === "run.settled" ? settled.data.error : undefined, "provider request failed\nretry next cycle");
+  assert.equal((await client.hostInfo()).state, "ready");
+
+  const continued = await client.prompt(sibling.id, "continue independently", "prompt", "sibling-run");
+  assert.equal(continued.receipt.accepted, true);
+  assert.equal(continued.instance.execution, "running");
+});
+
 test("mutation fault admission keeps extension widget viewport control available", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));

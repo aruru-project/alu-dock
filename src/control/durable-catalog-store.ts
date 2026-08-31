@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve, win32 as win32Path } from
 
 import {
   CatalogCorruptError,
+  MAX_CATALOG_LAST_ERROR_CHARS,
   type CatalogInstanceRecord,
   type CatalogMutationContext,
   type CatalogProjection,
@@ -233,7 +234,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     ...(value.ownerReleaseUnconfirmed === undefined ? {} : {
       ownerReleaseUnconfirmed: true as const,
     }),
-    ...(value.lastError === undefined ? {} : { lastError: text(value.lastError, `${field}.lastError`, 2_048) }),
+    ...(value.lastError === undefined ? {} : { lastError: contentText(value.lastError, `${field}.lastError`, MAX_CATALOG_LAST_ERROR_CHARS) }),
     createdAt: timestamp(value.createdAt, `${field}.createdAt`),
     updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`),
   };
@@ -290,6 +291,11 @@ function array(value: unknown, field: string, limit: number): unknown[] {
 
 function text(value: unknown, field: string, limit: number): string {
   if (typeof value !== "string" || value.length < 1 || value.length > limit || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) throw new Error(`${field} must be a bounded terminal-safe string`);
+  return value;
+}
+
+function contentText(value: unknown, field: string, limit: number): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > limit) throw new Error(`${field} must be bounded non-empty text`);
   return value;
 }
 

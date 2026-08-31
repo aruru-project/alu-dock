@@ -22,14 +22,14 @@ function record(id: string, overrides: Partial<CatalogInstanceRecord> = {}): Cat
   return {
     id,
     creationOperationId: `create-${id}`,
-    cwd: `/tmp/${id}`,
+    cwd: join(tmpdir(), id),
     lifecycle: "active",
     execution: "idle",
     lastRun: "never",
     runtimeGeneration: 1,
     ownerHostEpoch: "old-host",
     piSessionId: `pi-${id}`,
-    sessionFile: `/tmp/${id}.jsonl`,
+    sessionFile: join(tmpdir(), `${id}.jsonl`),
     admissionPending: false,
     pendingCount: 0,
     createdAt: "2026-07-15T00:00:00.000Z",
@@ -75,7 +75,18 @@ test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   );
 });
 
+test("durable catalog preserves a Work's multiline Agent error", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  const error = "provider request failed\nretry next cycle";
+  await store.commit(projection(1, [record("failed", {
+    execution: "failed",
+    lastRun: "failed",
+    lastError: error,
+  })]), { kind: "run.settled", effect: "post_effect", operationId: "failed-run" });
 
+  assert.equal((await store.load())?.instances[0]?.lastError, error);
+});
 
 test("catalog corruption, future schema, and symlinks preserve original evidence", async () => {
   const { root, path } = await temporaryCatalog();
