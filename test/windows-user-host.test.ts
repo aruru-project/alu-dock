@@ -82,10 +82,10 @@ test("Windows local Host install replaces the running Host and returns only afte
 
     current = { ready: true, pid: 99, hostEpoch: "busy-epoch", role: "main", blockingWork: 1 };
     await assert.rejects(manager.stop(), /1 work item is still active/u);
-    assert.equal(stops, 3);
+    assert.equal(stops, 2, "a Host with active work is not asked to stop");
     current.blockingWork = 0;
     const stopped = await manager.stop();
-    assert.equal(stops, 4);
+    assert.equal(stops, 3);
     assert.equal(stopped.ready, false);
     assert.equal(stopped.activeState, "inactive");
     const status = await manager.status();

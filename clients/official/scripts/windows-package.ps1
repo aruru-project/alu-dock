@@ -226,6 +226,7 @@ function Install-Package {
   Set-StartMenuShortcut
   $manifest = Get-Content -LiteralPath (Join-Path $InstallRoot "release-manifest.json") -Raw | ConvertFrom-Json
   Set-UninstallRegistration ([string]$manifest.productVersion)
+  Remove-Item -LiteralPath $PreviousRoot -Recurse -Force -ErrorAction SilentlyContinue
   Start-Process -FilePath $DesktopExecutable
   Write-Host "Alu Dock is installed and ready."
 }

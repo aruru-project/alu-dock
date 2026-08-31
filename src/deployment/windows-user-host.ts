@@ -127,13 +127,11 @@ export class WindowsUserHostManager {
   private async stopSafely(): Promise<void> {
     const current = await this.readStatus();
     if (!current) return;
+    // Refuse from the status snapshot first so an obviously busy Host is not
+    // asked to stop at all; the stop response re-checks under the Host's lock.
+    if (current.blockingWork > 0) throw stillActiveError(current.blockingWork);
     const result = await this.requestStop();
-    if (result?.stopAccepted === false) {
-      throw new Error(
-        `${result.blockingWork} work item${result.blockingWork === 1 ? " is" : "s are"} still active. `
-        + "Finish or stop the listed work, then try again.",
-      );
-    }
+    if (result?.stopAccepted === false) throw stillActiveError(result.blockingWork);
     const deadline = Date.now() + this.timeoutMs;
     while (Date.now() < deadline) {
       if (!await this.readStatus()) {
@@ -154,6 +152,13 @@ export class WindowsUserHostManager {
     }
     throw new Error("Alu Dock did not finish starting. Open the Host log from Alu Dock, then try again.");
   }
+}
+
+function stillActiveError(blockingWork: number): Error {
+  return new Error(
+    `${blockingWork} work item${blockingWork === 1 ? " is" : "s are"} still active. `
+    + "Finish or stop the listed work, then try again.",
+  );
 }
 
 async function launchHiddenHost(nodePath: string, cliPath: string, logPath: string): Promise<void> {

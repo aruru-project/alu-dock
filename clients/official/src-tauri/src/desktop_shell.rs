@@ -406,7 +406,27 @@ fn parse_service_status(stdout: &[u8]) -> Result<ServiceStatus, String> {
 #[cfg(target_os = "windows")]
 fn command_failure(output: &std::process::Output) -> String {
     let source = if output.stderr.is_empty() { &output.stdout } else { &output.stderr };
-    let message = String::from_utf8_lossy(source).trim().to_owned();
+    let text = String::from_utf8_lossy(source);
+    // --json invocations report failures as one machine-readable error line;
+    // surface its human message instead of the raw JSON.
+    let message = text
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .find_map(|value| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(|message| message.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('{'))
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
     if message.is_empty() {
         return "Alu Dock did not finish the requested action. Open the Host log and try again.".into();
     }
