@@ -1152,7 +1152,10 @@ impl RuntimeLifecycle {
 }
 
 impl ConnectionRuntimeState {
-    fn open(application_data_dir: Option<PathBuf>, prefer_local: bool) -> Result<Self, ClientError> {
+    fn open(
+        application_data_dir: Option<PathBuf>,
+        prefer_local: bool,
+    ) -> Result<Self, ClientError> {
         let registry = if let Some(path) = std::env::var_os("ALUDOCK_CLIENT_IDENTITY_DIR") {
             HostRegistry::open(PathBuf::from(path))?
         } else if let Some(path) = application_data_dir {
@@ -1163,7 +1166,11 @@ impl ConnectionRuntimeState {
         let preferences = ClientPreferencesStore::open(registry.root().join("client-preferences"))?;
         let local_identity = IdentityStore::new(registry.root().join("local-client-identity"));
         let mut snapshot = registry.snapshot()?;
-        if prefer_local && snapshot.active_host_id.is_none() && !snapshot.local_selected && snapshot.hosts.is_empty() {
+        if prefer_local
+            && snapshot.active_host_id.is_none()
+            && !snapshot.local_selected
+            && snapshot.hosts.is_empty()
+        {
             snapshot = registry.select_local(snapshot.revision)?;
         }
         let active_target = if snapshot.local_selected {
@@ -7681,7 +7688,11 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let builder = builder
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::Builder::new().args(["--background"]).build())
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .args(["--background"])
+                .build(),
+        )
         .on_window_event(|window, event| {
             desktop_shell::handle_window_event(window, event);
             if window.label() == "main"
@@ -7704,7 +7715,10 @@ pub fn run() {
             let desktop_shell = desktop_shell::DesktopShellState::initialize(app);
             let prefer_local = desktop_shell.prefer_local_connection();
             app.manage(desktop_shell);
-            app.manage(ConnectionRuntimeState::open(application_data_dir, prefer_local)?);
+            app.manage(ConnectionRuntimeState::open(
+                application_data_dir,
+                prefer_local,
+            )?);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);
@@ -8115,11 +8129,7 @@ mod tests {
         assert!(snapshot.local_selected);
         assert!(snapshot.active_host_id.is_none());
         assert_eq!(
-            runtime
-                .lifecycle
-                .lock()
-                .unwrap()
-                .active_target,
+            runtime.lifecycle.lock().unwrap().active_target,
             Some(ConnectionTarget::Local)
         );
 

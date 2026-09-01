@@ -259,7 +259,7 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         shell: bash
         run: |
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/aludock-release.p12"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$RUNNER_TEMP/aludock-release.p12"
           chmod 0600 "$RUNNER_TEMP/aludock-release.p12"
 
       - name: Build the signed ARM64 APK

@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
 #[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{App, AppHandle, Manager};
@@ -41,7 +41,9 @@ impl DesktopShellState {
                     host_ready: false,
                     role: None,
                     startup_error: Some(error.clone()),
-                    logs_path: windows_host_log_path().ok().map(|path| path.display().to_string()),
+                    logs_path: windows_host_log_path()
+                        .ok()
+                        .map(|path| path.display().to_string()),
                     login_start_enabled: false,
                 },
             };
@@ -69,7 +71,10 @@ impl DesktopShellState {
     }
 
     pub fn prefer_local_connection(&self) -> bool {
-        let status = self.status.lock().expect("desktop shell status lock poisoned");
+        let status = self
+            .status
+            .lock()
+            .expect("desktop shell status lock poisoned");
         status.host_ready && status.role.as_deref() == Some("main")
     }
 
@@ -82,7 +87,10 @@ impl DesktopShellState {
 
     #[cfg(target_os = "windows")]
     fn update(&self, app: &AppHandle, mut status: DesktopShellStatus) -> DesktopShellStatus {
-        let mut current = self.status.lock().expect("desktop shell status lock poisoned");
+        let mut current = self
+            .status
+            .lock()
+            .expect("desktop shell status lock poisoned");
         status.login_start_enabled = current.login_start_enabled;
         *current = status.clone();
         drop(current);
@@ -160,9 +168,13 @@ pub fn set_login_start(
     {
         let launcher = app.autolaunch();
         if enabled {
-            launcher.enable().map_err(|_| "Windows could not enable login startup. Try again from Alu Dock.".to_owned())?;
+            launcher.enable().map_err(|_| {
+                "Windows could not enable login startup. Try again from Alu Dock.".to_owned()
+            })?;
         } else {
-            launcher.disable().map_err(|_| "Windows could not disable login startup. Try again from Alu Dock.".to_owned())?;
+            launcher.disable().map_err(|_| {
+                "Windows could not disable login startup. Try again from Alu Dock.".to_owned()
+            })?;
         }
         let mut status = state.snapshot();
         status.login_start_enabled = enabled;
@@ -179,13 +191,12 @@ pub fn open_desktop_host_log(
     {
         use tauri_plugin_opener::OpenerExt;
 
-        let path = state
-            .snapshot()
-            .logs_path
-            .ok_or_else(|| "Alu Dock has not created a Host log yet. Try starting it first.".to_owned())?;
-        app.opener()
-            .open_path(path, None::<&str>)
-            .map_err(|_| "Windows could not open the Alu Dock log. Try again from the file explorer.".to_owned())
+        let path = state.snapshot().logs_path.ok_or_else(|| {
+            "Alu Dock has not created a Host log yet. Try starting it first.".to_owned()
+        })?;
+        app.opener().open_path(path, None::<&str>).map_err(|_| {
+            "Windows could not open the Alu Dock log. Try again from the file explorer.".to_owned()
+        })
     }
     #[cfg(target_os = "android")]
     {
@@ -233,15 +244,21 @@ struct ServiceStatus {
 #[cfg(target_os = "windows")]
 impl WindowsRuntime {
     fn discover() -> Result<Self, String> {
-        let executable = std::env::current_exe()
-            .map_err(|_| "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned())?;
+        let executable = std::env::current_exe().map_err(|_| {
+            "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned()
+        })?;
         let root = executable
             .parent()
-            .ok_or_else(|| "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned())?
+            .ok_or_else(|| {
+                "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned()
+            })?
             .to_path_buf();
-        let developer_node = std::env::var_os("ALUDOCK_DESKTOP_NODE_PATH").map(std::path::PathBuf::from);
-        let developer_cli = std::env::var_os("ALUDOCK_DESKTOP_CLI_PATH").map(std::path::PathBuf::from);
-        let developer_launcher = std::env::var_os("ALUDOCK_DESKTOP_LAUNCHER_PATH").map(std::path::PathBuf::from);
+        let developer_node =
+            std::env::var_os("ALUDOCK_DESKTOP_NODE_PATH").map(std::path::PathBuf::from);
+        let developer_cli =
+            std::env::var_os("ALUDOCK_DESKTOP_CLI_PATH").map(std::path::PathBuf::from);
+        let developer_launcher =
+            std::env::var_os("ALUDOCK_DESKTOP_LAUNCHER_PATH").map(std::path::PathBuf::from);
         let (node, cli, launcher) = match (developer_node, developer_cli, developer_launcher) {
             (Some(node), Some(cli), Some(launcher)) => (node, cli, launcher),
             (None, None, None) => {
@@ -254,9 +271,15 @@ impl WindowsRuntime {
             }
             _ => return Err("Alu Dock developer runtime overrides must provide Node, Dock, and terminal paths together.".into()),
         };
-        for (path, label) in [(&node, "Node runtime"), (&cli, "Dock runtime"), (&launcher, "terminal entry")] {
+        for (path, label) in [
+            (&node, "Node runtime"),
+            (&cli, "Dock runtime"),
+            (&launcher, "terminal entry"),
+        ] {
             if !path.is_file() {
-                return Err(format!("The Alu Dock {label} is missing. Run Setup.cmd from a complete Windows package."));
+                return Err(format!(
+                    "The Alu Dock {label} is missing. Run Setup.cmd from a complete Windows package."
+                ));
             }
         }
         Ok(Self {
@@ -325,7 +348,9 @@ impl WindowsRuntime {
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| self.project_status(&output.stdout).ok())
-            .unwrap_or_else(|| failed_status(error.clone(), Some(self.logs_path.display().to_string())));
+            .unwrap_or_else(|| {
+                failed_status(error.clone(), Some(self.logs_path.display().to_string()))
+            });
         status.startup_error = Some(error);
         status
     }
@@ -352,15 +377,19 @@ fn require_installed_root(root: &std::path::Path) -> Result<(), String> {
     let actual = std::fs::canonicalize(root).ok();
     let expected = std::fs::canonicalize(&installed).ok();
     if actual.is_none() || actual != expected {
-        return Err("Run Setup.cmd from the complete Windows package before opening AluDock.exe.".into());
+        return Err(
+            "Run Setup.cmd from the complete Windows package before opening AluDock.exe.".into(),
+        );
     }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn windows_local_root() -> Result<std::path::PathBuf, String> {
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| "Alu Dock could not locate your local application directory. Run Setup.cmd again.".to_owned())?;
+    let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
+        "Alu Dock could not locate your local application directory. Run Setup.cmd again."
+            .to_owned()
+    })?;
     Ok(std::path::PathBuf::from(local_app_data).join("Alu Dock"))
 }
 
@@ -399,13 +428,19 @@ fn parse_service_status(stdout: &[u8]) -> Result<ServiceStatus, String> {
         .rev()
         .find(|line| !line.trim().is_empty())
         .ok_or_else(|| "Alu Dock started without returning its readiness result. Open the Host log and try again.".to_owned())?;
-    serde_json::from_str(line)
-        .map_err(|_| "Alu Dock returned an unreadable readiness result. Open the Host log and try again.".to_owned())
+    serde_json::from_str(line).map_err(|_| {
+        "Alu Dock returned an unreadable readiness result. Open the Host log and try again."
+            .to_owned()
+    })
 }
 
 #[cfg(target_os = "windows")]
 fn command_failure(output: &std::process::Output) -> String {
-    let source = if output.stderr.is_empty() { &output.stdout } else { &output.stderr };
+    let source = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
     let text = String::from_utf8_lossy(source);
     // --json invocations report failures as one machine-readable error line;
     // surface its human message instead of the raw JSON.
@@ -428,7 +463,8 @@ fn command_failure(output: &std::process::Output) -> String {
                 .join(" ")
         });
     if message.is_empty() {
-        return "Alu Dock did not finish the requested action. Open the Host log and try again.".into();
+        return "Alu Dock did not finish the requested action. Open the Host log and try again."
+            .into();
     }
     message.chars().take(2_000).collect()
 }
@@ -465,22 +501,34 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
     let second_separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&open, &first_separator, &start, &stop, &logs, &terminal, &login, &second_separator, &exit],
+        &[
+            &open,
+            &first_separator,
+            &start,
+            &stop,
+            &logs,
+            &terminal,
+            &login,
+            &second_separator,
+            &exit,
+        ],
     )?;
     let login_for_event = login.clone();
     let mut tray = TrayIconBuilder::with_id("main-tray");
     if let Some(icon) = app.default_window_icon().cloned() {
         tray = tray.icon(icon);
     }
-    tray
-        .tooltip("Alu Dock")
+    tray.tooltip("Alu Dock")
         .menu(&menu)
         .on_tray_icon_event(|tray, event| {
-            if matches!(event, TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            }) {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
                 show_main_window(tray.app_handle());
             }
         })
