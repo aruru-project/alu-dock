@@ -62,7 +62,6 @@ impl WorkspaceFileEntry {
         if normalized != self.path
             || !safe_text(&self.name, MAX_WORKSPACE_ENTRY_NAME_CHARS)
             || self.name.contains('/')
-            || self.name.contains('\\')
         {
             return Err(protocol("workspace file metadata was invalid"));
         }
@@ -657,6 +656,20 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncWriteExt, duplex};
+
+    #[test]
+    fn a_linux_workspace_can_show_a_file_whose_name_contains_a_backslash() {
+        let entry = WorkspaceFileEntry {
+            path: "back\\slash.txt".into(),
+            name: "back\\slash.txt".into(),
+            kind: WorkspaceFileKind::File,
+            hidden: false,
+            target_kind: None,
+            size_bytes: Some(5),
+        };
+
+        entry.validate().unwrap();
+    }
 
     #[tokio::test]
     async fn opening_a_workspace_file_accepts_the_exact_bytes_observed_during_the_read() {

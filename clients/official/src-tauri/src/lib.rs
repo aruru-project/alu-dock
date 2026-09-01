@@ -39,7 +39,7 @@ use aludock_client_core::{
     SessionScope, SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo,
     StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay,
     WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress,
-    WorkspaceFileReadResult, WorkspacePage, delete_endpoint, probe_host_endpoint,
+    WorkspaceFileReadResult, WorkspaceCursor, WorkspacePage, delete_endpoint, probe_host_endpoint,
     record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
     saved_endpoint_for_test, set_connection_policy as update_connection_policy,
     set_endpoint_enabled, validate_device_name, validate_host_id,
@@ -4547,8 +4547,8 @@ fn workspace_client_error(error: ClientError) -> CommandError {
             "读取工作区时连接中断了。请检查连接后重试。",
         ),
         ClientError::Io(_) => workspace_command_error(
-            "workspace_storage_unavailable",
-            "设备存储空间当前不可用。请检查可用空间后重试。",
+            "workspace_read_interrupted",
+            "没有完整读取这个文件。请检查连接和设备可用空间后重试。",
         ),
         ClientError::Protocol(_) | ClientError::Json(_) => workspace_command_error(
             "workspace_verification_failed",
@@ -6860,11 +6860,12 @@ async fn list_workspace(
     selection_generation: u64,
     path: String,
     target_host_id: Option<String>,
+    cursor: Option<WorkspaceCursor>,
 ) -> Result<WorkspacePage, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     client
-        .list_workspace_for_machine(&path, None, target_host_id.as_deref())
+        .list_workspace_for_machine(&path, cursor.as_ref(), target_host_id.as_deref())
         .await
         .map_err(CommandError::from)
 }

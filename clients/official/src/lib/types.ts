@@ -187,6 +187,11 @@ export interface WorkspaceEntry {
   hidden: boolean
 }
 
+export interface WorkspaceCursor {
+  revision: string
+  offset: number
+}
+
 export interface WorkspacePage {
   path: string
   parent?: string
@@ -194,6 +199,7 @@ export interface WorkspacePage {
   entries: WorkspaceEntry[]
   total: number
   truncated: boolean
+  nextCursor?: WorkspaceCursor
 }
 
 export type WorkspaceFileKind = 'file' | 'directory' | 'symlink'

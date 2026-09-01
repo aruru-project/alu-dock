@@ -47,6 +47,7 @@ import type {
   Work,
   WorkCatalog,
   WindowsAwayDelay,
+  WorkspaceCursor,
   WorkspaceFileCacheResult,
   WorkspaceFileCursor,
   WorkspaceFileEntry,
@@ -697,8 +698,15 @@ export async function listMachines(context: ConnectionContext): Promise<MachineD
   ]
 }
 
-export async function listWorkspace(path: string, context: ConnectionContext, targetHostId?: string): Promise<WorkspacePage> {
-  if (isTauri) return invoke<WorkspacePage>('list_workspace', { ...context, path, targetHostId: targetHostId ?? null })
+export async function listWorkspace(
+  path: string,
+  context: ConnectionContext,
+  targetHostId?: string,
+  cursor?: WorkspaceCursor,
+): Promise<WorkspacePage> {
+  if (isTauri) return invoke<WorkspacePage>('list_workspace', {
+    ...context, path, targetHostId: targetHostId ?? null, cursor: cursor ?? null,
+  })
   await delay(180)
   return {
     path,

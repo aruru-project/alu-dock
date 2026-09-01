@@ -1,4 +1,4 @@
-import type { WorkspaceFileCursor, WorkspaceFileEntry } from './types'
+import type { WorkspaceFileCursor, WorkspaceFileEntry, WorkspacePage } from './types'
 
 export type WorkspacePreviewKind = 'text' | 'image' | 'unsupported'
 
@@ -67,6 +67,26 @@ export function mergeWorkspaceDirectoryEntries(
     return pageEntries
   }
   return [...existingEntries, ...pageEntries]
+}
+
+export function workspaceDirectoryRefreshPaths(
+  mobile: boolean,
+  mobilePath: string,
+  expandedPaths: ReadonlySet<string>,
+  directories: Readonly<Record<string, WorkspaceDirectoryState>>,
+): string[] {
+  if (mobile) return [mobilePath]
+  return [...new Set(['.', ...expandedPaths])]
+    .filter((path) => path === '.' || directories[path] !== undefined)
+    .sort((left, right) => pathDepth(left) - pathDepth(right) || left.localeCompare(right))
+}
+
+export function appendWorkspacePage(current: WorkspacePage, next: WorkspacePage): WorkspacePage {
+  return { ...next, entries: [...current.entries, ...next.entries] }
+}
+
+function pathDepth(path: string): number {
+  return path === '.' ? 0 : path.split('/').length
 }
 
 function extensionOf(name: string): string {

@@ -13,7 +13,7 @@ const SAFE_ERROR_CODES = new Set([
   'workspace_context_changed', 'workspace_not_active', 'workspace_entry_not_found',
   'workspace_entry_not_directory', 'workspace_entry_not_file', 'workspace_entry_unavailable',
   'workspace_file_too_large', 'workspace_changed', 'workspace_connection_failed',
-  'workspace_storage_unavailable', 'workspace_verification_failed', 'workspace_state_unavailable',
+  'workspace_storage_unavailable', 'workspace_read_interrupted', 'workspace_verification_failed', 'workspace_state_unavailable',
   'workspace_cache_unavailable', 'workspace_read_cancelled', 'workspace_read_invalid',
   'workspace_large_file_confirmation_required', 'workspace_preview_unsupported',
   'workspace_save_failed',

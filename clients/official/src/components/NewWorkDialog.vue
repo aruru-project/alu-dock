@@ -20,6 +20,7 @@ import {
   workspaceChildPath,
 } from '../lib/machines'
 import { treeNodeTime } from '../lib/sessionTree'
+import { appendWorkspacePage } from '../lib/workspaceBrowser'
 import type { MachineDto, SessionInventoryInfo, SessionInventoryResult, Work, WorkspacePage } from '../lib/types'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { useAppStore } from '../stores/app'
@@ -57,6 +58,7 @@ const workspace = ref<WorkspacePage | null>(null)
 const workspacePath = ref('')
 const workspaceSearch = ref('')
 const workspaceLoading = ref(false)
+const workspaceLoadingMore = ref(false)
 const inventory = ref<SessionInventoryResult | null>(null)
 const sessionSearch = ref('')
 const inventoryLoading = ref(false)
@@ -165,6 +167,7 @@ async function browse(path: string) {
   if (!selectedMachine?.available) return
   const epoch = ++workspaceEpoch
   workspaceLoading.value = true
+  workspaceLoadingMore.value = false
   workspaceSearch.value = ''
   error.value = ''
   try {
@@ -176,6 +179,30 @@ async function browse(path: string) {
     if (epoch === workspaceEpoch) error.value = errorMessage(cause)
   } finally {
     if (epoch === workspaceEpoch) workspaceLoading.value = false
+  }
+}
+
+async function loadMoreWorkspace() {
+  const selectedMachine = machine.value
+  const current = workspace.value
+  const cursor = current?.nextCursor
+  if (!selectedMachine?.available || !current || !cursor || workspaceLoadingMore.value) return
+  const epoch = ++workspaceEpoch
+  workspaceLoadingMore.value = true
+  error.value = ''
+  try {
+    const page = await currentConnectionCall(app, (context) => listWorkspace(
+      current.path,
+      context,
+      selectedMachine.hostId,
+      cursor,
+    ))
+    if (epoch !== workspaceEpoch || selectedMachine.hostId !== machineHostId.value) return
+    workspace.value = appendWorkspacePage(current, page)
+  } catch (cause) {
+    if (epoch === workspaceEpoch) error.value = errorMessage(cause)
+  } finally {
+    if (epoch === workspaceEpoch) workspaceLoadingMore.value = false
   }
 }
 
@@ -331,7 +358,8 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
           <button class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="createAt(workspace.path)"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
           <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
           <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(workspaceChildPath(workspace.path, entry.name, machine.platform))"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
-          <div v-if="!filteredWorkspaceEntries.length && !workspace.parent" class="ui-dialog-empty">没有匹配项</div>
+          <button v-if="workspace.nextCursor" type="button" class="ui-dialog-option" :disabled="workspaceLoadingMore" @click="loadMoreWorkspace"><span class="ui-dialog-option-marker">…</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ workspaceLoadingMore ? '正在读取更多目录…' : '加载更多目录' }}</span></span></button>
+          <div v-if="!filteredWorkspaceEntries.length && !workspace.nextCursor" class="ui-dialog-empty">没有匹配项</div>
         </div>
       </template>
 

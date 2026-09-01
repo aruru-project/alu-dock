@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict'
 import { reactive, watch } from 'vue'
 import {
+  appendWorkspacePage,
   classifyWorkspacePreview,
   mergeWorkspaceDirectoryEntries,
+  workspaceDirectoryRefreshPaths,
   workspaceDirectoryState,
   workspaceEntryIsDirectory,
   workspaceEntryIsFile,
   workspaceEntryIsMarkdown,
   type WorkspaceDirectoryState,
 } from '../src/lib/workspaceBrowser.ts'
-import type { WorkspaceFileEntry } from '../src/lib/types.ts'
+import type { WorkspaceFileEntry, WorkspacePage } from '../src/lib/types.ts'
 
 function file(path: string, name = path): WorkspaceFileEntry {
   return { path, name, kind: 'file', hidden: false, sizeBytes: 1 }
@@ -39,6 +41,33 @@ assert.deepEqual(
   ),
   [changedEntry],
 )
+
+const refreshDirectories: Record<string, WorkspaceDirectoryState> = {
+  '.': { entries: [], revision: 'root', loading: false, error: '', loadToken: 0 },
+  src: { entries: [], revision: 'src', loading: false, error: '', loadToken: 0 },
+  'src/lib': { entries: [], revision: 'lib', loading: false, error: '', loadToken: 0 },
+}
+assert.deepEqual(
+  workspaceDirectoryRefreshPaths(false, '.', new Set(['.', 'src', 'src/lib']), refreshDirectories),
+  ['.', 'src', 'src/lib'],
+)
+assert.deepEqual(
+  workspaceDirectoryRefreshPaths(true, 'src/lib', new Set(['.', 'src']), refreshDirectories),
+  ['src/lib'],
+)
+
+const firstWorkspacePage: WorkspacePage = {
+  path: '/work', revision: 'browse-a', entries: [{ name: 'a', kind: 'directory', hidden: false }],
+  total: 2, truncated: true, nextCursor: { revision: 'browse-a', offset: 1 },
+}
+const finalWorkspacePage: WorkspacePage = {
+  path: '/work', revision: 'browse-a', entries: [{ name: 'b', kind: 'directory', hidden: false }],
+  total: 2, truncated: false,
+}
+assert.deepEqual(appendWorkspacePage(firstWorkspacePage, finalWorkspacePage), {
+  ...finalWorkspacePage,
+  entries: [...firstWorkspacePage.entries, ...finalWorkspacePage.entries],
+})
 
 const directoryLink: WorkspaceFileEntry = {
   path: 'linked-dir', name: 'linked-dir', kind: 'symlink', hidden: false, targetKind: 'directory',

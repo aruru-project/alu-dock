@@ -34,6 +34,7 @@ import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 import {
   classifyWorkspacePreview as classifyPreview,
   mergeWorkspaceDirectoryEntries,
+  workspaceDirectoryRefreshPaths,
   workspaceDirectoryState,
   workspaceEntryIsDirectory as entryIsDirectory,
   workspaceEntryIsFile as entryIsFile,
@@ -82,6 +83,7 @@ const pendingIntent = ref<PendingIntent>('preview')
 const progressBytes = ref(0)
 const progressTotal = ref(0)
 const activeReadId = ref('')
+const refreshingDirectories = ref(false)
 const saving = ref(false)
 const saveStatus = ref('')
 const isMobile = ref(false)
@@ -89,6 +91,7 @@ let operationEpoch = 0
 let unlistenProgress: UnlistenFn | null = null
 let mediaQuery: MediaQueryList | null = null
 let componentMounted = false
+let fileCleanup = Promise.resolve()
 
 const selectedPathLabel = computed(() => {
   const path = selectedEntry.value?.path
@@ -189,13 +192,11 @@ function revokePreviewImage() {
   previewImageUrl.value = ''
 }
 
-async function invalidateFile(clearSelection: boolean) {
-  operationEpoch += 1
+async function invalidateFile(clearSelection: boolean): Promise<number> {
+  const epoch = ++operationEpoch
   const readId = activeReadId.value
   const context = currentContext()
   activeReadId.value = ''
-  if (readId && context) void cancelWorkspaceFileRead(readId, context).catch(() => undefined)
-  await clearWorkspaceFileState().catch(() => undefined)
   revokePreviewImage()
   cacheResult.value = null
   largeFileConfirmBytes.value = null
@@ -210,6 +211,13 @@ async function invalidateFile(clearSelection: boolean) {
     previewPhase.value = 'empty'
     mobilePreview.value = false
   }
+  const cleanup = async () => {
+    if (readId && context) await cancelWorkspaceFileRead(readId, context).catch(() => false)
+    await clearWorkspaceFileState().catch(() => undefined)
+  }
+  fileCleanup = fileCleanup.then(cleanup, cleanup)
+  await fileCleanup
+  return epoch
 }
 
 function resetDirectories() {
@@ -219,9 +227,39 @@ function resetDirectories() {
 }
 
 async function resetBrowser() {
-  await invalidateFile(true)
+  const context = currentContext()
+  if (!context) return
+  const epoch = await invalidateFile(true)
+  if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
   resetDirectories()
-  if (props.open && currentContext()) await loadDirectory('.', true)
+  await loadDirectory('.', true)
+}
+
+async function refreshDirectories() {
+  const context = currentContext()
+  if (!context || refreshingDirectories.value) return
+  const currentMobilePath = mobilePath.value
+  const expandedSnapshot = new Set(expandedPaths.value)
+  const paths = workspaceDirectoryRefreshPaths(
+    isMobile.value,
+    currentMobilePath,
+    expandedSnapshot,
+    directories,
+  )
+  refreshingDirectories.value = true
+  try {
+    const epoch = await invalidateFile(true)
+    if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
+    resetDirectories()
+    if (isMobile.value) mobilePath.value = currentMobilePath
+    else expandedPaths.value = expandedSnapshot
+    for (const path of paths) {
+      if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
+      await loadDirectory(path, true)
+    }
+  } finally {
+    refreshingDirectories.value = false
+  }
 }
 
 async function loadDirectory(path: string, reset = false) {
@@ -274,33 +312,34 @@ async function goToMobilePath(path: string) {
   if (!directories[path]) await loadDirectory(path, true)
 }
 
-async function openFile(entry: WorkspaceFileEntry) {
+async function openFile(entry: WorkspaceFileEntry, saveAfterRead = false) {
   if (!entryIsFile(entry)) return
-  await invalidateFile(true)
-  const context = currentContext()
-  if (!context) return
+  const cleanup = invalidateFile(true)
   const epoch = operationEpoch
   selectedEntry.value = entry
   previewKind.value = classifyPreview(entry)
   previewPhase.value = 'metadata'
   previewError.value = ''
+  pendingIntent.value = saveAfterRead ? 'save' : 'preview'
   mobilePreview.value = true
+  await cleanup
+  const context = currentContext()
+  if (!context || epoch !== operationEpoch || !contextMatches(context) || !props.open) return
   try {
     const metadata = await getWorkspaceEntryMetadata(entry.path, context)
     if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
     selectedEntry.value = metadata.entry
     previewKind.value = classifyPreview(metadata.entry)
     largeFileConfirmBytes.value = metadata.largeFileConfirmBytes
-    if (previewKind.value === 'unsupported') {
+    if (previewKind.value === 'unsupported' && !saveAfterRead) {
       previewPhase.value = 'unsupported'
       return
     }
     if ((metadata.entry.sizeBytes ?? 0) > metadata.largeFileConfirmBytes) {
-      pendingIntent.value = 'preview'
       previewPhase.value = 'confirm'
       return
     }
-    await beginRead(false, false, epoch)
+    await beginRead(false, saveAfterRead, epoch)
   } catch (cause) {
     if (epoch !== operationEpoch || !contextMatches(context)) return
     previewError.value = userErrorMessage(cause, '无法读取这个文件的状态。请刷新目录后重试。')
@@ -389,21 +428,13 @@ async function confirmPendingRead() {
 
 async function retryRead() {
   const entry = selectedEntry.value
-  if (!entry) return
-  const confirmed = largeFileConfirmBytes.value !== null
-    && (entry.sizeBytes ?? 0) > largeFileConfirmBytes.value
-  await invalidateFile(false)
-  await beginRead(confirmed, false)
+  if (entry) await openFile(entry)
 }
 
 async function cancelRead() {
-  const readId = activeReadId.value
-  const context = currentContext()
-  if (!readId || !context) return
-  operationEpoch += 1
-  activeReadId.value = ''
-  await cancelWorkspaceFileRead(readId, context).catch(() => false)
-  await clearWorkspaceFileState().catch(() => undefined)
+  if (!activeReadId.value) return
+  const epoch = await invalidateFile(false)
+  if (epoch !== operationEpoch) return
   previewError.value = '已停止读取。'
   previewPhase.value = 'error'
 }
@@ -417,13 +448,7 @@ async function requestSave() {
     await saveCached(cacheResult.value.cacheId, context, operationEpoch)
     return
   }
-  if (largeFileConfirmBytes.value !== null
-    && (entry.sizeBytes ?? 0) > largeFileConfirmBytes.value) {
-    pendingIntent.value = 'save'
-    previewPhase.value = 'confirm'
-    return
-  }
-  await beginRead(false, true)
+  await openFile(entry, true)
 }
 
 async function saveCached(cacheId: string, context: WorkspaceFileContext, expectedEpoch: number) {
@@ -440,12 +465,12 @@ async function saveCached(cacheId: string, context: WorkspaceFileContext, expect
   }
 }
 
-function handleMobileBack() {
+async function handleMobileBack() {
   if (mobilePreview.value) {
-    mobilePreview.value = false
+    await invalidateFile(true)
     return
   }
-  if (mobilePath.value !== '.') void goToMobilePath(parentPath(mobilePath.value))
+  if (mobilePath.value !== '.') await goToMobilePath(parentPath(mobilePath.value))
   else emit('close')
 }
 
@@ -467,7 +492,7 @@ watch(
     const changed = !previous || current.slice(1).some((value, index) => value !== previous[index + 1])
     if (!props.open) {
       void invalidateFile(true)
-      if (changed) resetDirectories()
+      resetDirectories()
       return
     }
     if (props.work?.lifecycle !== 'active' || !currentContext()) {
@@ -544,7 +569,7 @@ onBeforeUnmount(() => {
                 </template>
               </div>
               <span v-else>目录</span>
-              <button type="button" class="workspace-icon-button" :disabled="directories[isMobile ? mobilePath : '.']?.loading" :aria-label="`刷新 ${displayPath(isMobile ? mobilePath : '.')}`" @click="loadDirectory(isMobile ? mobilePath : '.', true)"><RefreshCw :size="15" :class="{ spinning: directories[isMobile ? mobilePath : '.']?.loading }" /></button>
+              <button type="button" class="workspace-icon-button" :disabled="refreshingDirectories || directories[isMobile ? mobilePath : '.']?.loading" :aria-label="isMobile ? `刷新 ${displayPath(mobilePath)}` : '刷新工作区'" @click="refreshDirectories"><RefreshCw :size="15" :class="{ spinning: refreshingDirectories || directories[isMobile ? mobilePath : '.']?.loading }" /></button>
             </div>
 
             <div v-if="isMobile" class="workspace-mobile-list" role="list">
@@ -618,7 +643,7 @@ onBeforeUnmount(() => {
               <span class="workspace-confirm-mark">!</span>
               <strong>这是一个较大的文件</strong>
               <p>{{ formatBytes(selectedEntry?.sizeBytes) }} · 读取可能占用较多流量和设备内存。</p>
-              <div><button type="button" class="workspace-secondary-button" @click="mobilePreview = false">返回</button><button type="button" class="workspace-primary-button" @click="confirmPendingRead">{{ pendingIntent === 'save' ? '读取并另存为' : '继续读取' }}</button></div>
+              <div><button type="button" class="workspace-secondary-button" @click="invalidateFile(true)">返回</button><button type="button" class="workspace-primary-button" @click="confirmPendingRead">{{ pendingIntent === 'save' ? '读取并另存为' : '继续读取' }}</button></div>
             </div>
             <div v-else-if="previewPhase === 'reading'" class="workspace-preview-state workspace-reading" role="status">
               <span class="workspace-spinner large" />
