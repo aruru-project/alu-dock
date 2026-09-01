@@ -259,9 +259,7 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         shell: bash
         run: |
-          # The stored secret carries one stray non-base64 character from being
-          # pasted into GitHub; keep only the base64 alphabet before decoding.
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -cd 'A-Za-z0-9+/=' | base64 --decode > "$RUNNER_TEMP/aludock-release.p12"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/aludock-release.p12"
           chmod 0600 "$RUNNER_TEMP/aludock-release.p12"
 
       - name: Build the signed ARM64 APK
