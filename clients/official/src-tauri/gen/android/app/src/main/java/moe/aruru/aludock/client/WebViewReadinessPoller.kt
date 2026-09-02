@@ -13,23 +13,24 @@ class WebViewReadinessPoller(
     readinessScript: String,
     onReady: () -> Unit,
     onFinished: () -> Unit,
+    shouldContinue: () -> Boolean = { true },
     attempt: Int = 0,
   ) {
     val target = webViewProvider()
-    if (target == null || isDestroyed()) {
+    if (target == null || isDestroyed() || !shouldContinue()) {
       onFinished()
       return
     }
 
     target.post {
       val active = webViewProvider()
-      if (active == null || isDestroyed()) {
+      if (active == null || isDestroyed() || !shouldContinue()) {
         onFinished()
         return@post
       }
 
       active.evaluateJavascript(readinessScript) { value ->
-        if (isDestroyed()) {
+        if (isDestroyed() || !shouldContinue()) {
           onFinished()
           return@evaluateJavascript
         }
@@ -43,7 +44,15 @@ class WebViewReadinessPoller(
           return@evaluateJavascript
         }
         active.postDelayed(
-          { pollUntilReady(readinessScript, onReady, onFinished, attempt + 1) },
+          {
+            pollUntilReady(
+              readinessScript,
+              onReady,
+              onFinished,
+              shouldContinue,
+              attempt + 1,
+            )
+          },
           retryDelayMs,
         )
       }

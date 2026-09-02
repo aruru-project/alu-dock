@@ -37,8 +37,6 @@ class AndroidNetworkBridge(
     val initial = currentSnapshot()
     observedSnapshot = initial
     deliveredSnapshot = initial
-    connectivityManager.registerDefaultNetworkCallback(callback)
-    registered = true
   }
 
   fun onWebViewAvailable() {
@@ -47,21 +45,33 @@ class AndroidNetworkBridge(
 
   fun onResume() {
     resumed = true
+    registerCallback()
     mainHandler.removeCallbacks(observeRunnable)
     observeCurrentNetwork()
   }
 
   fun onPause() {
     resumed = false
+    mainHandler.removeCallbacks(observeRunnable)
+    unregisterCallback()
   }
 
   fun onDestroy() {
     resumed = false
     mainHandler.removeCallbacks(observeRunnable)
-    if (registered) {
-      connectivityManager.unregisterNetworkCallback(callback)
-      registered = false
-    }
+    unregisterCallback()
+  }
+
+  private fun registerCallback() {
+    if (registered) return
+    connectivityManager.registerDefaultNetworkCallback(callback)
+    registered = true
+  }
+
+  private fun unregisterCallback() {
+    if (!registered) return
+    connectivityManager.unregisterNetworkCallback(callback)
+    registered = false
   }
 
   private fun scheduleObservation() {
@@ -89,12 +99,8 @@ class AndroidNetworkBridge(
         webViewProvider()?.evaluateJavascript(DISPATCH_SCRIPT, null)
         deliveredSnapshot = delivered
       },
-      onFinished = {
-        dispatchScheduled = false
-        if (!isDestroyed() && resumed && observedSnapshot != deliveredSnapshot) {
-          mainHandler.postDelayed({ dispatchIfNeeded() }, WebViewReadinessPoller.DEFAULT_RETRY_DELAY_MS)
-        }
-      },
+      onFinished = { dispatchScheduled = false },
+      shouldContinue = { resumed && !isDestroyed() },
     )
   }
 
