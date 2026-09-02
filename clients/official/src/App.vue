@@ -57,6 +57,7 @@ import {
   removeAttachment,
   reorderHostEndpoints,
   reopenWork,
+  reselectHostRoute,
   resumePairing,
   discardPairing,
   stageClipboardImage,
@@ -316,6 +317,9 @@ const hostNameSaving = ref(false)
 const hostNameError = ref('')
 const hostNameSaved = ref(false)
 const unlisteners: UnlistenFn[] = []
+let androidNetworkRecoveryPending = false
+let androidNetworkRecoveryTask: Promise<void> | null = null
+let androidRouteRefreshPending = false
 let projectionFrame = 0
 let fullConversationProjectionState: ConversationBootstrap | null = null
 const pendingLiveToolProjectionEvents = new Map<string, { state: ConversationBootstrap; event: ProjectedEvent }>()
@@ -918,6 +922,10 @@ onMounted(async () => {
   window.addEventListener('popstate', handlePopstate)
   window.addEventListener('focus', handleWebViewFocus)
   window.addEventListener('resize', positionDockToolsPopover)
+  if (isAndroidWebView) {
+    window.addEventListener('aludock:network-changed', handleAndroidNetworkChanged)
+    document.documentElement.dataset.aludockNetworkReady = 'true'
+  }
   try {
     appSettings.value = await getClientPreferences()
   } catch (cause) {
@@ -1028,6 +1036,10 @@ onUnmounted(() => {
   window.removeEventListener('popstate', handlePopstate)
   window.removeEventListener('focus', handleWebViewFocus)
   window.removeEventListener('resize', positionDockToolsPopover)
+  if (isAndroidWebView) {
+    window.removeEventListener('aludock:network-changed', handleAndroidNetworkChanged)
+    delete document.documentElement.dataset.aludockNetworkReady
+  }
   unlisteners.forEach((unlisten) => unlisten())
   window.clearTimeout(reconnectTimer)
   window.clearTimeout(composerCompletionTimer)
@@ -1711,8 +1723,10 @@ async function saveEndpointDraft() {
 async function chooseConnectionPolicy(mode: 'automatic' | 'fixed', endpointId?: string) {
   endpointError.value = ''
   try {
+    const context = requireConnectionContext(app)
     const revision = activeProfile().revision
-    applyProfile(await currentConnectionCall(app, (context) => setConnectionPolicy(mode, revision, context, endpointId)))
+    applyProfile(await currentConnectionCall(app, (current) => setConnectionPolicy(mode, revision, current, endpointId)))
+    if (app.contextMatches(context)) await reconnectThroughPreferredRoute(context)
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   }
@@ -2877,8 +2891,50 @@ function handleWebViewFocus() {
   void handleWindowFocusChanged(true)
 }
 
+function handleAndroidNetworkChanged() {
+  androidNetworkRecoveryPending = true
+  if (androidNetworkRecoveryTask) return
+  androidNetworkRecoveryTask = drainAndroidNetworkChanges().finally(() => {
+    androidNetworkRecoveryTask = null
+    if (androidNetworkRecoveryPending) handleAndroidNetworkChanged()
+  })
+}
+
+async function drainAndroidNetworkChanges() {
+  while (androidNetworkRecoveryPending) {
+    androidNetworkRecoveryPending = false
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    if (!context || app.localSelected) continue
+    try {
+      androidRouteRefreshPending = !await reconnectThroughPreferredRoute(context)
+    } catch (cause) {
+      if (app.contextMatches(context)) console.error('Failed to reconnect after the network changed.', cause)
+    }
+  }
+}
+
+async function reconnectThroughPreferredRoute(context: ConnectionContext) {
+  await reselectHostRoute(context)
+  if (!app.contextMatches(context)) return false
+  await detachConversationFollow()
+  if (!app.contextMatches(context) || !windowFocused.value) return false
+  await app.loadActive()
+  if (!app.contextMatches(context) || !windowFocused.value) return false
+  const connected = app.payload?.connectionId === context.connectionId
+  const work = selected.value
+  if (connected && work?.lifecycle === 'active') await reattachConversationFollow(work.id)
+  return connected
+}
+
 async function handleWindowFocusChanged(focused: boolean) {
   if (focused === windowFocused.value) {
+    if (focused && isAndroidWebView && androidRouteRefreshPending) {
+      const context = app.connectionContext ? { ...app.connectionContext } : null
+      await app.loadActive()
+      if (context && app.contextMatches(context)) {
+        androidRouteRefreshPending = app.payload?.connectionId !== context.connectionId
+      }
+    }
     const work = selected.value
     if (focused && work?.lifecycle === 'active' && !conversationLoading.value && !activeFollowCanContinue(work.id)) {
       await reattachConversationFollow(work.id)
@@ -2917,7 +2973,15 @@ async function handleWindowFocusChanged(focused: boolean) {
       console.error('Failed to finish Windows away period.', cause)
     }
   }
-  await app.refreshWorksQuietly()
+  if (isAndroidWebView && androidRouteRefreshPending) {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    await app.loadActive()
+    if (context && app.contextMatches(context)) {
+      androidRouteRefreshPending = app.payload?.connectionId !== context.connectionId
+    }
+  } else {
+    await app.refreshWorksQuietly()
+  }
   if (epoch !== windowFocusEpoch || !windowFocused.value) return
   const work = selected.value
   if (work?.lifecycle === 'active' && !activeFollowCanContinue(work.id)) {
@@ -4261,7 +4325,7 @@ async function toggleAllToolDetails() {
               <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="contextTransitionBusy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
             </form>
             <template v-if="app.activeHost && !app.localSelected && !addingHost">
-            <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost.displayName }}</h3></div><p>{{ app.activeHost.profile.endpoints.length }} 个 TLS 地址 · {{ app.activeHost.profile.policy.mode === 'automatic' ? '自动选择' : '固定地址' }}</p></div>
+            <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost.displayName }}</h3></div><p>{{ app.activeHost.profile.endpoints.length }} 个 TLS 地址 · {{ app.activeHost.profile.policy.mode === 'automatic' ? '自动选择' : '固定首选' }}</p></div>
             <form class="host-profile-form" @submit.prevent="saveHostDisplayName">
               <div><strong>Host 名称</strong><small>仅修改此设备上显示的名称；地址和配对关系保持原样。</small></div>
               <div class="host-name-field"><input v-model="hostDisplayName" maxlength="128" autocomplete="off" placeholder="例如 家里的工作站" :disabled="hostNameSaving" /><button class="button secondary" :disabled="hostNameSaving || hostDisplayName.trim() === app.activeHost?.displayName">{{ hostNameSaving ? '保存中…' : '保存名称' }}</button></div>
@@ -4286,9 +4350,9 @@ async function toggleAllToolDetails() {
                   <div class="endpoint-actions">
                     <button :disabled="index === 0 || !!endpointMutatingId" :aria-label="`上移 ${endpoint.label}`" @click="moveEndpoint(endpoint.id, -1)">↑</button>
                     <button :disabled="index === (app.activeHost?.profile.endpoints.length ?? 0) - 1 || !!endpointMutatingId" :aria-label="`下移 ${endpoint.label}`" @click="moveEndpoint(endpoint.id, 1)">↓</button>
-                    <button :disabled="!!endpointMutatingId" @click="testEndpoint(endpoint)">{{ endpointMutatingId === endpoint.id ? '测试中…' : endpoint.state === 'draft_unverified' ? '验证' : '重试' }}</button>
+                    <button :disabled="!!endpointMutatingId" @click="testEndpoint(endpoint)">{{ endpointMutatingId === endpoint.id ? '测试中…' : endpoint.state === 'draft_unverified' ? '验证' : '测试' }}</button>
                     <button :disabled="!!endpointMutatingId" @click="toggleEndpoint(endpoint)">{{ endpoint.state === 'disabled' ? '重新启用' : '停用' }}</button>
-                    <button v-if="endpoint.state === 'verified'" class="endpoint-use" :class="{ selected: app.activeHost?.profile.policy.mode === 'fixed' && app.activeHost!.profile.policy.endpointId === endpoint.id }" :disabled="!!endpointMutatingId" @click="chooseConnectionPolicy('fixed', endpoint.id)">固定</button>
+                    <button v-if="endpoint.state === 'verified'" class="endpoint-use" :class="{ selected: app.activeHost?.profile.policy.mode === 'fixed' && app.activeHost!.profile.policy.endpointId === endpoint.id }" :disabled="!!endpointMutatingId" @click="chooseConnectionPolicy('fixed', endpoint.id)">{{ app.activeHost?.profile.policy.mode === 'fixed' && app.activeHost.profile.policy.endpointId === endpoint.id ? '已设为首选' : '设为首选' }}</button>
                     <button class="endpoint-delete" :aria-label="`删除地址 ${endpoint.label}`" :disabled="!!endpointMutatingId" @click="removeEndpoint(endpoint.id, endpoint.label)"><Trash2 :size="15" /></button>
                   </div>
                 </article>

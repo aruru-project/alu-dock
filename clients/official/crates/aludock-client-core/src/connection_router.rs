@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use tokio::time::timeout;
 
 use crate::{
-    ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, Result,
+    ClientError, ClientIdentity, ConnectionPolicy, Endpoint, HostConnectionProfile, IdentityStore,
+    Result,
     client::{HelloAck, negotiate_local_endpoint, negotiate_pinned_endpoint},
     local_transport::LocalDockEndpoint,
     timing::CONNECTION_ACQUISITION_TIMEOUT,
@@ -46,6 +47,7 @@ struct Candidate {
 struct RouterState {
     connection_id: String,
     config_revision: u64,
+    policy: ConnectionPolicy,
     route_generation: u64,
     resolution_generation: u64,
     last_resolution_error: Option<String>,
@@ -81,6 +83,7 @@ impl ConnectionRouter {
                 state: Mutex::new(RouterState {
                     connection_id: profile.host_id.clone(),
                     config_revision: profile.revision,
+                    policy: profile.policy.clone(),
                     route_generation: 1,
                     resolution_generation: 0,
                     last_resolution_error: None,
@@ -111,6 +114,7 @@ impl ConnectionRouter {
                 state: Mutex::new(RouterState {
                     connection_id: "explicit-endpoint-probe".into(),
                     config_revision: 1,
+                    policy: ConnectionPolicy::Automatic,
                     route_generation: 1,
                     resolution_generation: 0,
                     last_resolution_error: None,
@@ -142,6 +146,7 @@ impl ConnectionRouter {
                 state: Mutex::new(RouterState {
                     connection_id: context_id,
                     config_revision: 1,
+                    policy: ConnectionPolicy::Automatic,
                     route_generation: 1,
                     resolution_generation: 0,
                     last_resolution_error: None,
@@ -166,20 +171,22 @@ impl ConnectionRouter {
         if state.closed || state.connection_id != profile.host_id {
             return Err(router_closed_error());
         }
-        if state.candidates == next_candidates {
+        let policy_changed = state.policy != profile.policy;
+        if state.candidates == next_candidates && !policy_changed {
             state.config_revision = profile.revision;
             return Ok(());
         }
         state.config_revision = profile.revision;
+        state.policy = profile.policy.clone();
         state.route_generation = state.route_generation.saturating_add(1);
         state.last_resolution_error = None;
         state.last_resolution_capabilities = None;
-        if state.active_endpoint_id.as_ref().is_some_and(|active| {
-            !next_candidates
-                .iter()
-                .any(|candidate| &candidate.id == active)
-        }) {
+        let preferred_endpoint_id = next_candidates
+            .first()
+            .map(|candidate| candidate.id.as_str());
+        if state.active_endpoint_id.as_deref() != preferred_endpoint_id {
             state.active_endpoint_id = None;
+            state.recently_failed_endpoint_id = None;
         }
         if state
             .recently_failed_endpoint_id
@@ -197,6 +204,29 @@ impl ConnectionRouter {
             .route_generation
             .send_replace(state.route_generation);
         Ok(())
+    }
+
+    pub fn reselect_preferred_route(&self) -> Result<bool> {
+        let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
+        if state.closed {
+            return Err(router_closed_error());
+        }
+        if !state
+            .candidates
+            .iter()
+            .any(|candidate| matches!(&candidate.target, CandidateTarget::Pinned(_)))
+        {
+            return Ok(false);
+        }
+        state.active_endpoint_id = None;
+        state.recently_failed_endpoint_id = None;
+        state.last_resolution_error = None;
+        state.last_resolution_capabilities = None;
+        state.route_generation = state.route_generation.saturating_add(1);
+        self.inner
+            .route_generation
+            .send_replace(state.route_generation);
+        Ok(true)
     }
 
     pub fn snapshot(&self) -> RouteSnapshot {
@@ -558,7 +588,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        DockClient,
+        ConnectionKind, DockClient, EndpointState, HostEndpoint,
         tls::{read_json_line, write_json_line},
     };
 
@@ -717,6 +747,7 @@ mod tests {
                 state: Mutex::new(RouterState {
                     connection_id: "test-host".into(),
                     config_revision: 1,
+                    policy: ConnectionPolicy::Automatic,
                     route_generation: 1,
                     resolution_generation: 0,
                     last_resolution_error: None,
@@ -736,6 +767,78 @@ mod tests {
                 acquisition: tokio::sync::Mutex::new(()),
             }),
         }
+    }
+
+    #[test]
+    fn choosing_a_fixed_preferred_address_stops_reusing_the_previous_route() {
+        let client = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        let local = Endpoint::new("127.0.0.1", 10001).unwrap();
+        let remote = Endpoint::new("127.0.0.1", 10002).unwrap();
+        let router = test_router(
+            &client,
+            &host,
+            vec![("local", local.clone()), ("remote", remote.clone())],
+            "remote",
+        );
+        let endpoint = |id: &str, kind, endpoint| HostEndpoint {
+            id: id.into(),
+            label: id.into(),
+            kind,
+            endpoint,
+            state: EndpointState::Verified,
+            verified_at: None,
+            last_success_at: None,
+            disabled_from: None,
+            last_manual_test: None,
+        };
+        let profile = HostConnectionProfile {
+            schema_version: 1,
+            revision: 2,
+            host_id: "test-host".into(),
+            display_name: "Test Host".into(),
+            endpoints: vec![
+                endpoint("local", ConnectionKind::Local, local),
+                endpoint("remote", ConnectionKind::Remote, remote),
+            ],
+            policy: ConnectionPolicy::Fixed {
+                endpoint_id: "local".into(),
+            },
+            last_successful_endpoint_id: None,
+        };
+
+        router.reconcile(&profile).unwrap();
+
+        assert_eq!(router.snapshot().active_endpoint_id, None);
+    }
+
+    #[tokio::test]
+    async fn network_change_reselects_the_preferred_address_instead_of_reusing_remote() {
+        let client = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        let local = spawn_test_host(&host, ServerMode::HelloThenClose).await;
+        let remote = spawn_test_host(&host, ServerMode::HelloThenClose).await;
+        let router = test_router(
+            &client,
+            &host,
+            vec![
+                ("local", local.endpoint.clone()),
+                ("remote", remote.endpoint.clone()),
+            ],
+            "remote",
+        );
+
+        assert!(router.reselect_preferred_route().unwrap());
+        drop(router.acquire(&[]).await.unwrap());
+
+        assert_eq!(
+            router.snapshot().active_endpoint_id.as_deref(),
+            Some("local")
+        );
+        assert_eq!(local.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.connections.load(Ordering::SeqCst), 0);
+        local.stop();
+        remote.stop();
     }
 
     #[tokio::test]

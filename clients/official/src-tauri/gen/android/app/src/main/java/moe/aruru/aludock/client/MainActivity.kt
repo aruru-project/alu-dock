@@ -16,6 +16,15 @@ class MainActivity : TauriActivity() {
   private val readinessPoller by lazy {
     WebViewReadinessPoller(webViewProvider = { webView }, isDestroyed = { destroyed })
   }
+  private val networkBridge by lazy {
+    AndroidNetworkBridge(
+      context = this,
+      webViewProvider = { webView },
+      isDestroyed = { destroyed },
+      mainHandler = mainHandler,
+      readinessPoller = readinessPoller,
+    )
+  }
   private val insetsBridge by lazy {
     AndroidInsetsBridge(
       window = window,
@@ -35,12 +44,14 @@ class MainActivity : TauriActivity() {
       navigationBarStyle = SystemBarStyle.dark(transparent),
     )
     super.onCreate(savedInstanceState)
+    networkBridge.onCreate()
     insetsBridge.onCreate()
   }
 
   override fun onWebViewCreate(webView: WebView) {
     webView.setBackgroundColor(getColor(R.color.aludock_background))
     this.webView = webView
+    networkBridge.onWebViewAvailable()
     insetsBridge.onWebViewAvailable()
   }
 
@@ -55,10 +66,17 @@ class MainActivity : TauriActivity() {
 
   override fun onResume() {
     super.onResume()
+    networkBridge.onResume()
     insetsBridge.onResume()
   }
 
+  override fun onPause() {
+    networkBridge.onPause()
+    super.onPause()
+  }
+
   override fun onDestroy() {
+    networkBridge.onDestroy()
     destroyed = true
     mainHandler.removeCallbacksAndMessages(null)
     webView = null

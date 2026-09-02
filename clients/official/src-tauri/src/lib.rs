@@ -2742,6 +2742,19 @@ fn discard_pairing(
 }
 
 #[tauri::command]
+fn reselect_host_route(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+) -> Result<bool, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .router()
+        .reselect_preferred_route()
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 async fn bootstrap(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
@@ -7752,6 +7765,7 @@ pub fn run() {
             resume_pairing,
             cancel_pairing,
             discard_pairing,
+            reselect_host_route,
             bootstrap,
             work_catalog,
             conversation_bootstrap,

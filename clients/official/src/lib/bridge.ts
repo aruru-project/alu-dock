@@ -209,6 +209,10 @@ export async function deleteHostEndpoint(endpointId: string, expectedRevision: n
   throw new Error('浏览器设计预览不会删除连接地址')
 }
 
+export async function reselectHostRoute(context: ConnectionContext): Promise<boolean> {
+  return isTauri ? invoke<boolean>('reselect_host_route', { ...context }) : false
+}
+
 export async function bootstrap(context: ConnectionContext): Promise<BootstrapPayload> {
   if (isTauri) return invoke<BootstrapPayload>('bootstrap', { ...context })
   await delay(280)
