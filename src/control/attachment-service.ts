@@ -3,6 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 
+import { isStrictDescendantLocalPath } from "../core/local-path.js";
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_FILE_ID_CHARS,
@@ -472,7 +473,9 @@ export class AttachmentStore {
       throw new AttachmentIntegrityError(`Attachment ${fileId} no longer matches its stored digest`);
     }
     const canonical = await realpath(path);
-    if (!canonical.startsWith(`${this.files}/`)) throw new AttachmentIntegrityError("Attachment resolved outside its managed store");
+    if (!isStrictDescendantLocalPath(this.files, canonical)) {
+      throw new AttachmentIntegrityError("Attachment resolved outside its managed store");
+    }
     return canonical;
   }
 

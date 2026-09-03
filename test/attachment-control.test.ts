@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import test from "node:test";
 
 import { AttachmentService } from "../src/control/attachment-service.js";
@@ -10,8 +10,18 @@ import { AttachmentStorageState } from "../src/control/attachment-storage-state.
 import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { isStrictDescendantLocalPath } from "../src/core/local-path.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
+
+test("attachment containment uses native Windows path semantics", () => {
+  const paths = { relative: win32.relative, isAbsolute: win32.isAbsolute };
+  const directory = "C:\\Users\\owner\\AppData\\Local\\Alu Dock\\attachments\\files";
+  assert.equal(isStrictDescendantLocalPath(directory, win32.join(directory, "image.png"), paths), true);
+  assert.equal(isStrictDescendantLocalPath(directory, directory, paths), false);
+  assert.equal(isStrictDescendantLocalPath(directory, "C:\\Users\\owner\\AppData\\Local\\Alu Dock\\attachments\\outside.png", paths), false);
+  assert.equal(isStrictDescendantLocalPath(directory, "D:\\outside.png", paths), false);
+});
 
 function source(name: string, bytes: Buffer, mediaType?: string) {
   return {
