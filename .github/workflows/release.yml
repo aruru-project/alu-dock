@@ -123,12 +123,12 @@ jobs:
           retention-days: 3
 
   windows:
-    name: Build Windows EXE
+    name: Build Windows package
     needs: prepare
     env:
       ALUDOCK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: clients/official
@@ -143,6 +143,13 @@ jobs:
       - name: Set up the build toolchain
         uses: ./.github/actions/setup-toolchain
 
+      - name: Install Dock dependencies
+        working-directory: .
+        run: npm ci
+
+      - name: Enter the Visual Studio developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
       - name: Restore Cargo packages and dependency builds
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -152,23 +159,14 @@ jobs:
             clients/official/src-tauri -> target
           cache-on-failure: false
 
-      - name: Build the Windows executable
-        run: pnpm tauri build --no-bundle --ci --config '{"version":"${{ needs.prepare.outputs.version }}"}'
+      - name: Assemble the Windows package
+        run: pnpm run package:windows
 
-      - name: Stage the Windows executable
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        shell: pwsh
-        run: |
-          Copy-Item `
-            'src-tauri/target/release/aludock-client-app.exe' `
-            "AluDock-$env:VERSION-windows-x86_64.exe"
-
-      - name: Upload the Windows executable
+      - name: Upload the Windows package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows-${{ needs.prepare.outputs.tag }}
-          path: clients/official/AluDock-*-windows-x86_64.exe
+          path: clients/official/dist/AluDock-*-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 3
 
