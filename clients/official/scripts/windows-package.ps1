@@ -49,10 +49,21 @@ function Invoke-AluDock([string]$Launcher, [string[]]$Arguments) {
   if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
     throw "The Alu Dock package is incomplete. Extract the complete package and try again."
   }
-  & $Launcher @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "Alu Dock could not finish the requested installation step. Review the message above and try again."
+  $lines = @(& $Launcher @Arguments 2>&1 | ForEach-Object { "$_" })
+  $parsed = $null
+  foreach ($line in $lines) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed.StartsWith("{")) { continue }
+    try { $parsed = $trimmed | ConvertFrom-Json } catch { }
   }
+  if ($LASTEXITCODE -ne 0) {
+    $failure = "Alu Dock could not finish this step. Run Setup.cmd again; if it keeps failing, report the message shown in this window."
+    if ($parsed -and $parsed.PSObject.Properties["error"] -and $parsed.error.message) {
+      $failure = [string]$parsed.error.message
+    }
+    throw $failure
+  }
+  return $parsed
 }
 
 function Get-FirstLine([string]$Path) {
@@ -84,11 +95,7 @@ function Set-GlobalLauncher {
   ) -join "`r`n"
   try {
     [IO.File]::WriteAllText($temporary, $content, [Text.UTF8Encoding]::new($false))
-    if (Test-Path -LiteralPath $GlobalLauncher) {
-      [IO.File]::Replace($temporary, $GlobalLauncher, $null)
-    } else {
-      Move-Item -LiteralPath $temporary -Destination $GlobalLauncher
-    }
+    Move-Item -LiteralPath $temporary -Destination $GlobalLauncher -Force
   } finally {
     Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
   }
@@ -194,11 +201,25 @@ function Install-Package {
       throw "The extracted Alu Dock package is incomplete. Extract the complete ZIP and try again."
     }
   }
-
-  Assert-DesktopStopped
-  Invoke-AluDock (Join-Path $Source "aludock.cmd") @("service", "stop", "--json")
+  $sourceManifest = Get-Content -LiteralPath (Join-Path $Source "release-manifest.json") -Raw | ConvertFrom-Json
+  $sourceVersion = [string]$sourceManifest.productVersion
 
   if (-not (Test-SamePath $Source $InstallRoot)) {
+    $installedVersion = Get-InstalledVersion
+    if ($installedVersion -eq $sourceVersion) {
+      Write-Host "Alu Dock $sourceVersion is already installed. Starting it now."
+      Invoke-AluDock (Join-Path $InstallRoot "aludock.cmd") @("service", "start", "--json") | Out-Null
+      Start-Process -FilePath $DesktopExecutable
+      return
+    }
+  }
+
+  Assert-DesktopStopped
+  Write-Host "Stopping any running Alu Dock service..."
+  Invoke-AluDock (Join-Path $Source "aludock.cmd") @("service", "stop", "--json") | Out-Null
+
+  if (-not (Test-SamePath $Source $InstallRoot)) {
+    Write-Host "Copying Alu Dock $sourceVersion into place. This can take a minute..."
     Remove-Item -LiteralPath $NextRoot -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $NextRoot -Force | Out-Null
     & "$env:SystemRoot\System32\robocopy.exe" $Source $NextRoot /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
@@ -220,15 +241,32 @@ function Install-Package {
     }
   }
 
-  Invoke-AluDock (Join-Path $InstallRoot "aludock.cmd") @("service", "install", "--now", "--json")
+  Write-Host "Starting the Alu Dock service..."
+  $service = Invoke-AluDock (Join-Path $InstallRoot "aludock.cmd") @("service", "install", "--now", "--json")
+  if (-not ($service -and $service.ready)) {
+    $logs = Join-Path (Split-Path -Parent $InstallRoot) "logs\host.log"
+    throw "Alu Dock is installed, but its service did not become ready. Check the log at $logs and run Setup.cmd again."
+  }
   Set-GlobalLauncher
   Set-UserPathEntry $BinRoot $true
   Set-StartMenuShortcut
-  $manifest = Get-Content -LiteralPath (Join-Path $InstallRoot "release-manifest.json") -Raw | ConvertFrom-Json
-  Set-UninstallRegistration ([string]$manifest.productVersion)
+  Set-UninstallRegistration $sourceVersion
   Remove-Item -LiteralPath $PreviousRoot -Recurse -Force -ErrorAction SilentlyContinue
   Start-Process -FilePath $DesktopExecutable
-  Write-Host "Alu Dock is installed and ready."
+  Write-Host "Alu Dock $sourceVersion is installed and ready. You can now open it from the Start Menu, and delete the extracted package folder."
+}
+
+function Get-InstalledVersion {
+  $manifestPath = Join-Path $InstallRoot "release-manifest.json"
+  foreach ($required in @("AluDock.exe", "aludock.cmd", "release-manifest.json", "runtime\node.exe", "dock\dist\src\cli.js")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $required) -PathType Leaf)) { return $null }
+  }
+  try {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    return [string]$manifest.productVersion
+  } catch {
+    return $null
+  }
 }
 
 function Schedule-PackageCleanup {
@@ -249,7 +287,8 @@ function Schedule-PackageCleanup {
 function Uninstall-Package {
   Assert-DesktopStopped
   $launcher = Join-Path $InstallRoot "aludock.cmd"
-  Invoke-AluDock $launcher @("service", "uninstall", "--json")
+  Invoke-AluDock $launcher @("service", "uninstall", "--json") | Out-Null
+  Write-Host "Removing shortcuts and command entries..."
   Remove-LoginStartup
   Remove-StartMenuShortcut
   Remove-Item -LiteralPath $UninstallRegistry -Recurse -Force -ErrorAction SilentlyContinue

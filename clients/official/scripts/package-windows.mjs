@@ -274,23 +274,38 @@ function renderLauncher() {
 function renderSetup() {
   return `@ECHO OFF\r
 @SETLOCAL\r
-@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& EXIT /B 1)\r
+@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& PAUSE & EXIT /B 1)\r
+@ECHO Installing Alu Dock. Keep this window open until it finishes.\r
 @"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0support\\windows-package.ps1" -Action Install -Source "%~dp0."\r
-@EXIT /B %ERRORLEVEL%\r
+@SET "RESULT=%ERRORLEVEL%"\r
+@IF NOT "%RESULT%"=="0" (ECHO.& ECHO Alu Dock was not installed. Read the message above, then close this window.)\r
+@ECHO.& PAUSE & EXIT /B %RESULT%\r
 `;
 }
 
 function renderUninstall() {
+  // The install root is deleted during uninstall, so the script relaunches
+  // itself from %TEMP% before doing any work.
   return `@ECHO OFF\r
 @SETLOCAL\r
-@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& EXIT /B 1)\r
+@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& PAUSE & EXIT /B 1)\r
+@IF "%~1"=="--from-temp" GOTO run\r
+@SET "RELAUNCH=%TEMP%\\AluDock-Uninstall-%RANDOM%-%RANDOM%.cmd"\r
+@COPY /Y "%~f0" "%RELAUNCH%" >NUL\r
+@IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& PAUSE & EXIT /B 1)\r
+@"%RELAUNCH%" --from-temp "%~dp0."\r
+@EXIT /B %ERRORLEVEL%\r
+:run\r
+@ECHO Removing Alu Dock from this computer...\r
 @SET "SCRIPT=%TEMP%\\AluDock-Uninstall-%RANDOM%-%RANDOM%.ps1"\r
-@COPY /Y "%~dp0support\\windows-package.ps1" "%SCRIPT%" >NUL\r
-@IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& EXIT /B 1)\r
-@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT%" -Action Uninstall -InstallRoot "%~dp0."\r
+@COPY /Y "%~2\\support\\windows-package.ps1" "%SCRIPT%" >NUL\r
+@IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& PAUSE & EXIT /B 1)\r
+@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT%" -Action Uninstall -InstallRoot "%~2"\r
 @SET "RESULT=%ERRORLEVEL%"\r
 @IF EXIST "%SCRIPT%" DEL /F /Q "%SCRIPT%" >NUL 2>NUL\r
-@EXIT /B %RESULT%\r
+@IF NOT "%RESULT%"=="0" (ECHO.& ECHO Alu Dock was not removed. Read the message above, then close this window.)\r
+@ECHO.& PAUSE\r
+@DEL /F /Q "%~f0" & EXIT /B %RESULT%\r
 `;
 }
 
