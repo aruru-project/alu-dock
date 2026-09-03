@@ -38,11 +38,12 @@ use aludock_client_core::{
     SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
     SessionScope, SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo,
     StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay,
-    WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress,
-    WorkspaceFileReadResult, WorkspaceCursor, WorkspacePage, delete_endpoint, probe_host_endpoint,
-    record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
-    saved_endpoint_for_test, set_connection_policy as update_connection_policy,
-    set_endpoint_enabled, validate_device_name, validate_host_id,
+    WorkspaceCursor, WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage,
+    WorkspaceFileReadProgress, WorkspaceFileReadResult, WorkspacePage, delete_endpoint,
+    probe_host_endpoint, record_endpoint_test, reorder_endpoints, save_unverified_endpoint,
+    save_verified_endpoint, saved_endpoint_for_test,
+    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_device_name,
+    validate_host_id,
 };
 use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use serde::{Deserialize, Serialize};
