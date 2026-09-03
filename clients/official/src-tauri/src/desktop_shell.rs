@@ -361,8 +361,7 @@ impl WindowsRuntime {
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
         std::process::Command::new("cmd.exe")
             .arg("/D")
-            .arg("/K")
-            .arg(format!("\"{}\"", self.launcher.display()))
+            .raw_arg(format!("/K \"{}\"", self.launcher.display()))
             .current_dir(&self.root)
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
@@ -378,7 +377,7 @@ fn require_installed_root(root: &std::path::Path) -> Result<(), String> {
     let expected = std::fs::canonicalize(&installed).ok();
     if actual.is_none() || actual != expected {
         return Err(
-            "Run Setup.cmd from the complete Windows package before opening AluDock.exe.".into(),
+            "This copy of AluDock.exe is part of the installation package. Run Setup.cmd first, then open Alu Dock from the Start Menu.".into(),
         );
     }
     Ok(())

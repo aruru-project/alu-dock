@@ -70,7 +70,12 @@ const releaseRoot = join(temporary, releaseName);
 
 try {
   mkdirSync(releaseRoot, { recursive: true });
-  const runtimeRoot = join(releaseRoot, "runtime");
+  // The top level of the extracted archive only carries Setup.cmd; everything
+  // the installed product needs lives under app/ so users are not tempted to
+  // run the executable from the extracted archive.
+  const payloadRoot = join(releaseRoot, "app");
+  mkdirSync(payloadRoot, { recursive: true });
+  const runtimeRoot = join(payloadRoot, "runtime");
   await materializeNode(runtimeRoot, temporary, runtimeManifest.node, systemTar);
   const buildRuntime = {
     nodePath: join(runtimeRoot, "node.exe"),
@@ -79,17 +84,17 @@ try {
 
   runNpm(buildRuntime, ["run", "build"], projectRoot);
   buildDesktop(version, target, buildRuntime);
-  materializeDock(join(releaseRoot, "dock"), buildRuntime);
-  copyDesktop(releaseRoot, target);
-  pruneNonTargetNativePrebuilds(releaseRoot);
-  copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(releaseRoot, "LICENSE-APACHE"));
-  const supportRoot = join(releaseRoot, "support");
+  materializeDock(join(payloadRoot, "dock"), buildRuntime);
+  copyDesktop(payloadRoot, target);
+  pruneNonTargetNativePrebuilds(payloadRoot);
+  copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(payloadRoot, "LICENSE-APACHE"));
+  const supportRoot = join(payloadRoot, "support");
   mkdirSync(supportRoot, { recursive: true });
   copyFileSync(join(clientRoot, "scripts", "windows-package.ps1"), join(supportRoot, "windows-package.ps1"));
-  writeFileSync(join(releaseRoot, "aludock.cmd"), renderLauncher(), "utf8");
+  writeFileSync(join(payloadRoot, "aludock.cmd"), renderLauncher(), "utf8");
   writeFileSync(join(releaseRoot, "Setup.cmd"), renderSetup(), "utf8");
-  writeFileSync(join(releaseRoot, "Uninstall.cmd"), renderUninstall(), "utf8");
-  writeFileSync(join(releaseRoot, "release-manifest.json"), `${JSON.stringify({
+  writeFileSync(join(payloadRoot, "Uninstall.cmd"), renderUninstall(), "utf8");
+  writeFileSync(join(payloadRoot, "release-manifest.json"), `${JSON.stringify({
     schemaVersion: 1,
     productVersion: version,
     target,
@@ -103,7 +108,7 @@ try {
   mkdirSync(dirname(output), { recursive: true });
   rmSync(output, { force: true });
   run(systemTar, ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
-  const requiredFiles = ["AluDock.exe", "Setup.cmd", "Uninstall.cmd", "aludock.cmd", "runtime/node.exe", "runtime/npm.cmd", "dock/dist/src/cli.js", "support/windows-package.ps1"];
+  const requiredFiles = ["Setup.cmd", "app/AluDock.exe", "app/Uninstall.cmd", "app/aludock.cmd", "app/runtime/node.exe", "app/runtime/npm.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"];
   const requiredPaths = requiredFiles.map((path) => `${releaseName}/${path}`);
   const listing = run(systemTar, ["-t", "-f", output, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/");
   const listedPaths = new Set(listing.split(/\r?\n/u).map((path) => path.trim()).filter(Boolean));
@@ -276,7 +281,7 @@ function renderSetup() {
 @SETLOCAL\r
 @IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& PAUSE & EXIT /B 1)\r
 @ECHO Installing Alu Dock. Keep this window open until it finishes.\r
-@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0support\\windows-package.ps1" -Action Install -Source "%~dp0."\r
+@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0app\\support\\windows-package.ps1" -Action Install -Source "%~dp0app"\r
 @SET "RESULT=%ERRORLEVEL%"\r
 @IF NOT "%RESULT%"=="0" (ECHO.& ECHO Alu Dock was not installed. Read the message above, then close this window.)\r
 @ECHO.& PAUSE & EXIT /B %RESULT%\r

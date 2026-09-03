@@ -3877,12 +3877,12 @@ async function toggleAllToolDetails() {
       </div>
       <div v-if="conversationSwitching && selected" class="alu-conversation-switching" role="status">正在打开 {{ selected.displayName }}…</div>
 
-      <div v-if="app.loading && !(desktopShell?.supported && (desktopShell.startupError || desktopShell.role === 'subhost' || !desktopShell.hostReady))" class="center-state" aria-live="polite">
+      <div v-if="app.loading && !(desktopShell?.supported && !app.payload && (desktopShell.startupError || !desktopShell.hostReady))" class="center-state" aria-live="polite">
         <span class="alu-spinner" />
         <p>正在连接 AluDock…</p>
       </div>
 
-      <div v-else-if="desktopShell?.supported && desktopShell.startupError" class="center-state error-state offline-host-state">
+      <div v-else-if="desktopShell?.supported && !app.payload && desktopShell.startupError" class="center-state error-state offline-host-state">
         <WifiOff :size="28" />
         <h1>Alu Dock 需要你的操作</h1>
         <p>{{ desktopShell.startupError }}</p>
@@ -3893,17 +3893,7 @@ async function toggleAllToolDetails() {
         </div>
       </div>
 
-      <div v-else-if="desktopShell?.supported && desktopShell.role === 'subhost'" class="center-state offline-host-state">
-        <Monitor :size="28" />
-        <h1>这台电脑正在作为 SubHost 运行</h1>
-        <p>它会继续连接 Main 并承载已有 Work。需要切换角色或修改连接时，请打开终端设置。</p>
-        <div class="pairing-actions">
-          <button class="button primary" @click="runDesktopShellAction(openDesktopTui)"><Settings :size="16" />打开终端设置</button>
-          <button v-if="desktopShell.logsPath" class="button secondary" @click="runDesktopShellAction(openDesktopHostLog)"><FileText :size="16" />打开日志</button>
-        </div>
-      </div>
-
-      <div v-else-if="desktopShell?.supported && !desktopShell.hostReady" class="center-state offline-host-state">
+      <div v-else-if="desktopShell?.supported && !app.payload && desktopShell.role !== 'subhost' && !desktopShell.hostReady" class="center-state offline-host-state">
         <Monitor :size="28" />
         <h1>Alu Dock 已停止</h1>
         <p>启动后即可继续这台电脑上的 Work。</p>
