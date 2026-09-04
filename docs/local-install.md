@@ -87,33 +87,26 @@ aludock list --all
 npm run package:windows
 ```
 
-完整包构建固定下载并校验 `windows-runtime.json` 声明的 Node/npm，构建 MSVC Tauri Desktop，安装 Dock production dependencies（其中包含 bundled Pi），检查所有随包 PE 文件的 x64 架构和非系统 DLL 依赖，再生成：
+完整包构建使用开发机 Node/npm，构建 MSVC Tauri Desktop，安装 Dock production dependencies（其中包含 bundled Pi），检查所有随包 PE 文件的 x64 架构和非系统 DLL 依赖，再生成唯一的 Windows 产物：
 
 ```text
 clients/official/dist/AluDock-<version>-windows-x86_64.zip
 ```
 
-正式 Release 会根据上一正式 tag 以来实际变化选择产物。只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，Windows job 跳过 Desktop/Rust/frontend 构建，生成：
+正式 Release 会根据上一正式 tag 以来实际变化选择产物。只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，Windows job 下载最近一次成功发布的完整 Windows ZIP 并校验 `SHA256SUMS.txt`，复用其中的 Desktop 和 DLL，只替换当前 Dock、bundled Pi、Setup、launcher 和发行元数据；不安装 Rust，也不重新构建 Tauri/前端。共享客户端变化仍执行完整构建；未知构建输入保守构建全部平台。两条路径最终都只产出一个可全新安装、也可直接升级的当前版本完整 ZIP。
 
-```text
-clients/official/dist/AluDock-<version>-windows-runtime-x86_64.zip
-```
-
-runtime update 仍由同一个 `Setup.cmd` 安装，并记录最近一次完整 Windows Release 作为兼容基线；电脑上已安装版本必须来自这条完整基线（中间可跳过其他 runtime update）。它沿用已安装的 Desktop 与固定 Node，只更新 Dock runtime；基线不匹配时 Setup 会要求先安装对应完整包，禁止拼出虚假的混合版本。共享客户端变化仍生成完整 Windows、Linux 和 Android 产物；未知构建输入保守生成全部产物。
-
-最终用户完整解压 ZIP 后运行一次 `Setup.cmd`。Setup 正常停止旧 Host、拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready。上一版本和事务记录会保留到新版本 ready、命令入口、Start Menu 与卸载登记全部完成；失败会恢复并重新启动上一版本，异常中断后的再次运行先完成恢复。重复执行同一版本会修复这些入口并确认 Host ready，而不是只根据版本号提前退出：
+最终用户先安装满足根 `package.json#engines.node` 的官方 Node.js，再完整解压 ZIP 并运行一次 `Setup.cmd`。Setup 在停止旧 Host 前通过包内唯一 launcher 检查系统 Node，随后拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready。上一版本和事务记录会保留到新版本 ready、命令入口、Start Menu 与卸载登记全部完成；失败会恢复并重新启动上一版本，异常中断后的再次运行先完成恢复。重复执行同一版本会修复这些入口并确认 Host ready，而不是只根据版本号提前退出：
 
 ```text
 %LOCALAPPDATA%\Alu Dock\app\AluDock.exe
 %LOCALAPPDATA%\Alu Dock\app\aludock.cmd
 %LOCALAPPDATA%\Alu Dock\app\Uninstall.cmd
-%LOCALAPPDATA%\Alu Dock\app\runtime\node.exe
 %LOCALAPPDATA%\Alu Dock\app\dock\
 %LOCALAPPDATA%\Alu Dock\bin\aludock.cmd
 %LOCALAPPDATA%\Alu Dock\logs\host.log
 ```
 
-Setup 不需要管理员权限、系统 Node/npm 或系统 Pi。它维护 Start Menu 中的 Desktop 入口、Windows Apps 中的卸载项，以及由 `%LOCALAPPDATA%\Alu Dock\bin` 提供的全局 `aludock` 命令；旧 npm local-install launcher 只在确认由 Alu Dock 生成后才会移除。若旧 Desktop 仍占用安装目录，Setup 会要求先从托盘选择 **退出 Desktop** 后重试；它不会为了更新强杀 GUI 或 active Work。当前包不签名、不发布、不自动更新。
+Setup 不需要管理员权限或系统 Pi，但需要 Windows 已安装兼容 Node.js；Alu Dock 不安装、更新或卸载 Node。它维护 Start Menu 中的 Desktop 入口、Windows Apps 中的卸载项，以及由 `%LOCALAPPDATA%\Alu Dock\bin` 提供的全局 `aludock` 命令；旧 npm local-install launcher 只在确认由 Alu Dock 生成后才会移除。若旧 Desktop 仍占用安装目录，Setup 会要求先从托盘选择 **退出 Desktop** 后重试；它不会为了更新强杀 GUI 或 active Work。当前包不签名、不发布、不自动更新。
 
 完成 Setup 后，`AluDock.exe` 是日常 Desktop 入口。它使用同一 Windows lifecycle authority 确保隐藏 Host ready，然后通过 `\\.\pipe\alu-dock` 连接 Protocol V2；首次无既有 Client 选择的 Main 会自动选择本机，不走设备配对。重复启动唤起已有 Desktop，不创建第二个 Host。
 

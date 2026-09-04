@@ -27,25 +27,21 @@ test("package exposes the installed Alu Dock runtime and its operator/client doc
   assert.doesNotMatch(manifest.scripts?.["install:local"] ?? "", /\btest\b/u);
 });
 
-test("Windows release has one package entry and a pinned bundled runtime", async () => {
-  const rootManifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as { scripts?: Record<string, string> };
-  const clientManifest = JSON.parse(await readFile(join(process.cwd(), "clients", "official", "package.json"), "utf8")) as { scripts?: Record<string, string> };
-  const runtime = JSON.parse(await readFile(join(process.cwd(), "clients", "official", "windows-runtime.json"), "utf8")) as {
-    schemaVersion?: unknown;
-    target?: unknown;
-    node?: { version?: unknown; npmVersion?: unknown; archive?: unknown; sha256?: unknown };
+test("Windows release has one complete package entry and uses the user's compatible Node.js", async () => {
+  const rootManifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as {
+    scripts?: Record<string, string>;
+    engines?: { node?: unknown };
   };
+  const clientManifest = JSON.parse(await readFile(join(process.cwd(), "clients", "official", "package.json"), "utf8")) as { scripts?: Record<string, string> };
+  const packager = await readFile(join(process.cwd(), "clients", "official", "scripts", "package-windows.mjs"), "utf8");
 
   assert.equal(rootManifest.scripts?.["package:windows"], "cd clients/official && corepack pnpm package:windows");
   assert.equal(clientManifest.scripts?.["package:windows"], "node scripts/package-windows.mjs");
   assert.equal(rootManifest.scripts?.["host:windows"], undefined);
   assert.equal(rootManifest.scripts?.["open:windows"], undefined);
-  assert.equal(runtime.schemaVersion, 1);
-  assert.equal(runtime.target, "x86_64-pc-windows-msvc");
-  assert.match(String(runtime.node?.version), /^\d+\.\d+\.\d+$/u);
-  assert.match(String(runtime.node?.npmVersion), /^\d+\.\d+\.\d+$/u);
-  assert.equal(runtime.node?.archive, `node-v${String(runtime.node?.version)}-win-x64.zip`);
-  assert.match(String(runtime.node?.sha256), /^[a-f0-9]{64}$/u);
+  assert.match(String(rootManifest.engines?.node), /^>=\d+\.\d+\.\d+$/u);
+  assert.match(packager, /const releaseName = `AluDock-\$\{version\}-windows-x86_64`/u);
+  assert.doesNotMatch(packager, /windows-runtime|nodejs\.org\/dist|materializeNode/u);
 });
 
 test("npm package excludes tests, fixtures, and development scripts", () => {

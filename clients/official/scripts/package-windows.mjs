@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import {
   copyFileSync,
   cpSync,
-  createWriteStream,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,30 +17,31 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { resolveReleaseVersion } from "./release-version.mjs";
 
 const clientRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectRoot = resolve(clientRoot, "..", "..");
 const clientManifest = JSON.parse(readFileSync(join(clientRoot, "package.json"), "utf8"));
 const dockManifest = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
-const runtimeManifest = JSON.parse(readFileSync(join(clientRoot, "windows-runtime.json"), "utf8"));
 const version = resolveReleaseVersion({
   cwd: projectRoot,
   explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
   fallbackVersion: clientManifest.version,
 });
 const packageMode = process.env.ALUDOCK_WINDOWS_PACKAGE_MODE || "full";
-if (packageMode !== "full" && packageMode !== "runtime") {
-  throw new Error("ALUDOCK_WINDOWS_PACKAGE_MODE must be full or runtime");
+if (packageMode !== "full" && packageMode !== "reuse") {
+  throw new Error("ALUDOCK_WINDOWS_PACKAGE_MODE must be full or reuse");
 }
-const windowsBaseVersion = packageMode === "runtime"
-  ? process.env.ALUDOCK_WINDOWS_BASE_VERSION
-  : version;
-if (!windowsBaseVersion || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(windowsBaseVersion)) {
-  throw new Error("A runtime-only package requires ALUDOCK_WINDOWS_BASE_VERSION from the latest full Windows release");
+const windowsBaseArchive = process.env.ALUDOCK_WINDOWS_BASE_ARCHIVE;
+if (packageMode === "reuse" && (!windowsBaseArchive || !existsSync(windowsBaseArchive))) {
+  throw new Error("A reused Windows package requires ALUDOCK_WINDOWS_BASE_ARCHIVE from a verified formal release");
 }
+const windowsTarget = "x86_64-pc-windows-msvc";
+const nodeRequirement = dockManifest.engines?.node;
+const minimumNode = typeof nodeRequirement === "string"
+  ? /^>=(\d+)\.(\d+)\.(\d+)$/u.exec(nodeRequirement)
+  : undefined;
+if (!minimumNode) throw new Error("package.json must declare one minimum supported Node.js version");
 // Windows 10/11 inbox contracts only. VC runtimes, WebView loaders, GNU runtimes,
 // and other redistributables are deliberately absent and must ship beside their importer.
 const AMD64_PE_MACHINE = 0x8664;
@@ -67,13 +67,8 @@ const WINDOWS_INBOX_LIBRARIES = new Set([
 if (process.platform !== "win32" || process.arch !== "x64") {
   throw new Error("Windows package assembly must run on native x86_64 Windows.");
 }
-validateRuntimeManifest(runtimeManifest);
-
-const target = runtimeManifest.target;
 const systemTar = windowsSystemExecutable("tar.exe");
-const releaseName = packageMode === "runtime"
-  ? `AluDock-${version}-windows-runtime-x86_64`
-  : `AluDock-${version}-windows-x86_64`;
+const releaseName = `AluDock-${version}-windows-x86_64`;
 const defaultOutputDirectory = join(clientRoot, "dist");
 const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
 const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}.zip`);
@@ -86,26 +81,22 @@ try {
   // the installed product needs lives under app/ so users are not tempted to
   // run the executable from the extracted archive.
   const payloadRoot = join(releaseRoot, "app");
-  mkdirSync(payloadRoot, { recursive: true });
-  let buildRuntime;
-  if (packageMode === "full") {
-    const runtimeRoot = join(payloadRoot, "runtime");
-    await materializeNode(runtimeRoot, temporary, runtimeManifest.node, systemTar);
-    buildRuntime = {
-      nodePath: join(runtimeRoot, "node.exe"),
-      npmCliPath: join(runtimeRoot, "node_modules", "npm", "bin", "npm-cli.js"),
-    };
+  if (packageMode === "reuse") {
+    reuseWindowsPayload(resolve(windowsBaseArchive), payloadRoot, temporary, systemTar);
   } else {
-    buildRuntime = hostNodeRuntime();
+    mkdirSync(payloadRoot, { recursive: true });
   }
+  const buildRuntime = hostNodeRuntime();
 
   runNpm(buildRuntime, ["run", "build"], projectRoot);
-  if (packageMode === "full") buildDesktop(version, target, buildRuntime);
+  if (packageMode === "full") buildDesktop(version, windowsTarget, buildRuntime);
   materializeDock(join(payloadRoot, "dock"), buildRuntime);
-  if (packageMode === "full") copyDesktop(payloadRoot, target);
+  if (packageMode === "full") copyDesktop(payloadRoot, windowsTarget);
+  rmSync(join(payloadRoot, "runtime"), { recursive: true, force: true });
   pruneNonTargetNativePrebuilds(payloadRoot);
   copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(payloadRoot, "LICENSE-APACHE"));
   const supportRoot = join(payloadRoot, "support");
+  rmSync(supportRoot, { recursive: true, force: true });
   mkdirSync(supportRoot, { recursive: true });
   copyFileSync(join(clientRoot, "scripts", "windows-package.ps1"), join(supportRoot, "windows-package.ps1"));
   writeFileSync(join(payloadRoot, "aludock.cmd"), renderLauncher(), "utf8");
@@ -113,24 +104,19 @@ try {
   writeFileSync(join(payloadRoot, "Uninstall.cmd"), renderUninstall(), "utf8");
   writeFileSync(join(payloadRoot, "release-manifest.json"), `${JSON.stringify({
     schemaVersion: 1,
-    packageKind: packageMode === "runtime" ? "runtime-update" : "complete",
     productVersion: version,
-    windowsBaseVersion,
-    ...(packageMode === "runtime" ? { requiredWindowsBaseVersion: windowsBaseVersion } : {}),
-    target,
+    target: windowsTarget,
     dockVersion: dockManifest.version,
-    node: runtimeManifest.node,
+    nodeRequirement,
     desktop: "AluDock.exe",
     cli: "aludock.cmd",
   }, null, 2)}\n`, "utf8");
 
-  inspectRelease(releaseRoot, packageMode === "full");
+  inspectRelease(releaseRoot);
   mkdirSync(dirname(output), { recursive: true });
   rmSync(output, { force: true });
   run(systemTar, ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
-  const requiredFiles = packageMode === "runtime"
-    ? ["Setup.cmd", "app/Uninstall.cmd", "app/aludock.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"]
-    : ["Setup.cmd", "app/AluDock.exe", "app/Uninstall.cmd", "app/aludock.cmd", "app/runtime/node.exe", "app/runtime/npm.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"];
+  const requiredFiles = ["Setup.cmd", "app/AluDock.exe", "app/Uninstall.cmd", "app/aludock.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"];
   const requiredPaths = requiredFiles.map((path) => `${releaseName}/${path}`);
   const listing = run(systemTar, ["-t", "-f", output, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/");
   const listedPaths = new Set(listing.split(/\r?\n/u).map((path) => path.trim()).filter(Boolean));
@@ -143,17 +129,21 @@ try {
   rmSync(temporary, { recursive: true, force: true });
 }
 
-function validateRuntimeManifest(manifest) {
-  if (manifest?.schemaVersion !== 1 || manifest.target !== "x86_64-pc-windows-msvc") {
-    throw new Error("windows-runtime.json must describe the supported Windows x64 MSVC target");
+function reuseWindowsPayload(archive, destination, workspace, tarPath) {
+  const extracted = join(workspace, "windows-base");
+  mkdirSync(extracted, { recursive: true });
+  run(tarPath, ["-x", "-f", archive, "-C", extracted]);
+  const roots = readdirSync(extracted, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  if (roots.length !== 1) throw new Error("The verified Windows base package must contain one release directory");
+  const source = join(extracted, roots[0].name, "app");
+  for (const required of ["AluDock.exe", "aludock.cmd", join("dock", "dist", "src", "cli.js")]) {
+    if (!existsSync(join(source, required))) throw new Error(`The verified Windows base package is missing app/${required}`);
   }
-  const node = manifest.node;
-  if (!node || !/^\d+\.\d+\.\d+$/u.test(node.version)
-    || !/^\d+\.\d+\.\d+$/u.test(node.npmVersion)
-    || node.archive !== `node-v${node.version}-win-x64.zip`
-    || !/^[a-f0-9]{64}$/u.test(node.sha256)) {
-    throw new Error("windows-runtime.json contains invalid Node release metadata");
+  const manifest = JSON.parse(readFileSync(join(source, "release-manifest.json"), "utf8"));
+  if (manifest?.target !== windowsTarget) {
+    throw new Error("The verified Windows base package does not support Windows x64");
   }
+  cpSync(source, destination, { recursive: true });
 }
 
 function hostNodeRuntime() {
@@ -176,6 +166,7 @@ function buildDesktop(productVersion, rustTarget, runtime) {
 }
 
 function materializeDock(destination, runtime) {
+  rmSync(destination, { recursive: true, force: true });
   mkdirSync(destination, { recursive: true });
   for (const name of ["package.json", "package-lock.json"]) {
     copyFileSync(join(projectRoot, name), join(destination, name));
@@ -187,27 +178,6 @@ function materializeDock(destination, runtime) {
   cpSync(join(projectRoot, "dist", "src"), join(destination, "dist", "src"), { recursive: true });
   const bundledPi = join(destination, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
   if (!existsSync(bundledPi)) throw new Error("The production Dock tree does not contain bundled Pi");
-}
-
-async function materializeNode(destination, workspace, node, tarPath) {
-  const configuredArchive = process.env.ALUDOCK_WINDOWS_NODE_ARCHIVE;
-  const archive = configuredArchive ? resolve(configuredArchive) : join(workspace, node.archive);
-  if (!configuredArchive) await download(`https://nodejs.org/dist/v${node.version}/${node.archive}`, archive);
-  if (!existsSync(archive) || sha256File(archive) !== node.sha256) {
-    throw new Error(`Node archive checksum does not match windows-runtime.json: ${archive}`);
-  }
-  const extracted = join(workspace, "node-extracted");
-  mkdirSync(extracted, { recursive: true });
-  run(tarPath, ["-x", "-f", archive, "-C", extracted]);
-  const source = join(extracted, `node-v${node.version}-win-x64`);
-  for (const required of ["node.exe", "npm.cmd", "npx.cmd", join("node_modules", "npm", "bin", "npm-cli.js")]) {
-    if (!existsSync(join(source, required))) throw new Error(`Official Node archive is missing ${required}`);
-  }
-  const npmVersion = run(join(source, "node.exe"), [join(source, "node_modules", "npm", "bin", "npm-cli.js"), "--version"], { capture: true }).stdout.trim();
-  if (npmVersion !== node.npmVersion) {
-    throw new Error(`Official Node archive contains npm ${npmVersion}; expected ${node.npmVersion}`);
-  }
-  cpSync(source, destination, { recursive: true });
 }
 
 function copyDesktop(destination, rustTarget) {
@@ -245,13 +215,10 @@ function pruneNonTargetNativePrebuilds(root) {
   visit(root);
 }
 
-function inspectRelease(root, requireBinary) {
+function inspectRelease(root) {
   const binaries = collectFiles(root).filter((path) =>
     /\.(?:exe|dll)$/iu.test(path) || (/\.node$/iu.test(path) && peMachine(path) !== undefined));
-  if (binaries.length === 0) {
-    if (requireBinary) throw new Error("Windows release contains no PE binaries");
-    return;
-  }
+  if (binaries.length === 0) throw new Error("Windows release contains no PE binaries");
   const dumpbin = findExecutable("dumpbin.exe");
   if (!dumpbin) throw new Error("Run package:windows from a Visual Studio Developer terminal so dumpbin.exe can inspect DLL dependencies.");
   for (const binary of binaries) {
@@ -261,7 +228,7 @@ function inspectRelease(root, requireBinary) {
     for (const imported of imports) {
       const normalized = imported.toLowerCase();
       if (/^(?:api|ext)-ms-/u.test(normalized) || WINDOWS_INBOX_LIBRARIES.has(normalized)) continue;
-      const available = [dirname(binary), root, join(root, "runtime")]
+      const available = [dirname(binary), root]
         .some((directory) => existsCaseInsensitive(directory, imported));
       if (!available) {
         throw new Error(`${relative(root, binary)} imports ${imported}, which is neither a supported Windows inbox library nor a packaged sidecar`);
@@ -302,11 +269,29 @@ function collectFiles(root) {
 }
 
 function renderLauncher() {
+  const [, major, minor, patch] = minimumNode;
+  const compatibilityCheck = `const v=process.versions.node.split('.').map(Number);process.exit(process.arch==='x64'&&(v[0]>${major}||(v[0]===${major}&&(v[1]>${minor}||(v[1]===${minor}&&v[2]>=${patch}))))?0:1)`;
   return "@REM Generated by Alu Dock package; do not edit in place.\r\n"
     + "@ECHO OFF\r\n"
+    + "@SETLOCAL\r\n"
     + "@SET \"ALUDOCK_ROOT=%~dp0\"\r\n"
-    + "@SET \"PATH=%ALUDOCK_ROOT%runtime;%PATH%\"\r\n"
-    + "@\"%ALUDOCK_ROOT%runtime\\node.exe\" \"%ALUDOCK_ROOT%dock\\dist\\src\\cli.js\" %*\r\n";
+    + "@SET \"ALUDOCK_NODE=\"\r\n"
+    + "@IF DEFINED ALUDOCK_NODE_PATH CALL :try_node \"%ALUDOCK_NODE_PATH%\"\r\n"
+    + "@IF NOT DEFINED ALUDOCK_NODE CALL :try_node \"%ProgramFiles%\\nodejs\\node.exe\"\r\n"
+    + "@IF NOT DEFINED ALUDOCK_NODE CALL :try_node \"%LOCALAPPDATA%\\Programs\\nodejs\\node.exe\"\r\n"
+    + "@IF NOT DEFINED ALUDOCK_NODE FOR /F \"delims=\" %%N IN ('WHERE node.exe 2^>NUL') DO @IF NOT DEFINED ALUDOCK_NODE CALL :try_node \"%%N\"\r\n"
+    + "@IF DEFINED ALUDOCK_NODE GOTO node_ready\r\n"
+    + `@ECHO Alu Dock needs 64-bit Node.js ${major}.${minor}.${patch} or newer. Install or update it from https://nodejs.org/ and run Setup.cmd again. 1>&2\r\n`
+    + "@EXIT /B 1\r\n"
+    + ":node_ready\r\n"
+    + "@FOR %%D IN (\"%ALUDOCK_NODE%\") DO @SET \"PATH=%%~dpD;%PATH%\"\r\n"
+    + "@\"%ALUDOCK_NODE%\" \"%ALUDOCK_ROOT%dock\\dist\\src\\cli.js\" %*\r\n"
+    + "@EXIT /B %ERRORLEVEL%\r\n"
+    + ":try_node\r\n"
+    + "@IF NOT EXIST \"%~1\" EXIT /B 0\r\n"
+    + `@"%~1" -e "${compatibilityCheck}" >NUL 2>NUL\r\n`
+    + "@IF NOT ERRORLEVEL 1 SET \"ALUDOCK_NODE=%~1\"\r\n"
+    + "@EXIT /B 0\r\n";
 }
 
 function renderSetup() {
@@ -345,17 +330,6 @@ function renderUninstall() {
 @ECHO.& PAUSE\r
 @DEL /F /Q "%~f0" & EXIT /B %RESULT%\r
 `;
-}
-
-async function download(url, destination) {
-  const response = await fetch(url, { headers: { "User-Agent": "AluDock-Windows-Packager" } });
-  if (!response.ok || !response.body) throw new Error(`Node download returned HTTP ${response.status}`);
-  try {
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(destination, { flags: "wx" }));
-  } catch (error) {
-    rmSync(destination, { force: true });
-    throw error;
-  }
 }
 
 function findExecutable(name) {

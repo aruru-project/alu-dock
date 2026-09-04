@@ -2,6 +2,7 @@
 
 import { pathToFileURL } from "node:url";
 
+const IGNORED_RELEASE_PREFIXES = ["test/", "clients/official/tests/"];
 const ROOT_RUNTIME_PREFIXES = ["src/", "docs/", "skills/"];
 const ROOT_RUNTIME_FILES = new Set([
   "README.md",
@@ -10,11 +11,10 @@ const ROOT_RUNTIME_FILES = new Set([
   "tsconfig.json",
   "scripts/clean-dist.mjs",
 ]);
-const WINDOWS_RUNTIME_FILES = new Set([
+const WINDOWS_REUSE_FILES = new Set([
   "clients/official/scripts/windows-package.ps1",
 ]);
-const WINDOWS_FULL_FILES = new Set([
-  "clients/official/windows-runtime.json",
+const WINDOWS_BUILD_FILES = new Set([
   "clients/official/scripts/package-windows.mjs",
   "clients/official/src-tauri/src/desktop_shell.rs",
 ]);
@@ -45,12 +45,12 @@ export function classifyReleaseArtifacts(paths, firstRelease = false) {
 
   for (const rawPath of paths) {
     const path = rawPath.replaceAll("\\", "/").replace(/^\.\//u, "");
-    if (!path) continue;
+    if (!path || IGNORED_RELEASE_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
     if (ROOT_RUNTIME_FILES.has(path) || ROOT_RUNTIME_PREFIXES.some((prefix) => path.startsWith(prefix))) {
-      selectWindows(plan, "runtime");
-    } else if (WINDOWS_RUNTIME_FILES.has(path)) {
-      selectWindows(plan, "runtime");
-    } else if (WINDOWS_FULL_FILES.has(path)) {
+      selectWindows(plan, "reuse");
+    } else if (WINDOWS_REUSE_FILES.has(path)) {
+      selectWindows(plan, "reuse");
+    } else if (WINDOWS_BUILD_FILES.has(path)) {
       selectWindows(plan, "full");
     } else if (LINUX_FILES.has(path)) {
       plan.linux = true;

@@ -203,22 +203,22 @@ function Get-PackageManifest([string]$Root) {
   catch { throw "The extracted Alu Dock package has an unreadable release manifest. Extract it again and retry." }
 }
 
-function Get-PackageKind($Manifest) {
-  if ($Manifest.PSObject.Properties["packageKind"]) { return [string]$Manifest.packageKind }
-  return "complete"
-}
-
-function Get-WindowsBaseVersion($Manifest) {
-  if ($Manifest.PSObject.Properties["windowsBaseVersion"]) { return [string]$Manifest.windowsBaseVersion }
-  return [string]$Manifest.productVersion
-}
-
 function Assert-AppComplete([string]$Root) {
-  foreach ($required in @("AluDock.exe", "aludock.cmd", "Uninstall.cmd", "release-manifest.json", "runtime\node.exe", "dock\dist\src\cli.js")) {
+  foreach ($required in @("AluDock.exe", "aludock.cmd", "Uninstall.cmd", "release-manifest.json", "dock\dist\src\cli.js")) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root $required) -PathType Leaf)) {
       throw "Alu Dock could not find a complete installed version to update. Run Setup.cmd from a complete Windows package first."
     }
   }
+}
+
+function Assert-SystemNode([string]$Launcher) {
+  $lines = @(& $Launcher help 2>&1 | ForEach-Object { "$_" })
+  if ($LASTEXITCODE -eq 0) { return }
+  $message = ($lines | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -First 3) -join " "
+  if (-not $message) {
+    $message = "Alu Dock needs a current Node.js installation. Install it from https://nodejs.org/ and run Setup.cmd again."
+  }
+  throw $message
 }
 
 function Assert-IntegrationAvailable {
@@ -328,7 +328,13 @@ function Recover-InterruptedInstall {
   Write-Host "Restoring the previous Alu Dock installation..."
   $launcher = Join-Path $InstallRoot "aludock.cmd"
   if (Test-Path -LiteralPath $launcher -PathType Leaf) {
-    Invoke-AluDock $launcher @("service", "stop", "--json") | Out-Null
+    try {
+      Invoke-AluDock $launcher @("service", "stop", "--json") | Out-Null
+    } catch {
+      $previousLauncher = Join-Path $PreviousRoot "aludock.cmd"
+      if (-not $hasPrevious -or -not (Test-Path -LiteralPath $previousLauncher -PathType Leaf)) { throw }
+      Invoke-AluDock $previousLauncher @("service", "stop", "--json") | Out-Null
+    }
   }
   if ($hasPrevious) {
     Remove-AppTree $InstallRoot
@@ -346,36 +352,27 @@ function Recover-InterruptedInstall {
   }
 }
 
-function Stage-Package([string]$PackageKind) {
+function Stage-Package {
   Remove-Item -LiteralPath $NextRoot -Recurse -Force -ErrorAction SilentlyContinue
-  if ($PackageKind -eq "runtime-update") {
-    Assert-AppComplete $InstallRoot
-    Copy-PackageTree $InstallRoot $NextRoot
-    foreach ($directory in @("dock", "support")) {
-      Copy-PackageTree (Join-Path $Source $directory) (Join-Path $NextRoot $directory)
-    }
-    foreach ($file in @("aludock.cmd", "Uninstall.cmd", "release-manifest.json", "LICENSE-APACHE")) {
-      Copy-Item -LiteralPath (Join-Path $Source $file) -Destination (Join-Path $NextRoot $file) -Force
-    }
-    $stagedManifest = Get-PackageManifest $NextRoot
-    $stagedManifest.packageKind = "complete"
-    $stagedManifest.PSObject.Properties.Remove("requiredWindowsBaseVersion")
-    [IO.File]::WriteAllText(
-      (Join-Path $NextRoot "release-manifest.json"),
-      ($stagedManifest | ConvertTo-Json -Depth 8),
-      [Text.UTF8Encoding]::new($false)
-    )
-  } else {
-    Copy-PackageTree $Source $NextRoot
-  }
+  Copy-PackageTree $Source $NextRoot
   Assert-AppComplete $NextRoot
 }
 
 function Rollback-Install([bool]$HadPrevious, [string]$PreviousVersion) {
-  $launcher = Join-Path $InstallRoot "aludock.cmd"
-  if (Test-Path -LiteralPath $launcher -PathType Leaf) {
-    try { Invoke-AluDock $launcher @("service", "stop", "--json") | Out-Null }
-    catch { Write-Warning "The replacement did not stop cleanly; continuing recovery." }
+  $stopped = $false
+  $stopFailure = ""
+  foreach ($launcher in @((Join-Path $InstallRoot "aludock.cmd"), (Join-Path $PreviousRoot "aludock.cmd"))) {
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { continue }
+    try {
+      Invoke-AluDock $launcher @("service", "stop", "--json") | Out-Null
+      $stopped = $true
+      break
+    } catch {
+      $stopFailure = $_.Exception.Message
+    }
+  }
+  if (-not $stopped) {
+    throw "The replacement could not be stopped, so Setup left its files in place. $stopFailure"
   }
   if (Test-Path -LiteralPath $PreviousRoot -PathType Container) {
     Remove-AppTree $InstallRoot
@@ -401,15 +398,7 @@ function Install-Package {
   if (-not $Source) { throw "Setup.cmd must provide the extracted package directory." }
   $Source = [IO.Path]::GetFullPath($Source)
   $sourceManifest = Get-PackageManifest $Source
-  $packageKind = Get-PackageKind $sourceManifest
-  if ($packageKind -notin @("complete", "runtime-update")) {
-    throw "This Alu Dock package type is not supported by Setup.cmd."
-  }
-  $sourceRequired = if ($packageKind -eq "runtime-update") {
-    @("aludock.cmd", "Uninstall.cmd", "release-manifest.json", "LICENSE-APACHE", "dock\dist\src\cli.js", "support\windows-package.ps1")
-  } else {
-    @("AluDock.exe", "aludock.cmd", "Uninstall.cmd", "release-manifest.json", "runtime\node.exe", "dock\dist\src\cli.js")
-  }
+  $sourceRequired = @("AluDock.exe", "aludock.cmd", "Uninstall.cmd", "release-manifest.json", "LICENSE-APACHE", "dock\dist\src\cli.js", "support\windows-package.ps1")
   foreach ($required in $sourceRequired) {
     if (-not (Test-Path -LiteralPath (Join-Path $Source $required) -PathType Leaf)) {
       throw "The extracted Alu Dock package is incomplete. Extract the complete ZIP and try again."
@@ -421,17 +410,7 @@ function Install-Package {
   Assert-DesktopStopped
   Assert-IntegrationAvailable
   Recover-InterruptedInstall
-  if ($packageKind -eq "runtime-update") {
-    Assert-AppComplete $InstallRoot
-    if (-not $sourceManifest.PSObject.Properties["requiredWindowsBaseVersion"]) {
-      throw "This runtime update does not identify the full Windows version it requires. Download it again."
-    }
-    $requiredBaseVersion = [string]$sourceManifest.requiredWindowsBaseVersion
-    $installedBaseVersion = Get-WindowsBaseVersion (Get-PackageManifest $InstallRoot)
-    if (-not $requiredBaseVersion -or $installedBaseVersion -ne $requiredBaseVersion) {
-      throw "This runtime update requires the full Windows $requiredBaseVersion installation. Install that full package first, then run this Setup.cmd again."
-    }
-  }
+  Assert-SystemNode (Join-Path $Source "aludock.cmd")
 
   $installedVersion = Get-InstalledVersion
   if (-not (Test-SamePath $Source $InstallRoot) -and $installedVersion -eq $sourceVersion) {
@@ -445,7 +424,7 @@ function Install-Package {
   }
 
   Write-Host "Copying Alu Dock $sourceVersion into place. This can take a minute..."
-  Stage-Package $packageKind
+  Stage-Package
   $hadPrevious = $null -ne $installedVersion
   $previousVersion = if ($hadPrevious) { [string]$installedVersion } else { "" }
   Write-InstallJournal $hadPrevious $previousVersion
@@ -482,7 +461,7 @@ function Install-Package {
 
 function Get-InstalledVersion {
   $manifestPath = Join-Path $InstallRoot "release-manifest.json"
-  foreach ($required in @("AluDock.exe", "aludock.cmd", "release-manifest.json", "runtime\node.exe", "dock\dist\src\cli.js")) {
+  foreach ($required in @("AluDock.exe", "aludock.cmd", "release-manifest.json", "dock\dist\src\cli.js")) {
     if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot $required) -PathType Leaf)) { return $null }
   }
   try {

@@ -6,11 +6,11 @@ import test from "node:test";
 const planner = fileURLToPath(new URL("../../scripts/release-artifacts.mjs", import.meta.url));
 
 test("a formal release builds only the artifacts that contain its changed product files", () => {
-  assert.deepEqual(plan(["src/control/dock-host.ts"]), {
+  assert.deepEqual(plan(["src/control/dock-host.ts", "test/dock-host.test.ts"]), {
     linux: false,
     windows: true,
     android: false,
-    windowsMode: "runtime",
+    windowsMode: "reuse",
   });
   assert.deepEqual(plan(["clients/official/src/App.vue"]), {
     linux: true,

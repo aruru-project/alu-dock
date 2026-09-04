@@ -105,7 +105,7 @@ npm run client:package:linux   # x86_64 Linux
 npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 完整包固定携带 Node/npm、Dock 与 bundled Pi；仅修改 Host/Worker/Pi runtime 的正式版本可提供较小的 `windows-runtime` 更新包，沿用电脑上已安装的 Desktop 与 Node。两种包都在完整解压后运行同一个 `Setup.cmd`；之后从 Start Menu 打开 Desktop，或在新终端运行全局 `aludock`。Windows Apps 中的卸载入口只移除程序和系统集成，保留 Dock/Pi 状态。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 始终提供一个可独立安装的完整 ZIP，包含 Desktop、Dock 与 bundled Pi，并使用电脑上已安装的兼容 Node.js。只有 Host/Worker/Pi 变化时，正式流水线复用上一正式包的 Desktop，不重新编译 Rust/Tauri/前端；用户下载和安装的仍是当前版本完整包。完整解压后运行一次 `Setup.cmd`，之后从 Start Menu 打开 Desktop，或在新终端运行全局 `aludock`。Windows Apps 中的卸载入口只移除程序和系统集成，保留 Dock/Pi 状态和系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 

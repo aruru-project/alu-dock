@@ -30,7 +30,7 @@ jobs:
       windows: ${{ steps.artifacts.outputs.windows }}
       android: ${{ steps.artifacts.outputs.android }}
       windows_mode: ${{ steps.artifacts.outputs.windows_mode }}
-      windows_base_version: ${{ steps.artifacts.outputs.windows_base_version }}
+      windows_base_tag: ${{ steps.artifacts.outputs.windows_base_tag }}
 
     steps:
       - name: Check out source and tags
@@ -78,6 +78,10 @@ jobs:
           windows=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).windows))' "$current_plan")
           android=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).android))' "$current_plan")
           windows_mode=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).windowsMode)' "$current_plan")
+          if [[ "$linux" != "true" && "$windows" != "true" && "$android" != "true" ]]; then
+            echo "::error::This tag does not change a releasable product artifact." >&2
+            exit 1
+          fi
 
           planned_base_tag=""
           mapfile -t release_tags < <(git tag --merged "$SOURCE_SHA" --sort=-version:refname --list 'v*' \
@@ -100,13 +104,14 @@ jobs:
           windows_base_tag=""
           if [[ -n "$planned_base_tag" ]]; then
             asset_name="AluDock-${planned_base_tag#v}-windows-x86_64.zip"
-            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$planned_base_tag" --jq '.assets[].name' \
-              | grep -Fxq "$asset_name"; then
+            if assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$planned_base_tag" --jq '.assets[].name') \
+              && grep -Fxq "$asset_name" <<< "$assets" \
+              && grep -Fxq "SHA256SUMS.txt" <<< "$assets"; then
               windows_base_tag="$planned_base_tag"
             fi
           fi
-          if [[ "$windows_mode" == "runtime" && -z "$windows_base_tag" ]]; then
-            echo "No successfully published full Windows baseline is available; building a full package." >&2
+          if [[ "$windows_mode" == "reuse" && -z "$windows_base_tag" ]]; then
+            echo "No verified Windows package is available to reuse; building the Desktop package." >&2
             windows_mode="full"
           fi
           {
@@ -114,7 +119,7 @@ jobs:
             echo "windows=$windows"
             echo "android=$android"
             echo "windows_mode=$windows_mode"
-            echo "windows_base_version=${windows_base_tag#v}"
+            echo "windows_base_tag=$windows_base_tag"
           } >> "$GITHUB_OUTPUT"
 
   linux:
@@ -199,7 +204,6 @@ jobs:
     env:
       ALUDOCK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       ALUDOCK_WINDOWS_PACKAGE_MODE: ${{ needs.prepare.outputs.windows_mode }}
-      ALUDOCK_WINDOWS_BASE_VERSION: ${{ needs.prepare.outputs.windows_base_version }}
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:
@@ -217,11 +221,34 @@ jobs:
         if: needs.prepare.outputs.windows_mode == 'full'
         uses: ./.github/actions/setup-toolchain
 
-      - name: Set up Node.js for a runtime-only package
-        if: needs.prepare.outputs.windows_mode == 'runtime'
+      - name: Set up Node.js while reusing the Desktop package
+        if: needs.prepare.outputs.windows_mode == 'reuse'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+
+      - name: Download and verify the reusable Windows package
+        if: needs.prepare.outputs.windows_mode == 'reuse'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_TAG: ${{ needs.prepare.outputs.windows_base_tag }}
+        shell: pwsh
+        working-directory: .
+        run: |
+          $baseVersion = $env:BASE_TAG.TrimStart("v")
+          $assetName = "AluDock-$baseVersion-windows-x86_64.zip"
+          $baseDirectory = Join-Path $env:RUNNER_TEMP "aludock-windows-base"
+          New-Item -ItemType Directory -Path $baseDirectory -Force | Out-Null
+          gh release download $env:BASE_TAG --repo $env:GITHUB_REPOSITORY --dir $baseDirectory --pattern $assetName --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Could not download the verified Windows package from $env:BASE_TAG" }
+          $archive = Join-Path $baseDirectory $assetName
+          $checksumFile = Join-Path $baseDirectory "SHA256SUMS.txt"
+          $checksumLine = Get-Content -LiteralPath $checksumFile | Where-Object { $_ -match "\s$([regex]::Escape($assetName))$" } | Select-Object -First 1
+          if (-not $checksumLine) { throw "SHA256SUMS.txt does not identify $assetName" }
+          $expected = ($checksumLine -split "\s+")[0].ToLowerInvariant()
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "The reusable Windows package checksum does not match $env:BASE_TAG" }
+          "ALUDOCK_WINDOWS_BASE_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Dock dependencies
         working-directory: .
@@ -243,7 +270,7 @@ jobs:
       - name: Assemble the Windows package
         shell: pwsh
         run: |
-          if ($env:ALUDOCK_WINDOWS_PACKAGE_MODE -eq "runtime") {
+          if ($env:ALUDOCK_WINDOWS_PACKAGE_MODE -eq "reuse") {
             node scripts/package-windows.mjs
           } else {
             pnpm run package:windows
@@ -253,7 +280,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows-${{ needs.prepare.outputs.tag }}
-          path: clients/official/dist/AluDock-*-windows*-x86_64.zip
+          path: clients/official/dist/AluDock-*-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 3
 

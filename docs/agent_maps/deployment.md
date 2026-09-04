@@ -29,7 +29,7 @@ Startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 t
 
 Durable catalog 在 POSIX 保持既有 owner/mode 与 same-directory fsync/rename 规则。Windows Host 在首次准备 catalog 目录时建立只含当前用户与 SYSTEM 的可继承私有 DACL；启动读取时额外收紧可能来自旧版本的既有 catalog。后续 atomic replacement 从该目录创建同目录临时文件并继承相同 DACL，不在每次 catalog transition 重复启动 `icacls.exe`。
 
-Linux Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 managed runtime 变量。Windows Host 由发行目录中的固定 `runtime/node.exe` 与 `dock/dist/src/cli.js` 启动，并把 stdout/stderr 追加到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。两边都不得把执行安装时的 PATH、RVM/NVM 选择、npm lifecycle 环境或 Extension 凭据复制成 Host 配置；这些也不能成为所有 Worker 的全局开发环境。
+Linux Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 managed runtime 变量。Windows 的唯一 `aludock.cmd` launcher 从 `ALUDOCK_NODE_PATH`、官方 Node 默认目录和当前 PATH 中依次选择一份满足 `package.json#engines.node` 的系统 Node；Desktop、Host、Worker 和 Pi 子进程都沿用该进程选择，不保存第二套 Node 路径或版本。Host 把 stdout/stderr 追加到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。两边都不得把执行安装时的 RVM/NVM 选择、npm lifecycle 环境或 Extension 凭据复制成所有 Worker 的全局开发环境。
 
 ## 网络入口与配对窗口
 
@@ -106,7 +106,7 @@ aludock service uninstall
 
 ## 本地安装与 Windows 发行
 
-Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 的完整发行由 `package:windows` 固定组装 `AluDock.exe`、Node/npm、Dock、bundled Pi、DLL sidecars、`aludock.cmd`、`Setup.cmd` 与 `Uninstall.cmd`；仅有 Host/Worker/Pi runtime 变化的正式版本改为生成同一 Release 下的 Windows runtime update，不重建 Desktop、Linux 或 Android。两种 Windows 包进入同一个 Setup：完整包可首次安装，runtime update 只替换已安装 app 中的 Dock 部分，并沿用已安装 Desktop 与 Node。runtime 包携带最近完整 Windows Release 的兼容基线；Setup 只合并基线一致的安装，中间 runtime 版本可以跳过，任意旧 Desktop/Node 不得被标成当前产品版本。Setup 通过 sibling staging、事务记录和上一版本目录把唯一安装位置切换到 `%LOCALAPPDATA%\Alu Dock\app`；候选版本 ready 且系统集成完成后才提交，失败或中断后的下一次执行先恢复上一版本。Start Menu、Windows Apps 卸载项和用户 PATH 中的全局 `aludock` launcher 仍由 Setup 维护。卸载只移除安装包及这些系统集成，不删除 Dock 或 Pi 的配置、身份、凭据和 Session。Setup 运行时不调用系统 Node/npm/Pi；checkout `install:local` 使用开发机工具链构建完整自包含包，再进入 Setup。两者都不保留旧 PowerShell launcher 作为第二条稳态路径。安装与测试是两件事；安装器和包组装 gate 不替代真实 Windows 验收。
+Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 始终只有一个可独立安装的正式 ZIP，由 `package:windows` 组装 `AluDock.exe`、Dock、bundled Pi、DLL sidecars、`aludock.cmd`、`Setup.cmd` 与 `Uninstall.cmd`，不携带 Node/npm。仅有 Host/Worker/Pi 变化时，正式流水线校验最近一次成功发布的完整 Windows ZIP，复用其中的 Desktop 和 DLL 并替换当前 Dock/发行入口；Rust、Tauri、前端、Linux 和 Android 均不因此重建。Setup 先验证系统 Node，再通过 sibling staging、事务记录和上一版本目录把唯一安装位置切换到 `%LOCALAPPDATA%\Alu Dock\app`；候选版本 ready 且系统集成完成后才提交，失败或中断后的下一次执行先恢复上一版本。Start Menu、Windows Apps 卸载项和用户 PATH 中的全局 `aludock` launcher 仍由 Setup 维护。卸载只移除安装包及这些系统集成，不删除系统 Node、Dock/Pi 配置、身份、凭据和 Session。checkout `install:local` 使用开发机工具链构建同一个完整包，再进入 Setup。两者都不保留旧 PowerShell launcher 作为第二条稳态路径。安装与测试是两件事；安装器和包组装 gate 不替代真实 Windows 验收。
 
 存在未完成 run、Queue、interaction 或 stopping instance 时，Linux 更新和 Windows stop/update 默认拒绝。Windows Desktop 的 X 只隐藏窗口，`Exit Desktop` 只退出 GUI，只有独立的 `Stop Alu Dock` 会请求 Host 正常停止；关闭或更新 GUI 不停止 Host 或 Work。
 
@@ -116,7 +116,7 @@ Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user
 
 - `src/deployment/`：安装布局和 user service 管理。
 - `scripts/install-local.ts`：Linux checkout 本地包更新入口；Windows checkout 构建官方 ZIP 并进入同一 Setup 流程。
-- `clients/official/scripts/package-windows.mjs`、`windows-package.ps1`、`windows-runtime.json`：Windows x64 固定 runtime、统一发行目录、安装/卸载、架构/DLL 检查与 ZIP 组装。
+- `clients/official/scripts/package-windows.mjs`、`windows-package.ps1`：Windows x64 完整发行目录、系统 Node 门禁、安装/卸载、组件复用、架构/DLL 检查与 ZIP 组装。
 - `src/deployment/windows-host-lifecycle.ts`、`windows-user-host.ts`：Windows 用户 session 隐藏 Host、持久日志与私有生命周期；不承载 Dock 客户端协议。
 - `clients/official/src-tauri/src/desktop_shell.rs`：Windows Desktop bootstrap、tray、single-instance 与 login startup；不复制 Host/Worker/Catalog 语义。
 - `src/control/dock-host.ts`：Host socket 与 shutdown。

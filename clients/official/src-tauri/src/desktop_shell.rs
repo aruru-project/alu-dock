@@ -149,7 +149,7 @@ pub async fn start_desktop_host(
         let runtime = state
             .runtime
             .clone()
-            .ok_or_else(|| "Alu Dock runtime is unavailable. Run Setup.cmd from the Windows package, then try again.".to_owned())?;
+            .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.cmd from the Windows package, then try again.".to_owned())?;
         let status = tauri::async_runtime::spawn_blocking(move || start_host(&runtime))
             .await
             .map_err(|error| format!("Alu Dock could not start: {error}"))?;
@@ -217,7 +217,7 @@ pub fn open_desktop_tui(state: tauri::State<'_, DesktopShellState>) -> Result<()
         let runtime = state
             .runtime
             .as_ref()
-            .ok_or_else(|| "Alu Dock runtime is unavailable. Run Setup.cmd from the Windows package, then try again.".to_owned())?;
+            .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.cmd from the Windows package, then try again.".to_owned())?;
         runtime.open_tui()
     }
     #[cfg(not(target_os = "windows"))]
@@ -231,8 +231,6 @@ pub fn open_desktop_tui(state: tauri::State<'_, DesktopShellState>) -> Result<()
 #[derive(Clone)]
 struct WindowsRuntime {
     root: std::path::PathBuf,
-    node: std::path::PathBuf,
-    cli: std::path::PathBuf,
     launcher: std::path::PathBuf,
     logs_path: std::path::PathBuf,
 }
@@ -258,39 +256,20 @@ impl WindowsRuntime {
                 "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned()
             })?
             .to_path_buf();
-        let developer_node =
-            std::env::var_os("ALUDOCK_DESKTOP_NODE_PATH").map(std::path::PathBuf::from);
-        let developer_cli =
-            std::env::var_os("ALUDOCK_DESKTOP_CLI_PATH").map(std::path::PathBuf::from);
-        let developer_launcher =
-            std::env::var_os("ALUDOCK_DESKTOP_LAUNCHER_PATH").map(std::path::PathBuf::from);
-        let (node, cli, launcher) = match (developer_node, developer_cli, developer_launcher) {
-            (Some(node), Some(cli), Some(launcher)) => (node, cli, launcher),
-            (None, None, None) => {
+        let launcher = match std::env::var_os("ALUDOCK_DESKTOP_LAUNCHER_PATH") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => {
                 require_installed_root(&root)?;
-                (
-                    root.join("runtime").join("node.exe"),
-                    root.join("dock").join("dist").join("src").join("cli.js"),
-                    root.join("aludock.cmd"),
-                )
+                root.join("aludock.cmd")
             }
-            _ => return Err("Alu Dock developer runtime overrides must provide Node, Dock, and terminal paths together.".into()),
         };
-        for (path, label) in [
-            (&node, "Node runtime"),
-            (&cli, "Dock runtime"),
-            (&launcher, "terminal entry"),
-        ] {
-            if !path.is_file() {
-                return Err(format!(
-                    "The Alu Dock {label} is missing. Run Setup.cmd from a complete Windows package."
-                ));
-            }
+        if !launcher.is_file() {
+            return Err(
+                "The Alu Dock command is missing. Run Setup.cmd from the Windows package.".into(),
+            );
         }
         Ok(Self {
             root,
-            node,
-            cli,
             launcher,
             logs_path: windows_host_log_path()?,
         })
@@ -300,22 +279,22 @@ impl WindowsRuntime {
         use std::os::windows::process::CommandExt;
 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let mut command = std::process::Command::new(&self.node);
+        let command_line = format!(
+            "\"\"{}\" {}\"",
+            self.launcher.display(),
+            arguments.join(" ")
+        );
+        let mut command = std::process::Command::new("cmd.exe");
         command
-            .arg(&self.cli)
-            .args(arguments)
+            .arg("/D")
+            .arg("/S")
+            .arg("/C")
+            .raw_arg(command_line)
             .current_dir(&self.root)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let runtime_directory = self.node.parent().unwrap_or(&self.root);
-        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::iter::once(runtime_directory.to_path_buf())
-            .chain(std::env::split_paths(&inherited_path));
-        if let Ok(path) = std::env::join_paths(path) {
-            command.env("PATH", path);
-        }
         command
     }
 
@@ -326,9 +305,9 @@ impl WindowsRuntime {
                 .project_status(&output.stdout)
                 .unwrap_or_else(|error| self.failure_status(error)),
             Ok(output) => self.failure_status(command_failure(&output)),
-            Err(_) => self.failure_status(
-                "Windows could not start the bundled Alu Dock runtime. Run Setup.cmd again.".into(),
-            ),
+            Err(_) => {
+                self.failure_status("Windows could not start Alu Dock. Run Setup.cmd again.".into())
+            }
         }
     }
 
@@ -609,7 +588,7 @@ fn run_tray_service(app: &AppHandle, start: bool) {
             Some(runtime) if start => start_host(runtime),
             Some(runtime) => stop_host(runtime),
             None => failed_status(
-                "Alu Dock runtime is unavailable. Run Setup.cmd from the Windows package, then try again.".into(),
+                "Alu Dock is not ready on this computer. Run Setup.cmd from the Windows package, then try again.".into(),
                 windows_host_log_path().ok().map(|path| path.display().to_string()),
             ),
         };
