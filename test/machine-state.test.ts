@@ -72,6 +72,37 @@ async function joinedState(root: string, state = new MainMachineState(root)): Pr
   return { state, machineId: pending.machineId };
 }
 
+test("a SubHost drops a stale link after wake even while its earlier inventory update is still waiting", () => {
+  const upstream = new SubHostMachineConnection({
+    state: {} as SubHostMachineState,
+    address: "127.0.0.1",
+    port: 1,
+    hostEpoch: "wake-subhost-epoch",
+    snapshots: () => [],
+    acceptProtocolSocket: () => {},
+  });
+  let destroyed = false;
+  const socket = {
+    get destroyed(): boolean { return destroyed; },
+    destroy(): void { destroyed = true; },
+  } as unknown as TLSSocket;
+  const internals = upstream as unknown as {
+    socket: TLSSocket;
+    ready: boolean;
+    lastMainRecordAt: number;
+    maintenanceSocket: TLSSocket;
+    maintenanceTick(): void;
+  };
+  internals.socket = socket;
+  internals.ready = true;
+  internals.lastMainRecordAt = Date.now() - 10_000;
+  internals.maintenanceSocket = socket;
+
+  internals.maintenanceTick();
+
+  assert.equal(destroyed, true);
+});
+
 test("concurrent offline RemoteInstance Stops each observe a terminal result", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-offline-stop-"));
   context.after(async () => rm(root, { recursive: true, force: true }));

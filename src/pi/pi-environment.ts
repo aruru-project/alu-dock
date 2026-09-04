@@ -42,6 +42,37 @@ export interface PiEnvironmentOptions {
   agentDir?: string;
 }
 
+const PI_MODEL_UPDATE_TIMEOUT_MS = 15_000;
+
+/** Refresh Pi's persisted upstream model catalogs without replacing the bundled Pi runtime. */
+export async function updatePiModelCatalog(options: PiEnvironmentOptions = {}): Promise<{ agentDir: string }> {
+  const agentDir = resolve(options.agentDir ?? getAgentDir());
+  await mkdir(agentDir, { recursive: true, mode: 0o700 });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PI_MODEL_UPDATE_TIMEOUT_MS);
+  try {
+    const runtime = await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+      allowModelNetwork: false,
+      signal: controller.signal,
+    });
+    const result = await runtime.refresh({
+      allowNetwork: true,
+      force: true,
+      signal: controller.signal,
+    });
+    if (result.aborted) throw new Error("Model catalog update timed out");
+    if (result.errors.size > 0) {
+      const details = Array.from(result.errors, ([provider, error]) => `${provider}: ${error.message}`).join("; ");
+      throw new Error(`Pi could not update its model catalogs: ${details}`);
+    }
+    return { agentDir };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /** Read Pi's own global settings, packages, providers, models, and credential metadata. */
 export async function inspectPiEnvironment(options: PiEnvironmentOptions = {}): Promise<PiEnvironmentSnapshot> {
   const environment = await openPiEnvironment(options);

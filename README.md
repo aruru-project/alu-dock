@@ -105,19 +105,20 @@ npm run client:package:linux   # x86_64 Linux
 npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 包固定携带 Node/npm、Dock 与 bundled Pi；完整解压后运行一次 `Setup.cmd`，之后从 Start Menu 打开 Desktop，或在新终端运行全局 `aludock`。Windows Apps 中的卸载入口只移除程序和系统集成，保留 Dock/Pi 状态。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 完整包固定携带 Node/npm、Dock 与 bundled Pi；仅修改 Host/Worker/Pi runtime 的正式版本可提供较小的 `windows-runtime` 更新包，沿用电脑上已安装的 Desktop 与 Node。两种包都在完整解压后运行同一个 `Setup.cmd`；之后从 Start Menu 打开 Desktop，或在新终端运行全局 `aludock`。Windows Apps 中的卸载入口只移除程序和系统集成，保留 Dock/Pi 状态。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 
 Hub 的 **Settings → Pi** 直接显示 bundled Pi 当前识别的 Providers/models，并调用 Pi 自己的 API-key 与 OAuth 登录流程。Pi 仍唯一拥有 `~/.pi/agent/settings.json`、`models.json`、`auth.json`、packages 和 `sessions/`；Alu Dock 不复制凭据、不创建另一份 Session 历史。
 
-安装 Pi package 不需要系统 Pi：
+安装 Pi package、更新 Pi 的模型列表都不需要系统 Pi：
 
 ```bash
 aludock pi:install <source>
+aludock update model
 ```
 
-现有 Work 使用 `/reload` 采用配置或 extension 变化。
+现有 Work 使用 `/reload` 采用配置、模型或 extension 变化。
 
 ## 本机与远程连接
 

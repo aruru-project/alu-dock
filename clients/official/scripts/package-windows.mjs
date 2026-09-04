@@ -32,6 +32,16 @@ const version = resolveReleaseVersion({
   explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
   fallbackVersion: clientManifest.version,
 });
+const packageMode = process.env.ALUDOCK_WINDOWS_PACKAGE_MODE || "full";
+if (packageMode !== "full" && packageMode !== "runtime") {
+  throw new Error("ALUDOCK_WINDOWS_PACKAGE_MODE must be full or runtime");
+}
+const windowsBaseVersion = packageMode === "runtime"
+  ? process.env.ALUDOCK_WINDOWS_BASE_VERSION
+  : version;
+if (!windowsBaseVersion || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(windowsBaseVersion)) {
+  throw new Error("A runtime-only package requires ALUDOCK_WINDOWS_BASE_VERSION from the latest full Windows release");
+}
 // Windows 10/11 inbox contracts only. VC runtimes, WebView loaders, GNU runtimes,
 // and other redistributables are deliberately absent and must ship beside their importer.
 const AMD64_PE_MACHINE = 0x8664;
@@ -61,7 +71,9 @@ validateRuntimeManifest(runtimeManifest);
 
 const target = runtimeManifest.target;
 const systemTar = windowsSystemExecutable("tar.exe");
-const releaseName = `AluDock-${version}-windows-x86_64`;
+const releaseName = packageMode === "runtime"
+  ? `AluDock-${version}-windows-runtime-x86_64`
+  : `AluDock-${version}-windows-x86_64`;
 const defaultOutputDirectory = join(clientRoot, "dist");
 const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
 const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}.zip`);
@@ -75,17 +87,22 @@ try {
   // run the executable from the extracted archive.
   const payloadRoot = join(releaseRoot, "app");
   mkdirSync(payloadRoot, { recursive: true });
-  const runtimeRoot = join(payloadRoot, "runtime");
-  await materializeNode(runtimeRoot, temporary, runtimeManifest.node, systemTar);
-  const buildRuntime = {
-    nodePath: join(runtimeRoot, "node.exe"),
-    npmCliPath: join(runtimeRoot, "node_modules", "npm", "bin", "npm-cli.js"),
-  };
+  let buildRuntime;
+  if (packageMode === "full") {
+    const runtimeRoot = join(payloadRoot, "runtime");
+    await materializeNode(runtimeRoot, temporary, runtimeManifest.node, systemTar);
+    buildRuntime = {
+      nodePath: join(runtimeRoot, "node.exe"),
+      npmCliPath: join(runtimeRoot, "node_modules", "npm", "bin", "npm-cli.js"),
+    };
+  } else {
+    buildRuntime = hostNodeRuntime();
+  }
 
   runNpm(buildRuntime, ["run", "build"], projectRoot);
-  buildDesktop(version, target, buildRuntime);
+  if (packageMode === "full") buildDesktop(version, target, buildRuntime);
   materializeDock(join(payloadRoot, "dock"), buildRuntime);
-  copyDesktop(payloadRoot, target);
+  if (packageMode === "full") copyDesktop(payloadRoot, target);
   pruneNonTargetNativePrebuilds(payloadRoot);
   copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(payloadRoot, "LICENSE-APACHE"));
   const supportRoot = join(payloadRoot, "support");
@@ -96,7 +113,10 @@ try {
   writeFileSync(join(payloadRoot, "Uninstall.cmd"), renderUninstall(), "utf8");
   writeFileSync(join(payloadRoot, "release-manifest.json"), `${JSON.stringify({
     schemaVersion: 1,
+    packageKind: packageMode === "runtime" ? "runtime-update" : "complete",
     productVersion: version,
+    windowsBaseVersion,
+    ...(packageMode === "runtime" ? { requiredWindowsBaseVersion: windowsBaseVersion } : {}),
     target,
     dockVersion: dockManifest.version,
     node: runtimeManifest.node,
@@ -104,11 +124,13 @@ try {
     cli: "aludock.cmd",
   }, null, 2)}\n`, "utf8");
 
-  inspectRelease(releaseRoot);
+  inspectRelease(releaseRoot, packageMode === "full");
   mkdirSync(dirname(output), { recursive: true });
   rmSync(output, { force: true });
   run(systemTar, ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
-  const requiredFiles = ["Setup.cmd", "app/AluDock.exe", "app/Uninstall.cmd", "app/aludock.cmd", "app/runtime/node.exe", "app/runtime/npm.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"];
+  const requiredFiles = packageMode === "runtime"
+    ? ["Setup.cmd", "app/Uninstall.cmd", "app/aludock.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"]
+    : ["Setup.cmd", "app/AluDock.exe", "app/Uninstall.cmd", "app/aludock.cmd", "app/runtime/node.exe", "app/runtime/npm.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"];
   const requiredPaths = requiredFiles.map((path) => `${releaseName}/${path}`);
   const listing = run(systemTar, ["-t", "-f", output, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/");
   const listedPaths = new Set(listing.split(/\r?\n/u).map((path) => path.trim()).filter(Boolean));
@@ -132,6 +154,14 @@ function validateRuntimeManifest(manifest) {
     || !/^[a-f0-9]{64}$/u.test(node.sha256)) {
     throw new Error("windows-runtime.json contains invalid Node release metadata");
   }
+}
+
+function hostNodeRuntime() {
+  const npmCliPath = join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (!existsSync(npmCliPath)) {
+    throw new Error(`The Node.js installation does not include npm-cli.js: ${npmCliPath}`);
+  }
+  return { nodePath: process.execPath, npmCliPath };
 }
 
 function buildDesktop(productVersion, rustTarget, runtime) {
@@ -215,12 +245,15 @@ function pruneNonTargetNativePrebuilds(root) {
   visit(root);
 }
 
-function inspectRelease(root) {
-  const dumpbin = findExecutable("dumpbin.exe");
-  if (!dumpbin) throw new Error("Run package:windows from a Visual Studio Developer terminal so dumpbin.exe can inspect DLL dependencies.");
+function inspectRelease(root, requireBinary) {
   const binaries = collectFiles(root).filter((path) =>
     /\.(?:exe|dll)$/iu.test(path) || (/\.node$/iu.test(path) && peMachine(path) !== undefined));
-  if (binaries.length === 0) throw new Error("Windows release contains no PE binaries");
+  if (binaries.length === 0) {
+    if (requireBinary) throw new Error("Windows release contains no PE binaries");
+    return;
+  }
+  const dumpbin = findExecutable("dumpbin.exe");
+  if (!dumpbin) throw new Error("Run package:windows from a Visual Studio Developer terminal so dumpbin.exe can inspect DLL dependencies.");
   for (const binary of binaries) {
     assertAmd64(binary);
     const report = run(dumpbin, ["/dependents", binary], { capture: true }).stdout;

@@ -87,13 +87,21 @@ aludock list --all
 npm run package:windows
 ```
 
-脚本固定下载并校验 `windows-runtime.json` 声明的 Node/npm，构建 MSVC Tauri Desktop，安装 Dock production dependencies（其中包含 bundled Pi），检查所有随包 PE 文件的 x64 架构和非系统 DLL 依赖，再生成：
+完整包构建固定下载并校验 `windows-runtime.json` 声明的 Node/npm，构建 MSVC Tauri Desktop，安装 Dock production dependencies（其中包含 bundled Pi），检查所有随包 PE 文件的 x64 架构和非系统 DLL 依赖，再生成：
 
 ```text
 clients/official/dist/AluDock-<version>-windows-x86_64.zip
 ```
 
-最终用户完整解压 ZIP 后运行一次 `Setup.cmd`。Setup 正常停止旧 Host、拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready：
+正式 Release 会根据上一正式 tag 以来实际变化选择产物。只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，Windows job 跳过 Desktop/Rust/frontend 构建，生成：
+
+```text
+clients/official/dist/AluDock-<version>-windows-runtime-x86_64.zip
+```
+
+runtime update 仍由同一个 `Setup.cmd` 安装，并记录最近一次完整 Windows Release 作为兼容基线；电脑上已安装版本必须来自这条完整基线（中间可跳过其他 runtime update）。它沿用已安装的 Desktop 与固定 Node，只更新 Dock runtime；基线不匹配时 Setup 会要求先安装对应完整包，禁止拼出虚假的混合版本。共享客户端变化仍生成完整 Windows、Linux 和 Android 产物；未知构建输入保守生成全部产物。
+
+最终用户完整解压 ZIP 后运行一次 `Setup.cmd`。Setup 正常停止旧 Host、拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready。上一版本和事务记录会保留到新版本 ready、命令入口、Start Menu 与卸载登记全部完成；失败会恢复并重新启动上一版本，异常中断后的再次运行先完成恢复。重复执行同一版本会修复这些入口并确认 Host ready，而不是只根据版本号提前退出：
 
 ```text
 %LOCALAPPDATA%\Alu Dock\app\AluDock.exe
@@ -112,9 +120,10 @@ Setup 不需要管理员权限、系统 Node/npm 或系统 Pi。它维护 Start 
 - X 隐藏 Desktop 到托盘；Host、Worker 和 Work 不停止。
 - **退出 Desktop** 只退出 GUI。
 - **停止 Alu Dock** 单独请求 Host 正常停止，active Work 存在时拒绝。
+- **更新模型** 调用与 `aludock update model` 相同的 bundled Pi 模型目录刷新能力。
 - **随 Windows 登录启动** 默认关闭；启用后以 `--background` 静默进入托盘并确保 Host ready。
 - **打开终端设置** 启动随包 `aludock.cmd`；Main/SubHost 角色及连接继续由同一个 TUI Settings 和 Host private state 管理。
-- Host 启动或停止失败时 Desktop 显示可执行的恢复提示；托盘和界面都可以打开持久 Host log。
+- 托盘启动、停止和更新模型会先显示进行中通知，再显示完成或可执行的失败提示；Host 日志仍可从托盘和界面打开。
 
 新开的 PowerShell 或 cmd 可以直接进入同一个 TUI 或 service authority：
 
@@ -122,6 +131,7 @@ Setup 不需要管理员权限、系统 Node/npm 或系统 Pi。它维护 Start 
 aludock
 aludock service status
 aludock service logs --lines 200
+aludock update model
 ```
 
 Windows logoff 或重启会结束当前用户 Host；启用登录启动后，下一次登录由 Desktop 恢复。更新不删除 `%LOCALAPPDATA%\Alu Dock\` 中的 catalog、Machine 设置、enrollment、attachments、Host identity/trust 或日志，也不改变 Pi 原生配置和 Session 位置。

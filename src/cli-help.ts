@@ -13,6 +13,7 @@ const PUBLIC_TOPICS = new Set([
   "service",
   "diagnostics",
   "pi:install",
+  "update",
   "host",
   "machine",
   "help",
@@ -47,6 +48,7 @@ export function requestedCliHelp(command: string, args: readonly string[]): stri
     return ["service", ...args.slice(1).filter((arg) => !HELP_FLAGS.has(arg))];
   }
   if (!args.some((arg) => HELP_FLAGS.has(arg))) return undefined;
+  if (command === "update") return [command, ...args.filter((arg) => !HELP_FLAGS.has(arg))];
   if (command !== "service") return [command];
   const action = args.find((arg) => !HELP_FLAGS.has(arg) && arg !== "help" && !arg.startsWith("-"));
   return action ? ["service", action] : ["service"];
@@ -62,6 +64,7 @@ export function renderCliHelp(topics: readonly string[]): string {
   }
   if (!PUBLIC_TOPICS.has(topic)) throw new Error(`Unknown help topic: ${topic}`);
   if (topic === "service") return serviceHelp(rest);
+  if (topic === "update") return updateHelp(rest);
   if (topic === "host") return hostHelp(rest);
   if (topic === "machine") return machineHelp(rest);
   if (rest.length > 0) throw new Error(`${topic} does not have help subtopics`);
@@ -83,11 +86,18 @@ export function renderCliHelp(topics: readonly string[]): string {
 }
 
 function overviewHelp(): string {
-  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  aludock\n  aludock COMMAND [OPTIONS]\n  aludock help [COMMAND]\n\nStart here:\n  aludock                 Open the Dock Hub\n  aludock -c              Continue recent work here, or create it\n  aludock new             Start separate Pi work\n  aludock attach TARGET   Open known running work in this terminal\n\nHuman commands:\n  continue  Continue recent work in this directory (-c, --continue)\n  open      Find matching work, or resume it by TARGET\n  new       Start separate work and a new Pi session\n  attach    Open known running work\n  list      Show work that is current or saved in History\n  status    Show one work item in detail\n  stop      End running work and remove it from the Dock\n  forget    Remove one ended work item from Dock History\n  prune     Remove ended work from Dock History\n  service   Manage the installed Alu Dock Host\n  diagnostics  Show saved Agent runtime failures on this computer\n  pi:install Install a Pi package with Alu Dock’s bundled Pi\n  host      Keep an installed Windows Host running in this window\n  help      Explore command help\n\nOpening or managing Work requires the Alu Dock service; if it is stopped, use\n'aludock service start'. Help and pi:install work without the service. New work\nstarts where you ran aludock and can use a different directory. Ctrl+D leaves\nWork for the shell while the work keeps running.\n\nExplore:\n  aludock help open\n  aludock help service\n  aludock COMMAND --help\n`;
+  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  aludock\n  aludock COMMAND [OPTIONS]\n  aludock help [COMMAND]\n\nStart here:\n  aludock                 Open the Dock Hub\n  aludock -c              Continue recent work here, or create it\n  aludock new             Start separate Pi work\n  aludock attach TARGET   Open known running work in this terminal\n\nHuman commands:\n  continue  Continue recent work in this directory (-c, --continue)\n  open      Find matching work, or resume it by TARGET\n  new       Start separate work and a new Pi session\n  attach    Open known running work\n  list      Show work that is current or saved in History\n  status    Show one work item in detail\n  stop      End running work and remove it from the Dock\n  forget    Remove one ended work item from Dock History\n  prune     Remove ended work from Dock History\n  service   Manage the installed Alu Dock Host\n  diagnostics  Show saved Agent runtime failures on this computer\n  pi:install Install a Pi package with Alu Dock’s bundled Pi\n  update    Refresh Pi’s model list from its upstream catalog\n  host      Keep an installed Windows Host running in this window\n  help      Explore command help\n\nOpening or managing Work requires the Alu Dock service; if it is stopped, use\n'aludock service start'. Help, pi:install, and update work without it. New work\nstarts where you ran aludock and can use a different directory. Ctrl+D leaves\nWork for the shell while the work keeps running.\n\nExplore:\n  aludock help open\n  aludock help service\n  aludock COMMAND --help\n`;
 }
 
 function diagnosticsHelp(): string {
   return `aludock diagnostics — show saved Agent runtime failures on this computer\n\nUsage:\n  aludock diagnostics [--limit N] [--verbose]\n\nUnexpected Agent runtime exits are saved independently from Work recovery, so\nreopening Work does not remove their diagnostic record. On a SubHost, run this\ncommand on that computer. --verbose includes bounded saved error output.\n`;
+}
+
+function updateHelp(rest: readonly string[]): string {
+  if (rest.length > 1 || (rest.length === 1 && rest[0] !== "model")) {
+    throw new Error(`Unknown update help topic: ${rest.join(" ")}`);
+  }
+  return `aludock update model — refresh Pi’s model list\n\nUsage:\n  aludock update model\n\nDownloads the latest model catalog through Alu Dock’s bundled Pi and saves it\nin Pi’s normal settings. Alu Dock and Pi are not replaced. Existing Work can\nload the refreshed list with /reload. The Alu Dock service does not need to be\nrunning.\n`;
 }
 
 function piInstallHelp(): string {

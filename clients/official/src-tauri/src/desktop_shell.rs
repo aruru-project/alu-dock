@@ -6,6 +6,8 @@ use serde::Serialize;
 use tauri::{App, AppHandle, Manager};
 #[cfg(target_os = "windows")]
 use tauri::{Emitter, WindowEvent};
+#[cfg(target_os = "windows")]
+use tauri_plugin_notification::NotificationExt;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +25,8 @@ pub struct DesktopShellState {
     status: Arc<Mutex<DesktopShellStatus>>,
     #[cfg(target_os = "windows")]
     exit_requested: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
+    tray_operation_active: Arc<AtomicBool>,
     #[cfg(target_os = "windows")]
     runtime: Option<WindowsRuntime>,
 }
@@ -51,6 +55,7 @@ impl DesktopShellState {
             return Self {
                 status: Arc::new(Mutex::new(status)),
                 exit_requested: Arc::new(AtomicBool::new(false)),
+                tray_operation_active: Arc::new(AtomicBool::new(false)),
                 runtime: runtime.ok(),
             };
         }
@@ -355,6 +360,18 @@ impl WindowsRuntime {
         status
     }
 
+    fn update_models(&self) -> Result<(), String> {
+        let output = self
+            .command(&["update", "model"])
+            .output()
+            .map_err(|_| "无法启动模型更新。请从 Alu Dock 终端重试。".to_owned())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(command_failure(&output))
+        }
+    }
+
     fn open_tui(&self) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
 
@@ -486,6 +503,7 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开 Alu Dock", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动 Alu Dock", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止 Alu Dock", true, None::<&str>)?;
+    let update_models = MenuItem::with_id(app, "update-models", "更新模型", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "打开 Host 日志", true, None::<&str>)?;
     let terminal = MenuItem::with_id(app, "terminal", "打开终端设置", true, None::<&str>)?;
     let login = CheckMenuItem::with_id(
@@ -506,6 +524,7 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
             &first_separator,
             &start,
             &stop,
+            &update_models,
             &logs,
             &terminal,
             &login,
@@ -536,6 +555,7 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
             "open" => show_main_window(app),
             "start" => run_tray_service(app, true),
             "stop" => run_tray_service(app, false),
+            "update-models" => run_tray_model_update(app),
             "logs" => {
                 let state = app.state::<DesktopShellState>();
                 let _ = open_desktop_host_log(app.clone(), state);
@@ -571,6 +591,19 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
 fn run_tray_service(app: &AppHandle, start: bool) {
     let app = app.clone();
     let state = app.state::<DesktopShellState>().inner().clone();
+    if state.tray_operation_active.swap(true, Ordering::SeqCst) {
+        show_tray_notice(&app, "Alu Dock 正在处理上一项操作", "完成后可以继续操作。");
+        return;
+    }
+    show_tray_notice(
+        &app,
+        if start {
+            "正在启动 Alu Dock"
+        } else {
+            "正在停止 Alu Dock"
+        },
+        "完成后会在这里显示结果。",
+    );
     std::thread::spawn(move || {
         let status = match &state.runtime {
             Some(runtime) if start => start_host(runtime),
@@ -580,10 +613,76 @@ fn run_tray_service(app: &AppHandle, start: bool) {
                 windows_host_log_path().ok().map(|path| path.display().to_string()),
             ),
         };
-        let has_error = status.startup_error.is_some();
+        let error = status.startup_error.clone();
         state.update(&app, status);
-        if has_error {
+        state.tray_operation_active.store(false, Ordering::SeqCst);
+        if let Some(error) = error {
+            show_tray_notice(
+                &app,
+                if start {
+                    "Alu Dock 启动未完成"
+                } else {
+                    "Alu Dock 停止未完成"
+                },
+                &error,
+            );
             show_main_window(&app);
+        } else {
+            show_tray_notice(
+                &app,
+                if start {
+                    "Alu Dock 已启动"
+                } else {
+                    "Alu Dock 已停止"
+                },
+                if start {
+                    "现在可以继续打开 Work。"
+                } else {
+                    "需要时可从托盘重新启动。"
+                },
+            );
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+fn run_tray_model_update(app: &AppHandle) {
+    let app = app.clone();
+    let state = app.state::<DesktopShellState>().inner().clone();
+    if state.tray_operation_active.swap(true, Ordering::SeqCst) {
+        show_tray_notice(&app, "Alu Dock 正在处理上一项操作", "完成后可以继续操作。");
+        return;
+    }
+    show_tray_notice(
+        &app,
+        "正在更新模型列表",
+        "Alu Dock 正在向 Pi 获取最新内容。",
+    );
+    std::thread::spawn(move || {
+        let result = state
+            .runtime
+            .as_ref()
+            .ok_or_else(|| {
+                "Alu Dock 安装内容不可用。请重新运行完整 Windows 包中的 Setup.cmd。".to_owned()
+            })
+            .and_then(WindowsRuntime::update_models);
+        state.tray_operation_active.store(false, Ordering::SeqCst);
+        match result {
+            Ok(()) => show_tray_notice(
+                &app,
+                "模型列表已更新",
+                "现有 Work 可使用 /reload 载入最新列表。",
+            ),
+            Err(error) => show_tray_notice(
+                &app,
+                "模型列表更新未完成",
+                &format!("{error} 请打开终端运行 aludock update model 后重试。"),
+            ),
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn show_tray_notice(app: &AppHandle, title: &str, body: &str) {
+    let _ = app.notification().builder().title(title).body(body).show();
 }

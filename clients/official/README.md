@@ -62,9 +62,11 @@ npm run client:install
 npm run package:windows
 ```
 
-产物位于 `dist/AluDock-<version>-windows-x86_64.zip`。源码 checkout 默认使用当前分支可达的最新 `vMAJOR.MINOR.PATCH` Client tag；`ALUDOCK_RELEASE_VERSION` 可为正式流水线显式指定版本，无 Git 元数据的源码包才回退到 manifest 版本。组装脚本读取 [`windows-runtime.json`](windows-runtime.json) 固定 Node/npm release 与 checksum，构建 `x86_64-pc-windows-msvc` Desktop，安装 Dock production tree 与 bundled Pi，复制 DLL sidecars，并使用 `dumpbin.exe` 检查随包 PE 架构及依赖后才写 ZIP。也可通过 `ALUDOCK_WINDOWS_NODE_ARCHIVE` 指定已经下载的同一 checksum archive；它不会放宽固定版本。
+完整产物位于 `dist/AluDock-<version>-windows-x86_64.zip`。源码 checkout 默认使用当前分支可达的最新 `vMAJOR.MINOR.PATCH` Client tag；`ALUDOCK_RELEASE_VERSION` 可为正式流水线显式指定版本，无 Git 元数据的源码包才回退到 manifest 版本。组装脚本读取 [`windows-runtime.json`](windows-runtime.json) 固定 Node/npm release 与 checksum，构建 `x86_64-pc-windows-msvc` Desktop，安装 Dock production tree 与 bundled Pi，复制 DLL sidecars，并使用 `dumpbin.exe` 检查随包 PE 架构及依赖后才写 ZIP。也可通过 `ALUDOCK_WINDOWS_NODE_ARCHIVE` 指定已经下载的同一 checksum archive；它不会放宽固定版本。
 
-最终用户完整解压后运行一次 `Setup.cmd`；唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常 Desktop 入口同时登记到 Start Menu，TUI/CLI 可在新终端直接运行 `aludock`。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**停止 Alu Dock** 在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
+正式流水线发现只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，会设置 `ALUDOCK_WINDOWS_PACKAGE_MODE=runtime` 并生成 `dist/AluDock-<version>-windows-runtime-x86_64.zip`。该包不重建 Desktop/Rust/frontend，也不重复携带 Node；它记录最近一次完整 Windows Release 的兼容基线，只接受来自该基线的完整安装（可跳过中间 runtime update），并继续使用同一个 Setup。
+
+最终用户完整解压后运行一次 `Setup.cmd`；唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常 Desktop 入口同时登记到 Start Menu，TUI/CLI 可在新终端直接运行 `aludock`。Setup 在新版本 ready 且入口登记完成前保留上一版本；失败会恢复上一版本，再次执行会先处理上次中断状态并修复同版本安装。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**启动 Alu Dock**、**停止 Alu Dock** 和 **更新模型** 都显示进行中及最终结果，停止在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
 
 Windows Apps 和安装目录中的 `Uninstall.cmd` 只移除应用包、Host setup、登录启动、Start Menu 与全局 launcher；Dock/Pi 配置、身份、凭据和 Session 一律保留。Windows checkout 的 `npm run install:local` 构建同一个 ZIP 并调用同一个 Setup，不创建第二套开发安装布局。
 

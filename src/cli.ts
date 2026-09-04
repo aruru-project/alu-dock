@@ -82,6 +82,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "update") {
+    await updatePiModels(parsed.commandArgs);
+    return;
+  }
+
   if (parsed.command === "hub" || parsed.command === "continue" || parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
     const options = parseInteractiveArgs(parsed.command, parsed.commandArgs);
     const { openDock } = await import("./interactive.js");
@@ -876,6 +881,20 @@ function waitForSignal(): Promise<NodeJS.Signals> {
     process.once("SIGINT", onSigint);
     process.once("SIGTERM", onSigterm);
   });
+}
+
+async function updatePiModels(args: string[]): Promise<void> {
+  if (args.length !== 1 || args[0] !== "model") {
+    throw new Error("update requires `model`; run `aludock help update`");
+  }
+  process.stdout.write("Updating Pi’s model list…\n");
+  const { updatePiModelCatalog } = await import("./pi/pi-environment.js");
+  try {
+    await updatePiModelCatalog();
+    process.stdout.write("Pi’s model list is up to date. Existing Work can load it with /reload.\n");
+  } catch (error) {
+    throw new Error(`Pi’s model list could not be updated: ${safeInstallOutput(errorMessage(error), 1_000)}. Check the network connection and try again.`, { cause: error });
+  }
 }
 
 async function installPiExtension(args: string[]): Promise<void> {

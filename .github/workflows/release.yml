@@ -26,6 +26,11 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       source_sha: ${{ steps.release.outputs.source_sha }}
+      linux: ${{ steps.artifacts.outputs.linux }}
+      windows: ${{ steps.artifacts.outputs.windows }}
+      android: ${{ steps.artifacts.outputs.android }}
+      windows_mode: ${{ steps.artifacts.outputs.windows_mode }}
+      windows_base_version: ${{ steps.artifacts.outputs.windows_base_version }}
 
     steps:
       - name: Check out source and tags
@@ -48,9 +53,74 @@ jobs:
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "source_sha=$(git rev-list -n 1 "$RELEASE_TAG")" >> "$GITHUB_OUTPUT"
 
+      - name: Select release artifacts that contain the changes
+        id: artifacts
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          previous_tag=""
+          while IFS= read -r candidate; do
+            if [[ "$candidate" != "$RELEASE_TAG" && "$candidate" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              previous_tag="$candidate"
+              break
+            fi
+          done < <(git tag --merged "$SOURCE_SHA" --sort=-version:refname --list 'v*')
+          if [[ -z "$previous_tag" ]]; then
+            current_plan=$(node scripts/release-artifacts.mjs --first-release)
+          else
+            current_plan=$(git diff --name-only -z "$previous_tag" "$SOURCE_SHA" \
+              | node scripts/release-artifacts.mjs --null)
+          fi
+          linux=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).linux))' "$current_plan")
+          windows=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).windows))' "$current_plan")
+          android=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).android))' "$current_plan")
+          windows_mode=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).windowsMode)' "$current_plan")
+
+          planned_base_tag=""
+          mapfile -t release_tags < <(git tag --merged "$SOURCE_SHA" --sort=-version:refname --list 'v*' \
+            | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')
+          for ((index = 1; index < ${#release_tags[@]}; index++)); do
+            candidate="${release_tags[$index]}"
+            if (( index + 1 < ${#release_tags[@]} )); then
+              predecessor="${release_tags[$((index + 1))]}"
+              historical_plan=$(git diff --name-only -z "$predecessor" "$candidate" | node scripts/release-artifacts.mjs --null)
+            else
+              historical_plan=$(node scripts/release-artifacts.mjs --first-release)
+            fi
+            mode=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).windowsMode)' "$historical_plan")
+            if [[ "$mode" == "full" ]]; then
+              planned_base_tag="$candidate"
+              break
+            fi
+          done
+
+          windows_base_tag=""
+          if [[ -n "$planned_base_tag" ]]; then
+            asset_name="AluDock-${planned_base_tag#v}-windows-x86_64.zip"
+            if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$planned_base_tag" --jq '.assets[].name' \
+              | grep -Fxq "$asset_name"; then
+              windows_base_tag="$planned_base_tag"
+            fi
+          fi
+          if [[ "$windows_mode" == "runtime" && -z "$windows_base_tag" ]]; then
+            echo "No successfully published full Windows baseline is available; building a full package." >&2
+            windows_mode="full"
+          fi
+          {
+            echo "linux=$linux"
+            echo "windows=$windows"
+            echo "android=$android"
+            echo "windows_mode=$windows_mode"
+            echo "windows_base_version=${windows_base_tag#v}"
+          } >> "$GITHUB_OUTPUT"
+
   linux:
     name: Build Linux ZIP
     needs: prepare
+    if: needs.prepare.outputs.linux == 'true'
     env:
       ALUDOCK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-24.04
@@ -125,8 +195,11 @@ jobs:
   windows:
     name: Build Windows package
     needs: prepare
+    if: needs.prepare.outputs.windows == 'true'
     env:
       ALUDOCK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      ALUDOCK_WINDOWS_PACKAGE_MODE: ${{ needs.prepare.outputs.windows_mode }}
+      ALUDOCK_WINDOWS_BASE_VERSION: ${{ needs.prepare.outputs.windows_base_version }}
     runs-on: windows-latest
     timeout-minutes: 90
     defaults:
@@ -140,8 +213,15 @@ jobs:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
-      - name: Set up the build toolchain
+      - name: Set up the complete client build toolchain
+        if: needs.prepare.outputs.windows_mode == 'full'
         uses: ./.github/actions/setup-toolchain
+
+      - name: Set up Node.js for a runtime-only package
+        if: needs.prepare.outputs.windows_mode == 'runtime'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
 
       - name: Install Dock dependencies
         working-directory: .
@@ -151,6 +231,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
       - name: Restore Cargo packages and dependency builds
+        if: needs.prepare.outputs.windows_mode == 'full'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: release-windows
@@ -160,19 +241,26 @@ jobs:
           cache-on-failure: false
 
       - name: Assemble the Windows package
-        run: pnpm run package:windows
+        shell: pwsh
+        run: |
+          if ($env:ALUDOCK_WINDOWS_PACKAGE_MODE -eq "runtime") {
+            node scripts/package-windows.mjs
+          } else {
+            pnpm run package:windows
+          }
 
       - name: Upload the Windows package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows-${{ needs.prepare.outputs.tag }}
-          path: clients/official/dist/AluDock-*-windows-x86_64.zip
+          path: clients/official/dist/AluDock-*-windows*-x86_64.zip
           if-no-files-found: error
           retention-days: 3
 
   android:
     name: Build signed Android APK
     needs: prepare
+    if: needs.prepare.outputs.android == 'true'
     env:
       ALUDOCK_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     runs-on: ubuntu-24.04
@@ -311,6 +399,12 @@ jobs:
       - linux
       - windows
       - android
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      (needs.linux.result == 'success' || needs.linux.result == 'skipped') &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      (needs.android.result == 'success' || needs.android.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

@@ -1236,7 +1236,8 @@ export class SubHostMachineConnection {
   private record: SubHostUpstreamRecord | undefined;
   private lastInventory = "";
   private lastMainRecordAt = 0;
-  private maintenancePending = false;
+  private connecting = false;
+  private maintenanceSocket: TLSSocket | undefined;
 
   constructor(private readonly options: {
     state: SubHostMachineState;
@@ -1254,11 +1255,7 @@ export class SubHostMachineConnection {
     if (!this.record) throw new Error("SubHost has not been prepared with a join file");
     this.stopped = false;
     await this.notifyConnectionChanged(false);
-    this.inventoryTimer = setInterval(() => {
-      if (this.maintenancePending) return;
-      this.maintenancePending = true;
-      void this.maintainConnection().catch(() => {}).finally(() => { this.maintenancePending = false; });
-    }, INVENTORY_INTERVAL_MS);
+    this.inventoryTimer = setInterval(() => this.maintenanceTick(), INVENTORY_INTERVAL_MS);
     void this.connectOnce().catch(() => {});
   }
 
@@ -1268,6 +1265,7 @@ export class SubHostMachineConnection {
     if (this.inventoryTimer) clearInterval(this.inventoryTimer);
     this.reconnectTimer = undefined;
     this.inventoryTimer = undefined;
+    this.maintenanceSocket = undefined;
     this.ready = false;
     await this.notifyConnectionChanged(false);
     this.socket?.destroy();
@@ -1304,6 +1302,16 @@ export class SubHostMachineConnection {
   }
 
   private async connectOnce(): Promise<void> {
+    if (this.stopped || this.connecting || this.connected()) return;
+    this.connecting = true;
+    try {
+      await this.openConnection();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private async openConnection(): Promise<void> {
     const record = this.record as SubHostUpstreamRecord;
     const socket = connect({
       host: this.options.address,
@@ -1358,7 +1366,11 @@ export class SubHostMachineConnection {
     });
     socket.once("error", () => {});
     socket.once("close", () => {
-      if (this.socket === socket) { this.socket = undefined; this.ready = false; void this.notifyConnectionChanged(false); }
+      if (this.socket !== socket) return;
+      this.socket = undefined;
+      this.ready = false;
+      if (this.maintenanceSocket === socket) this.maintenanceSocket = undefined;
+      void this.notifyConnectionChanged(false);
       for (const stream of this.streams.values()) stream.socket.remoteClose();
       this.streams.clear();
       for (const pending of this.toolRequests.values()) pending.reject(new Error("Main went offline before the Dock tool completed"));
@@ -1366,7 +1378,11 @@ export class SubHostMachineConnection {
       for (const pending of this.sourceOffRequests.values()) pending.reject(new Error("Main went offline before Dock tools were disabled"));
       this.sourceOffRequests.clear();
       if (!this.stopped) {
-        this.reconnectTimer = setTimeout(() => { void this.connectOnce().catch(() => {}); }, RECONNECT_DELAY_MS);
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = undefined;
+          void this.connectOnce().catch(() => {});
+        }, RECONNECT_DELAY_MS);
       }
     });
     await new Promise<void>((resolve, reject) => {
@@ -1483,21 +1499,33 @@ export class SubHostMachineConnection {
     }).catch(() => {});
   }
 
-  private async maintainConnection(): Promise<void> {
+  private maintenanceTick(): void {
     const socket = this.socket;
     if (!this.ready || !socket || socket.destroyed) return;
-    if (Date.now() - this.lastMainRecordAt >= MACHINE_HEARTBEAT_TIMEOUT_MS) { socket.destroy(); return; }
-    await writeMachine(socket, { kind: "machine_ping" });
-    await this.sendInventoryIfChanged();
+    // Sleep can leave an earlier write or inventory read pending forever. Liveness
+    // must still retire that half-open link so the normal reconnect path can run.
+    if (Date.now() - this.lastMainRecordAt >= MACHINE_HEARTBEAT_TIMEOUT_MS) {
+      socket.destroy();
+      return;
+    }
+    if (this.maintenanceSocket === socket) return;
+    this.maintenanceSocket = socket;
+    void this.maintainConnection(socket).catch(() => { socket.destroy(); }).finally(() => {
+      if (this.maintenanceSocket === socket) this.maintenanceSocket = undefined;
+    });
   }
 
-  private async sendInventoryIfChanged(): Promise<void> {
-    const socket = this.socket;
-    if (!this.ready || !socket || socket.destroyed) return;
+  private async maintainConnection(socket: TLSSocket): Promise<void> {
+    await writeMachine(socket, { kind: "machine_ping" });
+    await this.sendInventoryIfChanged(socket);
+  }
+
+  private async sendInventoryIfChanged(socket: TLSSocket): Promise<void> {
+    if (!this.ready || this.socket !== socket || socket.destroyed) return;
     const serialized = serializeInventory(await this.options.snapshots());
-    if (serialized === this.lastInventory) return;
+    if (!this.ready || this.socket !== socket || socket.destroyed || serialized === this.lastInventory) return;
     await sendInventory(socket, this.options.hostEpoch, serialized);
-    this.lastInventory = serialized;
+    if (this.ready && this.socket === socket && !socket.destroyed) this.lastInventory = serialized;
   }
 }
 

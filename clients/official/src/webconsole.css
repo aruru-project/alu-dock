@@ -2647,17 +2647,18 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   .alu-nav-hamburger { width: 34px; height: 34px; border-radius: 9px; }
 }
 
-/* 极窄屏（≤ 470px）：navbar 折两行——第一行面包屑 + 文件 + 汉堡，第二行只有
-   Model / Thinking / 上下文 / 费用。文件按钮必须钉在第一行：它是客户端比 Web
-   多出来的元素，留在第二行会把统计胶囊挤到溢出重叠。 */
+/* 极窄屏（≤ 470px）：navbar 折两行——第一行面包屑 + Dock Tools + 文件 +
+   汉堡，第二行只有 Model / Thinking / 上下文 / 费用。三个操作入口固定在
+   第一行，避免挤占状态信息。 */
 @media screen and (max-width: 470px) {
   :root { --alu-nav-height: auto; }
   .alu-navbar { position: relative; height: auto; min-height: 0; flex-wrap: wrap; padding: 6px 10px 4px; row-gap: 2px; }
-  .alu-navbar-left { flex: 0 0 100%; width: 100%; padding-right: 104px; }
+  .alu-navbar-left { flex: 0 0 100%; width: 100%; padding-right: 167px; }
   .alu-nav-session { max-width: none; }
   .alu-navbar-right { flex: 0 0 100%; width: 100%; justify-content: flex-start; padding-bottom: 4px; }
   .alu-nav-selector-model { flex: 1 1 auto; min-width: 0; }
   .alu-nav-selector-model .alu-nav-selector-value { max-width: none; }
+  .alu-navbar .alu-nav-dock-tools { position: absolute; top: 6px; right: 102px; width: 53px; }
   .alu-navbar .alu-nav-files { position: absolute; top: 6px; right: 56px; }
   .alu-navbar .alu-nav-hamburger { position: absolute; top: 6px; right: 10px; }
 }
