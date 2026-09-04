@@ -1,6 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+// TODO(upstream): Pi 0.85.0's root entry loads experimental/server.js without declaring
+// @earendil-works/pi-server; package.json pins the matching runtime until Pi fixes its manifest.
 import {
   createAgentSessionServices,
   DefaultPackageManager,

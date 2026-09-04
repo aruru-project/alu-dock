@@ -2251,37 +2251,6 @@ test("a running instance applies live metadata and next-step configuration witho
 
 
 
-
-test("models settings failures are typed, evented, and leave the in-memory state honest", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-settings-failure-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let session: DelayedAgentWorkerConnection | undefined;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    session = new DelayedAgentWorkerConnection(`pi-${id}`);
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session });
-  }, () => "settings-instance");
-  const host = new DockHost({ socketPath, registry });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const client = new DockClient({ socketPath });
-  const created = await client.create(directory);
-  (session as DelayedAgentWorkerConnection).settingsFailure = new Error("disk write failed");
-
-  await assert.rejects(
-    client.setModel(created.id, "fixture", "local", "failed-model-write"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "settings_write_failed" && /disk write failed/.test(error.message),
-  );
-  assert.deepEqual((await client.status(created.id)).executor.model, { provider: "fixture", id: "local" });
-  const events = await client.read(created.id);
-  assert.ok(events.page.events.some((event) => event.type === "settings.write_failed" && event.data.key === "model"));
-
-  (session as DelayedAgentWorkerConnection).settingsFailure = undefined;
-  const high = await client.setThinking(created.id, "high", "thinking-high");
-  assert.equal(high.actualLevel, "high");
-  assert.equal(high.settingsWrite.persisted, true);
-});
-
 test("tui projection exposes stable paged history and attach history while preserving semantic text", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));

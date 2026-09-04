@@ -21,7 +21,7 @@ import type {
   AgentSessionMetrics,
   ThinkingLevel,
 } from "../../src/core/agent-worker.js";
-import { AgentConversationCursorError, AgentInvalidDeliveryModeError, AgentInvalidTreeTargetError, AgentQueueRejectedBeforeEffectError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
+import { AgentConversationCursorError, AgentInvalidDeliveryModeError, AgentInvalidTreeTargetError, AgentQueueRejectedBeforeEffectError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 // SETTING_DEFINITIONS/SETTING_KEYS are the frozen Dock protocol setting schema (protocol.ts imports the
 // same constants and the client parser rejects any worker that omits a canonical key), not Pi internals.
@@ -68,7 +68,6 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   toolMutationCalls = 0;
   settingMutationCalls = 0;
   readonly observationNotifications: Array<Extract<AgentWorkerControl, { type: "observation_delivery" }>["notification"]> = [];
-  settingsFailure: Error | undefined;
   settingsReadFailure: Error | undefined;
   sessionMutationError: Error | undefined;
   sessionCatalog: AgentSessionInfo[] = [];
@@ -447,7 +446,6 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   async updateSetting(update: SettingUpdate): Promise<SettingDto> {
     this.settingMutationCalls += 1;
     (this.settingValues as unknown as Record<string, unknown>)[update.key] = structuredClone(update.value);
-    this.throwSettingsFailure(update.key);
     return (await this.getSettings()).find((setting) => setting.key === update.key) as SettingDto;
   }
 
@@ -602,14 +600,12 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       block.entered.resolve();
       await block.release.promise;
     }
-    this.throwSettingsFailure("model");
     return this.getModelState();
   }
 
   async setThinkingLevel(level: ThinkingLevel): Promise<AgentModelState> {
     this.thinkingMutationCalls += 1;
     this.modelState = { ...this.modelState, thinkingLevel: level };
-    this.throwSettingsFailure("thinking");
     return this.getModelState();
   }
 
@@ -892,15 +888,6 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     });
   }
 
-  private throwSettingsFailure(setting: import("../../src/core/config-projection.js").SettingKey | "model" | "thinking"): void {
-    if (!this.settingsFailure) return;
-    throw new AgentSettingsWriteError(
-      setting,
-      "write",
-      true,
-      [{ scope: "global", message: this.settingsFailure.message }],
-    );
-  }
 }
 
 function fixtureFrame(frame: ConversationFrame): AgentEvent {

@@ -53,7 +53,6 @@ pub struct ModelsResult {
 #[serde(rename_all = "camelCase")]
 struct ModelConfigurationResult {
     instance: InstanceSnapshot,
-    settings_write: SettingsWrite,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -62,12 +61,6 @@ struct ThinkingConfigurationResult {
     actual_level: ThinkingLevel,
     available_thinking_levels: Vec<ThinkingLevel>,
     instance: InstanceSnapshot,
-    settings_write: SettingsWrite,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SettingsWrite {
-    persisted: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -513,13 +506,12 @@ impl DockClient {
             .await?;
         validate_snapshot_mutation(&result.instance, instance_id, &host_epoch, operation_id)?;
         let selected = result.instance.executor.model.as_ref();
-        if !result.settings_write.persisted
-            || selected.map(|model| (model.provider.as_str(), model.id.as_str()))
-                != Some((provider, model_id))
+        if selected.map(|model| (model.provider.as_str(), model.id.as_str()))
+            != Some((provider, model_id))
         {
             return Err(effect_unknown(
                 operation_id,
-                "model response did not prove the requested persisted model",
+                "model response did not prove the requested selection",
             ));
         }
         Ok(result.instance)
@@ -552,15 +544,14 @@ impl DockClient {
         validate_snapshot_mutation(&result.instance, instance_id, &host_epoch, operation_id)?;
         let snapshot_level = result.instance.executor.thinking_level.as_deref();
         let requested = thinking_name(level);
-        if !result.settings_write.persisted
-            || result.actual_level != level
+        if result.actual_level != level
             || snapshot_level != Some(requested)
             || !valid_thinking_levels(&result.available_thinking_levels)
             || !result.available_thinking_levels.contains(&level)
         {
             return Err(effect_unknown(
                 operation_id,
-                "thinking response did not prove the requested persisted level",
+                "thinking response did not prove the requested level",
             ));
         }
         Ok(result.instance)

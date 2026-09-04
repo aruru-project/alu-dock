@@ -35,8 +35,9 @@
     "install:local": "npm run build && node dist/scripts/install-local.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-server": "0.85.0",
+    "@earendil-works/pi-tui": "0.85.0",
     "@peculiar/x509": "2.0.0",
     "fast-srp-hap": "2.0.4",
     "reflect-metadata": "0.2.2",

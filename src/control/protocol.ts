@@ -530,8 +530,8 @@ export interface ForgetResult { receipt: { operationId: string; forgottenId: str
 export interface PruneResult { receipt: { operationId: string; selector: "stopped"; forgottenIds: string[]; forgottenCount: number; hasMore: boolean; piSessionFilesDeleted: 0 } }
 export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
 export interface ModelsResult { models: AgentModelInfo[]; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; total: number; truncated: boolean }
-export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
-export interface ThinkingConfigurationResult { actualLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
+export interface ModelConfigurationResult { instance: InstanceSnapshot }
+export interface ThinkingConfigurationResult { actualLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot }
 export interface SessionsResult { sessions: SessionDto[]; total: number; truncated: boolean }
 export interface SessionInventoryResult {
   sessions: SessionDto[];
@@ -1574,14 +1574,13 @@ export function parseModelsResult(input: unknown): ModelsResult {
   return { ...modelListFields(value), instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 export function parseModelConfigurationResult(input: unknown): ModelConfigurationResult {
-  const value = object(input, "model configuration result"); exact(value, ["instance", "settingsWrite"]);
-  return { instance: parseInstanceSnapshot(value.instance, "instance"), settingsWrite: parseSettingsWrite(value.settingsWrite) };
+  const value = object(input, "model configuration result"); exact(value, ["instance"]);
+  return { instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 export function parseThinkingConfigurationResult(input: unknown): ThinkingConfigurationResult {
-  const value = object(input, "thinking configuration result"); exact(value, ["actualLevel", "availableThinkingLevels", "instance", "settingsWrite"]);
-  return { actualLevel: enumeration(value.actualLevel, "actualLevel", THINKING_LEVELS), availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstanceSnapshot(value.instance, "instance"), settingsWrite: parseSettingsWrite(value.settingsWrite) };
+  const value = object(input, "thinking configuration result"); exact(value, ["actualLevel", "availableThinkingLevels", "instance"]);
+  return { actualLevel: enumeration(value.actualLevel, "actualLevel", THINKING_LEVELS), availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstanceSnapshot(value.instance, "instance") };
 }
-function parseSettingsWrite(input: unknown): { persisted: true } { const write = object(input, "settingsWrite"); exact(write, ["persisted"]); if (write.persisted !== true) throw validation("invalid_response", "settingsWrite.persisted must be true"); return { persisted: true }; }
 export function parseSessionsResult(input: unknown): SessionsResult {
   const value = object(input, "sessions result"); exact(value, ["sessions", "total", "truncated"]);
   const sessions = parseSessionDtos(value.sessions);

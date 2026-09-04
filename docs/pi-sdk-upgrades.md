@@ -2,7 +2,9 @@
 
 Pi releases frequently. The normal upgrade workflow is deliberately short:
 
-1. Bump the Pi version cohort together: `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` in `package.json` and `package-lock.json`, plus `PI_SDK_VERSION` in `src/version.ts`.
+1. Bump the Pi version cohort together: every direct `@earendil-works/pi-*` runtime dependency in `package.json` and `package-lock.json`, plus `PI_SDK_VERSION` in `src/version.ts`.
+
+Pi 0.85.0 compatibility note: its published coding-agent root entry statically loads `experimental/server.js` but omits `@earendil-works/pi-server` from the package manifest. Alu Dock therefore pins the matching server package directly. Remove that temporary pin only after an upstream release declares the dependency and the SDK gate passes from a clean install.
 2. Run `npm run test:sdk-upgrade`.
 3. If it is green, continue the normal release workflow. Read the relevant changelog entry or SDK source only when the gate reports a capability failure; do not pre-read every intermediate release note.
 

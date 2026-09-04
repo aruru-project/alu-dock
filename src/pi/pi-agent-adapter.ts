@@ -907,7 +907,9 @@ export class PiAgentAdapter {
     const model = binding.services.modelRuntime.getModel(provider, modelId);
     if (!model || !(await binding.services.modelRuntime.checkAuth(provider))) throw new AgentModelNotFoundError(provider, modelId);
     this.assertCleanSettingsBaseline(binding, "model");
-    await binding.session.setModel(model);
+    // Preserve Pi <=0.84 behavior during this SDK upgrade; persistence is historical compatibility, not a Dock product contract.
+    // TODO(product): remove explicit persistence when session selection and global defaults become separate Dock actions.
+    await binding.session.setModel(model, { persist: true });
     await this.persistSettings(binding, "model");
     return this.getModelState();
   }
@@ -915,7 +917,8 @@ export class PiAgentAdapter {
   async setThinkingLevel(level: ThinkingLevel): Promise<AgentModelState> {
     const binding = this.requireActive();
     this.assertCleanSettingsBaseline(binding, "thinking");
-    binding.session.setThinkingLevel(level);
+    // Preserve the same historical behavior as model selection without exposing it as a Dock protocol guarantee.
+    binding.session.setThinkingLevel(level, { persist: true });
     await this.persistSettings(binding, "thinking");
     return this.getModelState();
   }

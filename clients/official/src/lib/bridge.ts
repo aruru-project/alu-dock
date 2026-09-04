@@ -851,7 +851,7 @@ const previewBootstrap: BootstrapPayload = {
     state: 'preview',
     hostEpoch: 'browser-preview',
     dockVersion: '0.2.0',
-    piSdkVersion: '0.84.2',
+    piSdkVersion: '0.85.0',
     startedAt: now,
     activeEndpointId: 'preview-local',
     profile: {
