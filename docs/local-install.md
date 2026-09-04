@@ -93,9 +93,9 @@ npm run package:windows
 clients/official/dist/AluDock-<version>-windows-x86_64.zip
 ```
 
-正式 Release 会根据上一正式 tag 以来实际变化选择产物。只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，Windows job 下载最近一次成功发布的完整 Windows ZIP 并校验 `SHA256SUMS.txt`，复用其中的 Desktop 和 DLL，只替换当前 Dock、bundled Pi、Setup、launcher 和发行元数据；不安装 Rust，也不重新构建 Tauri/前端。共享客户端变化仍执行完整构建；未知构建输入保守构建全部平台。两条路径最终都只产出一个可全新安装、也可直接升级的当前版本完整 ZIP。
+正式 Release 会根据上一次成功发布的正式 Release tag 以来实际变化选择产物；只有 tag 而没有成功 Release 的版本不会截断变化范围。只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，Windows job 下载最近一次成功发布的完整 Windows ZIP 并校验 `SHA256SUMS.txt`，复用其中的 Desktop 和 DLL，只替换当前 Dock、bundled Pi、Setup、launcher 和发行元数据；不安装 Rust，也不重新构建 Tauri/前端。共享客户端变化仍执行完整构建；未知构建输入保守构建全部平台。两条路径最终都只产出一个可全新安装、也可直接升级的当前版本完整 ZIP。
 
-最终用户先安装满足根 `package.json#engines.node` 的官方 Node.js，再完整解压 ZIP 并运行一次 `Setup.cmd`。Setup 在停止旧 Host 前通过包内唯一 launcher 检查系统 Node，随后拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready。上一版本和事务记录会保留到新版本 ready、命令入口、Start Menu 与卸载登记全部完成；失败会恢复并重新启动上一版本，异常中断后的再次运行先完成恢复。重复执行同一版本会修复这些入口并确认 Host ready，而不是只根据版本号提前退出：
+最终用户先安装满足根 `package.json#engines.node` 的官方 Node.js，再完整解压 ZIP 并运行一次 `Setup.cmd`。Setup 在停止旧 Host 前通过包内唯一 launcher 检查系统 Node，随后拒绝仍有 active Work 的更新、把新目录先复制到 sibling staging，再切换唯一安装位置并等待 Host ready。上一版本和事务记录会保留到新版本 ready、命令入口、Start Menu 与卸载登记全部完成；失败会恢复并重新启动上一版本，异常中断后的再次运行先完成恢复。重复执行同一版本也会从完整包重新暂存并替换安装目录、修复这些入口并确认 Host ready，而不是只根据版本号提前退出：
 
 ```text
 %LOCALAPPDATA%\Alu Dock\app\AluDock.exe

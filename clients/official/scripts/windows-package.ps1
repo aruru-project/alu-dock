@@ -413,16 +413,6 @@ function Install-Package {
   Assert-SystemNode (Join-Path $Source "aludock.cmd")
 
   $installedVersion = Get-InstalledVersion
-  if (-not (Test-SamePath $Source $InstallRoot) -and $installedVersion -eq $sourceVersion) {
-    Write-Host "Repairing the existing Alu Dock $sourceVersion installation..."
-    Complete-InstalledPackage $sourceVersion
-    Remove-Item -LiteralPath $PreviousRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $NextRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Start-InstalledDesktop
-    Write-Host "Alu Dock $sourceVersion is installed and ready."
-    return
-  }
-
   Write-Host "Copying Alu Dock $sourceVersion into place. This can take a minute..."
   Stage-Package
   $hadPrevious = $null -ne $installedVersion
