@@ -26,7 +26,7 @@ test("official Rust client lists saved sessions for an explicitly selected Main"
       mkdir(home),
       mkdir(workspace),
       mkdir(sessions, { recursive: true }),
-      mkdir(join(root, "state"), { recursive: true }),
+      mkdir(join(root, "state"), { recursive: true, mode: 0o700 }),
       chmod(root, 0o700),
     ]);
     await writeFile(join(sessions, "saved.jsonl"), `${[
