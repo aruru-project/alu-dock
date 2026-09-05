@@ -98,23 +98,6 @@ export function formatContextUsage(context?: { tokens?: number | null; contextWi
     : '—'
 }
 
-/** Matches WebConsole's 160px sticky-bottom threshold without stealing an intentional history scroll. */
-export function outputIsNearBottom(scrollHeight: number, scrollTop: number, clientHeight: number): boolean {
-  return scrollHeight - scrollTop - clientHeight < 160
-}
-
-/** An upward user scroll always owns the viewport, even inside the former
- *  sticky-bottom threshold. Following resumes only after moving back near the end. */
-export function outputFollowAfterScroll(
-  following: boolean,
-  previousScrollTop: number | null,
-  nextScrollTop: number,
-  nearBottom: boolean,
-): boolean {
-  if (previousScrollTop !== null && nextScrollTop < previousScrollTop) return false
-  return nearBottom ? true : following
-}
-
 /** Admission success clears only the exact draft that was submitted; failures and concurrent typing are preserved. */
 export function draftAfterSubmit(current: string, captured: string, succeeded: boolean): string {
   return succeeded && current === captured ? '' : current

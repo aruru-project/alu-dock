@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
@@ -45,8 +45,6 @@ import {
   loadSessionTree,
   loadConversation,
   loadAttachmentPreviewBytes,
-  loadConversationHistory,
-  loadConversationHistoryEntry,
   loadConversationImageBytes,
   loadPublishedImageBytes,
   openSavedDeliverable,
@@ -79,8 +77,8 @@ import {
   verifyHostEndpoint,
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
-import { applyLiveToolUpdateToProjection, foldLiveDelta, foldLiveToolUpdate, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
-import { assistantMarkdownSource } from './lib/conversationPresentation'
+import { useConversationContent } from './lib/conversationContent'
+import { useConversationViewport, type ConversationReadingAnchor } from './lib/conversationViewport'
 import { dockToolsState } from './lib/dockTools'
 import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import { subhostMachineName } from './lib/machines'
@@ -105,8 +103,6 @@ import {
   formatTokenCount,
   FollowActivationCoordinator,
   initialWindowFocused,
-  outputFollowAfterScroll,
-  outputIsNearBottom,
   type FollowConnectionState,
   type FollowConnectionStatus,
   stopCanStart,
@@ -116,7 +112,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, DesktopShellStatus, HostConnectionProfile, ConnectionContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, DesktopShellStatus, HostConnectionProfile, ConnectionContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -131,7 +127,7 @@ import AppSettings from './components/AppSettings.vue'
 import AttachmentCard from './components/AttachmentCard.vue'
 import DeliveryTray from './components/DeliveryTray.vue'
 import ControlCenter, { type ControlMutationDomain } from './components/ControlCenter.vue'
-import ConversationProcessParts from './components/ConversationProcessParts.vue'
+import ConversationView from './components/ConversationView.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
 import NewWorkDialog from './components/NewWorkDialog.vue'
@@ -154,6 +150,7 @@ const extensionUi = useExtensionUiStore()
 const draft = computed({ get: () => app.currentDraft, set: (value: string) => app.setCurrentDraft(value) })
 const draftAttachments = computed({ get: () => app.currentAttachments, set: (value: AttachmentDto[]) => app.setCurrentAttachments(value) })
 const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) => app.setDetailMode(value) })
+const selected = computed(() => app.selectedWork)
 const directoryOpen = ref(false)
 const commandOpen = ref(false)
 const controlSection = ref<ControlSection>('commands')
@@ -170,7 +167,8 @@ const desktopShellBusy = ref(false)
 const hostSettingsOpen = ref(false)
 const addingHost = ref(false)
 const output = ref<HTMLElement | null>(null)
-const outputAwayFromBottom = ref(false)
+const conversationViewport = useConversationViewport(output)
+const outputAwayFromBottom = conversationViewport.awayFromBottom
 const composerTextarea = ref<HTMLTextAreaElement | null>(null)
 const composerExpanded = ref(false)
 const hostMachines = ref<MachineDto[]>([])
@@ -181,9 +179,7 @@ const newWorkCompact = ref(true)
 let machineLoadEpoch = 0
 const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
 const reconcilingReopenWorkId = ref('')
-const realConversation = ref<ConversationItem[]>([])
 type ConversationImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
-type ConversationToolPart = Extract<ConversationProcessItem, { kind: 'tool' }>
 type ImagePreview =
   | { kind: 'conversation'; imageKey: string; url: string; name: string }
   | { kind: 'attachment'; attachmentKey: string; url: string; name: string }
@@ -202,41 +198,7 @@ let imageLoadEpoch = 0
 let imageAccessSequence = 0
 const conversationLoading = ref(false)
 const conversationError = ref<string | null>(null)
-const historyTruncated = ref(false)
-const conversationHistoryRevision = ref<string | null>(null)
-const historyCursor = ref<string | null>(null)
-const historyLoading = ref(false)
-const historyHydrationPending = ref<Set<string>>(new Set())
-const historyHydrationActiveEntries = ref<Set<string>>(new Set())
-const historyHydrationErrors = ref<Record<string, string>>({})
-const historyHydrating = computed(() => historyHydrationPending.value.size > 0)
-const historyPageError = ref<string | null>(null)
-const historyError = computed(() => historyPageError.value
-  ?? (Object.keys(historyHydrationErrors.value).length ? '部分对话内容暂时没有载入，请重试。' : null))
-interface HistoryHydrationDomain {
-  cancelled: boolean
-  active: number
-  queue: HistoryHydrationJob[]
-}
-interface HistoryHydrationBatch {
-  remaining: number
-  records: ConversationHistoryPage['records']
-}
-interface HistoryHydrationJob {
-  domain: HistoryHydrationDomain
-  batch: HistoryHydrationBatch
-  context: ConnectionContext
-  state: ConversationBootstrap
-  conversationEpoch: number
-  workId: string
-  pageCursor?: string
-  entryId: string
-  revision: string
-}
-let historyHydrationDomain: HistoryHydrationDomain = { cancelled: false, active: 0, queue: [] }
-let failedHistoryHydrations = new Map<string, HistoryHydrationJob>()
 let historyReloadRequiredWorkId: string | null = null
-const HISTORY_HYDRATION_CONCURRENCY = 2
 const submitting = ref(false)
 const aborting = ref(false)
 const compactionWorkIds = ref<Set<string>>(new Set())
@@ -282,7 +244,6 @@ const dockToolsTrigger = ref<HTMLButtonElement | null>(null)
 const dockToolsPopoverStyle = ref<Record<string, string>>({})
 const modalSurface = ref<HTMLElement | null>(null)
 let modalTrigger: HTMLElement | null = null
-const conversationState = ref<ConversationBootstrap | null>(null)
 const windowFocused = ref(!isTauri)
 let windowFocusEpoch = 0
 let windowsAwayId: string | null = null
@@ -320,16 +281,8 @@ const unlisteners: UnlistenFn[] = []
 let androidNetworkRecoveryPending = false
 let androidNetworkRecoveryTask: Promise<void> | null = null
 let androidRouteRefreshPending = false
-let projectionFrame = 0
-let fullConversationProjectionState: ConversationBootstrap | null = null
-const pendingLiveToolProjectionEvents = new Map<string, { state: ConversationBootstrap; event: ProjectedEvent }>()
-let outputScrollFrame = 0
-let outputScrollForced = false
-let autoFollowOutput = true
-let lastOutputScrollTop: number | null = null
 let reconnectTimer = 0
 let conversationLoadEpoch = 0
-let historyLoadEpoch = 0
 const followActivation = new FollowActivationCoordinator()
 const followConnectionTimers = new Map<string, number>()
 const pendingFollowEvents = new Map<string, ProjectedEvent[]>()
@@ -377,35 +330,34 @@ const previewQueue: QueueItem[] = [{
   imageCount: 1,
   acceptedAt: '2026-08-17T08:02:00.000Z',
 }]
-const conversation = computed(() => (isTauri ? realConversation.value : previewConversation))
-type GroupedProcessItem = ConversationProcessItem & { groupId: string }
-type StandaloneRow = Extract<ConversationItem, { kind: 'user' | 'activity' | 'record' }> | Extract<ConversationProcessItem, { kind: 'notice' }>
-type AssistantGroupRow = { id: string; kind: 'assistant-group'; parts: GroupedProcessItem[]; time: string }
-type ConversationRow = StandaloneRow | AssistantGroupRow
-function isGroupedProcessItem(item: ConversationItem): item is GroupedProcessItem {
-  return item.kind !== 'user' && item.kind !== 'activity' && item.kind !== 'record' && Boolean(item.groupId)
-}
-const conversationRows = computed<ConversationRow[]>(() => {
-  const rows: ConversationRow[] = []
-  const groups = new Map<string, AssistantGroupRow>()
-  for (const item of conversation.value) {
-    if (isGroupedProcessItem(item)) {
-      let group = groups.get(item.groupId)
-      if (!group) {
-        group = { id: item.groupId, kind: 'assistant-group', parts: [], time: '' }
-        groups.set(item.groupId, group)
-        rows.push(group)
-      }
-      group.parts.push(item)
-      group.time ||= item.groupTime || (item.kind === 'assistant' ? item.time : '')
-    } else {
-      rows.push(item as StandaloneRow)
-    }
-  }
-  return rows
+const conversationContent = useConversationContent({
+  compact: computed(() => !detailMode.value),
+  native: isTauri,
+  getEpoch: () => conversationLoadEpoch,
+  getContext: () => requireConnectionContext(app),
+  isCurrent: (context, state, epoch) => app.contextMatches(context)
+    && conversationLoadEpoch === epoch
+    && conversationContent.state.value === state
+    && selected.value?.id === state.instance.id,
+  reload: reloadConversationForHistory,
+  beforeLayoutChange: conversationViewport.captureAnchor,
+  afterLayoutChange: (snapshot, stickToBottom) => conversationViewport.restoreAnchor(snapshot as ConversationReadingAnchor | null, stickToBottom),
+  isFollowing: conversationViewport.isFollowing,
+  layoutChanged: conversationViewport.layoutChanged,
+  projected: pruneImageResources,
 })
+const conversationState = conversationContent.state
+const realConversation = conversationContent.items
+const streamingPartIds = conversationContent.streamingPartIds
+const historyTruncated = conversationContent.historyTruncated
+const historyCursor = conversationContent.historyCursor
+const historyLoading = conversationContent.historyLoading
+const historyHydrationActiveEntries = conversationContent.hydrationActiveEntries
+const historyHydrationErrors = conversationContent.hydrationErrors
+const historyHydrating = conversationContent.historyHydrating
+const historyError = conversationContent.historyError
+const conversation = computed(() => (isTauri ? realConversation.value : previewConversation))
 const queueItems = computed(() => isTauri ? conversationState.value?.queue ?? [] : previewQueue)
-const selected = computed(() => app.selectedWork)
 const selectedDockTools = computed(() => selected.value ? dockToolsState(selected.value.extensionStatus) : 'off')
 const selectedDockToolsLabel = computed(() => selectedDockTools.value === 'on' ? 'ON' : selectedDockTools.value === 'unavailable' ? 'N/A' : 'OFF')
 const dockToolsOpen = computed(() => commandOpen.value && controlSection.value === 'dock-tools')
@@ -708,7 +660,7 @@ function prefillSlashCommand(name: string) {
   })
 }
 watch(detailMode, () => {
-  if (conversationState.value) applyConversationProjection(conversationState.value)
+  if (conversationState.value) conversationContent.reproject(conversationState.value)
 })
 watch(() => extensionUi.toolsResetRevision, () => { toolExpansionOverrides.value = {} })
 watch(() => extensionUi.controller?.handle, (handle) => {
@@ -809,7 +761,7 @@ watch(
       submissionError.value = null
       resetConversationImages()
       resetAttachmentPreviews()
-      resetConversationProjectionSchedule()
+      conversationContent.resetProjectionSchedule()
       resetOutputFollow()
       messageTextView.value = null
       commandCatalogStore.invalidate()
@@ -818,7 +770,6 @@ watch(
     transientHostBoundary = connectionId && generation != null ? { connectionId, selectionGeneration: generation } : null
     transientContext = connectionId && generation != null && id ? { connectionId, selectionGeneration: generation, workId: id } : null
     ++conversationLoadEpoch
-    ++historyLoadEpoch
     resetHistoryHydration()
     ++deliveryLoadEpoch
     deliverables.value = []
@@ -1050,8 +1001,7 @@ onUnmounted(() => {
   pendingFollowEvents.clear()
   elapsedWindowsAwayIds.clear()
   if (appSettings.value?.windowsAwaySupported) void cancelWindowsAway(windowsAwayId)
-  if (projectionFrame) window.cancelAnimationFrame(projectionFrame)
-  if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
+  conversationContent.dispose()
   resetConversationImages()
   resetAttachmentPreviews()
   void extensionUi.clear()
@@ -2186,7 +2136,7 @@ async function abortCurrentRun() {
       && state.cursor.hostEpoch === authoritative.ownerHostEpoch
       && state.cursor.runtimeGeneration === authoritative.runtimeGeneration) {
       state.instance = authoritative
-      applyConversationProjection(state)
+      conversationContent.reproject(state)
     }
   } catch (cause) {
     markUnknownOutcome(cause, 'conversation', work.id)
@@ -2311,95 +2261,19 @@ async function forgetSelectedWork() {
 }
 
 function showAgentActivity(workId: string) {
-  if (realConversation.value.some((item) => item.kind === 'activity')) return
-  realConversation.value = [...realConversation.value, { id: `local-activity-${workId}`, kind: 'activity' }]
-  scrollOutputToBottom(true)
+  conversationContent.showActivity(workId)
+  conversationViewport.scrollToBottom()
 }
 
-function resetConversationProjectionSchedule() {
-  if (projectionFrame) window.cancelAnimationFrame(projectionFrame)
-  projectionFrame = 0
-  fullConversationProjectionState = null
-  pendingLiveToolProjectionEvents.clear()
-  liveTextTargets.clear()
-  liveToolTargets.clear()
-}
+const resetOutputFollow = conversationViewport.reset
+const handleOutputScroll = conversationViewport.handleScroll
+const handleOutputMediaLoad = conversationViewport.mediaLoaded
+const captureOutputAnchor = conversationViewport.captureAnchor
+const restoreOutputAnchor = conversationViewport.restoreAnchor
 
-function resetOutputFollow() {
-  if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
-  outputScrollFrame = 0
-  outputScrollForced = false
-  autoFollowOutput = true
-  lastOutputScrollTop = null
-  outputAwayFromBottom.value = false
-}
-
-function handleOutputScroll() {
-  const surface = output.value
-  if (!surface) return
-  const nextTop = surface.scrollTop
-  const previousTop = lastOutputScrollTop
-  const movedUp = previousTop !== null && nextTop < previousTop
-  lastOutputScrollTop = nextTop
-  autoFollowOutput = outputFollowAfterScroll(
-    autoFollowOutput,
-    previousTop,
-    nextTop,
-    outputIsNearBottom(surface.scrollHeight, nextTop, surface.clientHeight),
-  )
-  if (movedUp) {
-    if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
-    outputScrollFrame = 0
-    outputScrollForced = false
-  }
-  outputAwayFromBottom.value = !autoFollowOutput
-}
-
-function handleOutputMediaLoad(event: Event) {
-  if (event.target instanceof HTMLImageElement && event.target.closest('[data-conversation-id]')) {
-    scrollOutputToBottom()
-  }
-}
-
-type OutputAnchor = {
-  surface: HTMLElement
-  id?: string
-  offset?: number
-  scrollTop: number
-  scrollHeight: number
-}
-
-function captureOutputAnchor(): OutputAnchor | null {
-  const surface = output.value
-  if (!surface) return null
-  const surfaceTop = surface.getBoundingClientRect().top
-  const element = [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
-    .find((candidate) => candidate.getBoundingClientRect().bottom >= surfaceTop)
-  return {
-    surface,
-    id: element?.dataset.conversationId,
-    offset: element ? element.getBoundingClientRect().top - surfaceTop : undefined,
-    scrollTop: surface.scrollTop,
-    scrollHeight: surface.scrollHeight,
-  }
-}
-
-async function restoreOutputAnchor(anchor: OutputAnchor | null, stickToBottom: boolean) {
-  await nextTick()
-  if (!anchor || output.value !== anchor.surface) return
-  if (stickToBottom) {
-    scrollOutputToBottom(true)
-    return
-  }
-  const next = anchor.id
-    ? [...anchor.surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
-      .find((element) => element.dataset.conversationId === anchor.id)
-    : undefined
-  if (next && anchor.offset != null) {
-    anchor.surface.scrollTop += (next.getBoundingClientRect().top - anchor.surface.getBoundingClientRect().top) - anchor.offset
-  } else {
-    anchor.surface.scrollTop = anchor.scrollTop + (anchor.surface.scrollHeight - anchor.scrollHeight)
-  }
+function scrollOutputToBottom(force = false) {
+  if (force) conversationViewport.scrollToBottom()
+  else conversationViewport.layoutChanged()
 }
 
 const idleImageResource: ConversationImageResource = { state: 'idle' }
@@ -2489,62 +2363,6 @@ function pruneImageResources(items: ConversationItem[]) {
     if (imagePreview.value?.kind === 'conversation' && imagePreview.value.imageKey === key) imagePreview.value = null
   }
   if (changed) imageResources.value = next
-}
-
-function applyConversationProjection(state: ConversationBootstrap) {
-  const projected = projectConversation(state, { compact: !detailMode.value })
-  realConversation.value = projected
-  const targets = new Map<string, ConversationItem>()
-  for (const item of realConversation.value) {
-    const key = liveProjectionTargetKey(item)
-    if (key) targets.set(key, item)
-  }
-  liveTextTargets = targets
-  const toolTargets = new Map<string, ConversationToolPart>()
-  for (const item of realConversation.value) {
-    if (item.kind === 'tool' && item.toolCallId) toolTargets.set(item.toolCallId, item)
-    if (item.kind === 'record') {
-      for (const part of item.parts) {
-        if (part.kind === 'tool' && part.toolCallId) toolTargets.set(part.toolCallId, part)
-      }
-    }
-  }
-  liveToolTargets = toolTargets
-  pruneImageResources(projected)
-}
-
-/* ── 流式增量补丁 ──
- * delta 折叠状态与正在流式的条目都绑定在 conversationState 的身份上：
- * 会话重载/换 Work 会换新 state 对象，缓存自动随之作废。 */
-const liveStreamCaches = new WeakMap<ConversationBootstrap, { fold: Map<string, ProjectedEvent>; streaming: Set<string> }>()
-let liveTextTargets = new Map<string, ConversationItem>()
-let liveToolTargets = new Map<string, ConversationToolPart>()
-
-function liveStreamCache(state: ConversationBootstrap) {
-  let cache = liveStreamCaches.get(state)
-  if (!cache) {
-    cache = { fold: new Map(), streaming: reactive(new Set<string>()) }
-    liveStreamCaches.set(state, cache)
-  }
-  return cache
-}
-
-const EMPTY_STREAMING: Set<string> = new Set()
-const streamingPartIds = computed<Set<string>>(() => conversationState.value ? liveStreamCache(conversationState.value).streaming : EMPTY_STREAMING)
-
-/** 把文本/思考 delta 直接追加到已投影条目（O(delta)），并维持底部跟随；
- *  条目尚未投影（首包 delta）时返回 false，交给整段重投影建立条目。 */
-function applyLiveDeltaToProjection(state: ConversationBootstrap, event: ProjectedEvent): boolean {
-  const key = liveDeltaKey(event.data)
-  if (!key) return false
-  const target = liveTextTargets.get(key)
-  if (!target || (target.kind !== 'assistant' && target.kind !== 'thinking')) return false
-  const delta = typeof event.data.delta === 'string' ? event.data.delta : ''
-  if (!delta) return true
-  target.text += delta
-  liveStreamCache(state).streaming.add(target.id)
-  scrollOutputToBottom()
-  return true
 }
 
 function conversationHasImage(imageKey: string) {
@@ -2687,62 +2505,6 @@ async function saveOpenImage() {
   }
 }
 
-function scrollOutputToBottom(force = false) {
-  if (force) outputScrollForced = true
-  if (!force && !autoFollowOutput) return
-  if (outputScrollFrame) return
-  outputScrollFrame = window.requestAnimationFrame(() => {
-    outputScrollFrame = 0
-    const forced = outputScrollForced
-    outputScrollForced = false
-    if (!forced && !autoFollowOutput) return
-    const surface = output.value
-    if (!surface) return
-    surface.scrollTop = surface.scrollHeight
-    lastOutputScrollTop = surface.scrollTop
-    autoFollowOutput = true
-    outputAwayFromBottom.value = false
-  })
-}
-
-function requestConversationProjectionFrame() {
-  if (projectionFrame) return
-  projectionFrame = window.requestAnimationFrame(() => {
-    projectionFrame = 0
-    const state = conversationState.value
-    const requiresFullProjection = fullConversationProjectionState === state
-    const toolUpdates = [...pendingLiveToolProjectionEvents.values()]
-      .filter((pending) => pending.state === state)
-      .map((pending) => pending.event)
-    fullConversationProjectionState = null
-    pendingLiveToolProjectionEvents.clear()
-    if (!state || (!requiresFullProjection && !toolUpdates.length)) return
-    if (requiresFullProjection || toolUpdates.some((event) => {
-      const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
-      const target = toolCallId ? liveToolTargets.get(toolCallId) : undefined
-      return !target || !applyLiveToolUpdateToProjection(target, event)
-    })) {
-      applyConversationProjection(state)
-    }
-    scrollOutputToBottom()
-  })
-}
-
-function scheduleConversationProjection(state: ConversationBootstrap) {
-  fullConversationProjectionState = state
-  requestConversationProjectionFrame()
-}
-
-function scheduleLiveToolProjection(state: ConversationBootstrap, event: ProjectedEvent) {
-  const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
-  if (!toolCallId) {
-    scheduleConversationProjection(state)
-    return
-  }
-  pendingLiveToolProjectionEvents.set(`${event.eventType}:${toolCallId}`, { state, event })
-  requestConversationProjectionFrame()
-}
-
 async function applyFollowEvent(payload: { connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }) {
   const state = conversationState.value
   if (!state || payload.subscriptionId !== activeFollowSubscription.value) return
@@ -2780,27 +2542,7 @@ async function applyFollowEvent(payload: { connectionId: string; selectionGenera
   const commandRoute = commandConsole.handleDockEvent(payload.event)
   const commandOnlyNotification = payload.event.eventType === 'extension.notification' && commandRoute.matched
   if (commandOnlyNotification) return
-  if (payload.event.eventType === 'message.delta') {
-    foldLiveDelta(state.activeEvents, liveStreamCache(state).fold, payload.event)
-    if (!applyLiveDeltaToProjection(state, payload.event)) scheduleConversationProjection(state)
-    return
-  }
-  if (payload.event.eventType === 'message.completed') {
-    const messageId = typeof payload.event.data.messageId === 'string' ? payload.event.data.messageId : ''
-    if (messageId) {
-      const cache = liveStreamCache(state)
-      cache.streaming.delete(`live-${messageId}`)
-      cache.streaming.delete(`live-${messageId}-thinking`)
-    }
-  } else if (payload.event.eventType === 'run.settled') {
-    liveStreamCache(state).streaming.clear()
-  }
-  const foldedToolUpdate = foldLiveToolUpdate(state.activeEvents, payload.event)
-  if (!foldedToolUpdate) state.activeEvents.push(payload.event)
-  if (reduced.conversationChanged || payload.event.eventType === 'run.started') {
-    if (foldedToolUpdate) scheduleLiveToolProjection(state, payload.event)
-    else scheduleConversationProjection(state)
-  }
+  conversationContent.applyConversationEvent(state, payload.event, reduced.conversationChanged)
 }
 
 async function resumeConversationFollow(instanceId: string): Promise<boolean> {
@@ -2995,15 +2737,13 @@ async function detachConversationFollow() {
   const workId = selected.value?.id
   if (workId && (conversationLoading.value
     || historyLoading.value
-    || historyHydrationPending.value.size
+    || historyHydrating.value
     || historyError.value)) historyReloadRequiredWorkId = workId
   activeFollow.value = null
   followConnected.value = false
   ++conversationLoadEpoch
-  ++historyLoadEpoch
   resetHistoryHydration()
   conversationLoading.value = false
-  historyLoading.value = false
   window.clearTimeout(reconnectTimer)
   reconnectTimer = 0
   for (const timer of followConnectionTimers.values()) window.clearTimeout(timer)
@@ -3109,12 +2849,7 @@ async function mergeCompactionSummary(instanceId: string) {
     const existing = new Set(state.records.map((record) => record.entryId))
     const fresh = bootstrap.records.filter((record) => !existing.has(record.entryId)
       && (record.kind === 'compaction_summary' || record.kind === 'branch_summary'))
-    if (!fresh.length) return
-    const stickToBottom = autoFollowOutput
-    state.records = [...state.records, ...fresh]
-    if (bootstrap.historyRevision > state.historyRevision) state.historyRevision = bootstrap.historyRevision
-    applyConversationProjection(state)
-    if (stickToBottom) scrollOutputToBottom()
+    await conversationContent.appendHistoricalRecords(fresh, bootstrap.historyRevision)
   } catch {
     // 摘要取不到不打断当前会话；下次整页载入时会随历史一起出现。
   }
@@ -3123,18 +2858,15 @@ async function mergeCompactionSummary(instanceId: string) {
 async function loadSelectedConversation(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
   if (isTauri && !windowFocused.value) return false
   const epoch = ++conversationLoadEpoch
-  ++historyLoadEpoch
   resetHistoryHydration()
   const work = app.works.find((item) => item.id === instanceId)
   const preserveCurrent = preserveUntilSwap || Boolean(conversationState.value)
   if (!preserveCurrent) {
-    realConversation.value = []
-    conversationState.value = null
+    conversationContent.clear()
     if (!await extensionUi.clear()) return false
     if (epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
   }
   conversationError.value = null
-  historyPageError.value = null
   if (preserveCurrent) followConnected.value = false
   if (!work || work.lifecycle !== 'active') return false
   conversationLoading.value = true
@@ -3167,7 +2899,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     // 旧会话，不必让用户继续等实时连接握手与 Extension UI 恢复。
     if (preserveCurrent && !await extensionUi.clear()) return false
     const preservedAnchor = preserveCurrent ? captureOutputAnchor() : null
-    const preservedAutoFollow = preserveCurrent ? autoFollowOutput : true
+    const preservedAutoFollow = preserveCurrent ? conversationViewport.isFollowing() : true
     await publishConversationBootstrap(capturedHost, bootstrap, preservedAnchor, preservedAutoFollow)
     await connected
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
@@ -3214,213 +2946,28 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   }
 }
 
-function resetHistoryHydration() {
-  historyHydrationDomain.cancelled = true
-  historyHydrationDomain.queue = []
-  historyHydrationDomain = { cancelled: false, active: 0, queue: [] }
-  failedHistoryHydrations = new Map()
-  historyHydrationPending.value = new Set()
-  historyHydrationActiveEntries.value = new Set()
-  historyHydrationErrors.value = {}
-}
-
-function historyJobIsCurrent(job: HistoryHydrationJob) {
-  return historyHydrationDomain === job.domain
-    && !job.domain.cancelled
-    && job.conversationEpoch === conversationLoadEpoch
-    && conversationState.value === job.state
-    && selected.value?.id === job.workId
-    && app.contextMatches(job.context)
-}
-
-function setHistoryEntryPending(entryId: string, pending: boolean) {
-  const next = new Set(historyHydrationPending.value)
-  if (pending) next.add(entryId)
-  else next.delete(entryId)
-  historyHydrationPending.value = next
-}
-
-function setHistoryEntryActive(entryId: string, active: boolean) {
-  const next = new Set(historyHydrationActiveEntries.value)
-  if (active) next.add(entryId)
-  else next.delete(entryId)
-  historyHydrationActiveEntries.value = next
-}
-
-function setHistoryEntryError(entryId: string, message?: string) {
-  const next = { ...historyHydrationErrors.value }
-  if (message) next[entryId] = message
-  else delete next[entryId]
-  historyHydrationErrors.value = next
-}
-
-function queueHistoryHydration(job: HistoryHydrationJob) {
-  if (job.domain.cancelled || historyHydrationPending.value.has(job.entryId)) return
-  failedHistoryHydrations.delete(job.entryId)
-  setHistoryEntryError(job.entryId)
-  setHistoryEntryPending(job.entryId, true)
-  job.domain.queue.push(job)
-  pumpHistoryHydration(job.domain)
-}
+const resetHistoryHydration = conversationContent.resetHistoryHydration
+const retryHistoryEntry = conversationContent.retryHistoryEntry
+const retryConversationHydration = conversationContent.retryHydration
+const loadEarlierHistory = conversationContent.loadEarlierHistory
 
 function reloadConversationForHistory(workId: string) {
   historyReloadRequiredWorkId = workId
   void loadSelectedConversation(workId, true)
 }
 
-function pumpHistoryHydration(domain: HistoryHydrationDomain) {
-  while (!domain.cancelled && domain.active < HISTORY_HYDRATION_CONCURRENCY) {
-    const job = domain.queue.shift()
-    if (!job) return
-    domain.active += 1
-    void runHistoryHydration(job).finally(() => {
-      domain.active -= 1
-      pumpHistoryHydration(domain)
-    })
-  }
-}
-
-async function runHistoryHydration(job: HistoryHydrationJob) {
-  if (!historyJobIsCurrent(job)) return
-  setHistoryEntryActive(job.entryId, true)
-  try {
-    const completed = await loadConversationHistoryEntry(
-      job.workId,
-      job.pageCursor,
-      job.entryId,
-      job.revision,
-      job.state.cursor.hostEpoch,
-      job.state.cursor.runtimeGeneration,
-      job.context,
-    )
-    if (!historyJobIsCurrent(job)) return
-    if (completed.hostEpoch !== job.state.cursor.hostEpoch
-      || completed.instance.id !== job.workId
-      || completed.instance.runtimeGeneration !== job.state.cursor.runtimeGeneration
-      || completed.revision !== job.revision
-      || completed.record.entryId !== job.entryId) {
-      reloadConversationForHistory(job.workId)
-      return
-    }
-    job.batch.records.push(completed.record)
-    failedHistoryHydrations.delete(job.entryId)
-    setHistoryEntryError(job.entryId)
-  } catch (cause) {
-    if (!historyJobIsCurrent(job)) return
-    const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
-    if (code === 'protocol_error') {
-      reloadConversationForHistory(job.workId)
-      return
-    }
-    failedHistoryHydrations.set(job.entryId, job)
-    setHistoryEntryError(job.entryId, '这部分内容暂时没有读取成功，请重试。')
-  } finally {
-    job.batch.remaining -= 1
-    if (historyJobIsCurrent(job)) {
-      setHistoryEntryActive(job.entryId, false)
-      setHistoryEntryPending(job.entryId, false)
-      if (job.batch.remaining === 0 && job.batch.records.length) {
-        const anchor = captureOutputAnchor()
-        const stickToBottom = autoFollowOutput
-        job.state.records = mergeHydratedConversationRecords(job.state.records, job.batch.records)
-        applyConversationProjection(job.state)
-        await restoreOutputAnchor(anchor, stickToBottom)
-      }
-    }
-  }
-}
-
-function scheduleHistoryPageHydration(
-  context: ConnectionContext,
-  state: ConversationBootstrap,
-  conversationEpoch: number,
-  pageCursor: string | undefined,
-  page: ConversationHistoryPage,
-) {
-  const entryIds = page.incompleteEntryIds.filter((entryId) =>
-    state.records.some((record) => record.entryId === entryId)
-    && !historyHydrationPending.value.has(entryId))
-  const batch: HistoryHydrationBatch = { remaining: entryIds.length, records: [] }
-  for (const entryId of entryIds) {
-    queueHistoryHydration({
-      domain: historyHydrationDomain,
-      batch,
-      context,
-      state,
-      conversationEpoch,
-      workId: state.instance.id,
-      pageCursor,
-      entryId,
-      revision: page.revision,
-    })
-  }
-}
-
-async function loadRecentHistoryPage(context: ConnectionContext, state: ConversationBootstrap, loadEpoch: number) {
-  if (!isTauri) return
-  const epoch = ++historyLoadEpoch
-  historyLoading.value = true
-  historyPageError.value = null
-  try {
-    const page = await loadConversationHistory(
-      state.instance.id,
-      undefined,
-      state.cursor.hostEpoch,
-      state.cursor.runtimeGeneration,
-      context,
-    )
-    if (!app.contextMatches(context)
-      || epoch !== historyLoadEpoch
-      || loadEpoch !== conversationLoadEpoch
-      || conversationState.value !== state
-      || selected.value?.id !== state.instance.id) return
-    if (page.hostEpoch !== state.cursor.hostEpoch
-      || page.instance.id !== state.instance.id
-      || page.instance.runtimeGeneration !== state.cursor.runtimeGeneration) {
-      reloadConversationForHistory(state.instance.id)
-      return
-    }
-    const anchor = captureOutputAnchor()
-    const stickToBottom = autoFollowOutput
-    const existing = new Map(state.records.map((record) => [record.entryId, record]))
-    const pageIds = new Set(page.records.map((record) => record.entryId))
-    state.records = [
-      ...page.records.map((record) => existing.get(record.entryId) ?? record),
-      ...state.records.filter((record) => !pageIds.has(record.entryId)),
-    ]
-    conversationHistoryRevision.value = page.revision
-    historyCursor.value = page.nextCursor ?? null
-    historyTruncated.value = page.hasEarlier
-    applyConversationProjection(state)
-    scheduleHistoryPageHydration(context, state, loadEpoch, undefined, page)
-    await restoreOutputAnchor(anchor, stickToBottom)
-  } catch (cause) {
-    if (epoch === historyLoadEpoch && loadEpoch === conversationLoadEpoch && conversationState.value === state) {
-      historyPageError.value = '对话记录暂时没有读取成功，请重试。'
-    }
-  } finally {
-    if (epoch === historyLoadEpoch) historyLoading.value = false
-  }
-}
-
 async function publishConversationBootstrap(
   context: ConnectionContext,
   bootstrap: ConversationBootstrap,
-  preservedAnchor: OutputAnchor | null,
+  preservedAnchor: ConversationReadingAnchor | null,
   preservedAutoFollow: boolean,
 ) {
-  resetConversationProjectionSchedule()
   app.applyWorkSnapshot(bootstrap.instance, context)
   syncImageDomain(context, bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
-  conversationHistoryRevision.value = null
-  historyCursor.value = null
-  conversationState.value = bootstrap
-  applyConversationProjection(bootstrap)
+  conversationContent.publish(bootstrap)
   if (preservedAnchor && !preservedAutoFollow) await restoreOutputAnchor(preservedAnchor, false)
-  else scrollOutputToBottom(true)
-  historyTruncated.value = bootstrap.historyTruncated
-  historyPageError.value = null
-  void loadRecentHistoryPage(context, bootstrap, conversationLoadEpoch)
+  else conversationViewport.scrollToBottom()
+  void conversationContent.loadRecentHistory(context, bootstrap, conversationLoadEpoch)
 }
 
 async function refreshCurrent() {
@@ -3435,74 +2982,6 @@ async function reconcileExtensionInteraction(): Promise<boolean> {
   const work = selected.value
   if (!work) return false
   return loadSelectedConversation(work.id, true)
-}
-
-function retryHistoryEntry(entryId: string) {
-  const job = failedHistoryHydrations.get(entryId)
-  if (job && historyJobIsCurrent(job)) {
-    queueHistoryHydration({ ...job, batch: { remaining: 1, records: [] } })
-  }
-}
-
-function retryConversationHydration() {
-  const state = conversationState.value
-  if (!state || selected.value?.id !== state.instance.id) return
-  for (const entryId of [...failedHistoryHydrations.keys()]) retryHistoryEntry(entryId)
-  if (!historyPageError.value) return
-  try {
-    const context = requireConnectionContext(app)
-    if (historyCursor.value) void loadEarlierHistory()
-    else void loadRecentHistoryPage(context, state, conversationLoadEpoch)
-  } catch {
-    historyPageError.value = '对话记录暂时没有读取成功，请重试。'
-  }
-}
-
-async function loadEarlierHistory() {
-  const state = conversationState.value
-  const cursor = historyCursor.value
-  const work = selected.value
-  if (!state || !cursor || !work || historyLoading.value) return
-  const epoch = ++historyLoadEpoch
-  const loadEpoch = conversationLoadEpoch
-  const anchor = captureOutputAnchor()
-  historyLoading.value = true
-  historyPageError.value = null
-  try {
-    const capturedHost = requireConnectionContext(app)
-    const page = await loadConversationHistory(
-      work.id,
-      cursor,
-      state.cursor.hostEpoch,
-      state.cursor.runtimeGeneration,
-      capturedHost,
-    )
-    if (!app.contextMatches(capturedHost)) return
-    if (epoch !== historyLoadEpoch || loadEpoch !== conversationLoadEpoch || selected.value?.id !== work.id || conversationState.value !== state) return
-    if (page.hostEpoch !== state.cursor.hostEpoch
-      || page.instance.id !== state.instance.id
-      || page.instance.runtimeGeneration !== state.cursor.runtimeGeneration
-      || page.revision !== conversationHistoryRevision.value) {
-      reloadConversationForHistory(work.id)
-      return
-    }
-    const existing = new Set(state.records.map((record) => record.entryId))
-    const earlier = page.records.filter((record) => !existing.has(record.entryId))
-    state.records = [...earlier, ...state.records]
-    historyCursor.value = page.nextCursor ?? null
-    historyTruncated.value = page.hasEarlier
-    applyConversationProjection(state)
-    scheduleHistoryPageHydration(capturedHost, state, loadEpoch, cursor, page)
-    await restoreOutputAnchor(anchor, false)
-  } catch (cause) {
-    if (epoch === historyLoadEpoch) {
-      const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
-      if (code === 'protocol_error') reloadConversationForHistory(work.id)
-      else historyPageError.value = '更早的记录暂时没有读取成功，请重试。'
-    }
-  } finally {
-    if (epoch === historyLoadEpoch) historyLoading.value = false
-  }
 }
 
 function compactionErrorKey(connectionId: string, workId: string) {
@@ -4004,45 +3483,28 @@ async function toggleAllToolDetails() {
         <button v-if="selected" class="ui-dialog-btn" @click="loadSelectedConversation(selected.id)">重新载入</button>
       </div>
 
-      <template v-else-if="conversation.length">
-        <div class="conversation-flow" :class="{ 'is-switching': conversationSwitching }" role="log" aria-live="polite" aria-relevant="additions text">
-          <div v-if="historyLoading || historyHydrating || historyTruncated || historyError" class="history-loader">
-            <button v-if="historyTruncated" :disabled="historyLoading || !historyCursor" @click="loadEarlierHistory"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : '加载更早记录' }}</button>
-            <button v-if="historyError" :disabled="historyLoading" @click="retryConversationHydration"><RefreshCw :size="14" />重试读取</button>
-            <span v-if="historyHydrating">正在载入图片与较长内容…</span>
-            <span v-if="historyError">{{ historyError }}</span>
-          </div>
-          <template v-for="row in conversationRows" :key="row.id">
-            <article v-if="row.kind === 'user'" class="conversation-row msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
-              <div class="msg-user-bubble">
-                <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
-                <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
-                <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
-                <div v-if="row.text || row.time" class="msg-timestamp"><button v-if="row.text" type="button" class="message-text-action" aria-label="查看你的消息原文" @click="openMessageText('你的消息', row.text)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
-              </div>
-            </article>
-
-            <article v-else-if="row.kind === 'assistant-group'" class="conversation-row alu-msg-assistant-row" :class="{ 'is-compact-empty': !hasCompactConversationContent(row.parts) }" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
-              <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
-              <div class="alu-msg-assistant-content">
-                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
-                <div v-if="assistantMarkdownSource(row.parts) || row.time" class="msg-assistant-timestamp"><button v-if="assistantMarkdownSource(row.parts)" type="button" class="message-text-action" aria-label="查看 Agent 回复原文" @click="openMessageText('Agent 回复', assistantMarkdownSource(row.parts), true)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
-              </div>
-            </article>
-
-            <article v-else-if="row.kind === 'activity'" class="conversation-row alu-msg-assistant-row is-agent-active" :data-conversation-id="row.id">
-              <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
-              <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
-            </article>
-
-            <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
-
-            <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
-
-            <div v-else class="conversation-row alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
-          </template>
-        </div>
-      </template>
+      <ConversationView
+        v-else-if="conversation.length"
+        :items="conversation"
+        :switching="conversationSwitching"
+        :streaming-parts="streamingPartIds"
+        :history-loading="historyLoading"
+        :history-hydrating="historyHydrating"
+        :history-truncated="historyTruncated"
+        :history-cursor="historyCursor"
+        :history-error="historyError"
+        :attachment-previews="attachmentPreviews"
+        :tool-open="toolDetailOpen"
+        :image-resource="imageResource"
+        @load-earlier="loadEarlierHistory"
+        @retry-history="retryConversationHydration"
+        @tool-toggle="rememberToolDetail"
+        @image-request="requestConversationImage"
+        @image-preview="openImagePreview"
+        @image-failed="markConversationImageFailed"
+        @attachment-preview="openAttachmentPreview"
+        @open-text="openMessageText"
+      />
 
       <div v-else class="alu-welcome">
         <img src="./assets/new_logo_small.png" alt="AluDock" />

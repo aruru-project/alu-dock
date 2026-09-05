@@ -125,6 +125,8 @@ cargo run -p aludock-client-cli -- --help
 
 ## 目录结构
 
+对话内容、阅读位置、展示组件和样式的职责与定位入口见 [`CONVERSATION_ARCHITECTURE.md`](CONVERSATION_ARCHITECTURE.md)。
+
 ```text
 crates/aludock-client-core/  配对、Protocol V2 与本地/远程 transport
 crates/aludock-client-cli/   协议调试工具

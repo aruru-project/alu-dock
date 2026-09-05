@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
-import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, initialWindowFocused, outputFollowAfterScroll, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
+import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
@@ -266,11 +266,6 @@ assert.equal(formatTokenCount(561_999), '561k')
 assert.equal(formatTokenCount(999), '999')
 assert.equal(formatTokenCount(null), '—')
 assert.equal(formatContextUsage({ tokens: 245_000, contextWindow: 372_000, percent: 65.9 }), '245k/372k (65.9%)', 'navbar metrics preserve WebConsole density and precision')
-assert.equal(outputIsNearBottom(1_000, 701, 300), true, 'new output follows while the reader remains near the bottom')
-assert.equal(outputIsNearBottom(1_000, 500, 300), false, 'intentional history scrolling is not stolen by new output')
-assert.equal(outputFollowAfterScroll(true, 701, 700, true), false, 'even a small upward user scroll immediately suspends bottom following')
-assert.equal(outputFollowAfterScroll(false, 700, 650, false), false, 'streaming updates cannot reclaim a viewport that the reader moved away')
-assert.equal(outputFollowAfterScroll(false, 650, 702, true), true, 'following resumes when the reader moves back to the end')
 assert.doesNotMatch(userErrorMessage({ code: 'protocol_error', message: 'generation 4 cursor 8 failed' }), /generation|cursor|4|8/, 'protocol bookkeeping never becomes user-facing error text')
 assert.doesNotMatch(userErrorMessage({ code: 'instance_host_lost', message: 'Instance 123e4567-e89b is host_lost' }), /123e4567|host_lost/)
 assert.match(userErrorMessage({ code: 'invalid_tree_target', message: 'Entry abc no longer exists' }), /重新打开 Session Tree/, 'a stale Tree choice tells the user how to recover without exposing the missing entry')
