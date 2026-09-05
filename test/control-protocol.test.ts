@@ -14,6 +14,7 @@ import {
   parseControlRequest,
   parseControlResponse,
   parseConversationContentBody,
+  parseDeliverableDownloadFrame,
   parseEnsureResult,
   parseHistoryResult,
   parseFileReadBody,
@@ -21,6 +22,7 @@ import {
   parseKeyLookupResult,
   parseMachinesResult,
   parseStatusResult,
+  parseWorkspaceFileReadFrame,
   ProtocolValidationError,
   INSTANCE_READ_CAPABILITY,
   EVENTS_FOLLOW_CAPABILITY,
@@ -115,6 +117,20 @@ test("Protocol V2 clients accept additive Host response and event fields", () =>
     }],
   });
   assert.deepEqual(machines.machines[0]?.workspaceRoots, ["C:\\", "D:\\"]);
+
+  const workspaceFrame = parseWorkspaceFileReadFrame({
+    kind: "workspace_file_read_error", version: 2, requestId: "workspace-1", hostEpoch: "epoch-1",
+    instanceId: "i1", path: "notes.txt", futureFrameField: true,
+    error: { code: "workspace_entry_unavailable", message: "gone", futureErrorField: true },
+  }, { requestId: "workspace-1", hostEpoch: "epoch-1", instanceId: "i1", path: "notes.txt" });
+  assert.equal(workspaceFrame.kind, "workspace_file_read_error");
+
+  const deliveryFrame = parseDeliverableDownloadFrame({
+    kind: "deliverable_download_ready", version: 2, requestId: "delivery-1", hostEpoch: "epoch-1",
+    instanceId: "i1", deliveryRef: "ref-1", futureFrameField: true,
+    deliverable: { deliveryRef: "ref-1", name: "result.txt", sizeBytes: 5, futureDeliverableField: true },
+  }, { requestId: "delivery-1", hostEpoch: "epoch-1", instanceId: "i1", deliveryRef: "ref-1" });
+  assert.equal(deliveryFrame.kind, "deliverable_download_ready");
 });
 
 test("Protocol V2 history exposes only canonical persisted conversation records", () => {

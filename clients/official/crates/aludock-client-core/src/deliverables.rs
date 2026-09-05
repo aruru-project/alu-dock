@@ -111,14 +111,14 @@ struct DeliverableDownloadRequest<'a> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct DeliverableListResult {
     instance_id: String,
     deliverables: Vec<DeliverableDto>,
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
+#[serde(tag = "kind")]
 enum DeliverableDownloadFrame {
     #[serde(rename = "deliverable_download_ready")]
     Ready {
@@ -179,7 +179,6 @@ enum DeliverableDownloadFrame {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct DeliverableDownloadError {
     code: String,
     message: String,
@@ -527,7 +526,8 @@ mod tests {
                 "hostEpoch": "epoch",
                 "instanceId": "work",
                 "deliveryRef": "delivery-1",
-                "deliverable": { "deliveryRef": "delivery-1", "name": "hello.txt", "sizeBytes": 5 }
+                "deliverable": { "deliveryRef": "delivery-1", "name": "hello.txt", "sizeBytes": 5, "futureDeliverableField": true },
+                "futureFrameField": true
             }),
             json!({
                 "kind": "deliverable_download_chunk",
@@ -537,7 +537,8 @@ mod tests {
                 "instanceId": "work",
                 "deliveryRef": "delivery-1",
                 "index": 0,
-                "data": "aGVs"
+                "data": "aGVs",
+                "futureFrameField": true
             }),
             json!({
                 "kind": "deliverable_download_chunk",
@@ -547,7 +548,8 @@ mod tests {
                 "instanceId": "work",
                 "deliveryRef": "delivery-1",
                 "index": 1,
-                "data": "bG8="
+                "data": "bG8=",
+                "futureFrameField": true
             }),
             json!({
                 "kind": "deliverable_download_complete",
@@ -558,12 +560,55 @@ mod tests {
                 "deliveryRef": "delivery-1",
                 "chunks": 2,
                 "sizeBytes": 5,
-                "sha256": digest
+                "sha256": digest,
+                "futureFrameField": true
             }),
         ] {
             write_json_line(host, &frame).await.unwrap();
         }
         host.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn delivery_responses_and_error_frames_accept_additive_host_metadata() {
+        let list: DeliverableListResult = serde_json::from_value(json!({
+            "instanceId":"work",
+            "deliverables":[{
+                "deliveryRef":"delivery-1", "name":"hello.txt", "sizeBytes":5,
+                "futureDeliverableField":true
+            }],
+            "futureResultField":true
+        }))
+        .unwrap();
+        assert_eq!(list.deliverables[0].name, "hello.txt");
+
+        let error = parse_frame(
+            json!({
+                "kind":"deliverable_download_error", "version":2, "requestId":"request",
+                "hostEpoch":"epoch", "instanceId":"work", "deliveryRef":"delivery-1",
+                "error":{"code":"file_unavailable", "message":"gone", "futureErrorField":true},
+                "futureFrameField":true
+            }),
+            "request",
+            "epoch",
+            "work",
+            "delivery-1",
+        )
+        .unwrap();
+        assert!(matches!(error, DeliverableDownloadFrame::Error { .. }));
+        assert!(
+            parse_frame(
+                json!({
+                    "kind":"deliverable_download_future", "version":2, "requestId":"request",
+                    "hostEpoch":"epoch", "instanceId":"work", "deliveryRef":"delivery-1"
+                }),
+                "request",
+                "epoch",
+                "work",
+                "delivery-1"
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

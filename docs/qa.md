@@ -84,6 +84,7 @@ Fixture 的职责是扮演协议对端，不是复刻被测系统。
 npm run check -- --pretty false
 npm run build
 node --test dist/test/<focused-test>.test.js
+npm run test:client-protocol  # Host/official Rust protocol boundary (Linux)
 git diff --check
 ```
 
@@ -94,6 +95,8 @@ git diff --check
 ### Protocol 与 Host
 
 验证真实 Protocol V2 hello、request/response、`instance.read`、`instance.follow`、`interaction.control` 接手、mutation identity 和 reconnect，不绕过 Host 直接调用内部对象来证明客户端流程。
+
+根目录 `npm run test:client-protocol` 是 Linux 原生跨语言门：它在完全隔离的临时 HOME/XDG/Pi/state 路径启动 production CLI Host，使用官方 Rust core 的 public local-connection API 显式选择 Main 并读取一个静态 saved session。它证明 Host 与实际 Rust reader 的 Protocol V2 兼容，不替代 Android/WebView、mTLS、Windows lifecycle 或真机验收；非 Linux 环境会明确失败而不是静默跳过。
 
 ### Worker 与 Agent adapter
 

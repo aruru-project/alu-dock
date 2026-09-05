@@ -95,6 +95,7 @@ import {
   type InstanceReadResult,
   type HelloError,
   type HistoryResult,
+  type SessionInventoryResult,
   parseAttachmentUploadFrame,
   parseClientHello,
   parseControlRequest,
@@ -1194,17 +1195,9 @@ function mutationOperationId(request: ControlRequest): string | undefined {
 
 function boundedSessionInventory(
   source: Awaited<ReturnType<SessionInventory["list"]>>,
-  query: { cwd: string; scope: "cwd" | "all" },
-): {
-  sessions: Awaited<ReturnType<SessionInventory["list"]>>["sessions"];
-  query: { cwd: string; scope: "cwd" | "all" };
-  total: number;
-  truncated: boolean;
-  incomplete?: boolean;
-  diagnostics?: Awaited<ReturnType<SessionInventory["list"]>>["diagnostics"];
-  diagnosticsTruncated?: boolean;
-} {
-  const diagnostics: Awaited<ReturnType<SessionInventory["list"]>>["diagnostics"] = [];
+  query: SessionInventoryResult["query"],
+): SessionInventoryResult {
+  const diagnostics: SessionInventoryResult["diagnostics"] = [];
   let diagnosticBytes = 0;
   for (const diagnostic of source.diagnostics) {
     const itemBytes = Buffer.byteLength(JSON.stringify(diagnostic), "utf8") + 1;
@@ -1212,7 +1205,7 @@ function boundedSessionInventory(
     diagnostics.push(diagnostic);
     diagnosticBytes += itemBytes;
   }
-  const sessions: Awaited<ReturnType<SessionInventory["list"]>>["sessions"] = [];
+  const sessions: SessionInventoryResult["sessions"] = [];
   let bytes = 256 + diagnosticBytes;
   for (const session of source.sessions.slice(0, MAX_SESSION_INVENTORY_ITEMS)) {
     const itemBytes = Buffer.byteLength(JSON.stringify(session), "utf8") + 1;
@@ -1222,7 +1215,7 @@ function boundedSessionInventory(
   }
   return {
     sessions,
-    query: { ...query },
+    query: { cwd: query.cwd, scope: query.scope },
     total: source.sessions.length,
     truncated: sessions.length < source.sessions.length,
     incomplete: source.incomplete,

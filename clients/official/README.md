@@ -117,6 +117,14 @@ cargo fmt --all -- --check
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 ```
 
+从 monorepo 根目录运行真实 Host 与官方 Rust core 的 Protocol V2 兼容门：
+
+```bash
+npm run test:client-protocol
+```
+
+该门只支持 Linux：它隔离启动 production CLI Host，让 Rust core 通过 public local connection 显式选择 Main 并列出静态 saved session。它是只读验证，不会采用或恢复 Session；也不覆盖 Android/WebView、mTLS、Windows lifecycle 或真机验收。
+
 协议调试工具仍可从 Rust workspace 运行：
 
 ```bash

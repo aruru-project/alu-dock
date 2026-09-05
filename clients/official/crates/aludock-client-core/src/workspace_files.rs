@@ -44,7 +44,7 @@ pub enum WorkspaceTargetKind {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileEntry {
     pub path: String,
     pub name: String,
@@ -90,14 +90,14 @@ impl WorkspaceFileEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceFileCursor {
     pub revision: String,
     pub offset: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceFilePage {
     pub instance_id: String,
     pub path: String,
@@ -155,14 +155,14 @@ struct WorkspaceFileReadRequest<'a> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceEntryResult {
     instance_id: String,
     entry: WorkspaceFileEntry,
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
+#[serde(tag = "kind")]
 enum WorkspaceFileReadFrame {
     #[serde(rename = "workspace_file_read_ready")]
     Ready {
@@ -219,7 +219,6 @@ enum WorkspaceFileReadFrame {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct WorkspaceFileReadError {
     code: String,
     message: String,
@@ -669,6 +668,56 @@ mod tests {
         };
 
         entry.validate().unwrap();
+    }
+
+    #[test]
+    fn workspace_responses_and_stream_frames_accept_additive_host_metadata() {
+        let page: WorkspaceFilePage = serde_json::from_value(json!({
+            "instanceId":"work", "path":".", "revision":"revision-1",
+            "entries":[{
+                "path":"notes.txt", "name":"notes.txt", "kind":"file", "hidden":false,
+                "sizeBytes":3, "futureEntryField":true
+            }],
+            "total":2, "truncated":true,
+            "nextCursor":{"revision":"revision-1", "offset":1, "futureCursorField":true},
+            "futurePageField":true
+        }))
+        .unwrap();
+        validate_page(&page, "work", ".", None).unwrap();
+        let entry_result: WorkspaceEntryResult = serde_json::from_value(json!({
+            "instanceId":"work",
+            "entry":{"path":"notes.txt", "name":"notes.txt", "kind":"file", "hidden":false, "sizeBytes":3},
+            "futureResultField":true
+        })).unwrap();
+        assert_eq!(entry_result.entry.name, "notes.txt");
+
+        let ready = parse_frame(json!({
+            "kind":"workspace_file_read_ready", "version":2, "requestId":"request",
+            "hostEpoch":"epoch", "instanceId":"work", "path":"notes.txt",
+            "entry":{"path":"notes.txt", "name":"notes.txt", "kind":"file", "hidden":false, "sizeBytes":3, "futureEntryField":true},
+            "futureFrameField":true
+        }), "request", "epoch", "work", "notes.txt").unwrap();
+        assert!(matches!(ready, WorkspaceFileReadFrame::Ready { .. }));
+        let error = parse_frame(json!({
+            "kind":"workspace_file_read_error", "version":2, "requestId":"request",
+            "hostEpoch":"epoch", "instanceId":"work", "path":"notes.txt",
+            "error":{"code":"workspace_entry_unavailable", "message":"gone", "futureErrorField":true},
+            "futureFrameField":true
+        }), "request", "epoch", "work", "notes.txt").unwrap();
+        assert!(matches!(error, WorkspaceFileReadFrame::Error { .. }));
+        assert!(
+            parse_frame(
+                json!({
+                    "kind":"workspace_file_read_future", "version":2, "requestId":"request",
+                    "hostEpoch":"epoch", "instanceId":"work", "path":"notes.txt"
+                }),
+                "request",
+                "epoch",
+                "work",
+                "notes.txt"
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

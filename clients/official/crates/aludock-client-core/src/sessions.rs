@@ -39,7 +39,7 @@ pub enum SessionScope {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
     pub session_id: String,
     pub session_file: String,
@@ -50,7 +50,6 @@ pub struct SessionInfo {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SessionsWireResult {
     sessions: Vec<SessionInfo>,
     total: u64,
@@ -66,21 +65,21 @@ pub struct SessionListResult {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct SessionInventoryQuery {
     cwd: String,
     scope: SessionScope,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionInventoryDiagnostic {
     pub message: String,
     pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct SessionInventoryWireResult {
     sessions: Vec<SessionInfo>,
     query: SessionInventoryQuery,
@@ -106,7 +105,7 @@ pub struct SessionInventoryResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationHistoryEntry {
     pub entry: HistoryRecord,
     pub content_ref: String,
@@ -115,7 +114,7 @@ pub struct ConversationHistoryEntry {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationHistoryPage {
     pub instance: InstanceSnapshot,
     pub revision: String,
@@ -125,7 +124,7 @@ pub struct ConversationHistoryPage {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionHistoryPage {
     pub history_revision: u64,
     pub entries: Vec<HistoryRecord>,
@@ -187,7 +186,7 @@ pub enum ConversationContentChunk {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationContentPage {
     pub instance_id: String,
     pub runtime_generation: u64,
@@ -407,20 +406,18 @@ struct SessionCompactParams<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionReplacementResult {
     pub cancelled: bool,
     pub instance: InstanceSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionNameResult {
     pub instance: InstanceSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCompaction {
     pub summary: String,
     pub first_kept_entry_id: String,
@@ -428,14 +425,13 @@ pub struct SessionCompaction {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionCompactionResult {
     pub result: SessionCompaction,
     pub instance: InstanceSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionReloadResult {
     pub resources: Vec<ResourceInfo>,
     pub diagnostics: Vec<DiagnosticInfo>,
@@ -547,7 +543,7 @@ pub struct NavigateOptions<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionNavigateResult {
     pub cancelled: bool,
     pub aborted: Option<bool>,
@@ -556,7 +552,7 @@ pub struct SessionNavigateResult {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionForkResult {
     pub cancelled: bool,
     pub selected_text: Option<String>,
@@ -2189,9 +2185,56 @@ mod tests {
     }
 
     #[test]
-    fn strict_session_wire_parser_rejects_unknown_fields() {
-        let value = serde_json::json!({"sessions": [], "total": 0, "truncated": false, "sessionFile": "/leak"});
-        assert!(serde_json::from_value::<SessionsWireResult>(value).is_err());
+    fn saved_session_inventory_accepts_additive_host_metadata() {
+        let value = serde_json::json!({
+            "sessions": [{
+                "sessionId": "saved-session",
+                "sessionFile": "/sessions/saved.jsonl",
+                "name": "Saved",
+                "firstUserMessage": "continue",
+                "cwd": "/workspace",
+                "updatedAt": "2026-09-05T00:00:00.000Z",
+                "futureSessionField": true
+            }],
+            "query": {
+                "cwd": "/workspace",
+                "scope": "all",
+                "hostId": "main-host",
+                "futureQueryField": true
+            },
+            "total": 1,
+            "truncated": false,
+            "incomplete": true,
+            "diagnostics": [{
+                "message": "one location was unavailable",
+                "path": "/sessions/missing",
+                "futureDiagnosticField": true
+            }],
+            "diagnosticsTruncated": false,
+            "futureResultField": true
+        });
+        let parsed = serde_json::from_value::<SessionInventoryWireResult>(value).unwrap();
+        assert_eq!(parsed.query.cwd, "/workspace");
+        assert_eq!(parsed.query.scope, SessionScope::All);
+        assert_eq!(parsed.sessions[0].session_id, "saved-session");
+        assert_eq!(
+            parsed.diagnostics[0].message,
+            "one location was unavailable"
+        );
+
+        assert!(
+            serde_json::from_value::<SessionInventoryWireResult>(serde_json::json!({
+                "sessions": [], "query": {"cwd": "/workspace", "scope": "future"},
+                "total": 0, "truncated": false
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SessionsWireResult>(serde_json::json!({
+                "sessions": [], "total": "zero", "truncated": false, "futureResultField": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]

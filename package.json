@@ -21,6 +21,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "test:sdk-upgrade": "npm run build && node --test dist/test/pi-sdk-compat/**/*.compat.js",
+    "test:client-protocol": "npm run build && cargo build --locked --manifest-path clients/official/Cargo.toml -p aludock-client-core --example protocol_inventory && node --test dist/test/client-protocol/*.compat.js",
     "cli": "npm run build && node dist/src/cli.js",
     "serve": "npm run build && ALU_DOCK_SOCKET=${ALU_DOCK_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.alu-dock/run}/alu-dock-dev.sock} node dist/src/cli.js serve --dev",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",

@@ -23,7 +23,7 @@ pub enum InteractionMethod {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct ActiveInteraction {
     pub id: String,
     pub method: InteractionMethod,
@@ -31,7 +31,7 @@ pub struct ActiveInteraction {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "method", rename_all = "snake_case")]
 pub enum InteractionRequest {
     Select {
         #[serde(rename = "controllerId")]
@@ -259,28 +259,28 @@ pub enum ExtensionEvent {
     Error(ExtensionError),
 }
 
-macro_rules! strict_data {
+macro_rules! event_data {
     ($name:ident { $($field:ident : $ty:ty),* $(,)? }) => {
         #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        #[serde(rename_all = "camelCase")]
         pub struct $name { $(pub $field: $ty),* }
     };
 }
 
-strict_data!(InteractionResolution {
+event_data!(InteractionResolution {
     interaction_id: String,
     method: InteractionMethod
 });
-strict_data!(InteractionCancellation {
+event_data!(InteractionCancellation {
     interaction_id: String,
     method: InteractionMethod,
     reason: InteractionCancellationReason
 });
-strict_data!(ExtensionNotification { message: String, level: NotificationLevel, operation_id: Option<String> });
-strict_data!(StatusChanged { key: String, text: Option<String> });
-strict_data!(ToolsExpandedChanged { expanded: bool });
-strict_data!(WidgetChanged { key: String, lines: Option<Vec<String>>, placement: Option<WidgetPlacement> });
-strict_data!(ExtensionError { source: Option<String>, event: Option<String>, error: String });
+event_data!(ExtensionNotification { message: String, level: NotificationLevel, operation_id: Option<String> });
+event_data!(StatusChanged { key: String, text: Option<String> });
+event_data!(ToolsExpandedChanged { expanded: bool });
+event_data!(WidgetChanged { key: String, lines: Option<Vec<String>>, placement: Option<WidgetPlacement> });
+event_data!(ExtensionError { source: Option<String>, event: Option<String>, error: String });
 
 impl ExtensionEvent {
     pub fn from_dock_event(event: &DockEvent) -> Result<Option<Self>> {
@@ -360,11 +360,11 @@ pub enum ControllerEventData {
     EditorTextSet(EditorDirective),
 }
 
-strict_data!(TitleDirective {
+event_data!(TitleDirective {
     controller_id: String,
     title: String
 });
-strict_data!(EditorDirective {
+event_data!(EditorDirective {
     controller_id: String,
     text: String
 });
@@ -470,7 +470,7 @@ struct ControlParams<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct ControlResult {
     instance_id: String,
     runtime_generation: u64,
@@ -496,7 +496,7 @@ pub enum InteractionResolutionState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct InteractionRespondResult {
     pub interaction_id: String,
     pub state: InteractionResolutionState,
@@ -513,7 +513,6 @@ struct ViewportParams<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WidgetViewportResult {
     pub accepted: bool,
 }
@@ -528,7 +527,6 @@ struct ToolsExpandedParams<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ToolsExpandedResult {
     instance: InstanceSnapshot,
 }
@@ -782,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_extension_events_are_strict_and_controller_events_are_rejected() {
+    fn extension_events_accept_additive_host_metadata_but_keep_stream_types_separate() {
         let valid = dock_event(
             "extension.widget_changed",
             serde_json::json!({"key":"build","lines":["ok"],"placement":"aboveEditor"}),
@@ -793,9 +791,24 @@ mod tests {
         ));
         let extra = dock_event(
             "extension.status_changed",
-            serde_json::json!({"key":"x","text":"y","secret":"no"}),
+            serde_json::json!({"key":"x","text":"y","futureDataField":true}),
         );
-        assert!(ExtensionEvent::from_dock_event(&extra).is_err());
+        assert!(matches!(
+            ExtensionEvent::from_dock_event(&extra).unwrap(),
+            Some(ExtensionEvent::StatusChanged(StatusChanged { key, .. })) if key == "x"
+        ));
+        let directive: TitleDirective = parse_data(&serde_json::json!({
+            "controllerId":"controller", "title":"Build", "futureDataField":true
+        }))
+        .unwrap();
+        assert_eq!(directive.title, "Build");
+        let request: InteractionRequest = parse_data(&serde_json::json!({
+            "controllerId":"controller", "interactionId":"interaction", "method":"confirm",
+            "title":"Continue?", "message":"Ready", "issuedAt":"2026-01-01T00:00:00.000Z",
+            "expiresAt":null, "futureDataField":true
+        }))
+        .unwrap();
+        assert_eq!(request.method(), InteractionMethod::Confirm);
         let targeted = dock_event(
             "extension.title_set",
             serde_json::json!({"controllerId":"c","title":"x"}),
@@ -826,9 +839,14 @@ mod tests {
         assert!(
             matches!(error, ClientError::EffectUnknown { operation_id, .. } if operation_id == "operation-1")
         );
+        let additive = serde_json::from_value::<InteractionRespondResult>(serde_json::json!({
+            "interactionId":"expected", "state":"resolved", "futureResultField":true
+        }))
+        .unwrap();
+        assert_eq!(additive.interaction_id, "expected");
         assert!(
             serde_json::from_value::<InteractionRespondResult>(serde_json::json!({
-                "interactionId":"expected", "state":"resolved", "extra":true
+                "interactionId":"expected", "state":"future"
             }))
             .is_err()
         );
