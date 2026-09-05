@@ -25,6 +25,12 @@ test("stale Worker extension UI generations reject dialogs instead of fabricatin
   await assert.rejects(stale.editor("Editor"), WorkerUiLifecycleCancelledError);
   assert.deepEqual(calls, []);
 
+  const current = endpoint.createGenerationPort();
+  current.setStatus("fixture", "ready");
+  assert.deepEqual(calls, []);
+  await endpoint.completeGenerationChange();
+  assert.deepEqual(calls, ["ui.setStatus"]);
+
   await endpoint.beginGenerationChange("reload");
-  assert.deepEqual(calls, ["ui.runtimeReload"]);
+  assert.deepEqual(calls, ["ui.setStatus", "ui.runtimeReload"]);
 });

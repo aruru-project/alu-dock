@@ -9,6 +9,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
 
 const PROXY_ENVIRONMENT_KEYS = [
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
@@ -57,6 +58,87 @@ export default function (pi) {
   await assertPackageLoaded();
   assert.equal((await instance.reloadSession("package-lifecycle-reload")).cancelled, false);
   await assertPackageLoaded();
+});
+
+test("fresh real-Pi session status and Work tool access survive new and reload for a new Protocol reader", { timeout: 20_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-session-ui-handoff-"));
+  const cwd = join(root, "cwd");
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  const home = join(root, "home");
+  const stateHome = join(root, "state");
+  const dataHome = join(root, "data");
+  const socketPath = join(root, "dock.sock");
+  await Promise.all([
+    mkdir(cwd),
+    mkdir(sessionDir),
+    mkdir(home),
+    mkdir(stateHome),
+    mkdir(dataHome),
+    mkdir(join(agentDir, "extensions"), { recursive: true }),
+  ]);
+  await chmod(root, 0o700);
+  await writeFile(join(agentDir, "extensions", "session-status.ts"), `
+export default function (pi) {
+  pi.on("session_start", (event, ctx) => {
+    ctx.ui.setStatus("session-fixture", event.reason);
+  });
+}
+`, "utf8");
+
+  const workerEnvironment = {
+    ...process.env,
+    PI_OFFLINE: "1",
+    HOME: home,
+    XDG_STATE_HOME: stateHome,
+    XDG_DATA_HOME: dataHome,
+  };
+  const registry = new DockRegistry(
+    (input) => createPiInstance({
+      ...input,
+      agentDir,
+      sessionDir,
+      workerEnvironment,
+      workerTimeouts: { mutationMs: 10_000, termMs: 300 },
+    }),
+    () => "session-ui-handoff-instance",
+  );
+  const host = new DockHost({ socketPath, registry });
+  const client = new DockClient({ socketPath, timeoutMs: 3_000, longMutationTimeoutMs: 12_000 });
+  const reader = new DockClient({ socketPath, timeoutMs: 3_000 });
+  context.after(async () => {
+    client.closeActiveConnections();
+    reader.closeActiveConnections();
+    await host.stop().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  const created = await client.create(cwd, "session UI handoff", "session-ui-create");
+  assert.equal((await client.read(created.id)).instance.extensionStatus?.["session-fixture"], "startup");
+
+  await client.prompt(created.id, "/dock-tools on", "auto", "session-ui-tools-on");
+  const enabled = await waitForRead(client, created.id, (read) => (
+    read.instance.execution === "idle"
+    && read.instance.extensionStatus?.["Dock tools"] === "on"
+    && read.instance.extensionStatus?.["session-fixture"] === "reload"
+  ));
+  assert.equal(enabled.instance.extensionStatus?.["Dock tools"], "on");
+  assert.equal(enabled.instance.extensionStatus?.["session-fixture"], "reload");
+
+  await client.reloadSession(created.id, "session-ui-reload");
+  const reloaded = await reader.read(created.id);
+  assert.equal(reloaded.instance.extensionStatus?.["Dock tools"], "on");
+  assert.equal(reloaded.instance.extensionStatus?.["session-fixture"], "reload");
+  const reloadedTools = await reader.tools(created.id);
+  for (const name of DOCK_TOOL_NAMES) assert.equal(reloadedTools.tools.find((tool) => tool.name === name)?.active, true);
+
+  await client.newSession(created.id, undefined, "session-ui-new");
+  const fresh = await reader.read(created.id);
+  assert.equal(fresh.instance.extensionStatus?.["Dock tools"], "on");
+  assert.equal(fresh.instance.extensionStatus?.["session-fixture"], "new");
+  const freshTools = await reader.tools(created.id);
+  for (const name of DOCK_TOOL_NAMES) assert.equal(freshTools.tools.find((tool) => tool.name === name)?.active, true);
 });
 
 test("real Protocol reload completes when remote model catalogs are unavailable (card #222)", { timeout: 15_000 }, async () => {
@@ -122,6 +204,19 @@ test("real Protocol reload completes when remote model catalogs are unavailable 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function waitForRead(
+  client: DockClient,
+  instanceId: string,
+  predicate: (read: Awaited<ReturnType<DockClient["read"]>>) => boolean,
+): Promise<Awaited<ReturnType<DockClient["read"]>>> {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    const read = await client.read(instanceId);
+    if (predicate(read)) return read;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for the Work projection");
+}
 
 function restoreEnvironment(original: ReadonlyMap<string, string | undefined>): void {
   for (const [key, value] of original) {

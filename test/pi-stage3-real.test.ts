@@ -15,7 +15,10 @@ import { appendFileSync } from "node:fs";
 
 export default function stage3Fixture(pi) {
   const record = (line) => appendFileSync(${JSON.stringify(logPath)}, line + "\\n");
-  pi.on("session_start", (event) => record("start:" + event.reason));
+  pi.on("session_start", (event, ctx) => {
+    record("start:" + event.reason);
+    ctx.ui.setStatus("stage3-session", event.reason);
+  });
   pi.on("session_shutdown", (event) => record("shutdown:" + event.reason));
   pi.on("session_info_changed", (event) => record("name:" + (event.name ?? "")));
   pi.on("session_before_compact", (event) => {
@@ -118,6 +121,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.ok((await instance.setActiveTools(["read"], "real-tools")).tools.find((tool) => tool.name === "read")?.active);
 
     assert.equal((await instance.switchSession("real-resume-1", targetFile, { canonicalCwd: cwd, projectTrusted: true })).cancelled, false);
+    assert.equal(instance.snapshot().extensionStatus?.["stage3-session"], "resume");
     await instance.setSessionName("real-name", "Stage 3 named");
     assert.equal(instance.snapshot().name, "Stage 3 named");
 
@@ -129,7 +133,9 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.ok((await instance.getHistoryPage(undefined, 200)).entries.some((entry) => entry.content.some((block) => block.type === "text" && block.text === "deterministic extension summary")));
 
     assert.equal((await instance.reloadSession("real-reload")).cancelled, false);
+    assert.equal(instance.snapshot().extensionStatus?.["stage3-session"], "reload");
     assert.equal((await instance.newSession("real-new")).cancelled, false);
+    assert.equal(instance.snapshot().extensionStatus?.["stage3-session"], "new");
     const newSessionFile = instance.snapshot().executor.sessionFile;
     assert.ok(newSessionFile);
     assert.notEqual(newSessionFile, targetFile);
@@ -142,6 +148,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     );
     assert.equal(instance.snapshot().execution, "idle");
     assert.equal((await instance.switchSession("real-resume-2", targetFile, { canonicalCwd: cwd, projectTrusted: true })).cancelled, false);
+    assert.equal(instance.snapshot().extensionStatus?.["stage3-session"], "resume");
     assert.equal(instance.snapshot().runtimeGeneration, 5);
     assert.equal(instance.snapshot().name, "Stage 3 named");
     assert.equal(instance.snapshot().executor.sessionFile, targetFile);

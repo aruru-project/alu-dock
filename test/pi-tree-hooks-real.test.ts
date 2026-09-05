@@ -39,7 +39,10 @@ import { appendFileSync } from "node:fs";
 const path = ${JSON.stringify(hookLog)};
 const record = (value) => appendFileSync(path, JSON.stringify(value) + "\\n");
 export default function (pi) {
-  pi.on("session_start", (event) => record({ type: event.type, reason: event.reason }));
+  pi.on("session_start", (event, ctx) => {
+    record({ type: event.type, reason: event.reason });
+    ctx.ui.setStatus("tree-session", event.reason);
+  });
   pi.on("session_before_tree", async (event) => {
     record({ type: event.type, targetId: event.preparation.targetId });
     if (event.preparation.targetId === "u1") return { cancel: true };
@@ -82,6 +85,7 @@ export default function (pi) {
   });
   try {
     const originalFile = instance.snapshot().executor.sessionFile;
+    assert.equal(instance.snapshot().extensionStatus?.["tree-session"], "startup");
     assert.deepEqual(await instance.navigateSession("navigate-cancelled", "u1"), { cancelled: true, summaryCreated: false });
     assert.equal(instance.snapshot().runtimeGeneration, 1);
     assert.equal(instance.snapshot().executor.sessionFile, originalFile);
@@ -100,14 +104,17 @@ export default function (pi) {
 
     assert.deepEqual(await instance.cloneSession("clone-cancelled", "a1"), { cancelled: true });
     assert.equal(instance.snapshot().runtimeGeneration, 1);
+    assert.equal(instance.snapshot().extensionStatus?.["tree-session"], "startup");
     assert.equal(instance.snapshot().executor.sessionFile, originalFile);
 
     assert.deepEqual(await instance.forkSession("fork-cancelled", "u1"), { cancelled: true });
     assert.equal(instance.snapshot().runtimeGeneration, 1);
+    assert.equal(instance.snapshot().extensionStatus?.["tree-session"], "startup");
     assert.equal(instance.snapshot().executor.sessionFile, originalFile);
 
     assert.deepEqual(await instance.forkSession("fork-success", "u2"), { cancelled: false, selectedText: "second prompt" });
     assert.equal(instance.snapshot().runtimeGeneration, 2);
+    assert.equal(instance.snapshot().extensionStatus?.["tree-session"], "fork");
     assert.notEqual(instance.snapshot().executor.sessionFile, originalFile);
     assert.equal(instance.snapshot().lastRun, "never");
     assert.equal(instance.eventsSince().events.some((event) => event.type === "run.started"), false);

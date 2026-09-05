@@ -25,6 +25,8 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   private rendererGeneration = 0;
   private generation = 0;
   private toolsExpanded = false;
+  private generationChangePending = false;
+  private readonly pendingUiCalls: Array<{ capability: UiCapability; args: Record<string, unknown> }> = [];
   private readonly notificationOrigin = new AsyncLocalStorage<{ operationId: string; active: boolean }>();
 
   constructor(private readonly call: WorkerUiCall) {}
@@ -124,8 +126,9 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   beginGenerationChange(kind: "binding" | "reload" = "binding"): Promise<void> {
     // Pi reload reuses the originally bound ExtensionUIContext object. Keep its
     // port live for the new runner; replacement paths bind a fresh generation
-    // port and must fence the old one. Host replacement suspension is derived
-    // from dock_session_replaced/dock_runtime_error, never this private endpoint.
+    // port and must fence the old one. New one-way UI state is held until the
+    // replacement event has made the Host retire the old generation.
+    this.generationChangePending = true;
     let hostReset = Promise.resolve();
     if (kind === "binding") {
       this.generation += 1;
@@ -141,10 +144,31 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
     this.toolsExpanded = false;
     return hostReset;
   }
+
+  async completeGenerationChange(): Promise<void> {
+    while (this.pendingUiCalls.length > 0) {
+      const pending = this.pendingUiCalls.shift()!;
+      await this.call(pending.capability, pending.args).catch(() => {});
+    }
+    this.generationChangePending = false;
+  }
+
   resetFromHost(): void { this.renderer?.reset(); }
-  failGenerationChange(): Promise<void> { this.generation += 1; this.toolsExpanded = false; this.renderer?.reset(); this.renderer = undefined; return Promise.resolve(); }
+  failGenerationChange(): Promise<void> {
+    this.generation += 1;
+    this.generationChangePending = false;
+    this.pendingUiCalls.length = 0;
+    this.toolsExpanded = false;
+    this.renderer?.reset();
+    this.renderer = undefined;
+    return Promise.resolve();
+  }
 
   private fire(capability: UiCapability, args: Record<string, unknown>): void {
+    if (this.generationChangePending) {
+      this.pendingUiCalls.push({ capability, args });
+      return;
+    }
     void this.call(capability, args).catch(() => {});
   }
 }

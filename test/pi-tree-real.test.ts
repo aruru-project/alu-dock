@@ -89,7 +89,12 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
   const sessionDir = join(root, "sessions");
-  await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(sessionDir)]);
+  await Promise.all([mkdir(cwd), mkdir(join(agentDir, "extensions"), { recursive: true }), mkdir(sessionDir)]);
+  await writeFile(join(agentDir, "extensions", "session-status.ts"), `
+export default function (pi) {
+  pi.on("session_start", (event, ctx) => ctx.ui.setStatus("session-fixture", event.reason));
+}
+`, "utf8");
   const sessionFile = join(sessionDir, "tree-source.jsonl");
   const timestamp = "2026-07-14T00:00:00.000Z";
   await writeFile(sessionFile, [
@@ -114,6 +119,7 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
   });
   try {
     const initial = instance.snapshot();
+    assert.equal(initial.extensionStatus?.["session-fixture"], "startup");
     const initialMessages = initial.metrics?.messages.total;
     const first = await instance.getTree();
     assert.deepEqual(first.nodes.filter((node) => node.kind === "message").map((node) => [node.entryId, node.depth, node.role]), [
@@ -143,6 +149,7 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
     const forkFile = forkSnapshot.executor.sessionFile;
     assert.ok(forkFile && forkFile !== sessionFile);
     assert.equal(forkSnapshot.runtimeGeneration, 2);
+    assert.equal(forkSnapshot.extensionStatus?.["session-fixture"], "fork");
     assert.equal(forkSnapshot.lastRun, "never");
     const forkHeader = JSON.parse((await readFile(forkFile, "utf8")).split("\n")[0] as string) as Record<string, unknown>;
     assert.equal(forkHeader.parentSession, sessionFile);
@@ -156,6 +163,7 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
     const cloneFile = cloneSnapshot.executor.sessionFile;
     assert.ok(cloneFile && cloneFile !== forkFile);
     assert.equal(cloneSnapshot.runtimeGeneration, 3);
+    assert.equal(cloneSnapshot.extensionStatus?.["session-fixture"], "fork");
     assert.equal(cloneSnapshot.lastRun, "never");
     const cloneHeader = JSON.parse((await readFile(cloneFile, "utf8")).split("\n")[0] as string) as Record<string, unknown>;
     assert.equal(cloneHeader.parentSession, forkFile);

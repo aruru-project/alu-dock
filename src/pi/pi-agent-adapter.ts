@@ -165,6 +165,7 @@ type ReplacementKind = "new" | "switch" | "fork" | "clone" | "reload";
 
 export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
   beginGenerationChange(kind?: "binding" | "reload"): Promise<void>;
+  completeGenerationChange(): Promise<void>;
   failGenerationChange(): Promise<void>;
 }
 
@@ -1103,6 +1104,7 @@ export class PiAgentAdapter {
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
         binding.bufferEvents = false;
         this.publishReplacement(operationId, "reload", previousSessionFile, binding.session.sessionFile);
+        await this.options.extensionUiBroker?.completeGenerationChange();
         this.publishReplacementBuffer(buffered);
         return { cancelled: false };
       } catch (error) {
@@ -1171,7 +1173,7 @@ export class PiAgentAdapter {
       }
       if (!this.rebindEntered || !this.staged) throw new Error("Runtime replacement completed without exactly one rebind");
       await this.options.commitReplacement?.({ operationId, kind, previousSessionFile, sessionFile: this.staged.session.sessionFile });
-      this.promoteStaged(operationId, kind, previousSessionFile);
+      await this.promoteStaged(operationId, kind, previousSessionFile);
       return result;
     } catch (error) {
       if (!this.replacementInvalidated) {
@@ -1305,6 +1307,7 @@ export class PiAgentAdapter {
               this.options.configureNetwork?.(services.settingsManager);
             },
           });
+          await this.options.extensionUiBroker?.completeGenerationChange();
         } catch (error) {
           await this.options.extensionUiBroker?.failGenerationChange();
           throw error;
@@ -1322,7 +1325,7 @@ export class PiAgentAdapter {
     // and explicitly activates the initial binding.
   }
 
-  private promoteStaged(operationId: string, kind: "new" | "switch" | "fork" | "clone", previousSessionFile?: string): void {
+  private async promoteStaged(operationId: string, kind: "new" | "switch" | "fork" | "clone", previousSessionFile?: string): Promise<void> {
     const binding = this.staged;
     if (!binding) throw new Error("Replacement runtime binding was not staged");
     this.staged = undefined;
@@ -1331,6 +1334,7 @@ export class PiAgentAdapter {
     binding.buffered = [];
     binding.bufferEvents = false;
     this.publishReplacement(operationId, kind, previousSessionFile, binding.session.sessionFile);
+    await this.options.extensionUiBroker?.completeGenerationChange();
     this.publishReplacementBuffer(events);
   }
 

@@ -2640,6 +2640,9 @@ export class ManagedInstance {
 
   private dispatchAgentEvent(event: AgentEvent): void {
     if (this.hostDrainActive) return;
+    // Replacement UI retirement must begin at event receipt, before the durable
+    // transition queue yields to freshly initialized UI calls from the Worker.
+    if (event.type === "dock_session_replaced") this.extensionUi.beginGenerationChange();
     // Lifecycle edges are authoritative once observed. Pi publishes
     // compaction_end before its finally block clears isCompacting, so the
     // completed edge must not be reversed by that stale state snapshot.
@@ -2850,7 +2853,6 @@ export class ManagedInstance {
           kind: "session.replaced",
           durable: true,
           operationId: this.resolveAgentEventOperationId(event),
-          before: () => this.extensionUi.beginGenerationChange(),
           mutate: () => {
             this.runtimeGenerationValue += 1;
             this.replacementIntent = undefined;

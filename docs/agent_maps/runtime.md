@@ -131,6 +131,8 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。
 
+会话替换的 UI 交接由同一生命周期控制：Worker 暂存新插件初始化期间的单向 UI 更新，在发布 `dock_session_replaced` 后按顺序释放；Host 在收到替换事件时立即使旧 UI 失效，不等持久化转换队列才清理。这样新状态不会被后续收尾清空。取消替换不进入交接，失败则丢弃暂存发布；同一 session 的插件 `ctx.reload()` 在原有重置完成后释放新状态。这里暂存的是新插件发布，不是旧画面缓存，Work 的 Dock tools 授权不参与迁移。
+
 某个客户端没有实现一种 Extension UI，只影响该客户端，不影响 extension runtime、Agent 或其他客户端，也不能产生假的用户回答。
 
 Extension command 仍通过完整 Agent input 语义执行，不另建第二条命令通道。Worker 在执行前确认当前输入确实命中已注册的 Extension command，并只在该 handler 尚未结束时，把同一次提交已有的 `operationId` 附到 `extension.notification`。它只表达来源关联：通知仍不是 conversation record。handler 返回后遗留的 timer、后台任务以及其他被动 Extension 通知不携带该 ID；Host 不按文本、时间或命令名称猜测来源。
