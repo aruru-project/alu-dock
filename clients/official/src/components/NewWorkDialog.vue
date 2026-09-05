@@ -9,6 +9,7 @@ import {
   listWorkspace,
   type CreateWorkContinuation,
 } from '../lib/bridge'
+import { copyPlainText } from '../lib/clipboard'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import {
   defaultMachineHostId,
@@ -22,11 +23,12 @@ import {
 import { treeNodeTime } from '../lib/sessionTree'
 import { appendWorkspacePage } from '../lib/workspaceBrowser'
 import type { MachineDto, SessionInventoryInfo, SessionInventoryResult, Work, WorkspacePage } from '../lib/types'
-import { userErrorMessage as errorMessage } from '../lib/userError'
+import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import AluSelect from './AluSelect.vue'
 
 type View = 'launcher' | 'browse' | 'sessions'
+type DialogError = UserErrorPresentation & { copyState?: 'copied' | 'failed' }
 type TrustAttempt = {
   kind: 'create' | 'adopt'
   operationId: string
@@ -63,7 +65,7 @@ const inventory = ref<SessionInventoryResult | null>(null)
 const sessionSearch = ref('')
 const inventoryLoading = ref(false)
 const pending = ref<'create' | 'adopt' | ''>('')
-const error = ref('')
+const error = ref<DialogError | null>(null)
 const trust = ref<TrustAttempt | null>(null)
 let workspaceEpoch = 0
 let inventoryEpoch = 0
@@ -113,7 +115,9 @@ const actionBusy = computed(() => props.machinesLoading || !!pending.value || !!
 
 watch(() => props.machines, (machines) => {
   if (machines.some((candidate) => candidate.hostId === machineHostId.value && candidate.available)) return
-  machineHostId.value = defaultMachineHostId(machines)
+  const nextMachineHostId = defaultMachineHostId(machines)
+  if (nextMachineHostId !== machineHostId.value) clearError()
+  machineHostId.value = nextMachineHostId
 }, { immediate: true })
 watch(pending, (value) => emit('busy', !!value), { immediate: true })
 watch(view, (value) => emit('view', value), { immediate: true })
@@ -128,10 +132,29 @@ function sessionLabel(session: SessionInventoryInfo) {
   return session.name || session.firstUserMessage || '未命名 Session'
 }
 
+function clearError() {
+  error.value = null
+}
+
+function setError(cause: unknown, action?: string, request?: string) {
+  error.value = userErrorPresentation(cause, undefined, action && request ? { action, request } : undefined)
+}
+
+async function copyErrorDiagnostic() {
+  const current = error.value
+  if (!current?.diagnostic) return
+  try {
+    await copyPlainText(current.diagnostic)
+    if (error.value === current) current.copyState = 'copied'
+  } catch {
+    if (error.value === current) current.copyState = 'failed'
+  }
+}
+
 async function selectMachine(value: string) {
   if (actionBusy.value || value === machineHostId.value) return
   machineHostId.value = value
-  error.value = ''
+  clearError()
   workspace.value = null
   inventory.value = null
   if (view.value === 'browse') await startBrowsing()
@@ -151,7 +174,7 @@ function backToLauncher() {
   inventory.value = null
   workspaceSearch.value = ''
   sessionSearch.value = ''
-  error.value = ''
+  clearError()
 }
 
 async function startBrowsing(path = machineWorkspaceStart(machine.value)) {
@@ -169,14 +192,14 @@ async function browse(path: string) {
   workspaceLoading.value = true
   workspaceLoadingMore.value = false
   workspaceSearch.value = ''
-  error.value = ''
+  clearError()
   try {
     const page = await currentConnectionCall(app, (context) => listWorkspace(path, context, selectedMachine.hostId))
     if (epoch !== workspaceEpoch || selectedMachine.hostId !== machineHostId.value) return
     workspace.value = page
     workspacePath.value = page.path
   } catch (cause) {
-    if (epoch === workspaceEpoch) error.value = errorMessage(cause)
+    if (epoch === workspaceEpoch) setError(cause, '读取这台机器的目录', 'list_workspace')
   } finally {
     if (epoch === workspaceEpoch) workspaceLoading.value = false
   }
@@ -189,7 +212,7 @@ async function loadMoreWorkspace() {
   if (!selectedMachine?.available || !current || !cursor || workspaceLoadingMore.value) return
   const epoch = ++workspaceEpoch
   workspaceLoadingMore.value = true
-  error.value = ''
+  clearError()
   try {
     const page = await currentConnectionCall(app, (context) => listWorkspace(
       current.path,
@@ -200,7 +223,7 @@ async function loadMoreWorkspace() {
     if (epoch !== workspaceEpoch || selectedMachine.hostId !== machineHostId.value) return
     workspace.value = appendWorkspacePage(current, page)
   } catch (cause) {
-    if (epoch === workspaceEpoch) error.value = errorMessage(cause)
+    if (epoch === workspaceEpoch) setError(cause, '读取更多目录', 'list_workspace')
   } finally {
     if (epoch === workspaceEpoch) workspaceLoadingMore.value = false
   }
@@ -214,7 +237,7 @@ async function loadInventory() {
   inventoryLoading.value = true
   inventory.value = null
   sessionSearch.value = ''
-  error.value = ''
+  clearError()
   try {
     const context = requireConnectionContext(app)
     const result = await currentConnectionCall(app, () => listSessionInventory(context, selectedMachine.hostId, machineWorkspaceStart(selectedMachine)))
@@ -227,7 +250,10 @@ async function loadInventory() {
     }
     inventory.value = result
   } catch (cause) {
-    if (epoch === inventoryEpoch) error.value = errorMessage(cause)
+    const action = selectedMachine.kind === 'main'
+      ? '读取 Main 上保存的 Session 列表'
+      : '读取所选机器上保存的 Session 列表'
+    if (epoch === inventoryEpoch) setError(cause, action, 'session_inventory')
   } finally {
     if (epoch === inventoryEpoch) inventoryLoading.value = false
   }
@@ -238,7 +264,7 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   pending.value = 'create'
-  error.value = ''
+  clearError()
   try {
     const context = requireConnectionContext(app)
     const work = await createWork(path, context, undefined, continuation, machineId)
@@ -257,7 +283,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   pending.value = 'adopt'
-  error.value = ''
+  clearError()
   try {
     const context = requireConnectionContext(app)
     const work = await adoptSession(sessionToken, context, machineId, undefined, continuation)
@@ -280,11 +306,15 @@ function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind
       trust.value = { ...attempt, operationId, trustChallengeId }
       return
     }
-    error.value = 'Dock 返回的信任确认与当前操作对不上。请重新选择后再试。'
+    error.value = { message: 'Dock 返回的信任确认与当前操作对不上。请重新选择后再试。' }
     return
   }
   if (failure?.outcomeUnknown === true) emit('unknown', cause)
-  error.value = errorMessage(cause)
+  setError(
+    cause,
+    attempt.kind === 'create' ? '创建 Work' : '从保存的 Session 创建 Work',
+    attempt.kind === 'create' ? 'create_work' : 'adopt_session',
+  )
 }
 
 function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecision']) {
@@ -322,7 +352,12 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 
     <div v-if="machinesLoading && !machines.length" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取可用机器…</div>
     <div v-else-if="machineError || (!machine && !machinesLoading)" class="alu-dialog-error">{{ machineError || '当前没有可用于创建 Work 的机器。' }}</div>
-    <div v-if="error" class="alu-dialog-error">{{ error }}</div>
+    <div v-if="error" class="alu-dialog-error">
+      <span>{{ error.message }}</span>
+      <button v-if="error.diagnostic" type="button" @click="copyErrorDiagnostic">
+        {{ error.copyState === 'copied' ? '诊断信息已复制' : error.copyState === 'failed' ? '复制失败，请重试' : '复制诊断信息' }}
+      </button>
+    </div>
     <div v-if="pending" class="alu-dialog-pending"><span class="alu-agent-activity-spinner" />{{ pending === 'adopt' ? '正在创建新的 Work…' : '正在创建 Work…' }}</div>
 
     <template v-if="machine">

@@ -1693,17 +1693,24 @@ impl From<ClientError> for CommandError {
                 outcome_unknown: false,
                 operation_id: None,
             },
-            ClientError::Protocol(message) => Self {
+            ClientError::Protocol(reason) => Self {
                 code: "protocol_error".into(),
-                message,
-                details: None,
+                message: "收到的数据无法识别。请刷新当前内容后重试。".into(),
+                details: Some(serde_json::json!({ "reason": reason })),
                 outcome_unknown: false,
                 operation_id: None,
             },
-            ClientError::Json(_) | ClientError::Crypto(_) => Self {
+            ClientError::Json(error) => Self {
                 code: "client_error".into(),
-                message: "收到的数据有问题，刚才的更改未生效。请刷新状态后重试。".into(),
-                details: None,
+                message: "客户端无法完成数据处理。请刷新当前内容后重试。".into(),
+                details: Some(serde_json::json!({ "reason": error.to_string() })),
+                outcome_unknown: false,
+                operation_id: None,
+            },
+            ClientError::Crypto(reason) => Self {
+                code: "client_error".into(),
+                message: "客户端无法完成数据处理。请刷新当前内容后重试。".into(),
+                details: Some(serde_json::json!({ "reason": reason })),
                 outcome_unknown: false,
                 operation_id: None,
             },
@@ -7851,6 +7858,24 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn command_errors_keep_safe_decoding_reason_for_diagnostics() {
+        let parsing_error = serde_json::from_str::<Value>("{").unwrap_err();
+        let command_error = CommandError::from(ClientError::Json(parsing_error));
+        let serialized = serde_json::to_value(&command_error).unwrap();
+        let reason = serialized["details"]["reason"].as_str().unwrap();
+
+        assert_eq!(serialized["code"], "client_error");
+        assert!(reason.contains("EOF"));
+        assert!(!command_error.message.contains(reason));
+
+        let protocol_error = CommandError::from(ClientError::Protocol("missing version".into()));
+        assert_eq!(
+            protocol_error.details,
+            Some(serde_json::json!({ "reason": "missing version" }))
+        );
+    }
 
     #[test]
     fn command_projection_keeps_owner_path_behind_an_opaque_reference() {

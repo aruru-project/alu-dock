@@ -19,10 +19,34 @@ const SAFE_ERROR_CODES = new Set([
   'workspace_save_failed',
 ])
 
+export interface UserErrorPresentation {
+  message: string
+  diagnostic?: string
+}
+
+interface DiagnosticContext {
+  action: string
+  request: string
+}
+
+function errorCode(cause: unknown): string {
+  return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
+}
+
+function decodingReason(cause: unknown): string {
+  if (!cause || typeof cause !== 'object') return ''
+  if ('details' in cause && cause.details && typeof cause.details === 'object' && 'reason' in cause.details) {
+    const reason = String(cause.details.reason || '').trim()
+    if (reason) return reason
+  }
+  return 'message' in cause ? String(cause.message || '').trim() : ''
+}
+
 export function userErrorMessage(cause: unknown, fallback = '操作没有完成。请刷新状态后重试。') {
   if (cause && typeof cause === 'object') {
-    const code = 'code' in cause ? String(cause.code || '') : ''
-    if (code === 'protocol_error' || code === 'client_error') return '收到的数据有问题，刚才的更改未生效。请刷新状态后重试。'
+    const code = errorCode(cause)
+    if (code === 'protocol_error') return '收到的数据无法识别。请刷新当前内容后重试。'
+    if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '还无法确认刚才的操作是否完成。请刷新状态后确认，不要重复提交。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
     if (code === 'invalid_tree_target') return '这个节点已不在当前 Session 中。请重新打开 Session Tree 后再选择。'
@@ -34,4 +58,30 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     return fallback
   }
   return fallback
+}
+
+export function userErrorPresentation(
+  cause: unknown,
+  fallback?: string,
+  diagnosticContext?: DiagnosticContext,
+): UserErrorPresentation {
+  const code = errorCode(cause)
+  if (!diagnosticContext || (code !== 'protocol_error' && code !== 'client_error')) {
+    return { message: userErrorMessage(cause, fallback) }
+  }
+
+  const message = code === 'protocol_error'
+    ? `${diagnosticContext.action}时，收到的数据无法识别。请重试。`
+    : `${diagnosticContext.action}时，客户端无法完成数据处理。请重试。`
+  const reason = decodingReason(cause)
+  if (!reason) return { message }
+  return {
+    message,
+    diagnostic: [
+      `操作：${diagnosticContext.action}`,
+      `请求：${diagnosticContext.request}`,
+      `错误代码：${code}`,
+      `原因：${reason}`,
+    ].join('\n'),
+  }
 }
