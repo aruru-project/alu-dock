@@ -134,6 +134,7 @@ import NewWorkDialog from './components/NewWorkDialog.vue'
 import MessageTextDialog from './components/MessageTextDialog.vue'
 import LocalConnectionCard from './components/LocalConnectionCard.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
+import dockIconUrl from '../../../assets/icon.svg'
 import { useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
 import { useCommandConsoleStore } from './stores/command-console'
@@ -3303,7 +3304,7 @@ async function toggleAllToolDetails() {
   <div class="alu-client-shell" :class="{ 'alu-compact-mode': !detailMode }">
     <nav class="alu-navbar select-none">
       <div class="alu-navbar-left">
-        <img src="./assets/console_icon_small.png" class="alu-navbar-avatar session-dot" alt="AluDock" />
+        <img :src="dockIconUrl" class="alu-navbar-avatar session-dot" alt="Alu Dock" />
         <button type="button" class="alu-navbar-breadcrumb" title="查看项目状态" aria-label="查看项目状态" :disabled="!selected" @click="openControlCenter('resources')">
           <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
           <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>
@@ -3384,7 +3385,7 @@ async function toggleAllToolDetails() {
 
       <div v-else-if="app.needsPairing" class="pairing-onboarding">
         <div class="pairing-intro">
-          <img src="./assets/new_logo_small.png" alt="AluDock" />
+          <img :src="dockIconUrl" alt="Alu Dock" />
           <div><span class="eyebrow">WELCOME TO ALUDOCK</span><h1>连接你的 AluDock</h1><p>连接这台设备上的 AluDock，或通过配对连接其他电脑。</p></div>
         </div>
         <div class="pairing-layout">
@@ -3453,7 +3454,7 @@ async function toggleAllToolDetails() {
       </div>
 
       <div v-else-if="!selected" class="alu-welcome">
-        <img src="./assets/new_logo_small.png" alt="AluDock" />
+        <img :src="dockIconUrl" alt="Alu Dock" />
         <div class="alu-welcome-text">{{ app.works.length ? '请从工作列表选择一个 Work' : '没有可用的 Work' }}</div>
       </div>
 
@@ -3473,12 +3474,12 @@ async function toggleAllToolDetails() {
       </div>
 
       <div v-else-if="conversationLoading && !conversationState" class="alu-welcome" aria-live="polite">
-        <img src="./assets/new_logo_small.png" alt="AluDock" />
+        <img :src="dockIconUrl" alt="Alu Dock" />
         <div class="alu-welcome-text">正在连接 {{ selected.displayName }}…</div>
       </div>
 
       <div v-else-if="conversationError && !conversationState" class="alu-welcome alu-welcome-error">
-        <img src="./assets/new_logo_small.png" alt="AluDock" />
+        <img :src="dockIconUrl" alt="Alu Dock" />
         <div class="alu-welcome-text">对话暂时没有载入。当前 Work 继续运行。</div>
         <button v-if="selected" class="ui-dialog-btn" @click="loadSelectedConversation(selected.id)">重新载入</button>
       </div>
@@ -3507,7 +3508,7 @@ async function toggleAllToolDetails() {
       />
 
       <div v-else class="alu-welcome">
-        <img src="./assets/new_logo_small.png" alt="AluDock" />
+        <img :src="dockIconUrl" alt="Alu Dock" />
         <div class="alu-welcome-text">「{{ selected.name || 'New session' }}」准备好了。</div>
       </div>
     </main>
@@ -3593,7 +3594,7 @@ async function toggleAllToolDetails() {
     <button class="alu-sidebar-overlay" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :tabindex="app.workDrawerOpen ? 0 : -1" aria-label="关闭工作列表" @click="app.workDrawerOpen = false" />
     <aside class="alu-sidebar" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :inert="!app.workDrawerOpen || undefined" aria-label="工作列表">
       <div class="alu-sidebar-head">
-        <img src="./assets/console_icon_small.png" class="alu-sidebar-avatar" alt="AluDock" />
+        <img :src="dockIconUrl" class="alu-sidebar-avatar" alt="Alu Dock" />
         <div class="alu-sidebar-title">AluDock Client</div>
         <button class="alu-sidebar-refresh" title="刷新" :disabled="contextTransitionBusy" @click="refreshWorkDrawer">↻</button>
         <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
@@ -3621,7 +3622,7 @@ async function toggleAllToolDetails() {
         <span aria-hidden="true">›</span>
       </button>
       <button class="alu-sidebar-settings-entry" aria-label="Host 与配对设置" @click="openHostSettings">
-        <img src="./assets/aludock-icon.png" alt="" />
+        <img :src="dockIconUrl" alt="" />
         <span><strong>{{ app.localSelected ? '本机 AluDock' : app.activeHost?.displayName || '连接 AluDock' }}</strong><small>{{ connectionLabel }}</small></span>
         <span aria-hidden="true">⚙</span>
       </button>
@@ -3726,7 +3727,7 @@ async function toggleAllToolDetails() {
             @view="newWorkCompact = $event === 'launcher'"
           />
           <header v-if="hostSettingsOpen" class="host-settings-header">
-            <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">连接设置</h2><p>本机或 Host · 版本 {{ appBuildIdentity }}</p></div></div>
+            <div class="host-settings-heading"><img :src="dockIconUrl" alt="" /><div><h2 id="host-settings-title">连接设置</h2><p>本机或 Host · 版本 {{ appBuildIdentity }}</p></div></div>
             <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
           </header>
           <div v-if="hostSettingsOpen" class="host-settings-panel">

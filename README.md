@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/icon.svg" width="160" alt="Alu Dock">
+</p>
+
 # Alu Dock
 
 Alu Dock 是本机单用户的 Agent 运行与控制主体。长期 Host Service 持有 Work 与 Worker 生命周期；官方 Desktop/Android Client、Hub/Work TUI 和自定义 Client 都通过 Protocol V2 进入同一份工作。客户端离开后，Agent 继续运行，之后可以从任一入口重新接入。

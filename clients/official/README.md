@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./src/assets/aludock-icon.png" width="120" alt="AluDock">
+  <img src="../../assets/icon.svg" width="120" alt="Alu Dock">
 </p>
 
 <h1 align="center">Alu Dock Official Client</h1>
@@ -32,6 +32,16 @@ npm run client:dev         # 浏览器设计预览
 corepack pnpm install --frozen-lockfile
 corepack pnpm tauri dev
 corepack pnpm tauri build --no-bundle --ci
+```
+
+Web UI 与文档直接使用根目录的 `assets/icon.svg`。从同一个 SVG 重建 Desktop、移动端图标，并同步 Tauri Android 工程实际消费的资源：
+
+```bash
+icon_output="$(mktemp -d)"
+corepack pnpm tauri icon ../../assets/icon.svg --output "$icon_output"
+cp -R "$icon_output"/. src-tauri/icons/
+cp -R "$icon_output"/android/. src-tauri/gen/android/app/src/main/res/
+rm -rf "$icon_output"
 ```
 
 `corepack pnpm dev` 只启动浏览器设计预览，不具备 Tauri native bridge，因此不能用来证明本机 socket、文件系统或其他原生能力。根 `client:test` / `client:build` 也只覆盖前端；Rust core 与 Tauri host 的完整 gates 见下文「验证入口」。
