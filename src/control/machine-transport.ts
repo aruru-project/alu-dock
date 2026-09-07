@@ -1254,7 +1254,7 @@ export class SubHostMachineConnection {
     this.record = await this.options.state.load();
     if (!this.record) throw new Error("SubHost has not been prepared with a join file");
     this.stopped = false;
-    await this.notifyConnectionChanged(false);
+    this.notifyConnectionChanged(false);
     this.inventoryTimer = setInterval(() => this.maintenanceTick(), INVENTORY_INTERVAL_MS);
     void this.connectOnce().catch(() => {});
   }
@@ -1267,7 +1267,7 @@ export class SubHostMachineConnection {
     this.inventoryTimer = undefined;
     this.maintenanceSocket = undefined;
     this.ready = false;
-    await this.notifyConnectionChanged(false);
+    this.notifyConnectionChanged(false);
     this.socket?.destroy();
     this.socket = undefined;
     for (const stream of this.streams.values()) stream.socket.remoteClose();
@@ -1353,7 +1353,7 @@ export class SubHostMachineConnection {
             ready = true;
             this.ready = true;
             this.lastMainRecordAt = Date.now();
-            await this.notifyConnectionChanged(true);
+            this.notifyConnectionChanged(true);
             if (record.joinToken) {
               record.joinToken = undefined;
               await this.options.state.markJoined();
@@ -1370,7 +1370,7 @@ export class SubHostMachineConnection {
       this.socket = undefined;
       this.ready = false;
       if (this.maintenanceSocket === socket) this.maintenanceSocket = undefined;
-      void this.notifyConnectionChanged(false);
+      this.notifyConnectionChanged(false);
       for (const stream of this.streams.values()) stream.socket.remoteClose();
       this.streams.clear();
       for (const pending of this.toolRequests.values()) pending.reject(new Error("Main went offline before the Dock tool completed"));
@@ -1397,8 +1397,9 @@ export class SubHostMachineConnection {
     });
   }
 
-  private async notifyConnectionChanged(connected: boolean): Promise<void> {
-    await this.options.onConnectionChanged?.(connected);
+  private notifyConnectionChanged(connected: boolean): void {
+    try { void Promise.resolve(this.options.onConnectionChanged?.(connected)).catch(() => {}); }
+    catch {}
   }
 
   private async consumeSubHostRecord(socket: TLSSocket, record: MachineWireRecord): Promise<void> {

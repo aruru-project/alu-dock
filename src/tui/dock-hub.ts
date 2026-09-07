@@ -209,7 +209,9 @@ export async function runSubHostHub(
           ]);
           return {
             data: { settings, status },
-            subtitle: notice ?? (status.connected ? "Connected to Main" : "Main is unavailable"),
+            subtitle: notice ?? (status.updatedAt
+              ? `Last recorded observation (${humanRelativeTime(status.updatedAt)}): ${status.connected ? "connected to Main" : "Main connection unavailable"}`
+              : "No Main connection observation has been recorded"),
             entries: [
               { value: "connection", label: "Main connection", description: settings.subhost ? `${terminalSafe(settings.subhost.mainAddress)} · Port ${settings.subhost.port}` : "Connection settings are missing" },
               { value: "pi", label: "Pi", description: "Models and provider access on this computer" },

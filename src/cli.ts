@@ -17,7 +17,7 @@ import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import { WorkerIncidentStore, workerIncidentStoreRoot } from "./control/worker-incident-store.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
-import { MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
+import { MachineSettingsState, SubHostStatusReporter, machineSettingsStateRoot, machineStatePersistenceDiagnostic } from "./control/machine-settings-state.js";
 import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection } from "./control/machine-transport.js";
 import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./control/main-machine-dock-tools.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
@@ -254,7 +254,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   let registry!: DockRegistry;
   let host!: DockHost;
   let upstream: SubHostMachineConnection | undefined;
-  let subHostStatus: { state: MachineSettingsState; hostEpoch: string } | undefined;
+  let subHostStatus: { state: MachineSettingsState; hostEpoch: string; reporter: SubHostStatusReporter } | undefined;
 
   if (options.role === "subhost") {
     const subHostEpoch = randomUUID();
@@ -262,13 +262,20 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     const machinePort = options.machinePort as number;
     const machineName = options.machineName as string;
     const settingsState = machineSettingsState as MachineSettingsState;
-    subHostStatus = { state: settingsState, hostEpoch: subHostEpoch };
-    await settingsState.writeSubHostStatus({ hostEpoch: subHostEpoch, connected: false });
     const subState = new SubHostMachineState(machineStateRoot(catalogPath as string));
     if (options.joinFile) await subState.prepare(await readMachineJoinFile(options.joinFile), machineName);
     const enrolled = await subState.load();
     if (!enrolled) throw new Error("This computer is not enrolled with a Main. Start it as Main, then choose Use as SubHost in Settings.");
     if (enrolled.machineName !== machineName) await subState.updateMachineName(machineName);
+    const statusReporter = new SubHostStatusReporter({
+      state: settingsState,
+      hostEpoch: subHostEpoch,
+      onError: (error) => {
+        process.stderr.write(`Alu Dock: SubHost connection status could not be saved. Work will keep running and the status will be retried automatically. ${machineStatePersistenceDiagnostic(error)}\n`);
+      },
+    });
+    subHostStatus = { state: settingsState, hostEpoch: subHostEpoch, reporter: statusReporter };
+    statusReporter.update(false);
     const upstreamConnection = new SubHostMachineConnection({
       state: subState,
       address: mainAddress,
@@ -276,7 +283,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       hostEpoch: subHostEpoch,
       snapshots: () => registry.list(),
       acceptProtocolSocket: (socket) => host.acceptProtocolSocket(socket),
-      onConnectionChanged: (connected) => settingsState.writeSubHostStatus({ hostEpoch: subHostEpoch, connected }),
+      onConnectionChanged: (connected) => statusReporter.update(connected),
     });
     upstream = upstreamConnection;
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
@@ -371,7 +378,10 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   try { await upstream?.stop(); await host.stop(); } finally {
     clearTimeout(shutdownTimer);
     await windowsLifecycle?.stop().catch(() => {});
-    if (subHostStatus) await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});
+    if (subHostStatus) {
+      await subHostStatus.reporter.stop();
+      await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});
+    }
   }
   const lateFatal = host.fatalCompletion();
   if (outcome.kind === "signal" && lateFatal) { process.stderr.write(`${JSON.stringify({ kind: "error", error: lateFatal })}\n`); process.exitCode = lateFatal.exitCode; }
@@ -387,6 +397,7 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
   });
   const windowsHostLogPath = layout.windowsHostLogPath;
   if (process.platform === "win32" && !windowsHostLogPath) throw new Error("Alu Dock could not determine where to store Windows Host logs.");
+  const serviceMachineSettings = new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath()));
   const manager = process.platform === "win32"
     ? new WindowsUserHostManager({
       nodePath: process.execPath,
@@ -399,7 +410,6 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       cliPath: resolve(entryPath),
       socketPath,
       subHostProbe: async () => {
-        const serviceMachineSettings = new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath()));
         const status = await serviceMachineSettings.readSubHostStatus();
         if (status.processId !== undefined) {
           return { role: "subhost", processId: status.processId, ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };

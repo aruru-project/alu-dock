@@ -42,6 +42,8 @@ Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 
 
 Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Main 的加密上游连接和本机原生 Registry；它不监听客户端本地 IPC、不启用 Remote Access、不接子节点，也不把远端实例混进本机 Registry。
 
+SubHost 本机状态文件只是由进程写入的最近一次连接观察，Hub 必须连同记录时间展示，不能把它当成 Main 当前可用性的证明；无记录或记录进程已结束时也不推断 Main 是否可用。Main 对机器当前可用性的判断仍以自己的 transport 状态为权威。
+
 SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file 和既有 catalog 字节边界，因此所有 SubHost 不共享一个 16 MiB route 上限。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 不为每个 method 建 proxy，也不创建假的 remote `ManagedInstance`。
 
 InstanceManager 是 Main ID、位置和 instance key 的唯一应用 authority；DockRegistry 仍只管理本机原生 instance。MainMachineController 实现 InstanceManager 注入的私有 persistent remote-directory/transport backend：它保存由 Machine inventory 驱动的 binding、tombstone 与 key reservation，但不接收未分类的客户端请求，也不另做 local/remote 业务路由。Key 没有 placement 含义：Main-local snapshot、持久 route 和正在进行的 ensure reservation 共同参与全局认领，已有 owner 保留 key，后来上报的重复 instance 仍按 Main ID 可见但其 Main snapshot 省略 key，SubHost catalog 不被改写。`instance.get_by_key` 始终全局查询；`instance.ensure` 先全局查询，只有 miss 时可选 `hostId` 才选择第一次创建的位置，省略时创建在 Main 本机。同 key ensure 在 authority 外执行实际本机或机器请求，并在 reservation 释放后统一返回最终 owner。
