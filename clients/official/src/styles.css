@@ -919,7 +919,8 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
   .delivery-tray-footer button { min-height: 44px; }
 }
 
-.ui-dialog-box-composer { height: min(76dvh, 680px); }
+/* The overlay already excludes the keyboard; fit that space instead of moving above it. */
+.ui-dialog-box-composer { height: min(76dvh, 680px); max-height: 100%; }
 .ui-dialog-close { border: 0; background: transparent; }
 
 @media (max-width: 640px) {

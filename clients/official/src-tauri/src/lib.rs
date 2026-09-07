@@ -52,7 +52,9 @@ use tauri::{
     Emitter, Manager,
     ipc::{Channel, InvokeBody, Request, Response},
 };
-use tauri_plugin_dialog::{DialogExt, FilePath};
+#[cfg(not(target_os = "android"))]
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::FilePath;
 use tauri_plugin_fs::{FsExt, OpenOptions as PluginOpenOptions};
 #[cfg(target_os = "windows")]
 use tauri_plugin_notification::NotificationExt;
@@ -4648,6 +4650,20 @@ fn create_delivery_staging_file(path: &PathBuf) -> Result<std::fs::File, Command
     })
 }
 
+#[cfg(target_os = "android")]
+async fn pick_save_destination(
+    app: &tauri::AppHandle,
+    name: &str,
+) -> Result<Option<FilePath>, CommandError> {
+    // The dialog plugin maps Android errors to cancellation; preserve the distinction.
+    android_documents::save_document(app, name)
+        .await
+        .map_err(|_| {
+            deliverable_command_error("deliverable_picker_failed", "无法选择保存位置。请重试。")
+        })
+}
+
+#[cfg(not(target_os = "android"))]
 async fn pick_save_destination(
     app: &tauri::AppHandle,
     name: &str,

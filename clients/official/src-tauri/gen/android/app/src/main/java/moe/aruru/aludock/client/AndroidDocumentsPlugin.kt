@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
+import android.webkit.MimeTypeMap
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
@@ -18,6 +19,11 @@ import app.tauri.plugin.Plugin
 class DocumentUriArgs {
   lateinit var uri: String
   var mediaType: String? = null
+}
+
+@InvokeArg
+class SaveDocumentArgs {
+  lateinit var name: String
 }
 
 @TauriPlugin
@@ -51,6 +57,39 @@ class AndroidDocumentsPlugin(private val activity: Activity) : Plugin(activity) 
     }
     response.put("files", JSArray.from(uris.distinct().toTypedArray()))
     invoke.resolve(response)
+  }
+
+  @Command
+  fun saveDocument(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(SaveDocumentArgs::class.java)
+      val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = MimeTypeMap.getSingleton()
+          .getMimeTypeFromExtension(args.name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
+        putExtra(Intent.EXTRA_TITLE, args.name)
+      }
+      startActivityForResult(invoke, intent, "saveDocumentResult")
+    } catch (_: Exception) {
+      invoke.reject("无法打开保存位置选择器，请重试。")
+    }
+  }
+
+  @ActivityCallback
+  fun saveDocumentResult(invoke: Invoke, result: androidx.activity.result.ActivityResult) {
+    // Only the user's Back/Cancel action is cancellation. Native failures must reach the UI.
+    when (result.resultCode) {
+      Activity.RESULT_CANCELED -> invoke.resolve(JSObject().put("status", "cancelled"))
+      Activity.RESULT_OK -> {
+        val uri = result.data?.data
+        if (uri == null) {
+          invoke.reject("未取得保存位置，请重新选择。")
+        } else {
+          invoke.resolve(JSObject().put("status", "selected").put("file", uri.toString()))
+        }
+      }
+      else -> invoke.reject("无法选择保存位置，请重试。")
+    }
   }
 
   @Command

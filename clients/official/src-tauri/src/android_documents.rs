@@ -16,6 +16,13 @@ struct PickFilesResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+enum SaveDocumentResponse {
+    Cancelled,
+    Selected { file: FilePath },
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenDocumentResponse {
     outcome: String,
@@ -50,6 +57,21 @@ pub async fn pick_recent_files(app: &AppHandle<Wry>) -> Result<Vec<FilePath>, St
         .run_mobile_plugin_async::<PickFilesResponse>("pickRecentFiles", ())
         .await
         .map(|response| response.files)
+        .map_err(|error| error.to_string())
+}
+
+pub async fn save_document(app: &AppHandle<Wry>, name: &str) -> Result<Option<FilePath>, String> {
+    app.state::<AndroidDocuments<Wry>>()
+        .0
+        .run_mobile_plugin_async::<SaveDocumentResponse>(
+            "saveDocument",
+            serde_json::json!({ "name": name }),
+        )
+        .await
+        .map(|response| match response {
+            SaveDocumentResponse::Cancelled => None,
+            SaveDocumentResponse::Selected { file } => Some(file),
+        })
         .map_err(|error| error.to_string())
 }
 
