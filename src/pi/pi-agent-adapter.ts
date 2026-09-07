@@ -14,7 +14,6 @@ import {
   type ExtensionUIContext,
   type PromptOptions,
   SessionManager,
-  buildContextEntries,
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
@@ -837,7 +836,8 @@ export class PiAgentAdapter {
 
   private conversationEntries(binding: Binding = this.requireActive()): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
     const branch = binding.session.sessionManager.getBranch();
-    return buildContextEntries(branch).flatMap((source) => {
+    // History is the full current branch, not Pi's compacted model context.
+    return branch.flatMap((source) => {
       const projected = projectHistoryEntry(source, this.options.attachmentContextKey, this.options.publishedFiles);
       return projected === undefined ? [] : [{ source, projected }];
     });

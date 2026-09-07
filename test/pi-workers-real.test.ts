@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { DockRegistry } from "../src/control/dock-registry.js";
 import { WorkerIncidentStore } from "../src/control/worker-incident-store.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
@@ -239,6 +240,58 @@ test("real Pi Worker projects persisted session entries into canonical conversat
   } finally {
     await instance.disposeUnpublished();
   }
+});
+
+// #261: inspect must find the owner's original requirements after Pi compaction.
+test("dock_inspect reads and pages through user messages from before compaction on the current branch", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-compacted-history-"));
+  const cwd = join(root, "cwd");
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(sessionDir)]);
+  const manager = SessionManager.create(cwd, sessionDir);
+  const original = "Keep the original requirements.";
+  const first = manager.appendMessage({ role: "user", content: original, timestamp: 1 });
+  manager.appendMessage({ role: "user", content: "A different branch", timestamp: 2 });
+  manager.branch(first);
+  const kept = manager.appendMessage({
+    role: "assistant", content: [{ type: "text", text: "Recent progress" }],
+    api: "openai-responses", provider: "fixture", model: "fixture", usage: ZERO_USAGE,
+    stopReason: "stop", timestamp: 3,
+  });
+  manager.appendCompaction("Summary of the original requirements", kept, 100_000);
+  manager.appendMessage({ role: "user", content: "Continue working", timestamp: 4 });
+  const registry = new DockRegistry(async (input) => createPiInstance({
+    ...input, cwd, agentDir, sessionDir,
+    ...(input.key === "target" ? { sessionFile: manager.getSessionFile()! } : {}),
+    projectTrusted: false, tools: [],
+    workerEnvironment: {
+      ...process.env, PI_OFFLINE: "1", HOME: root,
+      XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"),
+      XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), XDG_RUNTIME_DIR: join(root, "run"),
+    },
+  }));
+  context.after(async () => {
+    for (const snapshot of registry.list()) await registry.get(snapshot.id).disposeUnpublished();
+    await rm(root, { recursive: true, force: true });
+  });
+  const source = await registry.create({ operationId: "source", cwd });
+  const ensured = await registry.ensure({ operationId: "target", cwd, key: "target" });
+  const target = registry.get(ensured.instance.id);
+  await registry.configureDockTools(source.id, true, "enable-inspect");
+  const recent = await registry.invokeDockTool(source.id, { type: "inspect", target: "target", types: ["user"], limit: 1 });
+  if (recent.type !== "inspect") assert.fail("expected inspect result");
+  assert.deepEqual(recent.result.conversation?.messages.map((message) => message.text), ["Continue working"]);
+  assert.ok(recent.result.conversation?.hasEarlier, "compaction must not hide earlier user messages");
+  const cursor = recent.result.conversation.nextCursor;
+  assert.ok(cursor);
+  const earlier = await registry.invokeDockTool(source.id, { type: "inspect", target: "target", types: ["user"], limit: 1, cursor });
+  if (earlier.type !== "inspect") assert.fail("expected inspect result");
+  assert.deepEqual(earlier.result.conversation?.messages.map((message) => message.text), [original]);
+  assert.equal(earlier.result.conversation?.hasEarlier, false);
+  const history = await target.getHistoryPage(undefined, 200);
+  assert.deepEqual(history.entries.filter((entry) => entry.source === "user").map((entry) => entry.entryId), [first, manager.getLeafId()]);
+  assert.ok(history.entries.some((entry) => entry.kind === "compaction_summary"));
 });
 
 test("one crashed Worker leaves a saved diagnostic while other work continues", async (context) => {
