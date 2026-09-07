@@ -10,6 +10,8 @@ import {
 } from '../lib/localState'
 import type { AttachmentDto, BootstrapPayload, HostCatalog, HostConnectionProfile, ConnectionContext, MachinePlatform, Work } from '../lib/types'
 import { userErrorMessage as humanError } from '../lib/userError'
+import { draftAfterSubmit } from '../lib/uiBoundaries'
+import { attachmentsAfterSubmit } from '../lib/attachmentDraft'
 
 export const useAppStore = defineStore('app', () => {
   const catalog = ref<HostCatalog | null>(null)
@@ -25,6 +27,10 @@ export const useAppStore = defineStore('app', () => {
   let localStateInitialized = false
   let loadEpoch = 0
   let workCatalogRefreshEpoch = 0
+  let editorRevision = 0
+  const draftRevisions = new Map<string, number>()
+  const attachmentRevisions = new Map<string, number>()
+  const editorKey = (connectionId: string, workId: string, fileId?: string) => JSON.stringify([connectionId, workId, fileId])
 
   const localSelected = computed(() => catalog.value?.activeTarget?.kind === 'local')
   const activeHostId = computed(() => catalog.value?.activeTarget?.kind === 'host'
@@ -316,6 +322,7 @@ export const useAppStore = defineStore('app', () => {
     payload.value.total = Math.max(0, payload.value.total - 1)
     const connection = localUiState.value.connections[context.connectionId]
     if (connection) {
+      invalidateSubmitDraft(context.connectionId, instanceId)
       delete connection.drafts[instanceId]
       delete connection.attachments[instanceId]
       if (connection.selectedWorkId === instanceId) connection.selectedWorkId = null
@@ -339,6 +346,7 @@ export const useAppStore = defineStore('app', () => {
     const workId = selectedWork.value?.id
     const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
     if (!connection || !workId) return
+    if ((connection.drafts[workId] ?? '') !== value) draftRevisions.set(editorKey(connectionId!, workId), ++editorRevision)
     if (value) connection.drafts[workId] = value
     else delete connection.drafts[workId]
     saveLocalState()
@@ -349,10 +357,59 @@ export const useAppStore = defineStore('app', () => {
     const workId = selectedWork.value?.id
     const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
     if (!connection || !workId) return
+    const previous = connection.attachments[workId] ?? []
+    for (const fileId of new Set([...previous, ...value].map((item) => item.fileId))) {
+      if (JSON.stringify(previous.find((item) => item.fileId === fileId)) !== JSON.stringify(value.find((item) => item.fileId === fileId))) {
+        attachmentRevisions.set(editorKey(connectionId!, workId, fileId), ++editorRevision)
+      }
+    }
     // Preserve the complete Queue restore; submit sends these in batches of 32.
     if (value.length) connection.attachments[workId] = value.map((item) => ({ ...item }))
     else delete connection.attachments[workId]
     saveLocalState()
+  }
+
+  function invalidateSubmitDraft(connectionId: string, workId: string) {
+    draftRevisions.set(editorKey(connectionId, workId), ++editorRevision)
+    for (const item of localUiState.value.connections[connectionId]?.attachments[workId] ?? []) {
+      attachmentRevisions.set(editorKey(connectionId, workId, item.fileId), ++editorRevision)
+    }
+  }
+
+  /** Capture editor ownership, including edits away and back to identical content. */
+  function captureSubmitDraft(connectionId: string, workId: string, attachments: AttachmentDto[]) {
+    const key = editorKey(connectionId, workId)
+    return {
+      connectionId, workId,
+      text: localUiState.value.connections[connectionId]?.drafts[workId] ?? '',
+      textRevision: draftRevisions.get(key) ?? 0,
+      attachments: attachments.map((attachment) => ({
+        attachment: { ...attachment },
+        revision: attachmentRevisions.get(editorKey(connectionId, workId, attachment.fileId)) ?? 0,
+      })),
+    }
+  }
+
+  /** A receipt consumes only the original editor items, never the selected editor. */
+  function completeSubmitDraft(captured: ReturnType<typeof captureSubmitDraft>) {
+    const { connectionId, workId } = captured
+    const connection = localUiState.value.connections[connectionId]
+    if (!connection) return []
+    if ((draftRevisions.get(editorKey(connectionId, workId)) ?? 0) === captured.textRevision) {
+      const text = draftAfterSubmit(connection.drafts[workId] ?? '', captured.text, true)
+      if (text) connection.drafts[workId] = text
+      else delete connection.drafts[workId]
+    }
+    const currentAttachments = connection.attachments[workId] ?? []
+    const consumed = currentAttachments.filter((item) => {
+      const original = captured.attachments.find(({ attachment }) => attachment.fileId === item.fileId)
+      return original && (attachmentRevisions.get(editorKey(connectionId, workId, item.fileId)) ?? 0) === original.revision
+    })
+    const retained = attachmentsAfterSubmit(currentAttachments, consumed.map((item) => item.fileId), true)
+    if (retained.length) connection.attachments[workId] = retained
+    else delete connection.attachments[workId]
+    saveLocalState()
+    return consumed
   }
 
   function setDetailMode(value: boolean) {
@@ -379,7 +436,7 @@ export const useAppStore = defineStore('app', () => {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    setCurrentDraft, setCurrentAttachments, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
+    setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

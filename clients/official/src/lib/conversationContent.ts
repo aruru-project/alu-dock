@@ -65,6 +65,8 @@ export function useConversationContent(options: ConversationContentOptions) {
   let projectionFrame = 0
   let fullProjectionState: ConversationBootstrap | null = null
   const pendingToolEvents = new Map<string, { state: ConversationBootstrap; event: ProjectedEvent }>()
+  const pendingTextDeltas = new Map<string, { state: ConversationBootstrap; delta: string }>()
+  const pendingStreamingChanges = new Map<string, { state: ConversationBootstrap; streaming: boolean }>()
   const streamCaches = new WeakMap<ConversationBootstrap, { fold: Map<string, ProjectedEvent>; streaming: Set<string> }>()
   let textTargets = new Map<string, ConversationItem>()
   let toolTargets = new Map<string, ConversationToolPart>()
@@ -83,6 +85,11 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   function rebuildProjection(current: ConversationBootstrap) {
+    // Canonical events already contain every delta, including those awaiting paint.
+    // History hydration / compact-mode rebuilds can also run before the shared frame.
+    for (const [key, pending] of pendingTextDeltas) {
+      if (pending.state === current) pendingTextDeltas.delete(key)
+    }
     const projected = projectConversation(current, { compact: options.compact.value })
     items.value = projected
     textTargets = new Map()
@@ -113,6 +120,8 @@ export function useConversationContent(options: ConversationContentOptions) {
     projectionFrame = 0
     fullProjectionState = null
     pendingToolEvents.clear()
+    pendingTextDeltas.clear()
+    pendingStreamingChanges.clear()
     textTargets.clear()
     toolTargets.clear()
   }
@@ -126,15 +135,32 @@ export function useConversationContent(options: ConversationContentOptions) {
       const toolUpdates = [...pendingToolEvents.values()]
         .filter((pending) => pending.state === current)
         .map((pending) => pending.event)
+      const textUpdates = [...pendingTextDeltas].filter(([, pending]) => pending.state === current)
+      const streamingChanges = [...pendingStreamingChanges].filter(([, pending]) => pending.state === current)
       fullProjectionState = null
       pendingToolEvents.clear()
-      if (!current || (!requiresFullProjection && !toolUpdates.length)) return
-      const snapshot = options.beforeLayoutChange()
+      pendingTextDeltas.clear()
+      pendingStreamingChanges.clear()
+      if (!current || (!requiresFullProjection && !toolUpdates.length && !textUpdates.length && !streamingChanges.length)) return
+      const streaming = streamCache(current).streaming
+      const preserveText = streamingChanges.some(([id, pending]) => !pending.streaming && streaming.has(id))
       const stick = options.isFollowing()
+      // layoutChanged already schedules cancellable following; an anchor is only
+      // needed while reading earlier content, especially at the Markdown transition.
+      const snapshot = stick ? null : options.beforeLayoutChange(preserveText)
+      for (const [id, pending] of streamingChanges) {
+        if (pending.streaming) streaming.add(id)
+        else streaming.delete(id)
+      }
       if (requiresFullProjection || toolUpdates.some((event) => {
         const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
         const target = toolCallId ? toolTargets.get(toolCallId) : undefined
         return !target || !applyLiveToolUpdateToProjection(target, event)
+      }) || textUpdates.some(([key, pending]) => {
+        const target = textTargets.get(key)
+        if (!target || (target.kind !== 'assistant' && target.kind !== 'thinking')) return true
+        target.text += pending.delta
+        return false
       })) rebuildProjection(current)
       else options.layoutChanged()
       void options.afterLayoutChange(snapshot, stick)
@@ -162,13 +188,11 @@ export function useConversationContent(options: ConversationContentOptions) {
       scheduleProjection(current)
       return
     }
-    if (delta) {
-      const snapshot = options.beforeLayoutChange()
-      const stick = options.isFollowing()
-      target.text += delta
-      streamCache(current).streaming.add(target.id)
-      options.layoutChanged()
-      void options.afterLayoutChange(snapshot, stick)
+    if (delta && key) {
+      const pending = pendingTextDeltas.get(key)
+      pendingTextDeltas.set(key, { state: current, delta: `${pending?.state === current ? pending.delta : ''}${delta}` })
+      pendingStreamingChanges.set(target.id, { state: current, streaming: true })
+      requestProjectionFrame()
     }
   }
 
@@ -180,18 +204,18 @@ export function useConversationContent(options: ConversationContentOptions) {
     if (event.eventType === 'message.completed') {
       const messageId = typeof event.data.messageId === 'string' ? event.data.messageId : ''
       if (messageId) {
-        const cache = streamCache(current)
-        const textId = `live-${messageId}`
-        const thinkingId = `live-${messageId}-thinking`
-        const presentationChanged = cache.streaming.has(textId) || cache.streaming.has(thinkingId)
-        const snapshot = presentationChanged ? options.beforeLayoutChange(true) : null
-        const stick = presentationChanged && options.isFollowing()
-        cache.streaming.delete(textId)
-        cache.streaming.delete(thinkingId)
-        if (presentationChanged) void options.afterLayoutChange(snapshot, stick)
+        pendingStreamingChanges.set(`live-${messageId}`, { state: current, streaming: false })
+        pendingStreamingChanges.set(`live-${messageId}-thinking`, { state: current, streaming: false })
+        requestProjectionFrame()
       }
     } else if (event.eventType === 'run.settled') {
-      streamCache(current).streaming.clear()
+      for (const id of streamCache(current).streaming) {
+        pendingStreamingChanges.set(id, { state: current, streaming: false })
+      }
+      for (const [id, pending] of pendingStreamingChanges) {
+        if (pending.state === current) pendingStreamingChanges.set(id, { state: current, streaming: false })
+      }
+      requestProjectionFrame()
     }
     const foldedToolUpdate = foldLiveToolUpdate(current.activeEvents, event)
     if (!foldedToolUpdate) current.activeEvents.push(event)

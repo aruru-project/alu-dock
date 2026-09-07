@@ -80,7 +80,7 @@ import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { useConversationContent } from './lib/conversationContent'
 import { useConversationViewport, type ConversationReadingAnchor } from './lib/conversationViewport'
 import { dockToolsState } from './lib/dockTools'
-import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
+import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import { subhostMachineName } from './lib/machines'
 import {
   DEVICE_NAME_FALLBACK,
@@ -98,7 +98,6 @@ import { editorAfterSessionReplacement } from './lib/sessionEditor'
 import {
   conversationBoundaryKey,
   conversationSwapIsCorrelated,
-  draftAfterSubmit,
   formatContextUsage,
   formatTokenCount,
   FollowActivationCoordinator,
@@ -172,6 +171,8 @@ const conversationViewport = useConversationViewport(output)
 const outputAwayFromBottom = conversationViewport.awayFromBottom
 const composerTextarea = ref<HTMLTextAreaElement | null>(null)
 const composerExpanded = ref(false)
+let composerExpansionRevision = 0
+watch(composerExpanded, () => { composerExpansionRevision += 1 }, { flush: 'sync' })
 const hostMachines = ref<MachineDto[]>([])
 const machineListError = ref('')
 const newWorkMachinesLoading = ref(false)
@@ -200,7 +201,64 @@ let imageAccessSequence = 0
 const conversationLoading = ref(false)
 const conversationError = ref<string | null>(null)
 let historyReloadRequiredWorkId: string | null = null
-const submitting = ref(false)
+type SubmitAttempt = {
+  readonly id: number
+  readonly context: Readonly<ConnectionContext>
+  readonly workId: string
+  readonly ownerHostEpoch: Work['ownerHostEpoch']
+  readonly runtimeGeneration: Work['runtimeGeneration']
+  readonly piSessionId: string
+  state: 'pending' | 'unknown' | 'failed'
+  acknowledged: boolean
+}
+const submitAttempts = ref<Map<string, SubmitAttempt>>(new Map())
+let submitAttemptSequence = 0
+let submitViewRevision = 0
+watch(() => JSON.stringify([
+  conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id),
+  selected.value?.ownerHostEpoch, selected.value?.runtimeGeneration, selected.value?.executor.piSessionId,
+]), () => { submitViewRevision += 1 }, { flush: 'sync' })
+const submitScopeKey = (connectionId: string, workId: string) => JSON.stringify([connectionId, workId])
+function submitWorkMatches(attempt: SubmitAttempt, work: Work | null | undefined): boolean {
+  return !!work && work.id === attempt.workId && work.ownerHostEpoch === attempt.ownerHostEpoch
+    && work.runtimeGeneration === attempt.runtimeGeneration && work.executor.piSessionId === attempt.piSessionId
+}
+const selectedSubmitAttempt = computed(() => {
+  const context = app.connectionContext
+  const work = selected.value
+  const attempt = context && work ? submitAttempts.value.get(submitScopeKey(context.connectionId, work.id)) : undefined
+  return attempt && work?.lifecycle === 'active' && submitWorkMatches(attempt, work) ? attempt : undefined
+})
+const submitting = computed(() => selectedSubmitAttempt.value?.state === 'pending')
+const submitOutcomeUnknown = computed(() => selectedSubmitAttempt.value?.state === 'unknown')
+const submitBlocked = computed(() => submitting.value || (submitOutcomeUnknown.value && !selectedSubmitAttempt.value?.acknowledged))
+const submitAttemptError = computed(() => selectedSubmitAttempt.value?.state === 'unknown'
+  ? '还无法确认消息是否已进入 Queue，内容已保留。请刷新查看；再次发送可能重复。'
+  : selectedSubmitAttempt.value?.state === 'failed' ? '消息没有发送，内容已保留。请检查连接后重试。' : null)
+
+// Work navigation leaves the captured native request alive. A Host selection change
+// can invalidate its router, but does not establish whether the message was accepted.
+watch(() => app.connectionContext, (context) => {
+  for (const attempt of submitAttempts.value.values()) {
+    if (attempt.state === 'pending' && (!context || context.connectionId !== attempt.context.connectionId
+      || context.selectionGeneration !== attempt.context.selectionGeneration)) attempt.state = 'unknown'
+  }
+})
+
+// Retire inaccessible state only from an observed Work list, never from a Host switch's empty projection.
+watch(() => app.works.map((work) => [work.id, work.lifecycle, work.ownerHostEpoch, work.runtimeGeneration, work.executor.piSessionId]), () => {
+  if (!app.payload || app.payload.connectionId !== app.activeConnectionId) return
+  for (const [scope, attempt] of submitAttempts.value) {
+    if (attempt.context.connectionId !== app.payload.connectionId) continue
+    const work = app.works.find((item) => item.id === attempt.workId)
+    if (work?.lifecycle !== 'active' || !submitWorkMatches(attempt, work)) submitAttempts.value.delete(scope)
+  }
+}, { flush: 'sync' })
+
+function allowAnotherSubmit() {
+  const attempt = selectedSubmitAttempt.value
+  if (attempt?.state === 'unknown') attempt.acknowledged = true
+}
 const aborting = ref(false)
 const compactionWorkIds = ref<Set<string>>(new Set())
 const compactionErrors = ref<Record<string, string>>({})
@@ -223,6 +281,7 @@ const downloadHistoryStorage = (() => {
 const downloadHistory = ref(readDownloadHistory(downloadHistoryStorage))
 let deliveryLoadEpoch = 0
 const restoredImageCounts = ref<Record<string, number>>({})
+const restoredImageRevisions = new Map<string, number>()
 const clearingRestoredImages = ref(false)
 const attachmentPicking = ref(false)
 type UploadDraft = SelectedAttachment & { state: 'hashing' | 'uploading' | 'finalizing' | 'error'; progress: number; error?: string; target?: LocalAttachmentUpload }
@@ -406,6 +465,7 @@ const restoredImageCount = computed({
     const workId = selected.value?.id
     if (!context || !workId) return
     const key = restoredImageKey(context, workId)
+    restoredImageRevisions.set(key, (restoredImageRevisions.get(key) ?? 0) + 1)
     const next = { ...restoredImageCounts.value }
     if (value > 0) next[key] = value
     else delete next[key]
@@ -419,7 +479,6 @@ const contextTransitionBusy = computed(() => pairingInProgress.value
   || attachmentPicking.value
   || clearingRestoredImages.value
   || queueRestoring.value
-  || submitting.value
   || aborting.value
   || uploadDrafts.value.some((item) => item.state !== 'error'))
 const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
@@ -488,7 +547,7 @@ const currentCompactionError = computed(() => {
   const workId = selected.value?.id
   return connectionId && workId ? compactionErrors.value[compactionErrorKey(connectionId, workId)] ?? null : null
 })
-const visibleComposerError = computed(() => submissionError.value || currentCompactionError.value)
+const visibleComposerError = computed(() => submitAttemptError.value || submissionError.value || currentCompactionError.value)
 const recoverablePairings = computed(() => app.catalog?.pairingTransactions ?? [])
 
 const windowsAwayLabel = computed(() => ({
@@ -2057,7 +2116,7 @@ async function submit(): Promise<boolean> {
   const capturedAttachments = draftAttachments.value.slice(0, maxMessageAttachments.value).map((item) => ({ ...item }))
   const localCommand = submittedLocalControl(captured)
   if (localCommand) return executeLocalControl(localCommand, captured)
-  if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
+  if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitBlocked.value || mutationOutcomeUnknown.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
   const currentHost = app.connectionContext
   if (!currentHost) return false
   const attachmentTarget = attachmentUploadTarget(work, currentHost)
@@ -2065,37 +2124,80 @@ async function submit(): Promise<boolean> {
     submissionError.value = '附件正在为当前工作重新上传，请稍后再发送。'
     return false
   }
-  submitting.value = true
+  const capturedHost = { ...requireConnectionContext(app) }
+  const workId = work.id
+  const scope = submitScopeKey(capturedHost.connectionId, workId)
+  const id = ++submitAttemptSequence
+  const attempt: SubmitAttempt = {
+    id, context: capturedHost, workId, ownerHostEpoch: work.ownerHostEpoch,
+    runtimeGeneration: work.runtimeGeneration, piSessionId: work.executor.piSessionId,
+    state: 'pending', acknowledged: false,
+  }
+  // Only the latest deliberate send owns this scope; older promises retain their captures, not UI state.
+  submitAttempts.value.set(scope, attempt)
+  const ownedAttempt = () => {
+    const current = submitAttempts.value.get(scope)
+    return current?.id === id ? current : undefined
+  }
+  const originalWorkStillActive = () => {
+    const current = app.works.find((item) => item.id === workId)
+    return current?.lifecycle === 'active' && submitWorkMatches(attempt, current)
+  }
+  const currentWorkMatches = () => app.contextMatches(capturedHost) && originalWorkStillActive()
+  const viewRevision = submitViewRevision
+  const ownsVisibleEditor = () => !!ownedAttempt() && submitViewRevision === viewRevision
+    && currentWorkMatches() && selected.value?.id === workId
+  const capturedEditor = app.captureSubmitDraft(capturedHost.connectionId, workId, capturedAttachments)
+  const imageKey = restoredImageKey(capturedHost, workId)
+  const capturedImages = restoredImageCounts.value[imageKey] ?? 0
+  const capturedImageRevision = restoredImageRevisions.get(imageKey) ?? 0
+  let succeeded = false
   submissionError.value = null
   try {
-    const capturedHost = requireConnectionContext(app)
-    const result = await submitMessage(work.id, captured, capturedAttachments.map((item) => item.fileId), capturedHost)
-    if (!app.contextMatches(capturedHost)) return false
-    app.applyWorkSnapshot(result.instance, capturedHost)
-    draft.value = draftAfterSubmit(draft.value, captured, true)
-    draftAttachments.value = attachmentsAfterSubmit(draftAttachments.value, capturedAttachments.map((item) => item.fileId), true)
-    for (const attachment of capturedAttachments) {
-      const token = attachment.localUpload?.sourceToken
-      if (token) void removeAttachment(work.id, token, capturedHost).catch(() => undefined)
+    const result = await submitMessage(workId, captured, capturedAttachments.map((item) => item.fileId), capturedHost)
+    if (!submitWorkMatches(attempt, result.instance)) throw { outcomeUnknown: true }
+    succeeded = true
+    if (!ownedAttempt()) return false
+    // A correlated receipt can consume unchanged original content even while another Host is selected.
+    // Locally observed removal/session replacement invalidates the store's editor capture.
+    const consumed = app.activeConnectionId !== capturedHost.connectionId || originalWorkStillActive()
+      ? app.completeSubmitDraft(capturedEditor) : []
+    if (currentWorkMatches()) {
+      app.applyWorkSnapshot(result.instance, capturedHost)
+      for (const attachment of consumed) {
+        const token = attachment.localUpload?.sourceToken
+        if (token) void removeAttachment(workId, token, capturedHost).catch(() => undefined)
+      }
+      if ((restoredImageRevisions.get(imageKey) ?? 0) === capturedImageRevision
+        && (restoredImageCounts.value[imageKey] ?? 0) === capturedImages) delete restoredImageCounts.value[imageKey]
     }
-    restoredImageCount.value = 0
-    if (!result.receipt.queued) showAgentActivity(work.id)
-    if (draftAttachments.value.length) showQueueNotice(`已发送一批附件；还有 ${draftAttachments.value.length} 个保留在编辑器中。`)
-    if (!followConnected.value) void loadSelectedConversation(work.id, true)
-    await nextTick()
-    scrollOutputToBottom(true)
+    if (ownsVisibleEditor()) {
+      if (!result.receipt.queued) showAgentActivity(workId)
+      if (draftAttachments.value.length) showQueueNotice(`已发送一批附件；还有 ${draftAttachments.value.length} 个保留在编辑器中。`)
+      if (!followConnected.value) void loadSelectedConversation(workId, true)
+      await nextTick()
+      if (ownsVisibleEditor()) scrollOutputToBottom(true)
+    }
     return true
   } catch (cause) {
-    markUnknownOutcome(cause, 'conversation', work.id)
-    submissionError.value = '消息没有发送，内容已保留。请检查连接后重试。'
+    const owned = ownedAttempt()
+    if (owned) {
+      const failure = cause as { outcomeUnknown?: boolean } | null
+      // Only an explicit native known-failure result establishes non-acceptance.
+      owned.state = failure?.outcomeUnknown === false ? 'failed' : 'unknown'
+    }
     return false
   } finally {
-    submitting.value = false
+    if (succeeded && ownedAttempt()) submitAttempts.value.delete(scope)
   }
 }
 
 async function submitExpanded() {
-  if (await submit()) composerExpanded.value = false
+  const viewRevision = submitViewRevision
+  const expansionRevision = composerExpansionRevision
+  const attemptSequence = submitAttemptSequence
+  if (await submit() && submitViewRevision === viewRevision && composerExpansionRevision === expansionRevision
+    && submitAttemptSequence <= attemptSequence + 1 && !draft.value && !draftAttachments.value.length && !restoredImageCount.value) composerExpanded.value = false
 }
 
 async function executeLocalControl(command: LocalControlCommand, captured: string): Promise<boolean> {
@@ -3052,6 +3154,7 @@ async function resyncSession(snapshot: Work, returnedDraft?: string) {
   const authoritative = applyAuthoritativeWorkSnapshot(snapshot)
   if (selected.value?.id !== authoritative.id) return
   composerResetEpoch += 1
+  if (app.activeConnectionId) app.invalidateSubmitDraft(app.activeConnectionId, authoritative.id)
   const editor = editorAfterSessionReplacement(returnedDraft)
   draft.value = editor.text
   // Queue-owned references belong to the replaced Session. Locally selected files
@@ -3516,7 +3619,7 @@ async function toggleAllToolDetails() {
     <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
       <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
       <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
-        <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><button v-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
+        <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!selectedSubmitAttempt?.acknowledged" @click="allowAnotherSubmit">允许再次发送</button></template><button v-else-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
         <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}</div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
           <span class="alu-queue-title">Queue · {{ selected.pending.total }}</span>
@@ -3543,7 +3646,7 @@ async function toggleAllToolDetails() {
           </div>
           <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
           <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" :disabled="conversationLoading" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
-          <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitting || queueRestoring || attachmentPicking || workMutating || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
+          <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitBlocked || queueRestoring || attachmentPicking || workMutating || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
         </form>
       </ExtensionUiSurface>
 
@@ -3658,8 +3761,8 @@ async function toggleAllToolDetails() {
           <textarea v-model="draft" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" title="Ctrl+J 换行" aria-keyshortcuts="Control+J" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event, true)" />
           <footer class="ui-dialog-actions ui-dialog-composer-footer">
             <span class="ui-dialog-composer-attachments">{{ draftAttachments.length + restoredImageCount ? `已附加 ${draftAttachments.length + restoredImageCount} 个文件` : '未附加文件' }}</span>
-            <span v-if="submissionError" class="ui-dialog-composer-status">未发送，内容已保留。</span>
-            <button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="submitting || (!draft.trim() && !draftAttachments.length && !restoredImageCount)" @click="submitExpanded">{{ submitting ? '发送中…' : '发送' }}</button>
+            <span v-if="visibleComposerError" class="ui-dialog-composer-status">{{ visibleComposerError }}</span>
+            <button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="submitBlocked || (!draft.trim() && !draftAttachments.length && !restoredImageCount)" @click="submitExpanded">{{ submitting ? '发送中…' : '发送' }}</button>
           </footer>
         </section>
       </div>
