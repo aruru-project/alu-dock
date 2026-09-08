@@ -6,11 +6,7 @@ import type { AgentWorkerState } from "../src/core/agent-worker.js";
 import { projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
 import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerFrame } from "../src/pi/worker-protocol.js";
 
-// #265, 2026-09-08: a 5,767-character Cloudflare 520 page caused Dock to
-// terminate a real Worker while Pi was reporting an ordinary upstream retry.
-// Synthetic HTML keeps the shape/approximate size without the user's IP/Ray ID.
-const errorPage = `<html><head><style>${"/* upstream error page styling */\n".repeat(165)}</style></head>
-<body>520: Web server is returning an unknown error</body></html>`;
+import { PROVIDER_ERROR_HTML as errorPage } from "./support/provider-error-fixture.js";
 const state: AgentWorkerState = {
   sessionId: "error-fixture", sessionFile: "/tmp/error-fixture.jsonl",
   isStreaming: false, isCompacting: false,
@@ -28,6 +24,8 @@ async function crossWorkerBoundary(event: AgentSessionEvent) {
     hostEpoch: "error-host", instanceId: "error-work", runtimeGeneration: 1, workerIncarnation: "error-worker",
   }, (frame, callback) => { frames.push(frame); queueMicrotask(() => callback(null)); return true; });
   for (const projected of projectAgentSessionEvents(event)) {
+    // The Worker entry fills checkpoint markers with history; this check concerns error events.
+    if (projected.type === "conversation_checkpoint") continue;
     await sender.sendEnvelope({ kind: "event", event: projected, state: structuredClone(state) });
   }
   const receiver = new WorkerFrameReceiver(() => true);
@@ -48,6 +46,9 @@ test("provider failures remain reportable during retries and final failure", asy
     { name: "an exhausted request reports its long final error", field: "finalError", event: {
       type: "auto_retry_end", success: false, attempt: 3, finalError: errorPage,
     } },
+    { name: "a compaction failure keeps the full diagnostic", field: "errorMessage", event: {
+      type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: false, errorMessage: errorPage,
+    } },
     { name: "a multiline rate-limit error remains readable", field: "errorMessage", event: {
       type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "429 Too Many Requests\nRetry later",
     } },
@@ -56,9 +57,7 @@ test("provider failures remain reportable during retries and final failure", asy
     const events = await crossWorkerBoundary(scenario.event);
     const reported = events.find((event) => event.type === scenario.event.type);
     assert.ok(reported, "the lifecycle error must reach Host handling, not fail transport parsing");
-    const text = reported[scenario.field];
-    assert.ok(typeof text === "string" && text.length > 0,
-      "keep useful failure evidence instead of dropping the error");
-    if (scenario.name.startsWith("a multiline")) assert.equal(reported.errorMessage, "429 Too Many Requests\nRetry later");
+    assert.equal(reported[scenario.field], (scenario.event as unknown as Record<string, unknown>)[scenario.field],
+      "the full diagnostic, including its tail, must survive the boundary");
   });
 });

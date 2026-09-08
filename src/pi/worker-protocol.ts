@@ -15,6 +15,8 @@ import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import {
   parseAttachmentDto,
+  parseAgentErrorText,
+  parseOptionalAgentErrorText,
   parseCommandCompletionsResult,
   parseCommandContentResult,
   parseCommandsResult,
@@ -337,7 +339,7 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       exactKeys(event, ["type"], `Worker ${type} event`); return;
     case "agent_settled":
       exactKeys(event, ["type", "stopReason", "error", "operationId"], "Worker agent-settled event");
-      optionalString(event.stopReason, 128); optionalString(event.error, 2_048); optionalString(event.operationId, 128); return;
+      optionalString(event.stopReason, 128); parseOptionalAgentErrorText(event.error); optionalString(event.operationId, 128); return;
     case "conversation_checkpoint":
       exactKeys(event, ["type", "history"], "Worker conversation checkpoint");
       if (!Array.isArray(event.history) || event.history.length > 100_000) throw new Error("Worker checkpoint history is invalid");
@@ -354,7 +356,7 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       exactKeys(event, ["type", "reason", "aborted", "willRetry", "errorMessage", "operationId"], "Worker compaction-end event");
       oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason");
       if (typeof event.aborted !== "boolean" || typeof event.willRetry !== "boolean") throw new Error("Compaction event flags are invalid");
-      optionalString(event.errorMessage, 2_048); optionalString(event.operationId, 128); return;
+      parseOptionalAgentErrorText(event.errorMessage); optionalString(event.operationId, 128); return;
     case "dock_conversation_frame": {
       exactKeys(event, ["type", "frame"], "Worker conversation-frame event");
       const frame = parseConversationFrame(event.frame, "Worker conversation frame");
@@ -368,10 +370,10 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       exactKeys(event, ["type", "level"], "Worker thinking event"); oneOf(event.level, ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "Thinking level"); return;
     case "auto_retry_start": case "summarization_retry_scheduled":
       exactKeys(event, ["type", "attempt", "maxAttempts", "delayMs", "errorMessage"], `Worker ${type} event`);
-      nonNegativeInteger(event.attempt, "Retry attempt"); nonNegativeInteger(event.maxAttempts, "Retry maximum"); nonNegativeInteger(event.delayMs, "Retry delay"); boundedString(event.errorMessage, 2_048, "Retry error", true); return;
+      nonNegativeInteger(event.attempt, "Retry attempt"); nonNegativeInteger(event.maxAttempts, "Retry maximum"); nonNegativeInteger(event.delayMs, "Retry delay"); parseAgentErrorText(event.errorMessage, "Retry error"); return;
     case "auto_retry_end":
       exactKeys(event, ["type", "success", "attempt", "finalError"], "Worker retry-end event");
-      if (typeof event.success !== "boolean") throw new Error("Retry success flag is invalid"); nonNegativeInteger(event.attempt, "Retry attempt"); optionalString(event.finalError, 2_048); return;
+      if (typeof event.success !== "boolean") throw new Error("Retry success flag is invalid"); nonNegativeInteger(event.attempt, "Retry attempt"); parseOptionalAgentErrorText(event.finalError); return;
     case "summarization_retry_attempt_start":
       exactKeys(event, ["type", "source", "reason"], "Worker summarization-attempt event");
       oneOf(event.source, ["branchSummary", "compaction"], "Summarization source");

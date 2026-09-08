@@ -118,7 +118,7 @@ import {
   compareSourceDtos,
   compareToolDtos,
 } from "../core/config-projection.js";
-import { parseSessionTreeResult, type SessionTreeResult } from "../control/protocol.js";
+import { parseOptionalAgentErrorText, parseSessionTreeResult, type SessionTreeResult } from "../control/protocol.js";
 import { AgentModelNotFoundError, AgentSettingsWriteError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
 import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
@@ -1621,7 +1621,7 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
       reason: source.reason,
       aborted: source.aborted === true,
       willRetry: source.willRetry === true,
-      ...(safeOptionalText(source.errorMessage, 2_048) === undefined ? {} : { errorMessage: safeOptionalText(source.errorMessage, 2_048) }),
+      ...(source.errorMessage === undefined ? {} : { errorMessage: parseOptionalAgentErrorText(source.errorMessage) }),
     };
   }
   return source as AgentEvent;
@@ -1634,7 +1634,7 @@ function projectRuntimeMessage(message: Record<string, unknown>, publishedFiles?
     content: role === "toolResult" ? projectPrivateToolContent(message.content, publishedFiles) : projectPrivateContent(message.content, publishedFiles),
   };
   const stopReason = safeOptionalText(message.stopReason, 128);
-  const errorMessage = safeOptionalText(message.errorMessage, 2_048);
+  const errorMessage = parseOptionalAgentErrorText(message.errorMessage);
   const toolCallId = safeOptionalText(message.toolCallId, 128);
   if (stopReason !== undefined) projected.stopReason = stopReason;
   if (errorMessage !== undefined) projected.errorMessage = errorMessage;
@@ -1913,7 +1913,7 @@ export class PiConversationProjector {
       dockRole = "assistant";
       this.lastAssistantOutcome = {
         ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
-        ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
+        ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
       };
     } else if (role === "user") {
       messageId = this.currentUserMessageId ?? `user-runtime-${++this.messageSequence}`;
@@ -1932,7 +1932,7 @@ export class PiConversationProjector {
       content: userProjection?.content ?? projectDockContent(message.content),
       ...(role !== "user" || (this.currentUserAttachments ?? userProjection?.attachments) === undefined ? {} : { attachments: structuredClone(this.currentUserAttachments ?? userProjection?.attachments) }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
-      ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
+      ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
     } });
     if (role === "assistant") this.currentAssistantMessageId = undefined;
     if (role === "user") { this.currentUserMessageId = undefined; this.currentUserAttachments = undefined; }
@@ -2103,7 +2103,7 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       content: userProjection?.content ?? projectDockContent(message.content, undefined, publishedFiles),
       ...(userProjection?.attachments === undefined ? {} : { attachments: userProjection.attachments }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
-      ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
+      ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
       ...(custom && typeof message.customType === "string" ? { customType: boundedString(message.customType, 256, "custom") } : {}),
       ...(custom && typeof message.display === "boolean" ? { display: message.display } : {}),
       ...projectRecordMetadata(message.details),

@@ -10,6 +10,7 @@ import {
   CatalogEffectUnknownError,
   CatalogWriteError,
   MutationFaultedError,
+  MAX_CATALOG_LAST_ERROR_CHARS,
   type CatalogInstanceRecord,
   type CatalogMutationContext,
   type InstanceCatalogMutationPort,
@@ -2971,7 +2972,7 @@ export class ManagedInstance {
       case "agent_settled": {
         this.lastAssistantOutcome = {
           stopReason: optionalRuntimeString(event.stopReason, 128),
-          errorMessage: optionalRuntimeString(event.error, 2_048),
+          errorMessage: event.error as string | undefined,
         };
         const outcome = this.lastAssistantOutcome;
         const operationId = this.resolveAgentEventOperationId(event);
@@ -2985,7 +2986,8 @@ export class ManagedInstance {
             if (outcome?.stopReason === "error") {
               result = "failed";
               this.state.execution = "failed";
-              this.state.lastError = outcome.errorMessage ?? "Pi run failed";
+              // Catalog status is a preview; events and history retain the full Agent error.
+              this.state.lastError = truncate(outcome.errorMessage || "Pi run failed", MAX_CATALOG_LAST_ERROR_CHARS);
             } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning) {
               result = "aborted";
               this.state.execution = "idle";
@@ -3049,7 +3051,7 @@ export class ManagedInstance {
             attempt: nonNegativeNumber(event.attempt),
             maxAttempts: nonNegativeNumber(event.maxAttempts),
             delayMs: nonNegativeNumber(event.delayMs),
-            error: boundedRuntimeString(event.errorMessage, 2_048, "Unknown retry error"),
+            error: event.errorMessage as string,
           }),
         };
       case "auto_retry_end":
@@ -3060,7 +3062,7 @@ export class ManagedInstance {
           publish: () => void this.appendEvent("run.retry_completed", {
             success: event.success === true,
             attempt: nonNegativeNumber(event.attempt),
-            error: optionalRuntimeString(event.finalError, 2_048),
+            error: event.finalError as string | undefined,
           }),
         };
       case "compaction_start": {
@@ -3098,7 +3100,7 @@ export class ManagedInstance {
               ...(operationId === undefined ? {} : { operationId }),
               aborted: event.aborted === true,
               willRetry: event.willRetry === true,
-              error: optionalRuntimeString(event.errorMessage, 2_048),
+              error: event.errorMessage as string | undefined,
             });
             this.appendStateEvent("compaction_completed");
           },
