@@ -3065,12 +3065,13 @@ async function publishConversationBootstrap(
   preservedAnchor: ConversationReadingAnchor | null,
   preservedAutoFollow: boolean,
 ) {
+  const epoch = conversationLoadEpoch
   app.applyWorkSnapshot(bootstrap.instance, context)
   syncImageDomain(context, bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
   conversationContent.publish(bootstrap)
   if (preservedAnchor && !preservedAutoFollow) await restoreOutputAnchor(preservedAnchor, false)
   else conversationViewport.scrollToBottom()
-  void conversationContent.loadRecentHistory(context, bootstrap, conversationLoadEpoch)
+  void conversationContent.loadRecentHistory(context, epoch)
 }
 
 async function refreshCurrent() {

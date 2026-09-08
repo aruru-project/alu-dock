@@ -60,4 +60,85 @@ assert.deepEqual(
   { type: 'inline', data: '/9j/', mimeType: 'image/jpeg' },
   '清空本地预览后，正式历史内容仍恢复同一张图片',
 )
-console.log('conversation hydration tests passed')
+// 2026-09-08: opening a Work left history permanently loading because the
+// content owner compared Vue's stored proxy with the raw bootstrap from App.
+const { createServer } = await import('vite')
+const { fileURLToPath } = await import('node:url')
+const server = await createServer({
+  root: fileURLToPath(new URL('../', import.meta.url)),
+  configFile: false, server: { middlewareMode: true }, appType: 'custom',
+})
+const previousWindow = globalThis.window
+const replies: Array<unknown> = []
+globalThis.window = {
+  __TAURI_INTERNALS__: { invoke: async (command: string) => {
+    assert.ok(command === 'conversation_history' || command === 'conversation_history_entry')
+    assert.ok(replies.length, 'unexpected native history request')
+    const reply = replies.shift()
+    if (reply instanceof Error) throw reply
+    return reply
+  } },
+} as unknown as Window & typeof globalThis
+try {
+  const { useConversationContent } = await server.ssrLoadModule('/src/lib/conversationContent.ts')
+  const context = { connectionId: 'local', selectionGeneration: 1 }
+  let epoch = 1
+  const initial = (): ConversationBootstrap => ({
+    instance: { id: 'work-1', execution: 'idle', runtimeGeneration: 1 } as Work,
+    records: [preview], activeEvents: [], queue: [],
+    extensionUi: { status: {}, toolsExpanded: false, events: [] },
+    cursor: { hostEpoch: 'epoch-1', instanceId: 'work-1', runtimeGeneration: 1, sequence: 0 },
+    historyRevision: 1, historyTruncated: true,
+  })
+  const page = {
+    records: [preview], incompleteEntryIds: ['entry-1'], revision: 'history-1',
+    hasEarlier: true, nextCursor: 'earlier', instance: initial().instance, hostEpoch: 'epoch-1',
+  }
+  const content = useConversationContent({
+    compact: { value: false }, native: true, getEpoch: () => epoch, getContext: () => context,
+    isCurrent: (_context: unknown, current: ConversationBootstrap, capturedEpoch: number) =>
+      content.state.value === current && epoch === capturedEpoch,
+    reload: () => assert.fail('unexpected conversation reload'),
+    beforeLayoutChange: () => null, afterLayoutChange: async () => {},
+    isFollowing: () => false, layoutChanged: () => {}, projected: () => {},
+  })
+  content.publish(initial())
+  replies.push(new Error('connection failed'))
+  await content.loadRecentHistory(context, epoch)
+  assert.equal(content.historyLoading.value, false, 'failed initial history stops loading')
+  assert.ok(content.historyError.value, 'failed initial history offers a retry instead of silently waiting')
+  replies.push(page, { record: completed, revision: 'history-1', instance: initial().instance, hostEpoch: 'epoch-1' })
+  content.retryHydration()
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(content.historyLoading.value, false, 'successful history stops loading')
+  assert.equal(content.historyError.value, null)
+  assert.equal(content.historyCursor.value, 'earlier', 'the user can now request earlier messages')
+  assert.equal(content.historyHydrating.value, false)
+  assert.deepEqual(content.state.value.records, [completed], 'initial history content can finish loading too')
+
+  replies.push({ ...page, records: [older], incompleteEntryIds: [], hasEarlier: false, nextCursor: undefined })
+  await content.loadEarlierHistory()
+  assert.equal(content.historyLoading.value, false)
+  assert.equal(content.historyTruncated.value, false)
+  assert.deepEqual(content.state.value.records.map((record: ConversationRecord) => record.entryId), ['entry-0', 'entry-1'])
+
+  let finishOldRequest!: (value: unknown) => void
+  replies.push(new Promise(resolve => { finishOldRequest = resolve }))
+  const pending = content.loadRecentHistory(context, epoch)
+  epoch++
+  content.clear()
+  content.publish({ ...initial(), records: [older] })
+  finishOldRequest(page)
+  await pending
+  // App can finish restoring layout after a switch. That old load must not
+  // put the replacement conversation into a loading state it cannot clear.
+  await content.loadRecentHistory(context, epoch - 1)
+  assert.equal(content.historyLoading.value, false)
+  assert.deepEqual(content.state.value.records, [older], 'late old history cannot replace the newly opened conversation')
+  content.dispose()
+} finally {
+  if (previousWindow === undefined) Reflect.deleteProperty(globalThis, 'window')
+  else globalThis.window = previousWindow
+  await server.close()
+}
+console.log('conversation hydration and history loading tests passed')

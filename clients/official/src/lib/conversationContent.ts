@@ -373,8 +373,9 @@ export function useConversationContent(options: ConversationContentOptions) {
     })
   }
 
-  async function loadRecentHistory(context: ConnectionContext, current: ConversationBootstrap, epoch: number) {
-    if (!options.native) return
+  async function loadRecentHistory(context: ConnectionContext, epoch: number) {
+    const current = state.value
+    if (!options.native || !current || !options.isCurrent(context, current, epoch)) return
     historyLoading.value = true
     historyPageError.value = null
     try {
@@ -451,7 +452,7 @@ export function useConversationContent(options: ConversationContentOptions) {
     try {
       const context = options.getContext()
       if (historyCursor.value) void loadEarlierHistory()
-      else void loadRecentHistory(context, current, options.getEpoch())
+      else void loadRecentHistory(context, options.getEpoch())
     } catch {
       historyPageError.value = '对话记录暂时没有读取成功，请重试。'
     }
