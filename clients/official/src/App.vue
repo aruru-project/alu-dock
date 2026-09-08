@@ -3815,7 +3815,7 @@ async function toggleAllToolDetails() {
     </Transition>
 
     <Transition name="fade">
-      <div v-if="directoryOpen || hostSettingsOpen" :class="directoryOpen ? 'ui-dialog-overlay' : 'modal-layer'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+      <div v-if="directoryOpen || hostSettingsOpen" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
         <section ref="modalSurface" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide', { 'ui-dialog-size-auto': newWorkCompact }] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'" @wheel="handleModalWheel">
           <NewWorkDialog
             v-if="directoryOpen"
