@@ -304,6 +304,40 @@ test("an inventory larger than the old machine line crosses real TLS in ordered 
   assert.equal(reconciled.at(-1)?.cwd, snapshots.at(-1)?.cwd);
 });
 
+test("SubHost stays connected and publishes startup recovery results together", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-recovery-batch-"));
+  const listener = createServer();
+  await new Promise<void>((resolve) => listener.listen(0, "::1", resolve));
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise<void>((resolve) => listener.close(() => resolve()));
+  const mainState = new MainMachineState(join(root, "main"));
+  const subState = new SubHostMachineState(join(root, "sub"));
+  await subState.prepare(await mainState.createJoin(), "Recovering SubHost");
+  let release!: () => void;
+  const recovery = new Promise<void>((resolve) => { release = resolve; });
+  const snapshots: InstanceSnapshot[] = [];
+  const controller = new MainMachineController({ state: mainState, settingsState: await enabledListener(root, port),
+    bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const upstream = new SubHostMachineConnection({ state: subState, address: "::1", port, hostEpoch: "subhost-epoch",
+    snapshots: () => snapshots, acceptProtocolSocket: (socket) => socket.destroy() });
+  context.after(async () => { release(); await upstream.stop(); await controller.stop(); await rm(root, { recursive: true, force: true }); });
+  await controller.start();
+  await upstream.start(recovery);
+  for (let attempt = 0; attempt < 400 && !upstream.connected(); attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(upstream.connected(), true);
+  snapshots.push(snapshot("restored-first"));
+  // Let normal maintenance run while the second restore is still outstanding.
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(upstream.connected(), true);
+  assert.deepEqual(controller.currentSnapshots(), [], "an unfinished batch must not publish per-instance inventory updates");
+  snapshots.push(snapshot("restored-second"));
+  release();
+  for (let attempt = 0; attempt < 400 && controller.currentSnapshots().length !== 2; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(controller.currentSnapshots().map((item) => item.displayName).sort(), ["restored-first", "restored-second"]);
+});
+
 test("a SubHost request ending before response leaves a mutation unconfirmed while a read remains retryable", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-interrupted-request-"));
   const portServer = createServer();

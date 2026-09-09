@@ -347,7 +347,8 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   }
 
   await host.start();
-  if (upstream) await upstream.start();
+  const initialRecovery = host.recoverInstancesOnce();
+  if (upstream) await upstream.start(initialRecovery);
   let windowsLifecycle: WindowsHostLifecycleServer | undefined;
   if (process.platform === "win32") {
     windowsLifecycle = new WindowsHostLifecycleServer();

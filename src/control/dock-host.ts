@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import {
@@ -91,6 +91,7 @@ import {
   type ControlEventEnvelope,
   type ControlRequest,
   type ControlResponse,
+  type ReopenResult,
   type FollowResult,
   type InstanceReadResult,
   type HelloError,
@@ -163,6 +164,7 @@ export class DockHost {
   private readonly interactionConnections = new Map<string, Socket>();
   private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
   private readonly inFlightDispatches = new Set<Promise<void>>();
+  private startupRecovery: Promise<void> | undefined;
   private readonly operationLedger: OperationLedger;
   private readonly instanceManager: InstanceManager;
   private readonly faultDrainTimeoutMs: number;
@@ -259,6 +261,32 @@ export class DockHost {
     this.state = "stopping";
     this.stopPromise = this.performStop();
     return this.stopPromise;
+  }
+
+  /** The startup equivalent of clicking reopen once for each local unavailable Work. */
+  recoverInstancesOnce(): Promise<void> {
+    if (this.startupRecovery) return this.startupRecovery;
+    if (this.state !== "running") return Promise.resolve();
+    const candidates = this.registry.list().filter((instance) => instance.reopenable);
+    this.startupRecovery = Promise.all(candidates.map((instance) => {
+      let task!: Promise<void>;
+      task = this.reopenInstance({ instanceId: instance.id, operationId: randomUUID() })
+        .then(() => {}, (error: unknown) => {
+          process.stderr.write(`Alu Dock: 无法恢复 ${instance.displayName}，请手动处理：${error instanceof Error ? error.message : String(error)}\n`);
+        })
+        .finally(() => this.inFlightDispatches.delete(task));
+      // Same ownership as admitted client requests: shutdown waits before disposing Workers.
+      this.inFlightDispatches.add(task);
+      return task;
+    })).then(() => {});
+    return this.startupRecovery;
+  }
+
+  private async reopenInstance(params: Extract<ControlRequest, { type: "instance.reopen" }>["params"]): Promise<ReopenResult> {
+    return this.operationLedger.run(params.operationId, "instance.reopen", params, async () => {
+      const reopened = await this.registry.reopen(params);
+      return { operationId: params.operationId, previousLifecycle: reopened.previousLifecycle, instance: reopened.instance.snapshot() };
+    });
   }
 
   private async performStart(): Promise<void> {
@@ -752,21 +780,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "instance.reopen": {
-        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
-          const reopened = await this.registry.reopen({
-            operationId: request.params.operationId,
-            instanceId: request.params.instanceId,
-            sessionFile: request.params.sessionFile,
-            trustChallengeId: request.params.trustChallengeId,
-            projectTrustDecision: request.params.projectTrustDecision,
-          });
-          return {
-            operationId: request.params.operationId,
-            previousLifecycle: reopened.previousLifecycle,
-            instance: reopened.instance.snapshot(),
-          };
-        });
-        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+        this.sendSuccessAndEnd(socket, request.requestId, await this.reopenInstance(request.params)); return;
       }
       case "interaction.respond": {
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {

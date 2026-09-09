@@ -7,10 +7,13 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { DockClient } from "../src/control/dock-client.js";
+import { DockHost } from "../src/control/dock-host.js";
+import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import { WorkerIncidentStore } from "../src/control/worker-incident-store.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createPiInstance, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
-import { RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
+import { RuntimeEffectUnknownError, type InstanceSnapshot } from "../src/core/managed-instance.js";
 import { PiWorkerProcess } from "../src/pi/worker-process.js";
 import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerIdentity } from "../src/pi/worker-protocol.js";
 
@@ -22,6 +25,87 @@ const ZERO_USAGE = {
   totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+
+test("startup restores local Works concurrently once, leaving failed and stopped Works alone", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-startup-recovery-"));
+  const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
+  await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
+  await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "offline", defaultModel: "fixture" }));
+  await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { offline: {
+    baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "unused-offline-fixture",
+    models: [{ id: "fixture", name: "Offline fixture", reasoning: false, input: ["text"], contextWindow: 32_000, maxTokens: 2_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+  } } }));
+  const files = ["A", "B", "missing", "stopped"].map((name) => {
+    const session = SessionManager.create(cwd, sessionDir);
+    session.appendModelChange("offline", "fixture");
+    session.appendMessage({ role: "user", content: `Saved request ${name}`, timestamp: 1 });
+    session.appendMessage({ role: "assistant", content: [{ type: "text", text: `Saved answer ${name}` }],
+      api: "openai-completions", provider: "offline", model: "fixture", stopReason: "stop", timestamp: 2, usage: ZERO_USAGE });
+    return session.getSessionFile()!;
+  });
+  const environment = { HOME: home, USERPROFILE: home, PATH: process.env.PATH,
+    XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_DATA_HOME: join(home, ".local/share"), XDG_STATE_HOME: join(home, ".local/state"), PI_OFFLINE: "1" };
+  const store = new FileCatalogStore(join(root, "state/catalog.json"));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let allStarting!: () => void;
+  const started = new Promise<void>((resolve) => { allStarting = resolve; });
+  let recovering = false, active = 0, peak = 0, starts = 0;
+  let host: DockHost | undefined;
+  let client: DockClient | undefined;
+  const startHost = async () => {
+    const registry = new DockRegistry(async (input) => {
+      if (recovering) { active++; peak = Math.max(peak, active); if (++starts === 2) allStarting(); }
+      try {
+        const instance = await createPiInstance({ ...input, agentDir, sessionDir, workerEnvironment: environment });
+        if (recovering) await gate;
+        return instance;
+      } finally { if (recovering) active--; }
+    }, undefined, { catalogStore: store, reopenTargetResolver: { resolve: resolvePiReopenTarget } });
+    host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog() });
+    await host.start();
+    client = new DockClient({ socketPath: host.socketPath, timeoutMs: 10_000 });
+  };
+  try {
+    await startHost();
+    const works: InstanceSnapshot[] = [];
+    for (const file of files) works.push((await client!.adopt(file)).instance);
+    await client!.stop(works[3]!.id, "explicit-stop");
+    await host!.stop(); client!.closeActiveConnections();
+    const missing = await readFile(files[2]!, "utf8");
+    await rm(files[2]!);
+    recovering = true;
+    await startHost();
+    const recovery = host!.recoverInstancesOnce();
+    let startupTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([started, new Promise<never>((_resolve, reject) => {
+        startupTimer = setTimeout(() => reject(new Error("the two startup recoveries did not begin")), 5_000);
+      })]);
+    } finally { clearTimeout(startupTimer); }
+    await client!.ping(); // Recovery must not block Host usability.
+    release();
+    await recovery;
+    assert.equal(peak, 2, "independent Worker startups must overlap");
+    for (let index = 0; index < 2; index++) {
+      const restored = await client!.status(works[index]!.id);
+      assert.equal(restored.lifecycle, "active");
+      assert.equal(restored.runtimeGeneration, works[index]!.runtimeGeneration + 1);
+      assert.ok((await client!.history(restored.id)).entries.some((entry) => entry.content.some((block) => block.type === "text" && block.text === `Saved answer ${["A", "B"][index]}`)));
+    }
+    const catalog = (await store.load())!;
+    assert.equal(catalog.instances.filter((record) => record.lifecycle === "active").length, 2);
+    assert.ok(catalog.instances.every((record) => record.id !== works[3]!.id), "explicit Stop remains retired");
+    await writeFile(files[2]!, missing);
+    await host!.recoverInstancesOnce();
+    assert.equal((await client!.status(works[2]!.id)).lifecycle, "host_lost", "fixing a failed target must not cause a second automatic attempt");
+    assert.equal((await client!.reopen(works[2]!.id, "manual-after-fix")).instance.lifecycle, "active");
+  } finally {
+    release(); client?.closeActiveConnections(); await host?.stop(); await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Pi extensions and workspace shells use the same Pi version as their Dock Worker", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-pi-runtime-"));

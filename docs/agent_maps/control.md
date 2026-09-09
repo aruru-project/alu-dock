@@ -166,6 +166,8 @@ Host 对 mutation 负责 admission、operation 去重和结果归属。客户端
 
 显式 stop 先持久化 stopping intent，再清理 Worker；完成提交直接把 instance 从 catalog 退役，同时向调用者和已连接客户端发布最终 stopped 状态。Agent 自己的持久 session 不属于 Dock catalog，stop 不删除它。Host shutdown、Host loss 和可恢复 runtime error 不是显式 stop，必须继续保留 reopen 所需的 catalog 记录。
 
+CLI 启动 Host 完成后，后台对本机 catalog 中可 reopen 的实例各尝试一次，并发复用手动 `instance.reopen` 的同一 operation/Registry 处理及 Host 在途请求收尾；不阻塞启动、不触发模型续跑、失败留给手动处理，明确 Stop 退役的实例不恢复。Main 不触发远端实例恢复。SubHost 同样处理本机实例，初次握手清单与心跳照常；启动恢复期间暂缓常规 inventory 更新，批次成功/失败全部收尾后集中刷新一次，断线重连仍发送当前完整清单。这不是常驻自动重启策略。
+
 Worker 接受副作用前失联和接受后失联是不同结果。Host 必须保留这个区别，不能把可能已经执行的 mutation 当成普通失败重试。
 
 附件上传的 `operationId` 在 header admission 时保留；同一参数的并发、completed 或 response-loss 重试共享 receipt，不重新执行 body effect，不同参数冲突。内容 SHA-256 另提供跨 operation 的永久 bytes 去重，不把 endpoint、文件名或客户端路径当 content identity；清洗后的 name/media type 只参与 logical attachment identity。

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,16 +16,25 @@ import { PROVIDER_ERROR_HTML } from "./support/provider-error-fixture.js";
 
 // #265: a recoverable upstream HTML error was escalated to Worker SIGTERM.
 // Only the HTTP peer is a fixture; Host, catalog, Worker, Pi retry and client parsing are real.
-test("upstream errors can retry or fail while the same Work and its sibling remain usable", { timeout: 30_000 }, async () => {
+test("upstream errors remain local and /retry repeats the failed request without replaying tools",  { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-provider-error-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const rateLimitError = `429 Too Many Requests\n${PROVIDER_ERROR_HTML}`;
-  const replies = [520, 200, 429, 429, 200, 200];
+  const replies = ["tool", 520, 200, 429, 429, 200, 200];
+  const requests: Array<{ messages: unknown[] }> = [];
   let requestIndex = 0;
   const server = createServer(async (request, response) => {
-    for await (const _chunk of request) { /* Consume the real SDK request before responding. */ }
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.from(chunk));
+    requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
     const status = replies[requestIndex++];
-    if (status === 520 || status === 429) {
+    if (status === "tool") {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      sendChunk(response, { role: "assistant", tool_calls: [{ index: 0, id: "write-once", type: "function",
+        function: { name: "bash", arguments: JSON.stringify({ command: "printf once >> retry-once.txt" }) } }] }, null);
+      sendChunk(response, {}, "tool_calls");
+      response.end("data: [DONE]\n\n");
+    } else if (status === 520 || status === 429) {
       response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
       response.end(status === 520 ? PROVIDER_ERROR_HTML : rateLimitError);
     } else if (status === 200) {
@@ -94,8 +103,13 @@ test("upstream errors can retry or fail while the same Work and its sibling rema
     assert.equal(catalogWork?.lastRun, "failed");
     assert.ok(catalogWork?.lastError, "the bounded status preview must still persist successfully");
 
-    await client.prompt(work.id, "Continue working.", "prompt", "next-run");
-    assert.equal((await waitForSettlement(events, "next-run")).data.result, "succeeded");
+    await client.prompt(work.id, "/retry", "prompt", "manual-retry");
+    assert.equal((await waitForSettlement(events, "manual-retry")).data.result, "succeeded");
+    assert.deepEqual(requests[5]!.messages, requests[3]!.messages, "manual retry must reuse the failed model context without an extra instruction");
+    assert.equal(await readFile(join(cwd, "retry-once.txt"), "utf8"), "once", "completed tool side effects must not be replayed");
+    const retriedHistory = await client.history(work.id);
+    assert.deepEqual(retriedHistory.entries.filter((entry) => entry.source === "user").map((entry) => entry.content),
+      history.entries.filter((entry) => entry.source === "user").map((entry) => entry.content), "the command must not add a user chat message");
     const siblingEvents: DockEvent[] = [];
     const siblingFollower = await client.streamEvents(sibling.id, { onEvent: (event) => siblingEvents.push(event) });
     try {

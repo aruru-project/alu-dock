@@ -124,6 +124,7 @@ import { configurePiNetwork } from "./configure-pi-network.js";
 import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
+import { retryExtension } from "./retry-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
 import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension, SHOW_IMAGE_UNAVAILABLE_MESSAGE } from "./show-image-extension.js";
 import {
@@ -2881,6 +2882,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       resourceLoaderOptions: {
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
+          { name: "alu-dock-retry", factory: retryExtension },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),

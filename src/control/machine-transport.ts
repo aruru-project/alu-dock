@@ -1235,6 +1235,7 @@ export class SubHostMachineConnection {
   private readonly observationSinks = new Map<string, ObservationDeliverySink>();
   private record: SubHostUpstreamRecord | undefined;
   private lastInventory = "";
+  private initialRecovery: Promise<void> | undefined;
   private lastMainRecordAt = 0;
   private connecting = false;
   private maintenanceSocket: TLSSocket | undefined;
@@ -1249,11 +1250,20 @@ export class SubHostMachineConnection {
     onConnectionChanged?: (connected: boolean) => void | Promise<void>;
   }) {}
 
-  async start(): Promise<void> {
+  async start(initialRecovery?: Promise<void>): Promise<void> {
     if (!this.stopped) return;
     this.record = await this.options.state.load();
     if (!this.record) throw new Error("SubHost has not been prepared with a join file");
     this.stopped = false;
+    this.initialRecovery = initialRecovery;
+    if (initialRecovery) {
+      const release = (): void => {
+        if (this.initialRecovery !== initialRecovery) return;
+        this.initialRecovery = undefined;
+        this.maintenanceTick();
+      };
+      void initialRecovery.then(release, release);
+    }
     this.notifyConnectionChanged(false);
     this.inventoryTimer = setInterval(() => this.maintenanceTick(), INVENTORY_INTERVAL_MS);
     void this.connectOnce().catch(() => {});
@@ -1261,6 +1271,7 @@ export class SubHostMachineConnection {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.initialRecovery = undefined;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.inventoryTimer) clearInterval(this.inventoryTimer);
     this.reconnectTimer = undefined;
@@ -1358,6 +1369,8 @@ export class SubHostMachineConnection {
               record.joinToken = undefined;
               await this.options.state.markJoined();
             }
+            // A recovery batch can settle while the initial inventory is in flight.
+            this.maintenanceTick();
             continue;
           }
           await this.consumeSubHostRecord(socket, machineRecord);
@@ -1522,6 +1535,8 @@ export class SubHostMachineConnection {
   }
 
   private async sendInventoryIfChanged(socket: TLSSocket): Promise<void> {
+    // Initial handshake and heartbeats stay live; publish recovery results as one batch.
+    if (this.initialRecovery) return;
     if (!this.ready || this.socket !== socket || socket.destroyed) return;
     const serialized = serializeInventory(await this.options.snapshots());
     if (!this.ready || this.socket !== socket || socket.destroyed || serialized === this.lastInventory) return;
