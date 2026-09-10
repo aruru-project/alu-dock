@@ -71,12 +71,11 @@ const releaseName = `AluDock-${version}-windows-x86_64`;
 const defaultOutputDirectory = join(clientRoot, "dist");
 const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
 const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}-Setup.exe`);
-// Tauri resource maps resolve from src-tauri. Keep staging on that volume so
-// the map can use a relative path instead of a Windows drive-qualified glob.
-const stagingRoot = join(clientRoot, "src-tauri", "target");
-mkdirSync(stagingRoot, { recursive: true });
-const temporary = mkdtempSync(join(stagingRoot, "aludock-windows-package-"));
-const releaseRoot = join(temporary, releaseName);
+// Keep resource paths on the backend volume and short enough for makensis.
+// Product/version identity belongs in the manifest and outer artifact name,
+// not in every deeply nested dependency's temporary source path.
+const temporary = mkdtempSync(join(projectRoot, ".aluw-"));
+const releaseRoot = join(temporary, "r");
 
 try {
   mkdirSync(releaseRoot, { recursive: true });
@@ -120,9 +119,9 @@ try {
   rmSync(output, { force: true });
   const components = output.replace(/-Setup\.exe$/iu, "-components.zip");
   if (components === output) throw new Error("ALUDOCK_WINDOWS_OUTPUT must end in -Setup.exe");
-  run(systemTar, ["-a", "-c", "-f", components, releaseName], { cwd: temporary });
+  run(systemTar, ["-a", "-c", "-f", components, basename(releaseRoot)], { cwd: temporary });
   const requiredPaths = ["AluDock.exe", "aludock.cmd", "release-manifest.json", "dock/dist/src/cli.js", "dock/dist/src/deployment/windows-host-bootstrap.js", "support/windows-package.ps1"]
-    .map((path) => `${releaseName}/app/${path}`);
+    .map((path) => `${basename(releaseRoot)}/app/${path}`);
   const listing = new Set(run(systemTar, ["-t", "-f", components, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/").split(/\r?\n/u).map((path) => path.trim()));
   for (const path of requiredPaths) if (!listing.has(path)) throw new Error(`The component archive is missing ${path}`);
   // tauri bundle (not build) also works when reusing a verified Desktop binary.

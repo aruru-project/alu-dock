@@ -6,3 +6,4 @@ coverage/
 *.pid
 .alu-dock/
 .pi-subagents/
+/.aluw-*/
