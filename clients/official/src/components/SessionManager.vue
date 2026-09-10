@@ -13,7 +13,7 @@ import {
   type TreeFilter, type VisibleTreeItem,
 } from '../lib/sessionTree'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { ResourcesResult, SessionInfo, SessionTree, Work } from '../lib/types'
+import type { SessionReloadResult, SessionInfo, SessionTree, Work } from '../lib/types'
 import { useAppStore } from '../stores/app'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
@@ -39,7 +39,8 @@ const sessionsTruncated = ref(false)
 const selectedToken = ref('')
 const renameDraft = ref('')
 const compactDraft = ref('')
-const reloadSummary = ref<ResourcesResult | null>(null)
+const reloadSummary = ref<SessionReloadResult | null>(null)
+const reloadScope = ref<SessionContext | null>(null)
 const trust = ref<(SessionTrustContinuation & { token: string }) | null>(null)
 const tree = ref<SessionTree | null>(null)
 const treeSearch = ref('')
@@ -57,12 +58,13 @@ const context = computed<SessionContext>(() => ({
   expectedHostEpoch: props.work.ownerHostEpoch ?? '',
   expectedRuntimeGeneration: props.work.runtimeGeneration,
 }))
-async function currentSessionCall<T>(scope: SessionContext, operation: () => Promise<T>): Promise<T> {
+async function currentSessionCall<T>(scope: SessionContext, operation: () => Promise<T>, replacementGeneration?: (result: T) => number): Promise<T> {
   const correlated = captureConnectionResult(scope, await operation())
   if (!hostResultMatches(correlated, app.connectionContext)
     || scope.instanceId !== props.work.id
     || scope.expectedHostEpoch !== props.work.ownerHostEpoch
-    || scope.expectedRuntimeGeneration !== props.work.runtimeGeneration) {
+    || (scope.expectedRuntimeGeneration !== props.work.runtimeGeneration
+      && replacementGeneration?.(correlated.result) !== props.work.runtimeGeneration)) {
     throw new Error('你已切换 Host 或 Work，请在当前页面重试。')
   }
   return correlated.result
@@ -92,10 +94,20 @@ const treeTabStopId = computed(() => windowedTreeItems.value.some((item) => item
 
 watch([
   () => app.activeConnectionId,
+  () => app.connectionContext?.selectionGeneration,
   () => props.work.id,
+  () => props.work.ownerHostEpoch,
   () => props.work.runtimeGeneration,
   () => props.mode,
 ], () => {
+  // Reload's reply/resync may advance this same Work after the success UI renders.
+  // Keep that receipt, but discard it for an actual target change or newer runtime.
+  if (props.mode === 'reload-session' && reloadScope.value && reloadSummary.value
+    && hostResultMatches(captureConnectionResult(reloadScope.value, null), app.connectionContext)
+    && reloadScope.value.instanceId === props.work.id
+    && reloadScope.value.expectedHostEpoch === props.work.ownerHostEpoch
+    && reloadSummary.value.instance.runtimeGeneration === props.work.runtimeGeneration) return
+  reloadScope.value = null
   error.value = ''; status.value = ''; trust.value = null
   if (props.mode === 'sessions') void loadSessionList()
   else if (props.mode === 'tree') void loadTree()
@@ -342,8 +354,16 @@ function compact() {
 }
 async function reload() {
   if (props.preview || pending.value || props.outcomeUnknown) return
-  pending.value = 'reload'; error.value = ''; reloadSummary.value = null
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => reloadSession(scope, operationId())); reloadSummary.value = result; status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`; emit('resync', result.instance) }
+  pending.value = 'reload'; error.value = ''; status.value = ''; reloadSummary.value = null; reloadScope.value = null
+  try {
+    const scope = { ...context.value }
+    // Accept only the generation returned by this Reload, not arbitrary replacements.
+    const result = await currentSessionCall(scope, () => reloadSession(scope, operationId()), (reply) => reply.instance.runtimeGeneration)
+    reloadScope.value = scope
+    reloadSummary.value = result
+    status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
+    emit('resync', result.instance)
+  }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
