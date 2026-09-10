@@ -62,3 +62,9 @@ jobs:
             clients/official/dist/candidate.txt
           if-no-files-found: error
           retention-days: 7
+      - name: Install the actual Setup in the disposable Windows profile
+        shell: powershell
+        run: |
+          ./test/windows-setup-smoke.test.ps1 `
+            -Installer "clients/official/dist/AluDock-$env:ALUDOCK_RELEASE_VERSION-windows-x86_64-Setup.exe" `
+            -ExpectedVersion $env:ALUDOCK_RELEASE_VERSION

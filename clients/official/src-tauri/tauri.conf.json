@@ -43,7 +43,9 @@
     "windows": {
       "nsis": {
         "template": "../scripts/windows-installer.nsi",
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       },
       "webviewInstallMode": {
         "type": "embedBootstrapper",

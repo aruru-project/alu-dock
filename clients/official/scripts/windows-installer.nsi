@@ -9,6 +9,8 @@ SetCompressor /SOLID lzma
 !include MUI2.nsh
 !include FileFunc.nsh
 !include LogicLib.nsh
+!define MUI_ICON "{{installer_icon}}"
+!define MUI_UNICON "{{uninstaller_icon}}"
 Name "Alu Dock"
 OutFile "{{out_file}}"
 VIProductVersion "{{version_with_build}}"
@@ -81,8 +83,9 @@ Section "Install"
   StrCpy $Payload "$PLUGINSDIR\payload"
   StrCpy $Helper "$Payload\support\windows-package.ps1"
   SetOutPath "$PLUGINSDIR"
+  ; Keep the doubled separator: one backslash escapes a Handlebars expression.
   {{#each resources_dirs}}
-    CreateDirectory "$PLUGINSDIR\{{this}}"
+    CreateDirectory "$PLUGINSDIR\\{{this}}"
   {{/each}}
   {{#each resources}}
     File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
