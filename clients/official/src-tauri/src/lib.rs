@@ -1191,13 +1191,17 @@ impl ConnectionRuntimeState {
     fn select_initial_local(&self) -> Result<(), CommandError> {
         let mut lifecycle = self.lifecycle.lock().map_err(|_| lifecycle_error())?;
         let snapshot = self.registry.snapshot().map_err(CommandError::from)?;
-        if snapshot.active_host_id.is_none() && !snapshot.local_selected && snapshot.hosts.is_empty() {
-            self.registry.select_local(snapshot.revision).map_err(CommandError::from)?;
+        if snapshot.active_host_id.is_none()
+            && !snapshot.local_selected
+            && snapshot.hosts.is_empty()
+        {
+            self.registry
+                .select_local(snapshot.revision)
+                .map_err(CommandError::from)?;
             lifecycle.transition_to_local()?;
         }
         Ok(())
     }
-
 }
 
 #[derive(Serialize)]
