@@ -13,7 +13,6 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -72,7 +71,11 @@ const releaseName = `AluDock-${version}-windows-x86_64`;
 const defaultOutputDirectory = join(clientRoot, "dist");
 const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
 const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}-Setup.exe`);
-const temporary = mkdtempSync(join(tmpdir(), "aludock-windows-package-"));
+// Tauri resource maps resolve from src-tauri. Keep staging on that volume so
+// the map can use a relative path instead of a Windows drive-qualified glob.
+const stagingRoot = join(clientRoot, "src-tauri", "target");
+mkdirSync(stagingRoot, { recursive: true });
+const temporary = mkdtempSync(join(stagingRoot, "aludock-windows-package-"));
 const releaseRoot = join(temporary, releaseName);
 
 try {
@@ -128,7 +131,7 @@ try {
   copyFileSync(join(payloadRoot, "AluDock.exe"), join(targetDirectory, "aludock-client-app.exe"));
   const tauriCli = join(clientRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
   run(buildRuntime.nodePath, [tauriCli, "bundle", "--bundles", "nsis", "--target", windowsTarget,
-    "--config", JSON.stringify({ version, bundle: { resources: { [payloadRoot]: "payload/" }, windows: {
+    "--config", JSON.stringify({ version, bundle: { resources: { [relative(join(clientRoot, "src-tauri"), payloadRoot).replaceAll("\\", "/")]: "payload/" }, windows: {
       nsis: { template: "../scripts/windows-installer.nsi", installMode: "currentUser" },
       webviewInstallMode: { type: "embedBootstrapper", silent: true },
     } } }),

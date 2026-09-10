@@ -30,7 +30,8 @@ jobs:
           workspaces: |
             clients/official -> target
             clients/official/src-tauri -> target
-          cache-on-failure: false
+          # Keep successful compilation when a later packaging step fails.
+          cache-on-failure: true
       - name: Install Dock dependencies
         run: npm ci
       - name: Check private installer transactions in an isolated tree
