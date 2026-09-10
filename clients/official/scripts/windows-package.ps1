@@ -263,22 +263,30 @@ function Write-InstallJournal([bool]$HadPrevious, [string]$PreviousVersion, [str
 }
 
 function Complete-InstalledPackage([string]$Version) {
-  Write-Host "Starting the Alu Dock service..."
-  $serviceSetup = Join-Path $InstallRoot ".windows-host"
-  $arguments = if (Test-Path -LiteralPath $serviceSetup -PathType Leaf) {
-    @("service", "start", "--json")
-  } else {
-    @("service", "install", "--now", "--json")
-  }
-  $service = Invoke-AluDock (Join-Path $InstallRoot "aludock.cmd") $arguments
-  if (-not ($service -and $service.ready)) {
-    $logs = Join-Path $ProductRoot "logs\host.log"
-    throw "Alu Dock did not become ready. Check the log at $logs and run Setup.cmd again."
-  }
   Set-GlobalLauncher
   Set-UserPathEntry $BinRoot $true
   Set-StartMenuShortcut
   Set-UninstallRegistration $Version
+}
+
+function Start-InstalledHost {
+  Write-Host "Starting the Alu Dock service..."
+  try {
+    $serviceSetup = Join-Path $InstallRoot ".windows-host"
+    $arguments = if (Test-Path -LiteralPath $serviceSetup -PathType Leaf) {
+      @("service", "start", "--json")
+    } else {
+      @("service", "install", "--now", "--json")
+    }
+    $service = Invoke-AluDock (Join-Path $InstallRoot "aludock.cmd") $arguments
+    if ($service -and $service.ready) { return $true }
+  } catch {
+    # Startup timeout is not an installation failure. The Host may still be
+    # starting, so do not stop it or remove the installed files here.
+  }
+  $logs = Join-Path $ProductRoot "logs\host.log"
+  Write-Warning "Alu Dock is installed, but startup could not be confirmed. Wait a moment, then open Alu Dock from the Start Menu. If it still cannot connect, check $logs."
+  return $false
 }
 
 function Remove-InstalledIntegration {
@@ -382,6 +390,7 @@ function Rollback-Install([bool]$HadPrevious, [string]$PreviousVersion) {
   if ($HadPrevious) {
     Assert-AppComplete $InstallRoot
     Complete-InstalledPackage $PreviousVersion
+    Start-InstalledHost | Out-Null
   } else {
     Remove-AppTree $InstallRoot
     Remove-InstalledIntegration
@@ -391,7 +400,7 @@ function Rollback-Install([bool]$HadPrevious, [string]$PreviousVersion) {
 
 function Start-InstalledDesktop {
   try { Start-Process -FilePath $DesktopExecutable }
-  catch { Write-Warning "Alu Dock is ready, but Windows could not open it. Open Alu Dock from the Start Menu." }
+  catch { Write-Warning "Windows could not open Alu Dock. Open it from the Start Menu." }
 }
 
 function Install-Package {
@@ -431,7 +440,6 @@ function Install-Package {
       Move-Item -LiteralPath $InstallRoot -Destination $PreviousRoot
     }
     Move-Item -LiteralPath $NextRoot -Destination $InstallRoot
-    Complete-InstalledPackage $sourceVersion
     Write-InstallJournal $hadPrevious $previousVersion "committed"
   } catch {
     $failure = $_.Exception.Message
@@ -439,14 +447,17 @@ function Install-Package {
     catch { throw "$failure The previous version could not be restored automatically: $($_.Exception.Message) Keep the extracted package and run Setup.cmd again." }
     throw "$failure The previous version has been restored; run Setup.cmd again when you are ready."
   }
+  # The file installation is committed before Windows integration or startup.
+  # A later failure must leave this complete version available for repair/use.
+  Complete-InstalledPackage $sourceVersion
   try {
     Remove-AppTree $PreviousRoot
     Remove-Item -LiteralPath $InstallJournal -Force
   } catch {
-    Write-Warning "Alu Dock is ready, but Setup could not remove the previous version. Run Setup.cmd again to finish cleanup."
+    Write-Warning "Alu Dock is installed, but Setup could not remove the previous version. Run Setup.cmd again to finish cleanup."
   }
-  Start-InstalledDesktop
-  Write-Host "Alu Dock $sourceVersion is installed and ready. You can now open it from the Start Menu, and delete the extracted package folder."
+  Write-Host "Alu Dock $sourceVersion is installed. You can open it from the Start Menu, and delete the extracted package folder."
+  if (Start-InstalledHost) { Start-InstalledDesktop }
 }
 
 function Get-InstalledVersion {
