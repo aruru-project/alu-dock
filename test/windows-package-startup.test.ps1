@@ -117,3 +117,6 @@ try {
   if ($heldFile) { $heldFile.Dispose() }
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
+# GitHub's PowerShell wrapper propagates LASTEXITCODE. Robocopy's successful
+# copy returns 1; only reaching here after all assertions is a successful test.
+exit 0
