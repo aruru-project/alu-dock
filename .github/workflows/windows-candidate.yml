@@ -4,6 +4,12 @@ on:
   push:
     branches: [feat/card-270-windows-install-experience]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Internal candidate version for an actual in-place upgrade baseline (no publication)
+        required: true
+        default: '2.9.0'
+        type: string
 
 permissions:
   contents: read
@@ -17,7 +23,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      ALUDOCK_RELEASE_VERSION: 2.9.0
+      ALUDOCK_RELEASE_VERSION: ${{ inputs.version || '2.9.0' }}
       RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
