@@ -74,11 +74,11 @@ npm run package:windows
 
 Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。源码 checkout 默认使用当前分支可达的最新版本 tag，正式构建可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 是后续构建复用 Desktop/DLL 的输入，不是安装入口；仅 Host/Worker/Pi 改动时无需重编译 Desktop。
 
-先安装符合根 `package.json#engines.node` 的 [Node.js](https://nodejs.org/)，再运行 Setup.exe。唯一安装位置为 `%LOCALAPPDATA%\Alu Dock\app`。Setup 使用正常 Host stop，拒绝仍有未完成 Work 的更新；旧 Desktop 占用文件时，先从托盘选择 **退出 Desktop** 再重试。文件提交后，启动慢或失败不会回滚新版本，重新运行 Setup.exe 可修复文件和入口，无需先卸载。
+从托盘正常退出 Alu Dock，再运行 Setup，按成熟安装器的默认流程安装或覆盖更新。默认程序目录是 `%LOCALAPPDATA%\AluDock`，原有资料仍保留在 `%LOCALAPPDATA%\Alu Dock`、Pi 和客户端资料目录中。只配置程序资源和图标等必要内容，不自建安装事务、进程关闭 hook、迁移脚本或安装器专项测试。只有启用本机服务才需要符合根 `package.json#engines.node` 的系统 [Node.js](https://nodejs.org/)；纯客户端不需要本机 Node。
 
-Desktop 窗口与托盘先显示，Host 在后台启动，ready 后自动连接；无法确认状态时提供日志入口。X 隐藏到托盘，**退出 Desktop** 不停止 Host。**停止 Alu Dock** 请求同一个 Host 正常停止。登录启动默认关闭，开启后以 `--background` 启动。日志在 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。
+Windows 无配置时默认随客户端启动本机 Dock，可在托盘取消此选项作为纯客户端；连接远程 Main 并不意味着不需要本机 SubHost。X 隐藏到托盘，工作继续；手动 **退出 Alu Dock** 正常停止所管理的本机 Host/Worker 后退出，停止受阻时说明原因并保留界面。**停止本机 Dock** 保留客户端，远端不受影响。托盘显示实际状态及对应操作。登录启动保留既有选择，只打开同一个客户端并遵循本机服务选项。日志仍在 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。
 
-Windows Apps 和安装目录中的 `Uninstall.exe` 只移除应用包和已归属的系统集成，保留 Dock/Pi 配置、身份、凭据、Session、附件与官方客户端数据。checkout 的 `npm run install:local` 构建并运行同一个 Setup.exe。
+退出应用后使用 Windows Apps 或安装目录中的标准卸载入口；程序资源与 Dock/Pi 配置、身份、凭据、Session、附件及客户端资料分开存放。checkout 的 `npm run install:local` 构建并运行同一个 Setup.exe。
 普通开发仍可运行：
 
 ```powershell

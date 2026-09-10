@@ -95,10 +95,7 @@ try {
   rmSync(join(payloadRoot, "runtime"), { recursive: true, force: true });
   pruneNonTargetNativePrebuilds(payloadRoot);
   copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(payloadRoot, "LICENSE-APACHE"));
-  const supportRoot = join(payloadRoot, "support");
-  rmSync(supportRoot, { recursive: true, force: true });
-  mkdirSync(supportRoot, { recursive: true });
-  copyFileSync(join(clientRoot, "scripts", "windows-package.ps1"), join(supportRoot, "windows-package.ps1"));
+  rmSync(join(payloadRoot, "support"), { recursive: true, force: true });
   writeFileSync(join(payloadRoot, "aludock.cmd"), renderLauncher(), "utf8");
   rmSync(join(payloadRoot, "Uninstall.cmd"), { force: true });
   rmSync(join(payloadRoot, "Uninstall.exe"), { force: true });
@@ -120,7 +117,7 @@ try {
   const components = output.replace(/-Setup\.exe$/iu, "-components.zip");
   if (components === output) throw new Error("ALUDOCK_WINDOWS_OUTPUT must end in -Setup.exe");
   run(systemTar, ["-a", "-c", "-f", components, basename(releaseRoot)], { cwd: temporary });
-  const requiredPaths = ["AluDock.exe", "aludock.cmd", "release-manifest.json", "dock/dist/src/cli.js", "dock/dist/src/deployment/windows-host-bootstrap.js", "support/windows-package.ps1"]
+  const requiredPaths = ["AluDock.exe", "aludock.cmd", "release-manifest.json", "dock/dist/src/cli.js", "dock/dist/src/deployment/windows-host-bootstrap.js"]
     .map((path) => `${basename(releaseRoot)}/app/${path}`);
   const listing = new Set(run(systemTar, ["-t", "-f", components, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/").split(/\r?\n/u).map((path) => path.trim()));
   for (const path of requiredPaths) if (!listing.has(path)) throw new Error(`The component archive is missing ${path}`);
@@ -130,11 +127,16 @@ try {
   // tauri bundle (not build) also works when reusing a verified Desktop binary.
   const targetDirectory = join(clientRoot, "src-tauri", "target", windowsTarget, "release");
   mkdirSync(targetDirectory, { recursive: true });
-  copyFileSync(join(payloadRoot, "AluDock.exe"), join(targetDirectory, "aludock-client-app.exe"));
+  copyFileSync(join(payloadRoot, "AluDock.exe"), join(targetDirectory, "AluDock.exe"));
+  // The standard installer supplies the main executable and owns installation.
+  // Resources are ordinary sibling files/directories, not a second installer payload.
+  const resources = Object.fromEntries(readdirSync(payloadRoot)
+    .filter((name) => name !== "AluDock.exe")
+    .map((name) => [join(payloadRoot, name), name + (statSync(join(payloadRoot, name)).isDirectory() ? "/" : "")]));
   const tauriCli = join(clientRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
   run(buildRuntime.nodePath, [tauriCli, "bundle", "--bundles", "nsis", "--target", windowsTarget,
-    "--config", JSON.stringify({ version, bundle: { resources: { [payloadRoot]: "payload/" }, windows: {
-      nsis: { template: "../scripts/windows-installer.nsi", installMode: "currentUser" },
+    "--config", JSON.stringify({ version, mainBinaryName: "AluDock", bundle: { resources, windows: {
+      nsis: { installMode: "currentUser" },
       webviewInstallMode: { type: "embedBootstrapper", silent: true },
     } } }),
   ], { cwd: clientRoot, env: runtimeEnvironment(buildRuntime.nodePath) });
@@ -181,7 +183,7 @@ function buildDesktop(productVersion, rustTarget, runtime) {
   }
   run(runtime.nodePath, [
     tauriCli, "build", "--no-bundle", "--ci", "--target", rustTarget,
-    "--config", JSON.stringify({ version: productVersion }),
+    "--config", JSON.stringify({ version: productVersion, mainBinaryName: "AluDock" }),
   ], { cwd: clientRoot, env: runtimeEnvironment(runtime.nodePath) });
 }
 
@@ -202,7 +204,7 @@ function materializeDock(destination, runtime) {
 
 function copyDesktop(destination, rustTarget) {
   const targetDirectory = join(clientRoot, "src-tauri", "target", rustTarget, "release");
-  const executable = join(targetDirectory, "aludock-client-app.exe");
+  const executable = join(targetDirectory, "AluDock.exe");
   if (!existsSync(executable)) throw new Error(`Tauri build did not produce ${executable}`);
   copyFileSync(executable, join(destination, "AluDock.exe"));
   for (const entry of readdirSync(targetDirectory, { withFileTypes: true })) {

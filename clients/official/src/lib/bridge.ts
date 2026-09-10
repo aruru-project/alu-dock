@@ -96,6 +96,7 @@ const previewDesktopShell: DesktopShellStatus = {
   supported: false,
   hostReady: false,
   loginStartEnabled: false,
+  autoStartLocalHost: false,
 }
 
 export async function getDesktopShellStatus(): Promise<DesktopShellStatus> {

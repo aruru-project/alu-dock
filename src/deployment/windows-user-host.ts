@@ -1,9 +1,8 @@
 import { spawn } from "node:child_process";
 import { unwatchFile, watchFile } from "node:fs";
-import { appendFile, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import { AttachmentStorageState } from "../control/attachment-storage-state.js";
 import type { ServiceCommandResult, UserServiceStatus } from "./user-service.js";
 import {
   readWindowsHostLifecycleStatus,
@@ -20,7 +19,6 @@ const WINDOWS_HOST_NAME = "Alu Dock Host";
 export interface WindowsUserHostManagerOptions {
   nodePath: string;
   cliPath: string;
-  setupPath: string;
   logPath: string;
   timeoutMs?: number;
   readStatus?: () => Promise<WindowsHostLifecycleStatus | undefined>;
@@ -29,7 +27,7 @@ export interface WindowsUserHostManagerOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
-/** Owns the current-user Windows Host lifecycle without tying it to a Desktop window. */
+/** Local Host operations shared by the Windows desktop's start/stop/exit actions. */
 export class WindowsUserHostManager {
   private readonly timeoutMs: number;
   private readonly readStatus: () => Promise<WindowsHostLifecycleStatus | undefined>;
@@ -45,18 +43,11 @@ export class WindowsUserHostManager {
     this.sleep = options.sleep ?? ((ms) => new Promise((resolveDelay) => setTimeout(resolveDelay, ms)));
   }
 
-  async install(startNow: boolean): Promise<UserServiceStatus> {
-    const locked = await this.withStartLock(["install", ...(startNow ? ["--now"] : [])]);
-    if (locked) return locked;
-    await mkdir(dirname(this.options.setupPath), { recursive: true });
-    await writeFile(this.options.setupPath, "Alu Dock Windows user Host\n", "utf8");
-    if (!startNow) return this.status();
-    return this.start();
+  async install(_startNow: boolean): Promise<UserServiceStatus> {
+    throw new Error("On Windows, install Alu Dock with Setup.exe and start its local service from the tray.");
   }
 
   async start(): Promise<UserServiceStatus> {
-    const locked = await this.withStartLock(["start"]);
-    if (locked) return locked;
     await this.requireInstalled();
     const current = await this.readStatus();
     if (!current) {
@@ -68,8 +59,6 @@ export class WindowsUserHostManager {
   }
 
   async restart(): Promise<UserServiceStatus> {
-    const locked = await this.withStartLock(["restart"]);
-    if (locked) return locked;
     await this.requireInstalled();
     const previous = await this.readStatus();
     await this.stopSafely();
@@ -83,14 +72,8 @@ export class WindowsUserHostManager {
     return this.status();
   }
 
-  async status(): Promise<UserServiceStatus & { stateDirectory: string; attachmentDirectory: string } & Pick<WindowsHostLifecycleStatus, "blockingWork" | "mainConnected" | "restoringWorks" | "unavailableWorks">> {
-    const stateRoot = resolve(dirname(this.options.logPath), "..");
-    const storage = await new AttachmentStorageState(stateRoot, join(stateRoot, "attachments")).readSettings();
-    const stateDirectory = await realpath(stateRoot).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return stateRoot;
-      throw error;
-    });
-    const installed = await fileExists(this.options.cliPath) && await fileExists(this.options.setupPath);
+  async status(): Promise<UserServiceStatus & Pick<WindowsHostLifecycleStatus, "blockingWork" | "mainConnected" | "restoringWorks" | "unavailableWorks">> {
+    const installed = await fileExists(this.options.cliPath);
     const current = await this.readStatus();
     const ready = current?.ready === true;
     const phase = current?.phase ?? (ready ? "ready" : current ? "starting" : await this.absentPhase());
@@ -101,7 +84,7 @@ export class WindowsUserHostManager {
     if (phase === "stopped") diagnostics.push("Alu Dock is not running. Run `aludock service start`.");
     return {
       unit: WINDOWS_HOST_NAME,
-      unitFile: this.options.setupPath,
+      unitFile: this.options.cliPath,
       activeState: current ? "active" : phase === "unknown" ? "unknown" : "inactive",
       subState: ready ? "running" : phase,
       unitFileState: installed ? "enabled" : "not-found",
@@ -115,8 +98,6 @@ export class WindowsUserHostManager {
       ...(current?.restoringWorks === undefined ? {} : { restoringWorks: current.restoringWorks }),
       ...(current?.unavailableWorks === undefined ? {} : { unavailableWorks: current.unavailableWorks }),
       logsPath: this.options.logPath,
-      stateDirectory,
-      attachmentDirectory: storage.directory,
       linger: "unknown",
       diagnostics,
     };
@@ -131,10 +112,7 @@ export class WindowsUserHostManager {
   }
 
   async uninstall(): Promise<{ unit: string; unitFile: string; removed: boolean }> {
-    await this.stopSafely();
-    const removed = await fileExists(this.options.setupPath);
-    await rm(this.options.setupPath, { force: true });
-    return { unit: WINDOWS_HOST_NAME, unitFile: this.options.setupPath, removed };
+    throw new Error("On Windows, exit Alu Dock and uninstall it from Windows Apps.");
   }
 
   private async absentPhase(): Promise<"stopped" | "unknown"> {
@@ -142,17 +120,11 @@ export class WindowsUserHostManager {
       const owner = JSON.parse(await readFile(join(dirname(this.options.logPath), "..", "host-owner.json"), "utf8")) as { pid?: number; exited?: boolean };
       if (owner.pid === 0 && owner.exited === true) return "stopped";
       return Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0 && !processAlive(Number(owner.pid)) ? "stopped" : "unknown";
-    } catch { return "unknown"; }
-  }
-
-  private async withStartLock(arguments_: string[]): Promise<UserServiceStatus | undefined> {
-    if (process.platform !== "win32" || process.env.ALUDOCK_START_LOCK_HELD === "1") return undefined;
-    const output = await nativeCommand(this.options.cliPath, ["--service", this.options.nodePath, this.options.cliPath, ...arguments_]);
-    return JSON.parse(output.trim().split(/\r?\n/u).at(-1) ?? "") as UserServiceStatus;
+    } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? "stopped" : "unknown"; }
   }
 
   private async requireInstalled(): Promise<void> {
-    if (!await fileExists(this.options.cliPath) || !await fileExists(this.options.setupPath)) {
+    if (!await fileExists(this.options.cliPath)) {
       throw new Error("Alu Dock is not set up for this user. Run Setup.exe, then try again.");
     }
   }
@@ -202,11 +174,9 @@ function stillActiveError(blockingWork: number): Error {
 async function launchHiddenHost(nodePath: string, cliPath: string, logPath: string): Promise<void> {
   await rotateHostLog(logPath);
   await appendFile(logPath, `\n--- Alu Dock started ${new Date().toISOString()} ---\n`, "utf8");
-  const ownerPath = join(dirname(logPath), "..", "host-owner.json");
-  await writeFile(ownerPath, JSON.stringify({ launching: true }), "utf8");
   const pid = Number((await nativeCommand(cliPath, ["--launch-host", nodePath, resolve(dirname(cliPath), "deployment/windows-host-bootstrap.js"), logPath])).trim());
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("Windows did not confirm the Alu Dock launch. Check the Host log.");
-  await writeFile(ownerPath, JSON.stringify({ pid }), "utf8");
+  // The bootstrap writes ownership only after claiming the unique lifecycle pipe.
 }
 
 async function nativeCommand(cliPath: string, args: string[]): Promise<string> {

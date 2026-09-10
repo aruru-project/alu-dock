@@ -109,7 +109,7 @@ npm run client:package:linux   # x86_64 Linux
 npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-Linux 产物为 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Windows 用户运行 `AluDock-<version>-windows-x86_64-Setup.exe`，使用系统中兼容的 Node.js。`-components.zip` 只用于正式构建复用 Desktop/DLL；用户不解压它来安装。Setup 完成后从 Start Menu 打开 Desktop，或在新终端运行 `aludock`。文件提交后，慢启动或启动失败保留新版本；再次运行 Setup.exe 可修复。Windows Apps 卸载只移除程序和系统集成，保留 Dock/Pi 状态及系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+Linux 产物为 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Windows 用户正常退出 Alu Dock 后，运行 `AluDock-<version>-windows-x86_64-Setup.exe`，沿用标准安装流程。客户端默认启动本机 Dock，也可取消该选项仅连接远程；仅本机服务需要兼容的系统 Node.js。`-components.zip` 只用于正式构建复用 Desktop/DLL；用户不解压它来安装。Setup 完成后从 Start Menu 打开 Alu Dock，或在安装目录调用 `aludock.cmd`。窗口 X 隐藏到托盘并继续工作，手动退出正常结束所管理的本机后台。Windows Apps 卸载只移除程序和系统集成，保留 Dock/Pi 状态及系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 

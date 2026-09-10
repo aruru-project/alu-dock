@@ -58,6 +58,8 @@ Do not put SDK, NDK, or JDK installation paths in tracked files or documentation
 
 ## Windows artifact delivery
 
+Windows 安装直接沿用现成安装器的默认流程，只做必要打包配置。不自制安装编排、进程关闭 hook、兼容迁移或安装器专项测试。用户先从托盘正常退出再安装；X 只是隐藏，不退出 Dock。客户端的起停、纯客户端选择和真实状态属于本项目功能，应按实际行为核对；这不授权扩展标准安装器的测试工程。Linux 的 systemctl 托管及 STORY.md 的多入口目标不变。
+
 A successful `--no-bundle` Windows build does not prove that the executable is a standalone artifact. Before delivering any Windows package:
 
 - Inspect the executable's imported DLLs and the target output directory instead of copying only the `.exe`.

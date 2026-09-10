@@ -76,12 +76,12 @@ test("Windows package uses one stable app directory and bundled terminal entry",
     platform: "win32",
     localAppData: "C:\\Users\\artist\\AppData\\Local",
   }), {
-    root: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app",
-    packageDirectory: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\dock",
-    cliPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\dock\\dist\\src\\cli.js",
-    packageExecutable: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\aludock.cmd",
-    userExecutable: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\aludock.cmd",
-    unitFile: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\.windows-host",
+    root: "C:\\Users\\artist\\AppData\\Local\\AluDock",
+    packageDirectory: "C:\\Users\\artist\\AppData\\Local\\AluDock\\dock",
+    cliPath: "C:\\Users\\artist\\AppData\\Local\\AluDock\\dock\\dist\\src\\cli.js",
+    packageExecutable: "C:\\Users\\artist\\AppData\\Local\\AluDock\\aludock.cmd",
+    userExecutable: "C:\\Users\\artist\\AppData\\Local\\AluDock\\aludock.cmd",
+    unitFile: "C:\\Users\\artist\\AppData\\Local\\AluDock\\dock\\dist\\src\\cli.js",
     windowsHostLogPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\logs\\host.log",
   });
 });

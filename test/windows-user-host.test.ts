@@ -63,7 +63,7 @@ test("Windows Host reports live SubHost status and stops even with an idle statu
 test("#270 slow Windows startup stays observable and retry does not launch another Host", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-windows-host-manager-"));
   try {
-    const cliPath = join(root, "cli.js"), setupPath = join(root, ".windows-host"), logPath = join(root, "logs", "host.log");
+    const cliPath = join(root, "cli.js"), logPath = join(root, "logs", "host.log");
     await mkdir(root, { recursive: true });
     await writeFile(cliPath, "// fixture\n", "utf8");
     const ownerPath = join(root, "host-owner.json");
@@ -74,7 +74,6 @@ test("#270 slow Windows startup stays observable and retry does not launch anoth
       timeoutMs: 1,
       nodePath: "C:\\Program Files\\nodejs\\node.exe",
       cliPath,
-      setupPath,
       logPath,
       readStatus: async () => current,
       requestStop: async () => {
@@ -89,7 +88,7 @@ test("#270 slow Windows startup stays observable and retry does not launch anoth
       sleep: async () => {},
     });
 
-    const installed = await manager.install(true);
+    const installed = await manager.start();
     assert.equal(stops, 0);
     assert.equal(launches, 1);
     assert.equal(installed.ready, false);
@@ -116,21 +115,10 @@ test("#270 slow Windows startup stays observable and retry does not launch anoth
     assert.equal(status.installed, true);
     assert.equal(status.logsPath, logPath);
 
-    // Installer safety uses the Host storage reader, not a second JSON schema.
-    const attachmentDirectory = join(root, "custom-attachments");
-    await writeFile(join(root, "attachment-storage.json"), JSON.stringify({ schemaVersion: 1, revision: 0, directory: attachmentDirectory }));
-    const storageStatus = await manager.status();
-    assert.equal(storageStatus.attachmentDirectory, attachmentDirectory);
-    assert.equal(storageStatus.stateDirectory, root);
-
     // #270: a missing pipe with an unconfirmed launch is not a stopped Host.
     await writeFile(ownerPath, JSON.stringify({ launching: true }));
     assert.equal((await manager.status()).subState, "unknown");
     await assert.rejects(manager.stop());
-    await writeFile(ownerPath, JSON.stringify({ pid: 0, exited: true }));
-    const removed = await manager.uninstall();
-    assert.equal(removed.removed, true);
-    assert.equal((await manager.status()).installed, false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

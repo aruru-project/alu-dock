@@ -45,9 +45,6 @@ jobs:
           cache-on-failure: true
       - name: Install Dock dependencies
         run: npm ci
-      - name: Check private installer transactions in an isolated tree
-        shell: powershell
-        run: ./test/windows-package-startup.test.ps1 -Installer ./clients/official/scripts/windows-package.ps1
       - name: Build Setup and reusable components
         run: npm run package:windows
       - name: Record exact candidate and package checksums
@@ -68,9 +65,3 @@ jobs:
             clients/official/dist/candidate.txt
           if-no-files-found: error
           retention-days: 7
-      - name: Install the actual Setup in the disposable Windows profile
-        shell: powershell
-        run: |
-          ./test/windows-setup-smoke.test.ps1 `
-            -Installer "clients/official/dist/AluDock-$env:ALUDOCK_RELEASE_VERSION-windows-x86_64-Setup.exe" `
-            -ExpectedVersion $env:ALUDOCK_RELEASE_VERSION

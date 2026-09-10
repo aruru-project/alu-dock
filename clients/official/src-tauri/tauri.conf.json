@@ -42,7 +42,6 @@
     ],
     "windows": {
       "nsis": {
-        "template": "../scripts/windows-installer.nsi",
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico"

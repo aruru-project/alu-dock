@@ -30,17 +30,18 @@ export function localInstallLayout(home: string, installRoot?: string, options: 
   if (platform === "win32") {
     const resolvedHome = win32Path.resolve(home);
     const localAppData = win32Path.resolve(options.localAppData ?? win32Path.join(resolvedHome, "AppData", "Local"));
-    const root = win32Path.resolve(installRoot ?? win32Path.join(localAppData, "Alu Dock", "app"));
+    const root = win32Path.resolve(installRoot ?? win32Path.join(localAppData, "AluDock"));
     const packageDirectory = win32Path.join(root, "dock");
     const packageExecutable = win32Path.join(root, "aludock.cmd");
+    const cliPath = win32Path.join(packageDirectory, "dist", "src", "cli.js");
     return {
       root,
       packageDirectory,
-      cliPath: win32Path.join(packageDirectory, "dist", "src", "cli.js"),
+      cliPath,
       packageExecutable,
       userExecutable: packageExecutable,
-      unitFile: win32Path.join(root, ".windows-host"),
-      windowsHostLogPath: win32Path.join(win32Path.dirname(root), "logs", "host.log"),
+      unitFile: cliPath,
+      windowsHostLogPath: win32Path.join(localAppData, "Alu Dock", "logs", "host.log"),
     };
   }
   const resolvedHome = resolve(home);

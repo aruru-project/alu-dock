@@ -8,9 +8,5 @@ fn main() {
     if let Some(code) = windows_launch::run() {
         std::process::exit(code);
     }
-    #[cfg(windows)]
-    if !windows_launch::desktop_allowed() {
-        std::process::exit(1);
-    }
     aludock_client_app_lib::run();
 }

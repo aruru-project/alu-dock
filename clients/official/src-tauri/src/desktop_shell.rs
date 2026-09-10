@@ -22,6 +22,7 @@ pub struct DesktopShellStatus {
     pub startup_error: Option<String>,
     pub logs_path: Option<String>,
     pub login_start_enabled: bool,
+    pub auto_start_local_host: bool,
 }
 
 #[derive(Clone)]
@@ -32,6 +33,8 @@ pub struct DesktopShellState {
     #[cfg(target_os = "windows")]
     tray_operation_active: Arc<AtomicBool>,
     #[cfg(target_os = "windows")]
+    manages_local_host: Arc<AtomicBool>,
+    #[cfg(target_os = "windows")]
     runtime: Option<WindowsRuntime>,
 }
 
@@ -41,6 +44,12 @@ impl DesktopShellState {
         {
             use tauri_plugin_autostart::ManagerExt;
 
+            let auto_start = app
+                .state::<super::ConnectionRuntimeState>()
+                .preferences
+                .snapshot()
+                .map(|p| p.windows_start_local_host)
+                .unwrap_or(true);
             let runtime = WindowsRuntime::discover();
             let mut status = match &runtime {
                 Ok(runtime) => runtime.initial_status(),
@@ -58,10 +67,16 @@ impl DesktopShellState {
                 },
             };
             status.login_start_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            status.auto_start_local_host = auto_start;
+            if !auto_start {
+                status.host_phase = "stopped".into();
+                status.startup_error = None;
+            }
             return Self {
                 status: Arc::new(Mutex::new(status)),
                 exit_requested: Arc::new(AtomicBool::new(false)),
                 tray_operation_active: Arc::new(AtomicBool::new(false)),
+                manages_local_host: Arc::new(AtomicBool::new(auto_start && runtime.is_ok())),
                 runtime: runtime.ok(),
             };
         }
@@ -98,6 +113,7 @@ impl DesktopShellState {
             .lock()
             .expect("desktop shell status lock poisoned");
 
+        status.auto_start_local_host = current.auto_start_local_host;
         status.login_start_enabled = app
             .autolaunch()
             .is_enabled()
@@ -133,13 +149,19 @@ pub fn finish_setup(app: &mut App) -> tauri::Result<()> {
             let starter = runtime.clone();
             let start_state = state.clone();
             let start_app = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Ok(status) =
-                    tauri::async_runtime::spawn_blocking(move || start_host(&starter)).await
-                {
-                    start_state.update(&start_app, status);
-                }
-            });
+            if state.snapshot().auto_start_local_host {
+                state.tray_operation_active.store(true, Ordering::SeqCst);
+                tauri::async_runtime::spawn(async move {
+                    if let Ok(status) =
+                        tauri::async_runtime::spawn_blocking(move || start_host(&starter)).await
+                    {
+                        start_state
+                            .tray_operation_active
+                            .store(false, Ordering::SeqCst);
+                        start_state.update(&start_app, status);
+                    }
+                });
+            }
             tauri::async_runtime::spawn(async move {
                 loop {
                     let mut status = runtime.observe().await;
@@ -199,6 +221,7 @@ pub async fn start_desktop_host(
             .runtime
             .clone()
             .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.exe from the Windows package, then try again.".to_owned())?;
+        state.manages_local_host.store(true, Ordering::SeqCst);
         let status = tauri::async_runtime::spawn_blocking(move || start_host(&runtime))
             .await
             .map_err(|error| format!("Alu Dock could not start: {error}"))?;
@@ -314,10 +337,7 @@ impl WindowsRuntime {
             .to_path_buf();
         let launcher = match std::env::var_os("ALUDOCK_DESKTOP_LAUNCHER_PATH") {
             Some(path) => std::path::PathBuf::from(path),
-            None => {
-                require_installed_root(&root)?;
-                root.join("aludock.cmd")
-            }
+            None => root.join("aludock.cmd"),
         };
         if !launcher.is_file() {
             return Err(
@@ -375,7 +395,13 @@ impl WindowsRuntime {
             _ => {
                 let exited = windows_local_root()
                     .ok()
-                    .and_then(|root| std::fs::read(root.join("host-owner.json")).ok())
+                    .and_then(|root| match std::fs::read(root.join("host-owner.json")) {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            Some(br#"{"pid":0,"exited":true}"#.to_vec())
+                        }
+                        Err(_) => None,
+                    })
                     .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
                     .is_some_and(|owner| {
                         match owner["pid"]
@@ -453,6 +479,7 @@ impl WindowsRuntime {
                 .logs_path
                 .or_else(|| Some(self.logs_path.display().to_string())),
             login_start_enabled: false,
+            auto_start_local_host: false,
         })
     }
 
@@ -497,19 +524,6 @@ impl WindowsRuntime {
             .map(|_| ())
             .map_err(|_| "Windows could not open the Alu Dock terminal. Try again from the package directory.".to_owned())
     }
-}
-
-#[cfg(target_os = "windows")]
-fn require_installed_root(root: &std::path::Path) -> Result<(), String> {
-    let installed = windows_local_root()?.join("app");
-    let actual = std::fs::canonicalize(root).ok();
-    let expected = std::fs::canonicalize(&installed).ok();
-    if actual.is_none() || actual != expected {
-        return Err(
-            "This copy of AluDock.exe is part of the installation package. Run Setup.exe first, then open Alu Dock from the Start Menu.".into(),
-        );
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -632,8 +646,7 @@ fn show_main_window(app: &AppHandle) {
 #[cfg(target_os = "windows")]
 struct DesktopTray {
     status: tauri::menu::MenuItem<tauri::Wry>,
-    start: tauri::menu::MenuItem<tauri::Wry>,
-    stop: tauri::menu::MenuItem<tauri::Wry>,
+    action: tauri::menu::MenuItem<tauri::Wry>,
 }
 
 #[cfg(target_os = "windows")]
@@ -647,11 +660,12 @@ fn update_tray(app: &AppHandle, status: &DesktopShellStatus) {
             Some(false) => "SubHost 运行中 · 正在连接 Main",
             None => "SubHost 运行中 · Main 连接待确认",
         },
-        "ready" => "本机 Main 运行中",
-        "starting" => "Alu Dock 正在启动",
-        "stopping" => "Alu Dock 正在停止",
-        "stopped" => "Alu Dock 已停止",
-        _ => "Alu Dock 状态暂不可确认",
+        "ready" => "本机 Dock：运行中",
+        "starting" => "本机 Dock：正在启动…",
+        "stopping" => "本机 Dock：正在停止…",
+        "stopped" if status.startup_error.is_some() => "本机 Dock：启动失败",
+        "stopped" => "本机 Dock：未启动",
+        _ => "本机 Dock：状态暂未确认",
     }
     .to_owned();
     if status.host_ready {
@@ -666,12 +680,18 @@ fn update_tray(app: &AppHandle, status: &DesktopShellStatus) {
         .tray_operation_active
         .load(Ordering::SeqCst);
     let _ = items.status.set_text(&text);
+    let action_text = match status.host_phase.as_str() {
+        "ready" => "停止本机 Dock",
+        "starting" => "正在启动…",
+        "stopping" => "正在停止…",
+        "stopped" if status.startup_error.is_some() => "重试启动本机 Dock",
+        "stopped" => "启动本机 Dock",
+        _ => "状态未确认，请查看日志",
+    };
+    let _ = items.action.set_text(action_text);
     let _ = items
-        .start
-        .set_enabled(!busy && matches!(status.host_phase.as_str(), "stopped" | "unknown"));
-    let _ = items
-        .stop
-        .set_enabled(!busy && matches!(status.host_phase.as_str(), "starting" | "ready"));
+        .action
+        .set_enabled(!busy && matches!(status.host_phase.as_str(), "stopped" | "ready"));
     if let Some(tray) = app.tray_by_id("main-tray") {
         let _ = tray.set_tooltip(Some(text));
     }
@@ -685,8 +705,17 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
 
     let status = MenuItem::with_id(app, "host-status", "Alu Dock 正在启动", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "打开 Alu Dock", true, None::<&str>)?;
-    let start = MenuItem::with_id(app, "start", "启动 Alu Dock", true, None::<&str>)?;
-    let stop = MenuItem::with_id(app, "stop", "停止 Alu Dock", true, None::<&str>)?;
+    let action = MenuItem::with_id(app, "host-action", "启动本机 Dock", true, None::<&str>)?;
+    let auto_start = CheckMenuItem::with_id(
+        app,
+        "local-start",
+        "随客户端启动本机 Dock",
+        true,
+        app.state::<DesktopShellState>()
+            .snapshot()
+            .auto_start_local_host,
+        None::<&str>,
+    )?;
     let update_models = MenuItem::with_id(app, "update-models", "更新模型", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "打开 Host 日志", true, None::<&str>)?;
     let terminal = MenuItem::with_id(app, "terminal", "打开终端设置", true, None::<&str>)?;
@@ -698,7 +727,7 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
         app.autolaunch().is_enabled().unwrap_or(false),
         None::<&str>,
     )?;
-    let exit = MenuItem::with_id(app, "exit", "退出 Desktop", true, None::<&str>)?;
+    let exit = MenuItem::with_id(app, "exit", "退出 Alu Dock", true, None::<&str>)?;
     let first_separator = PredefinedMenuItem::separator(app)?;
     let second_separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
@@ -707,8 +736,8 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
             &status,
             &open,
             &first_separator,
-            &start,
-            &stop,
+            &action,
+            &auto_start,
             &update_models,
             &logs,
             &terminal,
@@ -717,11 +746,8 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
             &exit,
         ],
     )?;
-    app.manage(DesktopTray {
-        status,
-        start,
-        stop,
-    });
+    app.manage(DesktopTray { status, action });
+    let auto_start_for_event = auto_start.clone();
     let login_for_event = login.clone();
     let mut tray = TrayIconBuilder::with_id("main-tray");
     if let Some(icon) = app.default_window_icon().cloned() {
@@ -743,8 +769,34 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
         })
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
-            "start" => run_tray_service(app, true),
-            "stop" => run_tray_service(app, false),
+            "host-action" => {
+                let running = app.state::<DesktopShellState>().snapshot().host_ready;
+                run_tray_service(app, !running, false);
+            }
+            "local-start" => {
+                let enabled = auto_start_for_event.is_checked().unwrap_or(true);
+                let runtime = app.state::<super::ConnectionRuntimeState>();
+                let result = runtime.preferences.snapshot().and_then(|p| {
+                    runtime
+                        .preferences
+                        .update_windows_start_local_host(p.revision, enabled)
+                });
+                match result {
+                    Ok(_) => {
+                        let state = app.state::<DesktopShellState>();
+                        state
+                            .status
+                            .lock()
+                            .expect("desktop shell status lock poisoned")
+                            .auto_start_local_host = enabled;
+                        let _ = app.emit("desktop-shell-changed", state.snapshot());
+                    }
+                    Err(_) => {
+                        let _ = auto_start_for_event.set_checked(!enabled);
+                        show_tray_notice(app, "设置未保存", "请重试。当前运行的工作不受影响。");
+                    }
+                }
+            }
             "update-models" => run_tray_model_update(app),
             "logs" => {
                 let state = app.state::<DesktopShellState>();
@@ -766,10 +818,16 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
                 }
             }
             "exit" => {
-                app.state::<DesktopShellState>()
-                    .exit_requested
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
+                let state = app.state::<DesktopShellState>();
+                if state.manages_local_host.load(Ordering::SeqCst)
+                    && (state.tray_operation_active.load(Ordering::SeqCst)
+                        || state.snapshot().host_phase != "stopped")
+                {
+                    run_tray_service(app, false, true);
+                } else {
+                    state.exit_requested.store(true, Ordering::SeqCst);
+                    app.exit(0);
+                }
             }
             _ => {}
         })
@@ -779,12 +837,15 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn run_tray_service(app: &AppHandle, start: bool) {
+fn run_tray_service(app: &AppHandle, start: bool, exit_after_stop: bool) {
     let app = app.clone();
     let state = app.state::<DesktopShellState>().inner().clone();
     if state.tray_operation_active.swap(true, Ordering::SeqCst) {
         show_tray_notice(&app, "Alu Dock 正在处理上一项操作", "完成后可以继续操作。");
         return;
+    }
+    if start && state.runtime.is_some() {
+        state.manages_local_host.store(true, Ordering::SeqCst);
     }
     update_tray(&app, &state.snapshot());
     show_tray_notice(
@@ -826,6 +887,14 @@ fn run_tray_service(app: &AppHandle, start: bool) {
             );
             show_main_window(&app);
         } else if complete {
+            if !start {
+                state.manages_local_host.store(false, Ordering::SeqCst);
+                if exit_after_stop {
+                    state.exit_requested.store(true, Ordering::SeqCst);
+                    app.exit(0);
+                    return;
+                }
+            }
             show_tray_notice(
                 &app,
                 if start {

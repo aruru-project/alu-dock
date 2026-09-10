@@ -114,7 +114,7 @@ git diff --check
 
 ### Deployment
 
-Service、installer 或 process lifecycle 改动使用隔离环境验证。真实安装和 service 操作必须另行获得用户授权。
+自行实现的 service 或 process lifecycle 行为按影响面验证。Windows 安装沿用成熟安装器的默认能力，不另建或反复运行安装器专项测试；正常安装/覆盖使用由用户验收，不把它扩展为测试工程。客户端自身的启动、退出、纯客户端选择和状态显示仍须核对。真实安装和 service 操作必须获得用户授权。
 
 ## 真实模型调用
 

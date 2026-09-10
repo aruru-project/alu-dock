@@ -11,15 +11,11 @@ const ROOT_RUNTIME_FILES = new Set([
   "tsconfig.json",
   "scripts/clean-dist.mjs",
 ]);
-const WINDOWS_REUSE_FILES = new Set([
-  "clients/official/scripts/windows-package.ps1",
-]);
 const WINDOWS_BUILD_FILES = new Set([
   "clients/official/scripts/package-windows.mjs",
   "clients/official/src-tauri/src/desktop_shell.rs",
   "clients/official/src-tauri/src/windows_launch.rs",
   "clients/official/src-tauri/src/main.rs",
-  "clients/official/scripts/windows-installer.nsi",
 ]);
 const ANDROID_PREFIXES = [
   "clients/official/src-tauri/gen/android/",
@@ -50,8 +46,6 @@ export function classifyReleaseArtifacts(paths, firstRelease = false) {
     const path = rawPath.replaceAll("\\", "/").replace(/^\.\//u, "");
     if (!path || IGNORED_RELEASE_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
     if (ROOT_RUNTIME_FILES.has(path) || ROOT_RUNTIME_PREFIXES.some((prefix) => path.startsWith(prefix))) {
-      selectWindows(plan, "reuse");
-    } else if (WINDOWS_REUSE_FILES.has(path)) {
       selectWindows(plan, "reuse");
     } else if (WINDOWS_BUILD_FILES.has(path)) {
       selectWindows(plan, "full");

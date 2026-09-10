@@ -7754,9 +7754,9 @@ pub fn run() {
             let application_data_dir = Some(app.path().app_local_data_dir()?);
             #[cfg(not(mobile))]
             let application_data_dir = None;
+            app.manage(ConnectionRuntimeState::open(application_data_dir)?);
             let desktop_shell = desktop_shell::DesktopShellState::initialize(app);
             app.manage(desktop_shell);
-            app.manage(ConnectionRuntimeState::open(application_data_dir)?);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);

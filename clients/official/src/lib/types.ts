@@ -16,6 +16,7 @@ export interface DesktopShellStatus {
   startupError?: string
   logsPath?: string
   loginStartEnabled: boolean
+  autoStartLocalHost: boolean
 }
 
 export interface ModelIdentity {

@@ -41,6 +41,12 @@ pub struct ClientPreferences {
     pub schema_version: u32,
     pub revision: u64,
     pub windows_away_delay: WindowsAwayDelay,
+    #[serde(default = "default_start_local_host")]
+    pub windows_start_local_host: bool,
+}
+
+fn default_start_local_host() -> bool {
+    true
 }
 
 impl ClientPreferences {
@@ -49,6 +55,7 @@ impl ClientPreferences {
             schema_version: PREFERENCES_SCHEMA_VERSION,
             revision: 1,
             windows_away_delay: WindowsAwayDelay::default(),
+            windows_start_local_host: true,
         }
     }
 
@@ -89,6 +96,26 @@ impl ClientPreferencesStore {
         expected_revision: u64,
         delay: WindowsAwayDelay,
     ) -> Result<ClientPreferences> {
+        self.update(expected_revision, |snapshot| {
+            snapshot.windows_away_delay = delay
+        })
+    }
+
+    pub fn update_windows_start_local_host(
+        &self,
+        expected_revision: u64,
+        enabled: bool,
+    ) -> Result<ClientPreferences> {
+        self.update(expected_revision, |snapshot| {
+            snapshot.windows_start_local_host = enabled
+        })
+    }
+
+    fn update(
+        &self,
+        expected_revision: u64,
+        change: impl FnOnce(&mut ClientPreferences),
+    ) -> Result<ClientPreferences> {
         let mut snapshot = self.snapshot()?;
         if snapshot.revision != expected_revision {
             return Err(ClientError::PreferencesConflict {
@@ -99,7 +126,7 @@ impl ClientPreferencesStore {
         snapshot.revision = snapshot.revision.checked_add(1).ok_or_else(|| {
             ClientError::InvalidPairing("client preferences revision overflowed".into())
         })?;
-        snapshot.windows_away_delay = delay;
+        change(&mut snapshot);
         snapshot.validate()?;
         if !self.write_snapshot(&snapshot)? {
             let actual = self.snapshot()?.revision;
@@ -187,19 +214,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chosen_away_time_is_kept_after_the_client_reopens() {
+    fn client_choices_are_kept_after_reopening() {
         let root =
             std::env::temp_dir().join(format!("aludock-client-preferences-{}", Uuid::new_v4()));
         let store = ClientPreferencesStore::open(&root).unwrap();
         let initial = store.snapshot().unwrap();
         assert_eq!(initial.windows_away_delay, WindowsAwayDelay::OneMinute);
+        assert!(initial.windows_start_local_host);
+        let pure_client = store
+            .update_windows_start_local_host(initial.revision, false)
+            .unwrap();
 
         store
-            .update_windows_away_delay(initial.revision, WindowsAwayDelay::ThirtyMinutes)
+            .update_windows_away_delay(pure_client.revision, WindowsAwayDelay::ThirtyMinutes)
             .unwrap();
         drop(store);
 
         let reopened = ClientPreferencesStore::open(&root).unwrap();
+        assert!(!reopened.snapshot().unwrap().windows_start_local_host);
         assert_eq!(
             reopened.snapshot().unwrap().windows_away_delay,
             WindowsAwayDelay::ThirtyMinutes

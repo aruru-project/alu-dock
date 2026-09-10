@@ -433,7 +433,6 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
     ? new WindowsUserHostManager({
       nodePath: process.execPath,
       cliPath: resolve(entryPath),
-      setupPath: layout.unitFile,
       logPath: windowsHostLogPath as string,
     })
     : new UserServiceManager({

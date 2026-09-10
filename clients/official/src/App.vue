@@ -913,6 +913,7 @@ async function retryDesktopHost() {
       hostReady: false,
       startupError: errorMessage(cause),
       loginStartEnabled: desktopShell.value?.loginStartEnabled ?? false,
+      autoStartLocalHost: desktopShell.value?.autoStartLocalHost ?? true,
     }
   } finally {
     desktopShellBusy.value = false
@@ -3466,12 +3467,12 @@ async function toggleAllToolDetails() {
       </div>
       <div v-if="conversationSwitching && selected" class="alu-conversation-switching" role="status">正在打开 {{ selected.displayName }}…</div>
 
-      <div v-if="app.loading && !(desktopShell?.supported && !app.payload && (desktopShell.startupError || !desktopShell.hostReady))" class="center-state" aria-live="polite">
+      <div v-if="app.loading && !(desktopShell?.supported && desktopShell.autoStartLocalHost && !app.payload && (desktopShell.startupError || !desktopShell.hostReady))" class="center-state" aria-live="polite">
         <span class="alu-spinner" />
         <p>正在连接 AluDock…</p>
       </div>
 
-      <div v-else-if="desktopShell?.supported && !app.payload && desktopShell.startupError" class="center-state error-state offline-host-state">
+      <div v-else-if="desktopShell?.supported && desktopShell.autoStartLocalHost && !app.payload && desktopShell.startupError" class="center-state error-state offline-host-state">
         <WifiOff :size="28" />
         <h1>Alu Dock 需要你的操作</h1>
         <p>{{ desktopShell.startupError }}</p>
@@ -3482,7 +3483,7 @@ async function toggleAllToolDetails() {
         </div>
       </div>
 
-      <div v-else-if="desktopShell?.supported && !app.payload && desktopShell.role !== 'subhost' && !desktopShell.hostReady" class="center-state offline-host-state">
+      <div v-else-if="desktopShell?.supported && desktopShell.autoStartLocalHost && !app.payload && desktopShell.role !== 'subhost' && !desktopShell.hostReady" class="center-state offline-host-state">
         <Monitor :size="28" />
         <h1>{{ desktopShell.hostPhase === 'starting' ? 'Alu Dock 正在启动' : desktopShell.hostPhase === 'stopping' ? 'Alu Dock 正在停止' : 'Alu Dock 已停止' }}</h1>
         <p>{{ desktopShell.hostPhase === 'starting' ? '窗口会在启动完成后自动连接。' : '启动后即可继续这台电脑上的 Work。' }}</p>
