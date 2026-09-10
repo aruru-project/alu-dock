@@ -37,6 +37,8 @@ $registration = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersio
 if ($registration.DisplayVersion -ne $ExpectedVersion -or $registration.InstallLocation -ne $app) { throw 'Windows app registration is incomplete.' }
 & (Join-Path $app 'aludock.cmd') help
 if ($LASTEXITCODE -ne 0) { throw 'The installed command cannot run.' }
+& node (Join-Path $PSScriptRoot 'windows-launch-smoke.mjs') (Join-Path $app 'AluDock.exe')
+if ($LASTEXITCODE -ne 0) { throw 'The installed native launcher did not release its caller.' }
 Write-Output 'PASS: actual Setup installed intact Desktop, Dock, bundled Pi, uninstaller and command, registered Windows integration, and preserved sibling data.'
 # Native GUI interaction, Work recovery and sleep continuity remain drawworker acceptance.
 exit 0

@@ -2,9 +2,13 @@
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use windows_sys::Win32::Foundation::{
+    SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -16,6 +20,21 @@ pub fn run() -> Option<i32> {
         return None;
     }
     let result = (|| -> io::Result<()> {
+        // Rust 1.88 Command inherits every inheritable handle, not just its
+        // configured stdio. Keep our reply pipes out of descendants: otherwise
+        // the caller waits for the long-lived Host to close a helper's stdout.
+        for handle in [
+            io::stdin().as_raw_handle(),
+            io::stdout().as_raw_handle(),
+            io::stderr().as_raw_handle(),
+        ] {
+            if !handle.is_null()
+                && handle != INVALID_HANDLE_VALUE
+                && unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
         if args.len() < 4 {
             return Err(io::Error::other(
                 "The Windows launch arguments are incomplete.",
