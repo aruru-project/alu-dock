@@ -18,11 +18,16 @@ jobs:
     timeout-minutes: 60
     env:
       ALUDOCK_RELEASE_VERSION: 2.9.0
+      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-toolchain
+      - name: Keep the temporary runner on the configured Rust toolchain
+        # rust-cache fingerprints every installed toolchain; hosted images vary
+        # in their unused stable version. This changes only this disposable job.
+        run: rustup toolchain uninstall stable
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

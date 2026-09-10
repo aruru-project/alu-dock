@@ -124,13 +124,16 @@ try {
     .map((path) => `${basename(releaseRoot)}/app/${path}`);
   const listing = new Set(run(systemTar, ["-t", "-f", components, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/").split(/\r?\n/u).map((path) => path.trim()));
   for (const path of requiredPaths) if (!listing.has(path)) throw new Error(`The component archive is missing ${path}`);
+  // Tauri's resource normalizer drops Windows drive prefixes. Staging is on
+  // the backend's volume, so a normalized absolute source still resolves there
+  // and avoids uncollapsed ../ segments inflating makensis's input path.
   // tauri bundle (not build) also works when reusing a verified Desktop binary.
   const targetDirectory = join(clientRoot, "src-tauri", "target", windowsTarget, "release");
   mkdirSync(targetDirectory, { recursive: true });
   copyFileSync(join(payloadRoot, "AluDock.exe"), join(targetDirectory, "aludock-client-app.exe"));
   const tauriCli = join(clientRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
   run(buildRuntime.nodePath, [tauriCli, "bundle", "--bundles", "nsis", "--target", windowsTarget,
-    "--config", JSON.stringify({ version, bundle: { resources: { [relative(join(clientRoot, "src-tauri"), payloadRoot).replaceAll("\\", "/")]: "payload/" }, windows: {
+    "--config", JSON.stringify({ version, bundle: { resources: { [payloadRoot]: "payload/" }, windows: {
       nsis: { template: "../scripts/windows-installer.nsi", installMode: "currentUser" },
       webviewInstallMode: { type: "embedBootstrapper", silent: true },
     } } }),
