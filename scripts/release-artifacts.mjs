@@ -17,6 +17,9 @@ const WINDOWS_REUSE_FILES = new Set([
 const WINDOWS_BUILD_FILES = new Set([
   "clients/official/scripts/package-windows.mjs",
   "clients/official/src-tauri/src/desktop_shell.rs",
+  "clients/official/src-tauri/src/windows_launch.rs",
+  "clients/official/src-tauri/src/main.rs",
+  "clients/official/scripts/windows-installer.nsi",
 ]);
 const ANDROID_PREFIXES = [
   "clients/official/src-tauri/gen/android/",

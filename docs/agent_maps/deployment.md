@@ -2,7 +2,7 @@
 
 ## 这部分负责什么
 
-Linux 安装形态使用长期 `systemd --user` Host Service。Windows 官方发行包使用随包 Node 在当前用户 session 中启动隐藏、detached 的同一个 Host；Tauri Desktop 只负责窗口、托盘、单实例与可选登录启动，私有 lifecycle pipe 仍是 CLI、Desktop 与一次性 `Setup.cmd` 共用的唯一 start/stop/ready authority。Windows 不创建 Windows Service 或 Scheduled Task，也不依赖长期 PowerShell/cmd 窗口。拿到 ZIP 的用户运行 `Setup.cmd`；Windows checkout 的 `install:local` 构建同一个 ZIP 并调用同一 Setup 流程，不产生第二套安装布局或 Host 生命周期。每个 active instance 的 Agent runtime 仍运行在独立 Worker 进程中。
+Linux 安装形态使用长期 `systemd --user` Host Service。Windows 官方发行入口是当前用户的 `Setup.exe`，保留系统 Node。短命的原生 Desktop 可执行文件启动模式用 Windows breakaway/no-window flags 启动同一个 Node Host，随后退出，不引入 Service、Scheduled Task 或常驻 broker。Host 的轻量 bootstrap 先取得私有 lifecycle pipe，再加载配置、Pi 和 catalog；Desktop 初始化窗口/托盘后异步启动，并直接观察同一个 Host。Windows checkout 的 `install:local` 构建并调用同一个 Setup.exe。每个 active instance 的 Agent runtime 仍运行在独立 Worker 进程中。
 
 ```text
 systemd --user / hidden Windows user-session Host
@@ -106,7 +106,15 @@ aludock service uninstall
 
 ## 本地安装与 Windows 发行
 
-Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 始终只有一个可独立安装的正式 ZIP，由 `package:windows` 组装 `AluDock.exe`、Dock、bundled Pi、DLL sidecars、`aludock.cmd`、`Setup.cmd` 与 `Uninstall.cmd`，不携带 Node/npm。仅有 Host/Worker/Pi 变化时，正式流水线校验最近一次成功发布的完整 Windows ZIP，复用其中的 Desktop 和 DLL 并替换当前 Dock/发行入口；Rust、Tauri、前端、Linux 和 Android 均不因此重建。Setup 先验证系统 Node，再通过 sibling staging、事务记录和上一版本目录把唯一安装位置切换到 `%LOCALAPPDATA%\Alu Dock\app`；文件替换完成即提交安装，随后完成系统集成并尝试启动；启动超时或失败保留完整新版本和开始菜单入口，只提示用户检查或稍后启动，不触发回滚。只有文件替换未完成的失败或中断才恢复上一版本；已提交安装的重试只补完系统集成和清理。Start Menu、Windows Apps 卸载项和用户 PATH 中的全局 `aludock` launcher 仍由 Setup 维护。卸载只移除安装包及这些系统集成，不删除系统 Node、Dock/Pi 配置、身份、凭据和 Session。checkout `install:local` 使用开发机工具链构建同一个完整包，再进入 Setup。两者都不保留旧 PowerShell launcher 作为第二条稳态路径。安装与测试是两件事；安装器和包组装 gate 不替代真实 Windows 验收。
+Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 的正式安装入口为 `AluDock-<version>-windows-x86_64-Setup.exe`；`-components.zip` 仅供后续构建复用 Desktop/DLL，不是另一条安装流程。包组装保留 bundled Pi、系统 Node 版本门槛、native prebuild pruning 和 PE/DLL 检查。
+
+Windows NSIS 自定义模板拥有页面、安装/卸载编排、Windows Apps 注册和开始菜单。它不执行任何旧 `UninstallString`，也不采用 stock 的旧卸载先于 preinstall hook 路径。私有 PowerShell helper 只负责校验、文件事务、旧入口/journal 迁移及 PATH 原语；没有公开 PowerShell/Setup.cmd 安装主流程。唯一位置仍是 `%LOCALAPPDATA%\Alu Dock\app`。
+
+Setup 与原生 service start/restart 使用同一个独占文件句柄（`install.lock`）；文件存在不是锁。准备完整 payload 后，旧 ZIP 的已确认归属入口有可恢复备份和临时 guard；已创建的旧 CLI/cmd spawner 必须退出，再通过 Host 正常 stop 并确认 package 使用者退出。Host 拒绝或观察不明时不切换目录；不按 Node 名称杀进程。预提交中断恢复完整旧包，`committed` 之后只补集成/清理，不因慢启动回滚新包。重新运行 Setup.exe 即修复；不要求先卸载。配置、catalog、身份、Pi/session、附件和官方客户端数据不属于 app 替换或卸载范围。
+
+Host 状态区分 starting、ready、stopping 和无法确认；观察超时不是死亡证明。15 秒内未 ready 但仍 starting 的启动返回可观察状态，重试不创建第二个 Host。无 pipe 时按已知进程退出证据或保守 unknown 处理，安装额外做有 guard 的旧包进程检查。Desktop 用短时私有 pipe 观察，而非高频运行完整 CLI；只在状态变化时发布，并在从未 ready 转为 ready 时触发连接。Main/SubHost 的连接状态仍由现有 Protocol/设置管理，不等同于本机 Host readiness。
+
+原生 breakaway 已有指定测试机的独立短命进程证据，不代表所有 Job 策略均允许。系统拒绝 breakaway 时显示失败，不悄悄退回 SSH Job。完整 Windows Setup/迁移/修复/卸载及同 Work 连续性仍需 Windows 候选验收，Linux cross-check 不代表可运行证明。
 
 存在未完成 run、Queue、interaction 或 stopping instance 时，Linux 更新和 Windows stop/update 默认拒绝。Windows Desktop 的 X 只隐藏窗口，`Exit Desktop` 只退出 GUI，只有独立的 `Stop Alu Dock` 会请求 Host 正常停止；关闭或更新 GUI 不停止 Host 或 Work。
 
@@ -115,8 +123,8 @@ Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user
 ## 代码范围
 
 - `src/deployment/`：安装布局和 user service 管理。
-- `scripts/install-local.ts`：Linux checkout 本地包更新入口；Windows checkout 构建官方 ZIP 并进入同一 Setup 流程。
-- `clients/official/scripts/package-windows.mjs`、`windows-package.ps1`：Windows x64 完整发行目录、系统 Node 门禁、安装/卸载、组件复用、架构/DLL 检查与 ZIP 组装。
+- `scripts/install-local.ts`：Linux checkout 本地包更新入口；Windows checkout 构建官方 Setup.exe 并进入同一流程。
+- `clients/official/scripts/package-windows.mjs`、`windows-package.ps1`：Windows x64 完整发行目录、系统 Node 门禁、私有文件事务、组件复用、架构/DLL 检查与 Setup 组装。
 - `src/deployment/windows-host-lifecycle.ts`、`windows-user-host.ts`：Windows 用户 session 隐藏 Host、持久日志与私有生命周期；不承载 Dock 客户端协议。
 - `clients/official/src-tauri/src/desktop_shell.rs`：Windows Desktop bootstrap、tray、single-instance 与 login startup；不复制 Host/Worker/Catalog 语义。
 - `src/control/dock-host.ts`：Host socket 与 shutdown。

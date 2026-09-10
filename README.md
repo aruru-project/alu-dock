@@ -102,14 +102,14 @@ npm run client:dev
 
 浏览器预览不具备 Tauri native bridge，不能证明本机 socket 或原生文件能力。Desktop 的真实本机入口使用 Unix socket 或 Windows Named Pipe，连接同一 Host 且不要求设备配对。
 
-生成可交付 Desktop ZIP：
+生成 Desktop 安装包：
 
 ```bash
 npm run client:package:linux   # x86_64 Linux
 npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 始终提供一个可独立安装的完整 ZIP，包含 Desktop、Dock 与 bundled Pi，并使用电脑上已安装的兼容 Node.js。只有 Host/Worker/Pi 变化时，正式流水线复用上一正式包的 Desktop，不重新编译 Rust/Tauri/前端；用户下载和安装的仍是当前版本完整包。完整解压后运行一次 `Setup.cmd`，之后从 Start Menu 打开 Desktop，或在新终端运行全局 `aludock`。Windows Apps 中的卸载入口只移除程序和系统集成，保留 Dock/Pi 状态和系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+Linux 产物为 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Windows 用户运行 `AluDock-<version>-windows-x86_64-Setup.exe`，使用系统中兼容的 Node.js。`-components.zip` 只用于正式构建复用 Desktop/DLL；用户不解压它来安装。Setup 完成后从 Start Menu 打开 Desktop，或在新终端运行 `aludock`。文件提交后，慢启动或启动失败保留新版本；再次运行 Setup.exe 可修复。Windows Apps 卸载只移除程序和系统集成，保留 Dock/Pi 状态及系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 

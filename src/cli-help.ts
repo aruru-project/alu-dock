@@ -157,7 +157,7 @@ function helpHelp(): string {
 function serviceHelp(rest: readonly string[]): string {
   if (rest.length === 0) {
     const updateGuidance = process.platform === "win32"
-      ? "Install or update a downloaded Windows package with Setup.cmd. From a source\ncheckout, `npm run install:local` builds that same package and runs Setup. Windows\nApps removes the application while keeping Dock and Pi settings available."
+      ? "Install or update a downloaded Windows package with Setup.exe. From a source\ncheckout, `npm run install:local` builds that same package and runs Setup. Windows\nApps removes the application while keeping Dock and Pi settings available."
       : "Install or update the local package from the current working tree with:\n\n  npm run install:local\n\nFinish or stop active work before updating. The installer will ask you to use an\nexplicit replacement option if work is still active.";
     return `aludock service — manage the installed Alu Dock Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the service for this user\n  start       Start Alu Dock\n  stop        Stop Alu Dock\n  restart     Restart Alu Dock\n  status      Show whether Alu Dock is ready\n  logs        Show service logs\n  uninstall   Remove the Alu Dock service setup\n\n${updateGuidance}\n\nSaved Pi sessions and project files remain available after service commands.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
   }

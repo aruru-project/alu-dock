@@ -9,6 +9,7 @@ export interface ClientPreferences {
 }
 
 export interface DesktopShellStatus {
+  hostPhase?: 'starting' | 'ready' | 'stopping' | 'stopped' | 'unknown'
   supported: boolean
   hostReady: boolean
   role?: 'main' | 'subhost'

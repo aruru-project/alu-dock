@@ -112,7 +112,7 @@ jobs:
 
           windows_base_tag=""
           if [[ -n "$planned_base_tag" ]]; then
-            asset_name="AluDock-${planned_base_tag#v}-windows-x86_64.zip"
+            asset_name="AluDock-${planned_base_tag#v}-windows-x86_64-components.zip"
             if assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$planned_base_tag" --jq '.assets[].name') \
               && grep -Fxq "$asset_name" <<< "$assets" \
               && grep -Fxq "SHA256SUMS.txt" <<< "$assets"; then
@@ -245,7 +245,7 @@ jobs:
         working-directory: .
         run: |
           $baseVersion = $env:BASE_TAG.TrimStart("v")
-          $assetName = "AluDock-$baseVersion-windows-x86_64.zip"
+          $assetName = "AluDock-$baseVersion-windows-x86_64-components.zip"
           $baseDirectory = Join-Path $env:RUNNER_TEMP "aludock-windows-base"
           New-Item -ItemType Directory -Path $baseDirectory -Force | Out-Null
           gh release download $env:BASE_TAG --repo $env:GITHUB_REPOSITORY --dir $baseDirectory --pattern $assetName --pattern SHA256SUMS.txt
@@ -259,9 +259,12 @@ jobs:
           if ($actual -ne $expected) { throw "The reusable Windows package checksum does not match $env:BASE_TAG" }
           "ALUDOCK_WINDOWS_BASE_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Install Dock dependencies
+      - name: Install Dock and bundler dependencies
         working-directory: .
-        run: npm ci
+        run: |
+          npm ci
+          corepack enable
+          npm run client:install
 
       - name: Enter the Visual Studio developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -289,7 +292,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows-${{ needs.prepare.outputs.tag }}
-          path: clients/official/dist/AluDock-*-windows-x86_64.zip
+          path: |
+            clients/official/dist/AluDock-*-windows-x86_64-Setup.exe
+            clients/official/dist/AluDock-*-windows-x86_64-components.zip
           if-no-files-found: error
           retention-days: 3
 

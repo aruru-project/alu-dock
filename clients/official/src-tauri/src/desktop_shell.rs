@@ -9,12 +9,16 @@ use tauri::{Emitter, WindowEvent};
 #[cfg(target_os = "windows")]
 use tauri_plugin_notification::NotificationExt;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopShellStatus {
     pub supported: bool,
     pub host_ready: bool,
+    pub host_phase: String,
     pub role: Option<String>,
+    pub main_connected: Option<bool>,
+    pub restoring_works: bool,
+    pub unavailable_works: u64,
     pub startup_error: Option<String>,
     pub logs_path: Option<String>,
     pub login_start_enabled: bool,
@@ -39,16 +43,18 @@ impl DesktopShellState {
 
             let runtime = WindowsRuntime::discover();
             let mut status = match &runtime {
-                Ok(runtime) => start_host(runtime),
+                Ok(runtime) => runtime.initial_status(),
                 Err(error) => DesktopShellStatus {
                     supported: true,
                     host_ready: false,
+                    host_phase: "unknown".into(),
                     role: None,
                     startup_error: Some(error.clone()),
                     logs_path: windows_host_log_path()
                         .ok()
                         .map(|path| path.display().to_string()),
                     login_start_enabled: false,
+                    ..Default::default()
                 },
             };
             status.login_start_enabled = app.autolaunch().is_enabled().unwrap_or(false);
@@ -66,21 +72,15 @@ impl DesktopShellState {
                 status: Arc::new(Mutex::new(DesktopShellStatus {
                     supported: false,
                     host_ready: false,
+                    host_phase: "unknown".into(),
                     role: None,
                     startup_error: None,
                     logs_path: None,
                     login_start_enabled: false,
+                    ..Default::default()
                 })),
             }
         }
-    }
-
-    pub fn prefer_local_connection(&self) -> bool {
-        let status = self
-            .status
-            .lock()
-            .expect("desktop shell status lock poisoned");
-        status.host_ready && status.role.as_deref() == Some("main")
     }
 
     pub fn snapshot(&self) -> DesktopShellStatus {
@@ -92,13 +92,32 @@ impl DesktopShellState {
 
     #[cfg(target_os = "windows")]
     fn update(&self, app: &AppHandle, mut status: DesktopShellStatus) -> DesktopShellStatus {
+        use tauri_plugin_autostart::ManagerExt;
         let mut current = self
             .status
             .lock()
             .expect("desktop shell status lock poisoned");
-        status.login_start_enabled = current.login_start_enabled;
+
+        status.login_start_enabled = app
+            .autolaunch()
+            .is_enabled()
+            .unwrap_or(current.login_start_enabled);
+        if status.host_ready && !current.host_ready && status.role.as_deref() == Some("main") {
+            if app
+                .state::<super::ConnectionRuntimeState>()
+                .select_initial_local()
+                .is_err()
+            {
+                status.startup_error =
+                    Some("无法自动连接本机 Alu Dock。请在主机列表中选择本机。".into());
+            }
+        }
+        if *current == status {
+            return status;
+        }
         *current = status.clone();
         drop(current);
+        update_tray(app, &status);
         let _ = app.emit("desktop-shell-changed", status.clone());
         status
     }
@@ -108,6 +127,36 @@ pub fn finish_setup(app: &mut App) -> tauri::Result<()> {
     #[cfg(target_os = "windows")]
     {
         create_tray(app)?;
+        let handle = app.handle().clone();
+        let state = app.state::<DesktopShellState>().inner().clone();
+        if let Some(runtime) = state.runtime.clone() {
+            let starter = runtime.clone();
+            let start_state = state.clone();
+            let start_app = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(status) =
+                    tauri::async_runtime::spawn_blocking(move || start_host(&starter)).await
+                {
+                    start_state.update(&start_app, status);
+                }
+            });
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let mut status = runtime.observe().await;
+                    if !status.host_ready
+                        && (status.host_phase == "unknown" || status.host_phase == "stopped")
+                    {
+                        // Keep an actionable launch failure until there is new
+                        // startup/readiness evidence, not merely an absent pipe.
+                        if let Some(error) = state.snapshot().startup_error {
+                            status.startup_error = Some(error);
+                        }
+                    }
+                    state.update(&handle, status);
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+        }
         let background = std::env::args().any(|argument| argument == "--background");
         let status = app.state::<DesktopShellState>().snapshot();
         if !background || status.startup_error.is_some() {
@@ -149,7 +198,7 @@ pub async fn start_desktop_host(
         let runtime = state
             .runtime
             .clone()
-            .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.cmd from the Windows package, then try again.".to_owned())?;
+            .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.exe from the Windows package, then try again.".to_owned())?;
         let status = tauri::async_runtime::spawn_blocking(move || start_host(&runtime))
             .await
             .map_err(|error| format!("Alu Dock could not start: {error}"))?;
@@ -217,7 +266,7 @@ pub fn open_desktop_tui(state: tauri::State<'_, DesktopShellState>) -> Result<()
         let runtime = state
             .runtime
             .as_ref()
-            .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.cmd from the Windows package, then try again.".to_owned())?;
+            .ok_or_else(|| "Alu Dock is not ready on this computer. Run Setup.exe from the Windows package, then try again.".to_owned())?;
         runtime.open_tui()
     }
     #[cfg(not(target_os = "windows"))]
@@ -242,18 +291,25 @@ struct ServiceStatus {
     ready: bool,
     role: Option<String>,
     logs_path: Option<String>,
+    #[serde(default)]
+    sub_state: String,
+    main_connected: Option<bool>,
+    #[serde(default)]
+    restoring_works: bool,
+    #[serde(default)]
+    unavailable_works: u64,
 }
 
 #[cfg(target_os = "windows")]
 impl WindowsRuntime {
     fn discover() -> Result<Self, String> {
         let executable = std::env::current_exe().map_err(|_| {
-            "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned()
+            "Alu Dock could not locate its Windows package. Run Setup.exe again.".to_owned()
         })?;
         let root = executable
             .parent()
             .ok_or_else(|| {
-                "Alu Dock could not locate its Windows package. Run Setup.cmd again.".to_owned()
+                "Alu Dock could not locate its Windows package. Run Setup.exe again.".to_owned()
             })?
             .to_path_buf();
         let launcher = match std::env::var_os("ALUDOCK_DESKTOP_LAUNCHER_PATH") {
@@ -265,7 +321,7 @@ impl WindowsRuntime {
         };
         if !launcher.is_file() {
             return Err(
-                "The Alu Dock command is missing. Run Setup.cmd from the Windows package.".into(),
+                "The Alu Dock command is missing. Run Setup.exe from the Windows package.".into(),
             );
         }
         Ok(Self {
@@ -273,6 +329,73 @@ impl WindowsRuntime {
             launcher,
             logs_path: windows_host_log_path()?,
         })
+    }
+
+    fn initial_status(&self) -> DesktopShellStatus {
+        DesktopShellStatus {
+            supported: true,
+            host_ready: false,
+            host_phase: "starting".into(),
+            role: None,
+            startup_error: None,
+            logs_path: Some(self.logs_path.display().to_string()),
+            login_start_enabled: false,
+            ..Default::default()
+        }
+    }
+
+    async fn observe(&self) -> DesktopShellStatus {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut pipe = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(r"\\.\pipe\alu-dock-host-lifecycle")?;
+            pipe.write_all(b"{\"action\":\"status\"}\n").await?;
+            let mut line = String::new();
+            BufReader::new(pipe).read_line(&mut line).await?;
+            serde_json::from_str::<serde_json::Value>(&line).map_err(std::io::Error::other)
+        })
+        .await;
+        let mut status = self.initial_status();
+        match observed {
+            Ok(Ok(value)) => {
+                status.host_ready = value["ready"].as_bool().unwrap_or(false);
+                status.host_phase = value["phase"]
+                    .as_str()
+                    .unwrap_or(if status.host_ready {
+                        "ready"
+                    } else {
+                        "starting"
+                    })
+                    .into();
+                status.role = value["role"].as_str().map(str::to_owned);
+                status.main_connected = value["mainConnected"].as_bool();
+                status.restoring_works = value["restoringWorks"].as_bool().unwrap_or(false);
+                status.unavailable_works = value["unavailableWorks"].as_u64().unwrap_or(0);
+            }
+            _ => {
+                let exited = windows_local_root()
+                    .ok()
+                    .and_then(|root| std::fs::read(root.join("host-owner.json")).ok())
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|owner| {
+                        match owner["pid"]
+                            .as_u64()
+                            .and_then(|pid| u32::try_from(pid).ok())
+                        {
+                            Some(0) => owner["exited"].as_bool() == Some(true),
+                            Some(pid) => process_has_exited(pid),
+                            None => false,
+                        }
+                    });
+                status.host_phase = if exited { "stopped" } else { "unknown" }.into();
+                if !exited {
+                    status.startup_error = Some(
+                        "暂时无法确认 Alu Dock 的状态。请查看日志或重新运行 Setup.exe。".into(),
+                    );
+                }
+            }
+        }
+        status
     }
 
     fn command(&self, arguments: &[&str]) -> std::process::Command {
@@ -306,7 +429,7 @@ impl WindowsRuntime {
                 .unwrap_or_else(|error| self.failure_status(error)),
             Ok(output) => self.failure_status(command_failure(&output)),
             Err(_) => {
-                self.failure_status("Windows could not start Alu Dock. Run Setup.cmd again.".into())
+                self.failure_status("Windows could not start Alu Dock. Run Setup.exe again.".into())
             }
         }
     }
@@ -316,7 +439,15 @@ impl WindowsRuntime {
         Ok(DesktopShellStatus {
             supported: true,
             host_ready: service.ready,
+            host_phase: if service.ready {
+                "ready".into()
+            } else {
+                service.sub_state
+            },
             role: service.role,
+            main_connected: service.main_connected,
+            restoring_works: service.restoring_works,
+            unavailable_works: service.unavailable_works,
             startup_error: None,
             logs_path: service
                 .logs_path
@@ -335,7 +466,9 @@ impl WindowsRuntime {
             .unwrap_or_else(|| {
                 failed_status(error.clone(), Some(self.logs_path.display().to_string()))
             });
-        status.startup_error = Some(error);
+        if !status.host_ready {
+            status.startup_error = Some(error);
+        }
         status
     }
 
@@ -373,7 +506,7 @@ fn require_installed_root(root: &std::path::Path) -> Result<(), String> {
     let expected = std::fs::canonicalize(&installed).ok();
     if actual.is_none() || actual != expected {
         return Err(
-            "This copy of AluDock.exe is part of the installation package. Run Setup.cmd first, then open Alu Dock from the Start Menu.".into(),
+            "This copy of AluDock.exe is part of the installation package. Run Setup.exe first, then open Alu Dock from the Start Menu.".into(),
         );
     }
     Ok(())
@@ -382,7 +515,7 @@ fn require_installed_root(root: &std::path::Path) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn windows_local_root() -> Result<std::path::PathBuf, String> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
-        "Alu Dock could not locate your local application directory. Run Setup.cmd again."
+        "Alu Dock could not locate your local application directory. Run Setup.exe again."
             .to_owned()
     })?;
     Ok(std::path::PathBuf::from(local_app_data).join("Alu Dock"))
@@ -408,10 +541,33 @@ fn failed_status(error: String, logs_path: Option<String>) -> DesktopShellStatus
     DesktopShellStatus {
         supported: true,
         host_ready: false,
+        host_phase: "unknown".into(),
         role: None,
         startup_error: Some(error),
         logs_path,
         login_start_enabled: false,
+        ..Default::default()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn process_has_exited(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    // An exit-intent file is not proof that its process has finished cleanup.
+    // Access denied/other failures stay unknown; a reused live PID is conservative.
+    unsafe {
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if process.is_null() {
+            return GetLastError() == ERROR_INVALID_PARAMETER;
+        }
+        let exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+        CloseHandle(process);
+        exited
     }
 }
 
@@ -474,11 +630,60 @@ fn show_main_window(app: &AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
+struct DesktopTray {
+    status: tauri::menu::MenuItem<tauri::Wry>,
+    start: tauri::menu::MenuItem<tauri::Wry>,
+    stop: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+#[cfg(target_os = "windows")]
+fn update_tray(app: &AppHandle, status: &DesktopShellStatus) {
+    let Some(items) = app.try_state::<DesktopTray>() else {
+        return;
+    };
+    let mut text = match status.host_phase.as_str() {
+        "ready" if status.role.as_deref() == Some("subhost") => match status.main_connected {
+            Some(true) => "SubHost 运行中 · 已连接 Main",
+            Some(false) => "SubHost 运行中 · 正在连接 Main",
+            None => "SubHost 运行中 · Main 连接待确认",
+        },
+        "ready" => "本机 Main 运行中",
+        "starting" => "Alu Dock 正在启动",
+        "stopping" => "Alu Dock 正在停止",
+        "stopped" => "Alu Dock 已停止",
+        _ => "Alu Dock 状态暂不可确认",
+    }
+    .to_owned();
+    if status.host_ready {
+        if status.restoring_works {
+            text.push_str(" · 正在恢复工作");
+        } else if status.unavailable_works > 0 {
+            text.push_str(&format!(" · {} 项工作暂不可用", status.unavailable_works));
+        }
+    }
+    let busy = app
+        .state::<DesktopShellState>()
+        .tray_operation_active
+        .load(Ordering::SeqCst);
+    let _ = items.status.set_text(&text);
+    let _ = items
+        .start
+        .set_enabled(!busy && matches!(status.host_phase.as_str(), "stopped" | "unknown"));
+    let _ = items
+        .stop
+        .set_enabled(!busy && matches!(status.host_phase.as_str(), "starting" | "ready"));
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(text));
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn create_tray(app: &mut App) -> tauri::Result<()> {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use tauri_plugin_autostart::ManagerExt;
 
+    let status = MenuItem::with_id(app, "host-status", "Alu Dock 正在启动", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "打开 Alu Dock", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动 Alu Dock", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止 Alu Dock", true, None::<&str>)?;
@@ -499,6 +704,7 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
     let menu = Menu::with_items(
         app,
         &[
+            &status,
             &open,
             &first_separator,
             &start,
@@ -511,6 +717,11 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
             &exit,
         ],
     )?;
+    app.manage(DesktopTray {
+        status,
+        start,
+        stop,
+    });
     let login_for_event = login.clone();
     let mut tray = TrayIconBuilder::with_id("main-tray");
     if let Some(icon) = app.default_window_icon().cloned() {
@@ -563,6 +774,7 @@ fn create_tray(app: &mut App) -> tauri::Result<()> {
             _ => {}
         })
         .build(app)?;
+    update_tray(app.handle(), &app.state::<DesktopShellState>().snapshot());
     Ok(())
 }
 
@@ -574,6 +786,7 @@ fn run_tray_service(app: &AppHandle, start: bool) {
         show_tray_notice(&app, "Alu Dock 正在处理上一项操作", "完成后可以继续操作。");
         return;
     }
+    update_tray(&app, &state.snapshot());
     show_tray_notice(
         &app,
         if start {
@@ -588,13 +801,19 @@ fn run_tray_service(app: &AppHandle, start: bool) {
             Some(runtime) if start => start_host(runtime),
             Some(runtime) => stop_host(runtime),
             None => failed_status(
-                "Alu Dock is not ready on this computer. Run Setup.cmd from the Windows package, then try again.".into(),
+                "Alu Dock is not ready on this computer. Run Setup.exe from the Windows package, then try again.".into(),
                 windows_host_log_path().ok().map(|path| path.display().to_string()),
             ),
+        };
+        let complete = if start {
+            status.host_ready
+        } else {
+            status.host_phase == "stopped"
         };
         let error = status.startup_error.clone();
         state.update(&app, status);
         state.tray_operation_active.store(false, Ordering::SeqCst);
+        update_tray(&app, &state.snapshot());
         if let Some(error) = error {
             show_tray_notice(
                 &app,
@@ -606,7 +825,7 @@ fn run_tray_service(app: &AppHandle, start: bool) {
                 &error,
             );
             show_main_window(&app);
-        } else {
+        } else if complete {
             show_tray_notice(
                 &app,
                 if start {
@@ -632,6 +851,7 @@ fn run_tray_model_update(app: &AppHandle) {
         show_tray_notice(&app, "Alu Dock 正在处理上一项操作", "完成后可以继续操作。");
         return;
     }
+    update_tray(&app, &state.snapshot());
     show_tray_notice(
         &app,
         "正在更新模型列表",
@@ -642,10 +862,11 @@ fn run_tray_model_update(app: &AppHandle) {
             .runtime
             .as_ref()
             .ok_or_else(|| {
-                "Alu Dock 安装内容不可用。请重新运行完整 Windows 包中的 Setup.cmd。".to_owned()
+                "Alu Dock 安装内容不可用。请重新运行完整 Windows 包中的 Setup.exe。".to_owned()
             })
             .and_then(WindowsRuntime::update_models);
         state.tray_operation_active.store(false, Ordering::SeqCst);
+        update_tray(&app, &state.snapshot());
         match result {
             Ok(()) => show_tray_notice(
                 &app,

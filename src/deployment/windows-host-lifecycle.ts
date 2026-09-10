@@ -6,10 +6,14 @@ const LIFECYCLE_TIMEOUT_MS = 2_000;
 
 export interface WindowsHostLifecycleStatus {
   ready: boolean;
+  phase?: "starting" | "ready" | "stopping";
   pid: number;
   hostEpoch?: string;
   role?: "main" | "subhost";
   blockingWork: number;
+  mainConnected?: boolean;
+  restoringWorks?: boolean;
+  unavailableWorks?: number;
 }
 
 export type WindowsHostLifecycleStopResult = WindowsHostLifecycleStatus & { stopAccepted: boolean };
@@ -21,12 +25,15 @@ export interface WindowsHostLifecycleServerOptions {
 
 export class WindowsHostLifecycleServer {
   private readonly server: Server;
+  private readonly sockets = new Set<Socket>();
+  private runtimeStatus: () => Pick<WindowsHostLifecycleStatus, "mainConnected" | "restoringWorks" | "unavailableWorks"> = () => ({});
   private ready: {
     hostEpoch: string;
     role: "main" | "subhost";
-    blockingWork: () => number;
-    beginStop: () => void;
   } | undefined;
+  private stopping = false;
+  private onStop: (() => void) | undefined;
+  private blockingWork: () => number = () => 0;
   private readonly stopPromise: Promise<void>;
   private requestStop!: () => void;
 
@@ -46,18 +53,49 @@ export class WindowsHostLifecycleServer {
     });
   }
 
-  markReady(hostEpoch: string, role: "main" | "subhost", blockingWork: () => number, beginStop: () => void): void {
-    this.ready = { hostEpoch, role, blockingWork, beginStop };
+  markReady(
+    hostEpoch: string,
+    role: "main" | "subhost",
+    blockingWork: () => number,
+    beginStop: () => void,
+    runtimeStatus: () => Pick<WindowsHostLifecycleStatus, "mainConnected" | "restoringWorks" | "unavailableWorks"> = () => ({}),
+  ): void {
+    if (this.stopping) return;
+    this.ready = { hostEpoch, role };
+    this.runtimeStatus = runtimeStatus;
+    this.onStartingStop(beginStop, blockingWork);
+  }
+
+  get stopRequested(): boolean { return this.stopping; }
+
+  onStartingStop(callback: () => void, blockingWork: () => number = () => 0): void {
+    this.onStop = callback;
+    this.blockingWork = blockingWork;
+    if (this.stopping) callback();
+  }
+
+  beginStop(): void {
+    if (this.stopping) return;
+    this.stopping = true;
+    this.onStop?.();
+    this.requestStop();
   }
 
   waitForStop(): Promise<void> { return this.stopPromise; }
 
   async stop(): Promise<void> {
     if (!this.server.listening) return;
-    await new Promise<void>((resolveClose) => this.server.close(() => resolveClose()));
+    await new Promise<void>((resolveClose) => {
+      this.server.close(() => resolveClose());
+      // Flush an accepted stop response, but don't let a client that sent no
+      // request keep the already-stopped Host process alive indefinitely.
+      for (const socket of this.sockets) socket.destroySoon();
+    });
   }
 
   private accept(socket: Socket): void {
+    this.sockets.add(socket);
+    socket.once("close", () => this.sockets.delete(socket));
     let bytes = Buffer.alloc(0);
     const fail = (): void => { socket.destroy(); };
     socket.on("data", (chunk: Buffer) => {
@@ -69,16 +107,17 @@ export class WindowsHostLifecycleServer {
       if (newline !== bytes.length - 1) { fail(); return; }
       try {
         const request = parseRequest(JSON.parse(bytes.subarray(0, newline).toString("utf8")) as unknown);
-        const blockingWork = this.ready?.blockingWork() ?? 0;
+        const blockingWork = this.blockingWork();
         const stopAccepted = request === "stop" ? blockingWork === 0 : undefined;
         if (stopAccepted) {
-          this.ready?.beginStop();
-          this.requestStop();
+          this.beginStop();
         }
         const response = {
-          ready: this.ready !== undefined,
+          ready: this.ready !== undefined && !this.stopping,
+          phase: this.stopping ? "stopping" : this.ready ? "ready" : "starting",
           pid: process.pid,
           blockingWork,
+          ...this.runtimeStatus(),
           ...(this.ready === undefined ? {} : { hostEpoch: this.ready.hostEpoch, role: this.ready.role }),
           ...(stopAccepted === undefined ? {} : { stopAccepted }),
         };
@@ -144,16 +183,24 @@ function parseRequest(input: unknown): "status" | "stop" {
 function parseStatus(input: unknown, action: "status" | "stop"): WindowsHostLifecycleStatus | WindowsHostLifecycleStopResult {
   if (!isRecord(input)) throw new Error("Windows Host lifecycle response is invalid");
   const keys = Object.keys(input);
-  if (keys.some((key) => !["ready", "pid", "hostEpoch", "role", "blockingWork", "stopAccepted"].includes(key))) throw new Error("Windows Host lifecycle response is invalid");
+  if (keys.some((key) => !["ready", "phase", "pid", "hostEpoch", "role", "blockingWork", "stopAccepted", "mainConnected", "restoringWorks", "unavailableWorks"].includes(key))) throw new Error("Windows Host lifecycle response is invalid");
   if (typeof input.ready !== "boolean" || !Number.isSafeInteger(input.pid) || Number(input.pid) < 1 || !Number.isSafeInteger(input.blockingWork) || Number(input.blockingWork) < 0) throw new Error("Windows Host lifecycle response is invalid");
   if ((action === "stop") !== (typeof input.stopAccepted === "boolean")) throw new Error("Windows Host lifecycle stop result is invalid");
   if (input.hostEpoch !== undefined && (typeof input.hostEpoch !== "string" || input.hostEpoch.length < 1 || input.hostEpoch.length > 128)) throw new Error("Windows Host lifecycle response is invalid");
   if (input.role !== undefined && input.role !== "main" && input.role !== "subhost") throw new Error("Windows Host lifecycle response is invalid");
-  if (input.ready !== (input.hostEpoch !== undefined && input.role !== undefined)) throw new Error("Windows Host lifecycle readiness is inconsistent");
+  if (input.phase !== undefined && !["starting", "ready", "stopping"].includes(String(input.phase))) throw new Error("Windows Host lifecycle phase is invalid");
+  if (input.ready && !(input.hostEpoch !== undefined && input.role !== undefined)) throw new Error("Windows Host lifecycle readiness is inconsistent");
+  if (input.mainConnected !== undefined && typeof input.mainConnected !== "boolean") throw new Error("Windows Host connection status is invalid");
+  if (input.restoringWorks !== undefined && typeof input.restoringWorks !== "boolean") throw new Error("Windows Host recovery status is invalid");
+  if (input.unavailableWorks !== undefined && (!Number.isSafeInteger(input.unavailableWorks) || Number(input.unavailableWorks) < 0)) throw new Error("Windows Host recovery count is invalid");
   return {
     ready: input.ready,
+    ...(input.phase === undefined ? {} : { phase: input.phase as WindowsHostLifecycleStatus["phase"] }),
     pid: Number(input.pid),
     blockingWork: Number(input.blockingWork),
+    ...(input.mainConnected === undefined ? {} : { mainConnected: input.mainConnected }),
+    ...(input.restoringWorks === undefined ? {} : { restoringWorks: input.restoringWorks }),
+    ...(input.unavailableWorks === undefined ? {} : { unavailableWorks: Number(input.unavailableWorks) }),
     ...(input.hostEpoch === undefined ? {} : { hostEpoch: input.hostEpoch }),
     ...(input.role === undefined ? {} : { role: input.role }),
     ...(input.stopAccepted === undefined ? {} : { stopAccepted: input.stopAccepted }),

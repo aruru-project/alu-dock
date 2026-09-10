@@ -72,14 +72,13 @@ npm run client:install
 npm run package:windows
 ```
 
-产物位于 `dist/AluDock-<version>-windows-x86_64.zip`。源码 checkout 默认使用当前分支可达的最新 `vMAJOR.MINOR.PATCH` Client tag；`ALUDOCK_RELEASE_VERSION` 可为正式流水线显式指定版本，无 Git 元数据的源码包才回退到 manifest 版本。组装脚本使用构建机的 Node/npm，构建 `x86_64-pc-windows-msvc` Desktop，安装 Dock production tree 与 bundled Pi，复制 DLL sidecars，并使用 `dumpbin.exe` 检查随包 PE 架构及依赖后才写 ZIP。交付包不携带 Node；Setup 和日常 launcher 使用电脑上已安装且满足根 `package.json#engines.node` 的 Node.js。
+Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。源码 checkout 默认使用当前分支可达的最新版本 tag，正式构建可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 是后续构建复用 Desktop/DLL 的输入，不是安装入口；仅 Host/Worker/Pi 改动时无需重编译 Desktop。
 
-正式流水线发现只有 Host、Worker、Pi adapter 或 bundled Pi 变化时，会校验并复用最近一次成功发布的完整 Windows ZIP，只替换其中的 Dock、bundled Pi、Setup 和发行元数据；Rust、Tauri 和前端不重新构建。无论采用复用还是完整构建，Release 都只有同名、可全新安装的当前版本完整包。
+先安装符合根 `package.json#engines.node` 的 [Node.js](https://nodejs.org/)，再运行 Setup.exe。唯一安装位置为 `%LOCALAPPDATA%\Alu Dock\app`。Setup 使用正常 Host stop，拒绝仍有未完成 Work 的更新；旧 Desktop 占用文件时，先从托盘选择 **退出 Desktop** 再重试。文件提交后，启动慢或失败不会回滚新版本，重新运行 Setup.exe 可修复文件和入口，无需先卸载。
 
-最终用户先安装 [Node.js](https://nodejs.org/) 当前版本，再完整解压 ZIP 并运行一次 `Setup.cmd`；Setup 会在停止旧 Host 前检查 Node 版本。唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常 Desktop 入口同时登记到 Start Menu，TUI/CLI 可在新终端直接运行 `aludock`。Setup 在新版本 ready 且入口登记完成前保留上一版本；失败会恢复上一版本，再次执行会先处理上次中断状态并修复同版本安装。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**启动 Alu Dock**、**停止 Alu Dock** 和 **更新模型** 都显示进行中及最终结果，停止在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
+Desktop 窗口与托盘先显示，Host 在后台启动，ready 后自动连接；无法确认状态时提供日志入口。X 隐藏到托盘，**退出 Desktop** 不停止 Host。**停止 Alu Dock** 请求同一个 Host 正常停止。登录启动默认关闭，开启后以 `--background` 启动。日志在 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。
 
-Windows Apps 和安装目录中的 `Uninstall.cmd` 只移除应用包、Host setup、登录启动、Start Menu 与全局 launcher；Dock/Pi 配置、身份、凭据和 Session 一律保留。Windows checkout 的 `npm run install:local` 构建同一个 ZIP 并调用同一个 Setup，不创建第二套开发安装布局。
-
+Windows Apps 和安装目录中的 `Uninstall.exe` 只移除应用包和已归属的系统集成，保留 Dock/Pi 配置、身份、凭据、Session、附件与官方客户端数据。checkout 的 `npm run install:local` 构建并运行同一个 Setup.exe。
 普通开发仍可运行：
 
 ```powershell

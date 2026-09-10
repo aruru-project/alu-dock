@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -64,21 +64,14 @@ async function installWindowsPackage(projectRoot: string, replaceActive: boolean
   if (replaceActive) {
     throw new Error("Windows installation waits for active Work to finish. Stop or finish that work, then run `npm run install:local` again.");
   }
-  await requireInstallAllowed(false);
   const temporary = await mkdtemp(join(tmpdir(), "alu-dock-windows-install-"));
   try {
-    const archive = join(temporary, "AluDock-windows-x86_64.zip");
+    const archive = join(temporary, "AluDock-windows-x86_64-Setup.exe");
     process.stdout.write("Building the Windows package…\n");
     runNpmInteractive(["run", "package:windows"], projectRoot, { ALUDOCK_WINDOWS_OUTPUT: archive });
 
-    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-    if (!systemRoot || !isAbsolute(systemRoot)) throw new Error("Windows did not provide its system directory.");
-    runInteractive(join(systemRoot, "System32", "tar.exe"), ["-x", "-f", archive, "-C", temporary], projectRoot);
-    const releaseDirectories = (await readdir(temporary, { withFileTypes: true })).filter((entry) => entry.isDirectory());
-    if (releaseDirectories.length !== 1) throw new Error("The Windows package did not contain one release directory.");
-    const setup = join(temporary, releaseDirectories[0]!.name, "Setup.cmd");
     process.stdout.write("Installing the Windows package…\n");
-    runInteractive(join(systemRoot, "System32", "cmd.exe"), ["/D", "/S", "/C", "call", setup], projectRoot);
+    runInteractive(archive, [], projectRoot);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

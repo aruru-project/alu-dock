@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
@@ -51,14 +52,15 @@ async function main(): Promise<void> {
   }
 
   if (parsed.command === "serve") {
-    await serve(parsed.socketPath, parsed.socketExplicit, parsed.commandArgs);
+    if (process.platform === "win32") await import("./deployment/windows-host-bootstrap.js");
+    else await serve(parsed.socketPath, parsed.socketExplicit, parsed.commandArgs);
     return;
   }
 
   if (parsed.command === "host") {
     requireNoArgs(parsed.commandArgs, "host");
     if (process.platform !== "win32") throw new Error("`aludock host` is the foreground Windows Host entry. On this platform, use `aludock service start`.");
-    await serve(defaultLocalEndpoint("win32") as string, true, ["--dev", "--state", defaultCatalogPath()]);
+    await import("./deployment/windows-host-bootstrap.js");
     return;
   }
 
@@ -185,7 +187,21 @@ async function main(): Promise<void> {
   }
 }
 
-async function serve(socketPath: string, socketExplicit: boolean, args: string[]): Promise<void> {
+export async function runWindowsHost(windowsLifecycle: WindowsHostLifecycleServer): Promise<void> {
+  const parsed = parseGlobalArgs(process.argv.slice(2));
+  if (parsed.command === "serve") {
+    await serve(parsed.socketPath, parsed.socketExplicit, parsed.commandArgs, windowsLifecycle);
+  } else {
+    await serve(defaultLocalEndpoint("win32") as string, true, ["--dev", "--state", defaultCatalogPath()], windowsLifecycle);
+  }
+}
+
+async function serve(socketPath: string, socketExplicit: boolean, args: string[], windowsLifecycle?: WindowsHostLifecycleServer): Promise<void> {
+  let registry!: DockRegistry;
+  let host!: DockHost;
+  let upstream: SubHostMachineConnection | undefined;
+  let subHostStatus: { state: MachineSettingsState; hostEpoch: string; reporter: SubHostStatusReporter } | undefined;
+  try {
   let options = parseServeOptions(args);
   let catalogPath = options.statePath;
   let machineSettingsState: MachineSettingsState | undefined;
@@ -199,6 +215,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   if (catalogPath) {
     machineSettingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath));
     const configured = await machineSettingsState.read();
+    if (windowsLifecycle?.stopRequested) return;
     if (configured.role === "subhost" && options.machinePort !== undefined) throw new Error("SubHost connection settings are changed in Settings, then applied on the next startup");
     options = configured.role === "subhost"
       ? {
@@ -225,6 +242,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   if (options.role === "main" && options.machinePort !== undefined) {
     const state = machineSettingsState as MachineSettingsState;
     const configured = await state.read();
+    if (windowsLifecycle?.stopRequested) return;
     if (!configured.main.connectionsEnabled || configured.main.port !== options.machinePort || configured.main.name !== options.machineName) {
       await state.writeMainConnections({ enabled: true, port: options.machinePort, name: options.machineName });
     }
@@ -251,10 +269,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
     ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
   });
-  let registry!: DockRegistry;
-  let host!: DockHost;
-  let upstream: SubHostMachineConnection | undefined;
-  let subHostStatus: { state: MachineSettingsState; hostEpoch: string; reporter: SubHostStatusReporter } | undefined;
+  if (windowsLifecycle?.stopRequested) return;
 
   if (options.role === "subhost") {
     const subHostEpoch = randomUUID();
@@ -265,6 +280,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     const subState = new SubHostMachineState(machineStateRoot(catalogPath as string));
     if (options.joinFile) await subState.prepare(await readMachineJoinFile(options.joinFile), machineName);
     const enrolled = await subState.load();
+    if (windowsLifecycle?.stopRequested) return;
     if (!enrolled) throw new Error("This computer is not enrolled with a Main. Start it as Main, then choose Use as SubHost in Settings.");
     if (enrolled.machineName !== machineName) await subState.updateMachineName(machineName);
     const statusReporter = new SubHostStatusReporter({
@@ -346,25 +362,35 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     });
   }
 
-  await host.start();
-  const initialRecovery = host.recoverInstancesOnce();
-  if (upstream) await upstream.start(initialRecovery);
-  let windowsLifecycle: WindowsHostLifecycleServer | undefined;
-  if (process.platform === "win32") {
-    windowsLifecycle = new WindowsHostLifecycleServer();
-    try { await windowsLifecycle.start(); }
-    catch (error) {
-      await upstream?.stop().catch(() => {});
-      await host.stop().catch(() => {});
-      throw error;
-    }
-    windowsLifecycle.markReady(
+  // While initialization is in flight, latch stop and let finally dispose it
+  // sequentially. DockHost.start/stop must not run against each other.
+  windowsLifecycle?.onStartingStop(
+    () => {},
+    () => localInstallBlockingInstances(registry.list()).length,
+  );
+    if (windowsLifecycle?.stopRequested) return;
+    await host.start();
+    if (windowsLifecycle?.stopRequested) return;
+    windowsLifecycle?.onStartingStop(
+      () => { void host.stop().catch(() => {}); },
+      () => localInstallBlockingInstances(registry.list()).length,
+    );
+    const initialRecovery = host.recoverInstancesOnce();
+    let restoringWorks = true;
+    void initialRecovery.then(() => { restoringWorks = false; }, () => { restoringWorks = false; });
+    if (upstream) await upstream.start(initialRecovery);
+    if (windowsLifecycle?.stopRequested) return;
+    windowsLifecycle?.markReady(
       host.hostEpoch,
       options.role,
       () => localInstallBlockingInstances(registry.list()).length,
       () => { void host.stop().catch(() => {}); },
+      () => ({
+        ...(upstream === undefined ? {} : { mainConnected: upstream.connected() }),
+        restoringWorks,
+        unavailableWorks: restoringWorks ? 0 : registry.list().filter((work) => work.lifecycle === "runtime_error" || work.lifecycle === "host_lost").length,
+      }),
     );
-  }
   writeJson({ kind: "host.ready", role: options.role, pid: process.pid, ...(options.role === "subhost" ? {} : { socketPath: host.socketPath }) });
   const outcome = await Promise.race([
     waitForSignal().then((signal) => ({ kind: "signal" as const, signal })),
@@ -373,20 +399,24 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   ].filter((pending): pending is Exclude<typeof pending, undefined> => pending !== undefined));
   const signal = outcome.kind === "signal" ? outcome.signal : "catalog_fault";
   if (outcome.kind === "fatal") { process.stderr.write(`${JSON.stringify({ kind: "error", error: outcome.fatal })}\n`); process.exitCode = outcome.fatal.exitCode; }
+  windowsLifecycle?.beginStop();
   writeJson({ kind: "host.stopping", signal });
   const shutdownTimeoutMs = outcome.kind === "fatal" ? 5_000 : HOST_SHUTDOWN_TIMEOUT_MS;
   const shutdownTimer = setTimeout(() => { process.stderr.write(`${JSON.stringify({ kind: "error", error: { code: "shutdown_timeout", message: `Host did not stop within ${shutdownTimeoutMs}ms` } })}\n`); process.exit(1); }, shutdownTimeoutMs);
   try { await upstream?.stop(); await host.stop(); } finally {
     clearTimeout(shutdownTimer);
-    await windowsLifecycle?.stop().catch(() => {});
+  }
+  const lateFatal = host.fatalCompletion();
+  if (outcome.kind === "signal" && lateFatal) { process.stderr.write(`${JSON.stringify({ kind: "error", error: lateFatal })}\n`); process.exitCode = lateFatal.exitCode; }
+  writeJson({ kind: "host.stopped", signal });
+  } finally {
+    await upstream?.stop();
+    await host?.stop();
     if (subHostStatus) {
       await subHostStatus.reporter.stop();
       await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});
     }
   }
-  const lateFatal = host.fatalCompletion();
-  if (outcome.kind === "signal" && lateFatal) { process.stderr.write(`${JSON.stringify({ kind: "error", error: lateFatal })}\n`); process.exitCode = lateFatal.exitCode; }
-  writeJson({ kind: "host.stopped", signal });
 }
 
 async function manageService(socketPath: string, socketExplicit: boolean, args: string[]): Promise<void> {
@@ -966,7 +996,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-main().catch((error: unknown) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch((error: unknown) => {
   if (!isMachineInvocation(process.argv.slice(2))) {
     const message = error instanceof ControlClientError ? humanControlErrorText(error) : errorMessage(error);
     process.stderr.write(`Alu Dock: ${message}\n`);

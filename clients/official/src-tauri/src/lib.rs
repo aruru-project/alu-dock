@@ -1155,10 +1155,7 @@ impl RuntimeLifecycle {
 }
 
 impl ConnectionRuntimeState {
-    fn open(
-        application_data_dir: Option<PathBuf>,
-        prefer_local: bool,
-    ) -> Result<Self, ClientError> {
+    fn open(application_data_dir: Option<PathBuf>) -> Result<Self, ClientError> {
         let registry = if let Some(path) = std::env::var_os("ALUDOCK_CLIENT_IDENTITY_DIR") {
             HostRegistry::open(PathBuf::from(path))?
         } else if let Some(path) = application_data_dir {
@@ -1168,14 +1165,7 @@ impl ConnectionRuntimeState {
         };
         let preferences = ClientPreferencesStore::open(registry.root().join("client-preferences"))?;
         let local_identity = IdentityStore::new(registry.root().join("local-client-identity"));
-        let mut snapshot = registry.snapshot()?;
-        if prefer_local
-            && snapshot.active_host_id.is_none()
-            && !snapshot.local_selected
-            && snapshot.hosts.is_empty()
-        {
-            snapshot = registry.select_local(snapshot.revision)?;
-        }
+        let snapshot = registry.snapshot()?;
         let active_target = if snapshot.local_selected {
             Some(ConnectionTarget::Local)
         } else {
@@ -1194,6 +1184,20 @@ impl ConnectionRuntimeState {
             selected_client: Arc::new(Mutex::new(None)),
         })
     }
+
+    // This is the same first-use selection as synchronous Windows startup used
+    // to make. Never replace an existing local/remote user selection.
+    #[cfg(any(target_os = "windows", test))]
+    fn select_initial_local(&self) -> Result<(), CommandError> {
+        let mut lifecycle = self.lifecycle.lock().map_err(|_| lifecycle_error())?;
+        let snapshot = self.registry.snapshot().map_err(CommandError::from)?;
+        if snapshot.active_host_id.is_none() && !snapshot.local_selected && snapshot.hosts.is_empty() {
+            self.registry.select_local(snapshot.revision).map_err(CommandError::from)?;
+            lifecycle.transition_to_local()?;
+        }
+        Ok(())
+    }
+
 }
 
 #[derive(Serialize)]
@@ -7751,12 +7755,8 @@ pub fn run() {
             #[cfg(not(mobile))]
             let application_data_dir = None;
             let desktop_shell = desktop_shell::DesktopShellState::initialize(app);
-            let prefer_local = desktop_shell.prefer_local_connection();
             app.manage(desktop_shell);
-            app.manage(ConnectionRuntimeState::open(
-                application_data_dir,
-                prefer_local,
-            )?);
+            app.manage(ConnectionRuntimeState::open(application_data_dir)?);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);
@@ -8180,7 +8180,8 @@ mod tests {
             "aludock-desktop-first-main-{}",
             uuid::Uuid::new_v4()
         ));
-        let runtime = ConnectionRuntimeState::open(Some(root.clone()), true).unwrap();
+        let runtime = ConnectionRuntimeState::open(Some(root.clone())).unwrap();
+        runtime.select_initial_local().unwrap();
         let snapshot = runtime.registry.snapshot().unwrap();
 
         assert!(snapshot.local_selected);

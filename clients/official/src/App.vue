@@ -943,15 +943,20 @@ onMounted(async () => {
     console.error('Failed to read App settings.', cause)
   }
   if (isTauri) {
-    desktopShell.value = await getDesktopShellStatus()
     const appWindow = getCurrentWindow()
+    let shellEventRevision = 0
     unlisteners.push(
       await listen<DesktopShellStatus>('desktop-shell-changed', ({ payload }) => {
+        shellEventRevision += 1
+        const becameReady = payload.hostReady && !desktopShell.value?.hostReady
         desktopShell.value = payload
-        if (payload.hostReady && payload.role === 'main') void app.load()
+        if (becameReady && payload.role === 'main') void app.load()
       }),
       await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }),
     )
+    const requestedRevision = shellEventRevision
+    const initialShell = await getDesktopShellStatus()
+    if (shellEventRevision === requestedRevision) desktopShell.value = initialShell
     windowFocused.value = initialWindowFocused(
       await appWindow.isFocused(),
       document.hasFocus(),
@@ -3479,8 +3484,8 @@ async function toggleAllToolDetails() {
 
       <div v-else-if="desktopShell?.supported && !app.payload && desktopShell.role !== 'subhost' && !desktopShell.hostReady" class="center-state offline-host-state">
         <Monitor :size="28" />
-        <h1>Alu Dock 已停止</h1>
-        <p>启动后即可继续这台电脑上的 Work。</p>
+        <h1>{{ desktopShell.hostPhase === 'starting' ? 'Alu Dock 正在启动' : desktopShell.hostPhase === 'stopping' ? 'Alu Dock 正在停止' : 'Alu Dock 已停止' }}</h1>
+        <p>{{ desktopShell.hostPhase === 'starting' ? '窗口会在启动完成后自动连接。' : '启动后即可继续这台电脑上的 Work。' }}</p>
         <div class="pairing-actions">
           <button class="button primary" :disabled="desktopShellBusy" @click="retryDesktopHost"><RefreshCw :size="16" />{{ desktopShellBusy ? '正在启动…' : '启动 Alu Dock' }}</button>
           <button v-if="desktopShell.logsPath" class="button secondary" @click="runDesktopShellAction(openDesktopHostLog)"><FileText :size="16" />打开日志</button>

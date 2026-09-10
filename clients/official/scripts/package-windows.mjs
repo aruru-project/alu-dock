@@ -71,15 +71,13 @@ const systemTar = windowsSystemExecutable("tar.exe");
 const releaseName = `AluDock-${version}-windows-x86_64`;
 const defaultOutputDirectory = join(clientRoot, "dist");
 const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
-const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}.zip`);
+const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}-Setup.exe`);
 const temporary = mkdtempSync(join(tmpdir(), "aludock-windows-package-"));
 const releaseRoot = join(temporary, releaseName);
 
 try {
   mkdirSync(releaseRoot, { recursive: true });
-  // The top level of the extracted archive only carries Setup.cmd; everything
-  // the installed product needs lives under app/ so users are not tempted to
-  // run the executable from the extracted archive.
+  // Internal component archive is a build input, not an installation entrypoint.
   const payloadRoot = join(releaseRoot, "app");
   if (packageMode === "reuse") {
     reuseWindowsPayload(resolve(windowsBaseArchive), payloadRoot, temporary, systemTar);
@@ -100,29 +98,46 @@ try {
   mkdirSync(supportRoot, { recursive: true });
   copyFileSync(join(clientRoot, "scripts", "windows-package.ps1"), join(supportRoot, "windows-package.ps1"));
   writeFileSync(join(payloadRoot, "aludock.cmd"), renderLauncher(), "utf8");
-  writeFileSync(join(releaseRoot, "Setup.cmd"), renderSetup(), "utf8");
-  writeFileSync(join(payloadRoot, "Uninstall.cmd"), renderUninstall(), "utf8");
+  rmSync(join(payloadRoot, "Uninstall.cmd"), { force: true });
+  rmSync(join(payloadRoot, "Uninstall.exe"), { force: true });
+  rmSync(join(payloadRoot, "release-manifest.json"), { force: true });
   writeFileSync(join(payloadRoot, "release-manifest.json"), `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     productVersion: version,
     target: windowsTarget,
     dockVersion: dockManifest.version,
     nodeRequirement,
     desktop: "AluDock.exe",
     cli: "aludock.cmd",
+    files: collectFiles(payloadRoot).map((path) => ({ path: relative(payloadRoot, path).replaceAll("\\", "/"), sha256: sha256File(path) })),
   }, null, 2)}\n`, "utf8");
 
   inspectRelease(releaseRoot);
   mkdirSync(dirname(output), { recursive: true });
   rmSync(output, { force: true });
-  run(systemTar, ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
-  const requiredFiles = ["Setup.cmd", "app/AluDock.exe", "app/Uninstall.cmd", "app/aludock.cmd", "app/dock/dist/src/cli.js", "app/support/windows-package.ps1"];
-  const requiredPaths = requiredFiles.map((path) => `${releaseName}/${path}`);
-  const listing = run(systemTar, ["-t", "-f", output, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/");
-  const listedPaths = new Set(listing.split(/\r?\n/u).map((path) => path.trim()).filter(Boolean));
-  for (const [index, required] of requiredFiles.entries()) {
-    if (!listedPaths.has(requiredPaths[index])) throw new Error(`Final archive is missing ${required}`);
-  }
+  const components = output.replace(/-Setup\.exe$/iu, "-components.zip");
+  if (components === output) throw new Error("ALUDOCK_WINDOWS_OUTPUT must end in -Setup.exe");
+  run(systemTar, ["-a", "-c", "-f", components, releaseName], { cwd: temporary });
+  const requiredPaths = ["AluDock.exe", "aludock.cmd", "release-manifest.json", "dock/dist/src/cli.js", "dock/dist/src/deployment/windows-host-bootstrap.js", "support/windows-package.ps1"]
+    .map((path) => `${releaseName}/app/${path}`);
+  const listing = new Set(run(systemTar, ["-t", "-f", components, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/").split(/\r?\n/u).map((path) => path.trim()));
+  for (const path of requiredPaths) if (!listing.has(path)) throw new Error(`The component archive is missing ${path}`);
+  // tauri bundle (not build) also works when reusing a verified Desktop binary.
+  const targetDirectory = join(clientRoot, "src-tauri", "target", windowsTarget, "release");
+  mkdirSync(targetDirectory, { recursive: true });
+  copyFileSync(join(payloadRoot, "AluDock.exe"), join(targetDirectory, "aludock-client-app.exe"));
+  const tauriCli = join(clientRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
+  run(buildRuntime.nodePath, [tauriCli, "bundle", "--bundles", "nsis", "--target", windowsTarget,
+    "--config", JSON.stringify({ version, bundle: { resources: { [payloadRoot]: "payload/" }, windows: {
+      nsis: { template: "../scripts/windows-installer.nsi", installMode: "currentUser" },
+      webviewInstallMode: { type: "embedBootstrapper", silent: true },
+    } } }),
+  ], { cwd: clientRoot, env: runtimeEnvironment(buildRuntime.nodePath) });
+  const bundles = collectFiles(join(targetDirectory, "bundle", "nsis")).filter((path) => path.endsWith("-setup.exe"));
+  const bundle = bundles.find((path) => basename(path).includes(version));
+  if (!bundle) throw new Error("Tauri did not produce the requested Setup.exe");
+  copyFileSync(bundle, output);
+  assertAmd64(join(payloadRoot, "AluDock.exe"));
   console.log(`Windows package: ${output}`);
   console.log(`SHA-256: ${sha256File(output)}`);
 } finally {
@@ -140,8 +155,8 @@ function reuseWindowsPayload(archive, destination, workspace, tarPath) {
     if (!existsSync(join(source, required))) throw new Error(`The verified Windows base package is missing app/${required}`);
   }
   const manifest = JSON.parse(readFileSync(join(source, "release-manifest.json"), "utf8"));
-  if (manifest?.target !== windowsTarget) {
-    throw new Error("The verified Windows base package does not support Windows x64");
+  if (manifest?.target !== windowsTarget || manifest?.schemaVersion !== 2) {
+    throw new Error("The reusable components must contain the gate-aware Windows x64 Desktop; build a full package first");
   }
   cpSync(source, destination, { recursive: true });
 }
@@ -281,7 +296,7 @@ function renderLauncher() {
     + "@IF NOT DEFINED ALUDOCK_NODE CALL :try_node \"%LOCALAPPDATA%\\Programs\\nodejs\\node.exe\"\r\n"
     + "@IF NOT DEFINED ALUDOCK_NODE FOR /F \"delims=\" %%N IN ('WHERE node.exe 2^>NUL') DO @IF NOT DEFINED ALUDOCK_NODE CALL :try_node \"%%N\"\r\n"
     + "@IF DEFINED ALUDOCK_NODE GOTO node_ready\r\n"
-    + `@ECHO Alu Dock needs 64-bit Node.js ${major}.${minor}.${patch} or newer. Install or update it from https://nodejs.org/ and run Setup.cmd again. 1>&2\r\n`
+    + `@ECHO Alu Dock needs 64-bit Node.js ${major}.${minor}.${patch} or newer. Install or update it from https://nodejs.org/ and run Setup.exe again. 1>&2\r\n`
     + "@EXIT /B 1\r\n"
     + ":node_ready\r\n"
     + "@FOR %%D IN (\"%ALUDOCK_NODE%\") DO @SET \"PATH=%%~dpD;%PATH%\"\r\n"
@@ -292,44 +307,6 @@ function renderLauncher() {
     + `@"%~1" -e "${compatibilityCheck}" >NUL 2>NUL\r\n`
     + "@IF NOT ERRORLEVEL 1 SET \"ALUDOCK_NODE=%~1\"\r\n"
     + "@EXIT /B 0\r\n";
-}
-
-function renderSetup() {
-  return `@ECHO OFF\r
-@SETLOCAL\r
-@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& PAUSE & EXIT /B 1)\r
-@ECHO Installing Alu Dock. Keep this window open until it finishes.\r
-@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0app\\support\\windows-package.ps1" -Action Install -Source "%~dp0app"\r
-@SET "RESULT=%ERRORLEVEL%"\r
-@IF NOT "%RESULT%"=="0" (ECHO.& ECHO Alu Dock was not installed. Read the message above, then close this window.)\r
-@ECHO.& PAUSE & EXIT /B %RESULT%\r
-`;
-}
-
-function renderUninstall() {
-  // The install root is deleted during uninstall, so the script relaunches
-  // itself from %TEMP% before doing any work.
-  return `@ECHO OFF\r
-@SETLOCAL\r
-@IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& PAUSE & EXIT /B 1)\r
-@IF "%~1"=="--from-temp" GOTO run\r
-@SET "RELAUNCH=%TEMP%\\AluDock-Uninstall-%RANDOM%-%RANDOM%.cmd"\r
-@COPY /Y "%~f0" "%RELAUNCH%" >NUL\r
-@IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& PAUSE & EXIT /B 1)\r
-@"%RELAUNCH%" --from-temp "%~dp0."\r
-@EXIT /B %ERRORLEVEL%\r
-:run\r
-@ECHO Removing Alu Dock from this computer...\r
-@SET "SCRIPT=%TEMP%\\AluDock-Uninstall-%RANDOM%-%RANDOM%.ps1"\r
-@COPY /Y "%~2\\support\\windows-package.ps1" "%SCRIPT%" >NUL\r
-@IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& PAUSE & EXIT /B 1)\r
-@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT%" -Action Uninstall -InstallRoot "%~2"\r
-@SET "RESULT=%ERRORLEVEL%"\r
-@IF EXIST "%SCRIPT%" DEL /F /Q "%SCRIPT%" >NUL 2>NUL\r
-@IF NOT "%RESULT%"=="0" (ECHO.& ECHO Alu Dock was not removed. Read the message above, then close this window.)\r
-@ECHO.& PAUSE\r
-@DEL /F /Q "%~f0" & EXIT /B %RESULT%\r
-`;
 }
 
 function findExecutable(name) {
