@@ -386,10 +386,18 @@ export function useConversationContent(options: ConversationContentOptions) {
         || page.instance.runtimeGeneration !== current.cursor.runtimeGeneration) return options.reload(current.instance.id)
       const snapshot = options.beforeLayoutChange()
       const stick = options.isFollowing()
-      const existing = new Map(current.records.map((record) => [record.entryId, record]))
-      const pageIds = new Set(page.records.map((record) => record.entryId))
-      current.records = [...page.records.map((record) => existing.get(record.entryId) ?? record),
-        ...current.records.filter((record) => !pageIds.has(record.entryId))]
+      // The bootstrap can cover more history than this recent page. Keep its
+      // order and completed content; insert unseen records before their next
+      // known page entry (or at the end for newly persisted tail records).
+      const merged = [...current.records]
+      let insertionIndex = merged.length
+      for (let index = page.records.length - 1; index >= 0; index--) {
+        const record = page.records[index]!
+        const existingIndex = merged.findIndex((entry) => entry.entryId === record.entryId)
+        if (existingIndex >= 0) insertionIndex = existingIndex
+        else merged.splice(insertionIndex, 0, record)
+      }
+      current.records = merged
       historyRevision.value = page.revision
       historyCursor.value = page.nextCursor ?? null
       historyTruncated.value = page.hasEarlier

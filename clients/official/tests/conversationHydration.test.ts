@@ -83,15 +83,27 @@ try {
   const { useConversationContent } = await server.ssrLoadModule('/src/lib/conversationContent.ts')
   const context = { connectionId: 'local', selectionGeneration: 1 }
   let epoch = 1
+  // Card #269: instance.read included 200 records, but the recent-history page
+  // covered only the last 50. Loading it moved the final reply above older work.
+  const bootstrapOnly: ConversationRecord = {
+    recordId: 'record-boundary', entryId: 'entry-boundary', kind: 'message',
+    source: 'assistant', visibility: 'conversation', timestamp: '2026-09-09T19:41:11.511Z',
+    content: [{ type: 'text', text: 'Checking the last changes.' }],
+  }
+  const finalReply: ConversationRecord = {
+    recordId: 'record-final', entryId: 'entry-final', kind: 'message',
+    source: 'assistant', visibility: 'conversation', timestamp: '2026-09-09T19:56:35.204Z',
+    content: [{ type: 'text', text: 'The work is complete and pushed.' }],
+  }
   const initial = (): ConversationBootstrap => ({
     instance: { id: 'work-1', execution: 'idle', runtimeGeneration: 1 } as Work,
-    records: [preview], activeEvents: [], queue: [],
+    records: [bootstrapOnly, preview, finalReply], activeEvents: [], queue: [],
     extensionUi: { status: {}, toolsExpanded: false, events: [] },
     cursor: { hostEpoch: 'epoch-1', instanceId: 'work-1', runtimeGeneration: 1, sequence: 0 },
     historyRevision: 1, historyTruncated: true,
   })
   const page = {
-    records: [preview], incompleteEntryIds: ['entry-1'], revision: 'history-1',
+    records: [preview, finalReply], incompleteEntryIds: ['entry-1'], revision: 'history-1',
     hasEarlier: true, nextCursor: 'earlier', instance: initial().instance, hostEpoch: 'epoch-1',
   }
   const content = useConversationContent({
@@ -114,13 +126,27 @@ try {
   assert.equal(content.historyError.value, null)
   assert.equal(content.historyCursor.value, 'earlier', 'the user can now request earlier messages')
   assert.equal(content.historyHydrating.value, false)
-  assert.deepEqual(content.state.value.records, [completed], 'initial history content can finish loading too')
+  assert.deepEqual(content.state.value.records, [bootstrapOnly, completed, finalReply],
+    'loading the recent page keeps older records before the final reply while completing images')
+  const visibleReplies = content.items.value.filter((item: { kind: string }) => item.kind === 'assistant')
+  assert.equal(visibleReplies.at(-1)?.text, 'The work is complete and pushed.',
+    'the final visible reply must still show that the work is complete')
 
   replies.push({ ...page, records: [older], incompleteEntryIds: [], hasEarlier: false, nextCursor: undefined })
   await content.loadEarlierHistory()
   assert.equal(content.historyLoading.value, false)
   assert.equal(content.historyTruncated.value, false)
-  assert.deepEqual(content.state.value.records.map((record: ConversationRecord) => record.entryId), ['entry-0', 'entry-1'])
+  assert.deepEqual(content.state.value.records.map((record: ConversationRecord) => record.entryId),
+    ['entry-0', 'entry-boundary', 'entry-1', 'entry-final'])
+
+  // A byte-limited bootstrap may also be shorter than the preview page. Add
+  // its missing prefix/tail without replacing content already fully loaded.
+  content.clear()
+  content.publish({ ...initial(), records: [completed] })
+  replies.push({ ...page, records: [older, preview, finalReply], incompleteEntryIds: [], hasEarlier: false, nextCursor: undefined })
+  await content.loadRecentHistory(context, epoch)
+  assert.deepEqual(content.state.value.records, [older, completed, finalReply],
+    'a larger recent page fills both ends and preserves completed content')
 
   let finishOldRequest!: (value: unknown) => void
   replies.push(new Promise(resolve => { finishOldRequest = resolve }))
