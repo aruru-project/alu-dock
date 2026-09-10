@@ -23,7 +23,7 @@ globalThis.window = {
     throw new Error(`Unexpected native call: ${command}`)
   } },
 }
-const server = await createServer({ root, configFile: false, server: { middlewareMode: true }, appType: 'custom' })
+const server = await createServer({ root, configFile: false, server: { middlewareMode: true, watch: null }, appType: 'custom' })
 try {
   const { useAppStore } = await server.ssrLoadModule('/src/stores/app.ts')
   setActivePinia(createPinia())

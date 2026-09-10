@@ -67,7 +67,7 @@ const { createServer } = await import('vite')
 const { fileURLToPath } = await import('node:url')
 const server = await createServer({
   root: fileURLToPath(new URL('../', import.meta.url)),
-  configFile: false, server: { middlewareMode: true }, appType: 'custom',
+  configFile: false, server: { middlewareMode: true, watch: null }, appType: 'custom',
 })
 const frames = new Map<number, FrameRequestCallback>()
 let frameId = 0
