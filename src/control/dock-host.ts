@@ -39,6 +39,7 @@ import { InvalidHistoryCursorError } from "../core/instance-event-journal.js";
 import type { JsonObject } from "../core/json-value.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
+import { ResourceContentError } from "../core/resource-content.js";
 import { DeliverableUnavailableError } from "../core/instance-deliverables.js";
 import { MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES } from "../core/transport-bounds.js";
@@ -840,6 +841,7 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
+      case "resource.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.readAgent(request)); return; }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,result); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommands(request.params.prefix)); return; }
       case "command.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandContent(request.params.command,request.params.cursor)); return; }
@@ -1453,6 +1455,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof AgentConversationCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof PublishedFileUnavailableError) return { code: error.code, message: error.message };
+  if (error instanceof ResourceContentError) return { code: "resource_unavailable", message: error.message };
   if (error instanceof DeliverableUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
   if (error instanceof AgentInvalidTreeTargetError) return { code: "invalid_tree_target", message: error.message };

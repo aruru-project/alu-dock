@@ -19,7 +19,7 @@ export const MAX_COMMAND_ARGUMENT_PREFIX_CHARS = 16_384;
 export const MAX_COMMAND_ARGUMENT_HINT_CHARS = 2_048;
 export const MAX_COMMAND_COMPLETION_TEXT_CHARS = 2_048;
 export const MAX_COMMAND_ARGUMENT_COMPLETIONS = 1_000;
-export interface ResourceDto { kind: "extension" | "skill" | "prompt" | "context"; name: string; path?: string; source?: SourceDto }
+export interface ResourceDto { kind: "extension" | "skill" | "prompt" | "context"; name: string; path?: string; source?: SourceDto; contentRef?: string }
 export interface DiagnosticDto { severity: "info" | "warning" | "error"; message: string; source?: string }
 
 /** Locale-independent canonical ordering shared by projection producers and wire validators. */

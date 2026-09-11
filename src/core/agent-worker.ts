@@ -268,7 +268,7 @@ export type AgentRequestType =
   | "command.submit" | "command.abort" | "queue.dequeue"
   | "model.list" | "model.set" | "thinking.set"
   | "tool.list" | "tool.set_active" | "settings.get" | "settings.update"
-  | "resource.get" | "command.catalog" | "command.content" | "command.complete" | "session.history"
+  | "resource.get" | "resource.content" | "command.catalog" | "command.content" | "command.complete" | "session.history"
   | "conversation.history" | "conversation.content" | "conversation.image" | "file.read" | "session.list"
   | "session.switch" | "session.new" | "session.name" | "session.compact"
   | "session.reload" | "session.tree" | "session.navigate" | "session.fork" | "session.clone";

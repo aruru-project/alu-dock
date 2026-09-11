@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { MAX_RESOURCE_CONTENT_PAGE_BYTES } from "../core/resource-content.js";
 
 import { MAX_EXTENSION_WIDGET_LINES, type InteractionResponse } from "../core/extension-ui-broker.js";
 import {
@@ -160,6 +161,7 @@ export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
+export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
 export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
@@ -195,6 +197,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "projection.completeness.v1",
   "queue.control.v1",
   "resources.v1",
+  RESOURCE_CONTENT_CAPABILITY,
   "run.abort.v1",
   "service.managed.v1",
   "session.adopt.v1",
@@ -285,6 +288,7 @@ export type ControlRequest =
   | Request<"settings.get", { instanceId: string }>
   | Request<"settings.update", { operationId: string; instanceId: string; update: SettingUpdate }>
   | Request<"resource.get", { instanceId: string }>
+  | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
   | Request<"command.complete", { instanceId: string; command: CommandReferenceDto; argumentPrefix: string }>
@@ -357,6 +361,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "settings.get": { target: "instance", effect: "query", transport: "unary" },
   "settings.update": { target: "instance", effect: "command", transport: "unary" },
   "resource.get": { target: "instance", effect: "query", transport: "unary" },
+  "resource.content": { target: "instance", effect: "query", transport: "unary" },
   "command.catalog": { target: "instance", effect: "query", transport: "unary" },
   "command.content": { target: "instance", effect: "query", transport: "unary" },
   "command.complete": { target: "instance", effect: "query", transport: "unary" },
@@ -566,6 +571,7 @@ export interface ResourcesResult {
   diagnosticTotal: number;
   diagnosticsTruncated: boolean;
 }
+export interface ResourceContentResult { text: string; revision: string; nextOffset?: number }
 export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
 export type CommandContentResult =
   | { command: CommandReferenceDto; available: false }
@@ -619,6 +625,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
   if (type === "command.content" || type === "command.complete") return COMMAND_DISCOVERY_CAPABILITY;
+  if (type === "resource.content") return RESOURCE_CONTENT_CAPABILITY;
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
   return "models.v1";
 }
@@ -920,6 +927,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "settings.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "settings.update": exact(params, ["operationId", "instanceId", "update"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), update: parseSettingUpdate(params.update, "params.update", "invalid_request") } };
     case "resource.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "resource.content": {
+      exact(params, ["instanceId", "contentRef", "offset", "revision"], "invalid_request");
+      const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
+      const revision = optionalString(params.revision, "params.revision", 128, "invalid_request");
+      if (offset !== undefined && offset > 0 && revision === undefined) throw validation("invalid_request", "Resource continuation requires revision");
+      return { ...base, type, params: { instanceId: instanceId(), contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"), offset, revision } };
+    }
     case "command.catalog": exact(params, ["instanceId", "prefix"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), prefix: optionalString(params.prefix, "params.prefix", 256, "invalid_request") } };
     case "command.content": {
       exact(params, ["instanceId", "command", "cursor"], "invalid_request");
@@ -2004,6 +2018,16 @@ export function parseCommandsResult(input: unknown): CommandsResult {
   return { commands, ...parseCollectionCompleteness(value, commands.length) };
 }
 
+export function parseResourceContentResult(input: unknown): ResourceContentResult {
+  const value = object(input, "resource content result");
+  exact(value, ["text", "revision", "nextOffset"]);
+  const text = boundedString(value.text, "text", MAX_RESOURCE_CONTENT_PAGE_BYTES);
+  if (Buffer.byteLength(text, "utf8") > MAX_RESOURCE_CONTENT_PAGE_BYTES) throw validation("invalid_response", "Resource page exceeds byte bound");
+  const nextOffset = value.nextOffset === undefined ? undefined : unsigned(value.nextOffset, "nextOffset");
+  if (nextOffset !== undefined && (nextOffset === 0 || text.length === 0)) throw validation("invalid_response", "Resource page did not advance");
+  return { text, revision: string(value.revision, "revision", 128), ...(nextOffset === undefined ? {} : { nextOffset }) };
+}
+
 export function parseCommandContentResult(input: unknown): CommandContentResult {
   const value = object(input, "command content result");
   exact(value, ["command", "available", "format", "revision", "text", "complete", "nextCursor"]);
@@ -2524,7 +2548,7 @@ function parseSettingValue(key: SettingKey, input: unknown, code = "invalid_resp
 }
 
 function parseTool(input: unknown, field: string): ToolDto { const value = object(input, field); exact(value, ["name", "description", "active", "source", "parameterSchema"]); return { name: string(value.name, `${field}.name`, 256), description: boundedString(value.description, `${field}.description`, MAX_MESSAGE), active: boolean(value.active, `${field}.active`), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.parameterSchema === undefined ? {} : { parameterSchema: parseJsonObject(value.parameterSchema, `${field}.parameterSchema`) }) }; }
-function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }) }; }
+function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source", "contentRef"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.contentRef === undefined ? {} : { contentRef: string(value.contentRef, `${field}.contentRef`, 128) }) }; }
 function parseSource(input: unknown, field: string, code = "invalid_response"): import("../core/config-projection.js").SourceDto { const value = object(input, field, code); exact(value, ["kind", "path", "package"], code); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"], code); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation(code,`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS, code) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256, code) }) }; }
 function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const value = object(input, field); exact(value, ["severity", "message", "source"]); return { severity: enumeration(value.severity, `${field}.severity`, ["info", "warning", "error"]), message: string(value.message, `${field}.message`, MAX_MESSAGE), ...(value.source === undefined ? {} : { source: string(value.source, `${field}.source`, 256) }) }; }
 function parseCommandReference(input: unknown, field: string, code = "invalid_response"): CommandReferenceDto { const value = object(input, field, code); exact(value, ["name", "source"], code); return { name: string(value.name, `${field}.name`, 256, code), source: parseSource(value.source, `${field}.source`, code) }; }

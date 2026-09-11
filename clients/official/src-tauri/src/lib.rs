@@ -34,11 +34,11 @@ use aludock_client_core::{
     InstanceCatalog, InstanceSelector, InstanceSnapshot, InteractionMethod, InteractionRequest,
     InteractionResponse, LocalDockEndpoint, Machine, ModelsResult, NavigateOptions,
     PairingProgress, PendingMessage, ProjectTrustDecision, PublishedFileDto, QueueDequeueResult,
-    ReadReplay, ResourceInfo, ResourcesResult, SessionCompactionResult, SessionForkResult,
-    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
-    SessionScope, SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo,
-    StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay,
-    WorkspaceCursor, WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage,
+    ReadReplay, ResourceContentResult, ResourceInfo, ResourcesResult, SessionCompactionResult,
+    SessionForkResult, SessionNameResult, SessionNavigateResult, SessionReloadResult,
+    SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
+    SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
+    WindowsAwayDelay, WorkspaceCursor, WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage,
     WorkspaceFileReadProgress, WorkspaceFileReadResult, WorkspacePage, delete_endpoint,
     probe_host_endpoint, record_endpoint_test, reorder_endpoints, save_unverified_endpoint,
     save_verified_endpoint, saved_endpoint_for_test,
@@ -823,6 +823,8 @@ struct SafeResource {
     kind: String,
     name: String,
     source: Option<SafeSource>,
+    #[serde(rename = "contentRef", skip_serializing_if = "Option::is_none")]
+    content_ref: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -5991,6 +5993,23 @@ async fn update_setting(
 }
 
 #[tauri::command]
+async fn resource_content(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    content_ref: String,
+    offset: Option<u64>,
+    revision: Option<String>,
+) -> Result<ResourceContentResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .resource_content(&instance_id, &content_ref, offset, revision.as_deref())
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 async fn get_resources(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
@@ -6075,6 +6094,7 @@ fn project_resources(result: ResourcesResult) -> SafeResourcesResult {
                 kind: format!("{:?}", resource.kind).to_lowercase(),
                 name: resource.name,
                 source: resource.source.map(project_source),
+                content_ref: resource.content_ref,
             })
             .collect(),
         diagnostics: result
@@ -7439,6 +7459,7 @@ fn project_session_reload(result: SessionReloadResult) -> SafeSessionReload {
                 kind: format!("{:?}", resource.kind).to_lowercase(),
                 name: resource.name,
                 source: resource.source.map(project_source),
+                content_ref: resource.content_ref,
             })
             .collect(),
         diagnostics: result
@@ -7835,6 +7856,7 @@ pub fn run() {
             get_settings,
             update_setting,
             get_resources,
+            resource_content,
             reopen_work,
             forget_work,
             verify_host_endpoint,

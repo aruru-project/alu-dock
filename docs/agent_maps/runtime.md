@@ -95,6 +95,8 @@ Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应�
 
 Pi Worker 自带 `/retry`，只在用户主动输入且最近一次模型响应失败、当前空闲时触发。命令使用公开的 extension `sendMessage` 进入 Pi 原有 Session 流程，并等待该轮结束；隐藏的 `alu-dock-retry` 标记保留在 Pi journal 里供识别，但由同一插件的 `context` hook 从模型上下文移除，因此不追加用户聊天指令，也不重放已经完成的工具。它不使用私有 SDK 补丁，不增加自动重试策略；Pi 原有重试、压缩和收尾照常生效。
 
+项目状态的资源正文通过 `resource.content.v1` 读取。Pi adapter 为已加载的 Skill、Prompt、Project Context 及文件来源的 SYSTEM.md / APPEND_SYSTEM.md 生成 opaque `contentRef`；只有这些当前登记的资源可以读取，不接收客户端任意路径。正文来自磁盘当前 UTF-8 文件，复用 source-file 基础按字节续读，文件变化时要求重新打开，不保存正文快照、不执行资源或触发 Reload。全局文件不受 workspace 根目录限制；system 文件列入 Project Context，不把 Pi 内置生成提示冒充磁盘文件。
+
 命令发现按能力而不是具体名称接入。Pi adapter 从公开的 loaded prompt template 保留 `argumentHint` 和可检查正文；正文分页来自内存中的 `PromptTemplate.content`，不让 Host 或客户端读取 `filePath`。Extension command 的动态参数候选由注册时的 `getArgumentCompletions` 产生，并通过同一通用结果体返回；Dock 自带 Extension command 也沿这条 owner API 声明候选，不在 Host 建名称表。Catalog 后续读取使用 `{name,source}`，同名的不同来源不会互相冒充。
 
 Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。

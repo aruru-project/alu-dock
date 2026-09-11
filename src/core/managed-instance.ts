@@ -179,7 +179,7 @@ export {
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "./instance-dto.js";
 import { projectAgentNavigateResult } from "./session-tree.js";
-import type { SessionTreeResult } from "../control/protocol.js";
+import { classifyControlRequest, type SessionTreeResult } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
 
 interface AgentEventTransition {
@@ -508,6 +508,14 @@ export class ManagedInstance {
       emit: (type, data) => this.enqueueExtensionUiEvent(type, data),
       projectionChanged: () => this.syncExtensionUiProjection(),
     });
+  }
+
+  /** Route a canonical Agent query under the same read/lifecycle boundary as other Worker reads. */
+  async readAgent(request: AgentRequest): Promise<unknown> {
+    if (request.params.instanceId !== this.id || classifyControlRequest(request).effect !== "query") {
+      throw new Error("Agent read requires a query for this instance");
+    }
+    return this.withProjectionRead(() => this.session.invoke(request));
   }
 
   private agentState() { return this.session.state(); }

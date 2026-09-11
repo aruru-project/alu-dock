@@ -11,6 +11,7 @@ import {
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
+import { ResourceContentError } from "../core/resource-content.js";
 import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import {
@@ -30,6 +31,7 @@ import {
   parseConversationFrame,
   parseModelListBody,
   parseResourcesResult,
+  parseResourceContentResult,
   parseSessionsResult,
   parseSettingDto,
   parseSettingDtos,
@@ -91,7 +93,7 @@ export interface WorkerErrorDto {
   code:
     | "compaction_known_failure" | "queue_rejected" | "queue_effect_unknown"
     | "unknown_tool" | "model_not_found" | "invalid_setting" | "settings_write"
-    | "conversation_cursor" | "file_unavailable" | "invalid_tree_target" | "invalid_delivery" | "runtime_error";
+    | "conversation_cursor" | "file_unavailable" | "resource_unavailable" | "invalid_tree_target" | "invalid_delivery" | "runtime_error";
   name: string;
   message: string;
   details?: Record<string, unknown>;
@@ -447,6 +449,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
     case "settings.get": parseSettingDtos(raw); return;
     case "settings.update": parseSettingDto(raw, "Worker setting"); return;
     case "resource.get": parseResourcesResult(raw); return;
+    case "resource.content": parseResourceContentResult(raw); return;
     case "command.catalog": parseCommandsResult(raw); return;
     case "command.content": parseCommandContentResult(raw); return;
     case "command.complete": parseCommandCompletionsResult(raw); return;
@@ -514,6 +517,7 @@ export function encodeWorkerError(error: unknown): WorkerErrorDto {
   if (error instanceof AgentCompactionKnownFailureError) return { ...base, code: "compaction_known_failure", details: { reason: error.reason } };
   if (error instanceof AgentConversationCursorError) return { ...base, code: "conversation_cursor" };
   if (error instanceof PublishedFileUnavailableError) return { ...base, code: "file_unavailable" };
+  if (error instanceof ResourceContentError) return { ...base, code: "resource_unavailable" };
   if (error instanceof AgentInvalidTreeTargetError) return { ...base, code: "invalid_tree_target" };
   if (error instanceof AgentInvalidDeliveryModeError) return { ...base, code: "invalid_delivery", details: { mode: error.mode, running: error.running } };
   if (error instanceof AgentQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
@@ -530,6 +534,7 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
     case "compaction_known_failure": return new AgentCompactionKnownFailureError(oneOfValue(error.details?.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "failed"), error.message);
     case "conversation_cursor": return new AgentConversationCursorError(error.message);
     case "file_unavailable": return new PublishedFileUnavailableError(error.message);
+    case "resource_unavailable": return new ResourceContentError(error.message);
     case "invalid_tree_target": return new AgentInvalidTreeTargetError(error.message);
     case "invalid_delivery": return new AgentInvalidDeliveryModeError(
       oneOfValue(error.details?.mode, ["prompt", "steer", "followUp"], "prompt"),
@@ -556,14 +561,14 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
-  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "invalid_tree_target", "invalid_delivery", "runtime_error"] as const, "Worker error code");
+  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "resource_unavailable", "invalid_tree_target", "invalid_delivery", "runtime_error"] as const, "Worker error code");
   const details = value.details === undefined ? undefined : record(value.details, "Worker error details");
   validateWorkerErrorDetails(code, details);
   return { code, name: boundedString(value.name, 128, "Worker error name"), message: boundedString(value.message, 2_048, "Worker error message", true), ...(details === undefined ? {} : { details }) };
 }
 
 function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Record<string, unknown> | undefined): void {
-  if (code === "runtime_error" || code === "conversation_cursor" || code === "file_unavailable" || code === "invalid_tree_target" || code === "queue_rejected" || code === "queue_effect_unknown") {
+  if (code === "runtime_error" || code === "conversation_cursor" || code === "file_unavailable" || code === "resource_unavailable" || code === "invalid_tree_target" || code === "queue_rejected" || code === "queue_effect_unknown") {
     if (details !== undefined && Object.keys(details).length > 0) throw new Error(`${code} details are invalid`);
     return;
   }
@@ -639,7 +644,7 @@ function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
 }
 
 function isAgentRequest(type: string): type is AgentRequest["type"] {
-  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
+  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "resource.content", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
 }
 
 function parseCapability(raw: unknown): WorkerCapability {

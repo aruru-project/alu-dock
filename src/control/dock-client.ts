@@ -101,6 +101,9 @@ import {
   parseSettingsResult,
   parseSettingUpdateResult,
   parseResourcesResult,
+  parseResourceContentResult,
+  RESOURCE_CONTENT_CAPABILITY,
+  type ResourceContentResult,
   parseCommandsResult,
   parseCommandContentResult,
   parseCommandCompletionsResult,
@@ -396,6 +399,7 @@ export class DockClient {
   setActiveTools(instanceId:string,names:string[],operationId=this.createRequestId()):Promise<ToolsResult>{return this.request("tool.set_active",{operationId,instanceId,names},["tools.v1","projection.completeness.v1"],parseToolsResult);}
   settings(instanceId:string):Promise<SettingsResult>{return this.request("settings.get",{instanceId},"settings.v1",parseSettingsResult);}
   updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
+  resourceContent(instanceId:string,contentRef:string,offset?:number,revision?:string):Promise<ResourceContentResult>{return this.request("resource.content",{instanceId,contentRef,offset,revision},RESOURCE_CONTENT_CAPABILITY,parseResourceContentResult);}
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},["resources.v1","projection.completeness.v1"],parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},["resources.v1","projection.completeness.v1"],parseCommandsResult);}
   commandContent(instanceId:string,command:CommandReferenceDto,cursor?:string):Promise<CommandContentResult>{return this.request("command.content",{instanceId,command,cursor},COMMAND_DISCOVERY_CAPABILITY,parseCommandContentResult);}

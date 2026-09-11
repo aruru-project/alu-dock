@@ -557,7 +557,8 @@ export interface SettingUpdateResult {
   reloadRequired: boolean
   hostRestartRequired: boolean
 }
-export interface ResourceInfo { kind: 'extension' | 'skill' | 'prompt' | 'context'; name: string; source?: SafeSource }
+export interface ResourceInfo { kind: 'extension' | 'skill' | 'prompt' | 'context'; name: string; source?: SafeSource; contentRef?: string }
+export interface ResourceContentResult { text: string; revision: string; nextOffset?: number }
 export interface ResourcesResult {
   resources: ResourceInfo[]
   diagnostics: Array<{ severity: 'info' | 'warning' | 'error'; message: string }>

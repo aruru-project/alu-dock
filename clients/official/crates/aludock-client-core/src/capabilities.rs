@@ -100,6 +100,7 @@ pub(crate) const SESSION_INVENTORY: &[&str] = &[
 ];
 pub(crate) const RESOURCES: &[&str] = &[CORE_V2, RESOURCES_V1, PROJECTION_COMPLETENESS_V1];
 pub(crate) const COMMAND_DISCOVERY: &[&str] = &[CORE_V2, COMMAND_DISCOVERY_V1];
+pub(crate) const RESOURCE_CONTENT: &[&str] = &[CORE_V2, "resource.content.v1"];
 pub(crate) const EXTENSION_CONTROL: &[&str] = &[
     CORE_V2,
     EXTENSION_UI_CONTROL_V1,

@@ -8,8 +8,9 @@ use crate::{
     ClientError, DockClient, InstanceSnapshot, Result,
     capabilities::{
         COMMAND_DISCOVERY as COMMAND_DISCOVERY_CAPABILITIES, MODELS as MODEL_CAPABILITIES,
-        RESOURCES as RESOURCE_CAPABILITIES, SETTINGS as SETTINGS_CAPABILITIES,
-        SNAPSHOT as SNAPSHOT_CAPABILITIES, TOOLS as TOOL_CAPABILITIES,
+        RESOURCE_CONTENT as RESOURCE_CONTENT_CAPABILITIES, RESOURCES as RESOURCE_CAPABILITIES,
+        SETTINGS as SETTINGS_CAPABILITIES, SNAPSHOT as SNAPSHOT_CAPABILITIES,
+        TOOLS as TOOL_CAPABILITIES,
     },
 };
 const MAX_COMMAND_CONTENT_PAGE_CHARS: usize = 64_000;
@@ -305,6 +306,32 @@ pub struct ResourceInfo {
     pub name: String,
     pub path: Option<String>,
     pub source: Option<SourceInfo>,
+    #[serde(
+        rename = "contentRef",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub content_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceContentResult {
+    pub text: String,
+    pub revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceContentParams<'a> {
+    instance_id: &'a str,
+    content_ref: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<&'a str>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -660,6 +687,27 @@ impl DockClient {
             ));
         }
         Ok(result)
+    }
+
+    pub async fn resource_content(
+        &self,
+        instance_id: &str,
+        content_ref: &str,
+        offset: Option<u64>,
+        revision: Option<&str>,
+    ) -> Result<ResourceContentResult> {
+        self.request(
+            "resource.content",
+            &ResourceContentParams {
+                instance_id,
+                content_ref,
+                offset,
+                revision,
+            },
+            RESOURCE_CONTENT_CAPABILITIES,
+            None,
+        )
+        .await
     }
 
     pub async fn resources(&self, instance_id: &str) -> Result<ResourcesResult> {

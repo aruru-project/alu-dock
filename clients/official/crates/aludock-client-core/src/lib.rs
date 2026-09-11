@@ -41,9 +41,10 @@ pub use client::DockClient;
 pub use config::{
     CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
     CommandContentResult, CommandInfo, CommandReference, CommandsResult, DiagnosticInfo,
-    DiagnosticSeverity, ModelInfo, ModelsResult, ResourceInfo, ResourceKind, ResourcesResult,
-    SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult, SettingValue,
-    SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
+    DiagnosticSeverity, ModelInfo, ModelsResult, ResourceContentResult, ResourceInfo, ResourceKind,
+    ResourcesResult, SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult,
+    SettingValue, SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel,
+    ToolInfo, ToolsResult,
 };
 pub use connection_router::{ConnectionRouter, RouteSnapshot};
 pub use connections::{

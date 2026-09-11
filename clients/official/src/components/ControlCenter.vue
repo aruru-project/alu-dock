@@ -23,6 +23,7 @@ import { generationSectionState as resolveGenerationSectionState, pendingGenerat
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
+import ResourceDocument from './ResourceDocument.vue'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
@@ -33,6 +34,7 @@ import type {
   ModelsResult,
   ProjectedEvent,
   ResourcesResult,
+  ResourceInfo,
   SettingInfo,
   SettingKey,
   SettingValue,
@@ -109,6 +111,7 @@ const commandArgsInput = ref<HTMLInputElement | null>(null)
 const models = ref<ModelsResult | null>(null)
 const tools = ref<ToolsResult | null>(null)
 const resources = ref<ResourcesResult | null>(null)
+const selectedResource = ref<ResourceInfo | null>(null)
 const settings = ref<SettingsResult | null>(null)
 const loading = ref<ControlSection | null>(null)
 const generationCaches = ref(pendingGenerationCaches())
@@ -207,6 +210,7 @@ watch([
   models.value = null
   tools.value = null
   resources.value = null
+  selectedResource.value = null
   settings.value = null
   generationCaches.value = pendingGenerationCaches()
   selectedCommandReferenceId.value = ''
@@ -219,12 +223,20 @@ watch([
   if (props.section === 'models' || props.section === 'thinking') void loadSection(props.section)
 }, { immediate: true })
 watch(() => props.section, (section) => {
+  selectedResource.value = null
   selectedSettingKey.value = ''
   optionCursor.value = 0
   const managed = ['commands', 'dock-tools', 'resources', 'tools', 'settings'].includes(section)
   if (!managed || generationCaches.value[section as GenerationCache] !== 'loading') void loadSection(section)
   if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
 }, { immediate: true })
+
+async function closeResource() {
+  const contentRef = selectedResource.value?.contentRef
+  selectedResource.value = null
+  await nextTick()
+  if (contentRef) document.getElementById(`resource-${contentRef}`)?.focus()
+}
 
 function reconcileControl() {
   emit('reconcile', props.unknownDomain ?? sectionDomain(props.section))
@@ -419,6 +431,7 @@ function applyLiveEvent(event: ProjectedEvent) {
   } else if (event.eventType === 'settings.write_failed' && typeof data.error === 'string') {
     error.value = data.error
   } else if (event.eventType === 'resources.reloaded') {
+    selectedResource.value = null
     resources.value = null
     tools.value = null
     if (props.section === 'resources' || props.section === 'tools') void loadSection(props.section, true)
@@ -844,6 +857,8 @@ function isCurrentModel(model: ModelInfo) {
       <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
     </section>
 
+    <ResourceDocument v-else-if="section === 'resources' && selectedResource" :work="work" :resource="selectedResource" @back="closeResource" />
+
     <section v-else-if="section === 'resources'" class="alu-project-status">
       <section class="alu-project-status-identity">
         <span class="alu-project-status-signal" :class="`is-${presence.tone}`" />
@@ -862,7 +877,7 @@ function isCurrentModel(model: ModelInfo) {
       </section>
       <section class="alu-project-status-section">
         <h3>Loaded Resources</h3>
-        <div v-for="group in resourceGroups" :key="group.kind" class="alu-project-status-resource-group"><h4>{{ group.label }} <span class="alu-project-status-count">{{ group.items.length }}</span></h4><div class="alu-project-status-chips"><span v-for="resource in group.items" :key="`${resource.kind}:${resource.name}`" class="alu-project-status-chip">{{ resource.name }}</span><span v-if="!group.items.length" class="alu-project-status-empty">—</span></div></div>
+        <div v-for="group in resourceGroups" :key="group.kind" class="alu-project-status-resource-group"><h4>{{ group.label }} <span class="alu-project-status-count">{{ group.items.length }}</span></h4><div class="alu-project-status-chips"><template v-for="(resource, index) in group.items" :key="resource.contentRef || `${resource.kind}:${resource.name}:${index}`"><button v-if="resource.contentRef" type="button" class="alu-project-status-chip resource-read-button" :disabled="preview" :id="`resource-${resource.contentRef}`" :aria-label="`阅读 ${resource.name}`" @click="selectedResource = resource">{{ resource.name }} <ChevronRight :size="11" /></button><span v-else class="alu-project-status-chip">{{ resource.name }}</span></template><span v-if="!group.items.length" class="alu-project-status-empty">—</span></div></div>
         <div v-if="filteredDiagnostics.length" class="alu-project-status-resource-group"><h4>Diagnostics <span class="alu-project-status-count">{{ resources?.diagnosticTotal ?? filteredDiagnostics.length }}</span></h4><div v-for="(diagnostic, index) in filteredDiagnostics" :key="index" class="alu-project-status-diagnostic" :class="`is-${diagnostic.severity}`">{{ diagnostic.message }}</div></div>
         <div v-if="resources?.resourcesTruncated || resources?.diagnosticsTruncated" class="alu-project-status-note">资源或诊断列表未完整返回</div>
       </section>
@@ -899,3 +914,9 @@ function isCurrentModel(model: ModelInfo) {
     </section>
   </div>
 </template>
+
+<style scoped>
+.resource-read-button { display: inline-flex; align-items: center; gap: 4px; font-family: inherit; cursor: pointer; }
+.resource-read-button:hover, .resource-read-button:focus-visible { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-hover); }
+.resource-read-button:disabled { cursor: default; opacity: .55; }
+</style>

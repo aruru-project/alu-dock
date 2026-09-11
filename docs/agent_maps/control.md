@@ -199,6 +199,12 @@ watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 tur
 
 `dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交固定可见来源包装的正文，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
+## 资源正文阅读
+
+`resource.get` 的可读资源附带可选 `contentRef`。`resource.content.v1` 提供 `resource.content {instanceId,contentRef,offset?,revision?}`，返回 `{text,revision,nextOffset?}`；没有 `nextOffset` 表示完整读取。首请求读取磁盘当前文件，续读携带返回的字节位置和 revision，文件变化或不可读取时返回 `resource_unavailable`。不接收客户端文件路径，不改写 `command.content` 的已加载模板正文语义。
+
+Worker 产出结果并与 TypeScript 客户端复用本文件所指 `protocol.ts` 的唯一 parser；Host 仅沿当前 instance 的查询与位置路由转发。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
+
 ## 命令发现
 
 `command.catalog` 返回命令所有者提供的名称、说明、来源和能力事实。静态参数用法保留为可选 `argumentHint`；`argumentCompletions` 只表示命令所有者能根据当前参数前缀提供候选，不把动态候选伪装成静态参数表；`contentAvailable` 表示该命令有可按需检查的权威内容。Host 不按命令名维护用法表，也不从 description 或 handler 猜参数。

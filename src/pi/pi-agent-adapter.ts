@@ -24,6 +24,8 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
+import { readResourceContent, ResourceContentError } from "../core/resource-content.js";
+import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
 import {
   dockAttachmentsExtension,
@@ -418,6 +420,11 @@ export class PiAgentAdapter {
       case "settings.get": return this.getSettings();
       case "settings.update": return this.updateSetting(request.params.update);
       case "resource.get": return this.getResources();
+      case "resource.content": {
+        const resource = this.getDocumentResources().find((item) => item.contentRef === request.params.contentRef);
+        if (!resource?.path) throw new ResourceContentError("这份资源已不在当前列表中。请返回项目状态重新选择。");
+        return readResourceContent(resource.path, request.params.offset, request.params.revision);
+      }
       case "command.catalog": return this.getCommands(request.params.prefix);
       case "command.content": return this.getCommandContent(request.params.command, request.params.cursor);
       case "command.complete": return this.getCommandCompletions(request.params.command, request.params.argumentPrefix);
@@ -559,33 +566,12 @@ export class PiAgentAdapter {
     const extensions = loader.getExtensions();
     const skills = loader.getSkills();
     const prompts = loader.getPrompts();
-    const contexts = loader.getAgentsFiles();
-    const resources: ResourceDto[] = [];
+    const resources: ResourceDto[] = this.getDocumentResources();
     for (const extension of extensions.extensions) {
       const path = boundedString(extension.resolvedPath || extension.path, 16_384, "");
       resources.push({
         kind: "extension", name: boundedString(basename(extension.path || extension.resolvedPath), 256, "extension"),
         ...(path ? { path } : {}), source: projectSource(extension.sourceInfo, "extension"),
-      });
-    }
-    for (const skill of skills.skills) {
-      const path = boundedString(skill.filePath, 16_384, "");
-      resources.push({
-        kind: "skill", name: boundedString(skill.name, 256, "skill"), ...(path ? { path } : {}),
-        source: projectSource(skill.sourceInfo, "skill"),
-      });
-    }
-    for (const prompt of prompts.prompts) {
-      const path = boundedString(prompt.filePath, 16_384, "");
-      resources.push({
-        kind: "prompt", name: boundedString(prompt.name, 256, "prompt"), ...(path ? { path } : {}),
-        source: projectSource(prompt.sourceInfo, "prompt"),
-      });
-    }
-    for (const context of contexts.agentsFiles) {
-      const path = boundedString(context.path, 16_384, "");
-      resources.push({
-        kind: "context", name: boundedString(basename(context.path), 256, "context"), ...(path ? { path } : {}),
       });
     }
     const modelError = binding.services.modelRuntime.getError();
@@ -607,6 +593,26 @@ export class PiAgentAdapter {
       diagnosticTotal: sortedDiagnostics.length,
       diagnosticsTruncated: projectedDiagnostics.length < sortedDiagnostics.length,
     };
+  }
+
+  private getDocumentResources(): ResourceDto[] {
+    const loader = this.requireActive().services.resourceLoader;
+    const resources: ResourceDto[] = [];
+    const add = (kind: ResourceDto["kind"], name: string, filePath: string | undefined, source?: SourceDto) => {
+      const path = exactOptionalText(filePath, MAX_SOURCE_FILE_PATH_CHARS);
+      resources.push({
+        kind, name: boundedString(name, 256, kind), ...(source ? { source } : {}),
+        ...(path ? { path, contentRef: createHash("sha256").update(`${kind}\u0000${path}`).digest("hex") } : {}),
+      });
+    };
+    for (const skill of loader.getSkills().skills) add("skill", skill.name, skill.filePath, projectSource(skill.sourceInfo, "skill"));
+    for (const prompt of loader.getPrompts().prompts) add("prompt", prompt.name, prompt.filePath, projectSource(prompt.sourceInfo, "prompt"));
+    const contextPaths = new Set(loader.getAgentsFiles().agentsFiles.map((context) => context.path));
+    const system = loader.getSystemPromptSource();
+    if (system) contextPaths.add(system.path);
+    for (const append of loader.getAppendSystemPromptSources()) contextPaths.add(append.path);
+    for (const path of contextPaths) add("context", basename(path), path);
+    return resources;
   }
 
   async getCommands(prefix?: string): Promise<AgentCommandCatalogBody> {

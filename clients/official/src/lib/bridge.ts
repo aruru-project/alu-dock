@@ -27,6 +27,7 @@ import type {
   QueueDequeueResult,
   SavedDeliverableLocation,
   ResourcesResult,
+  ResourceContentResult,
   SelectedAttachment,
   SessionCompactionResult,
   SessionForkResult,
@@ -413,6 +414,11 @@ export async function getSettings(instanceId: string, context: ConnectionContext
 export async function updateSetting(instanceId: string, key: SettingKey, value: SettingValue, context: ConnectionContext): Promise<SettingUpdateResult> {
   if (isTauri) return invoke<SettingUpdateResult>('update_setting', { ...context, instanceId, update: { key, value } })
   throw new Error('浏览器设计预览不会修改设置')
+}
+
+export async function getResourceContent(instanceId: string, contentRef: string, context: ConnectionContext, offset?: number, revision?: string): Promise<ResourceContentResult> {
+  if (isTauri) return invoke<ResourceContentResult>('resource_content', { ...context, instanceId, contentRef, offset: offset ?? null, revision: revision ?? null })
+  throw new Error('请连接 AluDock 后查看资源正文。')
 }
 
 export async function getResources(instanceId: string, context: ConnectionContext): Promise<ResourcesResult> {
