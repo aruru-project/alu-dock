@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { renderCliHelp } from "../src/cli-help.js";
+import { ptyUserEnvironment } from "./support/pty-user-environment.js";
 
 const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const unavailableSocket = "/tmp/aludock-help-must-not-connect.sock";
@@ -13,6 +17,29 @@ interface CliResult {
   stdout: string;
   stderr: string;
 }
+
+test("Windows Host bootstrap can load its entry before starting the service", async () => {
+  // Preserve the bootstrap import contract while fixing the 2026-09-12 CLI launch regression.
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-cli-import-"));
+  try {
+    const entry = join(directory, "bootstrap.mjs");
+    await writeFile(entry, `const { runWindowsHost } = await import(${JSON.stringify(pathToFileURL(cliPath).href)});
+if (typeof runWindowsHost !== "function") throw new Error("Host entry unavailable");
+console.log("Host entry loaded");
+`);
+    const environment = await ptyUserEnvironment(directory, {
+      PI_CODING_AGENT_DIR: join(directory, "pi"),
+      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_RUNTIME_DIR: join(directory, "run"),
+    });
+    const result = await runCli(["--help"], entry, environment);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout, "Host entry loaded\n");
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("top-level help is human-only, bounded, and locally rendered", async () => {
   const [flag, command, short] = await Promise.all([
@@ -153,11 +180,11 @@ test("help text is terminal-safe static guidance", () => {
   }
 });
 
-async function runCli(args: string[]): Promise<CliResult> {
+async function runCli(args: string[], entry = cliPath, environment = process.env): Promise<CliResult> {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(process.execPath, [cliPath, ...args], {
+    const child = spawn(process.execPath, [entry, ...args], {
       cwd: process.cwd(),
-      env: { ...process.env, ALU_DOCK_SOCKET: unavailableSocket },
+      env: { ...environment, ALU_DOCK_SOCKET: unavailableSocket },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];

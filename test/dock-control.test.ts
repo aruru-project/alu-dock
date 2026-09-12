@@ -640,7 +640,7 @@ test("two clients observe and replay one host-owned running instance", async (co
 
 
 
-test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side effects", async (context) => {
+test("installed aludock link opens the SSH Hub and returns to the shell", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-pty-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -659,9 +659,15 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   await host.start();
   const revision = registry.catalogRevision();
 
+  // 2026-09-12: the installed symlink silently exited while direct CLI tests passed.
+  const launcher = join(directory, "aludock");
+  const cliPath = join(process.cwd(), "dist/src/cli.js");
+  const cliMode = (await lstat(cliPath)).mode & 0o7777;
+  await symlink(cliPath, launcher);
+  context.after(() => chmod(cliPath, cliMode));
+  await chmod(launcher, 0o755); // npm gives the packaged bin its executable permission.
   const pty = await runPtyTui([
-    process.execPath,
-    join(process.cwd(), "dist/src/cli.js"),
+    launcher,
     "--socket", socketPath,
   ], "hub-exit");
   const output = Buffer.from(pty.output, "base64").toString("utf8");

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
 import { humanListWidth, renderHumanInstanceList, selectHumanInstanceList } from "./cli-list.js";
@@ -995,7 +996,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch((error: unknown) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) main().catch((error: unknown) => {
   if (!isMachineInvocation(process.argv.slice(2))) {
     const message = error instanceof ControlClientError ? humanControlErrorText(error) : errorMessage(error);
     process.stderr.write(`Alu Dock: ${message}\n`);
