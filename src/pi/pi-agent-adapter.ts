@@ -2895,16 +2895,8 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         ],
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],
-        ...((options.dockAttachmentPort === undefined && options.dockToolsBridge === undefined) ? {} : {
-          additionalSkillPaths: [
-            ...(options.dockAttachmentPort === undefined ? [] : [dockAttachmentSkillPath()]),
-            ...(options.dockToolsBridge === undefined ? [] : [dockToolsSkillPath()]),
-          ],
-          ...(options.dockToolsBridge === undefined ? {} : {
-            skillsOverride: (base) => options.dockToolsBridge!.enabled
-              ? base
-              : { ...base, skills: base.skills.filter((skill) => skill.name !== "dock-tools") },
-          }),
+        ...(options.dockAttachmentPort === undefined ? {} : {
+          additionalSkillPaths: [dockAttachmentSkillPath()],
         }),
       },
     });
@@ -2981,10 +2973,6 @@ async function loadAttachmentContextKey(agentDir: string): Promise<Buffer> {
 
 function dockAttachmentSkillPath(): string {
   return bundledDockSkillPath("dock-attachments");
-}
-
-function dockToolsSkillPath(): string {
-  return bundledDockSkillPath("dock-tools");
 }
 
 function bundledDockSkillPath(name: string): string {

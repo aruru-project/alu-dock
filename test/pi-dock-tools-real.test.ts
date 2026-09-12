@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -28,7 +28,7 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, message: str
   assert.fail(message);
 }
 
-test("real Pi Worker toggles all Dock tools and its bundled skill across reload without a model call", async () => {
+test("real Pi Worker toggles Dock tools and exposes its readable usage guide", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-tools-real-"));
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
@@ -86,13 +86,16 @@ test("real Pi Worker toggles all Dock tools and its bundled skill across reload 
     }
 
     await instance.submit("/dock-tools on", "prompt", "observation-on");
-    await waitFor(() => enabled, "Dock tools command did not reach the Host port");
-    await waitFor(() => instance.snapshot().execution === "idle", "Dock tools reload did not finish");
+    await waitFor(() => instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "observation-on"), "Dock tools command did not finish");
+    assert.equal(enabled, true);
     const active = await instance.listTools();
     for (const name of DOCK_TOOL_NAMES) {
       assert.equal(active.tools.find((tool) => tool.name === name)?.active, true);
     }
-    await waitFor(async () => (await instance.getResources()).resources.some((resource) => resource.kind === "skill" && resource.name === "dock-tools"), "Dock tools skill did not appear after reload");
+    const guidePath = active.tools.find((tool) => tool.name === "dock_list")?.description.split("Usage guide (read when needed): ")[1];
+    assert.ok(guidePath, "enabled tools must point to their usage guide");
+    assert.match(await readFile(guidePath, "utf8"), /^# Dock tools usage guide/u);
+    assert.equal((await instance.getResources()).resources.some((resource) => resource.kind === "skill" && resource.name === "dock-tools"), false);
 
     await instance.reloadSession("dock-tools-reload");
     const reloaded = await instance.listTools();
@@ -101,13 +104,12 @@ test("real Pi Worker toggles all Dock tools and its bundled skill across reload 
     }
 
     await instance.submit("/dock-tools off", "prompt", "observation-off");
-    await waitFor(() => !enabled, "Dock tools off command did not reach the Host port");
-    await waitFor(() => instance.snapshot().execution === "idle", "Dock tools off reload did not finish");
+    await waitFor(() => instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "observation-off"), "Dock tools off command did not finish");
+    assert.equal(enabled, false);
     const disabled = await instance.listTools();
     for (const name of DOCK_TOOL_NAMES) {
       assert.equal(disabled.tools.find((tool) => tool.name === name)?.active, false);
     }
-    await waitFor(async () => !(await instance.getResources()).resources.some((resource) => resource.kind === "skill" && resource.name === "dock-tools"), "Dock tools skill did not disappear after reload");
   } finally {
     await instance.stop().catch(() => {});
     await rm(root, { recursive: true, force: true });

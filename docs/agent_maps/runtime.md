@@ -109,7 +109,7 @@ Agent 需要访问 Host-owned 事实时，复用 observation 已建立的 revers
 2. Registry 在创建/reopen Worker 时注入 HostPort；
 3. `AgentWorkerConnection` 只从已认证连接上下文取得 `sourceInstanceId`，并继续使用 host epoch、runtime generation、worker incarnation 和 ordered private envelope fencing；Worker request 不能自行声明 caller identity；
 4. Worker bootstrap 只在 Host 授予对应 `dock.*` capability 时建立一个小型 bridge；
-5. Agent adapter 用 inline extension/tool 或其他 runtime-native API 暴露能力，需要长期使用说明时随包装载 bundled Skill。
+5. Agent adapter 用 inline extension/tool 或其他 runtime-native API 暴露能力；使用说明可随包提供为 Skill 或按需阅读的工具手册。
 
 每项能力保留自己的 closed request/result、bounds 和开关规则，不把这个 pattern 扩张成第二套 Protocol V2。公开业务 DTO 仍只在 Protocol V2 定义一次；private envelope 只验证 source binding、路径等 Host-private fact 和跨进程边界。
 
@@ -121,7 +121,7 @@ Pi inline extension 提供 `dock_attachment_list` 和 `dock_attachment_resolve`�
 
 Dock 通过 Pi resource `extensionsOverride` 明确持有 canonical inline `show_image`，只移除其他 extension 注册的同名 tool，不依赖修改用户的 `~/.pi`。tool 只把 `{path}` 登记到 Worker-local generation/session registry，Pi session 不持久化图片 bytes；live 与 history projector 从 structured details 产出同一个 path-free `PublishedFileDto`。`file.read` 经 Host 原样路由到当前 generation 的 Worker。原生 Pi ImageContent 在 live 与 history image block 上发布同一个由 immutable decoded bytes SHA-256 决定的 content ref；同 bytes 在 append、refresh 和 Worker restart 后保持 identity。既有 image block 与 `conversation.content` 形状保持不变，避免破坏已发布的 Protocol V2 客户端；新客户端通过单连接 `conversation.image` stream 的 ready frame 获得 canonical lowercase SHA-256 与 decoded size，再以 callback 读取 bytes。这里没有 provider context hook。
 
-Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久化，默认关闭；新建、adopt 和从别的来源创建的 instance 都不会继承。`dock.tools.configure` reverse capability 始终存在，但 Host 只在开关为 on 时授予 `dock.tools`；off 时 bundled Skill 不进入 Pi resource prompt，下面七个 tool 也不在 active set。显式切换会执行一次 Pi resource reload，让 tool system prompt 与 Skill 同步；普通 turn 不逐次改 prompt，session reload/rebind 继续从 Worker-level capability state 恢复。
+Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久化，默认关闭；新建、adopt 和从别的来源创建的 instance 都不会继承。`dock.tools.configure` reverse capability 始终存在，Host 在开关为 on 时授予 `dock.tools`。开关通过 Pi 原生 `setActiveTools` 更新可用工具及其提示，off 时这些工具离开 active set。使用手册随包保存在 `docs/agent/dock-tools.md`，由各工具的 description 提供实际文件路径，Agent 需要时读取；它不注册为 Pi Skill。切换开关不执行 resource reload，正在进行的调用继续使用有效上下文。用户主动 reload/rebind 时，开关仍从 Worker-level capability state 恢复。
 
 开关开启后恰好提供：`dock_list({scope?: "live" | "all"})`、`dock_machines()`、target 必填的 `dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file({path})`、`dock_create({cwd,name?,machine?})` 和 `dock_send({target,message})`。list 只读短状态，不拉取 conversation；inspect 才按需读取一个按消息条数分页的 conversation page。Agent-facing client 把 canonical message page 渲染成 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。`limit` 只限制一次返回的消息条数，选中的消息正文保持完整；若底层传输无法承载则明确失败，禁止返回截断内容。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
 
@@ -129,7 +129,7 @@ Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久�
 
 `dock_machines` 沿 Main 的同一 Machine authority 返回名称、availability、platform、Home 与 workspace roots，Agent-facing 文本省略内部 `hostId`；Machine 名称和路径按不可信 metadata 呈现。`dock_create` 接受 absolute cwd、可选名称和可选的精确 Machine display name；省略 Machine 时创建在来源 work 所属 Machine，提供时由 Main 将唯一名称解析为 `hostId`，再沿 Host 的 canonical `instance.create(hostId)` application service 创建。找不到、重名或离线都明确失败，不让 Agent 输入或看到 Machine UUID；新 instance 的 Dock tools 仍为 off。`dock_send` 先把 human-readable source display name 与固定来源说明包在正文外，再沿同一个 `command.submit` application service 使用 `delivery: auto`；因此目标的运行中/空闲判定、Queue、receipt、持久 conversation 与普通 user message 完全一致。包装不暴露 UUID、不改写内部 message body，也不会伪装成主人亲自输入。Dock tools 不提供 stop、interaction answer 或任意 Agent 私有控制。
 
-watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 只含 target/reason/time，不携带 sibling conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent；Agent 醒来后按主人原始意图决定是否 inspect。Host 不走 `command.submit` 冒充主人。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Bundled `dock-tools` Skill 只在开关开启时出现，说明按需读取、等待、创建和消息来源边界。
+watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 只含 target/reason/time，不携带 sibling conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent；Agent 醒来后按主人原始意图决定是否 inspect。Host 不走 `command.submit` 冒充主人。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
 
 ## Extension UI
 
@@ -154,7 +154,7 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 ## 代码范围
 
 - `src/pi/`：当前 Pi Worker、Pi adapter、Dock capability extensions 与 Worker 进程实现。
-- `skills/dock-attachments/`、`skills/dock-tools/`：随包发布的 Agent 使用说明。
+- `skills/dock-attachments/`、`docs/agent/dock-tools.md`：随包发布的附件 Skill 与 Dock tools 使用手册。
 - `src/control/`：Host control、Worker supervision 与 session routing。
 - `src/core/`：Dock 自己的协议数据与跨实现概念，不依赖 Pi runtime。
 - `src/tui/`：本机终端客户端（通常经 SSH 使用），不持有 Agent runtime。

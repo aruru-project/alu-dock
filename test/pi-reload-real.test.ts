@@ -121,10 +121,10 @@ export default function (pi) {
   const enabled = await waitForRead(client, created.id, (read) => (
     read.instance.execution === "idle"
     && read.instance.extensionStatus?.["Dock tools"] === "on"
-    && read.instance.extensionStatus?.["session-fixture"] === "reload"
+    && read.instance.extensionStatus?.["session-fixture"] === "startup"
   ));
   assert.equal(enabled.instance.extensionStatus?.["Dock tools"], "on");
-  assert.equal(enabled.instance.extensionStatus?.["session-fixture"], "reload");
+  assert.equal(enabled.instance.extensionStatus?.["session-fixture"], "startup");
 
   await client.reloadSession(created.id, "session-ui-reload");
   const reloaded = await reader.read(created.id);

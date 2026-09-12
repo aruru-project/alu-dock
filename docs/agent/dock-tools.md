@@ -1,9 +1,4 @@
----
-name: dock-tools
-description: Use owner-enabled Dock tools to deliver completed files or work with sibling Dock instances.
----
-
-# Dock tools
+# Dock tools usage guide
 
 Use these tools only for Dock work the owner requested, including temporary file delivery and explicit cross-instance work. Dock tools are an official local-workstation convenience, not a separate orchestration system.
 
