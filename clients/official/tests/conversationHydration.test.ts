@@ -139,14 +139,52 @@ try {
   assert.deepEqual(content.state.value.records.map((record: ConversationRecord) => record.entryId),
     ['entry-0', 'entry-boundary', 'entry-1', 'entry-final'])
 
-  // A byte-limited bootstrap may also be shorter than the preview page. Add
-  // its missing prefix/tail without replacing content already fully loaded.
+  // Card #278 (2026-09-11): switching back during a reply must not show
+  // live user messages again when the history reader has already persisted them.
+  // Two deliberate sends with identical text must both remain visible.
+  const repeatedText = 'Please check this change.'
+  const sent = ['send-1', 'send-2'].map((messageId, index) => ({
+    sequence: index + 1, runtimeGeneration: 1, eventType: 'message.submitted', occurredAt: '2026-09-11T02:50:00Z',
+    data: { messageId, text: repeatedText },
+  }))
+  const newlyPersisted = ['new-1', 'new-2'].map((entryId) => ({
+    ...older, recordId: entryId, entryId, content: [{ type: 'text', text: repeatedText }],
+  }))
+  content.clear()
+  content.publish({ ...initial(), activeEvents: sent })
+  // Enough output may arrive between the initial read and the history request
+  // that the newest page has no overlap at all. Keep paging to the opened history.
+  replies.push(
+    { ...page, records: newlyPersisted, incompleteEntryIds: [], nextCursor: 'before-new-sends' },
+    { ...page, records: [preview, finalReply], incompleteEntryIds: [], nextCursor: 'earlier' },
+  )
+  await content.loadRecentHistory(context, epoch)
+  assert.deepEqual(content.items.value.filter((item: { kind: string; text?: string }) =>
+    item.kind === 'user' && item.text === repeatedText).map((item: { id: string }) => item.id),
+  ['live-send-1', 'live-send-2'], 'switching back shows each deliberate send once, even with identical text')
+  assert.equal(content.historyCursor.value, 'earlier', 'earlier history remains available after skipping newer output')
+  replies.push({ ...page, records: [older], incompleteEntryIds: [], hasEarlier: false, nextCursor: undefined })
+  await content.loadEarlierHistory()
+  assert.equal(content.items.value[0]?.text, 'earlier', 'reading further back still loads the older message')
+
+  // Before the first checkpoint there is only live output; fetching already
+  // persisted messages must not import them into an otherwise empty history.
+  content.clear()
+  content.publish({ ...initial(), records: [], activeEvents: sent, historyTruncated: false })
+  await content.loadRecentHistory(context, epoch)
+  assert.deepEqual(content.items.value.filter((item: { kind: string }) => item.kind === 'user')
+    .map((item: { id: string }) => item.id), ['live-send-1', 'live-send-2'])
+  assert.equal(content.historyLoading.value, false)
+  assert.equal(content.historyError.value, null)
+
+  // A byte-limited bootstrap may be shorter than the preview page, but Host
+  // trimming removes its oldest prefix, never its tail. Only fill the prefix.
   content.clear()
   content.publish({ ...initial(), records: [completed] })
   replies.push({ ...page, records: [older, preview, finalReply], incompleteEntryIds: [], hasEarlier: false, nextCursor: undefined })
   await content.loadRecentHistory(context, epoch)
-  assert.deepEqual(content.state.value.records, [older, completed, finalReply],
-    'a larger recent page fills both ends and preserves completed content')
+  assert.deepEqual(content.state.value.records, [older, completed],
+    'a larger recent page fills older history and preserves completed content without importing a newer reply')
 
   let finishOldRequest!: (value: unknown) => void
   replies.push(new Promise(resolve => { finishOldRequest = resolve }))

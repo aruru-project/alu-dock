@@ -64,6 +64,7 @@ export function useConversationContent(options: ConversationContentOptions) {
 
   let projectionFrame = 0
   let fullProjectionState: ConversationBootstrap | null = null
+  let historyEndEntryId: string | undefined
   const pendingToolEvents = new Map<string, { state: ConversationBootstrap; event: ProjectedEvent }>()
   const pendingTextDeltas = new Map<string, { state: ConversationBootstrap; delta: string }>()
   const pendingStreamingChanges = new Map<string, { state: ConversationBootstrap; streaming: boolean }>()
@@ -246,6 +247,7 @@ export function useConversationContent(options: ConversationContentOptions) {
     resetProjectionSchedule()
     historyRevision.value = null
     historyCursor.value = null
+    historyEndEntryId = bootstrap.records.at(-1)?.entryId
     state.value = bootstrap
     rebuildProjection(bootstrap)
     historyTruncated.value = bootstrap.historyTruncated
@@ -255,6 +257,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   function clear() {
     resetProjectionSchedule()
     resetHistoryHydration()
+    historyEndEntryId = undefined
     state.value = null
     items.value = []
     options.projected([])
@@ -375,20 +378,39 @@ export function useConversationContent(options: ConversationContentOptions) {
 
   async function loadRecentHistory(context: ConnectionContext, epoch: number) {
     const current = state.value
-    if (!options.native || !current || !options.isCurrent(context, current, epoch)) return
+    const endEntryId = historyEndEntryId
+    if (!options.native || !current || !endEntryId || !options.isCurrent(context, current, epoch)) return
     historyLoading.value = true
     historyPageError.value = null
     try {
-      const page = await loadConversationHistory(current.instance.id, undefined, current.cursor.hostEpoch,
-        current.cursor.runtimeGeneration, context)
-      if (!options.isCurrent(context, current, epoch)) return
-      if (page.hostEpoch !== current.cursor.hostEpoch || page.instance.id !== current.instance.id
-        || page.instance.runtimeGeneration !== current.cursor.runtimeGeneration) return options.reload(current.instance.id)
+      let pageCursor: string | undefined
+      let scanRevision: string | undefined
+      const visitedCursors = new Set<string>()
+      let page: ConversationHistoryPage
+      // Worker history can already contain messages still represented by live
+      // events in this bootstrap. Seek its fixed last history entry, then only
+      // load that entry and its predecessors; newer output belongs to Follow.
+      while (true) {
+        page = await loadConversationHistory(current.instance.id, pageCursor, current.cursor.hostEpoch,
+          current.cursor.runtimeGeneration, context)
+        if (!options.isCurrent(context, current, epoch)) return
+        if (page.hostEpoch !== current.cursor.hostEpoch || page.instance.id !== current.instance.id
+          || page.instance.runtimeGeneration !== current.cursor.runtimeGeneration
+          || (scanRevision !== undefined && page.revision !== scanRevision)) return options.reload(current.instance.id)
+        const endIndex = page.records.findIndex((record) => record.entryId === endEntryId)
+        if (endIndex >= 0) {
+          page = { ...page, records: page.records.slice(0, endIndex + 1) }
+          break
+        }
+        if (!page.hasEarlier || !page.nextCursor || visitedCursors.has(page.nextCursor)) return options.reload(current.instance.id)
+        visitedCursors.add(page.nextCursor)
+        scanRevision = page.revision
+        pageCursor = page.nextCursor
+      }
       const snapshot = options.beforeLayoutChange()
       const stick = options.isFollowing()
-      // The bootstrap can cover more history than this recent page. Keep its
-      // order and completed content; insert unseen records before their next
-      // known page entry (or at the end for newly persisted tail records).
+      // The bootstrap can cover more history than this page. Keep its order
+      // and completed content; insert older records before their next known entry.
       const merged = [...current.records]
       let insertionIndex = merged.length
       for (let index = page.records.length - 1; index >= 0; index--) {
@@ -402,10 +424,14 @@ export function useConversationContent(options: ConversationContentOptions) {
       historyCursor.value = page.nextCursor ?? null
       historyTruncated.value = page.hasEarlier
       rebuildProjection(current)
-      scheduleHydration(context, current, epoch, undefined, page)
+      scheduleHydration(context, current, epoch, pageCursor, page)
       await options.afterLayoutChange(snapshot, stick)
-    } catch {
-      if (state.value === current && options.getEpoch() === epoch) historyPageError.value = '对话记录暂时没有读取成功，请重试。'
+    } catch (cause) {
+      if (state.value === current && options.getEpoch() === epoch) {
+        const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
+        if (code === 'protocol_error') options.reload(current.instance.id)
+        else historyPageError.value = '对话记录暂时没有读取成功，请重试。'
+      }
     } finally {
       if (state.value === current && options.getEpoch() === epoch) historyLoading.value = false
     }
