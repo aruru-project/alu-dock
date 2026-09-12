@@ -46,7 +46,7 @@ docs/                      产品接入、架构、QA 与部署文档
 scripts/                    Dock 构建、安装和开发入口
 ```
 
-根目录继续是 Dock 的 Node package。官方 Client 保留自己的 pnpm、Cargo workspace 和 lockfile；同仓不要求把 Node、Rust、Vue 或 Tauri 合并成一个进程或依赖管理器。
+根目录是 Dock 的 Node package；官方 Client 使用自己的 pnpm、Cargo workspace 和 lockfile。各部分保持既有的语言、构建和运行进程边界。
 
 ## Linux 快速开始
 
@@ -80,7 +80,7 @@ aludock service status
 aludock service logs --lines 200
 ```
 
-`forget` 和 `prune` 只删除 Dock catalog record，不删除 Agent Session 文件。
+`forget` 和 `prune` 移除 Dock 中的历史记录，Agent Session 文件保留在原位置。
 
 ## 官方 Desktop/Android Client
 
@@ -92,7 +92,7 @@ npm run client:test        # Vue/TypeScript tests
 npm run client:build       # Vue typecheck 与前端产物
 ```
 
-这两项检查不编译 Rust core 或 Tauri host；完整 Client gates、真实 Desktop 开发入口与各平台构建方式见 [`clients/official/README.md`](clients/official/README.md)。
+这两项检查覆盖前端；Rust core 与 Tauri host 的完整检查、Desktop 原生开发入口及各平台构建方式见 [`clients/official/README.md`](clients/official/README.md)。
 
 浏览器设计预览：
 
@@ -100,7 +100,7 @@ npm run client:build       # Vue typecheck 与前端产物
 npm run client:dev
 ```
 
-浏览器预览不具备 Tauri native bridge，不能证明本机 socket 或原生文件能力。Desktop 的真实本机入口使用 Unix socket 或 Windows Named Pipe，连接同一 Host 且不要求设备配对。
+浏览器预览用于检查界面。本机 socket 与原生文件能力需要在具备 Tauri native bridge 的 Desktop 中验证；Desktop 通过 Unix socket 或 Windows Named Pipe 连接同一 Host，本机连接无需设备配对。
 
 生成 Desktop 安装包：
 
@@ -109,7 +109,7 @@ npm run client:package:linux   # x86_64 Linux
 npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-Linux 产物为 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Windows 用户正常退出 Alu Dock 后，运行 `AluDock-<version>-windows-x86_64-Setup.exe`，沿用标准安装流程。客户端默认启动本机 Dock，也可取消该选项仅连接远程；仅本机服务需要兼容的系统 Node.js。`-components.zip` 只用于正式构建复用 Desktop/DLL；用户不解压它来安装。Setup 完成后从 Start Menu 打开 Alu Dock，或在安装目录调用 `aludock.cmd`。窗口 X 隐藏到托盘并继续工作，手动退出正常结束所管理的本机后台。Windows Apps 卸载只移除程序和系统集成，保留 Dock/Pi 状态及系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+Linux 产物为 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Windows 用户正常退出 Alu Dock 后，运行 `AluDock-<version>-windows-x86_64-Setup.exe`，沿用标准安装流程。客户端默认启动本机 Dock，也可取消该选项仅连接远程；仅本机服务需要兼容的系统 Node.js。`-components.zip` 供正式构建复用 Desktop/DLL，用户安装使用 Setup.exe。Setup 完成后从 Start Menu 打开 Alu Dock，或在安装目录调用 `aludock.cmd`。窗口 X 隐藏到托盘并继续工作，手动退出正常结束所管理的本机后台。Windows Apps 卸载只移除程序和系统集成，保留 Dock/Pi 状态及系统 Node.js。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 

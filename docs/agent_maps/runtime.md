@@ -4,7 +4,7 @@
 
 Agent Worker 负责运行真正的 Agent。当前实现是 Pi，未来可以增加其他 Agent adapter。
 
-Host 管理 Worker，但不在 Host 中模拟 Agent runtime。客户端通过 Protocol V2 与 Dock 通话，Host 完成控制判断后把 Agent 会话流量路由给对应 Worker。
+Agent runtime 在 Worker 中运行。客户端通过 Protocol V2 与 Dock 通话，Host 完成控制判断后把 Agent 会话流量路由给对应 Worker。
 
 ```text
 Protocol V2 client
@@ -73,9 +73,12 @@ Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信�
 
 Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `{nodes, leafId?}` 完整 snapshot，并复用 `protocol.ts` 的唯一 parser/type；raw Session entry、完整 message/tool content 不跨 Worker 边界。navigate/fork/clone 的 target membership 与 Pi 原生目标规则也在 adapter 内校验，Host 不为此读取或维护 Tree index。既有 generic Worker envelope chunking 原样承载这个结果；公开 `response_transfer` 是之后 Host→client 的透明 transport framing，不是 Worker tree chunking。
 
-同一项能力不能分别维护一套 RuntimeSession 方法、Worker capability、Host projection 和客户端 DTO。Worker 返回 Dock 已定义的结果和事件，Host 验证归属后转发。
+同一项能力的结果体和事件在 Dock 协议中定义一次，Worker、Host 和客户端复用该定义。Worker 返回 Dock 已定义的结果和事件，Host 验证归属后转发。
 
-事件分两类，边界不同。conversation frame（message/tool 事件）已经是 Protocol V2 词汇，Host 逐字转发，只补队列关联；生命周期信号（agent_start、queue_update、compaction 等）是 Worker 向 Host 权威提供的输入，Host 从中导出携带自身事实（operation 归属、合并队列计数、catalog 提交顺序）的 Dock event——这是权威在工作，不是重复投影，不要把它改成 Worker 直发。每个信号在 ManagedInstance 中只有一张转换表，durable 与非 durable 路径共用；不得按持久化模式分叉第二份。
+事件按所含事实分为两类：
+
+- conversation frame（message/tool 事件）已采用 Protocol V2 形状，Host 逐字转发，只补队列关联。
+- 生命周期 Dock event 包含 Host 管理的 operation 归属、合并队列计数和 catalog 提交顺序，因此由 Host 生成；Worker 提供 agent_start、queue_update、compaction 等生命周期信号。每个信号在 ManagedInstance 中使用唯一转换表，durable 与非 durable 路径共用。
 
 客户端不直接连接 Worker。这样 Worker replacement、旧 generation 隔离、controller 与 reconnect 仍由 Host 统一处理。
 
@@ -83,27 +86,27 @@ Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `
 
 Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部留在 Worker。Pi adapter 只在 Worker 内使用 Pi API，并把 Pi 的行为转换成 Dock 协议。
 
-消息提交的 input kind、实际 delivery 和 custody owner 都由 adapter 确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；普通 prompt 由 Pi input hook 再次检查运行状态后报告实际采用的 `prompt / steer / followUp`，registered extension command 则在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前报告。Compaction 期间不能交给 Pi 的普通 input 明确报告 Host custody。这个私有 preflight 是 Worker→Host 的事实通知，不增加逐条批准往返；Host 只按结果提交 receipt 和 Queue 状态，不根据自己稍早看到的 `isStreaming` 或 extension command 文本再猜一次。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
+消息提交的 input kind、实际 delivery 和 custody owner 都由 adapter 确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；普通 prompt 由 Pi input hook 再次检查运行状态后报告实际采用的 `prompt / steer / followUp`，registered extension command 则在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前报告。Compaction 期间不能交给 Pi 的普通 input 明确报告 Host custody。这个私有 preflight 是 Worker→Host 的事实通知，不增加逐条批准往返；Host 按 adapter 报告的实际 delivery 提交 receipt 和 Queue 状态；较早的 `isStreaming` 或 extension command 文本不作为 delivery 判断依据。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
 
-Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。Canonical conversation frame 不以 Host 的辅助 Queue identity 为发布前提：即使 Queue 关联异常，已经被 Worker 接受的用户消息也必须先出现在 conversation，不能被内部错误替代。
+Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。已经被 Worker 接受的用户消息始终发布为 canonical conversation frame；Host 的辅助 Queue identity 关联异常时，消息仍须先出现在 conversation。
 
-Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 branch entry 投影成 canonical persisted record，显式保留 message、tool result、custom/custom message、bash execution、compaction/branch summary、model/thinking/session/label record 及其 visibility/metadata；Host 不读取 Pi role 或 Pi session 私有 shape。大型内容的 record 只承载有界 preview，完整内容由 conversation history/content 的 revision、content ref 和 chunk 提供。Adapter 与 Host 的 history 分页都以 canonical `toolCallId` 形成完整语义单元，不能把 Assistant tool call 与已有的对应 results 拆页；这不增加另一套 owner identity。Worker 私有协议还限制整个 conversation history page 的传输字节数；adapter 应先去除可由 content ref 读取的 preview，而不是拆开语义单元。
+Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 branch entry 投影成 canonical persisted record，显式保留 message、tool result、custom/custom message、bash execution、compaction/branch summary、model/thinking/session/label record 及其 visibility/metadata；Host 不读取 Pi role 或 Pi session 私有 shape。大型内容的 record 只承载有界 preview，完整内容由 conversation history/content 的 revision、content ref 和 chunk 提供。Adapter 与 Host 的 history 分页沿用 canonical `toolCallId` 关联完整语义单元，Assistant tool call 与已有的对应 results 必须在同一页。Worker 私有协议还限制整个 conversation history page 的传输字节数；adapter 应先去除可由 content ref 读取的 preview，而不是拆开语义单元。
 
 实时事件与持久 record 不需要共享 identity。在线客户端在 `message_update`/tool event 上原位更新组件，完成后直接保留；重建时才从持久 record 重新生成。Adapter 在一个 turn、run、compaction 或独立持久写入形成安全边界后发出私有 `conversation_checkpoint`。Checkpoint 携带该边界的精确权威 branch history snapshot，表示它之前的 conversation frame 都已由这份 snapshot 表达；Host 原子安装 snapshot 并释放 active buffer，不能在稍后读取一个可能已经前进的 history 来猜测边界。Checkpoint 不等待任何客户端确认。
 
-Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应完整接入 Dock；不能因为某个客户端尚未实现、跨进程不方便或未来 Agent 可能不同而降低能力。
+Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应完整接入 Dock，跨进程适配保留其语义；各客户端按需实现界面，未来 Agent 按各自运行方式接入。
 
 Pi Worker 自带 `/retry`，只在用户主动输入且最近一次模型响应失败、当前空闲时触发。命令使用公开的 extension `sendMessage` 进入 Pi 原有 Session 流程，并等待该轮结束；隐藏的 `alu-dock-retry` 标记保留在 Pi journal 里供识别，但由同一插件的 `context` hook 从模型上下文移除，因此不追加用户聊天指令，也不重放已经完成的工具。它不使用私有 SDK 补丁，不增加自动重试策略；Pi 原有重试、压缩和收尾照常生效。
 
-项目状态的资源正文通过 `resource.content.v1` 读取。Pi adapter 为已加载的 Skill、Prompt、Project Context 及文件来源的 SYSTEM.md / APPEND_SYSTEM.md 生成 opaque `contentRef`；只有这些当前登记的资源可以读取，不接收客户端任意路径。正文来自磁盘当前 UTF-8 文件，复用 source-file 基础按字节续读，文件变化时要求重新打开，不保存正文快照、不执行资源或触发 Reload。全局文件不受 workspace 根目录限制；system 文件列入 Project Context，不把 Pi 内置生成提示冒充磁盘文件。
+项目状态的资源正文通过 `resource.content.v1` 读取。Pi adapter 为已加载的 Skill、Prompt、Project Context 及文件来源的 SYSTEM.md / APPEND_SYSTEM.md 生成 opaque `contentRef`；只有这些当前登记的资源可以读取，不接收客户端任意路径。正文来自磁盘当前 UTF-8 文件，复用 source-file 基础按字节续读，文件变化时要求重新打开，不保存正文快照、不执行资源或触发 Reload。全局文件不受 workspace 根目录限制；Project Context 中的 system 文件项只对应实际磁盘文件，Pi 内置生成提示不作为文件资源列出。
 
-命令发现按能力而不是具体名称接入。Pi adapter 从公开的 loaded prompt template 保留 `argumentHint` 和可检查正文；正文分页来自内存中的 `PromptTemplate.content`，不让 Host 或客户端读取 `filePath`。Extension command 的动态参数候选由注册时的 `getArgumentCompletions` 产生，并通过同一通用结果体返回；Dock 自带 Extension command 也沿这条 owner API 声明候选，不在 Host 建名称表。Catalog 后续读取使用 `{name,source}`，同名的不同来源不会互相冒充。
+命令发现按能力而不是具体名称接入。Pi adapter 从公开的 loaded prompt template 保留 `argumentHint` 和可检查正文；正文分页来自内存中的 `PromptTemplate.content`，不让 Host 或客户端读取 `filePath`。Extension command 的动态参数候选由注册时的 `getArgumentCompletions` 产生，并通过同一通用结果体返回；Dock 自带 Extension command 也沿这条 owner API 声明候选，不在 Host 建名称表。Catalog 后续读取使用 `{name,source}`，按名称和来源共同确定目标。
 
 Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
 
 ### Agent-facing Host capability pattern
 
-Agent 需要访问 Host-owned 事实时，复用 observation 已建立的 reverse-capability 形状，而不是增加 Worker 直连、把 Host object proxy 进 runtime，或建立通用任意 RPC：
+Agent 通过 observation 已建立的 reverse-capability 形状访问 Host-owned 事实。该边界使用按能力定义的接口，不提供 Worker 直连、Host object proxy 或通用任意 RPC：
 
 1. `src/core/` 定义一项 capability-specific HostPort 与 Dock 已有 DTO；
 2. Registry 在创建/reopen Worker 时注入 HostPort；
@@ -111,11 +114,11 @@ Agent 需要访问 Host-owned 事实时，复用 observation 已建立的 revers
 4. Worker bootstrap 只在 Host 授予对应 `dock.*` capability 时建立一个小型 bridge；
 5. Agent adapter 用 inline extension/tool 或其他 runtime-native API 暴露能力；使用说明可随包提供为 Skill 或按需阅读的工具手册。
 
-每项能力保留自己的 closed request/result、bounds 和开关规则，不把这个 pattern 扩张成第二套 Protocol V2。公开业务 DTO 仍只在 Protocol V2 定义一次；private envelope 只验证 source binding、路径等 Host-private fact 和跨进程边界。
+每项能力保留自己的 closed request/result、bounds 和开关规则。公开业务 DTO 统一在 Protocol V2 定义一次；private envelope 只验证 source binding、路径等 Host-private fact 和跨进程边界。
 
 `dock.attachments` 是这个 pattern 的第二个实现，而且始终随 managed Worker 提供。`command.submit` 的 full attachment metadata 通过 private invoke context 与公开 file IDs 做逐项一致性检查；Pi adapter 把一个明确的 untrusted metadata block 放进原生 prompt，同时在 live/history projection 中恢复干净文本和 `AttachmentDto[]`。该内部 block 由 Worker 使用 agent state 中持久、`0600` 的随机 key 做 HMAC 认证；普通 prompt 即使复制相同文本形状也不能伪造 attachment provenance，认证失败的文本不会被静默剥离。Host path 不进入 invoke context、Queue 或 conversation。
 
-Pi inline extension 提供 `dock_attachment_list` 和 `dock_attachment_resolve`。list 只返回 path-free metadata；resolve 通过当前 authenticated Worker 的 reverse call 让 Host 检查文件后，把一个 absolute path 只交给 Agent tool result。外部 conversation projector 对 resolve tool text 做固定 redaction，structured details 也不含 path。Bundled `dock-attachments` Skill 指导 Agent 在修改、转换或解压前，把原文件复制到 workspace 或临时目录并保留永久原件；文件名、media type 和内容一律是不可信数据。普通 resolve 不把任意文件塞进 Pi 的 image loader，也不假装提供 UID 之外的沙箱。
+Pi inline extension 提供 `dock_attachment_list` 和 `dock_attachment_resolve`。list 只返回 path-free metadata；resolve 通过当前 authenticated Worker 的 reverse call 让 Host 检查文件后，把一个 absolute path 只交给 Agent tool result。外部 conversation projector 对 resolve tool text 做固定 redaction，structured details 也不含 path。Bundled `dock-attachments` Skill 指导 Agent 在修改、转换或解压前，把原文件复制到 workspace 或临时目录并保留永久原件；文件名、media type 和内容一律是不可信数据。普通 resolve 只返回工具所需的文件路径，不调用 Pi image loader；文件访问权限以 Host/Worker 所用的同一 UID 为边界。
 
 当 `command.submit` 的 authenticated attachment context 含 `image/*` metadata 时，Pi adapter 在真正 delivery 前经同一个 attachment reverse capability resolve 每个图片 fileId，把 private Host path 只转换为本轮 Pi 原生 image input，同时继续把完整 attachment metadata 放进已认证的 prompt context。显式 image 与 attachment-derived image 共用 Pi 已有的数量、单图和 aggregate bytes 检查；Dock 不维护 model/provider 视觉能力表。Pi user message 中图片 bytes 的 SHA-256 与已认证 `AttachmentDto.sha256 + mediaType` 相同时，live/history projector 给 image block 加上对应 `fileId`；它不删除 image block 或 attachment，也不把 Host path 放进 Worker result、Queue 或 conversation。
 
@@ -127,17 +130,17 @@ Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久�
 
 `dock_deliver_file` 只接受 absolute path。Host 从 authenticated Worker connection 取得 source instance，把 readable regular source 的 path 与 identity metadata 暂存在当前 `ManagedInstance`；它不在 registration 时读全文、hash、复制或持久化。最多 100 MiB（含边界），跨 Pi session replacement 保留，stop/Host restart 后消失；已有登记不因 `/dock-tools off` 删除。公开 list/download 只含 path-free `DeliverableDto`，bytes 由 Host 专用 stream 直接送给客户端并用 terminal SHA-256 核对，始终不经过 Worker。`show_image` 继续使用独立的 Worker session-scoped inline image 语义。
 
-`dock_machines` 沿 Main 的同一 Machine authority 返回名称、availability、platform、Home 与 workspace roots，Agent-facing 文本省略内部 `hostId`；Machine 名称和路径按不可信 metadata 呈现。`dock_create` 接受 absolute cwd、可选名称和可选的精确 Machine display name；省略 Machine 时创建在来源 work 所属 Machine，提供时由 Main 将唯一名称解析为 `hostId`，再沿 Host 的 canonical `instance.create(hostId)` application service 创建。找不到、重名或离线都明确失败，不让 Agent 输入或看到 Machine UUID；新 instance 的 Dock tools 仍为 off。`dock_send` 先把 human-readable source display name 与固定来源说明包在正文外，再沿同一个 `command.submit` application service 使用 `delivery: auto`；因此目标的运行中/空闲判定、Queue、receipt、持久 conversation 与普通 user message 完全一致。包装不暴露 UUID、不改写内部 message body，也不会伪装成主人亲自输入。Dock tools 不提供 stop、interaction answer 或任意 Agent 私有控制。
+`dock_machines` 沿 Main 的同一 Machine authority 返回名称、availability、platform、Home 与 workspace roots，Agent-facing 文本省略内部 `hostId`；Machine 名称和路径按不可信 metadata 呈现。`dock_create` 接受 absolute cwd、可选名称和可选的精确 Machine display name；省略 Machine 时创建在来源 work 所属 Machine，提供时由 Main 将唯一名称解析为 `hostId`，再沿 Host 的 canonical `instance.create(hostId)` application service 创建。找不到、重名或离线都明确失败，不让 Agent 输入或看到 Machine UUID；新 instance 的 Dock tools 仍为 off。`dock_send` 先把 human-readable source display name 与固定来源说明包在正文外，再沿同一个 `command.submit` application service 使用 `delivery: auto`；因此目标的运行中/空闲判定、Queue、receipt、持久 conversation 与普通 user message 完全一致。包装明确标注消息来自另一个 Dock instance，正文逐字保留，来源使用人类名称并省略 UUID。Dock tools 不提供 stop、interaction answer 或任意 Agent 私有控制。
 
-watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 只含 target/reason/time，不携带 sibling conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent；Agent 醒来后按主人原始意图决定是否 inspect。Host 不走 `command.submit` 冒充主人。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
+watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 只含 target/reason/time，不携带 sibling conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent；Agent 醒来后按主人原始意图决定是否 inspect。watch completion 使用上述独立投递路径，不走用户消息的 `command.submit`。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
 
 ## Extension UI
 
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。
 
-会话替换的 UI 交接由同一生命周期控制：Worker 暂存新插件初始化期间的单向 UI 更新，在发布 `dock_session_replaced` 后按顺序释放；Host 在收到替换事件时立即使旧 UI 失效，不等持久化转换队列才清理。这样新状态不会被后续收尾清空。取消替换不进入交接，失败则丢弃暂存发布；同一 session 的插件 `ctx.reload()` 在原有重置完成后释放新状态。这里暂存的是新插件发布，不是旧画面缓存，Work 的 Dock tools 授权不参与迁移。
+会话替换的 UI 交接由同一生命周期控制：Worker 暂存新插件初始化期间的单向 UI 更新，在发布 `dock_session_replaced` 后按顺序释放；Host 在收到替换事件时立即使旧 UI 失效，不等持久化转换队列才清理。这样新状态不会被后续收尾清空。取消替换不进入交接，失败则丢弃暂存发布；同一 session 的插件 `ctx.reload()` 在原有重置完成后释放新状态。暂存范围仅包含新插件发布的 UI 更新；Work 的 Dock tools 授权保持独立，不参与迁移。
 
-某个客户端没有实现一种 Extension UI，只影响该客户端，不影响 extension runtime、Agent 或其他客户端，也不能产生假的用户回答。
+某个客户端尚未支持的 Extension UI，只在该客户端不可用；extension runtime、Agent 和其他客户端继续运行。客户端不得代替用户生成回答。
 
 Extension command 仍通过完整 Agent input 语义执行，不另建第二条命令通道。Worker 在执行前确认当前输入确实命中已注册的 Extension command，并只在该 handler 尚未结束时，把同一次提交已有的 `operationId` 附到 `extension.notification`。它只表达来源关联：通知仍不是 conversation record。handler 返回后遗留的 timer、后台任务以及其他被动 Extension 通知不携带该 ID；Host 不按文本、时间或命令名称猜测来源。
 
@@ -159,4 +162,4 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 - `src/core/`：Dock 自己的协议数据与跨实现概念，不依赖 Pi runtime。
 - `src/tui/`：本机终端客户端（通常经 SSH 使用），不持有 Agent runtime。
 
-具体实现应服从以上边界。任何普通 Agent 能力如果需要在多个层次重复定义和投影，应先修正边界，而不是继续增加转发代码。
+具体实现按以上边界组织。出现跨层重复定义或投影时，先将能力收敛到所属层，并复用 Protocol V2 的同一定义。

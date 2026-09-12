@@ -44,7 +44,7 @@ cp -R "$icon_output"/android/. src-tauri/gen/android/app/src/main/res/
 rm -rf "$icon_output"
 ```
 
-`corepack pnpm dev` 只启动浏览器设计预览，不具备 Tauri native bridge，因此不能用来证明本机 socket、文件系统或其他原生能力。根 `client:test` / `client:build` 也只覆盖前端；Rust core 与 Tauri host 的完整 gates 见下文「验证入口」。
+`corepack pnpm dev` 用于浏览器设计预览；本机 socket、文件系统等原生能力需要在具备 Tauri native bridge 的 Desktop 中验证。根 `client:test` / `client:build` 覆盖前端，Rust core 与 Tauri host 的完整 gates 见下文「验证入口」。
 
 ## Linux Desktop
 
@@ -72,13 +72,13 @@ npm run client:install
 npm run package:windows
 ```
 
-Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。源码 checkout 默认使用当前分支可达的最新版本 tag，正式构建可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 是后续构建复用 Desktop/DLL 的输入，不是安装入口；仅 Host/Worker/Pi 改动时无需重编译 Desktop。
+Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。源码 checkout 默认使用当前分支可达的最新版本 tag，正式构建可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 供后续构建复用 Desktop/DLL；仅 Host/Worker/Pi 改动时无需重编译 Desktop，用户安装仍使用 Setup.exe。
 
-从托盘正常退出 Alu Dock，再运行 Setup，按成熟安装器的默认流程安装或覆盖更新。默认程序目录是 `%LOCALAPPDATA%\AluDock`，原有资料仍保留在 `%LOCALAPPDATA%\Alu Dock`、Pi 和客户端资料目录中。只配置程序资源和图标等必要内容，不自建安装事务、进程关闭 hook、迁移脚本或安装器专项测试。只有启用本机服务才需要符合根 `package.json#engines.node` 的系统 [Node.js](https://nodejs.org/)；纯客户端不需要本机 Node。
+从托盘正常退出 Alu Dock，再运行 Setup，按标准安装器提示安装或覆盖更新。默认程序目录是 `%LOCALAPPDATA%\AluDock`，原有资料保留在 `%LOCALAPPDATA%\Alu Dock`、Pi 和客户端资料目录中。只有启用本机服务才需要符合根 `package.json#engines.node` 的系统 [Node.js](https://nodejs.org/)；纯客户端不需要本机 Node。安装器的工程边界见根[部署文档](../../docs/agent_maps/deployment.md#本地安装与-windows-发行)。
 
-Windows 无配置时默认随客户端启动本机 Dock，可在托盘取消此选项作为纯客户端；连接远程 Main 并不意味着不需要本机 SubHost。X 隐藏到托盘，工作继续；手动 **退出 Alu Dock** 正常停止所管理的本机 Host/Worker 后退出，停止受阻时说明原因并保留界面。**停止本机 Dock** 保留客户端，远端不受影响。托盘显示实际状态及对应操作。登录启动保留既有选择，只打开同一个客户端并遵循本机服务选项。日志仍在 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。
+Windows 无配置时默认随客户端启动本机 Dock，可在托盘取消此选项作为纯客户端；本机 Dock 的起停选择独立于当前连接的 Main。X 隐藏到托盘，工作继续；手动 **退出 Alu Dock** 正常停止所管理的本机 Host/Worker 后退出，停止受阻时说明原因并保留界面。**停止本机 Dock** 保留客户端，远端不受影响。托盘显示实际状态及对应操作。登录启动保留既有选择，只打开同一个客户端并遵循本机服务选项。日志仍在 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。
 
-退出应用后使用 Windows Apps 或安装目录中的标准卸载入口；程序资源与 Dock/Pi 配置、身份、凭据、Session、附件及客户端资料分开存放。checkout 的 `npm run install:local` 构建并运行同一个 Setup.exe。
+退出应用后使用 Windows Apps 或安装目录中的标准卸载入口；卸载移除程序资源，Dock/Pi 配置、身份、凭据、Session、附件及客户端资料保留在原位置。checkout 的 `npm run install:local` 构建并运行同一个 Setup.exe。
 普通开发仍可运行：
 
 ```powershell
@@ -86,7 +86,7 @@ corepack pnpm tauri dev
 corepack pnpm tauri build --no-bundle --ci
 ```
 
-这些是源码调试/Client build，不是第二套安装形态。Linux cross-check 可以证明 Windows Rust 分支可编译，但不能替代 [`AGENTS.md`](AGENTS.md) 要求的原生 DLL、隐藏窗口、tray、login startup、系统 Node、bundled Pi 与完整启动 smoke。当前验收包不签名、不发布、不自动更新。
+上述命令用于源码调试和 Client 构建，安装交付统一使用 Setup.exe。Linux cross-check 验证 Windows Rust 分支可编译；原生 DLL、隐藏窗口、tray、login startup、系统 Node、bundled Pi 与完整启动 smoke 按 [`AGENTS.md`](AGENTS.md) 在 Windows 上验证。当前验收包不签名、不发布、不自动更新。
 
 ## Android
 
@@ -132,7 +132,7 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 npm run test:client-protocol
 ```
 
-该门只支持 Linux：它隔离启动 production CLI Host，让 Rust core 通过 public local connection 显式选择 Main 并列出静态 saved session。它是只读验证，不会采用或恢复 Session；也不覆盖 Android/WebView、mTLS、Windows lifecycle 或真机验收。
+该门只支持 Linux：它隔离启动 production CLI Host，让 Rust core 通过 public local connection 显式选择 Main，只读列出静态 saved session，不采用或恢复 Session。Android/WebView、mTLS、Windows lifecycle 和真机体验需要分别验证。
 
 协议调试工具仍可从 Rust workspace 运行：
 
@@ -152,4 +152,4 @@ src/                         Vue 3 界面
 scripts/                     平台开发与本地打包入口
 ```
 
-Client 专用代码采用 [`LICENSE-APACHE`](LICENSE-APACHE)。产品语义与跨仓库工程规则以根 [`STORY.md`](../../STORY.md) 和 [`AGENTS.md`](../../AGENTS.md) 为准。
+Client 专用代码采用 [`LICENSE-APACHE`](LICENSE-APACHE)。产品语义与跨层工程规则以根 [`STORY.md`](../../STORY.md) 和 [`AGENTS.md`](../../AGENTS.md) 为准。

@@ -40,19 +40,17 @@ InstanceManager 解析出的 endpoint 只有两种实现：
 - **LocalInstance**：当前 Host 持有该 Instance 的状态、命令接纳权和受管 Worker。
 - **RemoteInstance**：Main 上同一 Work identity 的控制端点。它持有转发所需的 Machine、native identity、generation 与最近 snapshot，并把请求交给拥有 Worker 的 SubHost LocalInstance。
 
-RemoteInstance 不是假的本地 ManagedInstance。它不复制 Worker 状态机，也不重新实现具体命令。route 只是 RemoteInstance 的私有位置/连接数据，不是独立业务实体、第二个实例 identity 或第二个路由权威。
+RemoteInstance 保存转发所需的位置、连接与最近观察事实，具体命令和 Worker 状态机由 owner LocalInstance 处理。route 是 RemoteInstance 的私有位置/连接数据，沿用同一 Instance identity 和 InstanceManager 的位置决策。
 
 Main 与 SubHost 的临时断线不会自动改变存活 RemoteInstance 的 identity。断线时 endpoint 不再具有物理 Worker 控制能力，但仍可表达最近已知状态和连接不可用事实。
 
 ### RemoteInstance Stop
 
-Stop 的 terminal 语义作用于 Main-authoritative Instance identity：
+Stop 永久退役 Main-authoritative Instance identity；离线时以 Main 身份退役完成，不等待远端物理进程确认：
 
 - SubHost 在线时，RemoteInstance 把 Stop 转发给 owner LocalInstance；owner 正常关闭 Worker，Main 随后退役该 Instance。
-- SubHost 离线时，Main 无法控制物理 Worker。RemoteInstance 直接永久退役 Main Instance identity，不建立 pending Stop、不自动重试，也不声称保留了对该 Worker 的控制。
+- SubHost 离线时，Main 无法控制物理 Worker。RemoteInstance 直接永久退役 Main Instance identity 并结束控制关系，不建立 pending Stop，也不自动重试。
 - 已退役 identity 不能因旧 inventory 或重连恢复。若相同 native Worker 以后再次申报，它只能成为新的 Main Instance，而不是复活旧 identity。
-
-同一个物理 Worker 进程不等于同一个永久 Work identity。网络分区下无法取得的物理控制事实，不得迫使 Main 保留一个用户已经 Stop、却永远无法操作的幽灵 Instance。
 
 ## InstanceManager
 
@@ -72,7 +70,7 @@ Stop 的 terminal 语义作用于 Main-authoritative Instance identity：
 
 - 解释 Prompt、Abort、Stop、Tree、Session 或设置命令；
 - 为每种 Protocol request 建立逐方法 proxy；
-- 复制 LocalInstance 状态到假的 remote ManagedInstance；
+- 为 RemoteInstance 另存一份 LocalInstance 状态副本；
 - 读取或改写 Agent/用户 opaque payload；
 - 实现 Machine transport、Pi runtime 或客户端 stream framing。
 
@@ -89,7 +87,7 @@ Main 使用带 LocalInstance 与 RemoteInstance 的 global profile；SubHost 使
 
 InstanceManager 在 global profile 中组合一个 persistent `RemoteInstanceDirectory` backend；该目录拥有 Main/native binding 与 retirement tombstone，当前实现由 Machine controller 依靠 inventory/connection 事实提供。这个 backend 不接收未分类的客户端请求，也不形成另一套 local/remote decision。存活的 RemoteInstance 只持有当前连接和 location binding；endpoint 退役后，tombstone 仍由目录保留并阻止旧 inventory 复活原 Main identity。
 
-创建、list、key lookup 等目录命令同样进入 InstanceManager，但不伪装成对某个既有 Instance 的命令。
+创建、list、key lookup 等命令以 directory target 进入 InstanceManager，与指向既有 Instance 的命令分别处理。
 
 ## Protocol request 内部分类
 
@@ -136,7 +134,7 @@ Capability、wire parser、result parser 和 request classification 各表达不
 4. 返回 `start`、`enqueue`、`reject` 或 `preempt`；
 5. 维护 effect custody、generation 和 completion 归属。
 
-命令的到达顺序不是一个持续数分钟的 Promise 队列。Scheduler 只串行化业务决定；耗时 Worker effect 可以在队列外运行，但其提交位置和完成归属必须由 scheduler 保留。存在产品级阻塞关系的命令可以持有 exclusive slot，直到 effect 达到定义的完成边界。
+Scheduler 只串行化业务决定；耗时 Worker effect 可以在队列外运行，其提交位置和完成归属仍由 scheduler 保留。存在产品级阻塞关系的命令可以持有 exclusive slot，直到 effect 达到定义的完成边界。
 
 ### 调度类别
 
@@ -156,7 +154,7 @@ Capability、wire parser、result parser 和 request classification 各表达不
 - observation 是否继续读取旧 committed snapshot；
 - Stop 接纳后的处理。
 
-优先级来自用户语义，不来自接口名称或代码层级。Stop 是 terminal；其他命令默认保持已接受意图的因果顺序，不因“看起来更高级”而插队。
+优先级按用户语义定义：Stop 是 terminal；其他命令默认保持已接受意图的因果顺序。接口名称和代码层级不参与优先级判断。
 
 例如，如果产品定义回答运行中不能切换 Tree，则唯一规则是：
 
@@ -168,7 +166,7 @@ session.navigate + run active → reject
 
 ### Scheduler 与 Worker acceptance
 
-Scheduler 是 Dock 命令顺序、lifecycle、operation 和 Queue custody 的 authority；Worker adapter 是 Agent 实际接受 effect 的 authority。两者不能同时猜同一个事实。
+Scheduler 决定 Dock 命令顺序、lifecycle、operation 和 Queue custody；Worker adapter 报告 Agent 实际接受 effect 的事实。两者分别负责各自的事实。
 
 `command.submit` 的顺序是：
 
@@ -185,7 +183,7 @@ Worker 接受副作用前失联与接受后失联仍是不同结果。Scheduler 
 
 ## Query 与 stream observation
 
-Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行不阻塞 projection read。但“不排队”不等于没有一致性边界。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行，并在 manual compaction 期间等待；已经提交的 public/bootstrap read 仍可读取同一 committed snapshot。Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。这个 reservation 不是 command slot，也不建立第二套锁或 generation authority。
+Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行期间 projection read 继续可用。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行，并在 manual compaction 期间等待；已经提交的 public/bootstrap read 仍可读取同一 committed snapshot。Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。Projection reservation 与 command slot 分工不同，复用同一 scheduler 和 generation authority，不另建锁。
 
 每次 instance query/stream 在开始时取得不可混用的 observation binding：
 
@@ -241,7 +239,7 @@ scheduler terminal admission
 - `stopped` 可以存在于最终 receipt、已连接客户端的 terminal event 和并发 Stop 的 single-flight result中；它不构成可恢复历史。
 - 正常关闭的 Agent-specific cleanup 由 Worker adapter 负责。Instance 不逐项理解 Pi Queue、compaction、interaction 或 session Promise。Terminal admission 不等待可能无限挂起的 input hook 才开始 cleanup；Worker connection 的 disposal 必须让既有 invoke settle/reject，supervisor timeout 则保证 owner release 有界。
 - hard kill 是 supervisor 在 graceful shutdown 超时或 Worker 不响应时的异常兜底，不是 Stop 的产品定义。
-- project files 和 Agent 自己的持久 session 不因 Instance Stop 删除。
+- Instance Stop 后，project files 和 Agent 自己的持久 session 保留在原位置。
 - Stop operation 的 transport/idempotency result 保持 Protocol V2 既有形状。
 - Remote offline Stop 使用前述 Main identity retirement 语义。
 
@@ -250,12 +248,12 @@ scheduler terminal admission
 - Catalog 保存 Work identity、lifecycle intent、location 所需事实和 recovery material；不保存 Agent runtime 私有对象。
 - 每个 LocalInstance 的 durable transition 与 Worker event projection只有一个提交顺序。Command scheduler 决定谁可产生 effect，不取代 catalog/event 单写者。
 - 每个 active Instance 同时只有一个有效 runtime generation。旧 generation 的 event、response、query result、Extension UI 和 delayed completion不得提交到新 generation。
-- explicit Stop、Worker fault、Host drain 和 runtime replacement 使用不同 intent；它们不能通过同一个模糊 stopped/error shell 互相冒充。
+- explicit Stop、Worker fault、Host drain 和 runtime replacement 分别记录各自的 intent，按对应的终止或恢复语义处理。
 - Main/native identity mapping 与 retirement tombstone 只由 InstanceManager 的持久 location directory 维护；RemoteInstance 持有存活 endpoint 的连接数据。Machine transport 不创建第二份 authority。
 
 ## 性能约束
 
-这次重构不能产生用户可见性能回退：
+重构后须保持以下性能特征：
 
 - 普通 local query/command 不增加网络或 Worker round-trip；
 - InstanceManager resolve 使用内存 identity index，不扫描所有 Machine routes；
@@ -270,5 +268,5 @@ scheduler terminal admission
 - Protocol V2、DockClient、官方 Client 和现有自定义 Client shape 不变；classification metadata 只在 Host 内部。
 - 新实现可以在独立文件中建立，但接入时每项 authority 只有一条 live path。不得长期保留旧/新双轨 scheduler、directory 或 route decision。
 - 迁移按可独立回退的提交推进；每迁移一项旧 boundary，即删除对应 flag、特判或无调用方代码。
-- 当前实现只作为外部行为、真实竞态和平台限制的证据，不作为新职责边界的定义。
+- 以本文确定职责边界，并用当前实现核对外部行为、真实竞态和平台限制。
 - Main/SubHost、Windows/POSIX process supervision、catalog durability 和 effect-unknown 语义必须经过现有真实入口验证。

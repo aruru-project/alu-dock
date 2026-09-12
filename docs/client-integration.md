@@ -1,6 +1,6 @@
 # Client 接入 Protocol V2
 
-本文说明客户端怎样接入 Alu Dock。这里包括仓库内的官方 Desktop/Android Client、TUI、Web backend 和其他自定义 Client；只要遵守 Protocol V2，它们使用的就是同一套 instance、conversation、event 和 operation 语义。官方 Client 的实现位于 [`clients/official/`](../clients/official/)，不会因同仓而获得另一套业务接口。
+本文说明客户端怎样接入 Alu Dock。官方 Desktop/Android Client、TUI、Web backend 和其他自定义 Client 统一使用 Protocol V2 的 instance、conversation、event 和 operation 语义。官方 Client 的实现位于 [`clients/official/`](../clients/official/)。
 
 浏览器不能直接连接 Dock。Web 应用需要由本机后端代为连接：
 
@@ -45,16 +45,16 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有本地 IPC（POSIX Unix sock
 
 `session.tree.v2` 请求固定为 `{instanceId}`，一次逻辑调用返回当前 Pi Session Tree 的完整 compact `{nodes, leafId?}`。compact node 只有 ID/parent/depth、kind/role/displayClass/state、可选 label/timestamp、summary 和 hasChildren；绝不包含 raw Session JSONL、完整 message 或 tool content。客户端不发送 revision、cursor 或 limit，也不拼接 Tree pages。
 
-成功的 Tree response 在 wire 上始终由一组 `response_transfer` JSONL records 承载，即使内容只需一块。record 包含 `version:2 + requestId + hostEpoch + zero-based index + stable count + canonical-base64 data`；data 是正常成功 `ControlResponse` UTF-8 bytes 的 opaque slice。transport 必须验证 identity、连续顺序、count、canonical base64、decoded chunk bound 和 aggregate bound，全部收齐后再解析原 `ControlResponse`；每个合法 frame 刷新读取 idle deadline，断线、超时或缺块都不能返回 partial Tree。错误仍是普通 `response`，其他 request 也不能使用该 framing。Tree 打开后若目标已随 Session 变化而消失，操作返回 `invalid_tree_target`，客户端应重新打开 Tree 让用户选择，而不是沿用旧节点。该 invisible bounded framing 在本地 IPC 与 mTLS 上一致，只是 Tree success 的 transport 细节，不是通用 streaming RPC，业务/UI 层不应看到 frame。
+成功的 Tree response 在 wire 上始终由一组 `response_transfer` JSONL records 承载，即使内容只需一块。record 包含 `version:2 + requestId + hostEpoch + zero-based index + stable count + canonical-base64 data`；data 是正常成功 `ControlResponse` UTF-8 bytes 的 opaque slice。transport 必须验证 identity、连续顺序、count、canonical base64、decoded chunk bound 和 aggregate bound，全部收齐后再解析原 `ControlResponse`；每个合法 frame 刷新读取 idle deadline，断线、超时或缺块都不能返回 partial Tree。错误仍是普通 `response`，其他 request 也不能使用该 framing。Tree 打开后若目标已随 Session 变化而消失，操作返回 `invalid_tree_target`，客户端应重新打开 Tree 让用户选择，而不是沿用旧节点。本地 IPC 与 mTLS 使用同一 Tree success framing，由 transport 层透明重组后交给业务/UI 层。
 
-Wire shape、capability 名称和 bounds 的代码真相在：
+Wire shape、capability 名称和 bounds 的定义位于：
 
 - `src/control/protocol.ts`
 - `src/control/dock-client.ts`
 
 ### 本地 IPC 与远程 TLS 端口
 
-本机 IPC 和网络 TLS 端口只是 Protocol V2 的两类 transport，不是两套 API：
+本机 IPC 和网络 TLS 端口承载同一套 Protocol V2 API：
 
 ```text
 local client ── Unix socket / Named Pipe ─┐
@@ -97,7 +97,7 @@ paired client ── mutual TLS port ─────────┘
 
 `events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 Host 提供 `extension_ui.v1` 与 `extension_ui.control.v1`。
 
-hello 的 `requiredCapabilities` 是 fail-fast 功能探测：Host 缺少任何一项就拒绝连接并列出缺失项，让客户端在第一步就发现 Host 过旧，而不是运行到一半失败。它不是响应内容开关：Host 对所有客户端返回同一份 canonical response，不按客户端声明裁剪、改写或降级字段。图片、附件、`presentation`、`displayName`、`gitBranch`、`toolsExpanded`、`activeInteraction` 等可选字段是否出现只取决于事实本身（例如没有 git repo 就没有 `gitBranch`），与客户端声明无关；不渲染某个字段的客户端直接忽略它。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs。本地 IPC 与 mTLS 上的 wire 完全相同。
+hello 的 `requiredCapabilities` 用于在连接时确认所需能力：Host 缺少任何一项就拒绝连接并列出缺失项，客户端可立即提示 Host 版本要求。Host 对所有客户端返回同一份完整 canonical response，字段内容由实际事实决定。图片、附件、`presentation`、`displayName`、`gitBranch`、`toolsExpanded`、`activeInteraction` 等可选字段是否出现只取决于事实本身（例如没有 git repo 就没有 `gitBranch`），与客户端声明无关；不渲染某个字段的客户端直接忽略它。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs。本地 IPC 与 mTLS 上的 wire 完全相同。
 
 ## 需要分清的身份
 
@@ -155,7 +155,7 @@ Follow result 只包含 `page`。Read 和 follow 之间发生的事件会出现�
 - `generationChanged` 表示 runtime/session generation 已改变；
 - 客户端进程、页面或本地状态已经丢失原 conversation。
 
-此时应清空旧 conversation，重新读取 snapshot 和 conversation bootstrap。不要拿旧画面、一次较新的 latest history page 和一次较早的 seed 拼成“看似完整”的会话。
+此时清空旧 conversation，使用同一次读取的 snapshot 和 conversation bootstrap 重建，保持历史与实时内容的边界一致。
 
 一次 history scan 必须始终使用同一个 `historyRevision`。`instance.read` seed 和后续 `session.history` page 的 revision 不一致时，放弃整次 scan 并重新 bootstrap。History page 不会拆开 persisted Assistant tool call 与已经存在的对应 tool results；`limit` 是目标 record 数，完整工具语义单元可以使实际条目数超过 limit。客户端继续使用既有 `toolCallId` 关联，不需要额外的 persisted owner identity。
 
@@ -165,7 +165,7 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 ## 创建前浏览工作目录
 
-需要让用户选择 cwd 的客户端使用 `workspace.list.v1`，不自行扫描目录，也不为某种界面增加专用接口。`workspace.list` 接收 Host 文件系统中的绝对 `path` 以及可选分页 cursor，返回规范 `path`、可选 `parent`、目录条目和继续读取所需事实。客户端可以用键盘列表、点击列表或自己的视觉组件呈现同一份结果。
+需要让用户选择 cwd 时，客户端统一通过 `workspace.list.v1` 取得 Host 目录结果。`workspace.list` 接收 Host 文件系统中的绝对 `path` 以及可选分页 cursor，返回规范 `path`、可选 `parent`、目录条目和继续读取所需事实。客户端可以用键盘列表、点击列表或自己的视觉组件呈现同一份结果。
 
 浏览初始位置可使用所选 `machine.list` 项的 `homePath`。跨文件系统导航使用同一项中 Host 权威提供的 `workspaceRoots`：客户端可以投影 `Computer` 或盘符选择页，但该虚拟位置不是 Host path；用户选择某个 root 后，再将该原生绝对路径传给 `workspace.list.v1`。Windows 客户端不得从 `C:\` 的 parent 猜测其他盘符，也不得自行扫描 A–Z；旧 Host 未提供 roots 时仍可保留绝对路径输入。
 
@@ -199,7 +199,7 @@ Host control 提供 workspace list、instance create、ensure、list、get/get-b
 
 Agent session 能力包括 prompt、abort、Queue、conversation、model、thinking、tools、settings、resources、session replacement、tree、compaction 和 Extension UI。实际可用能力以 hello capability negotiation 为准。
 
-Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`。旧 generation 的 event、cursor 和 interaction response 不能继续使用。Tool、setting、resource 和 command catalog 也是 generation-scoped projection；客户端若缓存它们，观察到 generation 改变后必须丢弃旧缓存，并按需重新读取相应 Protocol V2 能力。清空旧显示不能冒充新 generation 的权威空 catalog。
+Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`。旧 generation 的 event、cursor 和 interaction response 不能继续使用。Tool、setting、resource 和 command catalog 也是 generation-scoped projection；客户端若缓存它们，观察到 generation 改变后必须丢弃旧缓存，并按需重新读取相应 Protocol V2 能力。清空旧显示后，新 generation 的 catalog 处于待读取状态；只有 Host 返回空结果时才显示为空。
 
 ## Mutation
 
@@ -223,9 +223,9 @@ Mutation 发出后如果发生 timeout、断线或 correlation error，结果可
 - `content`
 - 可选 metadata
 
-客户端应按这些结构处理 `message`、`custom_message`、`bash_execution`、`compaction_summary`、`branch_summary` 和 metadata records，不要从 system text 反推 Agent 私有 role。Entry 的 `contentRef` 用于继续读取 text、thinking、tool call/result 和 structured image block。
+客户端按这些结构处理 `message`、`custom_message`、`bash_execution`、`compaction_summary`、`branch_summary` 和 metadata records；record 的种类与来源以结构化字段为准。Entry 的 `contentRef` 用于继续读取 text、thinking、tool call/result 和 structured image block。
 
-Live `messageId` / `toolCallId` 只属于当前 event lifecycle。客户端不需要，也不应尝试把它们认领成 persisted `recordId` / `entryId`。在线 completion 原位收尾并留在本地画面；只有 fresh rebuild 才从 persisted records 重新生成组件。
+Live `messageId` / `toolCallId` 属于当前 event lifecycle，与 persisted `recordId` / `entryId` 分别管理，不建立跨来源的身份匹配。在线 completion 原位收尾并留在本地画面；fresh rebuild 从 persisted records 重新生成组件。
 
 客户端必须保持同一次读取的 revision、content ref、instance 和 generation 一致。Session、branch 或 generation 改变后，旧 cursor/ref 失效，应重新开始读取。
 
@@ -251,7 +251,7 @@ Web 应用通常由后端接收浏览器上传、保存为受控本机文件，�
 
 ## 附件
 
-附件由 Host 永久保存，所有文件类型使用同一机制。它不是 S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 IPC 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。聊天消息中的 `image/*` attachment 仍使用同一永久附件机制，同时由 Agent adapter 作为原生视觉输入交给 runtime。
+附件由 Host 永久保存，所有文件类型和客户端共用本文定义的上传与存储机制。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 IPC 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。聊天消息中的 `image/*` attachment 仍使用同一永久附件机制，同时由 Agent adapter 作为原生视觉输入交给 runtime。
 
 客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header。`instanceId` 可选：省略时上传到 Main 本机 storage，提供 Main ID 时路由到该 Work 所在的 SubHost：
 
@@ -300,11 +300,11 @@ Upload header 的 `operationId` 遵守普通 mutation identity。相同 ID 和�
 {"kind":"request","version":2,"requestId":"prompt-request","type":"command.submit","params":{"operationId":"prompt-operation","instanceId":"instance-id","message":"请检查附件","attachments":["123e4567-e89b-42d3-a456-426614174000"],"delivery":"auto"}}
 ```
 
-每个 command 最多 32 个 unique `fileId`。Host 在接受命令前解析全部 ID；任一 missing/corrupt ID 使整个提交失败。Canonical `AttachmentDto[]` 会出现在 pending Queue、`message.queued`、`message.submitted`、user `message.completed` 和 persisted user conversation record 中，也会由 `queue.dequeue` 随完整 queued message 返回。实现附件展示的客户端用同一 attachment card renderer 处理这些位置，并继续按 event identity/revision 去重；它不自行从 message text 恢复附件。无需附件 UI 的客户端照常显示文本并忽略可选 attachment metadata，Host 不为它删字段、降级重试或改变共享 Queue 语义。
+每个 command 最多 32 个 unique `fileId`。Host 在接受命令前解析全部 ID；任一 missing/corrupt ID 使整个提交失败。Canonical `AttachmentDto[]` 会出现在 pending Queue、`message.queued`、`message.submitted`、user `message.completed` 和 persisted user conversation record 中，也会由 `queue.dequeue` 随完整 queued message 返回。实现附件展示的客户端用同一 attachment card renderer 处理这些位置，并继续按 event identity/revision 去重；附件直接来自结构化 metadata。无需附件 UI 的客户端照常显示文本并忽略可选字段；Host 保留完整响应和共享 Queue 语义。
 
 如果 attachment 的 canonical media type 是 `image/*`，客户端仍只提交 fileId。Agent adapter 会自动把它加入原生 image input，同时保留已认证附件上下文；Agent 不需要先调用 read 才能看到图片。Pi/其他 Agent runtime 决定当前模型如何处理视觉能力，Dock 不做 model/provider capability 判断。之后的 user image block 通过 `fileId` 指向同一附件；两项都属于预期协议事实，是否合并显示是客户端职责。
 
-Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有路径。图片附件已经作为视觉输入时，resolve 只在 Agent 还需要原始文件路径进行复制、转换、OCR 或其他工具处理时使用。外部 Protocol V2 conversation 会固定遮蔽 resolve tool 的 path；客户端没有、也不需要 attachment path API。如果文件需要在网页下载或预览，那是另一项明确的产品能力，不能从 metadata 猜 Host path。
+Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有路径。图片附件已经作为视觉输入时，resolve 只在 Agent 还需要原始文件路径进行复制、转换、OCR 或其他工具处理时使用。外部 Protocol V2 conversation 会固定遮蔽 resolve tool 的 path；客户端没有、也不需要 attachment path API。网页下载或预览需要明确的产品能力支持，不得从 metadata 推断 Host path。
 
 ## Extension UI
 
@@ -320,11 +320,11 @@ Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有�
 
 `leaseToken` 是回答凭证，应只留在负责操作的 client process；Web 场景中只留在后端。`controllerId` 用来核对定向 event，不是回答凭证。
 
-新的操作连接会立即接替旧连接，但不会关闭普通 follow。若已有问题等待回答，Host 会把同一个 `interactionId` 重新发送给新连接。客户端应恢复原来的交互，而不是创建第二个业务问题。操作连接断开只释放操作权，不回答也不取消 pending interaction。
+新的操作连接会立即接替旧连接，但不会关闭普通 follow。若已有问题等待回答，Host 会把同一个 `interactionId` 重新发送给新连接。客户端用同一 `interactionId` 恢复原来的交互。操作连接断开只释放操作权，不回答也不取消 pending interaction。
 
 客户端使用当前 `leaseToken + interactionId` 发送 `interaction.respond`。只有 Host 明确确认 response 后，才能关闭交互状态；传输结果未知时先重新查询权威状态，不自动重发。
 
-客户端可以只实现自己真正支持的 Extension UI capability。没有实现某个 custom surface，不影响 Worker、Pi extension 或其他客户端；但客户端不能返回假的默认答案。
+客户端按实际支持情况实现 Extension UI capability。尚未支持的 custom surface 只在该客户端不可用，Worker、Pi extension 和其他客户端继续运行；客户端不得代替用户返回默认答案。
 
 已注册的 Extension command 继续使用 `command.submit`。如果 command handler 在执行期间调用 `ui.notify`，对应的 `extension.notification` 会携带该提交已有的 `operationId`；客户端可以把它与自己发起的命令关联并选择显示位置。没有 `operationId` 的 notification 是被动通知。这个字段不是订阅 token，也不会把 notification 变成 Conversation、Run 或 Queue 内容；handler 返回后的后台通知不再带该 ID。
 
@@ -354,4 +354,4 @@ Protocol V2 当前不提供：
 - Redis/Pi RPC compatibility；
 - 隐式 service install、start 或 restart。
 
-新增客户端能力应来自真实产品需要。某个客户端尚未实现一项 UI 或 interaction，只是该客户端自己的 backlog，不应要求 Host、Worker 或其他客户端降级。
+新增客户端能力以真实产品需要为依据。尚未实现的 UI 或 interaction 留在该客户端的 backlog；Host、Worker 和其他客户端已有能力继续可用。

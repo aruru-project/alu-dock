@@ -36,15 +36,15 @@ Host 自己处理：
 
 Prompt、conversation、model、tools、settings、session、tree 和 Extension UI 等 Agent 会话能力，由 Host 完成必要的 instance、operation、controller 与 lifecycle 判断后路由给 Worker。
 
-Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 已经产生的 Dock event/result。
+Agent 会话能力由 Worker 实现并产出 Dock event/result；Host 验证归属后沿同一协议转发。
 
 ## Main 与 SubHost
 
 Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Main 的加密上游连接和本机原生 Registry；它不监听客户端本地 IPC、不启用 Remote Access、不接子节点，也不把远端实例混进本机 Registry。
 
-SubHost 本机状态文件只是由进程写入的最近一次连接观察，Hub 必须连同记录时间展示，不能把它当成 Main 当前可用性的证明；无记录或记录进程已结束时也不推断 Main 是否可用。Main 对机器当前可用性的判断仍以自己的 transport 状态为权威。
+SubHost 本机状态文件记录进程最近一次观察到的连接状态，Hub 必须连同记录时间展示。它仅表达历史观察；无记录或记录进程已结束时，Main 当前可用性保持未确认。Main 根据自己的 transport 状态判断机器当前是否可用。
 
-SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file 和既有 catalog 字节边界，因此所有 SubHost 不共享一个 16 MiB route 上限。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 不为每个 method 建 proxy，也不创建假的 remote `ManagedInstance`。
+SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file，并分别受既有 catalog 字节边界约束。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 通过 RemoteInstance 统一转发，具体命令仍由 SubHost LocalInstance 处理。
 
 InstanceManager 是 Main ID、位置和 instance key 的唯一应用 authority；DockRegistry 仍只管理本机原生 instance。MainMachineController 实现 InstanceManager 注入的私有 persistent remote-directory/transport backend：它保存由 Machine inventory 驱动的 binding、tombstone 与 key reservation，但不接收未分类的客户端请求，也不另做 local/remote 业务路由。Key 没有 placement 含义：Main-local snapshot、持久 route 和正在进行的 ensure reservation 共同参与全局认领，已有 owner 保留 key，后来上报的重复 instance 仍按 Main ID 可见但其 Main snapshot 省略 key，SubHost catalog 不被改写。`instance.get_by_key` 始终全局查询；`instance.ensure` 先全局查询，只有 miss 时可选 `hostId` 才选择第一次创建的位置，省略时创建在 Main 本机。同 key ensure 在 authority 外执行实际本机或机器请求，并在 reservation 释放后统一返回最终 owner。
 
@@ -59,7 +59,7 @@ InstanceManager 是 Main ID、位置和 instance key 的唯一应用 authority�
 Protocol V2 的记录使用 UTF-8 JSONL，可以承载在两类 transport 上：
 
 - **私有本地 IPC**：POSIX 使用 Unix domain socket，以文件系统所有权和 mode 做 admission；Windows 使用 Named Pipe，以 Windows 本地访问控制做 admission。本机入口不使用 TLS、客户端证书或配对。
-- **远程 TLS 端口**：默认关闭；启用后绑定所有网络接口。TLS admission 成功的可信客户端进入与本地 IPC 完全相同的 Host request handler，不存在远程专用 DTO、业务路由或兼容层。
+- **远程 TLS 端口**：默认关闭；启用后绑定所有网络接口。TLS admission 成功的可信客户端复用本地 IPC 的同一个 Host request handler、DTO 与业务路由。
 
 Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
@@ -71,7 +71,7 @@ Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
 TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。Host 只把与持久信任记录中 leaf certificate DER 完全相同的连接交给 Protocol V2。无证书或未知证书永远不能发送 hello，也不能调用任何 Protocol V2 request。
 
-配对不是 Protocol V2，也不是远程管理 API。只有用户在本机 Hub 的 Devices 页面显式确认并打开五分钟窗口时，同一个 TLS 端口才临时允许未知证书发送 `pairing.*.v1` bootstrap。每条未知连接只接收一条有界 request、返回一条 response，然后立即关闭；人工确认只推进 Host 中有期限、有数量上限的 pairing transaction，不保留 socket、stream、callback 或等待中的网络 Promise。TLS handshake、首帧和 response close 分别有 5 秒、2 秒和 1 秒边界；用户批准后的完整证明最多持续 60 秒。
+配对使用独立于 Protocol V2 的 `pairing.*.v1` bootstrap，仅用于建立设备信任。用户在本机 Hub 的 Devices 页面显式确认并打开五分钟窗口后，同一个 TLS 端口才临时接收未知证书的配对请求。每条未知连接只接收一条有界 request、返回一条 response，然后立即关闭；人工确认只推进 Host 中有期限、有数量上限的 pairing transaction，不保留 socket、stream、callback 或等待中的网络 Promise。TLS handshake、首帧和 response close 分别有 5 秒、2 秒和 1 秒边界；用户批准后的完整证明最多持续 60 秒。
 
 客户端首请求只携带 TLS 客户端证书、设备名和随机数，绝不发送 PIN 或可离线枚举的 PIN verifier。用户在本机选择明确请求并输入客户端显示的四位 PIN。PIN 阶段采用 HomeKit Pair Setup 使用的 SRP-6a 3072-bit/SHA-512 参数；确认出的 session key 再按 HomeKit 的 domain-separated HKDF、ChaCha20-Poly1305 和签名交换形状，绑定 server-generated pairing ID、双方完整证书、本次随机数和双方私钥证明。事务顺序同时遵循 Moonlight/Sunshine 的经验：候选证书保持 provisional、阶段严格单调、全部验证后才原子写入客户端信任，客户端最后以精确 Host certificate pin 建立新的 TLS/Protocol V2 连接再提交 Host 信任。
 
@@ -126,9 +126,9 @@ interface AttachmentDto {
 
 Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 idle deadline 约束未完成 body。`operationId` 仍遵守同一 Host epoch 的 mutation identity：相同 header 重试共享进行中或已完成 receipt，不重复请求 body；同一 ID 换参数得到 `operation_conflict`。若 complete 后 response 丢失，客户端保留结果未知并以相同 operation/header 恢复；receipt 已淘汰时也可用新 operation 重传相同 bytes，content digest 会安全复用。普通 request 的一请求一响应规则不因此变成通用 streaming RPC。
 
-`command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。`attachments.v1` 只约束 `attachment.upload` 以及实际携带 attachment IDs 的 `command.submit` input；一旦消息被接受，attachment metadata 就是 canonical message 的可选组成部分，随 read、follow、history 和 `queue.dequeue` 原样返回。无需显示附件的客户端直接忽略该可选字段，不需要 attachment projection 协商、兼容重试或 Queue 特判。
+`command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。`attachments.v1` 只约束 `attachment.upload` 以及实际携带 attachment IDs 的 `command.submit` input；一旦消息被接受，attachment metadata 就是 canonical message 的可选组成部分，随 read、follow、history 和 `queue.dequeue` 原样返回。无需显示附件的客户端按通用可选字段规则忽略它；附件展示共用同一响应与 Queue 语义。
 
-聊天消息中 media type 为 `image/*` 的附件同时具有两项 canonical 语义：它仍是可 resolve、下载和交给工具的永久 attachment，并由 Agent adapter 通过私有 resolve path 加入同一条 Agent 请求的原生 image input。Dock 不按当前模型判断视觉能力，也不要求客户端增加 image mode 或让 Agent 先 read；模型能力与旁路处理由 Agent runtime 决定。持久和 live user content 中对应 image block 使用可选 `fileId` 关联同一 `AttachmentDto`。两项事实都保留，客户端按关联决定展示一次还是分别展示；Host 不为了 UI 去重而删除其中一项。
+聊天消息中 media type 为 `image/*` 的附件同时具有两项 canonical 语义：它仍是可 resolve、下载和交给工具的永久 attachment，并由 Agent adapter 通过私有 resolve path 加入同一条 Agent 请求的原生 image input。Dock 不按当前模型判断视觉能力，也不要求客户端增加 image mode 或让 Agent 先 read；模型能力与旁路处理由 Agent runtime 决定。持久和 live user content 中对应 image block 使用可选 `fileId` 关联同一 `AttachmentDto`。Host 完整保留两项事实，客户端按 `fileId` 关联决定合并展示或分别展示。
 
 ## Published files 与读取
 
@@ -166,13 +166,13 @@ Host 对 mutation 负责 admission、operation 去重和结果归属。客户端
 
 显式 stop 先持久化 stopping intent，再清理 Worker；完成提交直接把 instance 从 catalog 退役，同时向调用者和已连接客户端发布最终 stopped 状态。Agent 自己的持久 session 不属于 Dock catalog，stop 不删除它。Host shutdown、Host loss 和可恢复 runtime error 不是显式 stop，必须继续保留 reopen 所需的 catalog 记录。
 
-CLI 启动 Host 完成后，后台对本机 catalog 中可 reopen 的实例各尝试一次，并发复用手动 `instance.reopen` 的同一 operation/Registry 处理及 Host 在途请求收尾；不阻塞启动、不触发模型续跑、失败留给手动处理，明确 Stop 退役的实例不恢复。Main 不触发远端实例恢复。SubHost 同样处理本机实例，初次握手清单与心跳照常；启动恢复期间暂缓常规 inventory 更新，批次成功/失败全部收尾后集中刷新一次，断线重连仍发送当前完整清单。这不是常驻自动重启策略。
+CLI 启动 Host 完成后，执行一次后台恢复批次，对本机 catalog 中可 reopen 的实例各尝试一次，并发复用手动 `instance.reopen` 的同一 operation/Registry 处理及 Host 在途请求收尾；不阻塞启动、不触发模型续跑、失败留给手动处理，明确 Stop 退役的实例不恢复。Main 不触发远端实例恢复。SubHost 同样处理本机实例，初次握手清单与心跳照常；启动恢复期间暂缓常规 inventory 更新，批次成功/失败全部收尾后集中刷新一次，断线重连仍发送当前完整清单。
 
 Worker 接受副作用前失联和接受后失联是不同结果。Host 必须保留这个区别，不能把可能已经执行的 mutation 当成普通失败重试。
 
 附件上传的 `operationId` 在 header admission 时保留；同一参数的并发、completed 或 response-loss 重试共享 receipt，不重新执行 body effect，不同参数冲突。内容 SHA-256 另提供跨 operation 的永久 bytes 去重，不把 endpoint、文件名或客户端路径当 content identity；清洗后的 name/media type 只参与 logical attachment identity。
 
-消息提交中，Host 的 admission result 使用 Worker 报告的实际 delivery。`operationId` 是直接 prompt 与 Queue message 共用的提交身份；`queueItemId` 只属于确实等待过的 Queue item。一个 Host-deferred Queue item 可以在 Agent 恢复空闲后以 `prompt` delivery 被消费，此时 `message.submitted` 仍保留它真实的历史 Queue identity；普通 direct prompt 没有该 identity。若辅助关联异常，Host 省略这个可选 identity，而不是伪造一个或丢掉 canonical message。Host 不根据 catalog 中稍早的 running 状态替 Agent 决定最终 delivery。因此用户看到的状态必须始终可判定为未接受、Queue 中等待，或已经被 Agent 消费并出现在 conversation，不能两边都没有。
+消息提交中，Host 的 admission result 使用 Worker 报告的实际 delivery。`operationId` 是直接 prompt 与 Queue message 共用的提交身份；`queueItemId` 只属于确实等待过的 Queue item。一个 Host-deferred Queue item 可以在 Agent 恢复空闲后以 `prompt` delivery 被消费，此时 `message.submitted` 仍保留它真实的历史 Queue identity；普通 direct prompt 没有该 identity。若辅助关联异常，Host 省略这个可选 identity，canonical message 仍正常发布。Host 不根据 catalog 中稍早的 running 状态替 Agent 决定最终 delivery。用户必须始终能确认消息处于以下哪种状态：未接受、在 Queue 中等待，或已被 Agent 消费并出现在 conversation。
 
 ## Read、follow 与 Extension UI 操作
 
@@ -185,13 +185,13 @@ Worker 接受副作用前失联和接受后失联是不同结果。Host 必须�
 
 `instance.follow` 从 read boundary 开始补齐后续事件并持续跟随。保有本地画面且 cursor 连续时，客户端只消费 `event_log` replay 和 follow；不重新拉取历史。event ring 截断、Host epoch 改变、runtime generation 改变或本地状态丢失时，客户端丢弃旧 conversation，重新读取完整 bootstrap。不得把两次 history 读取边界拼成一个会话。普通 `session.history` page 与 bootstrap seed 都携带 Host `historyRevision`；分页中 revision 改变时客户端必须放弃该次 scan 并重新 bootstrap。History 只在完整语义单元之间分页：包含 tool call 的 Assistant record 与已经持久化的对应 tool-result records 不得被 record limit 或 Host 传输裁剪拆到两页。请求的 limit 是目标 record 数，单个完整语义单元可以使响应超过该数。
 
-active frame 的释放完全由 Worker persistence checkpoint 驱动。Host 只按 generation、sequence 和 checkpoint 机械暂存/释放，不等待客户端 ACK，不维护接收名单，也不做内容 fingerprint、认亲或去重。任意数量的客户端可以同时读取和跟随；观察连接中断不等于 Agent runtime 失败，也不结束 instance。
+Worker persistence checkpoint 确定 active frame 的释放边界。Host 按 generation、sequence 和 checkpoint 暂存或释放 frame，不等待客户端 ACK，也不维护接收名单；不按内容 fingerprint 做匹配或去重。任意数量的客户端可以同时读取和跟随，观察连接中断时 Agent runtime 和 instance 继续运行。
 
 Extension UI 操作使用独立连接，同一 instance 同时只有一个。新连接立即接手，旧操作连接结束但它的普通 follow 不受影响；等待中的 interaction 属于 runtime generation，不因接手或断线而被回答或取消。
 
 ## Agent-facing Dock tools
 
-Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力。开关默认关闭并持久化在 catalog；Host 从 authenticated Worker connection 取得 caller identity，每次操作都重新校验，Worker request 不能声明或替换 source。目标不是白名单：主人为一个来源实例开启后，它可以发现 Machine 与 sibling、按需读取、等待、创建 peer 或发送明确带来源的消息，但不能停止实例、回答 interaction 或调用任意 Agent 私有方法。新实例永远从 off 开始，也不继承创建者状态。
+Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力。开关默认关闭并持久化在 catalog；Host 从 authenticated Worker connection 取得 caller identity，每次操作都重新校验，Worker request 不能声明或替换 source。开关按来源实例授权：主人开启后，该来源可以访问同一 Dock 中的 Machine 与 sibling，按需读取、等待、创建 peer 或发送明确带来源的消息；不设置目标白名单，也不能停止实例、回答 interaction 或调用任意 Agent 私有方法。新实例永远从 off 开始，也不继承创建者状态。
 
 `dock_list` 与 `dock_inspect` 是两条 closed request：list 只投影 instance snapshot 的短状态，`scope=live` 排除 terminal catalog history，`scope=all` 才包含；它不读取任何 conversation。inspect 必须提供一个 human target，Host 解析后永远排除 caller 自己，再按普通 `types + limit + cursor` 语义返回按消息条数分页的清洗后 conversation page；选中的消息正文保持完整，不做字符截断。状态复用 canonical lifecycle/execution fact；`executionChangedAt` 与当前 running 区间的 `runStartedAt` 是权威时钟，不能用会被 Queue/settings 等变化刷新的 `updatedAt` 猜运行时长。Host-side `InstanceObservationService` 不把 TUI attach DTO、live transport event 或 Host 内部对象暴露给 Worker，也不生成 Host 摘要。
 
@@ -207,7 +207,7 @@ Worker 产出结果并与 TypeScript 客户端复用本文件所指 `protocol.ts
 
 ## 命令发现
 
-`command.catalog` 返回命令所有者提供的名称、说明、来源和能力事实。静态参数用法保留为可选 `argumentHint`；`argumentCompletions` 只表示命令所有者能根据当前参数前缀提供候选，不把动态候选伪装成静态参数表；`contentAvailable` 表示该命令有可按需检查的权威内容。Host 不按命令名维护用法表，也不从 description 或 handler 猜参数。
+`command.catalog` 返回命令所有者提供的名称、说明、来源和能力事实。静态参数用法保留为可选 `argumentHint`；`argumentCompletions` 表示命令所有者能根据当前参数前缀动态提供候选，与静态参数用法分别表达；`contentAvailable` 表示该命令有可按需检查的权威内容。Host 不按命令名维护用法表，也不从 description 或 handler 猜参数。
 
 `command.discovery.v1` 提供两条只读能力：`command.content` 分页读取命令所有者当前加载的 Markdown 内容，`command.complete` 取得命令所有者针对给定参数前缀生成的候选。请求使用 catalog 中的 canonical `{name,source}` 引用，避免同名的 prompt、extension 或 skill 被错误认领。Prompt 正文来自 Worker 已加载的模板对象，不暴露文件读取接口；Host 只做 instance/lifecycle 判断并原样路由。某个客户端不展示详情或动态候选，不影响其他客户端使用这项能力。
 
@@ -218,7 +218,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - Agent 提供但客户端未实现的能力，只在该客户端不可用；
 - 新 Agent 实现现有能力时，不修改 Protocol V2 和其他客户端；
 - 真正的新 Agent 能力在 Protocol V2 定义一次，再由需要它的客户端实现；
-- capability negotiation 不能成为删除内容或降低其他客户端能力的理由；也不得要求客户端预先声明 capability 才能使用已存在的能力。capability 是客户端对 Host 的 fail-fast 功能探测，不是客户端向 Host 的准入申报；不为尚不存在的客户端预埋兼容门或多形状响应。
+- capability 是客户端对 Host 的 fail-fast 功能探测。Host 按同一 canonical shape 完整返回内容；客户端使用既有能力无需预先申报，其他客户端的能力保持独立。兼容门和响应形状的扩展以真实客户端需求为依据。
 
 ## 代码范围
 
@@ -242,4 +242,4 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/instance-workspace.ts`：active instance workspace 的相对路径、符号链接与 canonical containment。
 - `src/control/source-file-transfer.ts`：workspace 与临时交付共用的 Host source-file streaming pump。
 
-新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。
+新增功能时先确定归属：Host control 留在 Host，Agent session 由 Worker adapter 实现；catalog/Managed state 只保存 Dock 自身的状态。Worker、Host 和客户端复用同一个 Protocol V2 shape 定义。

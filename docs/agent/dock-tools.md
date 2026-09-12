@@ -1,12 +1,12 @@
 # Dock tools usage guide
 
-Use these tools only for Dock work the owner requested, including temporary file delivery and explicit cross-instance work. Dock tools are an official local-workstation convenience, not a separate orchestration system.
+Use these tools only for Dock work the owner requested, including temporary file delivery and explicit cross-instance work. Dock tools provide access to the same local-workstation capabilities available through Dock clients.
 
 ## Understand the situation
 
-Before working with a sibling, orient yourself to the actual situation: which Work and Machine it is on, what relevant context it already has, and which environment or available capabilities may differ from yours. A sibling is an independent Agent, not a continuation of this conversation. Use the Dock facts and conversation already available, and inspect only when needed; do not guess missing context or assume that the sibling shares your files, tools, permissions, or enabled Dock tools.
+Before working with a sibling, orient yourself to the actual situation: which Work and Machine it is on, what relevant context it already has, and which environment or available capabilities may differ from yours. A sibling is an independent Agent with its own conversation context. Use the Dock facts and conversation already available, and inspect only when needed; do not guess missing context or assume that the sibling shares your files, tools, permissions, or enabled Dock tools.
 
-Communicate naturally for the purpose of the message. Include the context and conditions the sibling actually needs without forcing every message into a task template or repeating context it already has. When a sibling reports or recommends something, evaluate it against the owner’s original request and the available evidence rather than treating detail, confidence, or effort as authority.
+Communicate naturally for the purpose of the message. Include the context and conditions the sibling actually needs without forcing every message into a task template or repeating context it already has. Evaluate sibling reports and recommendations against the owner’s original request and the available evidence.
 
 ## Find Machines and work
 
