@@ -58,15 +58,15 @@ async function copySource() {
       </div>
       <div class="markdown-document-actions">
         <button v-if="mode === 'source'" type="button" @click="selectAllSource"><TextCursorInput :size="14" />全选</button>
-        <button type="button" @click="copySource"><Check v-if="copyState === 'copied'" :size="14" /><Copy v-else :size="14" />{{ copyState === 'copied' ? '已复制' : '复制 Markdown' }}</button>
+        <button type="button" @click="copySource"><Check v-if="copyState === 'copied'" :size="14" /><Copy v-else :size="14" />{{ copyState === 'copied' ? '已复制' : '复制全文' }}</button>
       </div>
     </div>
 
     <div v-if="mode === 'reading'" class="markdown-document-scroll">
       <MarkdownContent class="markdown-document-reading msg-text" :source="source" />
     </div>
-    <textarea v-else ref="sourceSurface" class="markdown-document-source" :value="source" readonly spellcheck="false" aria-label="Markdown 原文" />
-    <span v-if="copyState === 'failed'" class="markdown-document-error" role="status">自动复制失败，已选中 Markdown 原文。</span>
+    <textarea v-else ref="sourceSurface" class="markdown-document-source" :value="source" readonly spellcheck="false" aria-label="文档原文" />
+    <span v-if="copyState === 'failed'" class="markdown-document-error" role="status">自动复制失败，已选中原文。</span>
   </section>
 </template>
 

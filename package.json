@@ -14,7 +14,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=24.0.0"
   },
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
@@ -36,15 +36,15 @@
     "install:local": "npm run build && node dist/scripts/install-local.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2",
+    "@earendil-works/pi-coding-agent": "https://github.com/aruru-project/pi/releases/download/dock-v0.85.1-dock.1/earendil-works-pi-coding-agent-0.85.1-dock.1.tgz",
+    "@earendil-works/pi-tui": "https://github.com/aruru-project/pi/releases/download/dock-v0.85.1-dock.1/earendil-works-pi-tui-0.85.1-dock.1.tgz",
     "@peculiar/x509": "2.0.0",
     "fast-srp-hap": "2.0.4",
     "reflect-metadata": "0.2.2",
     "undici": "8.9.0"
   },
   "devDependencies": {
-    "@types/node": "22.19.1",
+    "@types/node": "22.19.19",
     "typescript": "5.9.3"
   }
 }

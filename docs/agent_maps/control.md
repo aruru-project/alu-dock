@@ -89,7 +89,7 @@ Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字�
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 
-`instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure`、adopt 和 Agent-facing `dock_create` 不接受该创建配置。
+`instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure` 和 adopt 不接受该创建配置；Agent-facing `dock_create` 只允许选择 system ID，不开放 generic workerConfig 编辑。
 
 `workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
 
@@ -197,13 +197,28 @@ Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力�
 
 watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 instance state，固定首次 terminal transition 的状态后删除 watch，再向当前来源 Worker 投递仅含 target/reason/time 的 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、Dock tools 关闭会清理，目标 forget 按 unavailable 完成。cancel/off 与 completion delivery 在来源实例栅栏内排序；取消确认后，尚未交付的 completion 不能再次唤醒。watch 不跨 Host restart 恢复或补发。
 
-`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交固定可见来源包装的正文，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
+`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?,systemId?,saveDefault?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交固定可见来源包装的正文，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
 ## 资源正文阅读
 
 `resource.get` 的可读资源附带可选 `contentRef`。`resource.content.v1` 提供 `resource.content {instanceId,contentRef,offset?,revision?}`，返回 `{text,revision,nextOffset?}`；没有 `nextOffset` 表示完整读取。首请求读取磁盘当前文件，续读携带返回的字节位置和 revision，文件变化或不可读取时返回 `resource_unavailable`。不接收客户端文件路径，不改写 `command.content` 的已加载模板正文语义。
 
 Worker 产出结果并与 TypeScript 客户端复用本文件所指 `protocol.ts` 的唯一 parser；Host 仅沿当前 instance 的查询与位置路由转发。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
+
+## 创建前 system 选择
+
+`system.templates.v1` 提供 directory-scoped 能力，三条请求都接受绝对 `cwd` 和可选 `hostId`；Main/SubHost 复用 InstanceManager 的 directory routing，不创建临时 Work、不触发 trust 或加载 extensions。
+
+- `system.catalog {cwd,hostId?,cursor?,limit?}` → `{cwd,candidates,total,revision,warnings,defaultSelection?,nextCursor?}`。候选按项目 `.pi/SYSTEM.md`、原生 agentDir 的 `SYSTEM.md`、目标 Host Home 下 `.aludock/systems/*.json` 文件名顺序返回。`nextCursor` 必须续读到缺省，不能只展示第一页；有效 `defaultSelection` 独立返回，即使不在当前页也可直接用于创建。
+- 候选的唯一 DTO 是 `protocol.ts` 中的 `SystemCandidate`：`{id,name,kind,path,workerConfig,warning?}`；`kind` 为 `project-system | global-system | dock-template`。`id` 是 cwd-bound opaque identity，不是文件路径。`warning` 表示该候选当前不可使用；可以预览原文并让用户修复或重选。
+- `system.content {cwd,hostId?,id,offset?,revision?}` 只读当前目录候选，不接受任意路径。与 `resource.content` 共用 `readResourceContent` 和唯一的 `ResourceContentResult` parser：`{text,revision,nextOffset?}`，字节续读、UTF-8 和文件变化处理完全一致。
+- `system.default.set {cwd,hostId?,id,operationId}` → `{selection}`。这是独立的显式保存操作，复用 operation ledger。只写本目录 `.aludock/system-default.json` 的 `{id}`，不继承父目录、不保存正文。普通查询和本次确认都不写这个文件。
+
+创建接线：没有有效默认就让调用方选择；有效默认可以直接使用。将选中候选的 `workerConfig` **原样**传给既有 `instance.create`，并在 project trust continuation 中保持它和目标 Host/cwd。预览、返回、取消均不创建 Work。保存默认与 create 有各自的 operation/失败结果，不合并成一次成功提示。坏默认、缺失/不可读文件或无效模板 JSON 以可读 warning 回到选择，不能静默换正文。其他尚未接选择的创建入口保持原有 Pi 行为。
+
+Host 的 `SystemService` 只拥有目录默认和 Dock 模板文件事实；Pi 原生来源、五字段模板校验及 opaque workerConfig 由组合入口注入的 provider 负责。CLI 使用已解析的原生 agentDir 与机器本地 Home。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成；已有用户正文不覆盖。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
+
+官方 Client、Hub/direct new 与 owner-enabled `dock_system`/`dock_create` 共用这三条请求和同一 create payload，不另写默认规则或机器代理。Agent create 接受 `systemId` 和显式 `saveDefault`，缺少有效默认时返回候选并要求选择；Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果。
 
 ## 命令发现
 

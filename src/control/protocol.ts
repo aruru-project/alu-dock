@@ -1,3 +1,4 @@
+import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash } from "node:crypto";
 import { MAX_RESOURCE_CONTENT_PAGE_BYTES } from "../core/resource-content.js";
 
@@ -161,12 +162,14 @@ export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
+export const SYSTEM_TEMPLATES_CAPABILITY = "system.templates.v1" as const;
 export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
 export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
+  SYSTEM_TEMPLATES_CAPABILITY,
   MACHINES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
@@ -288,6 +291,9 @@ export type ControlRequest =
   | Request<"settings.get", { instanceId: string }>
   | Request<"settings.update", { operationId: string; instanceId: string; update: SettingUpdate }>
   | Request<"resource.get", { instanceId: string }>
+  | Request<"system.catalog", { cwd: string; hostId?: string; cursor?: SystemCatalogCursor; limit: number }>
+  | Request<"system.content", { cwd: string; hostId?: string; id: string; offset?: number; revision?: string }>
+  | Request<"system.default.set", { cwd: string; hostId?: string; id: string; operationId: string }>
   | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
@@ -361,6 +367,9 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "settings.get": { target: "instance", effect: "query", transport: "unary" },
   "settings.update": { target: "instance", effect: "command", transport: "unary" },
   "resource.get": { target: "instance", effect: "query", transport: "unary" },
+  "system.catalog": { target: "directory", effect: "query", transport: "unary" },
+  "system.content": { target: "directory", effect: "query", transport: "unary" },
+  "system.default.set": { target: "directory", effect: "command", transport: "unary" },
   "resource.content": { target: "instance", effect: "query", transport: "unary" },
   "command.catalog": { target: "instance", effect: "query", transport: "unary" },
   "command.content": { target: "instance", effect: "query", transport: "unary" },
@@ -571,6 +580,17 @@ export interface ResourcesResult {
   diagnosticTotal: number;
   diagnosticsTruncated: boolean;
 }
+export type SystemSourceKind = "project-system" | "global-system" | "dock-template";
+export interface SystemCandidate {
+  id: string; name: string; kind: SystemSourceKind; path: string; workerConfig: JsonObject; warning?: string;
+}
+export interface SystemCatalogCursor { revision: string; offset: number }
+export interface SystemCatalogResult {
+  cwd: string; candidates: SystemCandidate[]; total: number; revision: string;
+  warnings: string[]; defaultSelection?: SystemCandidate; nextCursor?: SystemCatalogCursor;
+}
+export interface SystemDefaultSetResult { selection: SystemCandidate }
+
 export interface ResourceContentResult { text: string; revision: string; nextOffset?: number }
 export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
 export type CommandContentResult =
@@ -625,6 +645,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
   if (type === "command.content" || type === "command.complete") return COMMAND_DISCOVERY_CAPABILITY;
+  if (type === "system.catalog" || type === "system.content" || type === "system.default.set") return SYSTEM_TEMPLATES_CAPABILITY;
   if (type === "resource.content") return RESOURCE_CONTENT_CAPABILITY;
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
   return "models.v1";
@@ -927,6 +948,25 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "settings.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "settings.update": exact(params, ["operationId", "instanceId", "update"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), update: parseSettingUpdate(params.update, "params.update", "invalid_request") } };
     case "resource.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "system.catalog":
+    case "system.content":
+    case "system.default.set": {
+      exact(params, type === "system.catalog" ? ["cwd", "hostId", "cursor", "limit"] : type === "system.content" ? ["cwd", "hostId", "id", "offset", "revision"] : ["cwd", "hostId", "id", "operationId"], "invalid_request");
+      const cwd = string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request");
+      if (!isPortableAbsoluteLocalPath(cwd)) throw validation("invalid_request", "params.cwd must be absolute");
+      const common = { cwd, hostId: hostId() };
+      if (type === "system.catalog") {
+        const limit = params.limit === undefined ? MAX_SYSTEM_CATALOG_ITEMS : positive(params.limit, "params.limit", "invalid_request");
+        if (limit > MAX_SYSTEM_CATALOG_ITEMS) throw validation("invalid_request", "System page is too large");
+        return { ...base, type, params: { ...common, limit, cursor: params.cursor === undefined ? undefined : parseSystemCatalogCursor(params.cursor, "invalid_request") } };
+      }
+      const selected = string(params.id, "params.id", 128, "invalid_request");
+      if (type === "system.default.set") return { ...base, type, params: { ...common, id: selected, operationId: operationId() } };
+      const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
+      const revision = optionalString(params.revision, "params.revision", 128, "invalid_request");
+      if (offset !== undefined && offset > 0 && revision === undefined) throw validation("invalid_request", "Resource continuation requires revision");
+      return { ...base, type, params: { ...common, id: selected, offset, revision } };
+    }
     case "resource.content": {
       exact(params, ["instanceId", "contentRef", "offset", "revision"], "invalid_request");
       const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
@@ -2016,6 +2056,35 @@ export function parseCommandsResult(input: unknown): CommandsResult {
   const commands = array(value.commands, "commands", MAX_COLLECTION).map((item, index) => parseCommand(item, `commands[${index}]`));
   assertSorted(commands, "commands", compareCommandDtos);
   return { commands, ...parseCollectionCompleteness(value, commands.length) };
+}
+
+function parseSystemCatalogCursor(input: unknown, code = "invalid_response"): SystemCatalogCursor {
+  const value = object(input, "system page", code); exact(value, ["revision", "offset"], code);
+  return { revision: string(value.revision, "revision", 128, code), offset: unsigned(value.offset, "offset", code) };
+}
+function parseSystemCandidate(input: unknown): SystemCandidate {
+  const value = object(input, "system candidate");
+  exact(value, ["id", "name", "kind", "path", "workerConfig", "warning"]);
+  return { id: string(value.id, "id", 128), name: string(value.name, "name", MAX_CONTROL_CWD_CHARS),
+    kind: enumeration(value.kind, "kind", ["project-system", "global-system", "dock-template"]),
+    path: string(value.path, "path", MAX_CONTROL_CWD_CHARS), workerConfig: cloneWorkerConfig(value.workerConfig),
+    ...(value.warning === undefined ? {} : { warning: string(value.warning, "warning", MAX_CONTROL_CWD_CHARS + 256) }),
+  };
+}
+export function parseSystemCatalogResult(input: unknown): SystemCatalogResult {
+  const value = object(input, "system catalog");
+  exact(value, ["cwd", "candidates", "total", "revision", "warnings", "defaultSelection", "nextCursor"]);
+  return { cwd: string(value.cwd, "cwd", MAX_CONTROL_CWD_CHARS),
+    candidates: array(value.candidates, "candidates", MAX_SYSTEM_CATALOG_ITEMS).map(parseSystemCandidate),
+    total: unsigned(value.total, "total"), revision: string(value.revision, "revision", 128),
+    warnings: strings(value.warnings, "warnings", MAX_COLLECTION, MAX_CONTROL_CWD_CHARS + 256),
+    ...(value.defaultSelection === undefined ? {} : { defaultSelection: parseSystemCandidate(value.defaultSelection) }),
+    ...(value.nextCursor === undefined ? {} : { nextCursor: parseSystemCatalogCursor(value.nextCursor) }),
+  };
+}
+export function parseSystemDefaultSetResult(input: unknown): SystemDefaultSetResult {
+  const value = object(input, "system default result"); exact(value, ["selection"]);
+  return { selection: parseSystemCandidate(value.selection) };
 }
 
 export function parseResourceContentResult(input: unknown): ResourceContentResult {

@@ -1,3 +1,4 @@
+import { piSystemPromptResolver } from "./system-template-provider.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, open, realpath } from "node:fs/promises";
@@ -915,7 +916,10 @@ export class PiAgentAdapter {
     const model = binding.services.modelRuntime.getModel(provider, modelId);
     if (!model || !(await binding.services.modelRuntime.checkAuth(provider))) throw new AgentModelNotFoundError(provider, modelId);
     this.assertCleanSettingsBaseline(binding, "model");
-    await binding.session.setModel(model);
+    const previousThinking = binding.session.thinkingLevel;
+    await binding.session.setModel(model, { preserveThinkingLevel: true });
+    binding.services.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+    this.saveChangedThinkingPreference(binding, previousThinking);
     await this.persistSettings(binding, "model");
     return this.getModelState();
   }
@@ -923,7 +927,9 @@ export class PiAgentAdapter {
   async setThinkingLevel(level: ThinkingLevel): Promise<AgentModelState> {
     const binding = this.requireActive();
     this.assertCleanSettingsBaseline(binding, "thinking");
+    const previousThinking = binding.session.thinkingLevel;
     binding.session.setThinkingLevel(level);
+    this.saveChangedThinkingPreference(binding, previousThinking);
     await this.persistSettings(binding, "thinking");
     return this.getModelState();
   }
@@ -1417,6 +1423,15 @@ export class PiAgentAdapter {
   private assertCleanSettingsBaseline(binding: Binding, setting: SettingKey | "model" | "thinking"): void {
     const failures = projectSettingsErrors(binding.services.settingsManager.drainErrors());
     if (failures.length > 0) throw new AgentSettingsWriteError(setting, "baseline", false, failures);
+  }
+
+  private saveChangedThinkingPreference(binding: Binding, previous: ThinkingLevel): void {
+    const { session, services } = binding;
+    const effective = session.thinkingLevel;
+    // Dock saves the effective choice, without erasing the preference on non-reasoning models.
+    if (effective !== previous && (session.supportsThinking() || effective !== "off")) {
+      services.settingsManager.setDefaultThinkingLevel(effective);
+    }
   }
 
   private async persistSettings(binding: Binding, setting: SettingKey | "model" | "thinking"): Promise<void> {
@@ -2875,6 +2890,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     ? () => createPiExtensionUiContext(options.extensionUiContextPortFactory!())
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
+  const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
     const settingsManager = SettingsManager.create(canonicalCwd, agentDir, {
@@ -2886,6 +2902,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       agentDir,
       settingsManager,
       resourceLoaderOptions: {
+        ...(systemPromptResolver === undefined ? {} : { systemPromptResolver }),
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },

@@ -4,10 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import {
-  createPiInstance,
-  resolvePiReopenTarget,
-} from "../src/pi/create-pi-instance.js";
+import { resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 
 test("real Pi reopens a persisted session as a fresh Dock generation without a model run", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "alu-dock-real-reopen-cwd-"));

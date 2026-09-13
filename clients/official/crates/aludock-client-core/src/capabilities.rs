@@ -158,3 +158,5 @@ mod tests {
         );
     }
 }
+
+pub(crate) const SYSTEM_TEMPLATES: &[&str] = &[CORE_V2, "system.templates.v1"];

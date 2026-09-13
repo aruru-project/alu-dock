@@ -37,6 +37,7 @@ use aludock_client_core::{
     ReadReplay, ResourceContentResult, ResourceInfo, ResourcesResult, SessionCompactionResult,
     SessionForkResult, SessionNameResult, SessionNavigateResult, SessionReloadResult,
     SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
+    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
     SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
     WindowsAwayDelay, WorkspaceCursor, WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage,
     WorkspaceFileReadProgress, WorkspaceFileReadResult, WorkspacePage, delete_endpoint,
@@ -6919,6 +6920,56 @@ async fn list_machines(
 }
 
 #[tauri::command]
+async fn system_catalog(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    cwd: String,
+    target_host_id: Option<String>,
+    cursor: Option<SystemCatalogCursor>,
+) -> Result<SystemCatalogResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .system_catalog(&cwd, target_host_id.as_deref(), cursor.as_ref())
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+async fn system_content(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    cwd: String,
+    id: String,
+    target_host_id: Option<String>,
+    offset: Option<u64>,
+    revision: Option<String>,
+) -> Result<ResourceContentResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .system_content(&cwd, &id, target_host_id.as_deref(), offset, revision.as_deref())
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+async fn set_system_default(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    cwd: String,
+    id: String,
+    target_host_id: Option<String>,
+) -> Result<SystemDefaultSetResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_system_default(&cwd, &id, target_host_id.as_deref(), None)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 async fn list_workspace(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
@@ -7675,6 +7726,7 @@ async fn create_work(
     cwd: String,
     name: Option<String>,
     target_host_id: Option<String>,
+    worker_config: Option<serde_json::Map<String, Value>>,
     operation_id: Option<String>,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
@@ -7693,6 +7745,7 @@ async fn create_work(
             continuation,
             operation_id.as_deref(),
             target_host_id.as_deref(),
+            worker_config.as_ref(),
         )
         .await
         .map_err(CommandError::from)
@@ -7877,6 +7930,9 @@ pub fn run() {
             save_workspace_cached_file,
             list_machines,
             list_workspace,
+            system_catalog,
+            system_content,
+            set_system_default,
             list_sessions,
             session_inventory,
             adopt_session,

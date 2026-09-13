@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -15,6 +15,9 @@ test("a user can refresh Pi's saved model list again without replacing Pi", asyn
     return new Response(null, { status: 404 });
   };
   try {
+    // Pi refreshes configured providers. Do not depend on the developer's keys;
+    // the transport below is entirely replaced and never submits a model call.
+    await writeFile(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "fixture-catalog-only" } }), { mode: 0o600 });
     await updatePiModelCatalog({ agentDir });
     const firstRequestCount = requests.length;
     assert.ok(firstRequestCount > 0);

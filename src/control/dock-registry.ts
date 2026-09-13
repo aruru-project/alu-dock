@@ -530,13 +530,9 @@ export class DockRegistry implements DockToolsHostPort {
     }
     const mutations = this.dockToolsMutationPort;
     if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
-    if (request.type === "create") {
-      const result = await mutations.create({
-        operationId: request.operationId,
-        cwd: request.cwd,
-        ...(request.name === undefined ? {} : { name: request.name }),
-      });
-      return { type: "create", instance: result.instance };
+    if (request.type === "create" || request.type === "system") {
+      if (request.machine !== undefined) throw new Error("Machine selection requires a connection to Main. No local fallback was used.");
+      return request.type === "create" ? mutations.create(request) : mutations.system(request);
     }
     const source = this.getSnapshot(sourceInstanceId);
     const target = this.observationService.resolveTarget(sourceInstanceId, request.target);

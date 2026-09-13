@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+
+import { materializeDock } from "../src/deployment/materialize-dock.js";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { defaultSocketPath } from "../src/control/socket-path.js";
@@ -35,20 +38,20 @@ async function main(): Promise<void> {
   });
   const temporary = await mkdtemp(join(tmpdir(), "alu-dock-install-"));
   try {
-    process.stdout.write("Packing Alu Dock…\n");
-    const packed = runNpm(["pack", "--ignore-scripts", "--silent", "--pack-destination", temporary], projectRoot);
-    const tarballName = packed.stdout.trim().split("\n").at(-1);
-    if (!tarballName || tarballName.includes("/") || tarballName.includes("\\") || !tarballName.endsWith(".tgz")) {
-      throw new Error(`npm pack returned an invalid tarball name: ${String(tarballName)}`);
-    }
-    const tarball = join(temporary, tarballName);
+    process.stdout.write("Preparing Alu Dock from the locked dependencies…\n");
+    const stagedPackage = join(temporary, "dock");
+    materializeDock(projectRoot, stagedPackage, runNpm);
 
+    await requireInstallAllowed(options.replaceActive);
     process.stdout.write(`Installing to ${layout.root}…\n`);
     await mkdir(layout.root, { recursive: true, mode: 0o700 });
-    runNpm([
-      "install", "--prefix", layout.root, "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts", "--force", tarball,
-    ], projectRoot);
+    await rm(layout.packageDirectory, { recursive: true, force: true });
+    await copyStagedPackage(stagedPackage, layout.packageDirectory);
     await installUserExecutable(layout.userExecutable, layout.packageExecutable, home, layout.root);
+    // Remove the former outer npm consumer, not user data beside the application.
+    for (const name of ["node_modules", "package.json", "package-lock.json"]) {
+      await rm(join(layout.root, name), { recursive: true, force: true });
+    }
 
     await requireInstallAllowed(options.replaceActive);
     process.stdout.write("Starting the updated Alu Dock Host…\n");
@@ -97,7 +100,7 @@ async function requireInstallAllowed(replaceActive: boolean): Promise<void> {
   }
 }
 
-async function installUserExecutable(userExecutable: string, packageExecutable: string, home: string, installRoot: string): Promise<void> {
+export async function installUserExecutable(userExecutable: string, packageExecutable: string, home: string, installRoot: string): Promise<void> {
   await mkdir(dirname(userExecutable), { recursive: true, mode: 0o755 });
   const existing = await lstatIfPresent(userExecutable);
   if (existing) {
@@ -181,7 +184,12 @@ async function lstatIfPresent(path: string): Promise<Awaited<ReturnType<typeof l
   }
 }
 
-main().catch((error: unknown) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });
+
+/** Keep npm's relative executable links valid after the staging tree is removed. */
+export async function copyStagedPackage(stagedPackage: string, packageDirectory: string): Promise<void> {
+  await cp(stagedPackage, packageDirectory, { recursive: true, verbatimSymlinks: true });
+}

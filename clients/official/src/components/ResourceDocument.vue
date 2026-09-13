@@ -1,16 +1,24 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ArrowLeft, RotateCw } from '@lucide/vue'
-import { getResourceContent } from '../lib/bridge'
+import { getResourceContent, systemContent } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
 import { userErrorMessage } from '../lib/userError'
-import type { ResourceInfo, Work } from '../lib/types'
+import type { ResourceInfo, SystemCandidate, Work } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 
-const props = defineProps<{ work: Work; resource: ResourceInfo }>()
-const emit = defineEmits<{ back: [] }>()
+const props = defineProps<{
+  work?: Work
+  resource?: ResourceInfo
+  system?: { cwd: string; hostId: string; candidate: SystemCandidate }
+}>()
+const emit = defineEmits<{ back: []; failed: [cause: unknown] }>()
 const app = useAppStore()
+const name = computed(() => props.system?.candidate.name ?? props.resource?.name ?? '')
+const sourceKey = computed(() => props.system
+  ? `${props.system.hostId}:${props.system.cwd}:${props.system.candidate.id}`
+  : `${props.work?.id}:${props.resource?.contentRef}`)
 const backButton = ref<HTMLButtonElement | null>(null)
 onMounted(() => backButton.value?.focus())
 const loading = ref(false)
@@ -22,28 +30,32 @@ let readEpoch = 0
 watch([
   () => app.connectionContext?.connectionId,
   () => app.connectionContext?.selectionGeneration,
-  () => props.work.id,
-  () => props.work.ownerHostEpoch,
-  () => props.work.runtimeGeneration,
-  () => props.resource.contentRef,
+  () => props.work?.id,
+  () => props.work?.ownerHostEpoch,
+  () => props.work?.runtimeGeneration,
+  () => props.resource?.contentRef,
+  () => sourceKey.value,
 ], () => { void load() }, { immediate: true, flush: 'sync' })
 onUnmounted(() => { readEpoch += 1 })
 
 async function load() {
   const epoch = ++readEpoch
-  const instanceId = props.work.id
-  const contentRef = props.resource.contentRef
+  const instanceId = props.work?.id
+  const contentRef = props.resource?.contentRef
   text.value = ''
   revision.value = ''
   error.value = ''
   loading.value = true
   try {
-    if (!contentRef) throw new Error('这份资源没有可读取的正文。请返回项目状态重新选择。')
+    if (!props.system && (!contentRef || !instanceId)) throw new Error('这份资源没有可读取的正文。请返回项目状态重新选择。')
     const chunks: string[] = []
     let offset: number | undefined
     let currentRevision: string | undefined
     do {
-      const page = await currentConnectionCall(app, (context) => getResourceContent(instanceId, contentRef, context, offset, currentRevision))
+      const system = props.system
+      const page = await currentConnectionCall(app, (context) => system
+        ? systemContent(system.cwd, system.candidate.id, context, system.hostId, offset, currentRevision)
+        : getResourceContent(instanceId!, contentRef!, context, offset, currentRevision))
       if (epoch !== readEpoch) return
       chunks.push(page.text)
       currentRevision = page.revision
@@ -52,7 +64,10 @@ async function load() {
     text.value = chunks.join('')
     revision.value = currentRevision ?? ''
   } catch (cause) {
-    if (epoch === readEpoch) error.value = userErrorMessage(cause, '资源正文读取失败。请返回列表后重新打开，或重试。')
+    if (epoch === readEpoch) {
+      if (props.system) emit('failed', cause)
+      else error.value = userErrorMessage(cause, '资源正文读取失败。请返回列表后重新打开，或重试。')
+    }
   } finally {
     if (epoch === readEpoch) loading.value = false
   }
@@ -62,14 +77,14 @@ async function load() {
 <template>
   <section class="resource-document" aria-label="资源正文">
     <header class="resource-document-header">
-      <button ref="backButton" type="button" class="resource-document-back" aria-label="返回资源列表" @click="emit('back')"><ArrowLeft :size="17" /></button>
-      <div class="resource-document-title"><strong>{{ resource.name }}</strong><span>文件当前正文 · 阅读不会重新加载资源</span></div>
+      <button ref="backButton" type="button" class="resource-document-back" :aria-label="system ? '返回 system 选择' : '返回资源列表'" @click="emit('back')"><ArrowLeft :size="17" /></button>
+      <div class="resource-document-title"><strong>{{ name }}</strong><span>{{ system ? '文件当前正文 · 阅读不会创建 Work' : '文件当前正文 · 阅读不会重新加载资源' }}</span></div>
     </header>
     <div v-if="loading" class="resource-document-status" role="status"><span class="alu-agent-activity-spinner" />正在读取正文…</div>
     <div v-else-if="error" class="resource-document-status resource-document-error" role="alert"><p>{{ error }}</p><button type="button" class="ui-dialog-btn" @click="load"><RotateCw :size="14" />重试</button></div>
     <template v-else>
       <span v-if="text === ''" class="resource-document-empty">文件为空。</span>
-      <MarkdownDocumentSurface :source="text" :document-key="`${work.id}:${resource.contentRef}:${revision}`" :aria-label="resource.name" />
+      <MarkdownDocumentSurface :source="text" :document-key="`${sourceKey}:${revision}`" :initial-mode="system?.candidate.kind === 'dock-template' ? 'source' : 'reading'" :aria-label="name" />
     </template>
   </section>
 </template>

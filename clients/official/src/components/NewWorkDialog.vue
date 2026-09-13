@@ -7,6 +7,8 @@ import {
   isTauri,
   listSessionInventory,
   listWorkspace,
+  systemCatalog,
+  setSystemDefault,
   type CreateWorkContinuation,
 } from '../lib/bridge'
 import { copyPlainText } from '../lib/clipboard'
@@ -22,18 +24,20 @@ import {
 } from '../lib/machines'
 import { treeNodeTime } from '../lib/sessionTree'
 import { appendWorkspacePage } from '../lib/workspaceBrowser'
-import type { MachineDto, SessionInventoryInfo, SessionInventoryResult, Work, WorkspacePage } from '../lib/types'
+import type { MachineDto, SystemCandidate, SystemCatalogCursor, SessionInventoryInfo, SessionInventoryResult, Work, WorkspacePage } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import AluSelect from './AluSelect.vue'
+import ResourceDocument from './ResourceDocument.vue'
 
-type View = 'launcher' | 'browse' | 'sessions'
+type View = 'launcher' | 'browse' | 'sessions' | 'systems' | 'system-content'
 type DialogError = UserErrorPresentation & { copyState?: 'copied' | 'failed' }
 type TrustAttempt = {
   kind: 'create' | 'adopt'
   operationId: string
   trustChallengeId: string
   machineHostId: string
+  workerConfig?: Record<string, unknown>
   path?: string
   sessionToken?: string
 }
@@ -64,9 +68,19 @@ const workspaceLoadingMore = ref(false)
 const inventory = ref<SessionInventoryResult | null>(null)
 const sessionSearch = ref('')
 const inventoryLoading = ref(false)
-const pending = ref<'create' | 'adopt' | ''>('')
+const pending = ref<'create' | 'adopt' | 'save' | ''>('')
 const error = ref<DialogError | null>(null)
 const trust = ref<TrustAttempt | null>(null)
+const systemPath = ref('')
+const systemCandidates = ref<SystemCandidate[]>([])
+const systemWarnings = ref<string[]>([])
+const systemSelection = ref<SystemCandidate | null>(null)
+const systemPreview = ref<SystemCandidate | null>(null)
+const systemLoading = ref(false)
+const saveDefault = ref(false)
+const savedDefaultId = ref('')
+const saveFailed = ref(false)
+let systemEpoch = 0
 let workspaceEpoch = 0
 let inventoryEpoch = 0
 
@@ -98,8 +112,9 @@ const filteredSessions = computed(() => {
   const query = sessionSearch.value.trim().toLocaleLowerCase()
   return inventory.value?.sessions.filter((session) => !query || sessionSearchText(session).includes(query)) ?? []
 })
-const title = computed(() => view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
+const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
+  if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
   if (view.value === 'browse') {
     if (!workspace.value) return workspacePath.value
     return `${workspace.value.path}\n${workspace.value.truncated ? `显示前 ${workspace.value.entries.length} / ${workspace.value.total} 个目录` : `${workspace.value.total} 个子目录`}`
@@ -122,7 +137,124 @@ watch(() => props.machines, (machines) => {
 watch(pending, (value) => emit('busy', !!value), { immediate: true })
 watch(view, (value) => emit('view', value), { immediate: true })
 
-onUnmounted(() => { ++workspaceEpoch; ++inventoryEpoch })
+watch([
+  () => app.connectionContext?.connectionId,
+  () => app.connectionContext?.selectionGeneration,
+  () => machineHostId.value,
+], () => {
+  resetSystems()
+  ++workspaceEpoch
+  ++inventoryEpoch
+  workspace.value = null
+  inventory.value = null
+  trust.value = null
+  view.value = 'launcher'
+  clearError()
+}, { flush: 'sync' })
+
+onUnmounted(() => { ++workspaceEpoch; ++inventoryEpoch; ++systemEpoch })
+
+function resetSystems() {
+  ++systemEpoch
+  systemLoading.value = false
+  systemCandidates.value = []
+  systemWarnings.value = []
+  systemSelection.value = null
+  systemPreview.value = null
+  systemPath.value = ''
+  saveDefault.value = false
+  savedDefaultId.value = ''
+  saveFailed.value = false
+}
+
+async function chooseDirectory(path: string, refresh = false) {
+  if (!isTauri || props.preview || actionBusy.value || !machine.value?.available) return
+  const selectedId = refresh ? systemSelection.value?.id : undefined
+  const shouldSave = refresh && saveDefault.value
+  const previouslySaved = refresh ? savedDefaultId.value : ''
+  resetSystems()
+  saveDefault.value = shouldSave
+  savedDefaultId.value = previouslySaved
+  const epoch = systemEpoch
+  const hostId = machineHostId.value
+  systemPath.value = path
+  systemLoading.value = true
+  view.value = 'systems'
+  clearError()
+  try {
+    const candidates: SystemCandidate[] = []
+    const warnings: string[] = []
+    let cursor: SystemCatalogCursor | undefined
+    let defaultSelection: SystemCandidate | undefined
+    do {
+      const page = await currentConnectionCall(app, (context) => systemCatalog(path, context, hostId, cursor))
+      if (epoch !== systemEpoch) return
+      candidates.push(...page.candidates)
+      for (const warning of page.warnings) if (!warnings.includes(warning)) warnings.push(warning)
+      defaultSelection ??= page.defaultSelection
+      cursor = page.nextCursor
+    } while (cursor)
+    systemCandidates.value = candidates
+    systemWarnings.value = warnings
+    systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? null
+    if (!refresh && defaultSelection && !defaultSelection.warning) {
+      systemSelection.value = defaultSelection
+      await createAt(path, hostId, undefined, defaultSelection.workerConfig)
+    }
+  } catch (cause) {
+    if (epoch === systemEpoch) setError(cause, '读取这个目录的 system 列表', 'system_catalog')
+  } finally {
+    if (epoch === systemEpoch) systemLoading.value = false
+  }
+}
+
+function selectSystem(candidate: SystemCandidate) {
+  if (actionBusy.value) return
+  systemSelection.value = candidate
+  saveFailed.value = false
+  clearError()
+}
+
+function back() {
+  if (actionBusy.value) return
+  if (view.value === 'system-content') {
+    systemPreview.value = null
+    view.value = 'systems'
+  } else backToLauncher()
+}
+
+function systemReadFailed(cause: unknown) {
+  systemPreview.value = null
+  view.value = 'systems'
+  setError(cause, '读取所选 system 正文；请重新读取列表或选择其他文件', 'system_content')
+}
+
+async function confirmSystem() {
+  const selection = systemSelection.value
+  if (!selection || selection.warning || systemLoading.value || actionBusy.value) return
+  const epoch = systemEpoch
+  const path = systemPath.value
+  const hostId = machineHostId.value
+  if (saveDefault.value && savedDefaultId.value !== selection.id) {
+    pending.value = 'save'
+    clearError()
+    saveFailed.value = false
+    try {
+      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, context, hostId))
+      if (epoch !== systemEpoch) return
+      savedDefaultId.value = selection.id
+    } catch (cause) {
+      if (epoch !== systemEpoch) return
+      saveFailed.value = true
+      if ((cause as { outcomeUnknown?: boolean })?.outcomeUnknown) emit('unknown', cause)
+      setError(cause, '保存此目录的默认 system', 'set_system_default')
+      return
+    } finally {
+      pending.value = ''
+    }
+  }
+  if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection.workerConfig)
+}
 
 function sessionSearchText(session: SessionInventoryInfo) {
   return `${session.name ?? ''} ${session.firstUserMessage ?? ''} ${session.cwd}`.toLocaleLowerCase()
@@ -153,20 +285,22 @@ async function copyErrorDiagnostic() {
 
 async function selectMachine(value: string) {
   if (actionBusy.value || value === machineHostId.value) return
+  const previousView = view.value
   machineHostId.value = value
   clearError()
   workspace.value = null
   inventory.value = null
-  if (view.value === 'browse') await startBrowsing()
-  else if (view.value === 'sessions') await loadInventory()
+  if (previousView === 'browse') await startBrowsing()
+  else if (previousView === 'sessions') await loadInventory()
 }
 
 function requestClose() {
-  if (!pending.value) emit('close')
+  if (!pending.value) { ++systemEpoch; ++workspaceEpoch; ++inventoryEpoch; emit('close') }
 }
 
 function backToLauncher() {
   if (actionBusy.value) return
+  resetSystems()
   ++workspaceEpoch
   ++inventoryEpoch
   view.value = 'launcher'
@@ -259,20 +393,24 @@ async function loadInventory() {
   }
 }
 
-async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation) {
+async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, workerConfig?: Record<string, unknown>) {
   if (!isTauri || props.preview || !!pending.value || props.outcomeUnknown || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
+  const epoch = systemEpoch
   pending.value = 'create'
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const work = await createWork(path, context, undefined, continuation, machineId)
-    if (!app.contextMatches(context)) return
+    const work = await createWork(path, context, undefined, continuation, machineId, workerConfig)
+    if (!app.contextMatches(context) || epoch !== systemEpoch) return
     trust.value = null
     emit('created', work)
   } catch (cause) {
-    handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path })
+    if (epoch === systemEpoch) {
+      view.value = 'systems'
+      handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path, workerConfig })
+    }
   } finally {
     pending.value = ''
   }
@@ -297,7 +435,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
   }
 }
 
-function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken'>) {
+function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken' | 'workerConfig'>) {
   const failure = cause as { code?: string; details?: Record<string, unknown>; operationId?: string; outcomeUnknown?: boolean }
   if (failure?.code === 'project_trust_required') {
     const operationId = String(failure.details?.operationId || failure.operationId || '')
@@ -325,14 +463,14 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
     trustChallengeId: attempt.trustChallengeId,
     projectTrustDecision: decision,
   }
-  if (attempt.kind === 'create' && attempt.path) void createAt(attempt.path, attempt.machineHostId, continuation)
+  if (attempt.kind === 'create' && attempt.path) void createAt(attempt.path, attempt.machineHostId, continuation, attempt.workerConfig)
   else if (attempt.kind === 'adopt' && attempt.sessionToken) void adoptSaved(attempt.sessionToken, attempt.machineHostId, continuation)
 }
 </script>
 
 <template>
   <header class="ui-dialog-header new-work-header">
-    <button v-if="view !== 'launcher'" type="button" class="new-work-back" aria-label="返回新建 Work" :disabled="actionBusy" @click="backToLauncher">←</button>
+    <button v-if="view !== 'launcher' && view !== 'system-content'" type="button" class="new-work-back" aria-label="返回新建 Work" :disabled="actionBusy" @click="back">←</button>
     <div><div id="directory-title" class="ui-dialog-title">{{ title }}</div><div v-if="body" class="ui-dialog-body">{{ body }}</div></div>
   </header>
   <button class="ui-dialog-close" aria-label="关闭" :disabled="!!pending" @click="requestClose">×</button>
@@ -358,13 +496,13 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         {{ error.copyState === 'copied' ? '诊断信息已复制' : error.copyState === 'failed' ? '复制失败，请重试' : '复制诊断信息' }}
       </button>
     </div>
-    <div v-if="pending" class="alu-dialog-pending"><span class="alu-agent-activity-spinner" />{{ pending === 'adopt' ? '正在创建新的 Work…' : '正在创建 Work…' }}</div>
+    <div v-if="pending" class="alu-dialog-pending"><span class="alu-agent-activity-spinner" />{{ pending === 'save' ? '正在保存目录默认…' : '正在创建 Work…' }}</div>
 
     <template v-if="machine">
       <section v-if="view === 'launcher'" class="new-work-launcher">
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
-          <button v-for="path in recentWorkspaces" :key="path" type="button" class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="createAt(path)">
+          <button v-for="path in recentWorkspaces" :key="path" type="button" class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="chooseDirectory(path)">
             <span class="ui-dialog-option-marker">•</span>
             <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ path.split(/[\\/]/u).filter(Boolean).at(-1) || path }}</span><span class="ui-dialog-option-detail"><span>{{ path }}</span></span></span>
           </button>
@@ -390,7 +528,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索目录名称…" /></div>
         <div v-if="workspaceLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取目录…</div>
         <div v-else-if="workspace" class="ui-dialog-options" role="listbox">
-          <button class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="createAt(workspace.path)"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
+          <button class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="chooseDirectory(workspace.path)"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
           <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
           <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(workspaceChildPath(workspace.path, entry.name, machine.platform))"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
           <button v-if="workspace.nextCursor" type="button" class="ui-dialog-option" :disabled="workspaceLoadingMore" @click="loadMoreWorkspace"><span class="ui-dialog-option-marker">…</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ workspaceLoadingMore ? '正在读取更多目录…' : '加载更多目录' }}</span></span></button>
@@ -398,7 +536,33 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         </div>
       </template>
 
-      <template v-else>
+      <template v-else-if="view === 'systems'">
+        <div v-if="systemLoading" class="alu-dialog-loading" role="status"><span class="alu-agent-activity-spinner" />正在读取这个目录的 system…</div>
+        <template v-else>
+          <div v-if="systemWarnings.length" class="alu-dialog-error" role="alert"><span v-for="warning in systemWarnings" :key="warning">{{ warning }}</span><span>请修复文件后重新读取，或选择其他可用 system。</span></div>
+          <div v-if="savedDefaultId" class="cmd-palette-footer" role="status">目录默认已保存。{{ outcomeUnknown ? 'Work 是否创建成功尚不确定；请先刷新核对，不要再次创建。' : error ? 'Work 尚未创建；请检查错误后再确认创建。' : '创建 Work 是另一步操作。' }}</div>
+          <div v-if="saveFailed" class="alu-dialog-error">目录默认未确认保存，尚未创建 Work。可取消勾选，仅用于本次；若结果尚不确定，请先检查目录默认。</div>
+          <div class="ui-dialog-options" role="group" aria-label="可用 system">
+            <div v-for="candidate in systemCandidates" :key="candidate.id" class="system-option">
+              <button type="button" class="ui-dialog-option" :aria-pressed="systemSelection?.id === candidate.id" :disabled="actionBusy || !!candidate.warning" @click="selectSystem(candidate)">
+                <span class="ui-dialog-option-marker">{{ systemSelection?.id === candidate.id ? '✓' : '•' }}</span>
+                <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ candidate.name }}</span><span class="ui-dialog-option-detail"><span>{{ candidate.path }}</span><span v-if="candidate.warning">{{ candidate.warning }} 请修复后重新读取。</span></span></span>
+              </button>
+              <button type="button" class="ui-dialog-btn" :aria-label="`阅读 ${candidate.name}`" :disabled="actionBusy" @click="systemPreview = candidate; view = 'system-content'">阅读</button>
+            </div>
+            <div v-if="!systemCandidates.length" class="ui-dialog-empty">没有可用的 system。请检查这台机器的 SYSTEM 文件或 Dock 模板后重新读取。</div>
+          </div>
+          <footer class="system-confirm">
+            <button type="button" class="ui-dialog-btn" :disabled="actionBusy" @click="chooseDirectory(systemPath, true)">重新读取</button>
+            <label><input v-model="saveDefault" type="checkbox" :disabled="actionBusy" />设为此目录默认</label>
+            <button type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || !systemSelection || !!systemSelection.warning" @click="confirmSystem">确认并创建</button>
+          </footer>
+        </template>
+      </template>
+
+      <ResourceDocument v-else-if="view === 'system-content' && systemPreview" :system="{ cwd: systemPath, hostId: machineHostId, candidate: systemPreview }" @back="back" @failed="systemReadFailed" />
+
+      <template v-else-if="view === 'sessions'">
         <div class="ui-dialog-search-wrap"><input v-model="sessionSearch" type="search" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称或目录…" :disabled="inventoryLoading" /></div>
         <div v-if="inventoryLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取保存的 Session…</div>
         <div v-else-if="inventory" class="ui-dialog-options">
@@ -411,7 +575,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         <div v-if="inventory?.incomplete" class="cmd-palette-footer">部分 Session 暂时没有载入。请稍后重新打开。</div>
       </template>
 
-      <div v-if="trust" class="session-trust"><strong>这个项目需要你的信任确认</strong><p>确认后会继续创建新的 Work。</p><div><button @click="trust = null">取消</button><button @click="continueWithTrust('trust_once')">仅本次信任</button><button class="session-primary" @click="continueWithTrust('trust_and_remember')">信任并创建</button></div></div>
+      <div v-if="trust" class="session-trust"><strong>这个项目需要你的信任确认</strong><p>确认后会继续创建新的 Work。</p><div><button :disabled="!!pending" @click="trust = null">取消</button><button :disabled="!!pending" @click="continueWithTrust('trust_once')">仅本次信任</button><button class="session-primary" :disabled="!!pending" @click="continueWithTrust('trust_and_remember')">信任并创建</button></div></div>
     </template>
   </div>
 </template>
@@ -433,6 +597,14 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 }
 .new-work-back:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
 .new-work-dialog { position: relative; }
+.system-option { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid var(--alu-border); }
+.system-option .ui-dialog-option { flex: 1; min-width: 0; border-bottom: 0; }
+.system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-active); }
+.system-confirm { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
+.system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: 12px; }
+.system-confirm input { accent-color: var(--alu-blue); }
+.new-work-dialog > .resource-document { flex: 1; min-height: 0; }
+.alu-dialog-error > span { display: block; }
 .new-work-launcher { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-y: auto; padding: 12px 16px 18px; }
 .new-work-section-label { padding: 8px 4px 6px; color: var(--alu-text-faint); font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
 .new-work-recent-options,

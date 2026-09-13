@@ -17,7 +17,7 @@
 
 ## 开发环境
 
-需要 Node.js `>=22.19.0`、Corepack 管理的 pnpm 10、Rust 1.88，以及当前平台的 Tauri 2 构建依赖。从 monorepo 根目录可以运行：
+需要 Node.js `>=24.0.0`、Corepack 管理的 pnpm 10、Rust 1.88，以及当前平台的 Tauri 2 构建依赖。从 monorepo 根目录可以运行：
 
 ```bash
 npm run client:install

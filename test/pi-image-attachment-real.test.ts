@@ -10,7 +10,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 
 const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",

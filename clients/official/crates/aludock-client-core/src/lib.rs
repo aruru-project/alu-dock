@@ -22,6 +22,7 @@ mod published_files;
 mod sessions;
 mod srp;
 mod storage;
+mod systems;
 mod timing;
 mod tls;
 #[cfg(windows)]
@@ -105,3 +106,5 @@ pub use workspace_files::{
     WorkspaceFileReadProgress, WorkspaceFileReadResult, WorkspaceTargetKind,
     normalize_workspace_path,
 };
+
+pub use systems::{SystemCandidate, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, SystemSourceKind};

@@ -1,3 +1,4 @@
+import { DocumentReader } from "./document-reader.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -1587,9 +1588,24 @@ export async function runDockTui(
       const result = await client.resources(instance.id);
       addResourceDiagnostics(result.diagnostics);
       const indexed = result.resources.map((resource, index) => ({ resource, value: String(index) }));
-      const selected = await showChoicePicker("Pi resources", indexed.map(({ resource, value }) => ({ value, label: `${resource.kind}: ${resource.name}`, description: resource.path ?? resource.source?.package ?? resource.source?.kind })));
-      const resource = indexed.find((candidate) => candidate.value === selected)?.resource;
-      if (resource) conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`);
+      let selected: string | undefined;
+      while (true) {
+        selected = await showChoicePicker("Pi resources", indexed.map(({ resource, value }) => ({ value, label: `${resource.kind}: ${resource.name}`, description: resource.path ?? resource.source?.package ?? resource.source?.kind })), selected);
+        const resource = indexed.find((candidate) => candidate.value === selected)?.resource;
+        if (!resource) break;
+        if (!resource.contentRef) { conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`); break; }
+        const ref = resource.contentRef;
+        const reader = new DocumentReader(resource.name, resource.path?.endsWith(".json") === true, () => Math.max(4, Math.floor(terminal.rows * 0.9) - 2), () => tui.requestRender());
+        let close!: () => void;
+        const closed = new Promise<void>((resolve) => { close = resolve; });
+        reader.onClose = close;
+        const frame = new WorkModalFrame(reader);
+        const overlay = tui.showOverlay(frame, { width: "96%", maxHeight: "94%", anchor: "center", margin: 0 });
+        tui.setFocus(frame);
+        void reader.load((offset, revision) => client.resourceContent(instance.id, ref, offset, revision));
+        try { await closed; }
+        finally { reader.dispose(); overlay.hide(); }
+      }
       showStatus(`${result.resources.length} resources available${result.diagnostics.length === 0 ? "" : ` · ${result.diagnostics.length} problems`}`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
         conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources and ${result.diagnostics.length} of ${result.diagnosticTotal} problems.`, true);

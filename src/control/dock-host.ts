@@ -1,3 +1,6 @@
+import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
+import { SystemService } from "./system-service.js";
+import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -142,6 +145,7 @@ export interface DockHostOptions {
   initialize?: () => Promise<void>;
   sessionInventory?: SessionInventory;
   workspaceBrowser?: WorkspaceBrowser;
+  systemService?: SystemService;
   remoteAccessState?: RemoteAccessState;
   attachmentService?: AttachmentService;
   remoteInstances?: RemoteInstanceDirectory;
@@ -155,6 +159,7 @@ export class DockHost {
   readonly hostEpoch: string;
   readonly startedAt: string;
 
+  private readonly systemService?: SystemService;
   private state: HostState = "new";
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
@@ -187,6 +192,7 @@ export class DockHost {
   private resolveFatal!: (completion: HostFatalCompletion) => void;
 
   constructor(options: DockHostOptions) {
+    this.systemService = options.systemService;
     this.listenOnLocalEndpoint = options.listen !== false;
     this.socketPath = this.listenOnLocalEndpoint ? normalizeLocalEndpoint(options.socketPath) : options.socketPath;
     this.statePath = options.statePath ?? `memory:${this.socketPath}`;
@@ -195,11 +201,19 @@ export class DockHost {
     this.startedAt = options.registry.startedAt;
     this.operationLedger = new OperationLedger(options.operationReceiptCapacity);
     this.instanceManager = new InstanceManager(this.registry, this.operationLedger, options.attachmentService, options.remoteInstances);
+    const systemPort = {
+      systemCatalog: (cwd: string, _hostId?: string, cursor?: import("./protocol.js").SystemCatalogCursor, limit?: number) => requireSystems().catalog(cwd, cursor, limit),
+      systemContent: (cwd: string, id: string, _hostId?: string, offset?: number, revision?: string) => requireSystems().content(cwd, id, offset, revision),
+      setSystemDefault: (cwd: string, id: string, _hostId?: string, operationId = randomUUID()) => this.operationLedger.run(operationId, "system.default.set", { cwd, id, operationId }, () => requireSystems().setDefault(cwd, id)),
+      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig })).instance,
+    };
+    const requireSystems = () => {
+      if (!this.systemService) throw new ProtocolValidationError("capability_missing", "This Host does not provide system selection. Update the Host and retry.");
+      return this.systemService;
+    };
     this.registry.bindDockToolsMutationPort({
-      create: async (input) => {
-        const result = await this.instanceManager.create(input);
-        return { instance: this.registry.observationStatus(result.instance.id) };
-      },
+      create: (input) => this.operationLedger.run(systemToolOperation(input.operationId, "intent"), "dock.create", input, () => createDockSystem(systemPort, input)),
+      system: (input) => readDockSystem(systemPort, input),
       send: async (input) => {
         const result = await this.instanceManager.submit({
           operationId: input.operationId,
@@ -224,6 +238,7 @@ export class DockHost {
     this.attachmentService = options.attachmentService;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
+    if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
@@ -858,6 +873,19 @@ export class DockHost {
       }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.listSessions(request.params.scope)); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); await this.sendTreeSuccessAndEnd(socket,request.requestId,await instance.getTree()); return; }
+      case "system.catalog":
+      case "system.content":
+      case "system.default.set": {
+        if (!this.systemService) throw new ProtocolValidationError("capability_missing", "这台机器尚未提供 system 选择。请换一台机器或更新 Host。");
+        const params = request.params;
+        const result = request.type === "system.catalog"
+          ? await this.systemService.catalog(request.params.cwd, request.params.cursor, request.params.limit)
+          : request.type === "system.content"
+          ? await this.systemService.content(request.params.cwd, request.params.id, request.params.offset, request.params.revision)
+          : await this.operationLedger.run(request.params.operationId, request.type, params,
+            () => this.systemService!.setDefault(request.params.cwd, request.params.id));
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "workspace.list": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.workspaceBrowser.list(request.params));
         return;

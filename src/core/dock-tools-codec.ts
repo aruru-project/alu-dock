@@ -1,3 +1,4 @@
+import { parseControlRequest, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
 import {
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
@@ -31,14 +32,30 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     if (!isPortableAbsoluteLocalPath(path)) throw new Error("Dock deliver path must be absolute");
     return { type: "deliver", path };
   }
+  if (value.type === "system") {
+    exactKeys(value, ["type", "cwd", "machine", "id", "cursor", "offset", "revision"], "Dock system request");
+    const { type: _type, machine: _machine, ...params } = value;
+    const parsed = parseControlRequest({ kind: "request", version: 2, type: value.id === undefined ? "system.catalog" : "system.content", requestId: "dock-system", params });
+    if (parsed.type !== "system.catalog" && parsed.type !== "system.content") throw new Error("Invalid system request");
+    const machine = value.machine === undefined ? undefined : boundedString(value.machine, MAX_DOCK_TOOL_TARGET_CHARS, "Dock system Machine");
+    const { hostId: _hostId, ...input } = parsed.params;
+    // limit is controlled by the canonical producer, not an Agent-editable tuning option.
+    if ("limit" in input) delete (input as { limit?: number }).limit;
+    return { type: "system", ...input, ...(machine === undefined ? {} : { machine }) };
+  }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name", "machine"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
     const machine = value.machine === undefined ? undefined : boundedString(value.machine, MAX_DOCK_TOOL_TARGET_CHARS, "Dock create Machine name");
+    const systemId = value.systemId === undefined ? undefined : boundedString(value.systemId, 128, "Dock system selection");
+    if (value.saveDefault !== undefined && typeof value.saveDefault !== "boolean") throw new Error("saveDefault must be boolean");
+    if (value.saveDefault === true && systemId === undefined) throw new Error("Saving a directory default requires an explicit systemId");
     return {
       type: "create",
+      ...(systemId === undefined ? {} : { systemId }),
+      ...(value.saveDefault === undefined ? {} : { saveDefault: value.saveDefault }),
       operationId: boundedString(value.operationId, 128, "Dock create operation ID"),
       cwd,
       ...(name === undefined ? {} : { name }),
@@ -92,6 +109,15 @@ export function parseDockToolsResult(raw: unknown): void {
     parseObservationResult(value);
     return;
   }
+  if (value.type === "system_catalog") {
+    exactKeys(value, ["type", "result", "selectionRequired"], "Dock system catalog result");
+    if (value.selectionRequired !== undefined && typeof value.selectionRequired !== "boolean") throw new Error("Invalid selectionRequired");
+    parseSystemCatalogResult(value.result); return;
+  }
+  if (value.type === "system_content") {
+    exactKeys(value, ["type", "result"], "Dock system content result");
+    parseResourceContentResult(value.result); return;
+  }
   if (value.type === "machines") {
     exactKeys(value, ["type", "machines"], "Dock Machines result");
     if (!Array.isArray(value.machines) || value.machines.length < 1) throw new Error("Dock Machines result is invalid");
@@ -104,7 +130,8 @@ export function parseDockToolsResult(raw: unknown): void {
     return;
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "instance"], "Dock create result");
+    exactKeys(value, ["type", "instance", "defaultSaved"], "Dock create result");
+    if (value.defaultSaved !== undefined && typeof value.defaultSaved !== "boolean") throw new Error("Invalid defaultSaved");
     validateObservedStatus(value.instance);
     return;
   }

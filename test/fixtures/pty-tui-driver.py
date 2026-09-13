@@ -86,9 +86,13 @@ def main() -> int:
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
+        system_confirmed = False
         while startup_marker not in output and time.monotonic() < deadline:
             if read_available(fd, output, 0.1) < 0:
                 break
+            if action not in hub_actions and not system_confirmed and b"Choose a system" in output and b"pi-default.json" in output:
+                os.write(fd, b"\r")  # Direct new/miss requires an explicit system confirmation.
+                system_confirmed = True
         if startup_marker not in output:
             timed_out = True
         else:
@@ -151,6 +155,11 @@ def main() -> int:
                 while read_available(fd, output, 0.01) > 0:
                     pass
                 os.write(fd, b"\r")  # Confirm Use this directory.
+                system_deadline = time.monotonic() + 5
+                while b"pi-default.json" not in output and time.monotonic() < system_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Explicitly choose system, even without a project default.
                 work_deadline = time.monotonic() + 8
                 while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:

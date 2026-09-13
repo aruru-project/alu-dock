@@ -1,3 +1,5 @@
+import { OperationLedger } from "./operation-ledger.js";
+import { createDockSystem, readDockSystem } from "./system-tools.js";
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult, ObservationDeliverySink } from "../core/dock-tools.js";
 import { dockMessageText } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
@@ -13,6 +15,7 @@ import type { InstanceReadResult, MachineDto } from "./protocol.js";
 /** Main-owned global Dock-tool authority; observation semantics stay in InstanceObservationService. */
 export class MainMachineDockToolsAuthority {
   private readonly observation: InstanceObservationService;
+  private readonly toolOperations = new OperationLedger();
   private readonly authorizedSources = new Set<string>();
   private readonly sourceMachines = new Map<string, string>();
   private readonly sourceCleanup = new Map<string, () => void>();
@@ -52,11 +55,15 @@ export class MainMachineDockToolsAuthority {
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
     if (request.type === "machines") return { type: "machines", machines: await this.options.controller().machines() };
-    if (request.type === "create") {
-      const targetMachine = resolveCreateMachine(await this.options.controller().machines(), sourceMachineId, request.machine);
-      if (!targetMachine.available) throw new Error(`Machine ${JSON.stringify(targetMachine.name)} is offline. Reconnect it and try again.`);
-      const instance = await this.options.localClient.create(request.cwd, request.name, request.operationId, undefined, targetMachine.hostId);
-      return { type: "create", instance: observationStatus(instance) };
+    if (request.type === "create" || request.type === "system") {
+      const execute = async () => {
+        const targetMachine = resolveCreateMachine(await this.options.controller().machines(), sourceMachineId, request.machine);
+        if (!targetMachine.available) throw new Error(`Machine ${JSON.stringify(targetMachine.name)} is offline. Reconnect it and try again.`);
+        return request.type === "create"
+          ? createDockSystem(this.options.localClient, request, targetMachine.hostId)
+          : readDockSystem(this.options.localClient, request, targetMachine.hostId);
+      };
+      return request.type === "create" ? this.toolOperations.run(request.operationId, "dock.create", { sourceMainId, request }, execute) : execute();
     }
     if (request.type === "send") {
       const target = requireHumanTarget(snapshots.filter((item) => item.id !== sourceMainId), request.target);

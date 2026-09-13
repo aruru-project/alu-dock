@@ -1,3 +1,4 @@
+import { chooseSystem, type SystemChoice } from "./system-picker.js";
 import {
   ProcessTerminal,
   SelectList,
@@ -61,7 +62,7 @@ const LEAVE_ALTERNATE_SCREEN = "\u001b[?1049l";
 export type DockHubAction =
   | { kind: "attach"; instance: InstanceSnapshot }
   | { kind: "reopen"; instance: InstanceSnapshot }
-  | { kind: "new"; cwd: string }
+  | { kind: "new"; cwd: string; systemChoice: SystemChoice }
   | { kind: "adopt"; session: SessionDto }
   | { kind: "exit" };
 
@@ -127,7 +128,11 @@ export async function runDockHub(
       if (selected === NEW_INSTANCE) {
         const selectedCwd = await chooseWorkspaceDirectory(terminal, client, contextCwd);
         if (signalRequested) return { kind: "exit" };
-        if (selectedCwd !== undefined) return { kind: "new", cwd: selectedCwd };
+        if (selectedCwd !== undefined) {
+          const systemChoice = await chooseSystem(client, selectedCwd, terminal);
+          if (signalRequested) return { kind: "exit" };
+          if (systemChoice) return { kind: "new", cwd: systemChoice.cwd, systemChoice };
+        }
         continue;
       }
       if (selected === CONTINUE) {

@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { resolveReleaseVersion } from "./release-version.mjs";
 
@@ -89,8 +89,9 @@ try {
   const buildRuntime = hostNodeRuntime();
 
   runNpm(buildRuntime, ["run", "build"], projectRoot);
+  const { materializeDock } = await import(pathToFileURL(join(projectRoot, "dist/src/deployment/materialize-dock.js")).href);
   if (packageMode === "full") buildDesktop(version, windowsTarget, buildRuntime);
-  materializeDock(join(payloadRoot, "dock"), buildRuntime);
+  materializeDock(projectRoot, join(payloadRoot, "dock"), (args, cwd) => runNpm(buildRuntime, args, cwd));
   if (packageMode === "full") copyDesktop(payloadRoot, windowsTarget);
   rmSync(join(payloadRoot, "runtime"), { recursive: true, force: true });
   pruneNonTargetNativePrebuilds(payloadRoot);
@@ -185,21 +186,6 @@ function buildDesktop(productVersion, rustTarget, runtime) {
     tauriCli, "build", "--no-bundle", "--ci", "--target", rustTarget,
     "--config", JSON.stringify({ version: productVersion, mainBinaryName: "AluDock" }),
   ], { cwd: clientRoot, env: runtimeEnvironment(runtime.nodePath) });
-}
-
-function materializeDock(destination, runtime) {
-  rmSync(destination, { recursive: true, force: true });
-  mkdirSync(destination, { recursive: true });
-  for (const name of ["package.json", "package-lock.json"]) {
-    copyFileSync(join(projectRoot, name), join(destination, name));
-  }
-  runNpm(runtime, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], destination);
-  for (const name of ["README.md", "docs", "skills"]) {
-    cpSync(join(projectRoot, name), join(destination, name), { recursive: true });
-  }
-  cpSync(join(projectRoot, "dist", "src"), join(destination, "dist", "src"), { recursive: true });
-  const bundledPi = join(destination, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-  if (!existsSync(bundledPi)) throw new Error("The production Dock tree does not contain bundled Pi");
 }
 
 function copyDesktop(destination, rustTarget) {

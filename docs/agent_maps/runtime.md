@@ -61,6 +61,14 @@ Pi 继续唯一拥有 `~/.pi/agent`（或 `PI_CODING_AGENT_DIR` 指定目录）�
 
 `instance.create` 可携带 bounded JSON `workerConfig`。这个对象在 generic Protocol/Host/catalog 中保持 opaque，随 durable reopen 原样交给选中的 Worker adapter；Host 不枚举字段、不把 Pi option 提升为 Dock 语义。Pi adapter 把其中 JSON-safe create fields 交给 Pi 的 session constructor，Worker-owned services、SessionManager、identity 与 transport 不能由该对象替换。不同 Agent adapter 可以按自己的原生 contract 解释同一容器。
 
+### 显式 system 来源
+
+Pi provider 生成 `workerConfig.systemSelection`：原生 `project-system`/`global-system` 保留 custom 文本语义；`dock-template` 是 fork SDK 的 `DefaultSystemPromptBody` 五字段 JSON（`intro/toolNotes/guidelines/documentationHeading/documentationInstructions`），不是最终组装 prompt，也没有占位符语言。项目来源同时保存原始 cwd，Dock 模板保存发现时的原始 Home（限定其 `.aludock/systems/*.json`），避免 session replacement 或 Worker 登录 shell 改变 HOME 后重新发现或拒绝原来源。模板选择必须携带来源 Home；没有 systemSelection 的旧 Work 继续使用原生行为。
+
+Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加载读取固定选中文件并同时返回 custom/default 内容及实际 `source.path`；显式选择覆盖项目 SYSTEM，但 APPEND、context、skills、动态 tool prompt 继续由 Pi 原生组装。读取或校验失败明确失败，不把路径当正文、不回退。Host 不解释这个 workerConfig。配置随 durable catalog/reopen 原样保留，工具重建不查询目录默认；没有配置的旧 Work 保持原生行为。
+
+既有 `resource.get`/`resource.content` 自动使用 loader 的实际 source，所以 Work 读到的是选中的 JSON 或原生 SYSTEM 文件，而不是被覆盖的项目 SYSTEM，也不是最终组装快照。
+
 ## Worker 事故记录
 
 Host 对 Worker stderr 做有界尾部捕获，同时继续写入自己的 stderr，因此 Linux journal 与 Windows Host 窗口仍能显示即时输出。正常停止不产生事故记录；Worker 非预期退出、IPC 丢失或 transport deadline 导致所有权回收时，运行该 Worker 的 Host 在私有状态目录写入独立、不可变的 incident。记录包含 Machine、Work、runtime generation、退出原因、平台与保存的 stderr 尾部。
@@ -126,7 +134,7 @@ Dock 通过 Pi resource `extensionsOverride` 明确持有 canonical inline `show
 
 Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久化，默认关闭；新建、adopt 和从别的来源创建的 instance 都不会继承。`dock.tools.configure` reverse capability 始终存在，Host 在开关为 on 时授予 `dock.tools`。开关通过 Pi 原生 `setActiveTools` 更新可用工具及其提示，off 时这些工具离开 active set。使用手册随包保存在 `docs/agent/dock-tools.md`，由各工具的 description 提供实际文件路径，Agent 需要时读取；它不注册为 Pi Skill。切换开关不执行 resource reload，正在进行的调用继续使用有效上下文。用户主动 reload/rebind 时，开关仍从 Worker-level capability state 恢复。
 
-开关开启后恰好提供：`dock_list({scope?: "live" | "all"})`、`dock_machines()`、target 必填的 `dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file({path})`、`dock_create({cwd,name?,machine?})` 和 `dock_send({target,message})`。list 只读短状态，不拉取 conversation；inspect 才按需读取一个按消息条数分页的 conversation page。Agent-facing client 把 canonical message page 渲染成 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。`limit` 只限制一次返回的消息条数，选中的消息正文保持完整；若底层传输无法承载则明确失败，禁止返回截断内容。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
+开关开启后恰好提供：`dock_list({scope?: "live" | "all"})`、`dock_machines()`、target 必填的 `dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file({path})`、`dock_system({cwd,machine?,id?,cursor?,offset?,revision?})`、`dock_create({cwd,name?,machine?,systemId?,saveDefault?})` 和 `dock_send({target,message})`。list 只读短状态，不拉取 conversation；inspect 才按需读取一个按消息条数分页的 conversation page。Agent-facing client 把 canonical message page 渲染成 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。`limit` 只限制一次返回的消息条数，选中的消息正文保持完整；若底层传输无法承载则明确失败，禁止返回截断内容。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
 
 `dock_deliver_file` 只接受 absolute path。Host 从 authenticated Worker connection 取得 source instance，把 readable regular source 的 path 与 identity metadata 暂存在当前 `ManagedInstance`；它不在 registration 时读全文、hash、复制或持久化。最多 100 MiB（含边界），跨 Pi session replacement 保留，stop/Host restart 后消失；已有登记不因 `/dock-tools off` 删除。公开 list/download 只含 path-free `DeliverableDto`，bytes 由 Host 专用 stream 直接送给客户端并用 terminal SHA-256 核对，始终不经过 Worker。`show_image` 继续使用独立的 Worker session-scoped inline image 语义。
 
@@ -163,3 +171,5 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 - `src/tui/`：本机终端客户端（通常经 SSH 使用），不持有 Agent runtime。
 
 具体实现按以上边界组织。出现跨层重复定义或投影时，先将能力收敛到所属层，并复用 Protocol V2 的同一定义。
+
+`dock_system` 通过同一 Protocol 查询目录候选或分页读取原文件；返回正文与元数据始终作为 untrusted task data 引用。`dock_create` 显式选择覆盖目录默认，未选择且无有效默认时要求选择，不创建首项；`saveDefault` 是独立明确保存，不开放 generic workerConfig。来源授权和新 Work off 规则不变。

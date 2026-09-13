@@ -1,3 +1,4 @@
+import { chooseSystem, type SystemChoice } from "./tui/system-picker.js";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -84,6 +85,7 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
     });
   }
   if (!instance) {
+    client.closeActiveConnections();
     process.stdout.write(options.mode === "hub" ? "Left Alu Dock Hub.\n" : "No work opened.\n");
     return;
   }
@@ -115,7 +117,7 @@ async function executeHubAction(
 ): Promise<InstanceSnapshot | undefined> {
   if (action.kind === "exit") return undefined;
   if (action.kind === "attach") return assertAttachable(action.instance);
-  if (action.kind === "new") return createWithNotice(client, action.cwd);
+  if (action.kind === "new") return createWithNotice(client, action.cwd, undefined, action.systemChoice);
   if (action.kind === "reopen") return reopenWithNotice(client, action.instance);
   return adoptWithNotice(client, action.session);
 }
@@ -192,20 +194,41 @@ async function createWithNotice(
   client: DockClient,
   cwd: string,
   name?: string,
-): Promise<InstanceSnapshot> {
-  process.stdout.write(`Creating a Pi session for ${terminalSafe(cwd)}…\n`);
-  const operationId = randomUUID();
-  try {
-    return await client.create(cwd, name, operationId);
-  } catch (error) {
-    const challenge = projectTrustChallenge(error, operationId);
-    if (!challenge) throw error;
-    const decision = await askProjectTrust(challenge.cwd);
-    return client.create(cwd, name, operationId, {
-      challengeId: challenge.challengeId,
-      decision,
-    });
+  chosen?: SystemChoice,
+): Promise<InstanceSnapshot | undefined> {
+  let choice = chosen ?? await chooseSystem(client, cwd);
+  let defaultSaved = false;
+  while (choice) {
+    cwd = choice.cwd;
+    defaultSaved ||= choice.defaultSaved;
+    if (choice.defaultSaved) process.stdout.write("Directory default saved. Creating Work next.\n");
+    const workerConfig = choice.selection.workerConfig;
+    process.stdout.write(`Creating a Pi session for ${terminalSafe(cwd)}…\n`);
+    const operationId = randomUUID();
+    try {
+      try {
+        return await client.create(cwd, name, operationId, undefined, undefined, workerConfig);
+      } catch (error) {
+        const challenge = projectTrustChallenge(error, operationId);
+        if (!challenge) throw error;
+        const decision = await askProjectTrust(challenge.cwd);
+        return await client.create(cwd, name, operationId, {
+          challengeId: challenge.challengeId,
+          decision,
+        }, undefined, workerConfig);
+      }
+    } catch (error) {
+      // Startup failure is before Work publication. Transport loss, unknown
+      // effects and expired receipts must still leave this path without replay.
+      if (!(error instanceof ControlClientError) || !["runtime_unavailable", "resource_unavailable", "request_failed"].includes(error.code)) throw error;
+      choice = await chooseSystem(client, cwd, undefined, {
+        forceSelection: true,
+        selectedId: choice.selection.id,
+        notice: `${defaultSaved ? "Directory default was saved. " : ""}Work could not start. Check the source or choose again; Esc leaves.`,
+      });
+    }
   }
+  return undefined;
 }
 
 async function adoptWithNotice(

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 
 const ZERO_USAGE = {
   input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,

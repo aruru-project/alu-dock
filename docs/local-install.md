@@ -5,7 +5,7 @@ Linux checkout 使用 npm 本地安装入口及 `systemd --user` Host。Windows 
 ## 位置
 
 ```text
-~/.local/share/alu-dock/
+~/.local/share/alu-dock/dock/  # package.json、package-lock.json、node_modules 和编译产物
 ~/.local/bin/aludock
 ~/.config/systemd/user/alu-dock.service
 ```
@@ -25,7 +25,9 @@ npm run install:local
 aludock service status
 ```
 
-安装器构建当前 checkout，更新本地包、launcher 和 user service，然后等待 Host ready。它不运行测试，也不自动回滚。
+安装器构建当前 checkout，在临时目录复制完整根 `package.json` / `package-lock.json` 并运行 `npm ci --omit=dev --ignore-scripts`，再加入 Dock 编译产物和资源。Linux 与 Windows 共用这份物料准备逻辑；只装配已发布的 Pi 资产，不编译或重新打包 Pi。
+
+Linux 将准备好的应用更新到私有安装根的 `dock/`，launcher 直接指向可执行的 `dock/dist/src/cli.js`；更新 user service 后等待 Host ready。旧的外层 npm 依赖目录和锁会移除，旁边的附件及用户资料不动。安装器不运行测试，也不自动回滚。
 
 存在未完成 run、Queue、interaction 或 stopping instance 时，安装默认拒绝。只有明确接受中断这些工作时才使用：
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { CatalogTransactionCoordinator } from "../src/control/catalog-transactions.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 
 const ZERO_USAGE = {

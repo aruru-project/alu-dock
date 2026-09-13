@@ -6,12 +6,13 @@ import { fileURLToPath } from "node:url";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const PI_PACKAGE_DIR_ENV = "PI_PACKAGE_DIR";
 const PI_RUNTIME_NODE_ENV = "ALU_DOCK_PI_NODE";
+const PI_CLI_ENTRY_ENV = "ALU_DOCK_PI_CLI_ENTRY";
 const ALU_DOCK_CLI_ENV = "ALU_DOCK_CLI_ENTRY";
 let runtimeBin: string | undefined;
 
 export function piWorkerRuntimeEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const packageDir = loadedPiPackageDir();
-  realpathSync(join(packageDir, "dist", "cli.js"));
+  const cliEntry = resolvePiCliEntry(packageDir);
   const environment = { ...base };
   const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === "path") ?? "PATH";
   for (const key of Object.keys(environment)) {
@@ -20,6 +21,7 @@ export function piWorkerRuntimeEnvironment(base: NodeJS.ProcessEnv): NodeJS.Proc
   environment[pathKey] = [ensureRuntimeBin(), environment[pathKey]].filter(Boolean).join(delimiter);
   environment[PI_PACKAGE_DIR_ENV] = packageDir;
   environment[PI_RUNTIME_NODE_ENV] = process.execPath;
+  environment[PI_CLI_ENTRY_ENV] = cliEntry;
   environment[ALU_DOCK_CLI_ENV] = realpathSync(fileURLToPath(new URL("../cli.js", import.meta.url)));
   environment.PI_CODING_AGENT = "true";
   environment.AI_AGENT = "pi";
@@ -33,7 +35,20 @@ export function enterPiWorkerRuntime(): void {
   if (!runtimeNode || realpathSync(runtimeNode) !== realpathSync(process.execPath)) {
     throw new Error("Pi Worker runtime executable changed before startup");
   }
-  process.argv[1] = realpathSync(join(packageDir, "dist", "cli.js"));
+  process.argv[1] = resolvePiCliEntry(packageDir);
+}
+
+/** The installed package owns its CLI layout, including bundled releases. */
+export function resolvePiCliEntry(packageDir: string): string {
+  const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as {
+    name?: unknown;
+    bin?: string | { pi?: unknown };
+  };
+  const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.pi;
+  if (manifest.name !== PI_PACKAGE_NAME || typeof entry !== "string" || !entry) {
+    throw new Error("The installed Pi package does not declare its CLI entry");
+  }
+  return realpathSync(join(packageDir, entry));
 }
 
 function loadedPiPackageDir(): string {
@@ -53,11 +68,11 @@ function ensureRuntimeBin(): string {
   const directory = mkdtempSync(join(tmpdir(), "alu-dock-pi-runtime-"));
   try {
     chmodSync(directory, 0o700);
-    writeFileSync(join(directory, "pi"), "#!/bin/sh\nexec \"$ALU_DOCK_PI_NODE\" \"$PI_PACKAGE_DIR/dist/cli.js\" \"$@\"\n", { mode: 0o700 });
+    writeFileSync(join(directory, "pi"), "#!/bin/sh\nexec \"$ALU_DOCK_PI_NODE\" \"$ALU_DOCK_PI_CLI_ENTRY\" \"$@\"\n", { mode: 0o700 });
     writeFileSync(join(directory, "aludock"), "#!/bin/sh\nexec \"$ALU_DOCK_PI_NODE\" \"$ALU_DOCK_CLI_ENTRY\" \"$@\"\n", { mode: 0o700 });
     if (process.platform === "win32") {
-      writeFileSync(join(directory, "pi.cmd"), "@echo off\r\n\"%ALU_DOCK_PI_NODE%\" \"%PI_PACKAGE_DIR%\\dist\\cli.js\" %*\r\nexit /b %ERRORLEVEL%\r\n");
-      writeFileSync(join(directory, "pi.ps1"), "& $env:ALU_DOCK_PI_NODE (Join-Path $env:PI_PACKAGE_DIR 'dist\\cli.js') @args\r\nexit $LASTEXITCODE\r\n");
+      writeFileSync(join(directory, "pi.cmd"), "@echo off\r\n\"%ALU_DOCK_PI_NODE%\" \"%ALU_DOCK_PI_CLI_ENTRY%\" %*\r\nexit /b %ERRORLEVEL%\r\n");
+      writeFileSync(join(directory, "pi.ps1"), "& $env:ALU_DOCK_PI_NODE $env:ALU_DOCK_PI_CLI_ENTRY @args\r\nexit $LASTEXITCODE\r\n");
       writeFileSync(join(directory, "aludock.cmd"), "@echo off\r\n\"%ALU_DOCK_PI_NODE%\" \"%ALU_DOCK_CLI_ENTRY%\" %*\r\nexit /b %ERRORLEVEL%\r\n");
       writeFileSync(join(directory, "aludock.ps1"), "& $env:ALU_DOCK_PI_NODE $env:ALU_DOCK_CLI_ENTRY @args\r\nexit $LASTEXITCODE\r\n");
     }

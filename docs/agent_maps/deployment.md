@@ -108,7 +108,7 @@ aludock service uninstall
 
 ## 本地安装与 Windows 发行
 
-Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 的正式安装入口为 `AluDock-<version>-windows-x86_64-Setup.exe`；`-components.zip` 仅供后续构建复用 Desktop/DLL，最终仍生成 Setup.exe。包组装保留 bundled Pi、系统 Node 版本门槛、native prebuild pruning 和 PE/DLL 检查。
+Linux 本地安装更新 `~/.local/share/alu-dock/dock/` 中的应用、指向可执行 CLI 的 launcher 和 user service。Linux 与 Windows 通过同一物料函数复制 Dock 完整根 manifest/lock，在 staging 执行 `npm ci --omit=dev --ignore-scripts` 后加入编译产物与资源；不再使用外层 `npm install <Dock tarball>` 重新解析运行树。Windows x64 的正式安装入口为 `AluDock-<version>-windows-x86_64-Setup.exe`；`-components.zip` 仅供后续构建复用 Desktop/DLL，最终仍生成 Setup.exe。包组装保留 bundled Pi、系统 Node 版本门槛、native prebuild pruning 和 PE/DLL 检查。
 
 Windows 沿用 Tauri/NSIS 的标准安装、更新、卸载及运行程序提示，项目只配置包资源、图标和必要入口。安装器范围不包括自制安装模板、PowerShell 安装事务、旧入口保护、进程检测/关闭 hook 或兼容迁移脚本。用户从托盘正常退出后运行 Setup；应用仍在运行时，按标准安装器的默认提示处理。安装器与客户端的验证分工见 [`qa.md`](../qa.md#deployment)。
 

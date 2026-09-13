@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { homedir } from "node:os";
+import { SystemService } from "./control/system-service.js";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -254,6 +256,8 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   const managedPiAgentDir = options.mode === "managed"
     ? await (await import("./pi/pi-agent-directory.js")).resolveManagedPiAgentDir()
     : undefined;
+  const { createPiSystemTemplateProvider } = await import("./pi/system-template-provider.js");
+  const systemService = new SystemService(homedir(), createPiSystemTemplateProvider(managedPiAgentDir));
   const trustPreflight = createPiProjectTrustCoordinator(managedPiAgentDir);
   const sessionInventory = createPiSessionInventory({
     ...(managedPiAgentDir === undefined ? {} : { sessionsRoot: join(managedPiAgentDir, "sessions") }),
@@ -318,6 +322,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       registry,
       initialize: () => registry.initializeCatalog(),
       sessionInventory,
+      systemService,
       attachmentService,
       listen: false,
     });
@@ -358,6 +363,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ...(catalogPath ? { statePath: catalogPath, initialize: () => registry.initializeCatalog(), remoteAccessState: new RemoteAccessState(remoteAccessStateRoot(catalogPath)) } : {}),
       registry,
       sessionInventory,
+      systemService,
       attachmentService,
       remoteInstances,
     });

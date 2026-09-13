@@ -33,7 +33,7 @@ Devices 列表项来自 Host 保存的短期 metadata，不对应等待中的 so
 
 Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`：显式 session name 优先，其次是 Dock instance key，最后才回退到项目目录；首条用户消息只用于 persisted-session inventory 的未命名 session 摘要，不参与当前 Dock instance 的 `displayName`。重名项由项目路径和相对时间区分，Hub 和默认人类列表不再把短 instance ID 当作名称。
 
-Hub 的 Dock New 从启动 `aludock` 时的当前目录打开 workspace 列表，经 `workspace.list.v1` 返回上级和子目录后再确认 cwd。列表支持搜索、分页/跳页、直接输入路径和隐藏目录切换；隐藏目录默认不显示，但直接输入隐藏路径仍可进入。目录符号链接带标记并按 Host 返回的规范目标继续浏览。取消选择返回 Hub，确认后才调用 `instance.create(cwd)` 创建 instance。直接执行 `aludock new --cwd ...` 的既有入口不经过 Hub 选择器。
+Hub 的 Dock New 从启动 `aludock` 时的当前目录打开 workspace 列表，经 `workspace.list.v1` 返回上级和子目录后再确认 cwd。列表支持搜索、分页/跳页、直接输入路径和隐藏目录切换；隐藏目录默认不显示，但直接输入隐藏路径仍可进入。目录符号链接带标记并按 Host 返回的规范目标继续浏览。取消目录或 system 选择返回 Hub。目录确定后查询 `system.catalog`：有效目录默认可以直接使用；否则必须主动选择，包括存在项目 SYSTEM 的情况。Enter 仅本次，Ctrl+S 明确保存目录默认并确认，V 阅读原文后返回保留选择。坏默认说明原因并回选择；确认之后才创建 Work，保存成功不在 project trust 续接中重复。直接 `new`、continue/open miss 只跳过目录浏览，复用同一 system 选择。
 
 ## Session Work
 
@@ -96,3 +96,5 @@ Alu Dock 的主题、布局和组件由 `src/tui/` 内的实现负责。修改�
 - `src/tui/theme.ts`、`alu-palette.ts`：当前 TUI 主题实现。
 
 新增 Agent 能力时，只有选择支持它的 TUI surface 需要变化。不要在 TUI 中复制 Host lifecycle、读取 Pi JSONL 或直接连接 Worker。
+
+Work `/resources` 对有 `contentRef` 的项沿 `resource.content` 阅读真实正文，与创建前 system 共用 `DocumentReader`。JSON 默认原文，native Markdown 可渲染，r 切换；↑↓/PgUp/PgDn/Home/End 滚动，Esc/q 返回。读取即显示反馈，可随时返回并忽略迟到结果；没有编辑器或最终拼接诊断。Hub 借用自己的 alternate-screen terminal，direct 命令独占一次 alternate screen；Work 只开 main-buffer overlay，不切换 alternate screen。

@@ -7,7 +7,7 @@ import test from "node:test";
 import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
 
 test("Protocol V2 follows command-origin and passive notifications from a real Pi Worker", async (context) => {

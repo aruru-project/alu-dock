@@ -28,6 +28,9 @@ import type {
   SavedDeliverableLocation,
   ResourcesResult,
   ResourceContentResult,
+  SystemCatalogCursor,
+  SystemCatalogResult,
+  SystemDefaultSetResult,
   SelectedAttachment,
   SessionCompactionResult,
   SessionForkResult,
@@ -734,6 +737,21 @@ export async function listWorkspace(
   }
 }
 
+export async function systemCatalog(cwd: string, context: ConnectionContext, targetHostId: string, cursor?: SystemCatalogCursor): Promise<SystemCatalogResult> {
+  if (isTauri) return invoke<SystemCatalogResult>('system_catalog', { ...context, cwd, targetHostId, cursor: cursor ?? null })
+  throw new Error('请在已连接 Dock 的客户端中选择 system。')
+}
+
+export async function systemContent(cwd: string, id: string, context: ConnectionContext, targetHostId: string, offset?: number, revision?: string): Promise<ResourceContentResult> {
+  if (isTauri) return invoke<ResourceContentResult>('system_content', { ...context, cwd, id, targetHostId, offset: offset ?? null, revision: revision ?? null })
+  throw new Error('请在已连接 Dock 的客户端中读取 system。')
+}
+
+export async function setSystemDefault(cwd: string, id: string, context: ConnectionContext, targetHostId: string): Promise<SystemDefaultSetResult> {
+  if (isTauri) return invoke<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId })
+  throw new Error('请在已连接 Dock 的客户端中保存目录默认。')
+}
+
 export interface CreateWorkContinuation {
   operationId: string
   trustChallengeId: string
@@ -767,10 +785,12 @@ export async function createWork(
   name?: string,
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
+  workerConfig?: Record<string, unknown>,
 ): Promise<Work> {
   if (isTauri) {
     return invoke<Work>('create_work', {
       ...context, cwd,
+      workerConfig: workerConfig ?? null,
       name: name || null,
       targetHostId: targetHostId ?? null,
       operationId: continuation?.operationId ?? null,
@@ -858,7 +878,7 @@ const previewBootstrap: BootstrapPayload = {
     state: 'preview',
     hostEpoch: 'browser-preview',
     dockVersion: '0.2.0',
-    piSdkVersion: '0.84.2',
+    piSdkVersion: 'preview',
     startedAt: now,
     activeEndpointId: 'preview-local',
     profile: {

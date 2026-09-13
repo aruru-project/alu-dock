@@ -598,3 +598,23 @@ export type ConversationItem =
   | { id: string; kind: 'activity' }
   | ConversationProcessItem
   | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[] }
+
+export interface SystemCandidate {
+  id: string
+  name: string
+  kind: 'project-system' | 'global-system' | 'dock-template'
+  path: string
+  workerConfig: Record<string, unknown>
+  warning?: string
+}
+export interface SystemCatalogCursor { revision: string; offset: number }
+export interface SystemCatalogResult {
+  cwd: string
+  candidates: SystemCandidate[]
+  total: number
+  revision: string
+  warnings: string[]
+  defaultSelection?: SystemCandidate
+  nextCursor?: SystemCatalogCursor
+}
+export interface SystemDefaultSetResult { selection: SystemCandidate }

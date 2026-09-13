@@ -1,3 +1,5 @@
+import { SystemService } from "../src/control/system-service.js";
+import { createPiSystemTemplateProvider } from "../src/pi/system-template-provider.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -46,7 +48,9 @@ test("Dock tools create peers off and send visibly attributed messages through c
     { hostEpoch: "dock-tools-host" },
   );
   // Construction binds the same mutation application service used by Protocol V2.
-  new DockHost({ socketPath: join(root, "dock.sock"), registry });
+  const systems = new SystemService(root, createPiSystemTemplateProvider(join(root, "agent")));
+  new DockHost({ socketPath: join(root, "dock.sock"), registry, systemService: systems });
+  const chosenSystem = (await systems.catalog(createdCwd)).candidates[0]!;
 
   const source = await registry.create({ operationId: "create-source", cwd: sourceCwd, name: "Alu" });
   const target = await registry.create({ operationId: "create-target", cwd: targetCwd, name: "Sol" });
@@ -55,6 +59,7 @@ test("Dock tools create peers off and send visibly attributed messages through c
   const created = await registry.invokeDockTool(source.id, {
     type: "create",
     operationId: "tool-create",
+    systemId: chosenSystem.id,
     cwd: createdCwd,
     name: "Fresh Work",
   });

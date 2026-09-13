@@ -7,7 +7,7 @@ import test from "node:test";
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 
 test("real Protocol stop returns immediately after an idle Pi worker exits (card #222)", { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-stop-real-"));

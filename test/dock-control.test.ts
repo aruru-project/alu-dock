@@ -1,3 +1,5 @@
+import { SystemService } from "../src/control/system-service.js";
+import { createPiSystemTemplateProvider } from "../src/pi/system-template-provider.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
@@ -75,7 +77,7 @@ async function createHarness(): Promise<Harness> {
     await instance.submit("deterministic delayed task");
     return instance;
   }, () => `instance-${++sequence}`);
-  const host = new DockHost({ socketPath, registry });
+  const host = new DockHost({ socketPath, registry, systemService: new SystemService(directory, createPiSystemTemplateProvider(join(directory, "agent"))) });
   return { directory, socketPath, host, registry, sessions };
 }
 

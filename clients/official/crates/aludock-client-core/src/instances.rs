@@ -298,6 +298,8 @@ struct WorkspaceListParams<'a> {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateInstanceParams<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worker_config: Option<&'a serde_json::Map<String, Value>>,
     operation_id: &'a str,
     cwd: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -554,7 +556,7 @@ impl DockClient {
         continuation: Option<(&str, ProjectTrustDecision)>,
         operation_id: Option<&str>,
     ) -> Result<InstanceSnapshot> {
-        self.create_instance_for_machine(cwd, name, continuation, operation_id, None)
+        self.create_instance_for_machine(cwd, name, continuation, operation_id, None, None)
             .await
     }
 
@@ -565,6 +567,7 @@ impl DockClient {
         continuation: Option<(&str, ProjectTrustDecision)>,
         operation_id: Option<&str>,
         target_host_id: Option<&str>,
+        worker_config: Option<&serde_json::Map<String, Value>>,
     ) -> Result<InstanceSnapshot> {
         let generated_operation_id = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated_operation_id);
@@ -576,6 +579,7 @@ impl DockClient {
                 "instance.create",
                 &CreateInstanceParams {
                     operation_id,
+                    worker_config,
                     cwd,
                     name,
                     host_id: target_host_id,

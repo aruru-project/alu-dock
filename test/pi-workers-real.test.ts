@@ -11,7 +11,8 @@ import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import { WorkerIncidentStore } from "../src/control/worker-incident-store.js";
-import { createPiInstance, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
+import { resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { RuntimeEffectUnknownError, type InstanceSnapshot } from "../src/core/managed-instance.js";
 import { PiWorkerProcess } from "../src/pi/worker-process.js";
@@ -156,13 +157,18 @@ export default async function () {
 `, "utf8");
   context.after(() => rm(root, { recursive: true, force: true }));
 
-  const workerEnvironment = { ...process.env };
-  for (const key of Object.keys(workerEnvironment)) {
-    if (key.toLowerCase() === "path") delete workerEnvironment[key];
+  const workerEnvironment: NodeJS.ProcessEnv = {
+    PATH: emptyBin, HOME: root, USERPROFILE: root,
+    XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"),
+    XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state"),
+    APPDATA: join(root, "appdata"), LOCALAPPDATA: join(root, "localappdata"),
+    TMPDIR: root, TEMP: root, TMP: root,
+    PI_OFFLINE: "1", PI_CODING_AGENT_DIR: agentDir,
+    PI_PACKAGE_DIR: join(root, "wrong-pi-package"),
+  };
+  for (const key of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"]) {
+    if (process.env[key]) workerEnvironment[key] = process.env[key];
   }
-  workerEnvironment.PATH = emptyBin;
-  workerEnvironment.PI_OFFLINE = "1";
-  workerEnvironment.PI_PACKAGE_DIR = join(root, "wrong-pi-package");
 
   const instance = await createPiInstance({
     id: "pi-runtime-probe", hostEpoch: "pi-runtime-host", creationOperationId: "pi-runtime-create",

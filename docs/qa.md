@@ -52,6 +52,8 @@ Fixture 扮演协议对端，使用满足契约的最少行为。
 
 测试拉起子进程（PTY TUI、独立 Host 进程）时，产品从环境推导的每一条路径（`XDG_STATE_HOME`、`XDG_DATA_HOME`、`HOME` 派生默认值）都必须指进测试 tmpdir。出处：2026-08-18，remote-access PTY 测试未隔离 `XDG_DATA_HOME`，读取了用户的真实附件状态，导致首次实际上传后全套件持续失败。
 
+生产 Worker 的 login-shell bootstrap 按系统账户重新设定 HOME，因此仅修改测试进程的 HOME，或指定 fixture `workerEntry`，不足以隔离它。普通 Pi runtime 测试通过既有 `workerEnvironment` 入口（可复用 `test/fixtures/isolated-pi-instance.ts`）传入明确的临时环境；外层测试进程仍需隔离 HOME/XDG/Pi/npm 路径与凭据。不要在个人开发环境直接以 CLI `serve --dev` 启动后创建 Worker 来代替这个入口。CLI 专属的此类场景须在账户本身也是一次性环境时验证，未运行时明确列出，不记为全套通过。出处：card #271 隔离联调实际发现登录 Shell 恢复真实账户 HOME。
+
 ## 用户能看到的东西
 
 界面上的文字是产品的一部分，和功能同等重要。

@@ -8,7 +8,7 @@ import test from "node:test";
 import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
 
 const PROXY_ENVIRONMENT_KEYS = [

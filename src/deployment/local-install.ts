@@ -46,12 +46,12 @@ export function localInstallLayout(home: string, installRoot?: string, options: 
   }
   const resolvedHome = resolve(home);
   const root = resolve(installRoot ?? join(resolvedHome, ".local", "share", "alu-dock"));
-  const packageDirectory = join(root, "node_modules", "alu-dock");
+  const packageDirectory = join(root, "dock");
   return {
     root,
     packageDirectory,
     cliPath: join(packageDirectory, "dist", "src", "cli.js"),
-    packageExecutable: join(root, "node_modules", ".bin", "aludock"),
+    packageExecutable: join(packageDirectory, "dist", "src", "cli.js"),
     userExecutable: join(resolvedHome, ".local", "bin", "aludock"),
     unitFile: join(resolvedHome, ".config", "systemd", "user", ALU_DOCK_UNIT_NAME),
   };

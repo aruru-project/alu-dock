@@ -6,6 +6,8 @@ import { AttachmentService } from "../../src/control/attachment-service.js";
 import { AttachmentStorageState } from "../../src/control/attachment-storage-state.js";
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
+import { SystemService } from "../../src/control/system-service.js";
+import { createPiSystemTemplateProvider } from "../../src/pi/system-template-provider.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
 import { MachineSettingsState, SubHostStatusReporter, machineSettingsStateRoot, machineStatePersistenceDiagnostic } from "../../src/control/machine-settings-state.js";
 import { machineStateRoot, readMachineJoinFile, SubHostMachineState } from "../../src/control/machine-state.js";
@@ -85,7 +87,8 @@ registry = new DockRegistry(async (input) => realPiDockTools
 });
 await registry.initializeCatalog();
 if (registry.list().length === 0) await registry.create({ operationId: "native-create", cwd: workspace, name: "Remote work" });
-host = new DockHost({ socketPath: join(statePath, "unused.sock"), statePath, registry, attachmentService, listen: false });
+const systemService = new SystemService(homeDir ?? dirname(statePath), createPiSystemTemplateProvider(realPiDockTools ? agentDir! : join(dirname(statePath), "pi")));
+host = new DockHost({ socketPath: join(statePath, "unused.sock"), statePath, registry, attachmentService, systemService, listen: false });
 await host.start();
 await upstream.start();
 for (let attempt = 0; attempt < 200 && !upstream.connected(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
@@ -108,9 +111,14 @@ const visibleMachines = realPiDockTools || statusRecovery ? undefined : await up
 if (visibleMachines && (visibleMachines.type !== "machines" || !visibleMachines.machines.some((machine) => machine.name === "Fixture SubHost"))) {
   throw new Error("fixture SubHost could not discover its Machine name");
 }
-const createdByTool = realPiDockTools || statusRecovery
-  ? undefined
-  : await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool", machine: "Fixture SubHost" });
+let createdByTool;
+if (!realPiDockTools && !statusRecovery) {
+  const catalog = await upstream.invokeDockTool(sourceNativeId, { type: "system", cwd: workspace, machine: "Fixture SubHost" });
+  if (catalog.type !== "system_catalog") throw new Error("fixture system discovery did not return candidates");
+  const selection = catalog.result.candidates.find((item) => item.name === "pi-default.json");
+  if (!selection) throw new Error("fixture default template is missing");
+  createdByTool = await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool", machine: "Fixture SubHost", systemId: selection.id });
+}
 process.stdout.write(`${JSON.stringify({ kind: "ready", nativeInstanceId: sourceNativeId, createdByTool: createdByTool?.type === "create" ? createdByTool.instance.id : undefined, workerPid: realWorkerPid, digest: createHash("sha256").update("specialized-stream").digest("hex") })}\n`);
 
 let stopping = false;

@@ -50,7 +50,7 @@ scripts/                    Dock 构建、安装和开发入口
 
 ## Linux 快速开始
 
-从源码安装要求 Node.js `>=22.19.0`。Windows 日常安装使用下文的官方发行包，不运行 `install:local`。
+从源码安装要求 Node.js `>=24.0.0`。Windows 日常安装使用下文的官方发行包，不运行 `install:local`。
 
 ```bash
 npm install
