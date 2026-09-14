@@ -174,7 +174,6 @@ async function chooseDirectory(path: string, refresh = false) {
   const previouslySaved = refresh ? savedDefaultId.value : ''
   resetSystems()
   saveDefault.value = shouldSave
-  savedDefaultId.value = previouslySaved
   const epoch = systemEpoch
   const hostId = machineHostId.value
   systemPath.value = path
@@ -196,6 +195,7 @@ async function chooseDirectory(path: string, refresh = false) {
     } while (cursor)
     systemCandidates.value = candidates
     systemWarnings.value = warnings
+    savedDefaultId.value = defaultSelection?.id === previouslySaved ? previouslySaved : ''
     systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? null
     if (!refresh && defaultSelection && !defaultSelection.warning) {
       systemSelection.value = defaultSelection
@@ -235,7 +235,9 @@ async function confirmSystem() {
   const epoch = systemEpoch
   const path = systemPath.value
   const hostId = machineHostId.value
-  if (saveDefault.value && savedDefaultId.value !== selection.id) {
+  // A fresh confirmation is a fresh save intent; another Client may have changed
+  // the default. Trust continuation calls createAt directly and does not save again.
+  if (saveDefault.value) {
     pending.value = 'save'
     clearError()
     saveFailed.value = false

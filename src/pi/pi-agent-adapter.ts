@@ -2926,6 +2926,8 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       services,
       sessionManager,
       sessionStartEvent,
+      // Preserve existing plugin preferences; wire JSON cannot disable this contract.
+      extensionModelMutationPolicy: "legacy-defaults",
     });
     return { ...result, services, diagnostics: services.diagnostics };
   };

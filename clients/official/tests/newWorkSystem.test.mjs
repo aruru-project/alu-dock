@@ -60,12 +60,13 @@ try {
     }, vue()],
   })
   const { default: NewWorkDialog } = await import(join(directory, 'component.mjs'))
-  for (const scenario of ['once', 'read-failure', 'save-trust', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
+  for (const scenario of ['once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
     const store = reactive({ connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 },
       recentWorkspaces: () => ['/project'], contextMatches: context => context.connectionId === store.connectionContext.connectionId && context.selectionGeneration === store.connectionContext.selectionGeneration })
     const calls = [], created = [], unknown = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, preview: false, outcomeUnknown: false })
     let lateResolve
+    let currentDefault = scenario === 'default' ? template : undefined
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
@@ -73,20 +74,22 @@ try {
         if (scenario.startsWith('late-')) return new Promise(resolve => { lateResolve = resolve })
         return args.cursor
           ? { cwd: args.cwd, candidates: [template], total: 2, revision: 'r', warnings: [] }
-          : { cwd: args.cwd, candidates: [project], total: 2, revision: 'r', warnings: scenario === 'bad-default' ? ['默认文件损坏，请重新选择。'] : [], nextCursor: { revision: 'r', offset: 1 }, ...(scenario === 'default' || (scenario === 'save-create-failure' && calls.some(call => call.command === 'set_system_default')) ? { defaultSelection: template } : {}) }
+          : { cwd: args.cwd, candidates: [project], total: 2, revision: 'r', warnings: scenario === 'bad-default' ? ['默认文件损坏，请重新选择。'] : [], nextCursor: { revision: 'r', offset: 1 }, ...(currentDefault ? { defaultSelection: currentDefault } : {}) }
       }
       if (command === 'system_content' && scenario === 'read-failure') throw { code: 'resource_unavailable', message: '文件已删除，请重新选择。' }
       if (command === 'system_content' && scenario.startsWith('body-')) return new Promise(resolve => { lateResolve = resolve })
       if (command === 'system_content') return args.offset == null ? { text: original.slice(0, 10), revision: 'body', nextOffset: 12 } : { text: original.slice(10), revision: 'body' }
       if (command === 'set_system_default') {
+        assert.equal(args.id, 'chosen', 'The explicit save targets the user-selected A, not the other Client default B')
         if (scenario === 'save-failure') throw { code: 'system_default_unavailable', message: '无法保存，请检查目录权限。' }
         if (scenario === 'save-unknown') throw { code: 'effect_unknown', outcomeUnknown: true, operationId: 'save-1', message: '保存结果不确定。' }
+        currentDefault = template
         return { selection: template }
       }
       if (command === 'create_work') {
         if (scenario === 'save-trust' && !args.trustChallengeId) throw { code: 'project_trust_required', details: { operationId: 'create-1', challengeId: 'trust-1' } }
         if (scenario === 'save-create-unknown') throw { code: 'effect_unknown', outcomeUnknown: true, operationId: 'create-1', message: '创建结果不确定。' }
-        if (scenario === 'save-create-failure') throw { code: 'worker_start_failed', message: '文件无法读取，请检查后重试。' }
+        if (scenario === 'save-create-failure' || (scenario === 'save-default-changed' && calls.filter(call => call.command === 'create_work').length === 1)) throw { code: 'worker_start_failed', message: '文件无法读取，请检查后重试。' }
         return { id: 'created-work' }
       }
       throw new Error(`Unexpected IPC ${command}`)
@@ -166,6 +169,8 @@ try {
     } else if (scenario === 'save-failure') {
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0)
       assert.ok(text(container).includes('取消勾选'))
+      // Card 271 blind review: surface the Host's action, not only a generic failure.
+      assert.ok(text(container).includes('检查目录权限'), 'The user can see how to fix saving the default')
       const input = find(container, item => item.type === 'input' && item.props.type === 'checkbox')
       input.checked = false; input.change(); await settle()
       await click('确认并创建'); assert.equal(created.length, 1)
@@ -186,6 +191,16 @@ try {
       assert.equal(button('选择的模板').props['aria-pressed'], true)
       await click('确认并创建')
       assert.equal(calls.filter(c => c.command === 'create_work').length, 2, 'Retrying still requires explicit confirmation')
+    } else if (scenario === 'save-default-changed') {
+      // Card 271 blind review: another Client changes A to B after our save.
+      currentDefault = project
+      await click('重新读取')
+      assert.equal(button('选择的模板').props['aria-pressed'], true)
+      assert.equal(find(container, item => item.type === 'input' && item.props.type === 'checkbox').checked, true)
+      assert.equal(created.length, 0, 'Refresh still cannot create Work')
+      await click('确认并创建')
+      assert.equal(currentDefault.id, 'chosen', 'An explicit save restores A as the next Work default, not just this Work source')
+      assert.equal(created.length, 1)
     } else if (scenario === 'save-trust') {
       await click('仅本次信任')
       const attempts = calls.filter(c => c.command === 'create_work')
@@ -200,7 +215,8 @@ try {
       assert.equal(call.args.targetHostId, 'target')
       assert.equal(call.args.connectionId, 'connection-a')
     }
-    assert.equal(calls.filter(c => c.command === 'set_system_default').length, scenario.startsWith('save-') ? 1 : 0, 'Trust continuation does not save again')
+    const saves = scenario === 'save-create-failure' || scenario === 'save-default-changed' ? 2 : scenario.startsWith('save-') ? 1 : 0
+    assert.equal(calls.filter(c => c.command === 'set_system_default').length, saves, 'Trust continuation saves once; a new explicit confirmation saves its requested default again')
     app.unmount()
   }
   console.log('PASS: directory/recent → ordered selection → raw paged preview/copy → retained choice → once/save/failures/trust; stale discovery fenced; actual TS IPC payloads')

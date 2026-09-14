@@ -20,6 +20,7 @@ test("model and Thinking choices preserve saved preferences and report real disk
   await writeFile(settingsPath, JSON.stringify({
     defaultProvider: "settings-fixture", defaultModel: "reasoning-a", defaultThinkingLevel: "low",
     enabledModels: ["settings-fixture/reasoning-a"],
+    modelThinkingLevels: { "settings-fixture/reasoning-b": "low" },
   }));
   await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { "settings-fixture": {
     baseUrl: "http://127.0.0.1:1/v1", api: "openai-completions", apiKey: "literal-unused-fixture-key",
@@ -31,6 +32,15 @@ test("model and Thinking choices preserve saved preferences and report real disk
   await writeFile(join(agentDir, "extensions", "model-observer.ts"), `
 import { appendFileSync } from "node:fs";
 export default function (pi) {
+  pi.registerCommand("fixture-model-preference", { handler: async (id, ctx) => {
+    const model = ctx.modelRegistry.find("settings-fixture", id.trim());
+    if (!model || !await pi.setModel(model)) throw new Error("fixture model unavailable");
+    ctx.ui.notify("fixture preference applied: " + pi.getThinkingLevel(), "info");
+  } });
+  pi.registerCommand("fixture-thinking-preference", { handler: (level, ctx) => {
+    pi.setThinkingLevel(level.trim());
+    ctx.ui.notify("fixture preference applied: " + pi.getThinkingLevel(), "info");
+  } });
   pi.on("model_select", (event) => appendFileSync(${JSON.stringify(observerPath)}, JSON.stringify({
     model: event.model.id, thinking: pi.getThinkingLevel(),
   }) + "\\n"));
@@ -66,6 +76,31 @@ export default function (pi) {
     assert.equal(instance.executor.thinkingLevel, "high");
     assert.equal((await settings()).defaultThinkingLevel, "low");
 
+    const invokePlugin = async (command: string, operationId: string, expectedThinking: Parameters<DockClient["setThinking"]>[1]) => {
+      await client.prompt(id, command, "prompt", operationId);
+      for (let attempt = 0; ; attempt++) {
+        const applied = (await client.read(id)).page.events.find((event) => event.type === "extension.notification" && event.data.operationId === operationId);
+        if (applied?.type === "extension.notification") {
+          assert.equal(applied.data.message, `fixture preference applied: ${expectedThinking}`);
+          break;
+        }
+        assert.ok(attempt < 100, "the plugin command finishes without a model run");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Wait for the plugin's own post-setter observation, not command admission.
+      // Repeating that observed level only flushes queued settings; it cannot
+      // compensate for a plugin that forgot to save or preserve its preference.
+      await client.setThinking(id, expectedThinking);
+      return client.status(id);
+    };
+    // Card 271 blind review: plugins bypass the Protocol setter compensation.
+    const pluginModel = await invokePlugin("/fixture-model-preference reasoning-b", "plugin-model-b", "high");
+    assert.equal(pluginModel.executor.thinkingLevel, "high");
+    assert.equal((await settings()).defaultModel, "reasoning-b");
+    assert.equal((await settings()).defaultThinkingLevel, "low");
+    assert.deepEqual((await settings()).enabledModels, ["settings-fixture/reasoning-a"]);
+    await invokePlugin("/fixture-model-preference reasoning-a", "plugin-model-a", "high");
+
     const unchanged = await client.setThinking(id, "high");
     assert.equal(unchanged.settingsWrite.persisted, true);
     assert.equal((await settings()).defaultThinkingLevel, "low", "an unchanged session choice must not replace another saved preference");
@@ -89,6 +124,12 @@ export default function (pi) {
     assert.equal((await settings()).defaultThinkingLevel, "high");
     const restored = await client.setModel(id, "settings-fixture", "reasoning-a");
     assert.equal(restored.instance.executor.thinkingLevel, "high");
+
+    await invokePlugin("/fixture-thinking-preference low", "plugin-thinking-low", "low");
+    assert.equal((await settings()).defaultThinkingLevel, "low");
+    const pluginThinking = await invokePlugin("/fixture-thinking-preference max", "plugin-thinking-clamp", "high");
+    assert.equal(pluginThinking.executor.thinkingLevel, "high");
+    assert.equal((await settings()).defaultThinkingLevel, "high", "plugins save the changed effective level, not unsupported max");
 
     for (const key of ["thinking", "model"] as const) {
       const backup = join(agentDir, "saved-settings.json");
