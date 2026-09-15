@@ -158,7 +158,8 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
 
   async function applyLive(instance: string, subscription: string, event: ProjectedEvent): Promise<boolean> {
     if (instance !== instanceId.value || subscription !== subscriptionId.value) return false
-    if (event.sequence !== lastSequence.value + 1) return false
+    // Ordinary Follow can skip numbers reserved for controller-only directives.
+    if (event.sequence <= lastSequence.value) return false
     if (event.eventType === 'session.replaced') {
       const revision = ++lifecycleRevision
       acquisitionRevision++
@@ -173,7 +174,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       if (revision !== lifecycleRevision
         || instance !== instanceId.value
         || subscription !== subscriptionId.value
-        || event.sequence !== lastSequence.value + 1) return false
+        || event.sequence <= lastSequence.value) return false
       lastSequence.value = event.sequence
       status.value = {}
       aboveWidgets.value = {}

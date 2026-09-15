@@ -49,7 +49,8 @@ impl FollowStream {
         let event: DockEvent = self.inner.next().await?;
         let same_generation = event.instance_id == self.cursor.instance_id
             && event.runtime_generation == self.cursor.runtime_generation
-            && self.cursor.sequence.checked_add(1) == Some(event.sequence);
+            // Host filters controller-only events without renumbering the journal.
+            && event.sequence > self.cursor.sequence;
         let replacement = event.instance_id == self.cursor.instance_id
             && self.cursor.runtime_generation.checked_add(1) == Some(event.runtime_generation)
             && event.sequence == 1
@@ -381,6 +382,78 @@ impl DockClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #298: controller-only events consume journal sequence numbers but are not
+    // sent on ordinary Follow. The real client must keep reading that stream.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn follow_keeps_receiving_after_controller_only_events() {
+        use crate::tls::{read_json_line, write_json_line};
+        use crate::{ConnectionRouter, IdentityStore, LocalDockEndpoint};
+        let directory = std::env::temp_dir().join(format!("af-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let endpoint = directory.join("dock.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let hello: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+            write_json_line(
+                &mut socket,
+                &serde_json::json!({
+                    "kind": "hello_ack", "version": 2, "requestId": hello["requestId"],
+                    "catalogSchemaVersion": 1, "host": {"hostEpoch": "epoch"},
+                    "capabilities": FOLLOW_CAPABILITIES, "limits": {"maxLineBytes": 16384}
+                }),
+            )
+            .await
+            .unwrap();
+            let request: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+            assert_eq!(request["type"], "instance.follow");
+            let cursor = serde_json::json!({"hostEpoch": "epoch", "instanceId": "work", "runtimeGeneration": 1, "sequence": 10});
+            write_json_line(
+                &mut socket,
+                &serde_json::json!({
+                    "kind": "response", "version": 2, "requestId": request["requestId"],
+                    "hostEpoch": "epoch", "ok": true, "result": {"page": {
+                        "events": [], "earliest": cursor, "latest": cursor,
+                        "truncated": false, "epochChanged": false, "generationChanged": false
+                    }}
+                }),
+            )
+            .await
+            .unwrap();
+            for sequence in [11, 14] {
+                write_json_line(&mut socket, &serde_json::json!({
+                    "kind": "event", "version": 2, "requestId": request["requestId"], "hostEpoch": "epoch",
+                    "event": {"scope": "instance", "instanceId": "work", "runtimeGeneration": 1,
+                        "sequence": sequence, "occurredAt": "2026-09-15T00:00:00Z",
+                        "type": "extension.status_changed", "data": {"key": "phase", "text": "working"}}
+                })).await.unwrap();
+            }
+        });
+        let store = IdentityStore::new(directory.join("identity"));
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &store,
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "follow-gap".into(),
+            )
+            .unwrap(),
+        );
+        let cursor = EventCursor {
+            host_epoch: "epoch".into(),
+            instance_id: "work".into(),
+            runtime_generation: 1,
+            sequence: 10,
+        };
+        let (_, mut follow) = client.follow_instance("work", &cursor).await.unwrap();
+        let first = follow.next_event().await.unwrap();
+        let after_directives = follow.next_event().await;
+        peer.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(first.sequence, 11);
+        assert_eq!(after_directives.unwrap().sequence, 14);
+    }
 
     #[test]
     fn image_block_preserves_its_attachment_relation() {

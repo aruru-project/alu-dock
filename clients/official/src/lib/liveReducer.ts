@@ -14,7 +14,7 @@ export interface LiveEventEnvelope extends ConnectionContext {
 
 export type LiveReduction =
   | { kind: 'ignored'; state: LiveProjectionState; reason: 'stale_identity' | 'stale_event' }
-  | { kind: 'rebuild'; state: LiveProjectionState; reason: 'generation_boundary' | 'sequence_gap' }
+  | { kind: 'rebuild'; state: LiveProjectionState; reason: 'generation_boundary' }
   | { kind: 'applied'; state: LiveProjectionState; conversationChanged: boolean; configChanged: boolean }
 
 const conversationEvents = new Set([
@@ -47,7 +47,8 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
     || event.eventType === 'session.replaced') {
     return { kind: 'rebuild', state, reason: 'generation_boundary' }
   }
-  if (event.sequence !== state.sequence + 1) return { kind: 'rebuild', state, reason: 'sequence_gap' }
+  // Controller-only events keep their journal numbers but are absent from Follow.
+  // The stale-event check above enforces order without inventing missing frames.
 
   if (event.eventType === 'message.delta') {
     return {
