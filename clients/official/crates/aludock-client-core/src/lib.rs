@@ -107,4 +107,7 @@ pub use workspace_files::{
     normalize_workspace_path,
 };
 
-pub use systems::{SystemCandidate, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, SystemSourceKind};
+pub use systems::{
+    SystemCandidate, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
+    SystemSourceKind,
+};

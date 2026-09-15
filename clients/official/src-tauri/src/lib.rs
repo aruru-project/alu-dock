@@ -37,9 +37,9 @@ use aludock_client_core::{
     ReadReplay, ResourceContentResult, ResourceInfo, ResourcesResult, SessionCompactionResult,
     SessionForkResult, SessionNameResult, SessionNavigateResult, SessionReloadResult,
     SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
-    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
-    SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
-    WindowsAwayDelay, WorkspaceCursor, WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage,
+    SettingsResult, SourceInfo, StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult,
+    SystemDefaultSetResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay,
+    WorkspaceCursor, WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage,
     WorkspaceFileReadProgress, WorkspaceFileReadResult, WorkspacePage, delete_endpoint,
     probe_host_endpoint, record_endpoint_test, reorder_endpoints, save_unverified_endpoint,
     save_verified_endpoint, saved_endpoint_for_test,
@@ -6948,7 +6948,13 @@ async fn system_content(
 ) -> Result<ResourceContentResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .system_content(&cwd, &id, target_host_id.as_deref(), offset, revision.as_deref())
+        .system_content(
+            &cwd,
+            &id,
+            target_host_id.as_deref(),
+            offset,
+            revision.as_deref(),
+        )
         .await
         .map_err(CommandError::from)
 }

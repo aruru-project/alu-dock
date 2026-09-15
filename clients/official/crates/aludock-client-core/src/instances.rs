@@ -921,6 +921,7 @@ mod tests {
             operation_id: "operation-a",
             cwd: "/project",
             name: None,
+            worker_config: None,
             host_id: Some("subhost-a"),
             trust_challenge_id: None,
             project_trust_decision: None,
