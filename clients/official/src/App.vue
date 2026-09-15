@@ -1438,6 +1438,7 @@ function pulseCommandPalette() {
 }
 
 function handleModalKeydown(event: KeyboardEvent) {
+  if (event.isComposing || composer.composing.value) return
   if (event.key === 'Escape') {
     event.preventDefault()
     closeModal()
@@ -2746,7 +2747,7 @@ function reattachConversationFollow(instanceId: string) {
 async function performConversationReattach(instanceId: string, scopeIsCurrent: () => boolean) {
   const isCurrent = () => scopeIsCurrent() && selected.value?.lifecycle === 'active'
   if (!isCurrent()) return
-  if (activeFollow.value) await detachConversationFollow()
+  if (activeFollow.value) await detachConversationFollow('recovery')
   if (!isCurrent()) return
   if (historyReloadRequiredWorkId === instanceId) {
     await performConversationLoad(instanceId, true)
@@ -2879,7 +2880,8 @@ async function handleWindowFocusChanged(focused: boolean) {
   }
 }
 
-async function detachConversationFollow() {
+async function detachConversationFollow(owner: 'external' | 'recovery' = 'external') {
+  if (owner === 'external') recovery.invalidate()
   const followed = activeFollow.value
   const controllerHandle = extensionUi.controller?.handle
   const workId = selected.value?.id
@@ -3011,7 +3013,7 @@ function recoverConversation(instanceId: string, operation: (isCurrent: () => bo
   const selectionRevision = conversationSelectionRevision
   const focusEpoch = windowFocusEpoch
   const key = JSON.stringify([context, hostEpoch, instanceId, selected.value?.runtimeGeneration, selectionRevision, focusEpoch])
-  return recovery(key, activeFollow.value?.subscriptionId ?? null, (ownsRecovery) => {
+  return recovery.run(key, activeFollow.value?.subscriptionId ?? null, (ownsRecovery) => {
     const isCurrent = () => ownsRecovery() && !!context && app.contextMatches(context)
       && app.payload?.host.hostEpoch === hostEpoch && selectionRevision === conversationSelectionRevision
       && focusEpoch === windowFocusEpoch && windowFocused.value
@@ -3209,7 +3211,7 @@ async function startCompaction(customInstructions?: string) {
     const authoritative = applyAuthoritativeWorkSnapshot(result.instance)
     if (selected.value?.id === work.id) await refreshSessionConversation(authoritative)
   } catch (cause) {
-    markUnknownOutcome(cause, 'sessions', work.id)
+    markControlUnknown(cause, 'sessions', scope)
     const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
     const matchingFollow = followConnected.value
       && activeFollow.value?.connectionId === capturedHost.connectionId
@@ -3333,9 +3335,9 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
     } else if (domain === 'settings' && workId !== 'global') {
       reconciled = await reconcileControlProjection('settings', workId)
     } else if ((domain === 'sessions' || domain === 'tree') && workId !== 'global') {
-      await app.load()
+      const refreshed = await app.loadActive()
       if (!isCurrent()) return
-      if (app.error || selected.value?.id !== workId) throw new Error('暂时无法确认修改后的 Work 状态，请稍后重试。')
+      if (!refreshed || app.error || selected.value?.id !== workId) throw new Error('暂时无法确认修改后的 Work 状态，请稍后重试。')
       if (domain === 'sessions' && selected.value?.compacting) throw new Error('上下文仍在压缩；完成后再刷新确认。')
       await nextTick()
       if (!isCurrent()) return
@@ -3344,9 +3346,9 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
       const conversation = await loadSelectedConversation(workId, true)
       reconciled = projection && conversation && !app.error
     } else if (domain === 'work') {
-      await app.load()
+      reconciled = await app.loadActive()
       if (!isCurrent()) return
-      reconciled = !app.error
+      reconciled = reconciled && !app.error
     }
     if (!isCurrent()) return
     if (!reconciled) throw new Error('还无法确认刚才的修改是否生效。请再次刷新确认，不要重复提交。')

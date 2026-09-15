@@ -623,7 +623,7 @@ function ensureContentImage(
   let item = images.get(imageKey)
   if (!item) {
     item = {
-      id,
+      id: contentRef ? `${id}:${contentRef}` : id,
       kind: 'image',
       groupId,
       imageKey,

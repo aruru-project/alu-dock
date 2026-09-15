@@ -38,7 +38,7 @@ try {
     state = reduced.state
   }
   const { createConversationRecovery } = await server.ssrLoadModule('/src/lib/conversationRecovery.ts')
-  const recover = createConversationRecovery()
+  const { run: recover } = createConversationRecovery()
   let release, requests = 0
   const operation = () => { requests++; return new Promise(resolve => { release = resolve }) }
   const first = recover('host:work:runtime', 'old-follow', operation)

@@ -3,7 +3,7 @@
 export function createConversationRecovery() {
   type Recovery = { key: string; subscription: string | null; task: Promise<boolean>; next?: (isCurrent: () => boolean) => Promise<boolean> }
   let current: Recovery | null = null
-  return (key: string, subscription: string | null, operation: (isCurrent: () => boolean) => Promise<boolean>): Promise<boolean> => {
+  function run(key: string, subscription: string | null, operation: (isCurrent: () => boolean) => Promise<boolean>): Promise<boolean> {
     if (current?.key === key) {
       if (subscription && subscription !== current.subscription) {
         current.subscription = subscription
@@ -25,4 +25,5 @@ export function createConversationRecovery() {
     }).finally(() => { if (current === entry) current = null })
     return entry.task
   }
+  return { run, invalidate: () => { current = null } }
 }

@@ -99,24 +99,26 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  async function loadActive(epoch = ++loadEpoch) {
+  async function loadActive(epoch = ++loadEpoch): Promise<boolean> {
     ++workCatalogRefreshEpoch
     const context = connectionContext.value
-    if (!context) return
+    if (!context) return false
     const captured = { ...context }
     error.value = null
     hostUnreachable.value = false
     try {
       const next = await bootstrap(captured)
-      if (epoch !== loadEpoch || !contextMatches(captured)) return
-      if (next.connectionId !== captured.connectionId || next.selectionGeneration !== captured.selectionGeneration) return
+      if (epoch !== loadEpoch || !contextMatches(captured)) return false
+      if (next.connectionId !== captured.connectionId || next.selectionGeneration !== captured.selectionGeneration) return false
       applyBootstrapProjection(next, captured)
+      return true
     } catch (cause) {
-      if (epoch !== loadEpoch || !contextMatches(captured)) return
+      if (epoch !== loadEpoch || !contextMatches(captured)) return false
       payload.value = null
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
       hostUnreachable.value = code === 'host_unreachable' || code === 'connection_failed'
       error.value = humanError(cause)
+      return false
     }
   }
 

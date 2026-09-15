@@ -138,7 +138,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ] {
         assert_eq!(
-            format!("{:x}", Sha256::digest(text.as_bytes())),
+            Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
             expected,
             "complete {field} template"
         );
