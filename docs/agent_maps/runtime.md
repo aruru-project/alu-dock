@@ -96,6 +96,8 @@ Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部�
 
 创建 Pi session 时，adapter 固定启用 `extensionModelMutationPolicy: "legacy-defaults"`，保留既有插件 `pi.setModel()` / `pi.setThinkingLevel()` 的默认保存行为：切模型保存默认 provider/model 并保留当前 Thinking 偏好，只有发生变化的有效 Thinking 才写默认，非推理模型不会抹掉偏好，也不隐式扩大模型范围。该配置随既有 session factory 重建，不由 wire workerConfig 覆盖；Pi 的公开 SDK setter 仍保留 0.85 的显式持久化语义。插件同步 setter 只更新内存并排队写入，不是落盘回执，不能替代 Dock 原有的 `flush()` / `drainErrors()` 与 `settingsWrite.persisted` 合同。
 
+Worker event/response 已携带完整 `modelState`。连接接收时捕获其变化与 generation，Host 通过既有 catalog transition 提交模型/Thinking，并用 `model.changed` 通知实时客户端；被动观察没有原始 requested level，不编造 `thinking.changed.requested`。显式 Dock 配置仍拥有自身完成和失败事件，期间观察到的最新状态在该提交后补齐、相同值去重；Thinking 请求若同时观察到模型变更，也发布模型事件。Session replacement 使用对应消息携带的模型状态，不能在异步提交时重新读取已经前进的 Worker 状态。
+
 消息提交的 input kind、实际 delivery 和 custody owner 都由 adapter 确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；普通 prompt 由 Pi input hook 再次检查运行状态后报告实际采用的 `prompt / steer / followUp`，registered extension command 则在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前报告。Compaction 期间不能交给 Pi 的普通 input 明确报告 Host custody。这个私有 preflight 是 Worker→Host 的事实通知，不增加逐条批准往返；Host 按 adapter 报告的实际 delivery 提交 receipt 和 Queue 状态；较早的 `isStreaming` 或 extension command 文本不作为 delivery 判断依据。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
 
 Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。已经被 Worker 接受的用户消息始终发布为 canonical conversation frame；Host 的辅助 Queue identity 关联异常时，消息仍须先出现在 conversation。

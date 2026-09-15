@@ -67,6 +67,7 @@ import type {
   AgentCommandContentBody,
   AgentModelListBody,
   AgentModelState,
+  AgentModelStateObservation,
   AgentResourceProjectionBody,
   AgentSessionListBody,
   AgentNavigateOptions,
@@ -358,6 +359,8 @@ export class ManagedInstance {
   private committedSnapshotValue: InstanceSnapshot | undefined;
   private catalogAdmissionOperationId: string | undefined;
   private readonly admissionBufferedEvents: AgentEvent[] = [];
+  private modelConfigurationActive = false;
+  private deferredModelObservation: AgentModelStateObservation | undefined;
   private admissionBufferOverflow = false;
   private receiptBoundaryOperationId: string | undefined;
   private sessionNameOperationId: string | undefined;
@@ -1179,6 +1182,7 @@ export class ManagedInstance {
 
   async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<AgentModelState> {
     const configuration = await this.beginConfiguration("switching model", { admission: "live" });
+    this.modelConfigurationActive = true;
     try {
       const state = await this.invokeAgent<AgentModelState>("model.set", { operationId, provider, modelId });
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1203,18 +1207,20 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration(configuration);
+      this.finishModelConfiguration(configuration);
     }
   }
 
   async setThinkingLevel(level: ThinkingLevel, operationId = this.createCommandId()): Promise<AgentModelState> {
     const configuration = await this.beginConfiguration("changing thinking level", { admission: "live" });
+    this.modelConfigurationActive = true;
     try {
       const state = await this.invokeAgent<AgentModelState>("thinking.set", { operationId, level });
+      let modelChanged = false;
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "thinking.set", effect: "post_effect", operationId, instanceId: this.id },
-        () => { this.applyModelState(state); this.touch(); },
-        () => this.appendThinkingChanged(level, state),
+        () => { modelChanged = this.applyModelState(state); this.touch(); },
+        () => { if (modelChanged) this.appendModelChanged(state); this.appendThinkingChanged(level, state); },
       ));
       return state;
     } catch (error) {
@@ -1222,10 +1228,11 @@ export class ManagedInstance {
       if (error instanceof AgentSettingsWriteError) {
         if (error.mutationApplied) {
           const state = this.agentState().modelState;
+          let modelChanged = false;
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: "thinking.set", effect: "post_effect", operationId, instanceId: this.id },
-            () => { this.applyModelState(state); this.touch(); },
-            () => { this.appendThinkingChanged(level, state); this.appendSettingsWriteFailed(error); },
+            () => { modelChanged = this.applyModelState(state); this.touch(); },
+            () => { if (modelChanged) this.appendModelChanged(state); this.appendThinkingChanged(level, state); this.appendSettingsWriteFailed(error); },
           ));
         } else {
           await this.enqueueTransition(async () => { this.appendSettingsWriteFailed(error); });
@@ -1233,7 +1240,7 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration(configuration);
+      this.finishModelConfiguration(configuration);
     }
   }
 
@@ -2596,9 +2603,21 @@ export class ManagedInstance {
     await Promise.all(tasks);
   }
 
-  private applyModelState(state: AgentModelState): void {
+  private finishModelConfiguration(configuration: InstanceCommandLease): void {
+    this.modelConfigurationActive = false;
+    const observation = this.deferredModelObservation;
+    this.deferredModelObservation = undefined;
+    // The explicit setter owns its completion and requested/clamped event. Apply
+    // only a newer actual state after it, rather than racing its catalog commit.
+    if (observation) this.dispatchAgentEvent(observation);
+    this.endConfiguration(configuration);
+  }
+
+  private applyModelState(state: AgentModelState): boolean {
+    const changed = this.executorIdentity.model?.provider !== state.model?.provider || this.executorIdentity.model?.id !== state.model?.id;
     this.executorIdentity.model = state.model ? { provider: truncate(state.model.provider, 256) ?? "unknown", id: truncate(state.model.id, 512) ?? "unknown" } : undefined;
     this.executorIdentity.thinkingLevel = state.thinkingLevel;
+    return changed;
   }
 
   private appendModelChanged(state: AgentModelState): void {
@@ -2649,6 +2668,10 @@ export class ManagedInstance {
 
   private dispatchAgentEvent(event: AgentEvent): void {
     if (this.hostDrainActive) return;
+    if (event.type === "dock_model_state_observed" && this.modelConfigurationActive) {
+      this.deferredModelObservation = event as AgentModelStateObservation;
+      return;
+    }
     // Replacement UI retirement must begin at event receipt, before the durable
     // transition queue yields to freshly initialized UI calls from the Worker.
     if (event.type === "dock_session_replaced") this.extensionUi.beginGenerationChange();
@@ -2848,6 +2871,22 @@ export class ManagedInstance {
    */
   private agentEventTransition(event: AgentEvent): AgentEventTransition | undefined {
     switch (event.type) {
+      case "dock_model_state_observed": {
+        const observation = event as AgentModelStateObservation;
+        const model = observation.modelState;
+        if (observation.runtimeGeneration !== this.runtimeGenerationValue || this.state.lifecycle !== "active") return;
+        if (this.executorIdentity.model?.provider === model.model?.provider
+          && this.executorIdentity.model?.id === model.model?.id
+          && this.executorIdentity.thinkingLevel === model.thinkingLevel) return;
+        return {
+          kind: "model.observed",
+          durable: true,
+          mutate: () => { this.applyModelState(model); this.touch(); },
+          // This is the full observed model configuration. Unlike a Dock
+          // thinking.set request, an observation carries no requested level.
+          publish: () => this.appendModelChanged(model),
+        };
+      }
       case "dock_session_replaced": {
         const replacedQueue = removedQueueProjection(this.trackedQueueMessages(), this.state);
         const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
@@ -2858,6 +2897,7 @@ export class ManagedInstance {
           ? "clone"
           : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
         const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
+        const modelState = event.modelState as AgentModelState | undefined;
         return {
           kind: "session.replaced",
           durable: true,
@@ -2895,7 +2935,7 @@ export class ManagedInstance {
             this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
             this.durableSessionFileValue = this.runtimeDurableSessionFile();
             this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
-            this.applyModelState(this.agentState().modelState);
+            this.applyModelState(modelState ?? this.agentState().modelState);
             this.touch();
           },
           publish: () => {

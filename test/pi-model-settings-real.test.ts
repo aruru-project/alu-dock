@@ -8,6 +8,8 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
+import type { DockEvent } from "../src/core/managed-instance.js";
 import { createPiInstance, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
 
 test("model and Thinking choices preserve saved preferences and report real disk failures", { timeout: 30_000 }, async () => {
@@ -62,21 +64,27 @@ export default function (pi) {
     PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1",
   };
   for (const key of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"]) if (process.env[key]) env[key] = process.env[key];
+  const catalog = new FileCatalogStore(join(root, "catalog.json"));
   const registry = new DockRegistry(
     (input) => createPiInstance({ ...input, agentDir, sessionDir, workerEnvironment: env }),
     undefined,
-    { reopenTargetResolver: { resolve: resolvePiReopenTarget } },
+    { reopenTargetResolver: { resolve: resolvePiReopenTarget }, catalogStore: catalog },
   );
   const host = new DockHost({ socketPath: join(root, "dock.sock"), registry });
   const client = new DockClient({ socketPath: host.socketPath });
   try {
+    await registry.initializeCatalog();
     await host.start();
     const { instance } = await client.adopt(prior.getSessionFile()!);
     const id = instance.id;
+    const followed: DockEvent[] = [];
+    await client.follow(id, (await client.read(id)).page.latest, { onEvent: (event) => followed.push(event) });
     assert.equal(instance.executor.thinkingLevel, "high");
     assert.equal((await settings()).defaultThinkingLevel, "low");
 
-    const invokePlugin = async (command: string, operationId: string, expectedThinking: Parameters<DockClient["setThinking"]>[1]) => {
+    const invokePlugin = async (command: string, operationId: string, expectedThinking: Parameters<DockClient["setThinking"]>[1], expectedModel?: string) => {
+      const expectedModelId = expectedModel ?? (await client.status(id)).executor.model?.id;
+      const eventStart = followed.length;
       await client.prompt(id, command, "prompt", operationId);
       for (let attempt = 0; ; attempt++) {
         const applied = (await client.read(id)).page.events.find((event) => event.type === "extension.notification" && event.data.operationId === operationId);
@@ -87,19 +95,36 @@ export default function (pi) {
         assert.ok(attempt < 100, "the plugin command finishes without a model run");
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      // Wait for the plugin's own post-setter observation, not command admission.
-      // Repeating that observed level only flushes queued settings; it cannot
-      // compensate for a plugin that forgot to save or preserve its preference.
+      // Card 271: Worker/settings changed but Host kept its initial model. Observe
+      // without another configuration request so it cannot mask missing sync.
+      for (let attempt = 0; ; attempt++) {
+        const visible = (await client.status(id)).executor;
+        const notified = followed.slice(eventStart).some((event) => event.type === "model.changed"
+          && event.data.id === expectedModelId && event.data.thinkingLevel === expectedThinking);
+        if (visible.thinkingLevel === expectedThinking && visible.model?.id === expectedModelId && notified) break;
+        assert.ok(attempt < 100, "Host reflects the plugin model and Thinking without a configuration request");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const updates = followed.slice(eventStart).filter((event) => event.type === "model.changed");
+      assert.equal(updates.length, 1, "one plugin change produces one full model configuration update");
+      const listed = (await client.list()).find((item) => item.id === id)!;
+      const read = await client.read(id);
+      const stored = (await catalog.load())!.instances.find((item) => item.id === id)!;
+      for (const state of [listed.executor, read.instance.executor, stored]) {
+        assert.equal(state.model?.id, expectedModelId);
+        assert.equal(state.thinkingLevel, expectedThinking);
+      }
+      // This now-confirmed same-level call only flushes queued settings.
       await client.setThinking(id, expectedThinking);
       return client.status(id);
     };
     // Card 271 blind review: plugins bypass the Protocol setter compensation.
-    const pluginModel = await invokePlugin("/fixture-model-preference reasoning-b", "plugin-model-b", "high");
+    const pluginModel = await invokePlugin("/fixture-model-preference reasoning-b", "plugin-model-b", "high", "reasoning-b");
     assert.equal(pluginModel.executor.thinkingLevel, "high");
     assert.equal((await settings()).defaultModel, "reasoning-b");
     assert.equal((await settings()).defaultThinkingLevel, "low");
     assert.deepEqual((await settings()).enabledModels, ["settings-fixture/reasoning-a"]);
-    await invokePlugin("/fixture-model-preference reasoning-a", "plugin-model-a", "high");
+    await invokePlugin("/fixture-model-preference reasoning-a", "plugin-model-a", "high", "reasoning-a");
 
     const unchanged = await client.setThinking(id, "high");
     assert.equal(unchanged.settingsWrite.persisted, true);

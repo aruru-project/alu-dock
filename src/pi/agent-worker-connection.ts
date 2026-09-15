@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
-import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
+import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentModelStateObservation, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -211,8 +211,10 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
         this.sender.updateRuntimeGeneration(this.expectedGeneration);
         this.cancelGenerationCalls(previous);
       }
-      this.applyState(envelope.state);
-      for (const listener of this.listeners) { try { listener(envelope.event as AgentEvent); } catch {} }
+      const replaced = envelope.event.type === "dock_session_replaced";
+      this.applyState(envelope.state, !replaced);
+      const event = replaced ? { ...envelope.event, modelState: structuredClone(envelope.state.modelState) } : envelope.event;
+      for (const listener of this.listeners) { try { listener(event as AgentEvent); } catch {} }
       return;
     }
     if (envelope.kind === "call" && !this.reverseCapabilities.has(envelope.capability as ReverseWorkerCapability)) {
@@ -284,8 +286,17 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     finally { this.uiAbort.delete(callId); }
   }
 
-  private applyState(state: AgentWorkerState): void {
+  private applyState(state: AgentWorkerState, notify = true): void {
+    const previous = this.stateValue?.modelState;
     this.stateValue = structuredClone(state);
+    if (!notify || !previous || JSON.stringify(previous) === JSON.stringify(state.modelState)) return;
+    const event: AgentModelStateObservation = {
+      type: "dock_model_state_observed",
+      modelState: structuredClone(state.modelState),
+      runtimeGeneration: this.expectedGeneration,
+    };
+    // Capture here: a queued Host transition must not read a later Worker state.
+    for (const listener of this.listeners) { try { listener(event); } catch {} }
   }
 
   private acceptIdentity(received: WorkerIdentity, initial: WorkerIdentity): boolean { return received.hostEpoch === initial.hostEpoch && received.instanceId === initial.instanceId && received.workerIncarnation === initial.workerIncarnation && received.runtimeGeneration === this.expectedGeneration; }

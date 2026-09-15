@@ -48,6 +48,13 @@ export interface AgentModelState {
   availableThinkingLevels: ThinkingLevel[];
 }
 
+/** Host-local notification of an already validated Worker state; never a wire event. */
+export interface AgentModelStateObservation extends AgentEvent {
+  type: "dock_model_state_observed";
+  modelState: AgentModelState;
+  runtimeGeneration: number;
+}
+
 export type AgentSessionInfo = SessionDto;
 
 export interface AgentSessionMetrics {
