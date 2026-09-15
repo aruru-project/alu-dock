@@ -127,6 +127,8 @@ import AttachmentCard from './components/AttachmentCard.vue'
 import DeliveryTray from './components/DeliveryTray.vue'
 import ControlCenter, { type ControlMutationDomain } from './components/ControlCenter.vue'
 import ConversationView from './components/ConversationView.vue'
+import { createConversationRecovery } from './lib/conversationRecovery'
+import { useComposer } from './lib/composer'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
 import NewWorkDialog from './components/NewWorkDialog.vue'
@@ -147,7 +149,13 @@ const app = useAppStore()
 const commandCatalogStore = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
 const extensionUi = useExtensionUiStore()
-const draft = computed({ get: () => app.currentDraft, set: (value: string) => app.setCurrentDraft(value) })
+const composer = useComposer({
+  read: () => app.currentDraft, write: (value) => app.setCurrentDraft(value),
+  identity: () => JSON.stringify([app.connectionContext, app.selectedWorkId]),
+  flush: () => app.flushLocalState(),
+  canFocus: () => !extensionUi.activeRequest && (!modalOpen.value || composerExpanded.value),
+})
+const { draft, compact: composerTextarea, expandedTextarea, expanded: composerExpanded } = composer
 const draftAttachments = computed({ get: () => app.currentAttachments, set: (value: AttachmentDto[]) => app.setCurrentAttachments(value) })
 const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) => app.setDetailMode(value) })
 const selected = computed(() => app.selectedWork)
@@ -169,8 +177,6 @@ const addingHost = ref(false)
 const output = ref<HTMLElement | null>(null)
 const conversationViewport = useConversationViewport(output)
 const outputAwayFromBottom = conversationViewport.awayFromBottom
-const composerTextarea = ref<HTMLTextAreaElement | null>(null)
-const composerExpanded = ref(false)
 let composerExpansionRevision = 0
 watch(composerExpanded, () => { composerExpansionRevision += 1 }, { flush: 'sync' })
 const hostMachines = ref<MachineDto[]>([])
@@ -343,6 +349,8 @@ let androidNetworkRecoveryTask: Promise<void> | null = null
 let androidRouteRefreshPending = false
 let reconnectTimer = 0
 let conversationLoadEpoch = 0
+let conversationSelectionRevision = 0
+watch(() => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id), () => { conversationSelectionRevision++ }, { flush: 'sync' })
 const followActivation = new FollowActivationCoordinator()
 const followConnectionTimers = new Map<string, number>()
 const pendingFollowEvents = new Map<string, ProjectedEvent[]>()
@@ -567,9 +575,6 @@ const connectionLabel = computed(() => {
   return app.payload ? 'Dock 已连接' : '等待连接'
 })
 
-watch(draft, () => void nextTick(resizeComposer))
-watch(composerExpanded, () => void nextTick(resizeComposer))
-
 /* ── 输入框斜杠命令建议 ────────────────────────────────
  * pi 只展开位于消息最开头的 /command，因此建议仅在整段草稿
  * 就是一个未完成命令 token 时出现；补全后尾部空格进入参数输入。
@@ -774,20 +779,25 @@ watch(
 watch(confirmDialog, async (dialog) => {
   if (!dialog) return
   await nextTick()
+  if (confirmDialog.value !== dialog) return
   modalSurface.value?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled)')?.focus()
 })
-watch(controlSection, async () => {
+watch(controlSection, async (section) => {
   if (!commandOpen.value) return
   await nextTick()
+  if (!commandOpen.value || controlSection.value !== section) return
   const surface = modalSurface.value
   const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
     ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
   if (initial) initial.focus()
   else surface?.focus()
 })
+let composerOwnsModalFocus = false
 watch(modalOpen, async (open, wasOpen) => {
   if (open && !wasOpen) {
+    composerOwnsModalFocus = composerExpanded.value
     await nextTick()
+    if (!modalOpen.value || composerExpanded.value) return
     const surface = modalSurface.value
     const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
       ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
@@ -796,9 +806,10 @@ watch(modalOpen, async (open, wasOpen) => {
   } else if (!open && wasOpen) {
     const trigger = modalTrigger
     modalTrigger = null
+    if (composerOwnsModalFocus) { composerOwnsModalFocus = false; return }
     await nextTick()
     window.requestAnimationFrame(() => {
-      if (!modalOpen.value && trigger?.isConnected) trigger.focus({ preventScroll: true })
+      if (!modalOpen.value && !extensionUi.activeRequest && trigger?.isConnected) trigger.focus({ preventScroll: true })
     })
   }
 })
@@ -932,6 +943,8 @@ onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
   window.addEventListener('popstate', handlePopstate)
+  window.addEventListener('pagehide', flushDrafts)
+  document.addEventListener('visibilitychange', flushDrafts)
   window.addEventListener('focus', handleWebViewFocus)
   window.addEventListener('resize', positionDockToolsPopover)
   if (isAndroidWebView) {
@@ -977,7 +990,7 @@ onMounted(async () => {
           return
         }
         if (payload.subscriptionId !== activeFollowSubscription.value) return
-        await applyFollowEvent(payload)
+        applyFollowEvent(payload)
       }),
       await listen<{ connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; state: FollowConnectionState; message?: string }>('aludock://follow-status', ({ payload }) => {
         if (!app.contextMatches(payload) || payload.instanceId !== selected.value?.id) return
@@ -1048,6 +1061,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  app.flushLocalState()
+  window.removeEventListener('pagehide', flushDrafts)
+  document.removeEventListener('visibilitychange', flushDrafts)
   window.removeEventListener('keydown', handleGlobalModalKeydown, true)
   window.removeEventListener('keydown', handleDesktopShortcut)
   window.removeEventListener('popstate', handlePopstate)
@@ -2614,9 +2630,9 @@ async function saveOpenImage() {
   }
 }
 
-async function applyFollowEvent(payload: { connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }) {
+function applyFollowEvent(payload: { connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }) {
   const state = conversationState.value
-  if (!state || payload.subscriptionId !== activeFollowSubscription.value) return
+  if (!state || !app.contextMatches(payload) || payload.subscriptionId !== activeFollowSubscription.value || payload.subscriptionId === pausedFollowSubscription) return
   const reduced = reduceLiveEvent({
     connectionId: payload.connectionId,
     selectionGeneration: payload.selectionGeneration,
@@ -2643,7 +2659,7 @@ async function applyFollowEvent(payload: { connectionId: string; selectionGenera
   if (payload.event.eventType === 'compaction.completed') void mergeCompactionSummary(payload.instanceId)
   if (payload.event.eventType === 'resources.reloaded') commandCatalogStore.invalidate()
   if (reduced.configChanged) controlCenterRef.value?.applyLiveEvent(payload.event)
-  if (!await extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)) {
+  if (!extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)) {
     followConnected.value = false
     void loadSelectedConversation(payload.instanceId, true)
     return
@@ -2659,6 +2675,7 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
   const work = selected.value
   if (!state || !work || work.id !== instanceId || work.lifecycle !== 'active' || state.instance.id !== instanceId) return false
   const epoch = ++conversationLoadEpoch
+  const selectionRevision = conversationSelectionRevision
   const capturedHost = requireConnectionContext(app)
   const cursor = { ...state.cursor }
   if (cursor.instanceId !== instanceId
@@ -2673,8 +2690,11 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
     await connected
     if (!windowFocused.value
       || !app.contextMatches(capturedHost)
+      || selectionRevision !== conversationSelectionRevision
       || epoch !== conversationLoadEpoch
       || selected.value?.id !== instanceId
+      || selected.value.runtimeGeneration !== cursor.runtimeGeneration
+      || selected.value.ownerHostEpoch !== cursor.hostEpoch
       || conversationState.value !== state
       || state.cursor.sequence !== cursor.sequence) return false
     if (!extensionUi.resumeFollow(capturedHost, subscriptionId, cursor)) return false
@@ -2687,7 +2707,7 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
     const buffered = pendingFollowEvents.get(subscriptionId) ?? []
     pendingFollowEvents.delete(subscriptionId)
     for (const event of buffered) {
-      await applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
+      applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
       if (activeFollowSubscription.value !== subscriptionId) break
     }
     return activeFollowSubscription.value === subscriptionId
@@ -2708,17 +2728,23 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
   }
 }
 
-async function reattachConversationFollow(instanceId: string) {
+function reattachConversationFollow(instanceId: string) {
+  return recoverConversation(instanceId, async () => {
+    await performConversationReattach(instanceId)
+    return activeFollowCanContinue(instanceId)
+  })
+}
+async function performConversationReattach(instanceId: string) {
   if (!windowFocused.value || selected.value?.id !== instanceId) return
   if (activeFollow.value) await detachConversationFollow()
   if (!windowFocused.value || selected.value?.id !== instanceId) return
   if (historyReloadRequiredWorkId === instanceId) {
-    await loadSelectedConversation(instanceId, true)
+    await performConversationLoad(instanceId, true)
     return
   }
   if (!await resumeConversationFollow(instanceId)
     && windowFocused.value
-    && selected.value?.id === instanceId) await loadSelectedConversation(instanceId, true)
+    && selected.value?.id === instanceId) await performConversationLoad(instanceId, true)
 }
 
 function runningWorkIdsForAway() {
@@ -2737,6 +2763,8 @@ function activeFollowCanContinue(instanceId: string) {
     && state.instance.runtimeGeneration === work?.runtimeGeneration
     && state.cursor.hostEpoch === app.payload?.host.hostEpoch
 }
+
+function flushDrafts() { app.flushLocalState() }
 
 function handleWebViewFocus() {
   void handleWindowFocusChanged(true)
@@ -2795,6 +2823,7 @@ async function handleWindowFocusChanged(focused: boolean) {
   const epoch = ++windowFocusEpoch
   windowFocused.value = focused
   if (!focused) {
+    app.flushLocalState()
     if (!appSettings.value?.windowsAwaySupported) {
       await detachConversationFollow()
       return
@@ -2887,7 +2916,7 @@ function handleActiveFollowStatus(payload: {
   state: FollowConnectionState
   message?: string
 }) {
-  if (payload.subscriptionId !== activeFollowSubscription.value) return
+  if (payload.subscriptionId !== activeFollowSubscription.value || payload.subscriptionId === pausedFollowSubscription) return
   if (selected.value?.id === payload.instanceId && selected.value.lifecycle !== 'active') {
     window.clearTimeout(reconnectTimer)
     reconnectTimer = 0
@@ -2951,7 +2980,7 @@ async function mergeCompactionSummary(instanceId: string) {
   }
   try {
     const bootstrap = await loadConversation(instanceId, capturedHost)
-    if (epoch !== conversationLoadEpoch || conversationState.value !== state || selected.value?.id !== instanceId) return
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || conversationState.value !== state || selected.value?.id !== instanceId) return
     if (bootstrap.cursor.instanceId !== instanceId
       || bootstrap.cursor.hostEpoch !== state.cursor.hostEpoch
       || bootstrap.cursor.runtimeGeneration !== state.cursor.runtimeGeneration) return
@@ -2964,31 +2993,48 @@ async function mergeCompactionSummary(instanceId: string) {
   }
 }
 
-async function loadSelectedConversation(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
-  if (isTauri && !windowFocused.value) return false
+let pausedFollowSubscription: string | null = null
+const recovery = createConversationRecovery()
+function recoverConversation(instanceId: string, operation: () => Promise<boolean>): Promise<boolean> {
+  const key = JSON.stringify([app.connectionContext, app.payload?.host.hostEpoch, instanceId, selected.value?.runtimeGeneration, conversationSelectionRevision, windowFocusEpoch])
+  return recovery(key, activeFollow.value?.subscriptionId ?? null, operation)
+}
+function loadSelectedConversation(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
+  return recoverConversation(instanceId, () => performConversationLoad(instanceId, preserveUntilSwap))
+}
+async function performConversationLoad(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
+  if ((isTauri && !windowFocused.value) || selected.value?.id !== instanceId) return false
   const epoch = ++conversationLoadEpoch
+  const selectionRevision = conversationSelectionRevision
+  const ensureFreshRuntime = (bootstrap: ConversationBootstrap) => {
+    if (selected.value?.lifecycle !== 'active' || selected.value.runtimeGeneration > bootstrap.cursor.runtimeGeneration) {
+      throw new Error('这项工作的状态已经变化，正在重新载入。')
+    }
+  }
+  pausedFollowSubscription = activeFollow.value?.subscriptionId ?? null
   resetHistoryHydration()
   const work = app.works.find((item) => item.id === instanceId)
   const preserveCurrent = preserveUntilSwap || Boolean(conversationState.value)
   if (!preserveCurrent) {
     conversationContent.clear()
     if (!await extensionUi.clear()) return false
-    if (epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+    if (epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
   }
   conversationError.value = null
   if (preserveCurrent) followConnected.value = false
-  if (!work || work.lifecycle !== 'active') return false
+  if (!work || work.lifecycle !== 'active') { await detachConversationFollow(); return false }
   conversationLoading.value = true
   let subscriptionId = ''
   let capturedHost: ConnectionContext | null = null
   try {
     capturedHost = requireConnectionContext(app)
     const bootstrap = await loadConversation(instanceId, capturedHost)
-    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
+    ensureFreshRuntime(bootstrap)
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) throw new Error('对话状态已经变化，请重新载入。')
     if (app.payload?.host.hostEpoch !== bootstrap.cursor.hostEpoch) {
       await app.refreshWorksQuietly()
-      if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+      if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
       if (selected.value.lifecycle !== 'active') return false
       if (app.payload?.host.hostEpoch !== bootstrap.cursor.hostEpoch) throw new Error('这项工作的状态已经变化，请重新载入。')
     }
@@ -2998,23 +3044,26 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     const connected = waitForFollowConnection(subscriptionId)
     const replacedFollow = activeFollow.value
     await startConversationFollow(instanceId, subscriptionId, bootstrap.cursor, capturedHost)
-    // Tauri owns one Follow task and aborts the previous task when this command is accepted.
-    if (replacedFollow && activeFollow.value?.subscriptionId === replacedFollow.subscriptionId) {
-      activeFollow.value = null
-      followConnected.value = false
-    }
-    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+    // Keep the retired handle until native accepts its replacement, so a
+    // background transition or failed bootstrap can still detach that task.
+    if (replacedFollow && activeFollow.value?.subscriptionId === replacedFollow.subscriptionId) activeFollow.value = null
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
     // Follow 已接受与 bootstrap 相同的 cursor，后续事件已缓冲；此时即可原子替换
     // 旧会话，不必让用户继续等实时连接握手与 Extension UI 恢复。
     if (preserveCurrent && !await extensionUi.clear()) return false
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
+    ensureFreshRuntime(bootstrap)
     const preservedAnchor = preserveCurrent ? captureOutputAnchor() : null
     const preservedAutoFollow = preserveCurrent ? conversationViewport.isFollowing() : true
     await publishConversationBootstrap(capturedHost, bootstrap, preservedAnchor, preservedAutoFollow)
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
     await connected
-    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId) return false
     if (!await extensionUi.bootstrap(capturedHost, subscriptionId, bootstrap)) return false
-    if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) return false
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selectionRevision !== conversationSelectionRevision || selected.value?.id !== instanceId
+      || !conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) return false
 
+    ensureFreshRuntime(bootstrap)
     const bufferedFollowStatus: FollowConnectionStatus | undefined = followActivation.activate(subscriptionId)
     activeFollow.value = { ...capturedHost, instanceId, subscriptionId }
     followConnected.value = true
@@ -3023,17 +3072,18 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     const buffered = pendingFollowEvents.get(subscriptionId) ?? []
     pendingFollowEvents.delete(subscriptionId)
     for (const event of buffered) {
-      await applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
+      applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
       if (activeFollowSubscription.value !== subscriptionId) break
     }
     if (!app.contextMatches(capturedHost)
       || epoch !== conversationLoadEpoch
+      || selectionRevision !== conversationSelectionRevision
       || selected.value?.id !== instanceId
       || activeFollowSubscription.value !== subscriptionId) return false
     if (historyReloadRequiredWorkId === instanceId) historyReloadRequiredWorkId = null
     return true
   } catch (cause) {
-    if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) {
+    if (epoch === conversationLoadEpoch && selectionRevision === conversationSelectionRevision && selected.value?.id === instanceId && (!capturedHost || app.contextMatches(capturedHost))) {
       conversationError.value = errorMessage(cause)
       if (windowFocused.value) scheduleConversationReconnect(instanceId)
     }
@@ -3051,7 +3101,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
         }
       }
     }
-    if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) conversationLoading.value = false
+    if (epoch === conversationLoadEpoch && selectionRevision === conversationSelectionRevision && selected.value?.id === instanceId) conversationLoading.value = false
   }
 }
 
@@ -3077,6 +3127,7 @@ async function publishConversationBootstrap(
   conversationContent.publish(bootstrap)
   if (preservedAnchor && !preservedAutoFollow) await restoreOutputAnchor(preservedAnchor, false)
   else conversationViewport.scrollToBottom()
+  if (epoch !== conversationLoadEpoch || !app.contextMatches(context) || selected.value?.id !== bootstrap.instance.id) return
   void conversationContent.loadRecentHistory(context, epoch)
 }
 
@@ -3319,16 +3370,10 @@ function applyExtensionEditorText(text: string) {
   draft.value = text
 }
 
-function resizeComposer() {
-  const textarea = composerTextarea.value
-  if (!textarea) return
-  textarea.style.height = 'auto'
-  const limit = composerExpanded.value ? Math.max(220, Math.floor(window.innerHeight * 0.45)) : 180
-  textarea.style.height = `${Math.min(textarea.scrollHeight, limit)}px`
-}
+const resizeComposer = composer.resize
 
 function handleComposerKeydown(event: KeyboardEvent, expanded = false) {
-  if (event.isComposing) return
+  if (event.isComposing || composer.composing.value) return
   const textarea = event.currentTarget as HTMLTextAreaElement
   if (!expanded && suggestOpen.value) {
     if (event.key === 'ArrowDown') {
@@ -3361,10 +3406,8 @@ function handleComposerKeydown(event: KeyboardEvent, expanded = false) {
     const end = textarea.selectionEnd ?? start
     textarea.setRangeText('\n', start, end, 'end')
     draft.value = textarea.value
-    void nextTick(() => {
-      textarea.focus()
-      if (!expanded) resizeComposer()
-    })
+    composer.remember(event)
+    resizeComposer()
     return
   }
   if (!expanded && event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -3625,7 +3668,7 @@ async function toggleAllToolDetails() {
 
     <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
       <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
-      <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
+      <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
         <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!selectedSubmitAttempt?.acknowledged" @click="allowAnotherSubmit">允许再次发送</button></template><button v-else-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
         <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}</div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
@@ -3651,8 +3694,8 @@ async function toggleAllToolDetails() {
             <div v-else-if="!suggestItems.length && commandCatalogStore.state === 'failed'" class="cmd-suggest-hint">当前命令目录暂时不可用，请稍后重试。</div>
             <div v-else-if="!suggestItems.length && slashQuery" class="cmd-suggest-hint">无匹配命令</div>
           </div>
-          <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
-          <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" :disabled="conversationLoading" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
+          <textarea ref="composerTextarea" v-model="draft" rows="1" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @select="composer.remember" @blur="composer.remember" @compositionstart="composer.composition" @compositionend="composer.composition" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
+          <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
           <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitBlocked || queueRestoring || attachmentPicking || workMutating || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
         </form>
       </ExtensionUiSurface>
@@ -3765,7 +3808,7 @@ async function toggleAllToolDetails() {
         <section ref="modalSurface" class="ui-dialog-box ui-dialog-box-composer ui-dialog-size-wide" role="dialog" aria-modal="true" aria-labelledby="expanded-composer-title" tabindex="-1" @wheel="handleModalWheel">
           <header class="ui-dialog-header"><div id="expanded-composer-title" class="ui-dialog-title">编辑消息</div></header>
           <button class="ui-dialog-close" aria-label="关闭" @click="composerExpanded = false">×</button>
-          <textarea v-model="draft" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" title="Ctrl+J 换行" aria-keyshortcuts="Control+J" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event, true)" />
+          <textarea ref="expandedTextarea" v-model="draft" @select="composer.remember" @blur="composer.remember" @compositionstart="composer.composition" @compositionend="composer.composition" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" title="Ctrl+J 换行" aria-keyshortcuts="Control+J" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event, true)" />
           <footer class="ui-dialog-actions ui-dialog-composer-footer">
             <span class="ui-dialog-composer-attachments">{{ draftAttachments.length + restoredImageCount ? `已附加 ${draftAttachments.length + restoredImageCount} 个文件` : '未附加文件' }}</span>
             <span v-if="visibleComposerError" class="ui-dialog-composer-status">{{ visibleComposerError }}</span>

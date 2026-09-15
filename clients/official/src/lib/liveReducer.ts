@@ -31,6 +31,15 @@ const configEvents = new Set([
   'resources.reloaded', 'extension.status_changed', 'extension.tools_expanded_changed',
 ])
 
+const workEvents = new Set([
+  'run.started', 'run.settled', 'message.queued', 'queue.changed', 'queue.cleared',
+  'instance.state_changed', 'instance.stopped', 'instance.runtime_error',
+  'compaction.started', 'compaction.completed', 'model.changed', 'thinking.changed',
+  'git.branch_changed', 'session.metrics_changed', 'session.info_changed',
+  'extension.status_changed', 'extension.tools_expanded_changed',
+  'interaction.requested', 'interaction.resolved', 'interaction.cancelled',
+])
+
 /** Reduce one already authenticated follow event without crossing connection, Work, or generation boundaries. */
 export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventEnvelope): LiveReduction {
   const event = envelope.event
@@ -50,23 +59,11 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
   // Controller-only events keep their journal numbers but are absent from Follow.
   // The stale-event check above enforces order without inventing missing frames.
 
-  if (event.eventType === 'message.delta') {
-    return {
-      kind: 'applied',
-      state: { ...state, sequence: event.sequence },
-      conversationChanged: true,
-      configChanged: false,
-    }
-  }
-
-  const instance: Work = {
+  const instance: Work = workEvents.has(event.eventType) ? {
     ...state.instance,
-    pending: { ...state.instance.pending },
-    executor: { ...state.instance.executor, model: state.instance.executor.model ? { ...state.instance.executor.model } : undefined },
-    extensionStatus: { ...state.instance.extensionStatus },
     updatedAt: event.occurredAt,
-  }
-  let queue = state.queue.map((item) => ({ ...item, attachments: item.attachments.map((attachment) => ({ ...attachment })) }))
+  } : state.instance
+  let queue = state.queue
   const data = event.data
 
   switch (event.eventType) {
@@ -91,14 +88,14 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
       const queueItemId = stringValue(data.queueItemId)
       if (queueItemId && !queue.some((item) => item.queueItemId === queueItemId)) {
         const delivery = stringValue(data.delivery) || 'followUp'
-        queue.push({
+        queue = [...queue, {
           queueItemId,
           delivery,
           text: stringValue(data.text) || '',
           attachments: attachmentArray(data.attachments),
           imageCount: Array.isArray(data.images) ? data.images.length : 0,
           acceptedAt: stringValue(data.acceptedAt) || event.occurredAt,
-        })
+        }]
         incrementPending(instance, delivery, 1)
       }
       break
@@ -165,6 +162,7 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
       if (typeof data.error === 'string') instance.lastError = data.error
       break
     case 'model.changed': {
+      instance.executor = { ...instance.executor }
       const provider = stringValue(data.provider)
       const id = stringValue(data.id)
       if (provider && id) instance.executor.model = { provider, id }
@@ -173,6 +171,7 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
       break
     }
     case 'thinking.changed': {
+      instance.executor = { ...instance.executor }
       const thinking = stringValue(data.thinkingLevel)
       if (thinking) instance.executor.thinkingLevel = thinking
       break
@@ -188,6 +187,7 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
       instance.displayName = stringValue(data.displayName) || instance.displayName
       break
     case 'extension.status_changed': {
+      instance.extensionStatus = { ...instance.extensionStatus }
       const key = stringValue(data.key)
       if (key) {
         const text = stringValue(data.text)
@@ -220,6 +220,7 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
 }
 
 function incrementPending(instance: Work, delivery: string, delta: number) {
+  instance.pending = { ...instance.pending }
   const key = delivery === 'steer' ? 'steering' : 'followUp'
   instance.pending[key] = Math.max(0, instance.pending[key] + delta)
   instance.pending.total = Math.max(instance.pending.steering + instance.pending.followUp, instance.pending.total + delta, 0)

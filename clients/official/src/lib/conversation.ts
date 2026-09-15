@@ -27,51 +27,6 @@ interface RecordGroup {
 const COMMAND_PREVIEW_CHARS = 320
 const CONTENT_PREVIEW_CHARS = 280
 const EDIT_SIDE_PREVIEW_CHARS = 120
-const SUPERSEDED_TOOL_EVENT_TYPES = new Set(['tool.args_updated', 'tool.output_updated'])
-
-/** Live tool updates contain the complete current value. Keep only the newest
- *  value of each kind per tool while preserving the latest event sequence. */
-export function foldLiveToolUpdate(events: ProjectedEvent[], event: ProjectedEvent): boolean {
-  if (!SUPERSEDED_TOOL_EVENT_TYPES.has(event.eventType)) return false
-  const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
-  if (!toolCallId) return false
-  let superseded = -1
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const candidate = events[index]!
-    if (candidate.eventType === event.eventType && candidate.data.toolCallId === toolCallId) {
-      superseded = index
-      break
-    }
-  }
-  if (superseded >= 0) events.splice(superseded, 1)
-  events.push(event)
-  return true
-}
-
-export function applyLiveToolUpdateToProjection(item: ToolItem, event: ProjectedEvent): boolean {
-  const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
-  if (!toolCallId || item.toolCallId !== toolCallId) return false
-  if (event.eventType === 'tool.args_updated') {
-    item.preview = standardToolCallPreview(item.name, event.data.args)
-    if (item.name !== 'show_image') item.detailArgs = event.data.args
-  } else if (event.eventType === 'tool.output_updated') {
-    const hasImage = Array.isArray(event.data.content) && event.data.content.some((block) => (
-      isRecord(block) && block.type === 'image'
-    ))
-    if (item.name === 'show_image' || hasImage || event.data.publishedFile !== undefined) return false
-    if (typeof event.data.text === 'string') item.detailOutputText = event.data.text
-  } else {
-    return false
-  }
-  if (Array.isArray(event.data.omittedFields)) {
-    item.detailOmittedFields = [...new Set([
-      ...(item.detailOmittedFields ?? []),
-      ...event.data.omittedFields.filter((field): field is string => typeof field === 'string' && Boolean(field)),
-    ])]
-  }
-  return true
-}
-
 export function toolDetailText(item: ToolItem): string {
   if (item.detailArgs === undefined && item.detailOutputText === undefined && !item.detailOmittedFields?.length) return item.detail ?? ''
   const sections: string[] = []
@@ -163,13 +118,8 @@ export function mergeHydratedConversationRecords(previews: ConversationRecord[],
   return previews.map((record) => replacements.get(record.entryId) ?? record)
 }
 
-/* ── 流式增量补丁 ─────────────────────────────────────
- * message.delta 一次运行可以产生上千个事件。它们全部堆在 activeEvents 里，
- * 每个事件都触发整段会话重投影（重放全部 activeEvents）会让成本随流式长度平方膨胀。
- * 这里提供两个配套机制：折叠（foldLiveDelta）让 activeEvents 按消息数增长；
- * 定位键（liveDeltaKey / liveProjectionTargetKey）让调用方可以把 delta 直接
- * 追加到已投影的条目上，只为首包 delta 做整段重投影。
- */
+// The folded replay log is separate from the incremental, indexed projector.
+// Only explicit presentation-mode changes/bootstrap replay it; Follow applies once.
 
 /** delta 事件的归并键，与 projector 里 messageItems 的键方案一致（messageId:block）。 */
 export function liveDeltaKey(data: Record<string, unknown>): string | null {
@@ -194,27 +144,30 @@ export function foldLiveDelta(events: ProjectedEvent[], foldMap: Map<string, Pro
   return true
 }
 
-/** 已投影条目对应的 delta 键；只有 live 分组的 assistant/thinking 条目可被增量追加，其余返回 null。 */
-export function liveProjectionTargetKey(item: ConversationItem): string | null {
-  if (item.kind !== 'assistant' && item.kind !== 'thinking') return null
-  const groupId = item.groupId
-  if (!groupId || !groupId.startsWith('live-message:')) return null
-  const messageId = groupId.slice('live-message:'.length)
-  if (item.kind === 'thinking') return item.id === `live-${messageId}-thinking` ? `${messageId}:thinking` : null
-  return item.id === `live-${messageId}` ? `${messageId}:text` : null
+export function projectConversation(bootstrap: ConversationBootstrap, options: ConversationProjectionOptions = {}): ConversationItem[] {
+  const live = createLiveConversationProjector(bootstrap, options)
+  for (const event of bootstrap.activeEvents) live.apply(event)
+  return [...projectRecordGroups(bootstrap.records), ...live.snapshot()]
 }
 
-export function projectConversation(bootstrap: ConversationBootstrap, options: ConversationProjectionOptions = {}): ConversationItem[] {
+/** One canonical live algorithm, used both by bootstrap replay and incremental Follow.
+ * Maps retain message/tool ownership; settled history is never revisited by apply. */
+export function createLiveConversationProjector(
+  bootstrap: ConversationBootstrap,
+  options: ConversationProjectionOptions = {},
+  observe: <T extends object>(value: T) => T = (value) => value,
+) {
   const processIsVisible = options.compact !== true
-  const items = projectRecordGroups(bootstrap.records)
-  const messageItems = new Map<string, ConversationItem>()
-  const toolItems = new Map<string, ToolProjection>()
+  const items = observe<ConversationItem[]>([])
+  const messageItems = observe(new Map<string, ConversationItem>())
+  const toolItems = observe(new Map<string, ToolProjection>())
   const toolOwners = new Map<string, string>()
-  const imageItems = new Map<string, ImageItem>()
+  const imageItems = observe(new Map<string, ImageItem>())
   let activityVisible = bootstrap.instance.execution === 'running'
   let activityId = `activity-${bootstrap.instance.id}`
 
-  for (const event of bootstrap.activeEvents) {
+  function apply(event: ProjectedEvent) {
+
     const data = event.data
     const time = shortTime(event.occurredAt)
     switch (event.eventType) {
@@ -416,11 +369,40 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
       }
     }
   }
-  if (activityVisible) items.push({ id: activityId, kind: 'activity' })
-  return items
+  function affectedIds(event: ProjectedEvent): Set<string> {
+    const ids = new Set<string>()
+    const add = (item?: ConversationItem) => { if (item) ids.add(item.id) }
+    const message = (id: string) => {
+      add(messageItems.get(id)); add(messageItems.get(`${id}:text`)); add(messageItems.get(`${id}:thinking`))
+    }
+    const tool = (id: string) => {
+      const projection = toolItems.get(id)
+      add(projection?.item); add(projection?.image)
+      const owner = toolOwners.get(id)
+      if (owner?.startsWith('live-message:')) message(owner.slice('live-message:'.length))
+    }
+    if (typeof event.data.messageId === 'string') message(event.data.messageId)
+    if (typeof event.data.toolCallId === 'string') tool(event.data.toolCallId)
+    if (Array.isArray(event.data.content)) for (const block of event.data.content) {
+      if (isRecord(block) && typeof block.toolCallId === 'string') tool(block.toolCallId)
+    }
+    if (event.eventType === 'run.settled') for (const projection of toolItems.values()) {
+      if (projection.item.status === 'running') add(projection.item)
+    }
+    // Entries without an existing target append at the live tail. Historical
+    // layout changes/hydration use the separate unconditional anchor path.
+    return ids
+  }
+  let activity: ConversationItem | undefined
+  function snapshot(): ConversationItem[] {
+    if (!activityVisible) return items
+    if (activity?.id !== activityId) activity = observe<ConversationItem>({ id: activityId, kind: 'activity' })
+    return [...items, activity!]
+  }
+  return { apply, snapshot, affectedIds, structureKey: () => `${items.length}:${activityVisible ? activityId : ""}` }
 }
 
-function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {
+export function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {
   const output: ConversationItem[] = []
   for (const group of groupRecords(records)) projectGroup(group, output)
   return output

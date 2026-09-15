@@ -91,10 +91,10 @@ pub use published_files::{
     MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES, PublishedFileBytes, PublishedFileDto,
 };
 pub use sessions::{
-    CompletedConversationEntry, ConversationContentChunk, ConversationContentPage,
-    ConversationHistoryEntry, ConversationHistoryPage, ConversationImageBytes,
-    ConversationPreviewPage, MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionCompaction,
-    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
+    CompactionPromptTemplatesResult, CompletedConversationEntry, ConversationContentChunk,
+    ConversationContentPage, ConversationHistoryEntry, ConversationHistoryPage,
+    ConversationImageBytes, ConversationPreviewPage, MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions,
+    SessionCompaction, SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
     SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
     SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
     SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,

@@ -24,6 +24,7 @@ export const useAppStore = defineStore('app', () => {
   const needsPairing = ref(false)
   const workDrawerOpen = ref(false)
   const storage = browserStorage()
+  let saveTimer: ReturnType<typeof setTimeout> | undefined
   let localStateInitialized = false
   let loadEpoch = 0
   let workCatalogRefreshEpoch = 0
@@ -349,7 +350,7 @@ export const useAppStore = defineStore('app', () => {
     if ((connection.drafts[workId] ?? '') !== value) draftRevisions.set(editorKey(connectionId!, workId), ++editorRevision)
     if (value) connection.drafts[workId] = value
     else delete connection.drafts[workId]
-    saveLocalState()
+    if (saveTimer === undefined) saveTimer = setTimeout(flushLocalState, 250)
   }
 
   function setCurrentAttachments(value: AttachmentDto[]) {
@@ -430,13 +431,18 @@ export const useAppStore = defineStore('app', () => {
     if (connectionId && rememberRecentWorkspace(localUiState.value, connectionId, machineHostId, path, platform)) saveLocalState()
   }
 
-  function saveLocalState() { persistLocalUiState(storage, localUiState.value) }
+  function flushLocalState() {
+    if (saveTimer !== undefined) clearTimeout(saveTimer)
+    saveTimer = undefined
+    persistLocalUiState(storage, localUiState.value)
+  }
+  function saveLocalState() { flushLocalState() }
 
   return {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
+    flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

@@ -156,37 +156,11 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       && binding.runtimeGeneration === runtimeGeneration.value
   }
 
-  async function applyLive(instance: string, subscription: string, event: ProjectedEvent): Promise<boolean> {
+  // App's live reducer has already authenticated generation and monotonic order.
+  // Keep our own binding/cursor for resume, without a second event validator or
+  // an unreachable session.replaced branch (that boundary always bootstraps).
+  function applyLive(instance: string, subscription: string, event: ProjectedEvent): boolean {
     if (instance !== instanceId.value || subscription !== subscriptionId.value) return false
-    // Ordinary Follow can skip numbers reserved for controller-only directives.
-    if (event.sequence <= lastSequence.value) return false
-    if (event.eventType === 'session.replaced') {
-      const revision = ++lifecycleRevision
-      acquisitionRevision++
-      const handle = controller.value?.handle
-      if (handle) {
-        suspendController(handle, false)
-        if (!await releaseController(handle, 'disconnected', false)) {
-          controllerEnded(handle, 'disconnected', false)
-          return false
-        }
-      }
-      if (revision !== lifecycleRevision
-        || instance !== instanceId.value
-        || subscription !== subscriptionId.value
-        || event.sequence <= lastSequence.value) return false
-      lastSequence.value = event.sequence
-      status.value = {}
-      aboveWidgets.value = {}
-      belowWidgets.value = {}
-      toolsExpanded.value = false
-      toolsResetRevision.value++
-      activeSummary.value = undefined
-      activeRequest.value = undefined
-      uncertainRequest = undefined
-      controllerState.value = 'disconnected'
-      return true
-    }
     lastSequence.value = event.sequence
     reduceEvent(event)
     return true

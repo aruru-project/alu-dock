@@ -7435,6 +7435,30 @@ async fn name_session(
 }
 
 #[tauri::command]
+async fn compaction_prompts(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+) -> Result<aludock_client_core::CompactionPromptTemplatesResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    verify_session_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await?;
+    client
+        .compaction_prompts(&instance_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn compact_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
@@ -7945,6 +7969,7 @@ pub fn run() {
             new_session,
             switch_session,
             name_session,
+            compaction_prompts,
             compact_session,
             reload_session,
             session_tree,

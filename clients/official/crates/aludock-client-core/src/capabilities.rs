@@ -83,6 +83,7 @@ snapshot_capabilities!(
     EVENTS_FOLLOW_V2,
 );
 
+pub(crate) const COMPACTION_PROMPTS: &[&str] = &[CORE_V2, "session.compaction-prompts.v1"];
 pub(crate) const HOST_INFO: &[&str] = &[CORE_V2, HOST_INFO_CAPABILITY];
 pub(crate) const ATTACHMENTS: &[&str] = &[CORE_V2, ATTACHMENTS_V1];
 pub(crate) const INSTANCE_DELIVERABLES: &[&str] = &[CORE_V2, INSTANCE_DELIVERABLES_V1];

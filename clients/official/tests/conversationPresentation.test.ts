@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { applyLiveToolUpdateToProjection, foldLiveToolUpdate, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
+import { createLiveConversationProjector, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
 import { BinaryChunkCollector } from '../src/lib/binaryChunkCollector.ts'
 import { assistantMarkdownSource } from '../src/lib/conversationPresentation.ts'
-import type { ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
+import type { ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
 const parts: ConversationProcessItem[] = [
   { id: 'thinking', kind: 'thinking', groupId: 'group', title: '思考', text: '不要复制这段' },
@@ -50,34 +50,18 @@ assert.equal(editPreview?.body, '− const oldValue = input\n＋ const newValue 
 assert.equal(editPreview?.truncated, true)
 assert.equal(standardToolCallPreview('show_image', { path: '/private/image.png' }), undefined)
 
-const activeEvents: ProjectedEvent[] = [toolEvent(1, 'tool.started', { toolCallId: 'write-1', toolName: 'write', args: { path: 'tmp/result.md', content: '' } })]
-for (let index = 1; index <= 500; index += 1) {
-  const update = toolEvent(index + 1, 'tool.args_updated', { toolCallId: 'write-1', args: { path: 'tmp/result.md', content: '文'.repeat(index * 10) } })
-  assert.equal(foldLiveToolUpdate(activeEvents, update), true)
-}
-for (let index = 1; index <= 200; index += 1) {
-  foldLiveToolUpdate(activeEvents, toolEvent(index + 501, 'tool.output_updated', { toolCallId: 'write-1', text: `output-${index}` }))
-}
-assert.equal(activeEvents.length, 3, 'growing full-value tool updates retain one current args value and one current output value')
-assert.equal((activeEvents.find((event) => event.eventType === 'tool.args_updated')?.data.args as { content: string }).content.length, 5_000)
-assert.equal(activeEvents.find((event) => event.eventType === 'tool.output_updated')?.data.text, 'output-200')
-
-const liveTool: Extract<ConversationProcessItem, { kind: 'tool' }> = {
-  id: 'live-tool-write-1',
-  kind: 'tool',
-  groupId: 'live-tool-staging',
-  toolCallId: 'write-1',
-  name: 'write',
-  summary: '正在运行工具',
-  status: 'running',
-}
-const currentArgs = activeEvents.find((event) => event.eventType === 'tool.args_updated')!
-assert.equal(applyLiveToolUpdateToProjection(liveTool, currentArgs), true)
-assert.equal(liveTool.preview?.body, `…${'文'.repeat(280)}`, 'the collapsed card displays the newest real write content')
-assert.equal(liveTool.detail, undefined, 'collapsed streaming updates do not duplicate the complete args as a formatted detail string')
-assert.equal(liveTool.detailArgs, currentArgs.data.args, 'the complete current args remain available for explicit expansion')
+const projector = createLiveConversationProjector({ instance: { id: 'work', execution: 'running' } } as ConversationBootstrap)
+projector.apply(toolEvent(1, 'tool.started', { toolCallId: 'write-1', toolName: 'write', args: { path: 'tmp/result.md', content: '' } }))
+const liveTool = projector.snapshot().find((part) => part.kind === 'tool') as Extract<ConversationProcessItem, { kind: 'tool' }>
+for (let index = 1; index <= 500; index++) projector.apply(toolEvent(index + 1, 'tool.args_updated', { toolCallId: 'write-1', args: { path: 'tmp/result.md', content: '文'.repeat(index * 10) } }))
+for (let index = 1; index <= 200; index++) projector.apply(toolEvent(index + 501, 'tool.output_updated', { toolCallId: 'write-1', text: `output-${index}` }))
+assert.equal(projector.snapshot()[0], liveTool, 'tool updates preserve the original part')
+assert.equal(liveTool.preview?.body, `…${'文'.repeat(280)}`)
+assert.equal(liveTool.detail, undefined, 'full detail is assembled only on explicit expansion')
 assert.match(toolDetailText(liveTool), /"content": "文+/)
-assert.equal(applyLiveToolUpdateToProjection(liveTool, toolEvent(702, 'tool.output_updated', { toolCallId: 'write-1', text: '写入完成' })), true)
+projector.apply(toolEvent(702, 'tool.completed', { toolCallId: 'write-1', text: '写入完成' }))
+assert.equal(projector.snapshot()[0], liveTool, 'completion updates the same indexed tool')
+assert.equal(liveTool.status, 'done')
 assert.match(toolDetailText(liveTool), /结果\n写入完成/)
 assert.match(toolDetailText(liveTool), /参数\n\{/)
 

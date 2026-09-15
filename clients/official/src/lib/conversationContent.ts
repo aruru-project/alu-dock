@@ -1,17 +1,14 @@
 import { computed, reactive, ref, type Ref } from 'vue'
 import { loadConversationHistory, loadConversationHistoryEntry } from './bridge'
 import {
-  applyLiveToolUpdateToProjection,
+  createLiveConversationProjector,
   foldLiveDelta,
-  foldLiveToolUpdate,
   liveDeltaKey,
-  liveProjectionTargetKey,
   mergeHydratedConversationRecords,
-  projectConversation,
+  projectRecordGroups,
 } from './conversation'
-import type { ConnectionContext, ConversationBootstrap, ConversationHistoryPage, ConversationItem, ConversationProcessItem, ProjectedEvent } from './types'
+import type { ConnectionContext, ConversationBootstrap, ConversationHistoryPage, ConversationItem, ProjectedEvent } from './types'
 
-type ConversationToolPart = Extract<ConversationProcessItem, { kind: 'tool' }>
 type LayoutSnapshot = unknown
 
 interface ConversationContentOptions {
@@ -21,7 +18,7 @@ interface ConversationContentOptions {
   getContext: () => ConnectionContext
   isCurrent: (context: ConnectionContext, state: ConversationBootstrap, epoch: number) => boolean
   reload: (workId: string) => void
-  beforeLayoutChange: (preserveText?: boolean) => LayoutSnapshot
+  beforeLayoutChange: (preserveText?: boolean, changedIds?: Set<string>) => LayoutSnapshot
   afterLayoutChange: (snapshot: LayoutSnapshot, stickToBottom: boolean) => Promise<void>
   isFollowing: () => boolean
   layoutChanged: () => void
@@ -63,14 +60,13 @@ export function useConversationContent(options: ConversationContentOptions) {
     ?? (Object.keys(hydrationErrors.value).length ? '部分对话内容暂时没有载入，请重试。' : null))
 
   let projectionFrame = 0
-  let fullProjectionState: ConversationBootstrap | null = null
   let historyEndEntryId: string | undefined
-  const pendingToolEvents = new Map<string, { state: ConversationBootstrap; event: ProjectedEvent }>()
-  const pendingTextDeltas = new Map<string, { state: ConversationBootstrap; delta: string }>()
-  const pendingStreamingChanges = new Map<string, { state: ConversationBootstrap; streaming: boolean }>()
-  const streamCaches = new WeakMap<ConversationBootstrap, { fold: Map<string, ProjectedEvent>; streaming: Set<string> }>()
-  let textTargets = new Map<string, ConversationItem>()
-  let toolTargets = new Map<string, ConversationToolPart>()
+  let live: ReturnType<typeof createLiveConversationProjector> | null = null
+  let liveState: ConversationBootstrap | null = null
+  let historyItems: ConversationItem[] = []
+  let publishedStructure = ''
+  const pendingEvents: ProjectedEvent[] = []
+  const streamCaches = new WeakMap<ConversationBootstrap, { fold: Map<string, ProjectedEvent>; streaming: Set<string>; tools: Map<string, number> }>()
   let hydrationDomain: HydrationDomain = { cancelled: false, active: 0, queue: [] }
   let failedHydrations = new Map<string, HydrationJob>()
 
@@ -79,39 +75,52 @@ export function useConversationContent(options: ConversationContentOptions) {
   function streamCache(current: ConversationBootstrap) {
     let cache = streamCaches.get(current)
     if (!cache) {
-      cache = { fold: new Map(), streaming: reactive(new Set<string>()) }
+      cache = { fold: new Map(), streaming: reactive(new Set<string>()), tools: new Map() }
       streamCaches.set(current, cache)
     }
     return cache
   }
 
+  function initializeLive(current: ConversationBootstrap) {
+    live = createLiveConversationProjector(current, { compact: options.compact.value }, reactive as <T extends object>(value: T) => T)
+    liveState = current
+    const cache = streamCache(current)
+    cache.fold.clear(); cache.tools.clear(); cache.streaming.clear()
+    current.activeEvents.forEach((event, index) => {
+      live!.apply(event)
+      updateStreaming(current, event)
+      const key = liveDeltaKey(event.data)
+      if (event.eventType === 'message.delta' && key) cache.fold.set(key, event)
+      if (foldableToolEvent(event)) cache.tools.set(`${event.eventType}:${event.data.toolCallId}`, index)
+      resetFoldBoundary(current, event)
+    })
+    pendingEvents.length = 0
+  }
+
+  function publishLive() {
+    const structure = live?.structureKey() ?? ''
+    if (publishedStructure === structure) return
+    publishedStructure = structure
+    const next = [...historyItems, ...(live?.snapshot() ?? [])]
+    // Text, tool completion and args/output mutate indexed parts in place. Only
+    // structural changes replace the list; stable historical objects survive.
+    if (next.length !== items.value.length || next.some((item, index) => item !== items.value[index])) items.value = next
+  }
+
   function rebuildProjection(current: ConversationBootstrap) {
-    // Canonical events already contain every delta, including those awaiting paint.
-    // History hydration / compact-mode rebuilds can also run before the shared frame.
-    for (const [key, pending] of pendingTextDeltas) {
-      if (pending.state === current) pendingTextDeltas.delete(key)
-    }
-    const projected = projectConversation(current, { compact: options.compact.value })
-    items.value = projected
-    textTargets = new Map()
-    toolTargets = new Map()
-    for (const item of items.value) {
-      const key = liveProjectionTargetKey(item)
-      if (key) textTargets.set(key, item)
-      if (item.kind === 'tool' && item.toolCallId) toolTargets.set(item.toolCallId, item)
-      if (item.kind === 'record') {
-        for (const part of item.parts) {
-          if (part.kind === 'tool' && part.toolCallId) toolTargets.set(part.toolCallId, part)
-        }
-      }
-    }
-    options.projected(projected)
+    if (liveState !== current) initializeLive(current)
+    else drainEvents(current)
+    historyItems = reactive(projectRecordGroups(current.records))
+    publishedStructure = ''
+    publishLive()
+    options.projected(items.value)
     options.layoutChanged()
   }
 
   function reproject(current: ConversationBootstrap) {
     const snapshot = options.beforeLayoutChange()
     const stick = options.isFollowing()
+    initializeLive(current)
     rebuildProjection(current)
     void options.afterLayoutChange(snapshot, stick)
   }
@@ -119,12 +128,27 @@ export function useConversationContent(options: ConversationContentOptions) {
   function resetProjectionSchedule() {
     if (projectionFrame) window.cancelAnimationFrame(projectionFrame)
     projectionFrame = 0
-    fullProjectionState = null
-    pendingToolEvents.clear()
-    pendingTextDeltas.clear()
-    pendingStreamingChanges.clear()
-    textTargets.clear()
-    toolTargets.clear()
+    pendingEvents.length = 0
+    live = null; liveState = null; historyItems = []; publishedStructure = ''
+  }
+
+  function updateStreaming(current: ConversationBootstrap, event: ProjectedEvent) {
+    const streaming = streamCache(current).streaming
+    if (event.eventType === 'message.delta') {
+      const id = typeof event.data.messageId === 'string' ? event.data.messageId : `message-${event.sequence}`
+      streaming.add(`live-${id}${event.data.block === 'thinking' ? '-thinking' : ''}`)
+    } else if (event.eventType === 'message.completed') {
+      streaming.delete(`live-${event.data.messageId}`)
+      streaming.delete(`live-${event.data.messageId}-thinking`)
+    } else if (event.eventType === 'run.settled') streaming.clear()
+  }
+
+  function drainEvents(current: ConversationBootstrap) {
+    for (const event of pendingEvents) {
+      live!.apply(event)
+      updateStreaming(current, event)
+    }
+    pendingEvents.length = 0
   }
 
   function requestProjectionFrame() {
@@ -132,98 +156,65 @@ export function useConversationContent(options: ConversationContentOptions) {
     projectionFrame = window.requestAnimationFrame(() => {
       projectionFrame = 0
       const current = state.value
-      const requiresFullProjection = fullProjectionState === current
-      const toolUpdates = [...pendingToolEvents.values()]
-        .filter((pending) => pending.state === current)
-        .map((pending) => pending.event)
-      const textUpdates = [...pendingTextDeltas].filter(([, pending]) => pending.state === current)
-      const streamingChanges = [...pendingStreamingChanges].filter(([, pending]) => pending.state === current)
-      fullProjectionState = null
-      pendingToolEvents.clear()
-      pendingTextDeltas.clear()
-      pendingStreamingChanges.clear()
-      if (!current || (!requiresFullProjection && !toolUpdates.length && !textUpdates.length && !streamingChanges.length)) return
-      const streaming = streamCache(current).streaming
-      const preserveText = streamingChanges.some(([id, pending]) => !pending.streaming && streaming.has(id))
+      if (!current || !pendingEvents.length) return
+      const preserveText = pendingEvents.some((event) => event.eventType === 'message.completed' || event.eventType === 'run.settled')
+      const changedIds = new Set<string>()
+      for (const event of pendingEvents) for (const id of live!.affectedIds(event)) changedIds.add(id)
       const stick = options.isFollowing()
-      // layoutChanged already schedules cancellable following; an anchor is only
-      // needed while reading earlier content, especially at the Markdown transition.
-      const snapshot = stick ? null : options.beforeLayoutChange(preserveText)
-      for (const [id, pending] of streamingChanges) {
-        if (pending.streaming) streaming.add(id)
-        else streaming.delete(id)
-      }
-      if (requiresFullProjection || toolUpdates.some((event) => {
-        const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
-        const target = toolCallId ? toolTargets.get(toolCallId) : undefined
-        return !target || !applyLiveToolUpdateToProjection(target, event)
-      }) || textUpdates.some(([key, pending]) => {
-        const target = textTargets.get(key)
-        if (!target || (target.kind !== 'assistant' && target.kind !== 'thinking')) return true
-        target.text += pending.delta
-        return false
-      })) rebuildProjection(current)
-      else options.layoutChanged()
+      const snapshot = stick ? null : options.beforeLayoutChange(preserveText, changedIds)
+      drainEvents(current)
+      publishLive()
+      options.layoutChanged()
       void options.afterLayoutChange(snapshot, stick)
     })
   }
 
-  function scheduleProjection(current: ConversationBootstrap) {
-    fullProjectionState = current
-    requestProjectionFrame()
+  function foldableToolEvent(event: ProjectedEvent) {
+    return (event.eventType === 'tool.args_updated' || event.eventType === 'tool.output_updated')
+      && typeof event.data.toolCallId === 'string' && Boolean(event.data.toolCallId)
+      && event.data.content === undefined && event.data.publishedFile === undefined
   }
 
-  function scheduleToolProjection(current: ConversationBootstrap, event: ProjectedEvent) {
-    const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
-    if (!toolCallId) return scheduleProjection(current)
-    pendingToolEvents.set(`${event.eventType}:${toolCallId}`, { state: current, event })
-    requestProjectionFrame()
-  }
-
-  function applyMessageDelta(current: ConversationBootstrap, event: ProjectedEvent) {
-    foldLiveDelta(current.activeEvents, streamCache(current).fold, event)
-    const key = liveDeltaKey(event.data)
-    const target = key ? textTargets.get(key) : undefined
-    const delta = typeof event.data.delta === 'string' ? event.data.delta : ''
-    if (!target || (target.kind !== 'assistant' && target.kind !== 'thinking')) {
-      scheduleProjection(current)
-      return
+  function resetFoldBoundary(current: ConversationBootstrap, event: ProjectedEvent) {
+    const cache = streamCache(current)
+    const tool = (id: unknown) => {
+      if (typeof id !== 'string') return
+      cache.tools.delete(`tool.args_updated:${id}`)
+      cache.tools.delete(`tool.output_updated:${id}`)
     }
-    if (delta && key) {
-      const pending = pendingTextDeltas.get(key)
-      pendingTextDeltas.set(key, { state: current, delta: `${pending?.state === current ? pending.delta : ''}${delta}` })
-      pendingStreamingChanges.set(target.id, { state: current, streaming: true })
-      requestProjectionFrame()
+    if (event.eventType === 'run.settled') { cache.tools.clear(); cache.fold.clear() }
+    if (event.eventType === 'tool.completed' || (event.eventType.startsWith('tool.') && !foldableToolEvent(event))) tool(event.data.toolCallId)
+    if (event.eventType === 'message.completed') {
+      cache.fold.delete(`${event.data.messageId}:text`)
+      cache.fold.delete(`${event.data.messageId}:thinking`)
+      if (Array.isArray(event.data.content)) for (const block of event.data.content) {
+        if (block && typeof block === 'object' && 'toolCallId' in block) tool(block.toolCallId)
+      }
     }
   }
 
   function applyConversationEvent(current: ConversationBootstrap, event: ProjectedEvent, conversationChanged: boolean) {
-    if (event.eventType === 'message.delta') {
-      applyMessageDelta(current, event)
-      return
-    }
-    if (event.eventType === 'message.completed') {
-      const messageId = typeof event.data.messageId === 'string' ? event.data.messageId : ''
-      if (messageId) {
-        pendingStreamingChanges.set(`live-${messageId}`, { state: current, streaming: false })
-        pendingStreamingChanges.set(`live-${messageId}-thinking`, { state: current, streaming: false })
-        requestProjectionFrame()
+    if (!conversationChanged && event.eventType !== 'run.started') return
+    if (liveState !== current) initializeLive(current)
+    // The replay log is folded separately from this frame's original events.
+    pendingEvents.push({ ...event, data: { ...event.data } })
+    const cache = streamCache(current)
+    if (event.eventType === 'message.delta' && liveDeltaKey(event.data)) foldLiveDelta(current.activeEvents, cache.fold, { ...event, data: { ...event.data } })
+    else if (foldableToolEvent(event)) {
+      const key = `${event.eventType}:${event.data.toolCallId}`
+      const index = cache.tools.get(key)
+      if (index !== undefined) {
+        const previous = current.activeEvents[index]!
+        const omitted = [...(Array.isArray(previous.data.omittedFields) ? previous.data.omittedFields : []), ...(Array.isArray(event.data.omittedFields) ? event.data.omittedFields : [])]
+        current.activeEvents[index] = { ...event, occurredAt: previous.occurredAt, data: { ...previous.data, ...event.data, ...(omitted.length ? { omittedFields: [...new Set(omitted)] } : {}) } }
       }
-    } else if (event.eventType === 'run.settled') {
-      for (const id of streamCache(current).streaming) {
-        pendingStreamingChanges.set(id, { state: current, streaming: false })
-      }
-      for (const [id, pending] of pendingStreamingChanges) {
-        if (pending.state === current) pendingStreamingChanges.set(id, { state: current, streaming: false })
-      }
-      requestProjectionFrame()
+      else { cache.tools.set(key, current.activeEvents.length); current.activeEvents.push(event) }
+    } else {
+      // Images and completion are ordered facts, not replaceable text updates.
+      resetFoldBoundary(current, event)
+      current.activeEvents.push(event)
     }
-    const foldedToolUpdate = foldLiveToolUpdate(current.activeEvents, event)
-    if (!foldedToolUpdate) current.activeEvents.push(event)
-    if (conversationChanged || event.eventType === 'run.started') {
-      if (foldedToolUpdate) scheduleToolProjection(current, event)
-      else scheduleProjection(current)
-    }
+    requestProjectionFrame()
   }
 
   function showActivity(workId: string) {
@@ -249,7 +240,7 @@ export function useConversationContent(options: ConversationContentOptions) {
     historyCursor.value = null
     historyEndEntryId = bootstrap.records.at(-1)?.entryId
     state.value = bootstrap
-    rebuildProjection(bootstrap)
+    rebuildProjection(state.value!)
     historyTruncated.value = bootstrap.historyTruncated
     historyPageError.value = null
   }
@@ -501,7 +492,7 @@ export function useConversationContent(options: ConversationContentOptions) {
     state, items, streamingPartIds,
     historyTruncated, historyRevision, historyCursor, historyLoading,
     hydrationActiveEntries, hydrationErrors, historyHydrating, historyError,
-    reproject, resetProjectionSchedule, scheduleProjection, applyConversationEvent, showActivity, appendHistoricalRecords,
+    reproject, resetProjectionSchedule, applyConversationEvent, showActivity, appendHistoricalRecords,
     publish, clear, resetHistoryHydration, loadRecentHistory, loadEarlierHistory,
     retryHistoryEntry, retryHydration, dispose,
   }

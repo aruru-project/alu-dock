@@ -39,6 +39,7 @@ import type {
   SessionNameResult,
   SessionNavigateResult,
   SessionReloadResult,
+  CompactionPromptTemplatesResult,
   SessionReplacementResult,
   SessionTree,
   SettingKey,
@@ -617,6 +618,10 @@ export async function switchSession(context: SessionContext, sessionToken: strin
 export async function nameSession(context: SessionContext, name: string, operationId: string): Promise<SessionNameResult> {
   if (isTauri) return invoke('name_session', { ...context, name, operationId })
   throw new Error('浏览器设计预览不会重命名 Session')
+}
+export async function compactionPrompts(context: SessionContext): Promise<CompactionPromptTemplatesResult> {
+  if (isTauri) return invoke('compaction_prompts', { ...context })
+  throw new Error('请连接 Dock 后读取默认压缩模板。')
 }
 export async function compactSession(context: SessionContext, customInstructions: string | undefined, operationId: string): Promise<SessionCompactionResult> {
   if (isTauri) return invoke('compact_session', { ...context, customInstructions: customInstructions || null, operationId })

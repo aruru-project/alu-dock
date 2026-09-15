@@ -618,3 +618,11 @@ export interface SystemCatalogResult {
   nextCursor?: SystemCatalogCursor
 }
 export interface SystemDefaultSetResult { selection: SystemCandidate }
+
+/** Native default instructions; excludes this call's conversation and extension payload. */
+export interface CompactionPromptTemplatesResult {
+  system: string
+  summarize: string
+  update: string
+  turnPrefix: string
+}

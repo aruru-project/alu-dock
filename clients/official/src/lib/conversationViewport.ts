@@ -10,6 +10,7 @@ interface ConversationTextAnchor {
 }
 
 export interface ConversationReadingAnchor {
+  element?: HTMLElement
   surface: HTMLElement
   id?: string
   offset?: number
@@ -191,18 +192,29 @@ export function useConversationViewport(surfaceRef: Ref<HTMLElement | null>) {
     return null
   }
 
-  function captureAnchor(preserveText = false): ConversationReadingAnchor | null {
+  function elementById(surface: HTMLElement, id: string) {
+    const escaped = id.replace(/[\x00-\x1f\x7f"\\]/g, (character) => `\\${character.charCodeAt(0).toString(16)} `)
+    return surface.querySelector<HTMLElement>(`[data-conversation-id="${escaped}"]`)
+  }
+
+  function captureAnchor(preserveText = false, changedIds?: Set<string>): ConversationReadingAnchor | null {
     const surface = surfaceRef.value
     if (!surface) return null
     const surfaceTop = surface.getBoundingClientRect().top
+    const byId = (id: string) => elementById(surface, id)
+    if (changedIds && [...changedIds].every((id) => {
+      const element = byId(id)
+      return element && element.getBoundingClientRect().top > surfaceTop + 1
+    })) return null
     const text = preserveText ? captureTextAnchor(surface, surfaceTop) : null
     const element = text
-      ? [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
-        .find((candidate) => candidate.dataset.conversationId === text.id)
-      : [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
-        .find((candidate) => candidate.getBoundingClientRect().bottom >= surfaceTop)
+      ? byId(text.id)
+      : surface.ownerDocument?.elementsFromPoint?.(surface.getBoundingClientRect().left + 1, surfaceTop + 1)
+        .find((candidate) => surface.contains(candidate) && candidate.hasAttribute('data-conversation-id')) as HTMLElement | undefined
+        ?? [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')].find((candidate) => candidate.getBoundingClientRect().bottom >= surfaceTop)
     return {
       surface,
+      element: element ?? undefined,
       id: element?.dataset.conversationId,
       offset: element ? element.getBoundingClientRect().top - surfaceTop : undefined,
       text: text?.anchor,
@@ -219,9 +231,8 @@ export function useConversationViewport(surfaceRef: Ref<HTMLElement | null>) {
       scheduleLayout()
       return
     }
-    const next = anchor.id
-      ? [...anchor.surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
-        .find((element) => element.dataset.conversationId === anchor.id)
+    const next = anchor.element?.isConnected && anchor.surface.contains(anchor.element) ? anchor.element : anchor.id
+      ? elementById(anchor.surface, anchor.id)
       : undefined
     const text = next && anchor.text ? resolveTextAnchor(next, anchor.text) : null
     const textTop = text ? textPointTop(text.node, text.offset) : null

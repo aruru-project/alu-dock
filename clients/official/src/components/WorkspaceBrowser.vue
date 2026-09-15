@@ -491,6 +491,7 @@ watch(
   (current, previous) => {
     const changed = !previous || current.slice(1).some((value, index) => value !== previous[index + 1])
     if (!props.open) {
+      if (!changed && !previous?.[0]) return
       void invalidateFile(true)
       resetDirectories()
       return

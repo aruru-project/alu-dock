@@ -27,6 +27,16 @@ use crate::{
     wire::decode_canonical_base64,
 };
 
+/// Complete native default templates, not a dynamically assembled provider request.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionPromptTemplatesResult {
+    pub system: String,
+    pub summarize: String,
+    pub update: String,
+    pub turn_prefix: String,
+}
+
 pub const MAX_CONVERSATION_IMAGE_BYTES: usize = 20 * 1_024 * 1_024;
 const MAX_CONVERSATION_IMAGE_CHUNK_BYTES: usize = 512 * 1_024;
 const CONVERSATION_IMAGE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -983,6 +993,19 @@ impl DockClient {
             ));
         }
         Ok(result)
+    }
+
+    pub async fn compaction_prompts(
+        &self,
+        instance_id: &str,
+    ) -> Result<CompactionPromptTemplatesResult> {
+        self.request(
+            "session.compaction.prompts",
+            &serde_json::json!({ "instanceId": instance_id }),
+            crate::capabilities::COMPACTION_PROMPTS,
+            None,
+        )
+        .await
     }
 
     pub async fn compact_session(
@@ -1981,6 +2004,22 @@ fn unknown(operation_id: &str, message: &str) -> ClientError {
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn compaction_prompts_preserve_all_four_strings_without_snapshot() {
+        let wire = serde_json::json!({
+            "system": "系统\n完整文本", "summarize": "first summary",
+            "update": "update summary", "turnPrefix": "prefix\n"
+        });
+        let result: CompactionPromptTemplatesResult = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(result).unwrap(), wire);
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("turnPrefix");
+        assert!(serde_json::from_value::<CompactionPromptTemplatesResult>(missing).is_err());
+        let mut invalid = wire;
+        invalid["system"] = serde_json::json!(123);
+        assert!(serde_json::from_value::<CompactionPromptTemplatesResult>(invalid).is_err());
+    }
 
     #[tokio::test]
     async fn loading_conversation_image_returns_exact_streamed_bytes() {

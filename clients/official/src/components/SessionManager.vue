@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import {
-  cloneSession, forkSession, listSessions, loadSessionTree, nameSession,
+  compactionPrompts, cloneSession, forkSession, listSessions, loadSessionTree, nameSession,
   navigateSession, newSession, reloadSession, switchSession,
   type SessionContext, type SessionTrustContinuation,
 } from '../lib/bridge'
@@ -13,7 +13,8 @@ import {
   type TreeFilter, type VisibleTreeItem,
 } from '../lib/sessionTree'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { SessionReloadResult, SessionInfo, SessionTree, Work } from '../lib/types'
+import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
+import type { CompactionPromptTemplatesResult, SessionReloadResult, SessionInfo, SessionTree, Work } from '../lib/types'
 import { useAppStore } from '../stores/app'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
@@ -39,6 +40,26 @@ const sessionsTruncated = ref(false)
 const selectedToken = ref('')
 const renameDraft = ref('')
 const compactDraft = ref('')
+const promptTemplates = ref<CompactionPromptTemplatesResult | null>(null)
+const promptLoading = ref(false)
+const promptError = ref('')
+let promptEpoch = 0
+let targetRevision = 0
+const promptSections = [
+  { key: 'system', label: '系统说明' }, { key: 'summarize', label: '首次摘要' },
+  { key: 'update', label: '更新已有摘要' }, { key: 'turnPrefix', label: '跨轮次保留片段' },
+] as const
+onUnmounted(() => { promptEpoch++; loadEpoch++; targetRevision++ })
+async function loadPromptTemplates() {
+  const epoch = ++promptEpoch
+  const scope = { ...context.value }
+  promptTemplates.value = null; promptError.value = ''; promptLoading.value = true
+  try {
+    const result = await currentSessionCall(scope, () => compactionPrompts(scope))
+    if (epoch === promptEpoch && props.mode === 'compact-session') promptTemplates.value = result
+  } catch (cause) { if (epoch === promptEpoch) promptError.value = errorMessage(cause) }
+  finally { if (epoch === promptEpoch) promptLoading.value = false }
+}
 const reloadSummary = ref<SessionReloadResult | null>(null)
 const reloadScope = ref<SessionContext | null>(null)
 const trust = ref<(SessionTrustContinuation & { token: string }) | null>(null)
@@ -58,9 +79,11 @@ const context = computed<SessionContext>(() => ({
   expectedHostEpoch: props.work.ownerHostEpoch ?? '',
   expectedRuntimeGeneration: props.work.runtimeGeneration,
 }))
+watch(() => JSON.stringify([app.connectionContext, props.work.id, props.work.ownerHostEpoch]), () => { targetRevision++ }, { flush: 'sync' })
 async function currentSessionCall<T>(scope: SessionContext, operation: () => Promise<T>, replacementGeneration?: (result: T) => number): Promise<T> {
+  const revision = targetRevision
   const correlated = captureConnectionResult(scope, await operation())
-  if (!hostResultMatches(correlated, app.connectionContext)
+  if (revision !== targetRevision || !hostResultMatches(correlated, app.connectionContext)
     || scope.instanceId !== props.work.id
     || scope.expectedHostEpoch !== props.work.ownerHostEpoch
     || (scope.expectedRuntimeGeneration !== props.work.runtimeGeneration
@@ -107,11 +130,13 @@ watch([
     && reloadScope.value.instanceId === props.work.id
     && reloadScope.value.expectedHostEpoch === props.work.ownerHostEpoch
     && reloadSummary.value.instance.runtimeGeneration === props.work.runtimeGeneration) return
+  promptEpoch++; promptTemplates.value = null; promptError.value = ''; promptLoading.value = false
   reloadScope.value = null
   error.value = ''; status.value = ''; trust.value = null
   if (props.mode === 'sessions') void loadSessionList()
   else if (props.mode === 'tree') void loadTree()
   else if (props.mode === 'new-session') void createNew()
+  else if (props.mode === 'compact-session') void loadPromptTemplates()
   else {
     renameDraft.value = props.work.name ?? ''
     reloadSummary.value = null
@@ -317,7 +342,7 @@ async function createNew() {
   if (props.preview) { status.value = '浏览器预览仅作演示。'; return }
   if (pending.value || props.outcomeUnknown) return
   pending.value = 'new'; error.value = ''; status.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(scope, operationId())); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消新建 Session。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(scope, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消新建 Session。' }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
@@ -328,7 +353,7 @@ async function resumeSelected(continuation?: SessionTrustContinuation) {
   pending.value = 'switch'; error.value = ''; status.value = ''
   try {
     const scope = { ...context.value }
-    const result = await currentSessionCall(scope, () => switchSession(scope, selected.token, attempt))
+    const result = await currentSessionCall(scope, () => switchSession(scope, selected.token, attempt), (reply) => reply.instance.runtimeGeneration)
     trust.value = null
     if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消切换。'
   } catch (cause) {
@@ -371,21 +396,21 @@ async function navigate(summarize: boolean) {
   const node = selectedNode.value
   if (!node || props.preview || pending.value || props.outcomeUnknown) return
   pending.value = summarize ? 'navigate-summary' : 'navigate'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(scope, node.entryId, summarize, operationId())); if (!result.cancelled) emit('resync', result.instance, result.editorText); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(scope, node.entryId, summarize, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance, result.editorText); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function fork() {
   const node = selectedNode.value
   if (!node || node.role !== 'user' || props.preview || pending.value || props.outcomeUnknown) return
   pending.value = 'fork'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => forkSession(scope, node.entryId, operationId())); if (!result.cancelled) emit('resync', result.instance, result.selectedText); else status.value = 'Extension 已取消 Fork。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => forkSession(scope, node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance, result.selectedText); else status.value = 'Extension 已取消 Fork。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function clone() {
   const node = selectedNode.value
   if (!node || props.preview || pending.value || props.outcomeUnknown) return
   pending.value = 'clone'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => cloneSession(scope, node.entryId, operationId())); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消 Clone。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => cloneSession(scope, node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消 Clone。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 
@@ -440,7 +465,12 @@ function time(value?: string | null) { return treeNodeTime(value) }
 
     <section v-else-if="mode === 'compact-session'" class="alu-session-form">
       <div v-if="compactionPending || work.compacting" class="alu-dialog-status">上下文正在压缩；进度与结果会显示在对话中。</div>
-      <textarea v-model="compactDraft" class="ui-dialog-editor" rows="6" placeholder="自定义说明（可选）" :disabled="compactionPending || work.compacting" />
+      <p>以下是 Agent 的完整默认压缩模板，只读可复制，不是本次发送给模型的完整内容。对话、已有摘要和补充说明会在调用时加入；Extension 可以接管或取消压缩。</p>
+      <p v-if="promptLoading" role="status">正在读取默认模板…</p>
+      <div v-if="promptError" class="alu-dialog-error">{{ promptError }} <button type="button" @click="loadPromptTemplates">重试读取</button></div>
+      <template v-if="promptTemplates"><details v-for="section in promptSections" :key="section.key"><summary>{{ section.label }}</summary><MarkdownDocumentSurface initial-mode="source" :source="promptTemplates[section.key]" :document-key="`${work.id}:${work.runtimeGeneration}:${section.key}`" :aria-label="section.label" /></details></template>
+      <label>补充说明（可编辑）</label>
+      <textarea v-model="compactDraft" class="ui-dialog-editor" rows="6" placeholder="补充说明（可选，追加到摘要任务）" :disabled="compactionPending || work.compacting" />
       <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
     </section>
 

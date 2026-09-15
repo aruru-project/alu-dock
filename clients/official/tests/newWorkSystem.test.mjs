@@ -9,7 +9,7 @@ import { createRenderer, h, reactive, nextTick } from 'vue'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const filename = join(root, 'src/components/NewWorkDialog.vue')
-const directory = await mkdtemp(join(root, 'node_modules/.system-check-'))
+const directory = await mkdtemp(join(root, '.system-check-'))
 const stateKey = '__aluSystemCheck'
 const node = (type, text = '') => ({ type, text, props: {}, children: [], parent: null, checked: false,
   focus() {}, select() {}, addEventListener(name, handler) { this[name] = handler }, removeEventListener() {},
@@ -220,6 +220,36 @@ try {
     app.unmount()
   }
   console.log('PASS: directory/recent → ordered selection → raw paged preview/copy → retained choice → once/save/failures/trust; stale discovery fenced; actual TS IPC payloads')
+
+  // A closed browser shares the real Work prop with the shell. Content-only
+  // snapshots must not enqueue native file cleanup on that hidden surface.
+  await build({ root, configFile: false, logLevel: 'silent', plugins: [vue()],
+    build: { outDir: directory, emptyOutDir: false, minify: false,
+      lib: { entry: join(root, 'src/components/WorkspaceBrowser.vue'), formats: ['es'], fileName: () => 'workspace.mjs' }, rolldownOptions: { external: ['vue'] } } })
+  const { default: WorkspaceBrowser } = await import(join(directory, 'workspace.mjs'))
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
+  window.__TAURI_INTERNALS__.transformCallback = () => 1
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
+  const cleanup = []
+  globalThis[stateKey] = { invoke: async (command) => {
+    if (command === 'clear_workspace_file_state') cleanup.push(command)
+    else assert.ok(command.startsWith('plugin:event|'), `unexpected native call: ${command}`)
+    return 1
+  } }
+  const browserProps = reactive({ open: false, work: { id: 'work', lifecycle: 'active', runtimeGeneration: 1, cwd: '/project' }, context: { connectionId: 'host', selectionGeneration: 1 }, hostEpoch: 'epoch' })
+  const browserApp = renderer.createApp({ render: () => h(WorkspaceBrowser, browserProps) })
+  browserApp.mount(node('root'))
+  await settle()
+  const initialCleanup = cleanup.length
+  browserProps.work = { ...browserProps.work, updatedAt: 'new-output' }
+  await settle()
+  assert.equal(cleanup.length, initialCleanup, 'closed Work prop reevaluation creates no native cleanup')
+  browserProps.work = { ...browserProps.work, runtimeGeneration: 2 }
+  await settle()
+  assert.equal(cleanup.length, initialCleanup + 1, 'real resource identity change still cleans up')
+  browserApp.unmount()
+  await settle()
+  console.log('PASS: closed WorkspaceBrowser / output prop isolation / native cleanup on real identity change')
 } finally {
   delete globalThis[stateKey]
   await rm(directory, { recursive: true, force: true })

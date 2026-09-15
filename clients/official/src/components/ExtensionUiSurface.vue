@@ -16,7 +16,7 @@ import { requireConnectionContext } from '../lib/hostResult'
 import { useExtensionUiStore, type ExtensionWidget } from '../stores/extension-ui'
 import { useAppStore } from '../stores/app'
 
-const props = defineProps<{ work: Work | null; reconcileInteraction: () => Promise<boolean> }>()
+const props = defineProps<{ work: Work | null; focusSuspended?: boolean; reconcileInteraction: () => Promise<boolean> }>()
 const emit = defineEmits<{ editorText: [text: string]; title: [title: string] }>()
 const extension = useExtensionUiStore()
 const app = useAppStore()
@@ -76,7 +76,14 @@ watch(() => request.value?.interactionId, async (id) => {
   confirmation.value = null
   answer.value = request.value?.method === 'editor' ? request.value.prefill ?? '' : ''
   await nextTick()
-  dialog.value?.querySelector<HTMLElement>('input, textarea, button')?.focus()
+  if (request.value?.interactionId === id && !props.focusSuspended) focusDialog()
+})
+function focusDialog() { dialog.value?.querySelector<HTMLElement>('input, textarea, button')?.focus() }
+watch(() => props.focusSuspended, async (suspended) => {
+  if (suspended || !request.value) return
+  const id = request.value.interactionId
+  await nextTick()
+  if (!props.focusSuspended && request.value?.interactionId === id) focusDialog()
 })
 watch(() => extension.controller?.handle, () => scheduleViewport())
 watch(automaticControlKey, (key, previous) => {
@@ -352,8 +359,8 @@ function interactionMethodLabel(method: string) {
     </div>
 
     <Teleport to="body">
-      <div v-if="request" class="extension-dialog-layer" role="presentation">
-        <section ref="dialog" class="extension-dialog" role="dialog" aria-modal="true" :aria-labelledby="`extension-dialog-${request.interactionId}`" @keydown.esc.prevent="respond(true)">
+      <div v-if="request" v-show="!focusSuspended" class="extension-dialog-layer" role="presentation">
+        <section ref="dialog" class="extension-dialog" role="dialog" aria-modal="true" :aria-labelledby="`extension-dialog-${request.interactionId}`" @keydown.esc.prevent.stop="respond(true)">
           <header><div><small>互动 · {{ interactionMethodLabel(request.method) }}</small><h2 :id="`extension-dialog-${request.interactionId}`">{{ request.title }}</h2></div><span v-if="secondsRemaining !== null">{{ secondsRemaining }}s</span></header>
 
           <template v-if="request.method === 'select'">
