@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { controlRequestDescriptor } from "../control/protocol.js";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js";
@@ -386,6 +387,6 @@ function deadlineForRequest(type: AgentRequest["type"]): "request" | "mutation" 
   // Pi abort waits for the Agent to become idle. Queued input may legally start
   // another turn first, so abort completion is not a Worker liveness signal.
   if (["command.submit", "command.abort", "session.navigate", "session.compact"].includes(type)) return "none";
-  if (["model.list", "tool.list", "settings.get", "resource.get", "resource.content", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.tree"].includes(type)) return "request";
+  if (controlRequestDescriptor(type).effect === "query") return "request";
   return "mutation";
 }

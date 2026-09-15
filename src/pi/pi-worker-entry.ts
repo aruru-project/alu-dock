@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { controlRequestDescriptor } from "../control/protocol.js";
 
 import { createPiAgentAdapter, type PiAgentAdapter } from "./pi-agent-adapter.js";
 import { openValidatedPiSession } from "./pi-session-target.js";
@@ -266,7 +267,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
 
 function tryCaptureState(runtime: PiAgentAdapter): AgentWorkerState | undefined { try { return captureState(runtime); } catch { return undefined; } }
 function isAcceptedRequest(type: AgentRequest["type"]): boolean {
-  return !["model.list", "tool.list", "settings.get", "resource.get", "resource.content", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.tree"].includes(type);
+  return controlRequestDescriptor(type).effect === "command";
 }
 function parseEnvJson(name: string): unknown { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return JSON.parse(value); }
 function parseInit(raw: unknown): PiWorkerInitOptions {

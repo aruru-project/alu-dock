@@ -1149,7 +1149,11 @@ export class ManagedInstance {
       this.compactionRequestOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
-      const result = await this.invokeAgent<AgentCompactionResult>("session.compact", { operationId, ...(customInstructions === undefined ? {} : { customInstructions }) });
+      const response = this.invokeAgent<AgentCompactionResult>("session.compact", { operationId, ...(customInstructions === undefined ? {} : { customInstructions }) });
+      // Compaction keeps the same runtime. After ordered startup, reads may
+      // observe it while the exclusive effect lease still prevents replacement.
+      configuration.releaseProjection();
+      const result = await response;
       await this.closeRuntimeOperationBoundary(operationId);
       return result;
     } catch (error) {
@@ -1181,7 +1185,7 @@ export class ManagedInstance {
   }
 
   async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<AgentModelState> {
-    const configuration = await this.beginConfiguration("switching model", { admission: "live" });
+    const configuration = await this.beginConfiguration("switching model", { kind: "model-settings" });
     this.modelConfigurationActive = true;
     try {
       const state = await this.invokeAgent<AgentModelState>("model.set", { operationId, provider, modelId });
@@ -1212,7 +1216,7 @@ export class ManagedInstance {
   }
 
   async setThinkingLevel(level: ThinkingLevel, operationId = this.createCommandId()): Promise<AgentModelState> {
-    const configuration = await this.beginConfiguration("changing thinking level", { admission: "live" });
+    const configuration = await this.beginConfiguration("changing thinking level", { kind: "model-settings" });
     this.modelConfigurationActive = true;
     try {
       const state = await this.invokeAgent<AgentModelState>("thinking.set", { operationId, level });
@@ -1761,6 +1765,11 @@ export class ManagedInstance {
       && this.commandScheduler.activeCommand("control", "queue") === undefined
       && this.commandScheduler.activeCommand("terminal") === undefined
     ) {
+      const modelSettings = this.commandScheduler.activeCommand("model-settings");
+      if (modelSettings) {
+        await modelSettings.completion;
+        continue;
+      }
       const firstCustodyItem = this.pendingQueueMessages.find((candidate) => (
         candidate.phase === "host_deferred"
         || candidate.phase === "dispatching"
@@ -2493,11 +2502,11 @@ export class ManagedInstance {
     action: string,
     options: {
       admission?: "idle" | "live" | "run_preempting";
-      kind?: "general" | "navigation" | "compaction";
+      kind?: "general" | "navigation" | "compaction" | "model-settings";
     } = {},
   ): Promise<InstanceCommandLease> {
     this.catalogPort?.assertWritable();
-    const decision = this.commandScheduler.admit({
+    const decision = this.commandScheduler.admit(options.kind === "model-settings" ? { class: "model-settings" } : {
       class: "exclusive",
       kind: options.kind ?? "general",
       admission: options.admission ?? "idle",

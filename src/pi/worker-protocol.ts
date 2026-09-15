@@ -1,4 +1,5 @@
 import {
+  AGENT_REQUEST_TYPES,
   AgentCompactionKnownFailureError,
   AgentConversationCursorError,
   AgentInvalidDeliveryModeError,
@@ -28,6 +29,7 @@ import {
   parseFileReadBody,
   parseHistoryEntry,
   parseCompactionBody,
+  parseCompactionPromptTemplatesResult,
   parseConversationFrame,
   parseModelListBody,
   parseResourcesResult,
@@ -445,6 +447,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
     case "file.read": parseFileReadBody(raw); return;
     case "model.list": parseModelListBody(raw); return;
     case "session.compact": parseCompactionBody(raw); return;
+    case "session.compaction.prompts": parseCompactionPromptTemplatesResult(raw); return;
     case "tool.list": case "tool.set_active": parseToolListBody(raw); return;
     case "settings.get": parseSettingDtos(raw); return;
     case "settings.update": parseSettingDto(raw, "Worker setting"); return;
@@ -644,7 +647,7 @@ function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
 }
 
 function isAgentRequest(type: string): type is AgentRequest["type"] {
-  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "resource.content", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
+  return (AGENT_REQUEST_TYPES as readonly string[]).includes(type);
 }
 
 function parseCapability(raw: unknown): WorkerCapability {

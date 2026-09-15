@@ -164,6 +164,7 @@ export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as co
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
 export const SYSTEM_TEMPLATES_CAPABILITY = "system.templates.v1" as const;
 export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
+export const COMPACTION_PROMPTS_CAPABILITY = "session.compaction-prompts.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
 export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
@@ -205,6 +206,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "service.managed.v1",
   "session.adopt.v1",
   "session.commands.v1",
+  COMPACTION_PROMPTS_CAPABILITY,
   "session.core",
   "session.inventory.v1",
   "session.inventory-diagnostics.v1",
@@ -309,6 +311,7 @@ export type ControlRequest =
   | Request<"session.new", { operationId: string; instanceId: string; parentSession?: string }>
   | Request<"session.name", { operationId: string; instanceId: string; name: string }>
   | Request<"session.compact", { operationId: string; instanceId: string; customInstructions?: string }>
+  | Request<"session.compaction.prompts", { instanceId: string }>
   | Request<"session.reload", { operationId: string; instanceId: string }>
   | Request<"session.tree", { instanceId: string }>
   | Request<"session.navigate", { operationId: string; instanceId: string; targetId: string; summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }>
@@ -385,6 +388,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "session.new": { target: "instance", effect: "command", transport: "unary" },
   "session.name": { target: "instance", effect: "command", transport: "unary" },
   "session.compact": { target: "instance", effect: "command", transport: "unary" },
+  "session.compaction.prompts": { target: "instance", effect: "query", transport: "unary" },
   "session.reload": { target: "instance", effect: "command", transport: "unary" },
   "session.tree": { target: "instance", effect: "query", transport: "response_transfer" },
   "session.navigate": { target: "instance", effect: "command", transport: "unary" },
@@ -564,6 +568,8 @@ export type FileReadResult = PublishedFileReadPage & { instanceId: string; runti
 export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
 export interface SessionNameResult { instance: InstanceSnapshot }
 export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
+/** Runtime-owned default instruction text, not a current provider request payload. */
+export interface CompactionPromptTemplatesResult { system: string; summarize: string; update: string; turnPrefix: string }
 export interface SessionReloadResult extends ResourcesResult { instance: InstanceSnapshot }
 export interface SessionTreeResult { nodes: TreeNodeDto[]; leafId?: string }
 export interface SessionNavigateResult { cancelled: boolean; aborted?: boolean; editorText?: string; instance: InstanceSnapshot }
@@ -641,6 +647,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "session.inventory") return "session.inventory.v1";
   if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v2";
   if (type === "command.submit" || type === "session.list") return "session.core";
+  if (type === "session.compaction.prompts") return COMPACTION_PROMPTS_CAPABILITY;
   if (type.startsWith("session.")) return "session.commands.v1";
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
@@ -1039,6 +1046,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     }
     case "session.new": exact(params, ["operationId", "instanceId", "parentSession"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), parentSession: optionalString(params.parentSession, "params.parentSession", MAX_CONTROL_CWD_CHARS, "invalid_request") } };
     case "session.name": exact(params, ["operationId", "instanceId", "name"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name: boundedString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request") } };
+    case "session.compaction.prompts": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "session.compact": exact(params, ["operationId", "instanceId", "customInstructions"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), customInstructions: optionalString(params.customInstructions, "params.customInstructions", MAX_PROMPT_CHARS, "invalid_request") } };
     case "session.reload": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "session.tree": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
@@ -1884,6 +1892,17 @@ export function parseSessionNameResult(input: unknown): SessionNameResult {
   if (instance.lifecycle !== "active") throw validation("invalid_response", "Session name success requires an active instance");
   return { instance };
 }
+export function parseCompactionPromptTemplatesResult(input: unknown): CompactionPromptTemplatesResult {
+  const value = object(input, "compaction prompt templates");
+  exact(value, ["system", "summarize", "update", "turnPrefix"]);
+  return {
+    system: boundedString(value.system, "system", MAX_JSON_STRING_CHARS),
+    summarize: boundedString(value.summarize, "summarize", MAX_JSON_STRING_CHARS),
+    update: boundedString(value.update, "update", MAX_JSON_STRING_CHARS),
+    turnPrefix: boundedString(value.turnPrefix, "turnPrefix", MAX_JSON_STRING_CHARS),
+  };
+}
+
 export function parseCompactionBody(input: unknown): SessionCompactionResult["result"] {
   const result = object(input, "result"); exact(result, ["summary", "firstKeptEntryId", "tokensBefore"]);
   return {

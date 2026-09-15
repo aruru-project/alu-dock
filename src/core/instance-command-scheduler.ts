@@ -7,6 +7,7 @@ export type ControlCommandKind = "immediate" | "queue";
 export type InstanceCommandRequest =
   | { class: "terminal" }
   | { class: "exclusive"; kind: ExclusiveCommandKind; admission: ExclusiveAdmission }
+  | { class: "model-settings" }
   | { class: "input" }
   | { class: "interrupt" }
   | { class: "control"; kind: ControlCommandKind };
@@ -69,6 +70,13 @@ export class InstanceCommandLease {
     return this.current(runtimeGeneration) && this.scheduler.effectAllowed(this.command);
   }
 
+  /** End only the startup read barrier; the effect lease stays active. */
+  releaseProjection(): void {
+    const release = this.command.releaseProjection;
+    this.command.releaseProjection = undefined;
+    release?.();
+  }
+
   release(): void {
     if (this.released) return;
     this.released = true;
@@ -123,9 +131,20 @@ export class InstanceCommandScheduler {
     const input = this.find("input");
     const interrupt = this.find("interrupt");
     const queue = this.find("control", "queue");
+    const modelSettings = this.find("model-settings");
+
+    if (request.class === "model-settings") {
+      if (modelSettings || input || interrupt || queue
+        || (exclusive?.request.class === "exclusive" && exclusive.request.kind !== "compaction")) {
+        return { kind: "reject", reason: "busy" };
+      }
+      const projection = this.reserveProjection();
+      const lease = this.activate(request, facts.runtimeGeneration, projection.release);
+      return { kind: "wait", lease, forCompletion: projection.entered };
+    }
 
     if (request.class === "exclusive") {
-      if (exclusive || input || interrupt || queue || facts.compactionActive) {
+      if (exclusive || modelSettings || input || interrupt || queue || facts.compactionActive) {
         return { kind: "reject", reason: "busy" };
       }
       if (request.admission !== "live" && this.hasQueueCustody(facts)) return { kind: "reject", reason: "busy" };
@@ -139,13 +158,13 @@ export class InstanceCommandScheduler {
 
     if (request.class === "control") {
       if (request.kind === "immediate") return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
-      if (exclusive || interrupt || queue) return { kind: "reject", reason: "busy" };
+      if (exclusive || modelSettings || interrupt || queue) return { kind: "reject", reason: "busy" };
       if (input) return { kind: "reject", reason: "input_admission" };
       return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
     }
 
     if (request.class === "input") {
-      if (input || interrupt || queue) return { kind: "reject", reason: input ? "input_admission" : "busy" };
+      if (input || modelSettings || interrupt || queue) return { kind: "reject", reason: input ? "input_admission" : "busy" };
       if (exclusive?.request.class === "exclusive" && exclusive.request.kind !== "compaction") {
         return { kind: "reject", reason: "busy" };
       }
@@ -160,6 +179,11 @@ export class InstanceCommandScheduler {
         return { kind: "preempt", lease, preempted: view };
       }
       return { kind: "wait", lease, forCompletion: exclusive.completion };
+    }
+    // Preserve normal configuration ordering, but never delay aborting an
+    // active auto-compaction behind a settings write.
+    if (modelSettings && !facts.compactionActive) {
+      return { kind: "wait", lease: this.activate(request, facts.runtimeGeneration), forCompletion: modelSettings.completion };
     }
     if (input) return { kind: "reject", reason: "input_admission" };
     return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };

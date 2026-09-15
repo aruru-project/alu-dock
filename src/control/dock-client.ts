@@ -38,6 +38,9 @@ import {
   CONVERSATION_CONTENT_CAPABILITY,
   CONVERSATION_IMAGES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
+  COMPACTION_PROMPTS_CAPABILITY,
+  parseCompactionPromptTemplatesResult,
+  type CompactionPromptTemplatesResult,
   PUBLISHED_FILES_CAPABILITY,
   INSTANCE_DELIVERABLES_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
@@ -592,6 +595,7 @@ export class DockClient {
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
   newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}
   nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
+  compactionPrompts(instanceId:string):Promise<CompactionPromptTemplatesResult>{return this.request("session.compaction.prompts",{instanceId},COMPACTION_PROMPTS_CAPABILITY,parseCompactionPromptTemplatesResult);}
   compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult,undefined,this.longMutationTimeoutMs);}
   reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},["session.commands.v1","projection.completeness.v1"],parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
   tree(instanceId:string):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId},"session.tree.v2",parseSessionTreeResult);}

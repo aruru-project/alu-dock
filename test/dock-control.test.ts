@@ -1606,7 +1606,7 @@ test("manual compaction aborts a running model command without stealing its run 
   assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
 });
 
-test("committed reads and follow stay available while Worker projection waits for manual compaction", async (context) => {
+test("queries and follow stay available while manual compaction continues", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -1631,9 +1631,8 @@ test("committed reads and follow stay available while Worker projection waits fo
 
     const liveEvents: DockEvent[] = [];
     const observer = new DockClient({ socketPath: harness.socketPath, timeoutMs: 2_000 });
-    let treeSettled = false;
-    const treeDuringCompaction = managed.getTree().finally(() => { treeSettled = true; });
-    const [projection, attached, history] = await Promise.all([
+    const treeDuringCompaction = managed.getTree();
+    const [projection, attached, history, tree] = await Promise.all([
       observer.read(created.id, undefined, "conversation_bootstrap"),
       observer.streamEvents(created.id, {
         onEvent: (event) => liveEvents.push(event),
@@ -1641,6 +1640,7 @@ test("committed reads and follow stay available while Worker projection waits fo
         conversationBootstrap: true,
       }),
       managed.getHistoryPage(undefined, 20),
+      treeDuringCompaction,
     ]);
     subscription = attached;
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1651,7 +1651,7 @@ test("committed reads and follow stay available while Worker projection waits fo
     assert.equal(attached.initial.instance.compacting, true);
     assert.equal(attached.initial.instance.runtimeGeneration, created.runtimeGeneration);
     assert.equal(history.instance.compacting, true);
-    assert.equal(treeSettled, false);
+    assert.equal(Array.isArray(tree.nodes), true, "Tree observes the current branch without waiting for the summary");
 
     const queued = await observer.prompt(created.id, "queued during observed manual compaction", "auto", "manual-compaction-observer-queue");
     assert.equal(queued.receipt.queued, true);
@@ -1662,9 +1662,8 @@ test("committed reads and follow stay available while Worker projection waits fo
 
     block.finish();
     blockFinished = true;
-    const [result, tree] = await Promise.all([compacting, treeDuringCompaction]);
+    const result = await compacting;
     assert.equal(result.result.summary, "fixture summary");
-    assert.equal(Array.isArray(tree.nodes), true);
     const deadline = Date.now() + 2_000;
     while (!liveEvents.some((event) => event.type === "compaction.completed") && Date.now() < deadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
@@ -1677,6 +1676,81 @@ test("committed reads and follow stay available while Worker projection waits fo
     if (subscription) await subscription.done;
     if (!blockFinished) block.finish();
     await compacting.catch(() => {});
+  }
+});
+
+// #291 adds concurrent settings, not a second way around earlier reads or Stop/Abort.
+test("an earlier read finishes before compaction, then menus and model changes remain usable", { timeout: 8_000 }, async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 1_000 });
+  const created = await client.create(harness.directory, "compaction-read-handoff");
+  const managed = harness.registry.get(created.id);
+  const runtime = harness.sessions.get(created.id)!;
+  runtime.settle(); await managed.waitForIdle();
+  const readBlock = runtime.blockNextTreeRead();
+  const earlier = managed.getTree();
+  await readBlock.entered;
+  const compactBlock = runtime.blockNextCompaction();
+  const compacting = managed.compactSession("read-before-compact");
+  void compacting.catch(() => {});
+  const menu = client.models(created.id);
+  const changing = client.setModel(created.id, "fixture", "local", "read-before-model");
+  void menu.catch(() => {}); void changing.catch(() => {});
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(managed.snapshot().compacting, false, "compaction has not overtaken the unfinished read");
+    assert.equal(managed.snapshot().executor.model?.id, "default");
+    readBlock.release();
+    await earlier;
+    await compactBlock.entered;
+    const [, changed] = await Promise.all([menu, changing]);
+    assert.equal(changed.instance.executor.model?.id, "local");
+    assert.equal((await client.status(created.id)).compacting, true, "the menus and setting completed before the held summary");
+  } finally {
+    readBlock.release(); compactBlock.finish();
+    await Promise.allSettled([earlier, compacting, menu, changing]);
+  }
+});
+
+test("Abort remains usable while a next-model save is pending during manual or automatic compaction", { timeout: 8_000 }, async (context) => {
+  for (const reason of ["manual", "threshold"] as const) {
+    const harness = await createHarness();
+    let releaseModel: (() => void) | undefined;
+    let compacting: Promise<unknown> | undefined;
+    try {
+      await harness.host.start();
+      const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 1_000 });
+      const created = await client.create(harness.directory, `abort-compaction-${reason}`);
+      const runtime = harness.sessions.get(created.id)!;
+      runtime.settle(); await harness.registry.get(created.id).waitForIdle();
+      if (reason === "manual") {
+        const block = runtime.blockNextCompaction();
+        compacting = client.compactSession(created.id, undefined, "abort-pending-compact");
+        void compacting.catch(() => {});
+        await Promise.race([block.entered, compacting]);
+      } else {
+        runtime.isCompacting = true;
+        runtime.emit({ type: "compaction_start", reason });
+      }
+      assert.equal((await client.status(created.id)).compacting, true);
+      const block = runtime.blockNextModelMutation();
+      releaseModel = block.release;
+      const changing = client.setModel(created.id, "fixture", "local", "abort-pending-model");
+      void changing.catch(() => {});
+      try {
+        await Promise.race([block.entered, changing]);
+        const aborted = await client.abort(created.id, `abort-${reason}`);
+        assert.equal(aborted.instance.compacting, false);
+        assert.equal(aborted.instance.lifecycle, "active");
+      } finally { block.release(); }
+      assert.equal((await changing).settingsWrite.persisted, true);
+      await compacting?.catch(() => {}); // The static Worker reports generic cancellation, not Pi's error policy.
+    } finally {
+      releaseModel?.();
+      await cleanupHarness(harness);
+    }
   }
 });
 
@@ -1768,8 +1842,20 @@ test("Sol-style compaction keeps a concurrent cross-client prompt visible and ha
   await attached.done;
   assert.ok((await second.list()).some((item) => item.id === created.id), "a valid compaction queue must keep Hub/list usable");
 
-  guard.finishCompaction();
-  await guard.continuationStarted;
+  // #291: the hidden continuation may start before a compatible setting finishes,
+  // but Host-owned user input must retain custody until that setting is committed.
+  const modelBlock = runtime.blockNextModelMutation();
+  const changing = first.setModel(created.id, "fixture", "local", "post-compaction-model");
+  void changing.catch(() => {});
+  await Promise.race([modelBlock.entered, changing]);
+  try {
+    guard.finishCompaction();
+    await guard.continuationStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(runtime.promptCalls, 1, "queued input is not delivered while next-model saving is unfinished");
+    assert.equal((await first.status(created.id)).pending.total, 1);
+  } finally { modelBlock.release(); }
+  assert.equal((await changing).settingsWrite.persisted, true);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(runtime.promptCalls, 2);
   assert.equal(runtime.promptMessages.at(-1), "must survive compaction");
@@ -1890,6 +1976,11 @@ test("stop preempts a manual compaction even before its start event is projected
       && error.operationId === "blocked-compact-op",
   );
   await startBlock.entered;
+  // #291: Stop must still begin cleanup when compaction and a model save coexist.
+  const modelBlock = runtime.blockNextModelMutation();
+  const changing = client.setModel(created.id, "fixture", "local", "stop-during-model-save");
+  void changing.catch(() => {});
+  await Promise.race([modelBlock.entered, changing]);
 
   const stopping = client.stop(created.id, "stop-during-compaction");
   await stopIntentGate.entered;
@@ -1898,8 +1989,10 @@ test("stop preempts a manual compaction even before its start event is projected
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "stopping");
   startBlock.release();
+  modelBlock.release();
   const stopped = await stopping;
   await compactFailure;
+  assert.equal((await changing).settingsWrite.persisted, true);
 
   assert.equal(stopped.instance.lifecycle, "stopped");
   assert.equal(stopped.instance.runtimeGeneration, created.runtimeGeneration);
@@ -1938,6 +2031,9 @@ test("reload and reads both succeed in either arrival order", async (context) =>
 
   const reloadFirst = managed.reloadSession("reload-first");
   await reloadEntered;
+  // A selected model cannot leak into a Session that is already being replaced.
+  await assert.rejects(client.setModel(created.id, "fixture", "local", "model-after-reload"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy");
   let treeSettled = false;
   let historySettled = false;
   const treeAfterReload = managed.getTree().finally(() => { treeSettled = true; });
@@ -1954,6 +2050,16 @@ test("reload and reads both succeed in either arrival order", async (context) =>
   assert.equal(historyResult.instance.runtimeGeneration, created.runtimeGeneration + 1);
 
   runtime.reload = originalReload;
+  const modelBlock = runtime.blockNextModelMutation();
+  const changing = client.setModel(created.id, "fixture", "local", "model-before-reload");
+  void changing.catch(() => {});
+  await Promise.race([modelBlock.entered, changing]);
+  try {
+    await assert.rejects(client.reloadSession(created.id, "reload-after-model"),
+      (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy");
+  } finally { modelBlock.release(); }
+  await changing;
+
   const treeBlock = runtime.blockNextTreeRead();
   const treeFirst = managed.getTree();
   await treeBlock.entered;

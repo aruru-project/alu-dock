@@ -79,7 +79,7 @@ Incident 不属于当前运行状态，reopen 不删除它；清理由独立的�
 
 Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信只补充进程所需的信息，例如 Worker identity、generation、调用关联、接收确认、分帧和背压。
 
-Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `{nodes, leafId?}` 完整 snapshot，并复用 `protocol.ts` 的唯一 parser/type；raw Session entry、完整 message/tool content 不跨 Worker 边界。navigate/fork/clone 的 target membership 与 Pi 原生目标规则也在 adapter 内校验，Host 不为此读取或维护 Tree index。既有 generic Worker envelope chunking 原样承载这个结果；公开 `response_transfer` 是之后 Host→client 的透明 transport framing，不是 Worker tree chunking。
+Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `{nodes, leafId?}` 完整 snapshot，并复用 `protocol.ts` 的唯一 parser/type；raw Session entry、完整 message/tool content 不跨 Worker 边界。navigate/fork/clone 的 target membership 与 Pi 原生目标规则也在 adapter 内校验，Host 不为此读取或维护 Tree index。Clone 可选任意仍有效的历史节点，按 position=at 从该处创建新 Pi Session，原保存 Session 不变、Dock Work identity 不变；不能额外限制为当前 leaf。既有 generic Worker envelope chunking 原样承载这个结果；公开 `response_transfer` 是之后 Host→client 的透明 transport framing，不是 Worker tree chunking。
 
 同一项能力的结果体和事件在 Dock 协议中定义一次，Worker、Host 和客户端复用该定义。Worker 返回 Dock 已定义的结果和事件，Host 验证归属后转发。
 
@@ -97,6 +97,19 @@ Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部�
 创建 Pi session 时，adapter 固定启用 `extensionModelMutationPolicy: "legacy-defaults"`，保留既有插件 `pi.setModel()` / `pi.setThinkingLevel()` 的默认保存行为：切模型保存默认 provider/model 并保留当前 Thinking 偏好，只有发生变化的有效 Thinking 才写默认，非推理模型不会抹掉偏好，也不隐式扩大模型范围。该配置随既有 session factory 重建，不由 wire workerConfig 覆盖；Pi 的公开 SDK setter 仍保留 0.85 的显式持久化语义。插件同步 setter 只更新内存并排队写入，不是落盘回执，不能替代 Dock 原有的 `flush()` / `drainErrors()` 与 `settingsWrite.persisted` 合同。
 
 Worker event/response 已携带完整 `modelState`。连接接收时捕获其变化与 generation，Host 通过既有 catalog transition 提交模型/Thinking，并用 `model.changed` 通知实时客户端；被动观察没有原始 requested level，不编造 `thinking.changed.requested`。显式 Dock 配置仍拥有自身完成和失败事件，期间观察到的最新状态在该提交后补齐、相同值去重；Thinking 请求若同时观察到模型变更，也发布模型事件。Session replacement 使用对应消息携带的模型状态，不能在异步提交时重新读取已经前进的 Worker 状态。
+
+Model/Thinking 在手动或自动压缩期间可读、可设置。新选择用于后续调用，不自动取消或重跑已经开始的调用；设置的保存与失败回执沿用原合同。调度边界见 [instance.md](instance.md)。
+
+默认压缩提示由 public SDK `getCompactionPromptTemplates()` 只读提供：`system`、首次 `summarize`、已有摘要时的 `update`、保留分段前缀的 `turnPrefix`。Protocol 的 `session.compaction.prompts` 及 `DockClient.compactionPrompts(instanceId)` 原样读取四项。它们不含动态对话/旧摘要，不能冒充当前 provider payload 或扩展实际自定义提示；补充说明另行编辑，且只追加到历史摘要任务，不替换完整模板。读取不触发压缩、模型调用或文件写入。
+
+Agent/扩展也可直接导入同一 public SDK getter。Dock Agent 的 Bash 环境提供实际 bundled CLI 与 Node 入口，以下 POSIX 只读示例从该包的 ESM public export 读取，不依赖 workspace 恰好安装 Pi，也不假设私有 `dist` 路径或新增 Dock tool：
+
+```sh
+(cd "$(dirname "$ALU_DOCK_PI_CLI_ENTRY")" && "$ALU_DOCK_PI_NODE" --input-type=module -e '
+import { getCompactionPromptTemplates } from "@earendil-works/pi-coding-agent";
+console.log(JSON.stringify(getCompactionPromptTemplates(), null, 2));
+')
+```
 
 消息提交的 input kind、实际 delivery 和 custody owner 都由 adapter 确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；普通 prompt 由 Pi input hook 再次检查运行状态后报告实际采用的 `prompt / steer / followUp`，registered extension command 则在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前报告。Compaction 期间不能交给 Pi 的普通 input 明确报告 Host custody。这个私有 preflight 是 Worker→Host 的事实通知，不增加逐条批准往返；Host 按 adapter 报告的实际 delivery 提交 receipt 和 Queue 状态；较早的 `isStreaming` 或 extension command 文本不作为 delivery 判断依据。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
 

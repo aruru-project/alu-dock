@@ -142,7 +142,8 @@ Scheduler 只串行化业务决定；耗时 Worker effect 可以在队列外运�
 |---|---|
 | `terminal` | 永久结束 Instance。Stop 接纳后关闭后续命令，清除等待项并驱动 graceful Worker shutdown。 |
 | `interrupt` | 控制当前运行但保留 Instance，例如 Abort。 |
-| `exclusive` | Session、Tree 或配置变更；同一时刻只允许一个冲突 effect。 |
+| `exclusive` | Session、Tree 或一般配置变更；同一时刻只允许一个冲突 effect。 |
+| `model-settings` | Model/Thinking 设置；彼此互斥，但可与已经进行的压缩并存，不取消或重跑已开始的模型调用。 |
 | `input` | Prompt/Steer/Follow-up 的统一输入入口；保持接纳因果，不替 Agent 猜实际 delivery。 |
 | `control` | 对当前 interaction/controller 的响应与控制。 |
 
@@ -183,7 +184,9 @@ Worker 接受副作用前失联与接受后失联仍是不同结果。Scheduler 
 
 ## Query 与 stream observation
 
-Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行期间 projection read 继续可用。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行，并在 manual compaction 期间等待；已经提交的 public/bootstrap read 仍可读取同一 committed snapshot。Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。Projection reservation 与 command slot 分工不同，复用同一 scheduler 和 generation authority，不另建锁。
+Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行及手动/自动压缩期间 projection read 继续可用。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行。手动压缩先等待已进入的读取，调用 Worker 后只释放启动阶段的 projection reservation，exclusive effect lease 仍保留到压缩完成；Model/Thinking 设置也通过这条 FIFO，并持有自身 reservation 直到设置与 catalog 提交结束。不存在第二条兼容队列或特定 query 旁路。
+
+Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。Projection reservation 与 command slot 分工不同，复用同一 scheduler 和 generation authority，不另建锁。Abort/Stop 保留对压缩的中止能力，不因同时设置 Model/Thinking 而等待压缩自然完成；压缩后的 Queue drain 等已经接纳的设置完成再发送。
 
 每次 instance query/stream 在开始时取得不可混用的 observation binding：
 
@@ -258,7 +261,7 @@ scheduler terminal admission
 - 普通 local query/command 不增加网络或 Worker round-trip；
 - InstanceManager resolve 使用内存 identity index，不扫描所有 Machine routes；
 - request classifier 是 O(1) canonical metadata lookup；
-- query/stream 不等待普通模型运行；manual compaction 只隔离串行的 Worker-backed projection read，committed public/bootstrap read 继续可用；
+- query/stream 不等待模型运行或压缩自然完成；手动压缩只持有启动阶段的 projection reservation，后续读取和 Model/Thinking 设置继续通过同一 FIFO；
 - RemoteInstance 继续复用一条 multiplexed Machine connection和每 logical stream 的既有背压边界；
 - 不创建 remote ManagedInstance 状态副本，不复制 conversation 或 stream body；
 - Stop、reload 和所有超过一秒的操作继续满足 STORY.md 的反馈要求。

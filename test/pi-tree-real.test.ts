@@ -84,7 +84,7 @@ test("real Pi keeps a previous durable recovery when fork-before-first-user defe
   }
 });
 
-test("real Pi navigates in-file, forks before a user message, and clones the current leaf without a model run", async () => {
+test("real Pi navigates, forks, and clones selected branch points without a model run", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-real-tree-"));
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
@@ -131,12 +131,20 @@ export default function (pi) {
     assert.ok(first.nodes.every((node) => node.summary.length > 0 && typeof node.hasChildren === "boolean"));
     assert.equal(first.leafId, first.nodes.at(-1)?.entryId);
 
+    // #292: the UI promises Clone from the selected node, not only the current leaf.
+    const sourceBytes = await readFile(sessionFile, "utf8");
+    assert.deepEqual(await instance.cloneSession("clone-history-point", "a1"), { cancelled: false });
+    assert.notEqual(instance.snapshot().executor.sessionFile, sessionFile);
+    assert.deepEqual((await instance.getTree()).nodes.filter((node) => node.kind === "message").map((node) => node.entryId), ["u1", "a1"]);
+    assert.equal(await readFile(sessionFile, "utf8"), sourceBytes, "cloning a history point preserves the original saved branch");
+    assert.deepEqual(await instance.switchSession("restore-original-branch", sessionFile, { canonicalCwd: cwd, projectTrusted: true }), { cancelled: false });
+
     const navigated = await instance.navigateSession("navigate-real-tree", "u2");
     assert.equal(navigated.cancelled, false);
     assert.equal(navigated.editorText, "second prompt");
     assert.equal(navigated.summaryCreated, false);
     const afterNavigate = instance.snapshot();
-    assert.equal(afterNavigate.runtimeGeneration, 1);
+    assert.equal(afterNavigate.runtimeGeneration, 3);
     assert.equal(afterNavigate.executor.sessionFile, sessionFile);
     assert.equal(afterNavigate.lastRun, "never");
     assert.equal(afterNavigate.metrics?.messages.total, initialMessages);
@@ -148,7 +156,7 @@ export default function (pi) {
     const forkSnapshot = instance.snapshot();
     const forkFile = forkSnapshot.executor.sessionFile;
     assert.ok(forkFile && forkFile !== sessionFile);
-    assert.equal(forkSnapshot.runtimeGeneration, 2);
+    assert.equal(forkSnapshot.runtimeGeneration, 4);
     assert.equal(forkSnapshot.extensionStatus?.["session-fixture"], "fork");
     assert.equal(forkSnapshot.lastRun, "never");
     const forkHeader = JSON.parse((await readFile(forkFile, "utf8")).split("\n")[0] as string) as Record<string, unknown>;
@@ -162,7 +170,7 @@ export default function (pi) {
     const cloneSnapshot = instance.snapshot();
     const cloneFile = cloneSnapshot.executor.sessionFile;
     assert.ok(cloneFile && cloneFile !== forkFile);
-    assert.equal(cloneSnapshot.runtimeGeneration, 3);
+    assert.equal(cloneSnapshot.runtimeGeneration, 5);
     assert.equal(cloneSnapshot.extensionStatus?.["session-fixture"], "fork");
     assert.equal(cloneSnapshot.lastRun, "never");
     const cloneHeader = JSON.parse((await readFile(cloneFile, "utf8")).split("\n")[0] as string) as Record<string, unknown>;

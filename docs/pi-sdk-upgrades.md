@@ -11,6 +11,8 @@ Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-proj
 
 All Pi runtime packages used by Dock come from **the same controlled fork release**. This includes the `pi-tui` imported directly by Dock's Hub/Work TUI and extension UI adapter, not just `pi-coding-agent`. Preserve their canonical package names for SDK/extension compatibility, but pin their actual artifact sources to our release. An equal version number on a community npm package is not an equivalent source. Ordinary non-Pi third-party dependencies are fixed by the actual Dock root lock; their first resolution need not reproduce the producer’s upstream build lock. Both platform assemblers consume that Dock lock with `npm ci --omit=dev --ignore-scripts`; unused Pi monorepo packages need not be distributed.
 
+The current controlled cohort is **`0.85.1-dock.3`**, release `dock-v0.85.1-dock.3` at `f552c4faeedd24208fb4eb95cae829cb219a17b1`. It adds the public readonly `getCompactionPromptTemplates()` getter while retaining the `.2` system body and extension-setting compatibility. Native compaction assembly, in-flight calls and extension hooks are unchanged; Dock reads the public templates rather than copying their bodies or intercepting provider requests.
+
 ## Build Pi only when Pi changes
 
 Pi's independent producer is `scripts/build-dock-package.mjs` in the fork; its `DOCK.md` documents inputs, source provenance, candidate artifacts and release checks. A published release records the source revision, package cohort, artifact URLs and integrity hashes. Uncommitted development candidates are not release artifacts.

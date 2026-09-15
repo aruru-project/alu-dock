@@ -87,6 +87,10 @@ Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字�
 
 完整 Tree response 即使只有一块，也使用 transport-only `response_transfer` records。每块是普通成功 `ControlResponse` UTF-8 序列化后的 opaque canonical-base64 byte slice；DockClient 检查同一 request/Host identity、从零连续 index、稳定 count、单块和 aggregate transport bounds，收齐后才解析原 response。缺块或越界没有 partial result。该 framing 在本地 IPC 与 mTLS Protocol V2 上相同，只承载成功的 `session.tree.v2` response；错误仍是一条普通 response，也不形成通用 streaming RPC。
 
+`session.compaction-prompts.v1` 提供只读 `session.compaction.prompts {instanceId}`，返回完整 `{system, summarize, update, turnPrefix}` 四个字符串。它是 instance/query/unary，无 operation、snapshot、分页或文件 contentRef。Pi adapter 直接返回 public SDK 的原生默认模板；Worker 与 DockClient 复用唯一 result parser，Host 只路由。它不是当前 provider 请求，也不代表扩展接管压缩时使用的自定义提示，动态对话/旧摘要和可编辑补充说明不混入模板。
+
+普通 Follow 的同代 sequence 只要求递增，不要求相邻：Host 从共用 journal 过滤 controller-only 事件，但不重新编号，也不把私有事件广播来补号。Client 仍校验 Host/Work/generation、重复倒序、truncated 与真实断线边界；只见序号跳跃不能触发重建。
+
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 
 `instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure` 和 adopt 不接受该创建配置；Agent-facing `dock_create` 只允许选择 system ID，不开放 generic workerConfig 编辑。

@@ -271,14 +271,16 @@ export type AgentCommandContentBody = CommandContentResult;
 export type AgentCommandCompletionsBody = CommandCompletionsResult;
 export type AgentResourceProjectionBody = ResourcesResult;
 
-export type AgentRequestType =
-  | "command.submit" | "command.abort" | "queue.dequeue"
-  | "model.list" | "model.set" | "thinking.set"
-  | "tool.list" | "tool.set_active" | "settings.get" | "settings.update"
-  | "resource.get" | "resource.content" | "command.catalog" | "command.content" | "command.complete" | "session.history"
-  | "conversation.history" | "conversation.content" | "conversation.image" | "file.read" | "session.list"
-  | "session.switch" | "session.new" | "session.name" | "session.compact"
-  | "session.reload" | "session.tree" | "session.navigate" | "session.fork" | "session.clone";
+export const AGENT_REQUEST_TYPES = [
+  "command.submit", "command.abort", "queue.dequeue",
+  "model.list", "model.set", "thinking.set",
+  "tool.list", "tool.set_active", "settings.get", "settings.update",
+  "resource.get", "resource.content", "command.catalog", "command.content", "command.complete", "session.history",
+  "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list",
+  "session.switch", "session.new", "session.name", "session.compact", "session.compaction.prompts",
+  "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone",
+] as const satisfies readonly ControlRequest["type"][];
+export type AgentRequestType = typeof AGENT_REQUEST_TYPES[number];
 
 /** The business request is the canonical Protocol V2 request, not a Worker RPC mirror. */
 export type AgentRequest = Extract<ControlRequest, { type: AgentRequestType }>;

@@ -47,6 +47,10 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有本地 IPC（POSIX Unix sock
 
 成功的 Tree response 在 wire 上始终由一组 `response_transfer` JSONL records 承载，即使内容只需一块。record 包含 `version:2 + requestId + hostEpoch + zero-based index + stable count + canonical-base64 data`；data 是正常成功 `ControlResponse` UTF-8 bytes 的 opaque slice。transport 必须验证 identity、连续顺序、count、canonical base64、decoded chunk bound 和 aggregate bound，全部收齐后再解析原 `ControlResponse`；每个合法 frame 刷新读取 idle deadline，断线、超时或缺块都不能返回 partial Tree。错误仍是普通 `response`，其他 request 也不能使用该 framing。Tree 打开后若目标已随 Session 变化而消失，操作返回 `invalid_tree_target`，客户端应重新打开 Tree 让用户选择，而不是沿用旧节点。本地 IPC 与 mTLS 使用同一 Tree success framing，由 transport 层透明重组后交给业务/UI 层。
 
+压缩面板可按 `session.compaction-prompts.v1` 调用 `session.compaction.prompts {instanceId}`，读取 `{system, summarize, update, turnPrefix}` 完整默认模板。该查询没有 snapshot、分页、operation 或文件引用；按需只读显示/复制，不提供替换完整提示的编辑器。补充说明与默认文本分开，须说明动态对话/旧摘要和扩展接管不在这四项里。压缩期间 Model/Thinking 查询与设置继续可用，设置只影响后续调用，不取消或重跑已开始的调用。
+
+New/Switch/Navigate/Fork/Clone/Reload 的成功回执可以携带本次操作的新 runtimeGeneration；Follow 先展示它并不使本次回执失效。客户端同时核对捕获的 Host/Work/选择归属，不接受其他操作产生的较新结果。Clone 使用用户选择的有效节点，不限于当前 leaf，且只在原 Work 内换成新 Session。失败/unknown 也须归到原目标；结果未知时不可自动重放。
+
 Wire shape、capability 名称和 bounds 的定义位于：
 
 - `src/control/protocol.ts`
@@ -142,7 +146,7 @@ Read result 包含 `instance`、`page`、`recentHistory`、`historyRevision`、`
 {"kind":"request","version":2,"requestId":"follow-id","type":"instance.follow","params":{"instanceId":"instance-id","since":{"hostEpoch":"host-epoch","instanceId":"instance-id","runtimeGeneration":3,"sequence":42}}}
 ```
 
-Follow result 只包含 `page`。Read 和 follow 之间发生的事件会出现在 follow 的初始 event page 中；处理完这页以后，再消费后续 live event。
+Follow result 只包含 `page`。Read 和 follow 之间发生的事件会出现在 follow 的初始 event page 中；处理完这页以后，再消费后续 live event。同一 Host/Work/runtimeGeneration 内的 sequence 要递增，但不要求相邻：controller-only 事件从公共 Follow 过滤后保留原 journal 序号，合法跳号不是丢失会话。
 
 ## 断线与重建
 
@@ -162,6 +166,8 @@ Follow result 只包含 `page`。Read 和 follow 之间发生的事件会出现�
 Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理。不得按 role、text、thinking、tool arguments/result、custom details 或它们的 hash 合并；完全相同的内容也可能是两次真实发生的事实。
 
 客户端不发送 conversation ACK。页面刷新、进程重启或本地状态丢失时，直接重新 bootstrap。Read、follow 或 Extension UI 操作连接断开，都不表示 Agent runtime 失败，也不会停止 instance。
+
+同一个旧订阅触发的恢复合并为一个在途任务；每次 await 后再确认原 Host/Work/选择及任务归属，真正的新边界仍须处理。同 Work 恢复可以阻止不安全的发送，但不能禁用或反复聚焦正在编辑的输入框；按钮、Enter、展开编辑的提交共用同一准入，草稿/selection/IME 与输出同步分别管理。
 
 ## 创建前浏览工作目录
 

@@ -18,6 +18,7 @@ import {
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
+  getCompactionPromptTemplates,
   SettingsManager,
   type ResourceDiagnostic,
   type SessionEntry,
@@ -442,6 +443,7 @@ export class PiAgentAdapter {
       case "session.new": return this.newSession(request.params.operationId, request.params.parentSession);
       case "session.name": return this.setSessionName(request.params.operationId, request.params.name);
       case "session.compact": return this.compact(request.params.operationId, request.params.customInstructions);
+      case "session.compaction.prompts": return getCompactionPromptTemplates();
       case "session.reload": return this.reload(request.params.operationId);
       case "session.tree": return this.getTree();
       case "session.navigate": return this.navigateTree(request.params.targetId, {
@@ -1030,9 +1032,6 @@ export class PiAgentAdapter {
   ): Promise<AgentForkResult> {
     return this.serialize(() => {
       const binding = this.requireActive();
-      if (kind === "clone" && binding.session.sessionManager.getLeafId() !== entryId) {
-        throw new AgentInvalidTreeTargetError("Clone entry must be the current session leaf");
-      }
       if (position === "before") {
         const selected = binding.session.getUserMessagesForForking().find((entry) => entry.entryId === entryId);
         if (!selected) throw new AgentInvalidTreeTargetError("Fork target must be a user message in the current session tree");
