@@ -214,11 +214,13 @@ Worker 产出结果并与 TypeScript 客户端复用本文件所指 `protocol.ts
 - `system.content {cwd,hostId?,id,offset?,revision?}` 只读当前目录候选，不接受任意路径。与 `resource.content` 共用 `readResourceContent` 和唯一的 `ResourceContentResult` parser：`{text,revision,nextOffset?}`，字节续读、UTF-8 和文件变化处理完全一致。
 - `system.default.set {cwd,hostId?,id,operationId}` → `{selection}`。这是独立的显式保存操作，复用 operation ledger。只写本目录 `.aludock/system-default.json` 的 `{id}`，不继承父目录、不保存正文。普通查询和本次确认都不写这个文件。
 
-创建接线：没有有效默认就让调用方选择；有效默认可以直接使用。将选中候选的 `workerConfig` **原样**传给既有 `instance.create`，并在 project trust continuation 中保持它和目标 Host/cwd。预览、返回、取消均不创建 Work。保存默认与 create 有各自的 operation/失败结果，不合并成一次成功提示。坏默认、缺失/不可读文件或无效模板 JSON 以可读 warning 回到选择，不能静默换正文。其他尚未接选择的创建入口保持原有 Pi 行为。
+创建默认归实际创建 Worker 的 Host：`DockRegistry.createNew` 在 project trust 完成、cwd 规范化后解析最终 `workerConfig`，覆盖 `instance.create` 和 `instance.ensure` 新建。显式 system 选择优先；省略时使用本目录保存的默认；仅在未配置目录默认时使用 Pi 原生行为。其他 `workerConfig` 字段不会关闭 system 默认。已配置但损坏、不可读或目标缺失时返回 `system_default_unavailable`，不静默换正文，新旧客户端一致。最终配置进入既有 creation/catalog 路径；同一创建操作不重选默认，ensure 命中已有 Work、adopt 和 reopen 不重新应用目录默认。
 
-Host 的 `SystemService` 只拥有目录默认和 Dock 模板文件事实；Pi 原生来源、五字段模板校验及 opaque workerConfig 由组合入口注入的 provider 负责。CLI 使用已解析的原生 agentDir 与机器本地 Home。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成；已有用户正文不覆盖。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
+客户端只在用户明确选择时，将候选 `workerConfig` 原样传给 `instance.create`；使用 Host 默认时省略选择，不把 catalog 的旧快照变成本次 override。显式选择、目标 Host/cwd 在 project trust continuation 中保留。预览、刷新、返回、取消均不创建 Work。坏默认在 catalog 中仍作为 warning 展示，让支持选择的客户端可以明确改选；不代替创建边界的报错。保存默认与 create 有各自的 operation/失败结果，不合并成一次成功提示。
 
-官方 Client、Hub/direct new 与 owner-enabled `dock_system`/`dock_create` 共用这三条请求和同一 create payload，不另写默认规则或机器代理。Agent create 接受 `systemId` 和显式 `saveDefault`，缺少有效默认时返回候选并要求选择；Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果。
+Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一实例；它拥有目录默认和 Dock 模板文件事实。Pi 原生来源、五字段模板校验、显式选择识别及 opaque workerConfig 合并由组合入口注入的 provider 负责。CLI 的 Main/SubHost 均使用已解析的原生 agentDir 与机器本地 Home。首次 catalog 发现触发初始化；默认解析、content 和 default.set 不初始化模板，不能通过读取缺失来源来复活它。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成；已有用户正文不覆盖。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
+
+官方 Client、Hub/direct new 保留选择和阅读界面；有效目录默认可直接进入创建，由 Host 在创建时应用，否则由用户明确选择。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
 
 ## 命令发现
 

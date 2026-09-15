@@ -42,14 +42,14 @@ test("Dock tools create peers off and send visibly attributed messages through c
   const createdCwd = await mkdtemp(join(root, "created-"));
   const ids = ["source-instance", "target-instance", "created-instance"];
   const runtimes: DelayedAgentWorkerConnection[] = [];
+  const systems = new SystemService(root, createPiSystemTemplateProvider(join(root, "agent")));
   const registry = new DockRegistry(
     async (input) => fixtureInstance(input, runtimes),
     () => ids.shift()!,
-    { hostEpoch: "dock-tools-host" },
+    { hostEpoch: "dock-tools-host", systemService: systems },
   );
   // Construction binds the same mutation application service used by Protocol V2.
-  const systems = new SystemService(root, createPiSystemTemplateProvider(join(root, "agent")));
-  new DockHost({ socketPath: join(root, "dock.sock"), registry, systemService: systems });
+  new DockHost({ socketPath: join(root, "dock.sock"), registry });
   const chosenSystem = (await systems.catalog(createdCwd)).candidates[0]!;
 
   const source = await registry.create({ operationId: "create-source", cwd: sourceCwd, name: "Alu" });

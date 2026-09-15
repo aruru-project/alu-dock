@@ -199,7 +199,7 @@ async function chooseDirectory(path: string, refresh = false) {
     systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? null
     if (!refresh && defaultSelection && !defaultSelection.warning) {
       systemSelection.value = defaultSelection
-      await createAt(path, hostId, undefined, defaultSelection.workerConfig)
+      await createAt(path, hostId)
     }
   } catch (cause) {
     if (epoch === systemEpoch) setError(cause, '读取这个目录的 system 列表', 'system_catalog')

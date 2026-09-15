@@ -76,8 +76,8 @@ async function createHarness(): Promise<Harness> {
     });
     await instance.submit("deterministic delayed task");
     return instance;
-  }, () => `instance-${++sequence}`);
-  const host = new DockHost({ socketPath, registry, systemService: new SystemService(directory, createPiSystemTemplateProvider(join(directory, "agent"))) });
+  }, () => `instance-${++sequence}`, { systemService: new SystemService(directory, createPiSystemTemplateProvider(join(directory, "agent"))) });
+  const host = new DockHost({ socketPath, registry });
   return { directory, socketPath, host, registry, sessions };
 }
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { SystemService } from "./system-service.js";
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -144,6 +145,7 @@ function newestInstanceFirst(left: InstanceSnapshot, right: InstanceSnapshot): n
 export class DockRegistry implements DockToolsHostPort {
   readonly hostEpoch: string;
   readonly startedAt: string;
+  readonly systemService: SystemService | undefined;
   private readonly instances = new Map<string, ManagedInstance>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
@@ -170,6 +172,7 @@ export class DockRegistry implements DockToolsHostPort {
       hostEpoch?: string;
       startedAt?: string;
       trustPreflight?: CreateTrustPreflight;
+      systemService?: SystemService;
       catalogCommitPort?: CatalogCommitPort;
       catalogStore?: CatalogStore;
       reopenTargetResolver?: ReopenTargetResolver;
@@ -182,6 +185,7 @@ export class DockRegistry implements DockToolsHostPort {
     this.startedAt = options.startedAt ?? new Date().toISOString();
     this.lastReconciledAtValue = this.startedAt;
     this.trustPreflight = options.trustPreflight;
+    this.systemService = options.systemService;
     this.reopenTargetResolver = options.reopenTargetResolver;
     this.catalogStore = options.catalogStore;
     this.catalogReady = options.catalogStore === undefined;
@@ -275,9 +279,12 @@ export class DockRegistry implements DockToolsHostPort {
       projectTrustDecision: input.projectTrustDecision,
     });
     const cwd = resolution.canonicalCwd;
-    const workerConfig = input.workerConfig === undefined
+    const resolvedConfig = this.systemService
+      ? await this.systemService.resolveWorkerConfig(cwd, input.workerConfig)
+      : input.workerConfig;
+    const workerConfig = resolvedConfig === undefined
       ? undefined
-      : cloneWorkerConfig(input.workerConfig, "Worker configuration");
+      : cloneWorkerConfig(resolvedConfig, "Worker configuration");
 
     const id = this.createId();
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {

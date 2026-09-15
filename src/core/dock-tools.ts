@@ -26,7 +26,7 @@ export type DockToolsResult =
   | ObservationResult
   | { type: "machines"; machines: MachineDto[] }
   | { type: "deliver"; deliverable: DeliverableDto }
-  | { type: "system_catalog"; result: SystemCatalogResult; selectionRequired?: boolean }
+  | { type: "system_catalog"; result: SystemCatalogResult }
   | { type: "system_content"; result: ResourceContentResult }
   | { type: "create"; instance: ObservedInstanceStatus; defaultSaved?: boolean }
   | {

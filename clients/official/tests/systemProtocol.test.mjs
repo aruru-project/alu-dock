@@ -46,14 +46,13 @@ try {
     const agentDir = ${JSON.stringify(agent)};
     const workerEnvironment = { ...process.env, HOME: ${JSON.stringify(join(root, 'worker-home'))}, USERPROFILE: ${JSON.stringify(join(root, 'worker-home'))} };
     const registry = new DockRegistry(input => createPiInstance({ ...input, agentDir, workerEnvironment }), undefined,
-      { trustPreflight: createPiProjectTrustCoordinator(agentDir) });
+      { trustPreflight: createPiProjectTrustCoordinator(agentDir), systemService: new SystemService(${JSON.stringify(home)}, createPiSystemTemplateProvider(agentDir)) });
     const remoteInstances = new MainMachineController({
       state: new MainMachineState(${JSON.stringify(join(root, 'main-state'))}, 'Isolated Main'),
       settingsState: new MachineSettingsState(${JSON.stringify(join(root, 'machine-settings'))}),
       mainHostEpoch: registry.hostEpoch, localSnapshots: () => registry.list(),
     });
-    const host = new DockHost({ remoteInstances, socketPath: ${JSON.stringify(socket)}, registry,
-      systemService: new SystemService(${JSON.stringify(home)}, createPiSystemTemplateProvider(agentDir)) });
+    const host = new DockHost({ remoteInstances, socketPath: ${JSON.stringify(socket)}, registry });
     await host.start();
     process.on('SIGTERM', async () => { await host.stop(); process.exit(0); });
     console.log(JSON.stringify({ kind: 'host.ready' }));

@@ -14,7 +14,8 @@ export interface SystemTemplateProvider {
   nativeSources(cwd: string): SystemSource[];
   initialTemplate(): string;
   validate(source: SystemSource, text: string): void;
-  workerConfig(source: SystemSource): JsonObject;
+  hasExplicitSelection(config: JsonObject | undefined): boolean;
+  workerConfig(source: SystemSource, provided?: JsonObject): JsonObject;
 }
 
 export class SystemService {
@@ -63,8 +64,6 @@ export class SystemService {
 
   private async sources(cwd: string, validate = true): Promise<{ candidates: SystemCandidate[]; warnings: string[] }> {
     const warnings: string[] = [];
-    try { await (this.initialization ??= this.initialize()); }
-    catch { this.initialization = undefined; warnings.push("无法初始化 system 模板目录。请检查 Home 下 .aludock 的写入权限后重试。"); }
     const sources = this.provider.nativeSources(cwd);
     try {
       const names = (await readdir(this.systemsPath)).filter((name) => name.endsWith(".json")).sort();
@@ -90,20 +89,52 @@ export class SystemService {
 
   async catalog(cwd: string, cursor?: SystemCatalogCursor, limit = MAX_SYSTEM_CATALOG_ITEMS): Promise<SystemCatalogResult> {
     cwd = await this.directory(cwd);
+    let initializationWarning: string | undefined;
+    try { await (this.initialization ??= this.initialize()); }
+    catch { this.initialization = undefined; initializationWarning = "无法初始化 system 模板目录。请检查 Home 下 .aludock 的写入权限后重试。"; }
     const { candidates, warnings } = await this.sources(cwd);
+    if (initializationWarning) warnings.unshift(initializationWarning);
     let defaultSelection: SystemCandidate | undefined;
     try {
-      const saved: unknown = JSON.parse(await readAll(join(cwd, ".aludock", "system-default.json")));
-      if (saved === null || typeof saved !== "object" || Object.keys(saved).length !== 1 || typeof (saved as { id?: unknown }).id !== "string") throw new Error();
-      defaultSelection = candidates.find((item) => item.id === (saved as { id: string }).id && !item.warning);
-      if (!defaultSelection) throw new Error();
+      const id = await this.savedDefaultId(cwd);
+      if (id !== undefined) {
+        defaultSelection = candidates.find((item) => item.id === id && !item.warning);
+        if (!defaultSelection) throw this.defaultUnavailable();
+      }
     } catch {
-      // readAll deliberately uses the same reader as previews; distinguish absent config here.
-      try { await lstat(join(cwd, ".aludock", "system-default.json")); }
-      catch (statError) { if (errorCode(statError) === "ENOENT") return this.page(cwd, candidates, warnings, cursor, limit); }
       warnings.push("本目录保存的 system 无法使用。请重新选择；需要时再明确保存目录默认。");
     }
     return this.page(cwd, candidates, warnings, cursor, limit, defaultSelection);
+  }
+
+  /** Creation defaults belong to the owning Host, regardless of the requesting Client. */
+  async resolveWorkerConfig(cwd: string, provided?: JsonObject): Promise<JsonObject | undefined> {
+    if (this.provider.hasExplicitSelection(provided)) return provided;
+    cwd = await this.directory(cwd);
+    const id = await this.savedDefaultId(cwd);
+    if (id === undefined) return provided;
+    try {
+      const selection = await this.selected(cwd, id);
+      return this.provider.workerConfig(selection, provided);
+    } catch { throw this.defaultUnavailable(); }
+  }
+
+  private defaultUnavailable(): ProtocolValidationError {
+    return new ProtocolValidationError("system_default_unavailable", "无法使用本目录保存的 system 默认。请检查 .aludock/system-default.json 及其所选文件，或明确选择其他 system 后重试。");
+  }
+
+  private async savedDefaultId(cwd: string): Promise<string | undefined> {
+    const path = join(cwd, ".aludock", "system-default.json");
+    try { await lstat(path); }
+    catch (error) {
+      if (errorCode(error) === "ENOENT") return undefined;
+      throw this.defaultUnavailable();
+    }
+    try {
+      const saved: unknown = JSON.parse(await readAll(path));
+      if (saved === null || typeof saved !== "object" || Object.keys(saved).length !== 1 || typeof (saved as { id?: unknown }).id !== "string") throw new Error();
+      return (saved as { id: string }).id;
+    } catch { throw this.defaultUnavailable(); }
   }
 
   private page(cwd: string, candidates: SystemCandidate[], warnings: string[], cursor: SystemCatalogCursor | undefined, limit: number, defaultSelection?: SystemCandidate): SystemCatalogResult {

@@ -110,8 +110,7 @@ export function parseDockToolsResult(raw: unknown): void {
     return;
   }
   if (value.type === "system_catalog") {
-    exactKeys(value, ["type", "result", "selectionRequired"], "Dock system catalog result");
-    if (value.selectionRequired !== undefined && typeof value.selectionRequired !== "boolean") throw new Error("Invalid selectionRequired");
+    exactKeys(value, ["type", "result"], "Dock system catalog result");
     parseSystemCatalogResult(value.result); return;
   }
   if (value.type === "system_content") {

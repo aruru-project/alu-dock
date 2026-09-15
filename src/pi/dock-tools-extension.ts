@@ -332,7 +332,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_create",
       label: "Create Dock work",
-      description: toolDescription("Create a new Dock instance in an absolute working directory. Use an exact Machine name to place it on another Machine; omit machine to use this work's Machine. Select systemId from dock_system; otherwise a valid directory default is required. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. The new instance starts with Dock tools off."),
+      description: toolDescription("Create a new Dock instance in an absolute working directory. Use an exact Machine name to place it on another Machine; omit machine to use this work's Machine. Select systemId from dock_system to override the Host default. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. The new instance starts with Dock tools off."),
       parameters: CREATE_SCHEMA,
       execute: async (_toolCallId: string, params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean }) => toolResult(await bridge.invoke({
         type: "create",

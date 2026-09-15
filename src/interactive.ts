@@ -202,7 +202,7 @@ async function createWithNotice(
     cwd = choice.cwd;
     defaultSaved ||= choice.defaultSaved;
     if (choice.defaultSaved) process.stdout.write("Directory default saved. Creating Work next.\n");
-    const workerConfig = choice.selection.workerConfig;
+    const workerConfig = choice.selection?.workerConfig;
     process.stdout.write(`Creating a Pi session for ${terminalSafe(cwd)}…\n`);
     const operationId = randomUUID();
     try {
@@ -220,10 +220,10 @@ async function createWithNotice(
     } catch (error) {
       // Startup failure is before Work publication. Transport loss, unknown
       // effects and expired receipts must still leave this path without replay.
-      if (!(error instanceof ControlClientError) || !["runtime_unavailable", "resource_unavailable", "request_failed"].includes(error.code)) throw error;
+      if (!(error instanceof ControlClientError) || !["runtime_unavailable", "resource_unavailable", "system_default_unavailable", "request_failed"].includes(error.code)) throw error;
       choice = await chooseSystem(client, cwd, undefined, {
         forceSelection: true,
-        selectedId: choice.selection.id,
+        selectedId: choice.selection?.id,
         notice: `${defaultSaved ? "Directory default was saved. " : ""}Work could not start. Check the source or choose again; Esc leaves.`,
       });
     }

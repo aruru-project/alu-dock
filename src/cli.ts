@@ -311,6 +311,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     registry = new DockRegistry(createManagedPiInstance, undefined, {
       hostEpoch: subHostEpoch,
       trustPreflight,
+      systemService,
       catalogStore: new FileCatalogStore(catalogPath as string),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       attachmentHostPort: attachmentService,
@@ -322,7 +323,6 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       registry,
       initialize: () => registry.initializeCatalog(),
       sessionInventory,
-      systemService,
       attachmentService,
       listen: false,
     });
@@ -337,6 +337,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     }) : undefined;
     registry = new DockRegistry(createManagedPiInstance, undefined, {
       trustPreflight,
+      systemService,
       ...(durable ? { catalogStore: new FileCatalogStore(catalogPath as string), attachmentHostPort: attachmentService } : {}),
       ...(mainDockToolsPort ? { dockToolsHostPort: mainDockToolsPort } : {}),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
@@ -363,7 +364,6 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ...(catalogPath ? { statePath: catalogPath, initialize: () => registry.initializeCatalog(), remoteAccessState: new RemoteAccessState(remoteAccessStateRoot(catalogPath)) } : {}),
       registry,
       sessionInventory,
-      systemService,
       attachmentService,
       remoteInstances,
     });

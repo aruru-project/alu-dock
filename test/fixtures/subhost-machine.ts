@@ -84,11 +84,11 @@ registry = new DockRegistry(async (input) => realPiDockTools
   catalogStore: new FileCatalogStore(statePath),
   attachmentHostPort: attachmentService,
   dockToolsHostPort: dockTools,
+  systemService: new SystemService(homeDir ?? dirname(statePath), createPiSystemTemplateProvider(realPiDockTools ? agentDir! : join(dirname(statePath), "pi"))),
 });
 await registry.initializeCatalog();
 if (registry.list().length === 0) await registry.create({ operationId: "native-create", cwd: workspace, name: "Remote work" });
-const systemService = new SystemService(homeDir ?? dirname(statePath), createPiSystemTemplateProvider(realPiDockTools ? agentDir! : join(dirname(statePath), "pi")));
-host = new DockHost({ socketPath: join(statePath, "unused.sock"), statePath, registry, attachmentService, systemService, listen: false });
+host = new DockHost({ socketPath: join(statePath, "unused.sock"), statePath, registry, attachmentService, listen: false });
 await host.start();
 await upstream.start();
 for (let attempt = 0; attempt < 200 && !upstream.connected(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));

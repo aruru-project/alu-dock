@@ -15,20 +15,21 @@ export async function readDockSystem(port: SystemPort, input: SystemToolRequest,
 
 /** Both local and Main tools use the canonical catalog/default and create application boundaries. */
 export async function createDockSystem(port: SystemPort, input: SystemCreateRequest, hostId?: string): Promise<DockToolsResult> {
+  if (input.saveDefault && input.systemId === undefined) throw new Error("Saving requires an explicit systemId.");
+  if (input.systemId === undefined) {
+    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId);
+    return { type: "create", instance: observationStatus(instance) };
+  }
   let page = await port.systemCatalog(input.cwd, hostId);
   const first = page;
-  let selection = input.systemId === undefined ? page.defaultSelection : page.candidates.find((item) => item.id === input.systemId);
-  while (input.systemId !== undefined && !selection && page.nextCursor) {
+  let selection = page.candidates.find((item) => item.id === input.systemId);
+  while (!selection && page.nextCursor) {
     page = await port.systemCatalog(first.cwd, hostId, page.nextCursor);
     selection = page.candidates.find((item) => item.id === input.systemId);
   }
-  if (!selection || selection.warning) {
-    if (input.systemId !== undefined) throw new Error("The selected system is unavailable. Use dock_system to inspect current candidates and choose again; no Work was created.");
-    return { type: "system_catalog", result: first, selectionRequired: true };
-  }
+  if (!selection || selection.warning) throw new Error("The selected system is unavailable. Use dock_system to inspect current candidates and choose again; no Work was created.");
   let saved = false;
   if (input.saveDefault) {
-    if (!input.systemId) throw new Error("Saving requires an explicit systemId.");
     selection = (await port.setSystemDefault(first.cwd, selection.id, hostId, systemToolOperation(input.operationId, "save"))).selection;
     saved = true;
   }

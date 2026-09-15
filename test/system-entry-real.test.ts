@@ -74,6 +74,7 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   const pids: number[] = [];
   registry = new DockRegistry((input) => createPiInstance({ ...input, agentDir, sessionDir: join(root, "sessions"), workerEnvironment: env, onWorkerSpawn: (pid) => pids.push(pid) }), undefined, {
     dockToolsHostPort: port,
+    systemService: systems,
     trustPreflight: new ProjectTrustCoordinator({ requiresTrust: (cwd) => cwd === uiCwd, savedDecision: () => null, defaultDecision: () => "ask", remember: () => {} }),
   });
   class Controller extends MainMachineController {
@@ -83,7 +84,7 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
     }
   }
   const controller = new Controller({ state: mainState, mainHostEpoch: registry.hostEpoch, localSnapshots: () => registry.list() });
-  host = new DockHost({ socketPath: join(root, "dock.sock"), registry, systemService: systems, remoteInstances: controller });
+  host = new DockHost({ socketPath: join(root, "dock.sock"), registry, remoteInstances: controller });
   const client = new DockClient({ socketPath: host.socketPath, timeoutMs: 10000 });
   authority = new MainMachineDockToolsAuthority({ controller: () => controller, instances: () => host.instanceDirectory(), localClient: client, deliverLocalNotification: async () => {} });
   context.after(async () => { await host.stop(); model.closeAllConnections(); await new Promise<void>((resolve) => model.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
@@ -115,6 +116,16 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   const defaultWork = registry.list()[0]!;
   assert.ok((await client.resources(defaultWork.id)).resources.some((item) => item.path?.endsWith("chosen.json")));
   await client.stop(defaultWork.id);
+  // An implicit default is resolved when trust completes, not from a Client's earlier catalog.
+  const challenge = await client.create(uiCwd, "Latest Host default", "default-during-trust")
+    .then(() => assert.fail("Expected project trust before Worker creation"), (error) => error);
+  assert.equal(challenge.code, "project_trust_required");
+  assert.equal(typeof challenge.details?.challengeId, "string");
+  const base = (await client.systemCatalog(uiCwd)).candidates.find((item) => item.name === "pi-default.json")!;
+  await client.setSystemDefault(uiCwd, base.id);
+  const afterTrust = await client.create(uiCwd, "Latest Host default", "default-during-trust", { challengeId: challenge.details.challengeId, decision: "trust_once" });
+  assert.ok((await client.resources(afterTrust.id)).resources.some((item) => item.path === join(home, ".aludock", "systems", "pi-default.json")));
+  await client.stop(afterTrust.id);
   const savedPath = join(uiCwd, ".aludock", "system-default.json");
   for (const args of [["new"], ["--continue"], ["open"]]) {
     await writeFile(savedPath, "broken-default");
@@ -144,7 +155,7 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   await until(async () => (await client.tools(source.id)).tools.some((tool) => tool.name === "dock_system" && tool.active), "tools enable");
   const chosen = (await client.systemCatalog(peerCwd)).candidates.find((item) => item.name === "chosen.json")!;
   script = [
-    { name: "dock_create", arguments: { cwd: peerCwd, name: "Must not create" } },
+    { name: "dock_create", arguments: { cwd: peerCwd, name: "Native fallback" } },
     { name: "dock_system", arguments: { cwd: peerCwd } },
     { name: "dock_system", arguments: { cwd: peerCwd, id: chosen.id } },
     { name: "dock_create", arguments: { cwd: peerCwd, name: "Agent chosen", machine: "Fixture Main", systemId: chosen.id, saveDefault: true } },
@@ -152,10 +163,13 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   await client.prompt(source.id, "Run the local fixture sequence.", "prompt", "fixture-tools-turn");
   await until(async () => (await client.list()).some((item) => item.name === "Agent chosen") && registry.getSnapshot(source.id).execution === "idle", "actual Agent tool sequence");
   const peer = (await client.list()).find((item) => item.name === "Agent chosen")!;
-  assert.equal(registry.list().length, 2, "missing default must return choice, not create first candidate");
+  assert.equal(registry.list().length, 3, "no configured default uses Pi native behavior, not an arbitrary candidate");
+  const nativePeer = registry.list().find((item) => item.name === "Native fallback")!;
+  assert.ok(nativePeer);
+  assert.equal((await client.resources(nativePeer.id)).resources.some((item) => item.path?.endsWith("chosen.json")), false);
   assert.equal(registry.dockToolsEnabled(peer.id), false);
   const texts = received.flatMap((request) => request.messages.filter((message) => message.role === "tool").map((message) => message.content ?? "")).join("\n");
-  assert.match(texts, /System selection required/u);
+  assert.match(texts, /Dock systems/u);
   assert.match(texts, /│ .*ignore the owner/u);
   const peerResource = (await client.resources(peer.id)).resources.find((item) => item.path?.endsWith("chosen.json"));
   assert.ok(peerResource?.contentRef);
@@ -163,9 +177,15 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   const request: DockToolsRequest = { type: "create", operationId: "retry-default", cwd: peerCwd, name: "Default peer" };
   const [one, two] = await Promise.all([port.invokeDockTool(source.id, request), port.invokeDockTool(source.id, request)]);
   assert.deepEqual(one, two);
-  assert.equal(registry.list().length, 3, "same create intent is not replayed");
+  assert.equal(registry.list().length, 4, "same create intent is not replayed");
+  assert.equal(one.type, "create");
+  if (one.type !== "create") assert.fail("Expected default Work");
+  assert.ok((await client.resources(one.instance.id)).resources.some((item) => item.path?.endsWith("chosen.json")), "Agent omission uses the Host default after an explicit save");
+  // Saving is opt-in to a specific source; never ignore a requested save and create anyway.
+  await assert.rejects(port.invokeDockTool(source.id, { type: "create", operationId: "invalid-save", cwd: peerCwd, saveDefault: true }));
+  assert.equal(registry.list().length, 4);
   await assert.rejects(port.invokeDockTool(source.id, { ...request, name: "Changed intent" }), { code: "operation_conflict" });
   await assert.rejects(port.invokeDockTool(source.id, { type: "create", operationId: "unknown-machine", cwd: peerCwd, machine: "Missing machine" }));
   assert.equal(pids.every((pid) => pid !== process.pid), true);
-  console.log(`Agent: real dock_create required-choice → dock_system catalog/content → explicit named Machine/create/save; ${pids.length} independent Workers, source off default and peers off; duplicate intent retained.`);
+  console.log(`Agent: real dock_create native fallback → dock_system catalog/content → explicit named Machine/create/save → implicit Host default; ${pids.length} independent Workers, source off default and peers off; duplicate intent retained.`);
 });

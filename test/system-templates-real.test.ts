@@ -52,10 +52,10 @@ export default function(pi) {
   const workerPids: number[] = [];
   const registryFactory = () => new DockRegistry((input) => createPiInstance({ ...input, agentDir, sessionDir: sessions,
     workerEnvironment: env, onWorkerSpawn: (pid) => workerPids.push(pid) }), undefined,
-  { catalogStore: store, reopenTargetResolver: { resolve: resolvePiReopenTarget } });
+  { catalogStore: store, reopenTargetResolver: { resolve: resolvePiReopenTarget }, systemService: new SystemService(home, createPiSystemTemplateProvider(agentDir)) });
   let registry = registryFactory();
   const makeSubHost = (listen: boolean) => new DockHost({ socketPath: join(root, "sub.sock"), registry, listen,
-    initialize: () => registry.initializeCatalog(), systemService: new SystemService(home, createPiSystemTemplateProvider(agentDir)) });
+    initialize: () => registry.initializeCatalog() });
   let subHost = makeSubHost(false);
   const mainState = new MainMachineState(join(root, "main-state"), "Main");
   await mainState.initialize();
@@ -78,6 +78,10 @@ export default function(pi) {
     const machine = (await client.machines()).machines.find((item) => item.name === "Selected machine");
     assert.ok(machine);
     const hostId = machine.hostId;
+    const nativeFallback = await client.create(cwd, "No Dock default", undefined, undefined, hostId);
+    assert.ok((await client.resources(nativeFallback.id)).resources.some((item) => item.path === join(cwd, ".pi", "SYSTEM.md")));
+    await assert.rejects(readFile(join(systems, "pi-default.json")), { code: "ENOENT" }, "a creation default lookup does not initialize templates");
+    await client.stop(nativeFallback.id);
     const first = await client.systemCatalog(cwd, hostId, undefined, 1);
     assert.equal(first.defaultSelection, undefined);
     assert.deepEqual(first.warnings, []);
@@ -104,7 +108,7 @@ export default function(pi) {
     await assert.rejects(client.systemContent(cwd, join(agentDir, "auth.json"), hostId), { code: "resource_unavailable" });
     await assert.rejects(client.systemContent(home, chosen.id, hostId), { code: "resource_unavailable" });
     await writeFile(join(cwd, ".pi", "SYSTEM.md"), "PROJECT NATIVE SYSTEM");
-    const work = await client.create(cwd, "Selected system", undefined, undefined, hostId, chosen.workerConfig);
+    let work = await client.create(cwd, "Selected system", undefined, undefined, hostId, chosen.workerConfig);
     assert.ok(workerPids[0] && workerPids[0] !== process.pid);
     await client.prompt(work.id, "/capture-system", "prompt");
     await waitFor(async () => (await readFile(observed, "utf8").catch(() => "")).includes("EXPLICIT DOCK BODY"));
@@ -120,11 +124,33 @@ export default function(pi) {
     assert.deepEqual(JSON.parse(await readFile(saved, "utf8")), { id: chosen.id });
     const withDefault = await client.systemCatalog(cwd, hostId, undefined, 1);
     assert.equal(withDefault.defaultSelection?.id, chosen.id, "saved default is usable even outside this candidate page");
+    // Host defaults are product behavior, not a feature opt-in by newer Clients.
+    const implicit = await client.create(cwd, "Old client uses Host default", "implicit-default", undefined, hostId);
+    assert.ok((await client.resources(implicit.id)).resources.some((item) => item.path === selectedPath), "an ordinary create without selection uses the target Host default");
+    assert.deepEqual((await store.load())!.instances.find((item) => item.creationOperationId === implicit.creationOperationId)?.workerConfig, chosen.workerConfig);
+    await client.setSystemDefault(cwd, all[1]!.id, hostId);
+    assert.equal((await client.create(cwd, "Old client uses Host default", "implicit-default", undefined, hostId)).id, implicit.id, "the same creation operation does not resolve a newer default again");
+    await client.setSystemDefault(cwd, chosen.id, hostId);
+    const configured = await client.create(cwd, "Other configuration keeps Host default", undefined, undefined, hostId, { tools: ["read"] });
+    assert.ok((await client.resources(configured.id)).resources.some((item) => item.path === selectedPath), "tools are not an explicit system override");
+    assert.equal((await client.tools(configured.id)).tools.some((item) => item.name === "bash" && item.active), false);
+    const ensured = await client.ensure("host-default-key", cwd, "Ensure default", "ensure-default", undefined, hostId);
+    assert.ok((await client.resources(ensured.instance.id)).resources.some((item) => item.path === selectedPath));
+    for (const id of [work.id, configured.id]) await client.stop(id);
+    work = implicit; // The later reload/reopen assertions now prove Host-resolved defaults stay bound.
     await mkdir(join(cwd, "child"));
     assert.equal((await client.systemCatalog(join(cwd, "child"), hostId)).defaultSelection, undefined, "no parent-directory inheritance");
     await writeFile(saved, "{bad JSON");
     const bad = await client.systemCatalog(cwd, hostId);
     assert.equal(bad.defaultSelection, undefined); assert.ok(bad.warnings.length); assert.ok(bad.candidates.length);
+    const beforeInvalidDefault = workerPids.length;
+    await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId), { code: "system_default_unavailable" });
+    assert.equal(workerPids.length, beforeInvalidDefault, "an invalid configured default fails before starting a Worker");
+    assert.equal((await client.ensure("host-default-key", cwd, "Existing Work", "existing-key", undefined, hostId)).instance.id, ensured.instance.id, "ensure hit retains the existing Work despite a changed default");
+    await client.stop(ensured.instance.id);
+    const override = await client.create(cwd, "Explicit source bypasses broken default", undefined, undefined, hostId, all[1]!.workerConfig);
+    assert.ok((await client.resources(override.id)).resources.some((item) => item.path === join(agentDir, "SYSTEM.md")));
+    await client.stop(override.id);
     await rm(saved); await mkdir(saved);
     await assert.rejects(client.setSystemDefault(cwd, chosen.id, hostId), { code: "system_default_unavailable" });
     await rm(saved, { recursive: true });
@@ -132,9 +158,11 @@ export default function(pi) {
     await writeFile(selectedPath, "{}");
     const invalidBody = await client.systemCatalog(cwd, hostId);
     assert.equal(invalidBody.defaultSelection, undefined); assert.ok(invalidBody.warnings.length);
+    await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId), { code: "system_default_unavailable" });
     await rm(selectedPath); await mkdir(selectedPath);
     const unreadable = await client.systemCatalog(cwd, hostId);
     assert.equal(unreadable.defaultSelection, undefined); assert.ok(unreadable.warnings.length);
+    await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId), { code: "system_default_unavailable" });
     await assert.rejects(client.systemContent(cwd, chosen.id, hostId), { code: "resource_unavailable" });
     // Explicit selected-source errors must fail creation, never turn the path into text or fall back.
     await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId, chosen.workerConfig));
@@ -145,6 +173,7 @@ export default function(pi) {
     await rm(join(systems, "pi-default.json"));
     const deleted = await client.systemCatalog(cwd, hostId);
     assert.equal(deleted.defaultSelection, undefined); assert.ok(deleted.warnings.length);
+    await assert.rejects(client.create(cwd, undefined, undefined, undefined, hostId), { code: "system_default_unavailable" });
     await assert.rejects(readFile(join(systems, "pi-default.json")), { code: "ENOENT" });
     // Reload/tool rebuild retain the Work selection, not the current directory default.
     await client.setActiveTools(work.id, ["read"]);

@@ -176,4 +176,4 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 
 具体实现按以上边界组织。出现跨层重复定义或投影时，先将能力收敛到所属层，并复用 Protocol V2 的同一定义。
 
-`dock_system` 通过同一 Protocol 查询目录候选或分页读取原文件；返回正文与元数据始终作为 untrusted task data 引用。`dock_create` 显式选择覆盖目录默认，未选择且无有效默认时要求选择，不创建首项；`saveDefault` 是独立明确保存，不开放 generic workerConfig。来源授权和新 Work off 规则不变。
+`dock_system` 通过同一 Protocol 查询目录候选或分页读取原文件；返回正文与元数据始终作为 untrusted task data 引用。`dock_create` 显式选择覆盖目录默认；未选择时交给创建 Host 应用目录默认，未配置才用 Pi 原生行为，已配置但损坏则明确报错，不创建首项。`saveDefault` 是独立明确保存，必须提供显式 ID，不开放 generic workerConfig。来源授权和新 Work off 规则不变。

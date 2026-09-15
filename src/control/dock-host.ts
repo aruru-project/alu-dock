@@ -145,7 +145,6 @@ export interface DockHostOptions {
   initialize?: () => Promise<void>;
   sessionInventory?: SessionInventory;
   workspaceBrowser?: WorkspaceBrowser;
-  systemService?: SystemService;
   remoteAccessState?: RemoteAccessState;
   attachmentService?: AttachmentService;
   remoteInstances?: RemoteInstanceDirectory;
@@ -192,7 +191,7 @@ export class DockHost {
   private resolveFatal!: (completion: HostFatalCompletion) => void;
 
   constructor(options: DockHostOptions) {
-    this.systemService = options.systemService;
+    this.systemService = options.registry.systemService;
     this.listenOnLocalEndpoint = options.listen !== false;
     this.socketPath = this.listenOnLocalEndpoint ? normalizeLocalEndpoint(options.socketPath) : options.socketPath;
     this.statePath = options.statePath ?? `memory:${this.socketPath}`;

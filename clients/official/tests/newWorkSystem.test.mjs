@@ -117,7 +117,7 @@ try {
       continue
     }
     if (scenario === 'default') {
-      assert.deepEqual(calls.find(c => c.command === 'create_work').args.workerConfig, template.workerConfig)
+      assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null, 'Only Host creation resolves an implicit default')
       assert.equal(created.length, 1)
       assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
       app.unmount(); continue

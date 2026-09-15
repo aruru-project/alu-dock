@@ -5,7 +5,7 @@ import { DocumentReader, safeDocumentText } from "./document-reader.js";
 import { parseTerminalMouseEvent } from "./mouse-input.js";
 import { paint } from "./theme.js";
 
-export interface SystemChoice { cwd: string; selection: SystemCandidate; defaultSaved: boolean }
+export interface SystemChoice { cwd: string; selection?: SystemCandidate; defaultSaved: boolean }
 interface SystemPickerOptions { forceSelection?: boolean; notice?: string; selectedId?: string }
 type SystemClient = Pick<DockClient, "systemCatalog" | "systemContent" | "setSystemDefault">;
 const systemKindLabels: Record<SystemCandidate["kind"], string> = {
@@ -33,7 +33,7 @@ export class SystemPicker implements Component, Focusable {
       const selectedId = this.catalog?.candidates[this.selected]?.id ?? this.options.selectedId;
       const first = await this.client.systemCatalog(this.cwd);
       if (!this.active) return;
-      if (useDefault && !this.options.forceSelection && first.defaultSelection) { this.finish({ cwd: first.cwd, selection: first.defaultSelection, defaultSaved: false }); return; }
+      if (useDefault && !this.options.forceSelection && first.defaultSelection) { this.finish({ cwd: first.cwd, defaultSaved: false }); return; }
       const candidates = [...first.candidates];
       let page = first;
       while (page.nextCursor) {
@@ -76,10 +76,6 @@ export class SystemPicker implements Component, Focusable {
     this.redraw();
   }
   private async save(item: SystemCandidate): Promise<void> {
-    if (this.catalog?.defaultSelection?.id === item.id) {
-      this.finish({ cwd: this.catalog.cwd, selection: item, defaultSaved: true });
-      return;
-    }
     this.busy = this.saving = true;
     this.status = "Saving this directory's default…";
     this.redraw();
