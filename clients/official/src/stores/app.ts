@@ -13,6 +13,10 @@ import { userErrorMessage as humanError } from '../lib/userError'
 import { draftAfterSubmit } from '../lib/uiBoundaries'
 import { attachmentsAfterSubmit } from '../lib/attachmentDraft'
 
+export function mutationScopeKey(connectionId: string, instanceId: string, domain: string) {
+  return JSON.stringify([connectionId, instanceId, domain])
+}
+
 export const useAppStore = defineStore('app', () => {
   const catalog = ref<HostCatalog | null>(null)
   const payload = ref<BootstrapPayload | null>(null)
@@ -20,6 +24,13 @@ export const useAppStore = defineStore('app', () => {
   const localUiState = ref(emptyLocalUiState())
   const loading = ref(false)
   const error = ref<string | null>(null)
+  // Unknown mutation outcomes outlive the initiating dialog and Host selection.
+  const unresolvedMutations = ref<Map<string, string>>(new Map())
+  function recordMutationUnknown(scope: { connectionId: string; instanceId: string }, domain: string, cause: unknown) {
+    if (!cause || typeof cause !== 'object' || !('outcomeUnknown' in cause) || cause.outcomeUnknown !== true) return
+    const operationId = 'operationId' in cause ? String(cause.operationId ?? '') : ''
+    unresolvedMutations.value = new Map(unresolvedMutations.value).set(mutationScopeKey(scope.connectionId, scope.instanceId, domain), operationId)
+  }
   const hostUnreachable = ref(false)
   const needsPairing = ref(false)
   const workDrawerOpen = ref(false)
@@ -442,7 +453,7 @@ export const useAppStore = defineStore('app', () => {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
+    unresolvedMutations, recordMutationUnknown, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

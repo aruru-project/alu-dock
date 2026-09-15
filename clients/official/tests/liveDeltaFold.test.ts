@@ -1,7 +1,8 @@
 // 流式 delta 折叠：同一消息的连续 delta 折叠进单个事件后，
 // 整段重投影的结果必须与逐条回放完全一致（流式性能优化不改动用户可见内容）。
 import { strict as assert } from 'node:assert'
-import { foldLiveDelta, projectConversation } from '../src/lib/conversation.ts'
+import { foldLiveDelta, projectConversation, mergeLiveEvents } from '../src/lib/conversation.ts'
+import { conversationRows } from '../src/lib/conversationPresentation.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
 
 function event(sequence: number, eventType: string, data: Record<string, unknown>): ProjectedEvent {
@@ -78,11 +79,12 @@ globalThis.window = {
 } as unknown as Window & typeof globalThis
 try {
   const { useConversationContent } = await server.ssrLoadModule('/src/lib/conversationContent.ts')
+  const anchors: { preserve: boolean; ids?: Set<string> }[] = []
   const content = useConversationContent({
     compact: { value: false }, native: false, getEpoch: () => 1,
     getContext: () => ({ connectionId: 'host', selectionGeneration: 1 }),
     isCurrent: () => true, reload: () => assert.fail('unexpected reload'),
-    beforeLayoutChange: () => null, afterLayoutChange: async () => {},
+    beforeLayoutChange: (preserve: boolean, ids?: Set<string>) => { anchors.push({ preserve, ids }); return null }, afterLayoutChange: async () => {},
     isFollowing: () => false, layoutChanged: () => {}, projected: () => {},
   })
   const flush = () => {
@@ -190,6 +192,62 @@ try {
   content.clear()
   flush()
   assert.deepEqual(content.items.value, [], 'clearing a conversation does not allow a pending frame to resurrect it')
+  // Real Pi output shape: cumulative public text appears in BOTH fields.
+  content.publish(bootstrap([]))
+  send(1, 'tool.started', { toolCallId: 'output', toolName: 'write', args: { path: 'result', content: '' } })
+  flush()
+  send(2, 'tool.args_updated', { toolCallId: 'output', args: { path: 'result', get content() { assert.fail('unpainted intermediate args must not be projected') } } })
+  send(3, 'tool.args_updated', { toolCallId: 'output', args: { path: 'result', content: 'final args' } })
+  for (let index = 1; index <= 20; index++) send(3 + index, 'tool.output_updated', {
+    toolCallId: 'output', text: `完整结果${index}`, content: [{ type: 'text', text: `完整结果${index}` }],
+    presentation: { iteration: index }, omittedFields: [index === 1 ? 'early' : 'later'],
+  })
+  flush()
+  const outputs = content.state.value.activeEvents.filter((event: ProjectedEvent) => event.eventType === 'tool.output_updated')
+  assert.equal(outputs.length, 1, 'real text+content snapshots replace full old versions')
+  assert.equal(outputs[0].data.text, '完整结果20')
+  assert.deepEqual(outputs[0].data.content, [{ type: 'text', text: '完整结果20' }])
+  assert.deepEqual(outputs[0].data.presentation, { iteration: 20 })
+  assert.deepEqual(outputs[0].data.omittedFields, ['early', 'later'])
+  assert.equal(content.items.value.find((item: { kind: string }) => item.kind === 'tool').detailOutputText, '完整结果20')
+  send(24, 'tool.output_updated', { toolCallId: 'output', text: 'image boundary', content: [{ type: 'image', mimeType: 'image/png', contentRef: 'native-image' }], publishedFile })
+  send(25, 'tool.output_updated', { toolCallId: 'output', text: 'after image', content: [{ type: 'text', text: 'after image' }] })
+  send(26, 'tool.output_updated', { toolCallId: 'output', text: 'final output', content: [{ type: 'text', text: 'final output' }] })
+  flush()
+  assert.equal(content.state.value.activeEvents.filter((event: ProjectedEvent) => event.eventType === 'tool.output_updated').length, 3, 'image fact remains an ordered folding barrier')
+  assert.deepEqual(content.items.value.filter((item: { kind: string }) => item.kind === 'image').map((item: { imageKey: string }) => item.imageKey), ['conversation:native-image', 'published:image-file'])
+  send(27, 'message.completed', { messageId: 'owner', role: 'assistant', content: [{ type: 'text', text: '正式回复' }, { type: 'tool_call', toolCallId: 'output', toolName: 'write', args: { path: 'result', content: 'final args' } }] })
+  send(28, 'message.completed', { messageId: 'result-message', role: 'tool', content: [{ type: 'tool_result', toolCallId: 'output', toolName: 'write', text: 'final output', isError: false, publishedFile }] })
+  flush()
+  for (const item of content.items.value.filter((item: { kind: string }) => item.kind === 'tool' || item.kind === 'image')) assert.equal(item.groupId, 'live-message:owner', 'tool_result cannot downgrade formal ownership; all owned images migrate')
+
+  content.publish(bootstrap([]))
+  send(1, 'tool.started', { toolCallId: 'old-failed', toolName: 'bash', args: {} })
+  send(2, 'run.settled', { result: 'failed' })
+  send(3, 'run.started', {})
+  send(4, 'message.delta', { messageId: 'new-turn', block: 'text', delta: 'next reply' })
+  send(5, 'tool.started', { toolCallId: 'new-tool', toolName: 'bash', args: {} })
+  flush()
+  const rows = conversationRows(content.items.value)
+  const oldRow = rows.findIndex(row => row.id === 'live-tool-staging:old-failed')
+  const replyRow = rows.findIndex(row => row.id === 'live-message:new-turn')
+  const newRow = rows.findIndex(row => row.id === 'live-tool-staging:new-tool')
+  assert.ok(oldRow >= 0 && replyRow > oldRow && newRow > replyRow, 'unowned tools never join a previous turn at its old position')
+
+  content.publish(bootstrap([]))
+  delta(1, '**reading this streamed Markdown**')
+  flush()
+  send(2, 'run.settled', { result: 'aborted' })
+  flush()
+  assert.equal(anchors.at(-1)?.preserve, true)
+  assert.ok(anchors.at(-1)?.ids?.has('live-m'), 'settled reports the actual stream→Markdown part even with no tools')
+  assert.equal(content.streamingPartIds.value.size, 0)
+  assert.equal(text(), '**reading this streamed Markdown**')
+  const firstDelta = event(1, 'message.delta', { messageId: 'merge', block: 'text', delta: 'a' })
+  const secondDelta = event(2, 'message.delta', { messageId: 'merge', block: 'text', delta: 'b' })
+  assert.equal(mergeLiveEvents(firstDelta, secondDelta)?.data.delta, 'ab', 'same-target contiguous deltas coalesce in order')
+  assert.equal(mergeLiveEvents(firstDelta, event(2, 'message.completed', { messageId: 'merge' })), null)
+  assert.equal(mergeLiveEvents(firstDelta, event(2, 'message.delta', { messageId: 'other', delta: 'b' })), null)
   content.dispose()
 } finally {
   if (previousWindow === undefined) Reflect.deleteProperty(globalThis, 'window')

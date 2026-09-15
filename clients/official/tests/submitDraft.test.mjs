@@ -126,6 +126,11 @@ try {
   assert.equal(focusCount, 1, 'only the explicit surface transition transfers focus')
   mounted.unmount()
   assert.ok(flushes > 0, 'unmount reliably flushes the latest draft')
+  app.recordMutationUnknown({ connectionId: 'host-a', instanceId: 'A' }, 'sessions', { outcomeUnknown: true, operationId: 'old-operation' })
+  assert.equal(app.unresolvedMutations.get(JSON.stringify(['host-a', 'A', 'sessions'])), 'old-operation')
+  assert.equal(app.unresolvedMutations.has(JSON.stringify(['host-b', 'A', 'sessions'])), false, 'same Work id on another Host is not blocked')
+  await app.switchHost('host-a')
+  assert.equal(app.unresolvedMutations.get(JSON.stringify(['host-a', 'A', 'sessions'])), 'old-operation', 'returning to original Host still requires reconciliation, not blind replay')
   console.log('PASS: late send receipts preserve other Work/Host editors, changed/re-added drafts, replaced sessions and removed Works')
 } finally {
   await server.close()

@@ -22,7 +22,7 @@ const props = defineProps<{ work: Work; mode: SessionMode; preview: boolean; out
 const app = useAppStore()
 const emit = defineEmits<{
   snapshot: [work: Work]
-  unknown: [cause: unknown, domain: 'sessions' | 'tree']
+  unknown: [cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext]
   resync: [work: Work, draftText?: string]
   compact: [customInstructions?: string]
   title: [title: string, body?: string]
@@ -80,17 +80,22 @@ const context = computed<SessionContext>(() => ({
   expectedRuntimeGeneration: props.work.runtimeGeneration,
 }))
 watch(() => JSON.stringify([app.connectionContext, props.work.id, props.work.ownerHostEpoch]), () => { targetRevision++ }, { flush: 'sync' })
+class SessionCallFailure extends Error {
+  constructor(readonly original: unknown, readonly scope: SessionContext, readonly current: boolean) { super(errorMessage(original)) }
+}
 async function currentSessionCall<T>(scope: SessionContext, operation: () => Promise<T>, replacementGeneration?: (result: T) => number): Promise<T> {
   const revision = targetRevision
-  const correlated = captureConnectionResult(scope, await operation())
-  if (revision !== targetRevision || !hostResultMatches(correlated, app.connectionContext)
-    || scope.instanceId !== props.work.id
-    || scope.expectedHostEpoch !== props.work.ownerHostEpoch
-    || (scope.expectedRuntimeGeneration !== props.work.runtimeGeneration
-      && replacementGeneration?.(correlated.result) !== props.work.runtimeGeneration)) {
-    throw new Error('你已切换 Host 或 Work，请在当前页面重试。')
+  const matches = (generation = scope.expectedRuntimeGeneration) => revision === targetRevision
+    && hostResultMatches(captureConnectionResult(scope, null), app.connectionContext)
+    && scope.instanceId === props.work.id && scope.expectedHostEpoch === props.work.ownerHostEpoch
+    && (scope.expectedRuntimeGeneration === props.work.runtimeGeneration || generation === props.work.runtimeGeneration)
+  let result: T
+  try { result = await operation() }
+  catch (cause) { throw new SessionCallFailure(cause, scope, matches()) }
+  if (!matches(replacementGeneration?.(result))) {
+    throw new SessionCallFailure(new Error('你已切换 Host 或 Work，请在当前页面重试。'), scope, false)
   }
-  return correlated.result
+  return result
 }
 const selectedSession = computed(() => sessions.value.find((item) => item.token === selectedToken.value) ?? null)
 const filteredSessions = computed(() => {
@@ -357,7 +362,8 @@ async function resumeSelected(continuation?: SessionTrustContinuation) {
     trust.value = null
     if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消切换。'
   } catch (cause) {
-    const failure = cause as { code?: string; details?: Record<string, unknown> }
+    if (cause instanceof SessionCallFailure && !cause.current) { mutationFailure(cause, 'sessions'); return }
+    const failure = (cause instanceof SessionCallFailure ? cause.original : cause) as { code?: string; details?: Record<string, unknown> }
     if (failure.code === 'project_trust_required') {
       const challenge = String(failure.details?.challengeId ?? '')
       const reported = String(failure.details?.operationId ?? '')
@@ -415,6 +421,14 @@ async function clone() {
 }
 
 function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
+  if (cause instanceof SessionCallFailure) {
+    // Store first: Vue discards emits from an unmounted initiating dialog.
+    app.recordMutationUnknown(cause.scope, domain, cause.original)
+    if (!cause.current) return
+    const scope = cause.scope
+    cause = cause.original
+    if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain, scope)
+  }
   const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
   if (domain === 'tree' && code === 'invalid_tree_target') {
     selectedNodeId.value = ''
@@ -424,7 +438,6 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
     return
   }
   error.value = errorMessage(cause)
-  if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain)
 }
 async function reconcileDomain(domain: 'sessions' | 'tree') { return domain === 'sessions' ? loadSessionList() : loadTree() }
 defineExpose({ reconcileDomain })

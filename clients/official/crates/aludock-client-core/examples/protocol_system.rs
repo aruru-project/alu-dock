@@ -1,6 +1,8 @@
 //! Isolated cross-language gate; invoked by tests/systemProtocol.test.mjs, never a managed Host.
 use std::{env, path::PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use aludock_client_core::{
     ClientError, ConnectionRouter, DockClient, IdentityStore, LocalDockEndpoint, MachineKind,
     ProjectTrustDecision,
@@ -110,6 +112,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&chosen.worker_config),
         )
         .await?;
+    // Independent public SDK observation: controlled 0.85.1-dock.3, Pi source
+    // f552c4faeedd24208fb4eb95cae829cb219a17b1. Hash complete bytes, not previews.
+    let prompts = client.compaction_prompts(&work.id).await?;
+    for (field, text, expected) in [
+        (
+            "system",
+            &prompts.system,
+            "c464889dcfa60441e642f291445b49523f263e6fb2725d0c25075543a2ec3f8f",
+        ),
+        (
+            "summarize",
+            &prompts.summarize,
+            "9b00aa68df1a64279bc36e9093367f638701d48ec82e3d08436f65092a515f9b",
+        ),
+        (
+            "update",
+            &prompts.update,
+            "240c52982209146eae47d73c7172f6ba1dab60f44520bcb6a6ec1a883fef2ec7",
+        ),
+        (
+            "turnPrefix",
+            &prompts.turn_prefix,
+            "9aeeb36ea731a8497d38abb03c2da351d81bcade4b2ae389bb6ae74300cf6ba5",
+        ),
+    ] {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(text.as_bytes())),
+            expected,
+            "complete {field} template"
+        );
+    }
     let resources = client.resources(&work.id).await?;
     let mut matched = false;
     for resource in resources.resources {
@@ -139,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     client.stop_instance(&work.id, None).await?;
     println!(
-        "PASS Rust→Host→Pi: target catalog, paged BOM original, explicit save, trust continuation with chosen config, Work actual source, stop (no model)"
+        "PASS Rust→Host→Pi: target catalog, paged BOM original, explicit save, trust continuation with chosen config, Work actual source, public compaction templates (four complete SHA256), stop (no model)"
     );
     Ok(())
 }

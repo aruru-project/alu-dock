@@ -16,7 +16,7 @@ interface ToolProjection {
   item: ToolItem
   args?: unknown
   outputText?: string
-  image?: ImageItem
+  images: ImageItem[]
   omitted: Set<string>
 }
 interface RecordGroup {
@@ -144,6 +144,30 @@ export function foldLiveDelta(events: ProjectedEvent[], foldMap: Map<string, Pro
   return true
 }
 
+/** Pi emits cumulative text both as text and as public text content blocks. */
+export function foldableToolEvent(event: ProjectedEvent) {
+  return (event.eventType === 'tool.args_updated' || event.eventType === 'tool.output_updated')
+    && typeof event.data.toolCallId === 'string' && Boolean(event.data.toolCallId)
+    && event.data.publishedFile === undefined
+    && (event.data.content === undefined || (Array.isArray(event.data.content)
+      && event.data.content.every((block) => isRecord(block) && block.type === 'text')))
+}
+
+/** Coalesce invisible intermediate values, never lifecycle/image/owner boundaries. */
+export function mergeLiveEvents(previous: ProjectedEvent, event: ProjectedEvent): ProjectedEvent | null {
+  if (previous.eventType !== event.eventType || previous.runtimeGeneration !== event.runtimeGeneration) return null
+  if (event.eventType === 'message.delta' && liveDeltaKey(event.data) && liveDeltaKey(previous.data) === liveDeltaKey(event.data)) {
+    return { ...event, occurredAt: previous.occurredAt, data: { ...previous.data, ...event.data,
+      delta: `${previous.data.delta ?? ''}${event.data.delta ?? ''}` } }
+  }
+  if (!foldableToolEvent(previous) || !foldableToolEvent(event) || previous.data.toolCallId !== event.data.toolCallId) return null
+  const omitted = [...(Array.isArray(previous.data.omittedFields) ? previous.data.omittedFields : []), ...(Array.isArray(event.data.omittedFields) ? event.data.omittedFields : [])]
+  return { ...event, occurredAt: previous.occurredAt, data: { ...previous.data, ...event.data,
+    ...(omitted.length ? { omittedFields: [...new Set(omitted)] } : {}) } }
+}
+
+const toolStagingGroup = (toolCallId: string) => `live-tool-staging:${toolCallId}`
+
 export function projectConversation(bootstrap: ConversationBootstrap, options: ConversationProjectionOptions = {}): ConversationItem[] {
   const live = createLiveConversationProjector(bootstrap, options)
   for (const event of bootstrap.activeEvents) live.apply(event)
@@ -169,7 +193,8 @@ export function createLiveConversationProjector(
   function apply(event: ProjectedEvent) {
 
     const data = event.data
-    const time = shortTime(event.occurredAt)
+    let formattedTime: string | undefined
+    const time = () => formattedTime ??= shortTime(event.occurredAt)
     switch (event.eventType) {
       case 'run.started':
         activityVisible = true
@@ -182,7 +207,7 @@ export function createLiveConversationProjector(
           id: `live-${messageId}`,
           kind: 'user',
           text: String(data.text || ''),
-          time,
+          time: time(),
           attachments: attachmentArray(data.attachments),
         }
         items.push(item)
@@ -198,8 +223,8 @@ export function createLiveConversationProjector(
         let item = messageItems.get(`${messageId}:${block}`)
         if (!item) {
           item = block === 'thinking'
-            ? { id: `live-${messageId}-thinking`, kind: 'thinking', groupId, title: '思考中', text: '', open: true, groupTime: time }
-            : { id: `live-${messageId}`, kind: 'assistant', groupId, text: '', time, groupTime: time }
+            ? { id: `live-${messageId}-thinking`, kind: 'thinking', groupId, title: '思考中', text: '', open: true, groupTime: time() }
+            : { id: `live-${messageId}`, kind: 'assistant', groupId, text: '', time: time(), groupTime: time() }
           items.push(item)
           messageItems.set(`${messageId}:${block}`, item)
         }
@@ -213,7 +238,7 @@ export function createLiveConversationProjector(
         const thinking = blockText(blocks, 'thinking')
         if (data.role === 'user') {
           const existing = messageItems.get(messageId)
-          const user = projectUserMessage(blocks, attachmentArray(data.attachments), `live-${messageId}`, time)
+          const user = projectUserMessage(blocks, attachmentArray(data.attachments), `live-${messageId}`, time())
           if (existing?.kind === 'user') {
             existing.text = user.text
             existing.time = user.time
@@ -229,7 +254,14 @@ export function createLiveConversationProjector(
 
         if (data.role === 'tool') {
           if (processIsVisible || blocks.some(compactVisibleBlock)) activityVisible = false
-          blocks.forEach((block, index) => applyLiveContentBlock(block, `live-tool-staging`, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items))
+          const result = blocks.find((block) => block.type === 'tool_result')
+          const toolCallId = result?.type === 'tool_result' ? result.toolCallId : typeof data.toolCallId === 'string' ? data.toolCallId : undefined
+          const groupId = toolCallId ? toolOwners.get(toolCallId) ?? toolStagingGroup(toolCallId) : `live-message:${messageId}`
+          const contentImages = blocks.map((block, index) => applyLiveContentBlock(block, groupId, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items, '', toolCallId))
+          const tool = toolCallId ? toolItems.get(toolCallId) : undefined
+          if (tool) for (const image of contentImages) {
+            if (image && !tool.images.some((item) => item.imageKey === image.imageKey)) tool.images.push(image)
+          }
           break
         }
 
@@ -244,25 +276,25 @@ export function createLiveConversationProjector(
         const textItem = messageItems.get(`${messageId}:text`)
         if (textItem?.kind === 'assistant') {
           textItem.text = text
-          textItem.groupTime = time
+          textItem.groupTime = time()
         } else if (text) {
-          const item: ConversationItem = { id: `live-${messageId}`, kind: 'assistant', groupId, text, time, groupTime: time }
+          const item: ConversationItem = { id: `live-${messageId}`, kind: 'assistant', groupId, text, time: time(), groupTime: time() }
           items.push(item)
           messageItems.set(`${messageId}:text`, item)
         }
         const thinkingItem = messageItems.get(`${messageId}:thinking`)
         if (thinkingItem?.kind === 'thinking') {
           thinkingItem.text = thinking
-          thinkingItem.groupTime = time
+          thinkingItem.groupTime = time()
           thinkingItem.open = false
         } else if (thinking) {
-          const item: ConversationItem = { id: `live-${messageId}-thinking`, kind: 'thinking', groupId, title: '思考过程', text: thinking, groupTime: time }
+          const item: ConversationItem = { id: `live-${messageId}-thinking`, kind: 'thinking', groupId, title: '思考过程', text: thinking, groupTime: time() }
           items.push(item)
           messageItems.set(`${messageId}:thinking`, item)
         }
-        blocks.forEach((block, index) => applyLiveContentBlock(block, groupId, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items, time))
+        blocks.forEach((block, index) => applyLiveContentBlock(block, groupId, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items, time()))
         if (typeof data.error === 'string' && data.error) {
-          items.push({ id: `live-${messageId}-error`, kind: 'notice', groupId, tone: 'error', text: data.error, groupTime: time })
+          items.push({ id: `live-${messageId}-error`, kind: 'notice', groupId, tone: 'error', text: data.error, groupTime: time() })
         }
         break
       }
@@ -271,7 +303,7 @@ export function createLiveConversationProjector(
       case 'tool.output_updated':
       case 'tool.completed': {
         const toolCallId = String(data.toolCallId || `tool-${event.sequence}`)
-        const groupId = toolOwners.get(toolCallId) || 'live-tool-staging'
+        const groupId = toolOwners.get(toolCallId) || toolStagingGroup(toolCallId)
         const tool = ensureTool(toolItems, items, toolCallId, String(data.toolName || 'tool'), groupId, `live-tool-${toolCallId}`)
         if (data.toolName) tool.item.name = String(data.toolName)
         if (data.args !== undefined) {
@@ -280,12 +312,13 @@ export function createLiveConversationProjector(
         }
         if (typeof data.text === 'string' && tool.item.name !== 'show_image') tool.outputText = data.text
         addOmitted(tool, data.omittedFields)
-        tool.item.groupTime ||= time
+        tool.item.groupTime ||= time()
         const eventContent = Array.isArray(data.content) ? (data.content as ContentBlock[]) : []
         eventContent.forEach((block, index) => {
           if (block.type === 'image') {
             const image = ensureContentImage(block, `live-tool-${toolCallId}-content-${index}`, groupId, items, imageItems)
-            image.groupTime ||= time
+            image.groupTime ||= time()
+            if (!tool.images.some((item) => item.imageKey === image.imageKey)) tool.images.push(image)
           }
         })
         const publishedFile = publishedFileFrom(data.publishedFile)
@@ -377,7 +410,8 @@ export function createLiveConversationProjector(
     }
     const tool = (id: string) => {
       const projection = toolItems.get(id)
-      add(projection?.item); add(projection?.image)
+      add(projection?.item)
+      projection?.images.forEach(add)
       const owner = toolOwners.get(id)
       if (owner?.startsWith('live-message:')) message(owner.slice('live-message:'.length))
     }
@@ -523,20 +557,24 @@ function applyLiveContentBlock(
   images: Map<string, ImageItem>,
   output: ConversationItem[],
   groupTime = '',
+  owningToolId?: string,
 ) {
   if (block.type === 'image') {
     const image = ensureContentImage(block, id, groupId, output, images)
     image.groupTime ||= groupTime
-    return
+    const tool = owningToolId ? tools.get(owningToolId) : undefined
+    if (tool && !tool.images.some((item) => item.imageKey === image.imageKey)) tool.images.push(image)
+    return image
   }
   if (block.type !== 'tool_call' && block.type !== 'tool_result') return
-  owners.set(block.toolCallId, groupId)
+  if (block.type === 'tool_call') owners.set(block.toolCallId, groupId)
+  else groupId = owners.get(block.toolCallId) ?? toolStagingGroup(block.toolCallId)
   const tool = ensureTool(tools, output, block.toolCallId, block.toolName, groupId, `live-tool-${block.toolCallId}`)
   tool.item.groupId = groupId
   tool.item.groupTime ||= groupTime
-  if (tool.image) {
-    tool.image.groupId = groupId
-    tool.image.groupTime ||= groupTime
+  for (const image of tool.images) {
+    image.groupId = groupId
+    image.groupTime ||= groupTime
   }
   if (block.type === 'tool_call') {
     tool.item.name = block.toolName || tool.item.name
@@ -565,7 +603,7 @@ function ensureTool(
   let tool = tools.get(toolCallId)
   if (tool) return tool
   const item: ToolItem = { id, kind: 'tool', groupId, toolCallId, name: toolName || 'tool', summary: '正在运行工具', status: 'running' }
-  tool = { item, omitted: new Set() }
+  tool = { item, images: [], omitted: new Set() }
   tools.set(toolCallId, tool)
   output.push(item)
   return tool
@@ -617,7 +655,7 @@ function ensurePublishedImage(
   let item = images.get(imageKey)
   if (!item) {
     item = {
-      id: `${tool.item.id}-image`,
+      id: `${tool.item.id}-image:${file.fileRef}`,
       kind: 'image',
       groupId: tool.item.groupId,
       imageKey,
@@ -633,7 +671,7 @@ function ensurePublishedImage(
     item.groupId = tool.item.groupId
     item.groupTime ||= tool.item.groupTime
   }
-  tool.image = item
+  if (!tool.images.some((image) => image.imageKey === item!.imageKey)) tool.images.push(item)
   return item
 }
 
@@ -725,9 +763,10 @@ function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''
 }
 
+const timeFormatter = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 function shortTime(value?: string) {
   if (!value) return ''
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
-  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+  return timeFormatter.format(date)
 }

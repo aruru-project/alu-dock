@@ -136,7 +136,7 @@ import MessageTextDialog from './components/MessageTextDialog.vue'
 import LocalConnectionCard from './components/LocalConnectionCard.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import dockIconUrl from '../../../assets/icon.svg'
-import { useAppStore } from './stores/app'
+import { mutationScopeKey, useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
 import { useCommandConsoleStore } from './stores/command-console'
 import { useExtensionUiStore } from './stores/extension-ui'
@@ -303,7 +303,7 @@ type ControlCenterHandle = {
   reconcileDomain: (domain: ControlMutationDomain) => Promise<boolean>
   applyLiveEvent: (event: ProjectedEvent) => void
 }
-const unresolvedMutations = ref<Map<string, string>>(new Map())
+const unresolvedMutations = computed({ get: () => app.unresolvedMutations, set: (value: Map<string, string>) => { app.unresolvedMutations = value } })
 const controlCenterRef = ref<ControlCenterHandle | null>(null)
 const deliveryTrayRef = ref<{ focusClear: () => void; focusClose: () => void } | null>(null)
 const dockToolsTrigger = ref<HTMLButtonElement | null>(null)
@@ -493,8 +493,8 @@ const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
 const unresolvedDomain = computed<MutationDomain | null>(() => {
   const workId = selected.value?.id ?? 'global'
   for (const key of unresolvedMutations.value.keys()) {
-    const [keyWorkId, domain] = JSON.parse(key) as [string, MutationDomain]
-    if (keyWorkId === workId || keyWorkId === 'global') return domain
+    const [connectionId, keyWorkId, domain] = JSON.parse(key) as [string, string, MutationDomain]
+    if (connectionId === (app.activeConnectionId ?? '') && (keyWorkId === workId || keyWorkId === 'global')) return domain
   }
   return null
 })
@@ -1373,7 +1373,7 @@ function closeModal() {
 }
 
 function handleGlobalModalKeydown(event: KeyboardEvent) {
-  if (!modalOpen.value || event.key !== 'Escape') return
+  if (!modalOpen.value || event.key !== 'Escape' || event.isComposing || composer.composing.value) return
   event.preventDefault()
   event.stopPropagation()
   if (confirmDialog.value) settleConfirm(false)
@@ -2132,13 +2132,21 @@ async function restoreQueue(): Promise<boolean> {
   }
 }
 
+const canSubmit = computed(() => {
+  if (submittedLocalControl(draft.value)) return !!selected.value && selected.value.lifecycle === 'active' && !conversationLoading.value
+  return !!selected.value && !conversationLoading.value && followConnected.value
+    && !workMutating.value && (!!draft.value.trim() || !!draftAttachments.value.length || !!restoredImageCount.value)
+    && isTauri && !pairingInProgress.value && !clearingRestoredImages.value && !submitBlocked.value
+    && !mutationOutcomeUnknown.value && !queueRestoring.value && !attachmentPicking.value && !uploadDrafts.value.length
+})
+
 async function submit(): Promise<boolean> {
   const work = selected.value
   const captured = draft.value
   const capturedAttachments = draftAttachments.value.slice(0, maxMessageAttachments.value).map((item) => ({ ...item }))
   const localCommand = submittedLocalControl(captured)
   if (localCommand) return executeLocalControl(localCommand, captured)
-  if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitBlocked.value || mutationOutcomeUnknown.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
+  if (!work || !canSubmit.value) return false
   const currentHost = app.connectionContext
   if (!currentHost) return false
   const attachmentTarget = attachmentUploadTarget(work, currentHost)
@@ -2670,34 +2678,34 @@ function applyFollowEvent(payload: { connectionId: string; selectionGeneration: 
   conversationContent.applyConversationEvent(state, payload.event, reduced.conversationChanged)
 }
 
-async function resumeConversationFollow(instanceId: string): Promise<boolean> {
+async function resumeConversationFollow(instanceId: string, isCurrent: () => boolean): Promise<'resumed' | 'failed' | 'superseded'> {
   const state = conversationState.value
   const work = selected.value
-  if (!state || !work || work.id !== instanceId || work.lifecycle !== 'active' || state.instance.id !== instanceId) return false
+  if (!state || !work || work.id !== instanceId || work.lifecycle !== 'active' || state.instance.id !== instanceId) return 'failed'
   const epoch = ++conversationLoadEpoch
   const selectionRevision = conversationSelectionRevision
   const capturedHost = requireConnectionContext(app)
   const cursor = { ...state.cursor }
   if (cursor.instanceId !== instanceId
     || cursor.hostEpoch !== app.payload?.host.hostEpoch
-    || cursor.runtimeGeneration !== state.instance.runtimeGeneration) return false
+    || cursor.runtimeGeneration !== state.instance.runtimeGeneration) return 'failed'
 
   const subscriptionId = crypto.randomUUID()
   pendingFollowEvents.set(subscriptionId, [])
   const connected = waitForFollowConnection(subscriptionId)
   try {
     await startConversationFollow(instanceId, subscriptionId, cursor, capturedHost)
+    if (!isCurrent() || epoch !== conversationLoadEpoch) return 'superseded'
     await connected
-    if (!windowFocused.value
+    if (!isCurrent() || !windowFocused.value
       || !app.contextMatches(capturedHost)
       || selectionRevision !== conversationSelectionRevision
       || epoch !== conversationLoadEpoch
       || selected.value?.id !== instanceId
-      || selected.value.runtimeGeneration !== cursor.runtimeGeneration
-      || selected.value.ownerHostEpoch !== cursor.hostEpoch
       || conversationState.value !== state
-      || state.cursor.sequence !== cursor.sequence) return false
-    if (!extensionUi.resumeFollow(capturedHost, subscriptionId, cursor)) return false
+      || state.cursor.sequence !== cursor.sequence) return 'superseded'
+    if (selected.value.runtimeGeneration !== cursor.runtimeGeneration || selected.value.ownerHostEpoch !== cursor.hostEpoch
+      || !extensionUi.resumeFollow(capturedHost, subscriptionId, cursor)) return 'failed'
 
     const bufferedFollowStatus = followActivation.activate(subscriptionId)
     activeFollow.value = { ...capturedHost, instanceId, subscriptionId }
@@ -2710,10 +2718,11 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
       applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
       if (activeFollowSubscription.value !== subscriptionId) break
     }
-    return activeFollowSubscription.value === subscriptionId
+    return activeFollowSubscription.value === subscriptionId ? 'resumed' : 'superseded'
   } catch (cause) {
+    if (!isCurrent() || epoch !== conversationLoadEpoch) return 'superseded'
     if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) conversationError.value = errorMessage(cause)
-    return false
+    return 'failed'
   } finally {
     clearFollowConnectionTimer(subscriptionId)
     followActivation.cancel(subscriptionId, new Error('连接恢复已结束。'))
@@ -2729,22 +2738,23 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
 }
 
 function reattachConversationFollow(instanceId: string) {
-  return recoverConversation(instanceId, async () => {
-    await performConversationReattach(instanceId)
-    return activeFollowCanContinue(instanceId)
+  return recoverConversation(instanceId, async (isCurrent) => {
+    await performConversationReattach(instanceId, isCurrent)
+    return isCurrent() && activeFollowCanContinue(instanceId)
   })
 }
-async function performConversationReattach(instanceId: string) {
-  if (!windowFocused.value || selected.value?.id !== instanceId) return
+async function performConversationReattach(instanceId: string, scopeIsCurrent: () => boolean) {
+  const isCurrent = () => scopeIsCurrent() && selected.value?.lifecycle === 'active'
+  if (!isCurrent()) return
   if (activeFollow.value) await detachConversationFollow()
-  if (!windowFocused.value || selected.value?.id !== instanceId) return
+  if (!isCurrent()) return
   if (historyReloadRequiredWorkId === instanceId) {
     await performConversationLoad(instanceId, true)
     return
   }
-  if (!await resumeConversationFollow(instanceId)
-    && windowFocused.value
-    && selected.value?.id === instanceId) await performConversationLoad(instanceId, true)
+  const resumed = await resumeConversationFollow(instanceId, isCurrent)
+  if (!isCurrent() || resumed !== 'failed') return
+  await performConversationLoad(instanceId, true)
 }
 
 function runningWorkIdsForAway() {
@@ -2995,9 +3005,19 @@ async function mergeCompactionSummary(instanceId: string) {
 
 let pausedFollowSubscription: string | null = null
 const recovery = createConversationRecovery()
-function recoverConversation(instanceId: string, operation: () => Promise<boolean>): Promise<boolean> {
-  const key = JSON.stringify([app.connectionContext, app.payload?.host.hostEpoch, instanceId, selected.value?.runtimeGeneration, conversationSelectionRevision, windowFocusEpoch])
-  return recovery(key, activeFollow.value?.subscriptionId ?? null, operation)
+function recoverConversation(instanceId: string, operation: (isCurrent: () => boolean) => Promise<boolean>): Promise<boolean> {
+  const context = app.connectionContext ? { ...app.connectionContext } : null
+  const hostEpoch = app.payload?.host.hostEpoch
+  const selectionRevision = conversationSelectionRevision
+  const focusEpoch = windowFocusEpoch
+  const key = JSON.stringify([context, hostEpoch, instanceId, selected.value?.runtimeGeneration, selectionRevision, focusEpoch])
+  return recovery(key, activeFollow.value?.subscriptionId ?? null, (ownsRecovery) => {
+    const isCurrent = () => ownsRecovery() && !!context && app.contextMatches(context)
+      && app.payload?.host.hostEpoch === hostEpoch && selectionRevision === conversationSelectionRevision
+      && focusEpoch === windowFocusEpoch && windowFocused.value
+      && selected.value?.id === instanceId
+    return isCurrent() ? operation(isCurrent) : Promise.resolve(false)
+  })
 }
 function loadSelectedConversation(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
   return recoverConversation(instanceId, () => performConversationLoad(instanceId, preserveUntilSwap))
@@ -3279,22 +3299,23 @@ function handleNewWorkUnknown(cause: unknown) {
 }
 
 function mutationKey(workId: string, domain: MutationDomain) {
-  return JSON.stringify([workId, domain])
+  return mutationScopeKey(app.activeConnectionId ?? '', workId, domain)
 }
 
 function markUnknownOutcome(cause: unknown, domain: MutationDomain = 'work', workId = selected.value?.id ?? 'global') {
-  if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) {
-    const operationId = 'operationId' in cause ? String(cause.operationId ?? '') : ''
-    unresolvedMutations.value = new Map(unresolvedMutations.value).set(mutationKey(workId, domain), operationId)
-  }
+  app.recordMutationUnknown({ connectionId: app.activeConnectionId ?? '', instanceId: workId }, domain, cause)
 }
 
-function markControlUnknown(cause: unknown, domain: ControlMutationDomain) {
-  markUnknownOutcome(cause, domain, selected.value?.id ?? 'global')
+function markControlUnknown(cause: unknown, domain: ControlMutationDomain, scope?: SessionContext) {
+  if (scope) app.recordMutationUnknown(scope, domain, cause)
+  else markUnknownOutcome(cause, domain, selected.value?.id ?? 'global')
 }
 
 async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
   const workId = selected.value?.id ?? 'global'
+  const context = app.connectionContext ? { ...app.connectionContext } : null
+  const revision = conversationSelectionRevision
+  const isCurrent = () => !!context && app.contextMatches(context) && revision === conversationSelectionRevision
   const domain = requestedDomain ?? unresolvedDomain.value
   if (!domain) return
   const selectedKey = mutationKey(workId, domain)
@@ -3313,16 +3334,21 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
       reconciled = await reconcileControlProjection('settings', workId)
     } else if ((domain === 'sessions' || domain === 'tree') && workId !== 'global') {
       await app.load()
+      if (!isCurrent()) return
       if (app.error || selected.value?.id !== workId) throw new Error('暂时无法确认修改后的 Work 状态，请稍后重试。')
       if (domain === 'sessions' && selected.value?.compacting) throw new Error('上下文仍在压缩；完成后再刷新确认。')
       await nextTick()
+      if (!isCurrent()) return
       const projection = await reconcileControlProjection(domain, workId)
+      if (!isCurrent()) return
       const conversation = await loadSelectedConversation(workId, true)
       reconciled = projection && conversation && !app.error
     } else if (domain === 'work') {
       await app.load()
+      if (!isCurrent()) return
       reconciled = !app.error
     }
+    if (!isCurrent()) return
     if (!reconciled) throw new Error('还无法确认刚才的修改是否生效。请再次刷新确认，不要重复提交。')
     const next = new Map(unresolvedMutations.value)
     next.delete(key)
@@ -3330,6 +3356,7 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
     submissionError.value = null
     if (domain === 'sessions' && workId !== 'global' && app.activeConnectionId) setCompactionError(app.activeConnectionId, workId)
   } catch (cause) {
+    if (!isCurrent()) return
     submissionError.value = errorMessage(cause)
   }
 }
@@ -3696,7 +3723,7 @@ async function toggleAllToolDetails() {
           </div>
           <textarea ref="composerTextarea" v-model="draft" rows="1" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @select="composer.remember" @blur="composer.remember" @compositionstart="composer.composition" @compositionend="composer.composition" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
           <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
-          <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitBlocked || queueRestoring || attachmentPicking || workMutating || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
+          <button class="alu-send-btn" type="submit" :disabled="!canSubmit">{{ submitting ? '发送中…' : '发送' }}</button>
         </form>
       </ExtensionUiSurface>
 
@@ -3812,7 +3839,7 @@ async function toggleAllToolDetails() {
           <footer class="ui-dialog-actions ui-dialog-composer-footer">
             <span class="ui-dialog-composer-attachments">{{ draftAttachments.length + restoredImageCount ? `已附加 ${draftAttachments.length + restoredImageCount} 个文件` : '未附加文件' }}</span>
             <span v-if="visibleComposerError" class="ui-dialog-composer-status">{{ visibleComposerError }}</span>
-            <button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="submitBlocked || (!draft.trim() && !draftAttachments.length && !restoredImageCount)" @click="submitExpanded">{{ submitting ? '发送中…' : '发送' }}</button>
+            <button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="!canSubmit" @click="submitExpanded">{{ submitting ? '发送中…' : '发送' }}</button>
           </footer>
         </section>
       </div>

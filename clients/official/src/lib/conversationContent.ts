@@ -3,6 +3,8 @@ import { loadConversationHistory, loadConversationHistoryEntry } from './bridge'
 import {
   createLiveConversationProjector,
   foldLiveDelta,
+  foldableToolEvent,
+  mergeLiveEvents,
   liveDeltaKey,
   mergeHydratedConversationRecords,
   projectRecordGroups,
@@ -159,7 +161,10 @@ export function useConversationContent(options: ConversationContentOptions) {
       if (!current || !pendingEvents.length) return
       const preserveText = pendingEvents.some((event) => event.eventType === 'message.completed' || event.eventType === 'run.settled')
       const changedIds = new Set<string>()
-      for (const event of pendingEvents) for (const id of live!.affectedIds(event)) changedIds.add(id)
+      for (const event of pendingEvents) {
+        for (const id of live!.affectedIds(event)) changedIds.add(id)
+        if (event.eventType === 'run.settled') for (const id of streamCache(current).streaming) changedIds.add(id)
+      }
       const stick = options.isFollowing()
       const snapshot = stick ? null : options.beforeLayoutChange(preserveText, changedIds)
       drainEvents(current)
@@ -167,12 +172,6 @@ export function useConversationContent(options: ConversationContentOptions) {
       options.layoutChanged()
       void options.afterLayoutChange(snapshot, stick)
     })
-  }
-
-  function foldableToolEvent(event: ProjectedEvent) {
-    return (event.eventType === 'tool.args_updated' || event.eventType === 'tool.output_updated')
-      && typeof event.data.toolCallId === 'string' && Boolean(event.data.toolCallId)
-      && event.data.content === undefined && event.data.publishedFile === undefined
   }
 
   function resetFoldBoundary(current: ConversationBootstrap, event: ProjectedEvent) {
@@ -197,16 +196,17 @@ export function useConversationContent(options: ConversationContentOptions) {
     if (!conversationChanged && event.eventType !== 'run.started') return
     if (liveState !== current) initializeLive(current)
     // The replay log is folded separately from this frame's original events.
-    pendingEvents.push({ ...event, data: { ...event.data } })
+    const previous = pendingEvents.at(-1)
+    const merged = previous ? mergeLiveEvents(previous, event) : null
+    if (merged) pendingEvents[pendingEvents.length - 1] = merged
+    else pendingEvents.push({ ...event, data: { ...event.data } })
     const cache = streamCache(current)
     if (event.eventType === 'message.delta' && liveDeltaKey(event.data)) foldLiveDelta(current.activeEvents, cache.fold, { ...event, data: { ...event.data } })
     else if (foldableToolEvent(event)) {
       const key = `${event.eventType}:${event.data.toolCallId}`
       const index = cache.tools.get(key)
       if (index !== undefined) {
-        const previous = current.activeEvents[index]!
-        const omitted = [...(Array.isArray(previous.data.omittedFields) ? previous.data.omittedFields : []), ...(Array.isArray(event.data.omittedFields) ? event.data.omittedFields : [])]
-        current.activeEvents[index] = { ...event, occurredAt: previous.occurredAt, data: { ...previous.data, ...event.data, ...(omitted.length ? { omittedFields: [...new Set(omitted)] } : {}) } }
+        current.activeEvents[index] = mergeLiveEvents(current.activeEvents[index]!, event)!
       }
       else { cache.tools.set(key, current.activeEvents.length); current.activeEvents.push(event) }
     } else {

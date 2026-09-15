@@ -11,6 +11,7 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const filename = join(root, 'src/components/SessionManager.vue')
 const directory = await mkdtemp(join(root, '.reload-check-'))
 const stateKey = '__aluReloadCheck'
+const recordMutationUnknown = () => {}
 const node = (type, text = '') => ({ type, text, props: {}, children: [], parent: null, focus() {}, select() {}, addEventListener() {}, removeEventListener() {}, querySelector() { return null }, querySelectorAll() { return [] } })
 const detach = (item) => {
   if (item.parent) item.parent.children.splice(item.parent.children.indexOf(item), 1)
@@ -58,7 +59,7 @@ try {
   const { default: SessionManager } = await import(outfile)
   for (const scenario of ['event-before-reply', 'reply-before-event', 'different-work', 'different-connection', 'different-host', 'newer-runtime', 'failure']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original work' })
-    const store = reactive({ activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+    const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
     let resolveReply, rejectReply, requests = 0
     const reply = new Promise((resolve, reject) => { resolveReply = resolve; rejectReply = reject })
     globalThis[stateKey] = { store, invoke: (command) => { assert.equal(command, 'reload_session'); requests++; return reply } }
@@ -93,7 +94,8 @@ try {
     } else {
       assert.equal(resync.length, 0, `${scenario}: do not apply an old or failed result`)
       assert.equal(find(container, hasClass('reload-summary')), undefined)
-      assert.ok(find(container, hasClass('alu-dialog-error')))
+      if (scenario === 'failure') assert.ok(find(container, hasClass('alu-dialog-error')))
+      else assert.equal(find(container, hasClass('alu-dialog-error')), undefined, 'stale result does not publish into the new target')
     }
     app.unmount()
     console.log(`PASS: Reload confirmation / ${scenario}`)
@@ -103,7 +105,7 @@ try {
   // the real native-edge command is held until Follow has published its runtime.
   for (const operation of ['new', 'switch', 'navigate', 'fork', 'clone']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
-    const store = reactive({ activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+    const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
     const nodes = [
       { entryId: 'selected-user', kind: 'message', role: 'user', displayClass: 'content', summary: 'Selected user', hasChildren: true, depth: 0 },
       { entryId: 'current-leaf', parentId: 'selected-user', kind: 'message', role: 'assistant', displayClass: 'content', summary: 'Current reply', depth: 1 },
@@ -149,7 +151,54 @@ try {
     console.log(`PASS: ${operation} / event-before-reply / editor restoration`)
   }
 
-  const store = reactive({ activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+  // Keep an unknown on its initiating target even if the native rejection
+  // arrives after another Work/Host is visible, or after this dialog unmounts.
+  for (const target of ['work', 'host', 'unmount']) {
+    const unknowns = []
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
+    const store = reactive({ activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 },
+      recordMutationUnknown: (scope, domain, cause) => { if (cause.outcomeUnknown) unknowns.push({ scope, domain, cause }) } })
+    let rejectReply
+    globalThis[stateKey] = { store, invoke: () => new Promise((_resolve, reject) => { rejectReply = reject }) }
+    const container = node('root')
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'reload-session', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
+    mounted.mount(container)
+    const pending = find(container, item => item.type === 'button' && 'data-modal-initial' in item.props).props.onClick()
+    await settle()
+    if (target === 'work') work.id = 'work-b'
+    if (target === 'host') { store.activeConnectionId = 'connection-b'; store.connectionContext = { connectionId: 'connection-b', selectionGeneration: 2 } }
+    if (target === 'unmount') mounted.unmount()
+    await settle()
+    rejectReply({ code: 'effect_unknown', outcomeUnknown: true, operationId: 'original-op', message: 'uncertain original call' })
+    await pending; await settle()
+    assert.equal(unknowns.length, 1)
+    assert.equal(unknowns[0].scope.connectionId, 'connection-a')
+    assert.equal(unknowns[0].scope.instanceId, 'work-a')
+    assert.equal(unknowns[0].scope.expectedRuntimeGeneration, 4)
+    assert.equal(unknowns[0].cause.operationId, 'original-op')
+    assert.equal(find(container, hasClass('alu-dialog-error')), undefined, 'late error cannot replace the current target UI')
+    if (target !== 'unmount') mounted.unmount()
+  }
+  {
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
+    const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+    let rejectReply, operationId
+    globalThis[stateKey] = { store, invoke: (command, args) => command === 'list_sessions'
+      ? Promise.resolve({ sessions: [{ token: 'saved', name: 'saved', cwd: '/project' }], total: 1, truncated: false })
+      : new Promise((_resolve, reject) => { rejectReply = reject; operationId = args.operationId }) }
+    const container = node('root')
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, outcomeUnknown: false, hasDraft: false, compactionPending: false }) })
+    mounted.mount(container); await settle()
+    const pending = find(container, hasClass('ui-dialog-option')).props.onClick()
+    await settle(); work.id = 'work-b'; await settle()
+    rejectReply({ code: 'project_trust_required', details: { challengeId: 'old-challenge', operationId } })
+    await pending; await settle()
+    assert.equal(find(container, hasClass('session-trust')), undefined, 'old trust challenge is never shown for another Work')
+    mounted.unmount()
+  }
+  console.log('PASS: Session native rejection keeps original unknown across Work/Host/unmount; late trust is fenced')
+
+  const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
   const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
   const templates = { system: '系统全文\n' + '长内容'.repeat(1000), summarize: '首次摘要\n', update: '已有摘要更新\n', turnPrefix: '跨轮次片段\n' }
   let resolveTemplates

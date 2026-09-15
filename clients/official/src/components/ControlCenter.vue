@@ -13,6 +13,7 @@ import {
   setModel,
   setThinking,
   updateSetting,
+  type SessionContext,
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
@@ -54,7 +55,7 @@ const commandConsole = useCommandConsoleStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
   snapshot: [work: Work]
-  unknown: [cause: unknown, domain: ControlMutationDomain]
+  unknown: [cause: unknown, domain: ControlMutationDomain, scope?: SessionContext]
   reconcile: [domain: ControlMutationDomain]
   section: [section: ControlSection]
   prefill: [name: string]
@@ -242,8 +243,8 @@ function reconcileControl() {
   emit('reconcile', props.unknownDomain ?? sectionDomain(props.section))
 }
 
-function forwardSessionUnknown(cause: unknown, domain: 'sessions' | 'tree') {
-  emit('unknown', cause, domain)
+function forwardSessionUnknown(cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext) {
+  emit('unknown', cause, domain, scope)
 }
 
 function forwardSessionTitle(title: string, body?: string) {
