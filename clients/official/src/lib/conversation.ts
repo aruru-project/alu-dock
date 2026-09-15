@@ -366,9 +366,13 @@ export function createLiveConversationProjector(
         appendLiveNotice(items, event, succeeded ? 'info' : 'error', succeeded ? '重试已恢复。' : stringValue(data.error) || '重试没有成功。')
         break
       }
-      case 'compaction.started':
-        appendLiveNotice(items, event, 'info', `正在压缩上下文${stringValue(data.reason) ? `（${stringValue(data.reason)}）` : ''}…`)
+      case 'compaction.started': {
+        const text = data.reason === 'threshold' ? '上下文接近上限，正在自动压缩…'
+          : data.reason === 'overflow' ? '上下文超过模型限制，正在自动压缩…'
+          : data.reason === 'manual' ? '正在执行手动压缩…' : '正在压缩上下文…'
+        appendLiveNotice(items, event, 'info', text)
         break
+      }
       case 'compaction.completed':
         appendLiveNotice(items, event, data.error ? 'error' : data.aborted ? 'warning' : 'info', stringValue(data.error) || (data.aborted ? '上下文压缩已取消。' : '上下文压缩完成。'))
         break
