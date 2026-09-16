@@ -45,6 +45,8 @@ function decodingReason(cause: unknown): string {
 export function userErrorMessage(cause: unknown, fallback = '操作没有完成。请刷新状态后重试。') {
   if (cause && typeof cause === 'object') {
     const code = errorCode(cause)
+    if (code === 'capability_missing') return '这台 Dock 尚不支持这项功能。请更新对应机器上的 Dock 后重试。'
+    if (code === 'unsupported_protocol') return '当前客户端与这台 Dock 的协议版本不兼容。请更新 Dock，或使用与它匹配的客户端。'
     if (code === 'protocol_error') return '收到的数据无法识别。请刷新当前内容后重试。'
     if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '还无法确认刚才的操作是否完成。请刷新状态后确认，不要重复提交。'

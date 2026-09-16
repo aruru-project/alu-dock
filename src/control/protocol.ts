@@ -747,11 +747,15 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
     const error = object(value.error, "hello_error.error");
     exact(error, ["code", "message", "hostVersions", "missing", "retryAfterMs"]);
     const code = enumeration(error.code, "hello_error.error.code", ["invalid_hello", "unsupported_protocol", "capability_missing", "host_starting", "host_draining"]);
-    string(error.message, "hello_error.error.message", MAX_MESSAGE);
-    if (error.hostVersions !== undefined) unsignedArray(error.hostVersions, "hello_error.error.hostVersions", 16);
-    if (error.missing !== undefined) strings(error.missing, "hello_error.error.missing", MAX_CAPABILITIES, MAX_CAPABILITY_CHARS);
-    if (error.retryAfterMs !== undefined) unsigned(error.retryAfterMs, "hello_error.error.retryAfterMs");
-    throw validation(code, error.message as string);
+    const message = string(error.message, "hello_error.error.message", MAX_MESSAGE);
+    const hostVersions = error.hostVersions === undefined ? undefined : unsignedArray(error.hostVersions, "hello_error.error.hostVersions", 16);
+    const missing = error.missing === undefined ? undefined : strings(error.missing, "hello_error.error.missing", MAX_CAPABILITIES, MAX_CAPABILITY_CHARS);
+    const retryAfterMs = error.retryAfterMs === undefined ? undefined : unsigned(error.retryAfterMs, "hello_error.error.retryAfterMs");
+    throw new ProtocolHelloRejectedError({ code, message,
+      ...(hostVersions === undefined ? {} : { hostVersions }),
+      ...(missing === undefined ? {} : { missing }),
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    });
   }
   exact(value, ["kind", "requestId", "version", "host", "catalogSchemaVersion", "capabilities", "limits"]);
   if (value.requestId !== requestId || value.version !== 2) throw validation("protocol_incompatible", "Peer did not complete the required Protocol V2 hello");
@@ -2661,6 +2665,13 @@ function omitted(input: unknown, field: string): string[] | undefined { if (inpu
 function thinkingLevels(input: unknown): ThinkingLevel[] { return array(input, "availableThinkingLevels", THINKING_LEVELS.length).map((item) => enumeration(item, "thinking level", THINKING_LEVELS)); }
 
 export class ProtocolValidationError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "ProtocolValidationError"; } }
+/** A validated, correlated refusal by the Host, not a malformed transport frame. */
+export class ProtocolHelloRejectedError extends ProtocolValidationError {
+  constructor(readonly rejection: HelloError["error"]) {
+    super(rejection.code, rejection.message);
+    this.name = "ProtocolHelloRejectedError";
+  }
+}
 function validation(code: string, message: string): ProtocolValidationError { return new ProtocolValidationError(code, message); }
 function object(input: unknown, field: string, code = "invalid_response"): Record<string, unknown> { if (input === null || typeof input !== "object" || Array.isArray(input)) throw validation(code, `${field} must be a JSON object`); return input as Record<string, unknown>; }
 function exact(value: Record<string, unknown>, keys: readonly string[], code = "invalid_response"): void {

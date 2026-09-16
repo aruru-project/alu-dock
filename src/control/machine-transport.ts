@@ -13,7 +13,7 @@ import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../co
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
-import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
+import { capabilityForRequest, decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseHelloReply, parseInstanceSnapshot, parseResponseTransferFrame, ProtocolHelloRejectedError, requiredCapabilities } from "./protocol.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
@@ -87,6 +87,7 @@ interface MainStream {
   emit: (record: unknown) => void | Promise<void>;
   ended: () => void;
   helloSeen: boolean;
+  requiredCapabilities: readonly string[];
   acceptingInput: boolean;
   inputTail: Promise<void>;
   queuedInputBytes: number;
@@ -623,6 +624,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       emit,
       ended,
       helloSeen: false,
+      requiredCapabilities: requiredCapabilities(capabilityForRequest(request.type)),
       acceptingInput: true,
       inputTail: Promise.resolve(),
       queuedInputBytes: 0,
@@ -638,7 +640,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
           requestId: `machine-${streamId}`,
           versions: [2],
           client: { name: "alu-dock-main", version: "0.2.0", clientId: this.mainId },
-          requiredCapabilities: [],
+          requiredCapabilities: stream.requiredCapabilities,
         }),
       });
       const nativeRequest = requestForNativeHost(request, identity);
@@ -867,7 +869,23 @@ export class MainMachineController implements RemoteInstanceDirectory {
     this.enqueueMainStream(connection, stream, Buffer.byteLength(record.data, "utf8"), async () => {
       const raw = JSON.parse(record.data) as unknown;
       if (!stream.helloSeen) {
-        if (!raw || typeof raw !== "object" || (raw as { kind?: unknown }).kind !== "hello_ack") throw new Error("SubHost stream did not negotiate Protocol V2");
+        try {
+          const hello = parseHelloReply(raw, `machine-${stream.streamId}`);
+          if (hello.host.hostEpoch !== stream.route.nativeHostEpoch
+            || stream.requiredCapabilities.some((capability) => !hello.capabilities.includes(capability))) {
+            throw new Error("SubHost hello did not match the routed Host or required capabilities");
+          }
+        } catch (error) {
+          if (!(error instanceof ProtocolHelloRejectedError)) throw error;
+          const { code, message, ...details } = error.rejection;
+          await this.emitMappedStreamRecords(stream, [{
+            kind: "response", version: 2, requestId: stream.requestId, hostEpoch: this.options.mainHostEpoch, ok: false,
+            error: { code, message, retryable: code === "host_starting" || code === "host_draining",
+              ...(Object.keys(details).length ? { details } : {}) },
+          }]);
+          this.closeMainStream(connection, stream.streamId, true);
+          return;
+        }
         stream.helloSeen = true;
         return;
       }

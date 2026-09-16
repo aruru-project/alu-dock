@@ -60,18 +60,25 @@ try {
     }, vue()],
   })
   const { default: NewWorkDialog } = await import(join(directory, 'component.mjs'))
-  for (const scenario of ['once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
+  // A missing optional Host feature must not block the existing creation contract.
+  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
     const store = reactive({ connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 },
       recentWorkspaces: () => ['/project'], contextMatches: context => context.connectionId === store.connectionContext.connectionId && context.selectionGeneration === store.connectionContext.selectionGeneration })
     const calls = [], created = [], unknown = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, preview: false, outcomeUnknown: false })
-    let lateResolve
+    let lateResolve, lateReject
     let currentDefault = scenario === 'default' ? template : undefined
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
       if (command === 'system_catalog') {
-        if (scenario.startsWith('late-')) return new Promise(resolve => { lateResolve = resolve })
+        if (scenario.startsWith('legacy') || (scenario === 'partial-unsupported' && args.cursor) || (scenario === 'refresh-unsupported' && calls.filter(call => call.command === command).length > 2)) {
+          throw { code: 'capability_missing', message: 'Required capabilities are unavailable', details: { missing: ['system.templates.v1'] } }
+        }
+        if (scenario === 'other-capability-missing') throw { code: 'capability_missing', details: { missing: ['core.v2', 'system.templates.v1'] } }
+        if (scenario === 'catalog-failure') throw { code: 'protocol_error', message: 'fixture failed read' }
+        if (scenario === 'catalog-empty') return { cwd: args.cwd, candidates: [], total: 0, revision: 'empty', warnings: [] }
+        if (scenario.startsWith('late-')) return new Promise((resolve, reject) => { lateResolve = resolve; lateReject = reject })
         return args.cursor
           ? { cwd: args.cwd, candidates: [template], total: 2, revision: 'r', warnings: [] }
           : { cwd: args.cwd, candidates: [project], total: 2, revision: 'r', warnings: scenario === 'bad-default' ? ['默认文件损坏，请重新选择。'] : [], nextCursor: { revision: 'r', offset: 1 }, ...(currentDefault ? { defaultSelection: currentDefault } : {}) }
@@ -87,8 +94,8 @@ try {
         return { selection: template }
       }
       if (command === 'create_work') {
-        if (scenario === 'save-trust' && !args.trustChallengeId) throw { code: 'project_trust_required', details: { operationId: 'create-1', challengeId: 'trust-1' } }
-        if (scenario === 'save-create-unknown') throw { code: 'effect_unknown', outcomeUnknown: true, operationId: 'create-1', message: '创建结果不确定。' }
+        if ((scenario === 'save-trust' || scenario === 'legacy-trust') && !args.trustChallengeId) throw { code: 'project_trust_required', details: { operationId: 'create-1', challengeId: 'trust-1' } }
+        if (scenario === 'save-create-unknown' || scenario === 'legacy-unknown') throw { code: 'effect_unknown', outcomeUnknown: true, operationId: 'create-1', message: '创建结果不确定。' }
         if (scenario === 'save-create-failure' || (scenario === 'save-default-changed' && calls.filter(call => call.command === 'create_work').length === 1)) throw { code: 'worker_start_failed', message: '文件无法读取，请检查后重试。' }
         return { id: 'created-work' }
       }
@@ -107,14 +114,40 @@ try {
     if (scenario.startsWith('late-')) {
       if (scenario === 'late-directory') { await click('返回新建 Work'); await click('选择其他目录') }
       if (scenario === 'late-machine') props.machines = [{ ...props.machines[0], hostId: 'new-target' }]
-      if (scenario === 'late-connection') store.connectionContext.selectionGeneration++
+      if (scenario === 'late-connection' || scenario === 'late-unsupported') store.connectionContext.selectionGeneration++
       if (scenario === 'late-close') await click('关闭')
       await settle()
-      lateResolve({ cwd: '/project', candidates: [template], total: 1, revision: 'r', warnings: [], defaultSelection: template })
+      if (scenario === 'late-unsupported') lateReject({ code: 'capability_missing', details: { missing: ['system.templates.v1'] } })
+      else lateResolve({ cwd: '/project', candidates: [template], total: 1, revision: 'r', warnings: [], defaultSelection: template })
       await settle()
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0, 'Old discovery cannot create in a changed or closed dialog')
       if (scenario !== 'late-close') app.unmount()
       continue
+    }
+    if (scenario.startsWith('legacy')) {
+      assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'new Client uses ordinary creation when old Host lacks system selection')
+      assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null)
+      assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
+      assert.ok(!text(container).includes('没有可用的 system'), 'unsupported feature is not an empty file list')
+      if (scenario === 'legacy-trust') {
+        await click('仅本次信任')
+        const attempts = calls.filter(c => c.command === 'create_work')
+        assert.equal(attempts.length, 2)
+        assert.equal(attempts[1].args.operationId, 'create-1')
+        assert.equal(attempts[1].args.trustChallengeId, 'trust-1')
+        assert.ok(attempts.every(call => call.args.workerConfig == null))
+      }
+      if (scenario === 'legacy-unknown') {
+        assert.equal(created.length, 0); assert.equal(unknown.length, 1)
+        await settle()
+        assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'unknown creation is never automatically replayed')
+      } else assert.equal(created.length, 1)
+      app.unmount(); continue
+    }
+    if (['partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing'].includes(scenario)) {
+      assert.equal(calls.filter(c => c.command === 'create_work').length, 0, 'only absence of the optional system capability allows ordinary creation')
+      assert.equal(text(container).includes('没有可用的 system'), scenario === 'catalog-empty', 'empty state requires a successful empty catalog')
+      app.unmount(); continue
     }
     if (scenario === 'default') {
       assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null, 'Only Host creation resolves an implicit default')
@@ -154,6 +187,12 @@ try {
     assert.equal(calls.filter(c => c.command === 'create_work').length, 0, 'Reading cannot create Work')
     await click('返回 system 选择')
     assert.equal(button('选择的模板').props['aria-pressed'], true)
+    if (scenario === 'refresh-unsupported') {
+      await click('重新读取')
+      assert.equal(calls.filter(c => c.command === 'create_work').length, 0, 'refresh of an explicit selection cannot silently create with Host defaults')
+      assert.ok(!text(container).includes('没有可用的 system'))
+      app.unmount(); continue
+    }
     if (scenario === 'once') {
       await click('重新读取')
       assert.equal(button('选择的模板').props['aria-pressed'], true, 'Refreshing keeps an available explicit choice')

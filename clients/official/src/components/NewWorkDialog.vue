@@ -77,6 +77,7 @@ const systemWarnings = ref<string[]>([])
 const systemSelection = ref<SystemCandidate | null>(null)
 const systemPreview = ref<SystemCandidate | null>(null)
 const systemLoading = ref(false)
+const systemCatalogState = ref<'idle' | 'ready' | 'unsupported' | 'failed'>('idle')
 const saveDefault = ref(false)
 const savedDefaultId = ref('')
 const saveFailed = ref(false)
@@ -157,6 +158,7 @@ onUnmounted(() => { ++workspaceEpoch; ++inventoryEpoch; ++systemEpoch })
 function resetSystems() {
   ++systemEpoch
   systemLoading.value = false
+  systemCatalogState.value = 'idle'
   systemCandidates.value = []
   systemWarnings.value = []
   systemSelection.value = null
@@ -180,6 +182,7 @@ async function chooseDirectory(path: string, refresh = false) {
   systemLoading.value = true
   view.value = 'systems'
   clearError()
+  let receivedCatalog = false
   try {
     const candidates: SystemCandidate[] = []
     const warnings: string[] = []
@@ -188,11 +191,13 @@ async function chooseDirectory(path: string, refresh = false) {
     do {
       const page = await currentConnectionCall(app, (context) => systemCatalog(path, context, hostId, cursor))
       if (epoch !== systemEpoch) return
+      receivedCatalog = true
       candidates.push(...page.candidates)
       for (const warning of page.warnings) if (!warnings.includes(warning)) warnings.push(warning)
       defaultSelection ??= page.defaultSelection
       cursor = page.nextCursor
     } while (cursor)
+    systemCatalogState.value = 'ready'
     systemCandidates.value = candidates
     systemWarnings.value = warnings
     savedDefaultId.value = defaultSelection?.id === previouslySaved ? previouslySaved : ''
@@ -202,7 +207,18 @@ async function chooseDirectory(path: string, refresh = false) {
       await createAt(path, hostId)
     }
   } catch (cause) {
-    if (epoch === systemEpoch) setError(cause, '读取这个目录的 system 列表', 'system_catalog')
+    if (epoch !== systemEpoch) return
+    const failure = cause as { code?: string; details?: { missing?: unknown } }
+    const missing = failure?.details?.missing
+    const unsupported = failure?.code === 'capability_missing' && Array.isArray(missing)
+      && missing.length === 1 && missing[0] === 'system.templates.v1'
+    systemCatalogState.value = unsupported ? 'unsupported' : 'failed'
+    // This is the original directory-create intent, not a retry after an effect.
+    // Refresh, partial discovery and an explicit choice never become implicit creation.
+    if (unsupported && !refresh && !receivedCatalog) {
+      view.value = 'launcher'
+      await createAt(path, hostId)
+    } else setError(cause, '读取这个目录的 system 列表', 'system_catalog')
   } finally {
     if (epoch === systemEpoch) systemLoading.value = false
   }
@@ -410,7 +426,7 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
     emit('created', work)
   } catch (cause) {
     if (epoch === systemEpoch) {
-      view.value = 'systems'
+      if (systemCatalogState.value !== 'unsupported') view.value = 'systems'
       handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path, workerConfig })
     }
   } finally {
@@ -552,7 +568,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
               </button>
               <button type="button" class="ui-dialog-btn" :aria-label="`阅读 ${candidate.name}`" :disabled="actionBusy" @click="systemPreview = candidate; view = 'system-content'">阅读</button>
             </div>
-            <div v-if="!systemCandidates.length" class="ui-dialog-empty">没有可用的 system。请检查这台机器的 SYSTEM 文件或 Dock 模板后重新读取。</div>
+            <div v-if="systemCatalogState === 'ready' && !systemCandidates.length" class="ui-dialog-empty">没有可用的 system。请检查这台机器的 SYSTEM 文件或 Dock 模板后重新读取。</div>
           </div>
           <footer class="system-confirm">
             <button type="button" class="ui-dialog-btn" :disabled="actionBusy" @click="chooseDirectory(systemPath, true)">重新读取</button>

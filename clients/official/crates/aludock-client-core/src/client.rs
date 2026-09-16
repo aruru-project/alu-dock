@@ -630,10 +630,22 @@ fn validate_hello(
         HelloReply::Error(error)
             if error.kind == "hello_error" && error.request_id == request_id =>
         {
-            return Err(ClientError::Protocol(format!(
-                "hello failed ({}): {}",
-                error.error.code, error.error.message
-            )));
+            let mut details = serde_json::Map::new();
+            if let Some(missing) = error.error.missing {
+                details.insert("missing".into(), serde_json::json!(missing));
+            }
+            if let Some(versions) = error.error.host_versions {
+                details.insert("hostVersions".into(), serde_json::json!(versions));
+            }
+            if let Some(delay) = error.error.retry_after_ms {
+                details.insert("retryAfterMs".into(), serde_json::json!(delay));
+            }
+            return Err(ClientError::Host {
+                retryable: matches!(error.error.code.as_str(), "host_starting" | "host_draining"),
+                code: error.error.code,
+                message: error.error.message,
+                details: (!details.is_empty()).then_some(Value::Object(details)),
+            });
         }
         HelloReply::Error(_) => {
             return Err(ClientError::Protocol(
@@ -728,9 +740,13 @@ struct HelloError {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct HelloErrorBody {
     code: String,
     message: String,
+    missing: Option<Vec<String>>,
+    host_versions: Option<Vec<u64>>,
+    retry_after_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]

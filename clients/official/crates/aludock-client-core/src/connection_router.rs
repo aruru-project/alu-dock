@@ -368,6 +368,10 @@ impl ConnectionRouter {
                         {
                             continue;
                         }
+                        // A correlated Host rejection is not an address failure.
+                        if matches!(&error, ClientError::Host { .. }) {
+                            return Err(error);
+                        }
                         state.active_endpoint_id = None;
                         state.route_generation = state.route_generation.saturating_add(1);
                         self.inner
@@ -473,6 +477,19 @@ impl ConnectionRouter {
                             endpoint_id: candidate.id,
                             route_generation,
                         });
+                    }
+                    Err(error @ ClientError::Host { .. }) => {
+                        let state = self.inner.state.lock().map_err(|_| router_state_error())?;
+                        if state.closed {
+                            return Err(router_closed_error());
+                        }
+                        if state.route_generation != resolution_generation
+                            || !state.candidates.iter().any(|current| current == &candidate)
+                        {
+                            stale = true;
+                            break;
+                        }
+                        return Err(error);
                     }
                     Err(error) => failures.push(format!("{}: {error}", candidate.id)),
                 }
@@ -597,6 +614,7 @@ mod tests {
         CloseBeforeHello,
         HelloThenClose,
         HelloWithoutCapabilities,
+        MissingSystemCapability,
         CloseAfterRequest,
         HoldHello {
             arrived: Arc<Notify>,
@@ -666,6 +684,17 @@ mod tests {
                         .get("requiredCapabilities")
                         .cloned()
                         .unwrap_or_else(|| Value::Array(Vec::new()));
+                    if matches!(mode, ServerMode::MissingSystemCapability)
+                        && requested_capabilities.as_array().is_some_and(|items| {
+                            items.iter().any(|item| item == "system.templates.v1")
+                        })
+                    {
+                        let _ = write_json_line(&mut stream, &serde_json::json!({
+                            "kind": "hello_error", "requestId": request_id,
+                            "error": { "code": "capability_missing", "message": "Required capabilities are unavailable", "missing": ["system.templates.v1"] }
+                        })).await;
+                        return;
+                    }
                     if let ServerMode::HoldHello { arrived, release } = &mode {
                         arrived.notify_one();
                         release.notified().await;
@@ -767,6 +796,55 @@ mod tests {
                 acquisition: tokio::sync::Mutex::new(()),
             }),
         }
+    }
+
+    // New Client / old Host: optional system discovery must not make the
+    // reachable paired Host look offline or destroy its capability evidence.
+    #[tokio::test]
+    async fn unsupported_system_selection_preserves_the_host_error_and_basic_connection() {
+        let client = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        let endpoint = spawn_test_host(&host, ServerMode::MissingSystemCapability).await;
+        for active in [false, true] {
+            let router = test_router(
+                &client,
+                &host,
+                vec![("local", endpoint.endpoint.clone())],
+                "local",
+            );
+            if !active {
+                router.inner.state.lock().unwrap().active_endpoint_id = None;
+            }
+            let result = router.acquire(&["core.v2", "system.templates.v1"]).await;
+            match result {
+                Err(ClientError::Host {
+                    code,
+                    details: Some(details),
+                    retryable: false,
+                    ..
+                }) => {
+                    assert_eq!(code, "capability_missing");
+                    assert_eq!(
+                        details,
+                        serde_json::json!({ "missing": ["system.templates.v1"] })
+                    );
+                }
+                _ => {
+                    panic!("an unsupported system feature must remain a structured Host rejection")
+                }
+            }
+            if active {
+                assert_eq!(
+                    router.snapshot().active_endpoint_id.as_deref(),
+                    Some("local")
+                );
+            }
+            assert!(
+                router.acquire(&["core.v2"]).await.is_ok(),
+                "ordinary Host requests remain available"
+            );
+        }
+        endpoint.stop();
     }
 
     #[test]

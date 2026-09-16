@@ -189,6 +189,10 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 不需要 adapter options 时省略该字段并继续只要求普通 instance catalog capability。`instance.ensure`、adopt、reopen 和 Agent-facing `dock_create` 没有该输入；reopen 自动复用最初 create 已持久化的对象。
 
+创建的默认规则始终由实际创建 Worker 的 Host 执行，不是 Client 读取 system 列表之后才成立。基础协议兼容时，四种组合保持同一合同：旧 Client→旧 Host 使用原有创建；旧 Client→新 Host 省略 system 选择，由 Host 应用目录默认、未配置才走 Pi 原生行为、配置损坏则报错；新 Client→旧 Host 明确不支持 `system.templates.v1` 时，原目录创建意图直接走不带选择的普通创建；新 Client→新 Host 保留正常默认和显式选择流程。
+
+system 查询的相关 `capability_missing` 及 `missing` 明细必须从 Rust/路由保留到界面，不能改说成网络不可达或空文件列表。仅首次目录创建且明确只缺 system 列表能力时可走普通创建；分页已开始、刷新、正文读取、显式选择、其他读取失败和结果未知均不能触发这条分流。只有成功读到空列表才显示“没有可用 system”。
+
 ## 读取 active Work 的 workspace 文件
 
 要求 `workspace.files.v1`。`workspace.entry.list {instanceId,path,cursor?,limit}`、`workspace.entry.get {instanceId,path}` 和 `workspace.file.read {instanceId,path}` 的 path 都相对受理时 instance snapshot 的 cwd，根为 `.`。这与创建前接受 Host absolute path 的 `workspace.list.v1` 是两项不同能力。

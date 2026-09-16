@@ -93,6 +93,8 @@ git diff --check
 
 通过真实 Host 入口验证 Protocol V2 hello、request/response、`instance.read`、`instance.follow`、`interaction.control` 接手、mutation identity 和 reconnect。
 
+新增可选能力接入已有用户入口时，须核对新旧 Client/Host 的组合，不让新增查询成为基础操作的错误前置。出处：system 列表接入新建时遗漏“新 Client→旧 Host”，同版本成功和“旧 Client→新 Host”默认测试未覆盖这个实际回归。常驻回归保护明确的缺能力结果及真实入口；旧发布版本的隔离联调记录其原始代码、锁和实际验证边界，不把模拟错误或同版本组件测试称为四组合联调。
+
 根目录 `npm run test:client-protocol` 是 Linux 原生跨语言门：它在完全隔离的临时 HOME/XDG/Pi/state 路径启动 production CLI Host，使用官方 Rust core 的 public local-connection API 显式选择 Main 并读取一个静态 saved session。它证明 Host 与实际 Rust reader 的 Protocol V2 兼容，不替代 Android/WebView、mTLS、Windows lifecycle 或真机验收；非 Linux 环境会明确失败而不是静默跳过。
 
 ### Worker 与 Agent adapter
