@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { ArrowLeft, BookOpen, ChevronRight } from '@lucide/vue'
 import {
   compactionPrompts, cloneSession, forkSession, listSessions, loadSessionTree, nameSession,
   navigateSession, newSession, reloadSession, switchSession,
@@ -43,12 +44,30 @@ const compactDraft = ref('')
 const promptTemplates = ref<CompactionPromptTemplatesResult | null>(null)
 const promptLoading = ref(false)
 const promptError = ref('')
+const promptReaderOpen = ref(false)
+const promptSection = ref<keyof CompactionPromptTemplatesResult>('summarize')
+const promptLink = ref<HTMLButtonElement | null>(null)
+const promptBack = ref<HTMLButtonElement | null>(null)
 let promptEpoch = 0
 let targetRevision = 0
 const promptSections = [
-  { key: 'system', label: '系统说明' }, { key: 'summarize', label: '首次摘要' },
-  { key: 'update', label: '更新已有摘要' }, { key: 'turnPrefix', label: '跨轮次保留片段' },
+  { key: 'summarize', label: '首次摘要', description: '没有历史摘要时，用这份说明整理对话。' },
+  { key: 'update', label: '更新摘要', description: '已有摘要时，将新增对话整合进摘要。' },
+  { key: 'system', label: '系统说明', description: '模型执行摘要任务时遵循的系统说明。' },
+  { key: 'turnPrefix', label: '分段摘要', description: '需要拆分一轮对话时，用于总结前半段。' },
 ] as const
+const selectedPromptSection = computed(() => promptSections.find(section => section.key === promptSection.value)!)
+async function openPromptReader() {
+  promptReaderOpen.value = true
+  if (!promptTemplates.value && !promptLoading.value) void loadPromptTemplates()
+  await nextTick()
+  promptBack.value?.focus()
+}
+async function closePromptReader() {
+  promptReaderOpen.value = false
+  await nextTick()
+  promptLink.value?.focus()
+}
 onUnmounted(() => { promptEpoch++; loadEpoch++; targetRevision++ })
 async function loadPromptTemplates() {
   const epoch = ++promptEpoch
@@ -136,13 +155,13 @@ watch([
     && reloadScope.value.expectedHostEpoch === props.work.ownerHostEpoch
     && reloadSummary.value.instance.runtimeGeneration === props.work.runtimeGeneration) return
   promptEpoch++; promptTemplates.value = null; promptError.value = ''; promptLoading.value = false
+  promptReaderOpen.value = false; promptSection.value = 'summarize'
   reloadScope.value = null
   error.value = ''; status.value = ''; trust.value = null
   if (props.mode === 'sessions') void loadSessionList()
   else if (props.mode === 'tree') void loadTree()
   else if (props.mode === 'new-session') void createNew()
-  else if (props.mode === 'compact-session') void loadPromptTemplates()
-  else {
+  else if (props.mode !== 'compact-session') {
     renameDraft.value = props.work.name ?? ''
     reloadSummary.value = null
   }
@@ -476,15 +495,29 @@ function time(value?: string | null) { return treeNodeTime(value) }
       <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown" @click="rename">{{ pending === 'rename' ? '正在提交…' : '确认' }}</button></div>
     </section>
 
-    <section v-else-if="mode === 'compact-session'" class="alu-session-form">
-      <div v-if="compactionPending || work.compacting" class="alu-dialog-status">上下文正在压缩；进度与结果会显示在对话中。</div>
-      <p>以下是 Agent 的完整默认压缩模板，只读可复制，不是本次发送给模型的完整内容。对话、已有摘要和补充说明会在调用时加入；Extension 可以接管或取消压缩。</p>
-      <p v-if="promptLoading" role="status">正在读取默认模板…</p>
-      <div v-if="promptError" class="alu-dialog-error">{{ promptError }} <button type="button" @click="loadPromptTemplates">重试读取</button></div>
-      <template v-if="promptTemplates"><details v-for="section in promptSections" :key="section.key"><summary>{{ section.label }}</summary><MarkdownDocumentSurface initial-mode="source" :source="promptTemplates[section.key]" :document-key="`${work.id}:${work.runtimeGeneration}:${section.key}`" :aria-label="section.label" /></details></template>
-      <label>补充说明（可编辑）</label>
-      <textarea v-model="compactDraft" class="ui-dialog-editor" rows="6" placeholder="补充说明（可选，追加到摘要任务）" :disabled="compactionPending || work.compacting" />
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
+    <section v-else-if="mode === 'compact-session'" class="compaction-panel">
+      <template v-if="!promptReaderOpen">
+        <div class="compaction-body">
+          <p class="compaction-intro">将较早的对话整理为摘要，为后续对话腾出空间。</p>
+          <div class="compaction-field">
+            <label for="compaction-instructions">补充说明 <span>可选</span></label>
+            <textarea id="compaction-instructions" v-model="compactDraft" class="ui-dialog-editor" rows="4" placeholder="例如：保留关键决策、未完成事项和相关文件路径。" aria-describedby="compaction-hint" :disabled="compactionPending || work.compacting" />
+            <p id="compaction-hint" class="compaction-hint">留空使用默认提示；填写后作为补充，不替换默认提示。</p>
+          </div>
+          <button ref="promptLink" type="button" class="compaction-prompt-link" @click="openPromptReader"><BookOpen :size="16" /><span>查看默认压缩提示</span><span class="compaction-readonly">只读</span><ChevronRight :size="15" /></button>
+          <div v-if="compactionPending || work.compacting" class="compaction-progress" role="status"><span class="alu-agent-activity-spinner" />正在压缩，进度与结果会显示在对话中。</div>
+        </div>
+        <div class="ui-dialog-form-footer compaction-footer"><button type="button" class="ui-dialog-btn" @click="$emit('close')">取消</button><button type="button" class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="preview || !!pending || outcomeUnknown || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
+      </template>
+      <section v-else class="compaction-reader" aria-label="默认压缩提示">
+        <div class="compaction-reader-header"><button ref="promptBack" type="button" class="compaction-reader-back" @click="closePromptReader"><ArrowLeft :size="15" />返回压缩</button><span class="compaction-readonly">默认提示 · 只读</span></div>
+        <p class="compaction-reader-note">这里是默认说明，不包含本次对话或已有摘要。扩展可以接管压缩。</p>
+        <div class="compaction-prompt-sections" role="group" aria-label="选择提示类型"><button v-for="section in promptSections" :key="section.key" type="button" :aria-pressed="promptSection === section.key" @click="promptSection = section.key">{{ section.label }}</button></div>
+        <p class="compaction-section-description">{{ selectedPromptSection.description }}</p>
+        <div v-if="promptLoading" class="compaction-reader-state" role="status"><span class="alu-agent-activity-spinner" />正在读取默认提示…</div>
+        <div v-else-if="promptError" class="compaction-reader-state compaction-reader-error" role="alert"><p>{{ promptError }}</p><button type="button" class="ui-dialog-btn" @click="loadPromptTemplates">重新读取</button></div>
+        <MarkdownDocumentSurface v-else-if="promptTemplates" initial-mode="reading" :source="promptTemplates[promptSection]" :document-key="`${work.id}:${work.runtimeGeneration}:${promptSection}`" :aria-label="selectedPromptSection.label" />
+      </section>
     </section>
 
     <section v-else-if="mode === 'reload-session'" class="alu-session-action-state alu-confirm-state">
@@ -578,3 +611,37 @@ function time(value?: string | null) { return treeNodeTime(value) }
     </section>
   </div>
 </template>
+
+<style scoped>
+.compaction-panel { display: flex; min-width: 0; min-height: 0; flex-direction: column; color: var(--alu-text-dim); }
+.compaction-body { display: flex; min-height: 0; flex-direction: column; gap: 20px; overflow-y: auto; padding: 20px; }
+.compaction-intro { margin: 0; color: var(--alu-text-dim); font-size: 13px; line-height: 1.7; }
+.compaction-field { display: flex; min-width: 0; flex-direction: column; gap: 9px; }
+.compaction-field > label { display: flex; align-items: baseline; gap: 8px; color: var(--alu-text); font-size: 12px; font-weight: 600; }
+.compaction-field > label > span { color: var(--alu-text-muted); font-size: 11px; font-weight: 400; }
+.compaction-field > .ui-dialog-editor { width: 100%; min-height: 120px; margin: 0; padding: 12px 14px; resize: vertical; font-size: 12px; line-height: 1.65; }
+.compaction-field > .ui-dialog-editor::placeholder { color: var(--alu-text-muted); }
+.compaction-hint { margin: 0; color: var(--alu-text-muted); font-size: 11px; line-height: 1.6; }
+.compaction-prompt-link { display: flex; min-height: 46px; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-bg); color: var(--alu-text-dim); text-align: left; font: inherit; font-size: 12px; }
+.compaction-prompt-link > svg:first-child { color: var(--alu-blue); }
+.compaction-prompt-link > span:first-of-type { flex: 1; }
+.compaction-prompt-link > svg:last-child { color: var(--alu-text-muted); }
+.compaction-prompt-link:hover, .compaction-prompt-link:focus-visible { outline: none; border-color: var(--alu-blue-border); background: var(--alu-hover); color: var(--alu-text); }
+.compaction-readonly { flex-shrink: 0; color: var(--alu-text-muted); font-size: 10px; }
+.compaction-progress { display: flex; align-items: center; gap: 8px; color: var(--alu-mint); font-size: 12px; line-height: 1.6; }
+.compaction-footer { border-top: 1px solid var(--alu-border); }
+.compaction-reader { display: flex; min-height: 0; height: min(64dvh, 560px); flex-direction: column; overflow: auto; }
+.compaction-reader-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px 0; }
+.compaction-reader-back { display: inline-flex; min-height: 36px; align-items: center; gap: 7px; padding: 0 4px; border: 0; border-radius: 5px; color: var(--alu-text-dim); background: transparent; font: inherit; font-size: 12px; }
+.compaction-reader-back:hover, .compaction-reader-back:focus-visible { outline: none; color: var(--alu-blue); background: var(--alu-hover); }
+.compaction-reader-note { flex-shrink: 0; margin: 6px 20px 14px; color: var(--alu-text-muted); font-size: 11px; line-height: 1.7; }
+.compaction-prompt-sections { display: grid; flex-shrink: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 0 16px; padding: 4px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg); }
+.compaction-prompt-sections > button { min-width: 0; min-height: 40px; padding: 6px 3px; border: 1px solid transparent; border-radius: 6px; color: var(--alu-text-muted); background: transparent; font: inherit; font-size: 11px; }
+.compaction-prompt-sections > button[aria-pressed="true"] { border-color: var(--alu-blue-border); color: var(--alu-text); background: var(--alu-active); }
+.compaction-prompt-sections > button:hover, .compaction-prompt-sections > button:focus-visible { outline: none; color: var(--alu-text); background: var(--alu-hover); }
+.compaction-section-description { flex-shrink: 0; margin: 10px 20px 14px; color: var(--alu-text-dim); font-size: 11px; line-height: 1.6; }
+.compaction-reader > .markdown-document { min-height: 160px; flex: 1 1 auto; border-top: 1px solid var(--alu-border); }
+.compaction-reader-state { display: flex; min-height: 160px; flex: 1; align-items: center; justify-content: center; gap: 9px; padding: 20px; color: var(--alu-text-muted); font-size: 12px; }
+.compaction-reader-error { flex-direction: column; color: var(--alu-rose); text-align: center; }
+.compaction-reader-error > p { margin: 0; line-height: 1.7; }
+</style>

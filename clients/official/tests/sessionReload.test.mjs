@@ -12,7 +12,10 @@ const filename = join(root, 'src/components/SessionManager.vue')
 const directory = await mkdtemp(join(root, '.reload-check-'))
 const stateKey = '__aluReloadCheck'
 const recordMutationUnknown = () => {}
-const node = (type, text = '') => ({ type, text, props: {}, children: [], parent: null, focus() {}, select() {}, addEventListener() {}, removeEventListener() {}, querySelector() { return null }, querySelectorAll() { return [] } })
+const previousDocument = globalThis.Document, previousShadowRoot = globalThis.ShadowRoot
+globalThis.Document ??= class Document {}
+globalThis.ShadowRoot ??= class ShadowRoot {}
+const node = (type, text = '') => ({ type, text, props: {}, children: [], parent: null, focus() {}, select() {}, getRootNode() { return { activeElement: null } }, addEventListener() {}, removeEventListener() {}, querySelector() { return null }, querySelectorAll() { return [] } })
 const detach = (item) => {
   if (item.parent) item.parent.children.splice(item.parent.children.indexOf(item), 1)
 }
@@ -52,8 +55,16 @@ try {
       rolldownOptions: { external: ['vue'] },
     },
     plugins: [{ name: 'static-transport-fixture', enforce: 'pre',
-      resolveId(id) { if (id === '../stores/app') return '\0store-fixture' },
-      load(id) { if (id === '\0store-fixture') return `export const useAppStore = () => globalThis.${stateKey}.store;` },
+      resolveId(id) {
+        if (id === '../stores/app') return '\0store-fixture'
+        if (id === './MarkdownContent.vue') return '\0browser-markdown'
+      },
+      load(id) {
+        if (id === '\0store-fixture') return `export const useAppStore = () => globalThis.${stateKey}.store;`
+        // This renderer has no HTML document. Only the browser-rendered leaf is
+        // replaced; sanitization/visual layout are not claimed by this test.
+        if (id === '\0browser-markdown') return `import { h } from 'vue'; export default { props: ['source'], render() { return h('div', this.source) } };`
+      },
     }, vue()],
   })
   const { default: SessionManager } = await import(outfile)
@@ -201,42 +212,63 @@ try {
   const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
   const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
   const templates = { system: '系统全文\n' + '长内容'.repeat(1000), summarize: '首次摘要\n', update: '已有摘要更新\n', turnPrefix: '跨轮次片段\n' }
-  let resolveTemplates
-  const compactCalls = []
+  let resolveTemplates, rejectTemplates
+  const compactCalls = [], submitted = []
   globalThis[stateKey] = { store, invoke: (command, args) => {
     assert.equal(command, 'compaction_prompts')
     compactCalls.push(args)
-    return new Promise(resolve => { resolveTemplates = resolve })
+    return new Promise((resolve, reject) => { resolveTemplates = resolve; rejectTemplates = reject })
   } }
   const container = node('root')
-  const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'compact-session', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
+  const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'compact-session', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false, onCompact: value => submitted.push(value) }) })
   mounted.mount(container)
   await settle()
+  const button = label => find(container, item => item.type === 'button' && text(item).includes(label))
+  const click = async label => { const target = button(label); assert.ok(target, label); assert.ok(!target.props.disabled); await target.props.onClick(); await settle() }
+  assert.equal(compactCalls.length, 0, 'the optional reader is not a prerequisite for compression')
+  const editor = find(container, item => item.type === 'textarea')
+  editor.props['onUpdate:modelValue']('保留未完成事项')
+  await settle()
+  await click('查看默认压缩提示')
   assert.equal(compactCalls.length, 1)
   assert.deepEqual(compactCalls[0], { connectionId: 'connection-a', selectionGeneration: 1, instanceId: 'work-a', expectedHostEpoch: 'epoch-a', expectedRuntimeGeneration: 4 })
   resolveTemplates(templates)
   await settle()
-  const sources = []
-  const walk = item => { if (item.type === 'textarea' && item.props.readonly !== undefined) sources.push(item); item.children.forEach(walk) }
-  walk(container)
-  assert.deepEqual(sources.map(item => item.props.value), Object.values(templates), 'four complete read-only defaults, not the editable supplement')
-  assert.ok(text(container).includes('不是本次发送给模型的完整内容'))
-  await find(container, item => item.type === 'button' && text(item) === '复制全文').props.onClick()
-  assert.equal(copied, templates.system, 'copy preserves the complete default text')
+  for (const [label, key] of [['首次摘要', 'summarize'], ['更新摘要', 'update'], ['系统说明', 'system'], ['分段摘要', 'turnPrefix']]) {
+    await click(label)
+    await click('原文')
+    const source = find(container, item => item.type === 'textarea' && item.props.readonly !== undefined)
+    assert.equal(source.props.value, templates[key], 'each default remains complete and read-only')
+    await click('复制全文')
+    assert.equal(copied, templates[key], 'copy preserves the selected full template')
+  }
+  assert.deepEqual(submitted, [], 'reading and copying never start compaction')
+  await click('返回压缩')
+  assert.equal(find(container, item => item.type === 'textarea').value, '保留未完成事项')
+  await click('开始压缩')
+  assert.deepEqual(submitted, ['保留未完成事项'], 'the supplement survives the reader and remains separate from its defaults')
   work.id = 'work-b'
   await settle()
+  await click('查看默认压缩提示')
   const oldResolve = resolveTemplates
   work.id = 'work-c'
   await settle()
   oldResolve(templates)
   await settle()
   assert.equal(find(container, hasClass('markdown-document')), undefined, 'late templates cannot publish into another Work')
-  mounted.unmount()
-  resolveTemplates(templates)
+  await click('查看默认压缩提示')
+  rejectTemplates({ code: 'capability_missing' })
   await settle()
-  console.log('PASS: compaction defaults / native seam / complete read-only copy / late Work fencing')
+  assert.ok(find(container, hasClass('compaction-reader-error')))
+  await click('返回压缩')
+  assert.ok(!button('开始压缩').props.disabled, 'an unavailable optional reader does not prevent the existing compaction action')
+  mounted.unmount()
+  await settle()
+  console.log('PASS: optional compaction reader / complete copy / preserved supplement / error return / late Work fencing')
 } finally {
   delete globalThis[stateKey]
   delete globalThis.window
+  if (previousDocument === undefined) delete globalThis.Document; else globalThis.Document = previousDocument
+  if (previousShadowRoot === undefined) delete globalThis.ShadowRoot; else globalThis.ShadowRoot = previousShadowRoot
   await rm(directory, { recursive: true, force: true })
 }

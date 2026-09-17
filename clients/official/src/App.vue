@@ -1466,7 +1466,7 @@ function handleModalKeydown(event: KeyboardEvent) {
 function controlDialogTitle(section: ControlSection) {
   return ({
     commands: '命令中心', 'dock-tools': 'Dock Tools', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
-    'rename-session': '会话名称', 'compact-session': 'Compact Context', 'reload-session': 'Reload Session',
+    'rename-session': '会话名称', 'compact-session': '压缩上下文', 'reload-session': 'Reload Session',
     models: '选择 Model', thinking: 'Thinking Level', tools: 'Active Tools', resources: '项目状态', settings: '设置',
   } as Record<ControlSection, string>)[section]
 }
