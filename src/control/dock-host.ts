@@ -769,7 +769,7 @@ export class DockHost {
         const instance=this.registry.get(request.params.instanceId);
         if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
         const projection=await instance.getAttachProjection(request.params.since,MAX_HISTORY_ITEMS,request.params.replay);
-        this.sendSuccessAndEnd(socket,request.requestId,createBoundedReadResult(projection,request.requestId)); return;
+        this.sendSuccessAndEnd(socket,request.requestId,projection,(projected)=>createBoundedReadResult(projected,request.requestId)); return;
       }
       case "instance.follow": await this.followEventStream(request,socket,setEventUnsubscribe); return;
       case "interaction.control": await this.controlExtensionUi(request,socket,setEventUnsubscribe); return;
@@ -861,7 +861,7 @@ export class DockHost {
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommands(request.params.prefix)); return; }
       case "command.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandContent(request.params.command,request.params.cursor)); return; }
       case "command.complete": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandCompletions(request.params.command,request.params.argumentPrefix)); return; }
-      case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
+      case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page,(projected)=>createBoundedHistoryResult(projected,request.requestId,this.hostEpoch)); return; }
       case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.image": await this.streamConversationImage(request, socket); return;
@@ -1225,8 +1225,14 @@ export class DockHost {
     if (!socket.destroyed && !socket.writableEnded) socket.end();
   }
 
-  private projectResult(result: unknown): unknown { return resultWithDefaultHostId(result, this.instanceManager.mainHostId()); }
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,this.projectResult(result)));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private projectResult<T>(result: T): T { return resultWithDefaultHostId(result, this.instanceManager.mainHostId()) as T; }
+  private sendSuccessAndEnd<T>(socket: Socket, requestId: string, result: T, bound?: (projected: T) => unknown): void {
+    if (socket.destroyed || socket.writableEnded) return;
+    // Size pages after adding Host identity; nothing may enlarge them after budgeting.
+    const projected = this.projectResult(result);
+    const outcome = endEnvelope(socket, successResponse(requestId, this.hostEpoch, bound ? bound(projected) : projected));
+    if (outcome === "too_large") this.sendErrorAndEnd(socket, "response_too_large", "Control response exceeds the JSONL record limit", requestId);
+  }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
