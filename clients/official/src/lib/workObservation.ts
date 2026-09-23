@@ -21,6 +21,7 @@ export type ObservationUpdate = {
 export type ObservationEmission = ConnectionContext & { instanceId: string; subscriptionId: string; revision: number; deliveryId?: number; update: ObservationUpdate }
 /** One fixed display destination. Neither input nor control panels subscribe to the native stream. */
 export interface ConversationSink {
+  preparingView(): boolean
   matchesToken(token: string): boolean
   bind(token: string, earlier: boolean): boolean
   content(token: string, change: ConversationContentChange): void
@@ -51,6 +52,7 @@ export function useWorkObservation(display: ConversationSink, options: {
   let revision = -1
   let unlisten: UnlistenFn | undefined
   let disposed = false
+  let refreshOnEntry = false
   async function listenNative() {
     const release = await listen<ObservationEmission>('aludock://observation', ({ payload }) => { void receive(payload) })
     if (disposed) release(); else unlisten = release
@@ -89,8 +91,11 @@ export function useWorkObservation(display: ConversationSink, options: {
   async function receive(payload: ObservationEmission) {
     accept(payload)
     if (payload.deliveryId === undefined) return
-    await nextTick()
-    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
+    // Preparing a cached view is data assembly, not a sequence of visible frames.
+    if (!display.preparingView()) {
+      await nextTick()
+      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
+    }
     if (matches(payload)) {
       try { await acknowledgeConversationFollow(payload, payload.instanceId, payload.subscriptionId, payload.deliveryId) }
       catch (cause) { error.value = userErrorMessage(cause) }
@@ -127,10 +132,11 @@ export function useWorkObservation(display: ConversationSink, options: {
     }
     if (payload.revision <= revision) return
     revision = payload.revision
-    if (update.kind === 'facts' && update.bootstrap) { readFacts(payload, update.bootstrap); return }
+    if (update.kind === 'facts' && update.bootstrap) { readFacts(payload, update.bootstrap); refreshOnEntry = false; return }
     if ((update.kind === 'replaced' || update.kind === 'replacement_snapshot') && update.target) { replace(update.target, true); options.replacement() }
     if ((update.kind === 'read' || update.kind === 'snapshot' || update.kind === 'replacement_snapshot') && update.bootstrap) {
       read({ ...payload, bootstrap: update.bootstrap }, sameContent, update.canLoadEarlier)
+      if (update.kind === 'read') refreshOnEntry = false
       if (update.contentToken) display.content(update.contentToken, { kind: 'checkpoint_begin', bootstrap: update.bootstrap, replay: true })
     } else if (update.kind === 'snapshot' && update.target) replace(update.target)
     for (const event of update.events ?? (update.event ? [update.event] : [])) applyEvent({ ...payload, event })
@@ -191,7 +197,7 @@ export function useWorkObservation(display: ConversationSink, options: {
     active.value = { ...context, instanceId, subscriptionId }
     loading.value = !facts.value; connected.value = false
     try {
-      await startConversationFollow(instanceId, subscriptionId, context, app.payload?.host.hostEpoch ?? '', refresh)
+      await startConversationFollow(instanceId, subscriptionId, context, app.payload?.host.hostEpoch ?? '', refresh || refreshOnEntry)
       return active.value?.subscriptionId === subscriptionId && app.contextMatches(context)
     } catch (cause) {
       if (active.value?.subscriptionId === subscriptionId && app.contextMatches(context)) { loading.value = false; error.value = userErrorMessage(cause) }
@@ -219,7 +225,10 @@ export function useWorkObservation(display: ConversationSink, options: {
   let selection = ''
   watch(() => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, app.selectedWork?.id), () => {
     const identity = JSON.stringify([app.activeConnectionId, app.selectedWork?.id])
-    if (identity !== selection) facts.value = null
+    if (identity !== selection) {
+      refreshOnEntry = Boolean(selection && JSON.parse(selection)[1] && app.selectedWork?.id)
+      facts.value = null
+    }
     selection = identity
     const id = app.selectedWork?.id
     if (isTauri && options.focused() && id) void load(id)

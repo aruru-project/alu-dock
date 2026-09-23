@@ -57,6 +57,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   const recordErrors = ref<Record<string, string>>({})
   let checkpoint: Pick<ConversationBootstrap, 'historyRevision'> | null = null
   let preserveHandoff = false
+  const preparingView = ref(false)
   let historyDirty = false
   let prepending = false
 
@@ -308,7 +309,7 @@ export function useConversationContent(options: ConversationContentOptions) {
       projectionFrame = 0; pendingEvents.length = 0; historyDirty = false
       checkpoint = { historyRevision: change.bootstrap.historyRevision }
       replaying = change.replay === true
-      preserveHandoff = !wasFresh && items.value.length > 0
+      preserveHandoff = preparingView.value || (!wasFresh && items.value.length > 0)
       seeding.value = true
       checkpointOrder = new Map()
       const tail = replaying ? [] : current.activeEvents.filter(event => event.sequence > change.bootstrap.cursor.sequence)
@@ -327,6 +328,7 @@ export function useConversationContent(options: ConversationContentOptions) {
       return
     }
     if (change.kind === 'checkpoint_end') {
+      preparingView.value = false
       seeding.value = false
       if (!checkpoint || !checkpointOrder) return
       for (let index = current.records.length - 1; index >= 0; index--) {
@@ -370,10 +372,11 @@ export function useConversationContent(options: ConversationContentOptions) {
     }
   }
 
-  function publish(bootstrap: ConversationBootstrap) {
+  function publish(bootstrap: ConversationBootstrap, prepareView = false) {
+    preparingView.value = prepareView
     resetProjectionSchedule()
     checkpoint = null
-    seeding.value = false
+    seeding.value = prepareView
     recordText = ''
     hydrationActiveEntries.value = new Set()
     hydrationErrors.value = {}
@@ -382,12 +385,13 @@ export function useConversationContent(options: ConversationContentOptions) {
     recordOrder = new Map(bootstrap.records.map((record, index) => [record.entryId, index]))
     recordErrors.value = {}
     state.value = bootstrap
-    rebuildProjection(state.value!)
+    if (!prepareView) rebuildProjection(state.value!)
     historyTruncated.value = bootstrap.historyTruncated
     historyError.value = null
   }
 
   function clear() {
+    preparingView.value = false
     resetProjectionSchedule()
     checkpoint = null
     recordText = ''
@@ -405,6 +409,8 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   function bindingFailed() {
+    if (preparingView.value && state.value) rebuildProjection(state.value)
+    preparingView.value = false
     seeding.value = false
     recordText = ''
   }
@@ -416,7 +422,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   return {
-    state, items, streamingPartIds, seeding, historyTruncated, historyLoading, historyError,
+    state, items, streamingPartIds, seeding, preparingView, historyTruncated, historyLoading, historyError,
     hydrationActiveEntries, hydrationErrors, historyHydrating,
     reproject, applyConversationEvent, applyReplayEvent, acceptReadCut, showActivity,
     publish, clear, applyContent, bindingFailed, dispose,

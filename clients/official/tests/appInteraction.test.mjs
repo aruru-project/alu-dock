@@ -36,7 +36,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, extensionBinding, allowExtension = false
-let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, releaseHistory, saveResult = 'cancelled'
+let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled'
 const emit = (name, payload) => listeners.get(name)?.({ payload })
 const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
 const contentChange = change => observation({ kind: 'content', token: 'native-content', change })
@@ -66,7 +66,7 @@ const invoke = async (command, args = {}) => {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
     return { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([work, otherWork]), total: 2, maxAttachmentsPerMessage: 32 }
   }
-  if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
+  if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); if (immediateAck) assert.equal(frames, beforeBatchFrame, 'cached data does not wait for a visible frame'); else assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
   if (command === 'start_conversation_follow') { binding = { ...args }; return }
   if (command === 'list_deliverables') return []
   if (command === 'restored_image_count') return 0
@@ -710,6 +710,35 @@ try {
     await find(uploadContainer, item => item.type === 'button' && item.props.title === '添加附件').props.onClick(); await settle()
   }
   await rebuildUploadView()
+  // Switching Work: show a complete cached view once, while asking for a fresh
+  // Host read. Keep this at the actual App/store/IPC entrance, not a second reader.
+  uploadApp.selectWork('other'); await settle()
+  assert.equal(calls.findLast(call => call.command === 'start_conversation_follow').args.refresh, true)
+  const otherBootstrap = { ...bootstrap, instance: otherWork, cursor: { ...cursor, instanceId: 'other' }, records: [] }
+  observation({ kind: 'snapshot', bootstrap: otherBootstrap, contentToken: 'native-content', canLoadEarlier: true, state: 'connected' })
+  const cacheRow = (id, value) => ({ ...bootstrap.records[0], recordId: id, entryId: id, content: [{ type: 'text', text: value }] })
+  beforeBatchFrame = frames; immediateAck = true
+  emit('aludock://observation', { ...binding, revision: ++revision, deliveryId: 701, update: { kind: 'batch', updates: [
+    { revision, update: { kind: 'content', token: 'native-content', change: { kind: 'record_chunk', entryId: 'cached-process', first: true, complete: true, text: JSON.stringify(cacheRow('cached-process', 'CACHED PROCESS')) } } },
+  ] } }); await settle()
+  assert.equal(text(uploadContainer).includes('CACHED PROCESS'), false, 'do not paint intermediate cached history while opening another Work')
+  immediateAck = false
+  recordChunk(cacheRow('cached-result', 'CACHED RESULT')); contentChange({ kind: 'checkpoint_end' }); await settle()
+  assert.ok(text(uploadContainer).includes('CACHED RESULT'), 'the cached view appears without waiting for Host refresh')
+  const editorDuringRefresh = uploadEditor()
+  editorDuringRefresh.props['onUpdate:modelValue']('keep this draft')
+  const fresh = { ...otherBootstrap, cursor: { ...otherBootstrap.cursor, sequence: 20 } }
+  observation({ kind: 'facts', bootstrap: fresh })
+  contentChange({ kind: 'checkpoint_begin', bootstrap: fresh })
+  recordChunk(cacheRow('host-result', 'LATEST HOST RESULT')); await settle()
+  assert.ok(text(uploadContainer).includes('CACHED RESULT'), 'existing content remains readable during the asynchronous refresh')
+  assert.equal(text(uploadContainer).includes('LATEST HOST RESULT'), false)
+  contentChange({ kind: 'checkpoint_end' }); await settle()
+  assert.ok(text(uploadContainer).includes('LATEST HOST RESULT'))
+  assert.equal(uploadEditor(), editorDuringRefresh)
+  assert.equal(uploadApp.currentDraft, 'keep this draft')
+  uploadApp.selectWork('work'); await settle(); contentSnapshot(); await settle()
+  console.log('PASS: Work switch displays cached content once / requests latest asynchronously / applies refresh once / editor preserved')
   // #301/#302: native preview handles use the existing actual attachment card,
   // magnification/save controls and projection. Vue must not override a standard
   // image's native decision merely because an editor fileId preview exists.

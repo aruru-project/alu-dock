@@ -249,7 +249,9 @@ export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof 
     toolExpansionOverrides.value = { ...toolExpansionOverrides.value, [id]: (event.currentTarget as HTMLDetailsElement).open }
   }
 
+  let enteringWork = false
   const sink: ConversationSink = {
+    preparingView: () => conversationContent.preparingView.value,
     matchesToken: conversationSession.matchesToken,
     bind: conversationSession.bind,
     content: (token, change) => {
@@ -271,7 +273,8 @@ export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof 
       const anchor = sameDomain ? conversationViewport.captureAnchor() : null
       const following = sameDomain ? conversationViewport.isFollowing() : true
       syncImageDomain(requireConnectionContext(app), bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
-      conversationContent.publish(earlier === undefined ? bootstrap : { ...bootstrap, historyTruncated: earlier })
+      conversationContent.publish(earlier === undefined ? bootstrap : { ...bootstrap, historyTruncated: earlier }, enteringWork)
+      enteringWork = false
       if (anchor && !following) void conversationViewport.restoreAnchor(anchor, false)
       else conversationViewport.layoutChanged()
     },
@@ -282,7 +285,8 @@ export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof 
     },
   }
 
-  watch(() => JSON.stringify([app.activeConnectionId, selected.value?.id]), () => {
+  watch(() => JSON.stringify([app.activeConnectionId, selected.value?.id]), (_next, previous) => {
+    enteringWork = Boolean(previous && JSON.parse(previous)[1])
     conversationViewport.bindScope(null)
     conversationContent.clear(); resetConversationImages(); toolExpansionOverrides.value = {}
   }, { flush: 'sync' })
