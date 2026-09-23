@@ -166,8 +166,9 @@ try {
   storage.clear()
   let view = await rebuild()
   view.store.setCurrentDraft('original')
-  const operation = (id, kind, result) => ({ operationId: id, kind, state: 'succeeded', connectionId: 'host-a', instanceId: 'B', hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'session', editor: view.store.captureSubmitDraft('host-a', 'B', []), result })
-  const queue = operation('queue', 'dequeue_messages', { instance: works[1], receipt: { restored: [{ queueItemId: 'q', text: 'returned Queue', attachments: [attachment('returned')], imageCount: 0 }] } })
+  view.store.flushLocalState()
+  const operation = (id, kind, result, editor = view.store.captureSubmitDraft('host-a', 'B', [])) => ({ operationId: id, kind, state: 'succeeded', connectionId: 'host-a', instanceId: 'B', hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: editor?.sessionId ?? '', editor, result })
+  const queue = operation('queue', 'dequeue_messages', { instance: works[1], receipt: { restored: [{ queueItemId: 'q', text: 'returned Queue', attachments: [attachment('returned')], imageCount: 0 }] } }, null)
   retainedOperations.set(queue.operationId, queue)
   const saved = storage.get('aludock.uiState')
   storageFails = true
@@ -176,17 +177,18 @@ try {
   assert.equal(storage.get('aludock.uiState'), saved)
   assert.equal(view.store.captureOperationTarget(view.store.connectionContext, 'B').instanceId, 'B')
   assert.equal(retainedOperations.has('queue'), true)
-  assert.ok(view.results.returnedContentErrors.value.queue)
+  assert.deepEqual(view.results.workResults.value.map(item => item.operationId), ['queue'], 'save failure is available through the operation result retry')
+  assert.equal(view.results.returnedOperations.value.length, 0, 'Queue does not offer a second append action')
   storageFails = false; consumeFails = true
-  // Retrying original receipt can still prove the unchanged editor revision.
+  // Applying the retained result inserts before the current editor, without a capture.
   view.scope.stop(); view = await rebuild(); await view.results.initialize()
-  assert.equal(view.store.currentDraft, 'original\n\nreturned Queue')
+  assert.equal(view.store.currentDraft, 'returned Queue\n\noriginal')
   assert.deepEqual(view.store.currentAttachments.map(a => a.fileId), ['returned'])
   assert.equal(view.store.operationWasApplied('queue'), true)
   assert.equal(view.results.returnedOperations.value.length, 0)
   view.scope.stop(); view = await rebuild(); await view.results.initialize()
-  assert.equal(view.store.currentDraft, 'original\n\nreturned Queue')
-  assert.equal(view.results.returnedOperations.value.length, 0, 'F5 offers ACK only, not append again')
+  assert.equal(view.store.currentDraft, 'returned Queue\n\noriginal')
+  assert.equal(view.results.returnedOperations.value.length, 0, 'F5 offers ACK only, not insertion again')
   consumeFails = false
   await view.results.consumeNativeOperation(queue)
   assert.equal(retainedOperations.size, 0)
