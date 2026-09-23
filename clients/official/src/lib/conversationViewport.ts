@@ -63,6 +63,7 @@ export function useConversationViewport(surfaceRef: Ref<HTMLElement | null>, per
   let observedContent: Element | null = null
   const readingError = ref<string | null>(null)
   let scope: ReadingScope | null = null
+  let initialBinding = true
   let pending: ConversationReadingPosition | null = null
   let heldAnchor: ConversationReadingAnchor | null = null
   let intentRevision = 0
@@ -106,7 +107,10 @@ export function useConversationViewport(surfaceRef: Ref<HTMLElement | null>, per
     savePosition()
     reset()
     scope = next ? { ...next } : null
-    const saved = retained ?? (scope && persistence?.read(scope))
+    // Stored positions resume a rebuilt view only. Switching Work starts a new
+    // visit at the latest output; only a same-Work rebind keeps this visit's anchor.
+    const saved = retained ?? (initialBinding && scope ? persistence?.read(scope) : undefined)
+    if (scope) initialBinding = false
     if (saved && saved.hostEpoch === scope!.hostEpoch && saved.sessionId === scope!.sessionId) {
       pending = saved
       following = saved.following

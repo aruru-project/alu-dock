@@ -102,10 +102,17 @@ mountedReader = mountReader(); reader!.bindScope(scope); loaded = true; reader!.
 assert.equal(top, 1115, 'a newly mounted viewport consumes the DOM-free saved entry/offset')
 reader!.bindScope(null); reader!.bindScope({ ...scope, workId: 'B', sessionId: 'session-B' }); reader!.seeded(); await tick()
 assert.equal(top, 3600)
-reader!.bindScope(null); reader!.bindScope(scope); reader!.seeded(); await tick(); assert.equal(top, 1115)
+reader!.bindScope(null); reader!.bindScope(scope); reader!.seeded(); await tick()
+assert.equal(top, 3600, 'A → B → A opens the latest result, not the previous reading position')
+// The new visit still yields to manual reading, including later content/layout
+// changes and a rebind that does not leave this Work.
+events.get('wheel')?.({ type: 'wheel' } as Event); top = 1115; reader!.handleScroll()
+reader!.layoutChanged(); await tick(); assert.equal(top, 1115, 'new output cannot pull an active reader to the bottom')
+reader!.bindScope(scope, true); reader!.seeded(); await tick()
+assert.equal(top, 1115, 'a same-Work rebind preserves the current visit’s reading intent')
 reader!.bindScope(null); loaded = false; top = 0; reader!.bindScope(scope); await tick()
 events.get('wheel')?.({ type: 'wheel' } as Event); top = 400; reader!.handleScroll()
-loaded = true; reader!.seeded(); await tick(); assert.equal(top, 400, 'new scrolling cancels the pending old restoration')
+loaded = true; reader!.seeded(); await tick(); assert.equal(top, 400, 'manual scrolling takes ownership while the new visit is filling')
 reader!.bindScope({ ...scope, sessionId: 'new-session' }, true); reader!.seeded(); await tick()
 assert.equal(top, 3600, 'a different actual Session starts at its own end, not the old reading offset')
 const previous = [...values.entries()]
@@ -113,4 +120,4 @@ const failing = { getItem: storage.getItem, setItem() { throw new Error('storage
 assert.equal(saveConversationPosition(failing, 'host', 'A', { hostEpoch: 'epoch', sessionId: 'new-session', following: true, scrollTop: 3600 }), false)
 assert.deepEqual([...values.entries()], previous)
 mountedReader.unmount()
-console.log('reading position restore / Work and view rebuild / progressive layout / user precedence / new Session / small storage failure passed')
+console.log('same-view rebuild preserves reading / A-B-A opens latest / manual reading wins / new Session / storage failure passed')
