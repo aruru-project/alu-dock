@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncReadExt, AsyncWrite},
+    io::{AsyncBufRead, AsyncReadExt, AsyncWrite},
     sync::Notify,
 };
 use uuid::Uuid;
@@ -89,14 +89,16 @@ pub struct AttachmentUploadResult {
     pub status: AttachmentUploadStatus,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AttachmentUploadPhase {
     Hashing,
     Uploading,
     Finalizing,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AttachmentUploadProgress {
     pub phase: AttachmentUploadPhase,
     pub bytes_processed: u64,
@@ -200,8 +202,8 @@ struct UploadComplete<'a> {
 
 impl DockClient {
     /// Pre-hashes and uploads one regular file over a fresh exact-pinned mTLS
-    /// connection. The operation ID is caller-owned and may be reused to query
-    /// the Host for the same exact upload intent.
+    /// connection. The operation ID is caller-owned. This is an upload, not a read-only
+    /// query: reconnecting callers must retain the result rather than replay it.
     pub async fn upload_attachment_file<F>(
         &self,
         path: impl AsRef<Path>,
@@ -268,9 +270,8 @@ impl DockClient {
         if result.is_err() {
             self.router()
                 .report_connection_failure(&endpoint_id, route_generation);
-        } else {
-            self.router().ensure_open()?;
         }
+        // A verified receipt remains a fact even if the view closed its router.
         result
     }
 }
@@ -357,7 +358,7 @@ async fn upload_after_header<S, F>(
     on_progress: &mut F,
 ) -> Result<AttachmentUploadResult>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncBufRead + AsyncWrite + Unpin,
     F: FnMut(AttachmentUploadProgress),
 {
     let first: Value =
@@ -756,7 +757,9 @@ mod tests {
         let prepared = prehash_file(&path, &cancellation, &mut ignored)
             .await
             .unwrap();
-        let (mut client, mut host) = duplex(16 * 1024);
+        let (client, host) = duplex(16 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
+        let mut host = tokio::io::BufReader::new(host);
         let digest = prepared.sha256.clone();
         let host_task = tokio::spawn(async move {
             write_json_line(
@@ -818,7 +821,8 @@ mod tests {
         let prepared = prehash_file(&path, &cancellation, &mut ignored)
             .await
             .unwrap();
-        let (mut client, mut host) = duplex(4096);
+        let (client, mut host) = duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
         write_json_line(
             &mut host,
             &terminal("request", &prepared.sha256, prepared.size_bytes),
@@ -851,7 +855,8 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(&path, b"changed").unwrap();
-        let (mut client, mut host) = duplex(4096);
+        let (client, mut host) = duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
         write_json_line(
             &mut host,
             &json!({
@@ -922,7 +927,8 @@ mod tests {
         let prepared = prehash_file(&path, &cancellation, &mut ignored)
             .await
             .unwrap();
-        let (mut client, _host) = duplex(256);
+        let (client, _host) = duplex(256);
+        let mut client = tokio::io::BufReader::new(client);
         let canceller = cancellation.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -958,7 +964,8 @@ mod tests {
         let prepared = prehash_file(&path, &cancellation, &mut ignored)
             .await
             .unwrap();
-        let (mut client, mut host) = duplex(256);
+        let (client, mut host) = duplex(256);
+        let mut client = tokio::io::BufReader::new(client);
         let host_task = tokio::spawn(async move {
             write_json_line(
                 &mut host,
@@ -1010,7 +1017,9 @@ mod tests {
         let prepared = prehash_file(&path, &cancellation, &mut ignored)
             .await
             .unwrap();
-        let (mut client, mut host) = duplex(4096);
+        let (client, host) = duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
+        let mut host = tokio::io::BufReader::new(host);
         let host_cancellation = cancellation.clone();
         let host_task = tokio::spawn(async move {
             write_json_line(
@@ -1064,7 +1073,8 @@ mod tests {
         let prepared = prehash_file(&path, &cancellation, &mut ignored)
             .await
             .unwrap();
-        let (mut client, mut host) = duplex(4096);
+        let (client, mut host) = duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
         write_json_line(
             &mut host,
             &json!({
@@ -1077,6 +1087,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut host = tokio::io::BufReader::new(host);
         let host_task = tokio::spawn(async move {
             let complete: Value = read_json_line(&mut host, 4096).await.unwrap();
             assert_eq!(complete["kind"], "attachment_complete");

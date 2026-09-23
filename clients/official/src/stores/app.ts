@@ -1,17 +1,19 @@
+import { operationDomain, type OperationContext, type OperationTarget, type HostOperationContext, type EditorCapture, type NativeOperation } from '../lib/operationBinding'
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { bootstrap, connectLocalDock, getHostCatalog, removeSavedHost, setActiveHost, setLocalEndpoint, workCatalog } from '../lib/bridge'
 import {
   emptyLocalUiState,
+  cloneLocalUiState,
   migrateLocalUiState,
   persistLocalUiState,
   readAndMigrateLocalUiState,
   rememberRecentWorkspace,
 } from '../lib/localState'
-import type { AttachmentDto, BootstrapPayload, HostCatalog, HostConnectionProfile, ConnectionContext, MachinePlatform, Work } from '../lib/types'
+import type { AttachmentDto, PendingAttachmentSelection, BootstrapPayload, HostCatalog, HostConnectionProfile, ConnectionContext, MachinePlatform, Work } from '../lib/types'
 import { userErrorMessage as humanError } from '../lib/userError'
 import { draftAfterSubmit } from '../lib/uiBoundaries'
-import { attachmentsAfterSubmit } from '../lib/attachmentDraft'
+import { appendRestoredQueue, attachmentsAfterSubmit } from '../lib/attachmentDraft'
 
 export function mutationScopeKey(connectionId: string, instanceId: string, domain: string) {
   return JSON.stringify([connectionId, instanceId, domain])
@@ -24,13 +26,10 @@ export const useAppStore = defineStore('app', () => {
   const localUiState = ref(emptyLocalUiState())
   const loading = ref(false)
   const error = ref<string | null>(null)
-  // Unknown mutation outcomes outlive the initiating dialog and Host selection.
-  const unresolvedMutations = ref<Map<string, string>>(new Map())
-  function recordMutationUnknown(scope: { connectionId: string; instanceId: string }, domain: string, cause: unknown) {
-    if (!cause || typeof cause !== 'object' || !('outcomeUnknown' in cause) || cause.outcomeUnknown !== true) return
-    const operationId = 'operationId' in cause ? String(cause.operationId ?? '') : ''
-    unresolvedMutations.value = new Map(unresolvedMutations.value).set(mutationScopeKey(scope.connectionId, scope.instanceId, domain), operationId)
-  }
+  const unresolvedMutations = computed(() => new Map([...nativeOperations.value.values()]
+    .filter(operation => operation.state === 'unknown' && operation.kind !== 'submit_message'
+      && (operation.connectionId !== activeConnectionId.value || !operation.hostEpoch || operation.hostEpoch === payload.value?.host.hostEpoch))
+    .map(operation => [mutationScopeKey(operation.connectionId, operation.instanceId, operationDomain(operation.kind)), operation.operationId])))
   const hostUnreachable = ref(false)
   const needsPairing = ref(false)
   const workDrawerOpen = ref(false)
@@ -39,9 +38,6 @@ export const useAppStore = defineStore('app', () => {
   let localStateInitialized = false
   let loadEpoch = 0
   let workCatalogRefreshEpoch = 0
-  let editorRevision = 0
-  const draftRevisions = new Map<string, number>()
-  const attachmentRevisions = new Map<string, number>()
   const editorKey = (connectionId: string, workId: string, fileId?: string) => JSON.stringify([connectionId, workId, fileId])
 
   const localSelected = computed(() => catalog.value?.activeTarget?.kind === 'local')
@@ -67,6 +63,37 @@ export const useAppStore = defineStore('app', () => {
     const workId = selectedWork.value?.id
     return connectionId && workId ? localUiState.value.connections[connectionId]?.attachments[workId] ?? [] : []
   })
+  const currentPendingAttachments = computed(() => {
+    const id = localUiState.value.activeConnectionId
+    const workId = selectedWork.value?.id
+    return id && workId ? localUiState.value.connections[id]?.pendingAttachments[workId] ?? [] : []
+  })
+  const operationResultsReady = ref(false)
+  function commitEditor(change: (state: ReturnType<typeof emptyLocalUiState>) => void): boolean {
+    const candidate = cloneLocalUiState(localUiState.value)
+    change(candidate)
+    if (!persistLocalUiState(storage, candidate)) return false
+    localUiState.value = candidate
+    return true
+  }
+  function setPendingAttachments(value: PendingAttachmentSelection[]): boolean {
+    const id = localUiState.value.activeConnectionId
+    const workId = selectedWork.value?.id
+    if (!id || !workId) return false
+    return commitEditor(state => { state.connections[id]!.pendingAttachments[workId] = value })
+  }
+  function completeAttachmentSelection(selection: PendingAttachmentSelection, attachment: AttachmentDto): boolean {
+    const id = localUiState.value.activeConnectionId
+    const work = selectedWork.value
+    if (!id || !work || work.executor.piSessionId !== selection.sessionId
+      || !currentPendingAttachments.value.some(item => item.jobId === selection.jobId && item.revision === selection.revision)) return false
+    return commitEditor(state => {
+      const connection = state.connections[id]!
+      connection.pendingAttachments[work.id] = connection.pendingAttachments[work.id]!.filter(item => item.revision !== selection.revision)
+      connection.attachments[work.id] = [...(connection.attachments[work.id] ?? []).filter(item => item.fileId !== attachment.fileId), attachment]
+      connection.attachmentRevisions[editorKey(id, work.id, attachment.fileId)] = selection.revision
+    })
+  }
   const detailMode = computed(() => {
     const connectionId = localUiState.value.activeConnectionId
     return connectionId ? localUiState.value.connections[connectionId]?.detailMode ?? true : true
@@ -114,7 +141,6 @@ export const useAppStore = defineStore('app', () => {
       return true
     } catch (cause) {
       if (epoch !== loadEpoch || !contextMatches(captured)) return false
-      payload.value = null
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
       hostUnreachable.value = code === 'host_unreachable' || code === 'connection_failed'
       error.value = humanError(cause)
@@ -281,6 +307,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function activateConnection(connectionId: string) {
+    if (localStateInitialized && localUiState.value.activeConnectionId === connectionId) return
     clearHostProjection()
     localUiState.value = localStateInitialized
       ? migrateLocalUiState(localUiState.value, { selectedWorkId: null, draft: null }, connectionId)
@@ -360,56 +387,134 @@ export const useAppStore = defineStore('app', () => {
     const workId = selectedWork.value?.id
     const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
     if (!connection || !workId) return
-    if ((connection.drafts[workId] ?? '') !== value) draftRevisions.set(editorKey(connectionId!, workId), ++editorRevision)
+    if ((connection.drafts[workId] ?? '') !== value) connection.editorRevisions[workId] = crypto.randomUUID()
     if (value) connection.drafts[workId] = value
     else delete connection.drafts[workId]
     if (saveTimer === undefined) saveTimer = setTimeout(flushLocalState, 250)
   }
 
-  function setCurrentAttachments(value: AttachmentDto[]) {
-    const connectionId = localUiState.value.activeConnectionId
+  function setCurrentAttachments(value: AttachmentDto[]): boolean {
+    const id = localUiState.value.activeConnectionId
     const workId = selectedWork.value?.id
-    const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
-    if (!connection || !workId) return
-    const previous = connection.attachments[workId] ?? []
-    for (const fileId of new Set([...previous, ...value].map((item) => item.fileId))) {
-      if (JSON.stringify(previous.find((item) => item.fileId === fileId)) !== JSON.stringify(value.find((item) => item.fileId === fileId))) {
-        attachmentRevisions.set(editorKey(connectionId!, workId, fileId), ++editorRevision)
+    if (!id || !workId) return false
+    return commitEditor(state => {
+      const connection = state.connections[id]!
+      const previous = connection.attachments[workId] ?? []
+      for (const fileId of new Set([...previous, ...value].map(item => item.fileId))) {
+        if (JSON.stringify(previous.find(item => item.fileId === fileId)) !== JSON.stringify(value.find(item => item.fileId === fileId))) {
+          connection.attachmentRevisions[editorKey(id, workId, fileId)] = crypto.randomUUID()
+        }
       }
-    }
-    // Preserve the complete Queue restore; submit sends these in batches of 32.
-    if (value.length) connection.attachments[workId] = value.map((item) => ({ ...item }))
-    else delete connection.attachments[workId]
-    saveLocalState()
+      connection.attachments[workId] = value.map(item => ({ ...item }))
+    })
   }
 
   function invalidateSubmitDraft(connectionId: string, workId: string) {
-    draftRevisions.set(editorKey(connectionId, workId), ++editorRevision)
-    for (const item of localUiState.value.connections[connectionId]?.attachments[workId] ?? []) {
-      attachmentRevisions.set(editorKey(connectionId, workId, item.fileId), ++editorRevision)
+    const connection = localUiState.value.connections[connectionId]
+    if (!connection) return
+    connection.editorRevisions[workId] = crypto.randomUUID()
+    for (const item of connection.attachments[workId] ?? []) {
+      connection.attachmentRevisions[editorKey(connectionId, workId, item.fileId)] = crypto.randomUUID()
     }
+    saveLocalState()
   }
 
-  /** Capture editor ownership, including edits away and back to identical content. */
-  function captureSubmitDraft(connectionId: string, workId: string, attachments: AttachmentDto[]) {
-    const key = editorKey(connectionId, workId)
-    return {
-      connectionId, workId,
-      text: localUiState.value.connections[connectionId]?.drafts[workId] ?? '',
-      textRevision: draftRevisions.get(key) ?? 0,
-      attachments: attachments.map((attachment) => ({
-        attachment: { ...attachment },
-        revision: attachmentRevisions.get(editorKey(connectionId, workId, attachment.fileId)) ?? 0,
-      })),
+  function captureSubmitDraft(connectionId: string, workId: string, attachments: AttachmentDto[]): EditorCapture {
+    const connection = localUiState.value.connections[connectionId]
+    if (connection) {
+      connection.editorRevisions[workId] ??= crypto.randomUUID()
+      for (const item of attachments) connection.attachmentRevisions[editorKey(connectionId, workId, item.fileId)] ??= crypto.randomUUID()
     }
+    // Persist the revision before native accepts an operation. Missing revisions
+    // after reconstruction can never prove ownership of an editor.
+    if (!flushLocalState()) throw new Error('无法保存当前输入，请检查本机存储后重试；本次操作尚未开始。')
+    return {
+      connectionId, workId, sessionId: works.value.find(work => work.id === workId)?.executor.piSessionId ?? '',
+      text: connection?.drafts[workId] ?? '',
+      textRevision: connection?.editorRevisions[workId],
+      attachments: attachments.map(attachment => ({ attachment: { ...attachment },
+        revision: connection?.attachmentRevisions[editorKey(connectionId, workId, attachment.fileId)] })),
+    }
+  }
+  function captureHostOperation(context: ConnectionContext): HostOperationContext {
+    if (!contextMatches(context) || !payload.value) throw new Error('当前连接已变化，请重新选择。')
+    return Object.freeze({ ...context, expectedHostEpoch: payload.value.host.hostEpoch })
+  }
+  function captureOperationTarget(context: ConnectionContext, workId: string): OperationTarget {
+    const work = works.value.find(work => work.id === workId)
+    if (!work || !contextMatches(context)) throw new Error('当前工作已变化，请重新选择。')
+    return Object.freeze({ ...context, instanceId: workId, expectedHostEpoch: work.ownerHostEpoch ?? payload.value?.host.hostEpoch ?? '',
+      expectedRuntimeGeneration: work.runtimeGeneration })
+  }
+  function captureOperation(context: ConnectionContext, workId: string, fileIds?: string[]): OperationContext {
+    const target = captureOperationTarget(context, workId)
+    const attachments = localUiState.value.connections[context.connectionId]?.attachments[workId] ?? []
+    const editor = captureSubmitDraft(context.connectionId, workId, fileIds ? attachments.filter(item => fileIds.includes(item.fileId)) : attachments)
+    return Object.freeze({ ...target, operationEditor: editor })
+  }
+  const operations = ref<Map<string, NativeOperation>>(new Map())
+  const nativeOperations = computed(() => operations.value as ReadonlyMap<string, NativeOperation>)
+  function bindNativeOperation(operation: NativeOperation) {
+    operations.value.set(operation.operationId, operation)
+  }
+  function forgetNativeOperation(operationId: string, state: NativeOperation['state']) {
+    if (operations.value.get(operationId)?.state === state) operations.value.delete(operationId)
+  }
+  // Only receipts applied locally but not yet confirmed natively survive F5.
+  function operationWasApplied(operationId: string) { return localUiState.value.appliedOperationIds.includes(operationId) }
+  function retainAppliedOperations(operationIds: string[]) {
+    const retained = localUiState.value.appliedOperationIds.filter(id => operationIds.includes(id))
+    if (retained.length === localUiState.value.appliedOperationIds.length) return true
+    return commitEditor(state => { state.appliedOperationIds = retained })
+  }
+  function confirmAppliedOperation(operationId: string) {
+    return retainAppliedOperations(localUiState.value.appliedOperationIds.filter(id => id !== operationId))
+  }
+  function applyReturnedDraft(captured: EditorCapture, text: string | undefined, operationId?: string) {
+    const connection = localUiState.value.connections[captured.connectionId]
+    if (!connection || !captured.textRevision || connection.editorRevisions[captured.workId] !== captured.textRevision) return false
+    return commitEditor(state => {
+      const connection = state.connections[captured.connectionId]!
+      if (text) connection.drafts[captured.workId] = text
+      else delete connection.drafts[captured.workId]
+      connection.editorRevisions[captured.workId] = crypto.randomUUID()
+      const previous = connection.attachments[captured.workId] ?? []
+      connection.attachments[captured.workId] = previous.filter(item => item.localUpload || !captured.attachments.some(original =>
+        original.attachment.fileId === item.fileId && original.revision && original.revision === connection.attachmentRevisions[editorKey(captured.connectionId, captured.workId, item.fileId)]))
+      if (operationId) state.appliedOperationIds.push(operationId)
+    }) || null
+  }
+
+  function restoreOperationQueue(captured: EditorCapture, items: import('../lib/types').QueueItem[], operationId: string, explicit = false) {
+    const connection = localUiState.value.connections[captured.connectionId]
+    if (!connection || (!explicit && (!captured.textRevision || connection.editorRevisions[captured.workId] !== captured.textRevision))) return false
+    return commitEditor(state => {
+      const connection = state.connections[captured.connectionId]!
+      const restored = appendRestoredQueue(connection.drafts[captured.workId] ?? '', connection.attachments[captured.workId] ?? [], items)
+      connection.drafts[captured.workId] = restored.text
+      connection.attachments[captured.workId] = restored.attachments
+      connection.editorRevisions[captured.workId] = crypto.randomUUID()
+      for (const item of restored.attachments) connection.attachmentRevisions[editorKey(captured.connectionId, captured.workId, item.fileId)] = crypto.randomUUID()
+      state.appliedOperationIds.push(operationId)
+    }) || null
+  }
+  function appendOperationText(captured: EditorCapture, text: string, operationId: string) {
+    if (!localUiState.value.connections[captured.connectionId]) return false
+    return commitEditor(state => {
+      const connection = state.connections[captured.connectionId]!
+      connection.drafts[captured.workId] = [connection.drafts[captured.workId] ?? '', text].filter(Boolean).join('\n\n')
+      connection.editorRevisions[captured.workId] = crypto.randomUUID()
+      state.appliedOperationIds.push(operationId)
+    }) || null
   }
 
   /** A receipt consumes only the original editor items, never the selected editor. */
   function completeSubmitDraft(captured: ReturnType<typeof captureSubmitDraft>) {
     const { connectionId, workId } = captured
-    const connection = localUiState.value.connections[connectionId]
+    const candidate = cloneLocalUiState(localUiState.value)
+    const connection = candidate.connections[connectionId]
     if (!connection) return []
-    if ((draftRevisions.get(editorKey(connectionId, workId)) ?? 0) === captured.textRevision) {
+    if (captured.textRevision && connection.editorRevisions[workId] === captured.textRevision) {
       const text = draftAfterSubmit(connection.drafts[workId] ?? '', captured.text, true)
       if (text) connection.drafts[workId] = text
       else delete connection.drafts[workId]
@@ -417,12 +522,13 @@ export const useAppStore = defineStore('app', () => {
     const currentAttachments = connection.attachments[workId] ?? []
     const consumed = currentAttachments.filter((item) => {
       const original = captured.attachments.find(({ attachment }) => attachment.fileId === item.fileId)
-      return original && (attachmentRevisions.get(editorKey(connectionId, workId, item.fileId)) ?? 0) === original.revision
+      return original?.revision && connection.attachmentRevisions[editorKey(connectionId, workId, item.fileId)] === original.revision
     })
     const retained = attachmentsAfterSubmit(currentAttachments, consumed.map((item) => item.fileId), true)
     if (retained.length) connection.attachments[workId] = retained
     else delete connection.attachments[workId]
-    saveLocalState()
+    if (!persistLocalUiState(storage, candidate)) return null
+    localUiState.value = candidate
     return consumed
   }
 
@@ -447,15 +553,15 @@ export const useAppStore = defineStore('app', () => {
   function flushLocalState() {
     if (saveTimer !== undefined) clearTimeout(saveTimer)
     saveTimer = undefined
-    persistLocalUiState(storage, localUiState.value)
+    return persistLocalUiState(storage, localUiState.value)
   }
-  function saveLocalState() { flushLocalState() }
+  function saveLocalState() { return flushLocalState() }
 
   return {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
-    currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
+    currentDraft, currentAttachments, currentPendingAttachments, setPendingAttachments, completeAttachmentSelection, operationResultsReady, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    unresolvedMutations, recordMutationUnknown, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
+    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, unresolvedMutations, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

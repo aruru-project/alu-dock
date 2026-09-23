@@ -55,9 +55,10 @@ import {
   type PublishedFileDto,
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
+  MAX_CONVERSATION_CONTENT_BLOCKS,
 } from "../core/instance-dto.js";
 import { projectJsonObject, type JsonObject, type JsonValue } from "../core/json-value.js";
-import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
+import { sliceSemanticHistory, slimSemanticHistoryBlock, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
@@ -224,6 +225,24 @@ interface Binding {
   bufferEvents: boolean;
   conversation: PiConversationProjector;
   runOperationId?: string;
+  conversationReadState?: ConversationReadState;
+}
+
+interface ConversationReadEntry {
+  source: SessionEntry;
+  semantic: Parameters<typeof sliceSemanticHistory>[0][number];
+  contentRef: string;
+}
+interface ConversationReadState {
+  revision: string;
+  sessionId: string;
+  leafId: string | null;
+  entries: ConversationReadEntry[];
+  byRef: Map<string, ConversationReadEntry>;
+  imageSources: Map<string, object>;
+  previews: Map<SessionEntry, { projected: AgentHistoryEntry; bytes: number }>;
+  previewBytes: number;
+  reading?: { item: ConversationReadEntry; blocks: ConversationSourceBlock[] };
 }
 
 /** In-Worker Pi adapter around the SDK's mutable AgentSessionRuntime. */
@@ -243,7 +262,6 @@ export class PiAgentAdapter {
   private initialActivated = false;
   private queueUpdateSequence = 0;
   private processCwdValue: string | undefined;
-  private conversationRevisionValue: string | undefined;
   private conversationScope = randomUUID();
   private sessionNameOperationId: string | undefined;
   private manualCompactionOperationId: string | undefined;
@@ -732,7 +750,7 @@ export class PiAgentAdapter {
   }
 
   getHistory(): AgentHistoryEntry[] {
-    return this.conversationEntries().map(({ projected }) => projected);
+    return this.conversationEntries();
   }
 
   async getConversationHistory(cursor?: string, limit = 50): Promise<AgentConversationHistoryPage> {
@@ -744,13 +762,20 @@ export class PiAgentAdapter {
       if (!continuation || continuation.revision !== state.revision) throw new AgentConversationCursorError("Conversation history cursor is stale");
       end = continuation.end;
     }
-    const page = sliceSemanticHistory(state.entries.map(({ projected }) => projected), end, boundedLimit);
-    let entries = state.entries.slice(page.start, page.end).map(({ source, projected }) => ({
-      entry: previewConversationEntry(projected),
-      contentRef: conversationContentRef(state.sessionId, source.id),
-      contentComplete: conversationPreviewIsComplete(source, projected),
-      totalBlocks: conversationBlockCount(source, this.options.attachmentContextKey),
-    }));
+    // A continuation reads its accepted prefix, not tool results appended after
+    // that page boundary (which could otherwise move an old semantic range).
+    const page = sliceSemanticHistory(state.entries.slice(0, end).map(({ semantic }) => semantic), end, boundedLimit);
+    const selected = state.entries.slice(page.start, page.end);
+    let entries = selected.map((item) => {
+      const projected = this.conversationProjection(state, item.source);
+      const entry = previewConversationEntry(projected);
+      const blocks = conversationContentBlocks(item.source, projected, this.options.attachmentContextKey);
+      return {
+        entry, contentRef: item.contentRef,
+        contentComplete: conversationPreviewIsComplete(blocks, entry),
+        totalBlocks: blocks.length,
+      };
+    });
     const nextCursor = page.hasEarlier ? randomUUID() : undefined;
     const result = (): AgentConversationHistoryPage => ({
       revision: state.revision,
@@ -759,7 +784,12 @@ export class PiAgentAdapter {
       ...(nextCursor === undefined ? {} : { nextCursor }),
     });
     if (Buffer.byteLength(JSON.stringify(result()), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
-      entries = entries.map((item) => ({ ...item, entry: slimSemanticHistoryEntry(item.entry) }));
+      entries = entries.map((item, index) => {
+        const entry = slimSemanticHistoryEntry(item.entry);
+        return { ...item, entry, contentComplete: item.contentComplete && conversationPreviewIsComplete(
+          conversationContentBlocks(selected[index]!.source, this.conversationProjection(state, selected[index]!.source), this.options.attachmentContextKey), entry,
+        ) };
+      });
     }
     const bounded = result();
     if (Buffer.byteLength(JSON.stringify(bounded), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
@@ -773,7 +803,8 @@ export class PiAgentAdapter {
   }
 
   getConversationImage(contentRef: string): ConversationImageBody {
-    const image = this.options.publishedFiles.image(contentRef);
+    const image = this.options.publishedFiles.image(contentRef)
+      ?? this.options.publishedFiles.image(contentRef, this.conversationState().imageSources.get(contentRef));
     if (image === undefined) throw new AgentConversationCursorError("Conversation image reference is stale");
     return image;
   }
@@ -782,6 +813,10 @@ export class PiAgentAdapter {
     const nativeImage = this.options.publishedFiles.readImageContent(contentRef, cursor);
     if (nativeImage !== undefined) return nativeImage;
     const state = this.conversationState();
+    if (this.options.publishedFiles.image(contentRef, state.imageSources.get(contentRef)) !== undefined) {
+      const restored = this.options.publishedFiles.readImageContent(contentRef, cursor);
+      if (restored !== undefined) return restored;
+    }
     let blockIndex = 0;
     let offset = 0;
     if (cursor !== undefined) {
@@ -792,9 +827,15 @@ export class PiAgentAdapter {
       blockIndex = continuation.blockIndex;
       offset = continuation.offset;
     }
-    const selected = state.entries.find(({ source }) => conversationContentRef(state.sessionId, source.id) === contentRef);
+    const selected = state.byRef.get(contentRef);
     if (!selected) throw new AgentConversationCursorError("Conversation content reference is stale");
-    const blocks = conversationContentBlocks(selected.source, selected.projected, this.options.attachmentContextKey, this.options.publishedFiles);
+    // Keep only the most recently read record's full block view. Persisted
+    // previews are cached, but full joined text/argument JSON is not duplicated
+    // for the whole session or for every continuation token.
+    if (state.reading?.item !== selected) state.reading = {
+      item: selected, blocks: conversationContentBlocks(selected.source, this.conversationProjection(state, selected.source), this.options.attachmentContextKey),
+    };
+    const blocks = state.reading.blocks;
     const chunks: AgentConversationContentChunk[] = [];
     let chars = 0;
     while (blockIndex < blocks.length && chunks.length < 64 && chars < 64_000) {
@@ -844,33 +885,81 @@ export class PiAgentAdapter {
     return { revision: state.revision, contentRef, chunks, complete: false, nextCursor };
   }
 
-  private conversationEntries(binding: Binding = this.requireActive()): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
-    const branch = binding.session.sessionManager.getBranch();
-    // History is the full current branch, not Pi's compacted model context.
-    return branch.flatMap((source) => {
-      const projected = projectHistoryEntry(source, this.options.attachmentContextKey, this.options.publishedFiles);
-      return projected === undefined ? [] : [{ source, projected }];
-    });
+  private conversationEntries(binding: Binding = this.requireActive()): AgentHistoryEntry[] {
+    const state = this.conversationState(binding);
+    return state.entries.map(({ source }) => this.conversationProjection(state, source));
   }
 
-  private conversationState(): { revision: string; sessionId: string; entries: Array<{ source: SessionEntry; projected: AgentHistoryEntry }> } {
-    const entries = this.conversationEntries();
-    const manager = this.requireActive().session.sessionManager;
-    const revision = createHash("sha256")
-      .update(this.conversationScope)
-      .update("\u0000")
-      .update(manager.getSessionId())
-      .update("\u0000")
-      .update(manager.getLeafId() ?? "")
-      .update("\u0000")
-      .update(entries.map(({ source }) => source.id).join("\u0000"))
-      .digest("hex");
-    if (revision !== this.conversationRevisionValue) {
-      this.conversationRevisionValue = revision;
+  private conversationProjection(state: ConversationReadState, source: SessionEntry): AgentHistoryEntry {
+    const cached = state.previews.get(source);
+    if (cached) {
+      state.previews.delete(source);
+      state.previews.set(source, cached);
+      return cached.projected;
+    }
+    const projected = projectHistoryEntry(source, this.options.attachmentContextKey, this.options.publishedFiles);
+    const bytes = Buffer.byteLength(JSON.stringify(projected), "utf8");
+    // One existing producer page budget for hot previews, not a second transcript.
+    if (bytes <= MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
+      while (state.previewBytes + bytes > MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
+        const oldest = state.previews.keys().next().value!;
+        state.previewBytes -= state.previews.get(oldest)!.bytes;
+        state.previews.delete(oldest);
+      }
+      state.previews.set(source, { projected, bytes });
+      state.previewBytes += bytes;
+    }
+    return projected;
+  }
+
+  private conversationState(binding: Binding = this.requireActive()): ConversationReadState {
+    const manager = binding.session.sessionManager;
+    const sessionId = manager.getSessionId();
+    const leafId = manager.getLeafId();
+    const previous = binding.conversationReadState;
+    // Pi's public SessionManager is append-only. Unchanged leaf object identity
+    // avoids walking/projecting/hashing the branch for each content chunk.
+    if (previous?.sessionId === sessionId && previous.leafId === leafId
+      && previous.entries.at(-1)?.source === manager.getLeafEntry()) return previous;
+    const branch = manager.getBranch();
+    const appended = previous?.sessionId === sessionId
+      && previous.entries.length <= branch.length
+      && previous.entries.every((item, index) => item.source === branch[index]);
+    const state: ConversationReadState = appended ? previous : {
+      revision: createHash("sha256").update(this.conversationScope).update(randomUUID()).digest("hex"),
+      sessionId, leafId, entries: [], byRef: new Map(), imageSources: new Map(), previews: new Map(), previewBytes: 0,
+    };
+    if (!appended) {
       this.conversationHistoryCursors.clear();
       this.conversationContentCursors.clear();
     }
-    return { revision, sessionId: manager.getSessionId(), entries };
+    // Retain just the current authoritative branch, not a snapshot per scan.
+    // The revision and old page end positions survive verified prefix append;
+    // a different branch/session/scope starts a new read domain for old clients too.
+    for (const source of branch.slice(state.entries.length)) {
+      const projected = this.conversationProjection(state, source);
+      const content = source.type === "message" ? (source.message as unknown as Record<string, unknown>).content
+        : source.type === "custom_message" ? source.content : undefined;
+      if (Array.isArray(content)) for (const block of content) {
+        if (!isRecord(block) || block.type !== "image") continue;
+        const imageRef = this.options.publishedFiles.imageReference(block);
+        if (imageRef !== undefined) state.imageSources.set(imageRef, block);
+      }
+      const item: ConversationReadEntry = {
+        source,
+        semantic: {
+          source: projected.source,
+          content: projected.content.flatMap((block) => block.type === "tool_call" || block.type === "tool_result"
+            ? [{ type: block.type, toolCallId: block.toolCallId }] : []),
+        },
+        contentRef: conversationContentRef(sessionId, source.id),
+      };
+      state.entries.push(item);
+      state.byRef.set(item.contentRef, item);
+    }
+    state.leafId = leafId;
+    binding.conversationReadState = state;
+    return state;
   }
 
   getTree(): SessionTreeResult {
@@ -1255,7 +1344,7 @@ export class PiAgentAdapter {
       }
       for (const projected of projectedEvents.flatMap((item) => binding.conversation.project(item))) {
         const outbound = projected.type === "conversation_checkpoint"
-          ? { ...projected, history: this.conversationEntries(binding).map(({ projected: record }) => record) }
+          ? { ...projected, history: this.conversationEntries(binding) }
           : projected;
         if (this.active === binding && !binding.bufferEvents) this.publish(outbound);
         else binding.buffered.push(outbound);
@@ -1393,7 +1482,6 @@ export class PiAgentAdapter {
   private invalidateBindingsSynchronously(): void {
     this.options.publishedFiles.clear();
     this.conversationScope = randomUUID();
-    this.conversationRevisionValue = undefined;
     this.conversationHistoryCursors.clear();
     this.conversationContentCursors.clear();
     this.commandContentCursors.clear();
@@ -1503,9 +1591,9 @@ function imageBase64Metadata(data: string): { sha256: string; sizeBytes: number 
   } catch { return undefined; }
 }
 
-function registerConversationImage(publishedFiles: TransientFileRegistry | undefined, data: string | undefined, mimeType: string): { contentRef: string; sha256: string; sizeBytes: number } | undefined {
+function registerConversationImage(publishedFiles: TransientFileRegistry | undefined, data: string | undefined, mimeType: string, source?: object): { contentRef: string; sha256: string; sizeBytes: number } | undefined {
   if (publishedFiles === undefined || data === undefined) return undefined;
-  try { return publishedFiles.registerImage(data, mimeType); }
+  try { return publishedFiles.registerImage(data, mimeType, source); }
   catch { return undefined; }
 }
 
@@ -1652,7 +1740,7 @@ function projectRuntimeMessage(message: Record<string, unknown>, publishedFiles?
   const role = safeRequiredText(message.role, 64, "system");
   const projected: Record<string, unknown> = {
     role,
-    content: role === "toolResult" ? projectPrivateToolContent(message.content, publishedFiles) : projectPrivateContent(message.content, publishedFiles),
+    content: role === "toolResult" ? projectPrivateToolContent(message.content, publishedFiles) : projectPrivateContent(message.content, publishedFiles, role === "user"),
   };
   const stopReason = safeOptionalText(message.stopReason, 128);
   const errorMessage = parseOptionalAgentErrorText(message.errorMessage);
@@ -1674,14 +1762,16 @@ function projectAssistantMessageEvent(update: Record<string, unknown>): Record<s
   return projected;
 }
 
-function projectPrivateContent(content: unknown, publishedFiles?: TransientFileRegistry): unknown {
-  if (typeof content === "string") return boundedContentString(content, 256_000);
+function projectPrivateContent(content: unknown, publishedFiles?: TransientFileRegistry, user = false): unknown {
+  // Authentication must run before public text clipping, including for long user
+  // messages whose signed attachment context is at the end. This stays in Worker.
+  if (typeof content === "string") return user ? content : boundedContentString(content, 256_000);
   if (!Array.isArray(content)) return [];
   const blocks: Record<string, unknown>[] = [];
-  for (const item of content.slice(0, 200)) {
+  for (const item of content.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS)) {
     if (!isRecord(item)) continue;
     if (item.type === "text" && typeof item.text === "string" && item.text.length > 0) {
-      blocks.push({ type: "text", text: boundedContentString(item.text, 8_000) });
+      blocks.push({ type: "text", text: user ? item.text : boundedContentString(item.text, 8_000) });
     } else if (item.type === "thinking") {
       const thinking = optionalContentString(item.thinking, 8_000);
       if (thinking !== undefined) blocks.push({ type: "thinking", thinking });
@@ -1690,11 +1780,11 @@ function projectPrivateContent(content: unknown, publishedFiles?: TransientFileR
     else if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
       const imageData = typeof item.data === "string" ? item.data : undefined;
-      const image = registerConversationImage(publishedFiles, imageData, mimeType);
+      const image = registerConversationImage(publishedFiles, imageData, mimeType, item);
       blocks.push({
         type: "image",
         mimeType,
-        ...(image === undefined ? {} : { contentRef: image.contentRef }),
+        ...(image === undefined ? {} : { contentRef: image.contentRef, sha256: image.sha256 }),
       });
     }
   }
@@ -1704,12 +1794,12 @@ function projectPrivateContent(content: unknown, publishedFiles?: TransientFileR
 function projectPrivateToolContent(content: unknown, publishedFiles?: TransientFileRegistry): unknown {
   if (typeof content === "string") return boundedContentString(content, 256_000);
   if (!Array.isArray(content)) return [];
-  return content.slice(0, 200).flatMap((item): Record<string, unknown>[] => {
+  return content.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS).flatMap((item): Record<string, unknown>[] => {
     if (!isRecord(item)) return [];
     if (item.type === "text" && typeof item.text === "string") return [{ type: "text", text: boundedContentString(item.text, 256_000) }];
     if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
-      const image = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType);
+      const image = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType, item);
       return [{ type: "image", mimeType, ...(image === undefined ? {} : { contentRef: image.contentRef }) }];
     }
     return [];
@@ -1729,7 +1819,7 @@ function toolResultText(content: unknown): string | undefined {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return undefined;
   const parts: string[] = [];
-  for (const item of content.slice(0, 200)) {
+  for (const item of content) {
     if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") continue;
     parts.push(item.text);
   }
@@ -2053,20 +2143,23 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       const showImageError = publishedFiles === undefined ? undefined : publishedFileFailureFromDetails(message.details, publishedFiles);
       const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(message.content) ?? ""), publishedFile, showImageError), 256_000);
       const presentation = projectBuiltInToolPresentation(toolName, text, message.details, isError);
+      let firstText = true;
       return {
         ...base,
         kind: "message",
         source: "tool",
         visibility: "conversation",
-        content: [{
-          type: "tool_result",
-          toolCallId,
-          toolName,
-          text,
-          isError,
-          ...(publishedFile === undefined ? {} : { publishedFile }),
-          ...(presentation === undefined ? {} : { presentation }),
-        }],
+        content: boundConversationPreviewBlocks(toolResultParts(message.content).slice(0, MAX_CONVERSATION_CONTENT_BLOCKS).flatMap((part): ContentBlockDto[] => {
+          if (part.type === "image") return projectDockContent([part], undefined, publishedFiles);
+          const attachMetadata = firstText;
+          firstText = false;
+          return [{
+            type: "tool_result", toolCallId, toolName, isError,
+            text: boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, part.text as string), publishedFile, showImageError), 256_000),
+            ...(attachMetadata && publishedFile !== undefined ? { publishedFile } : {}),
+            ...(attachMetadata && presentation !== undefined ? { presentation } : {}),
+          }];
+        })),
         toolCallId,
         toolName,
         isError,
@@ -2247,15 +2340,14 @@ function projectDockContent(content: unknown, attachments?: readonly AttachmentD
     imageAttachments.set(key, matches);
   }
   const blocks: ContentBlockDto[] = [];
-  let bytes = 2;
-  for (const item of content.slice(0, 200)) {
+  for (const item of content.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS)) {
     if (!isRecord(item)) continue;
     let block: ContentBlockDto | undefined;
     if (item.type === "text" && typeof item.text === "string") block = { type: "text", text: boundedContentString(item.text, 8_000) };
     else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, 8_000) };
     else if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
-      const registered = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType);
+      const registered = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType, item);
       const sha256 = typeof item.sha256 === "string" && /^[a-f0-9]{64}$/u.test(item.sha256)
         ? item.sha256
         : registered?.sha256 ?? (typeof item.data === "string" ? imageBase64Metadata(item.data)?.sha256 : undefined);
@@ -2282,12 +2374,24 @@ function projectDockContent(content: unknown, attachments?: readonly AttachmentD
       };
     }
     if (block === undefined) continue;
-    const blockBytes = Buffer.byteLength(JSON.stringify(block), "utf8") + (blocks.length > 0 ? 1 : 0);
-    if (bytes + blockBytes > 512_000) break;
     blocks.push(block);
-    bytes += blockBytes;
   }
-  return blocks;
+  return boundConversationPreviewBlocks(blocks);
+}
+
+function boundConversationPreviewBlocks(blocks: ContentBlockDto[]): ContentBlockDto[] {
+  // Reserve tool and media identities before spending bytes in source order.
+  // If arguments/text no longer fit, emit their slim identity, never lose the
+  // tool edge that both Host and Worker semantic pagination depend on.
+  const identities = blocks.map(slimSemanticHistoryBlock);
+  const size = (block: ContentBlockDto | undefined): number => block === undefined ? 0 : Buffer.byteLength(JSON.stringify(block), "utf8") + 1;
+  let remaining = 512_000 - 2 - identities.reduce((total, block) => total + size(block), 0);
+  return blocks.flatMap((block, index) => {
+    const identity = identities[index];
+    const extra = size(block) - size(identity);
+    if (extra <= remaining) { remaining -= extra; return [block]; }
+    return identity === undefined ? [] : [identity];
+  });
 }
 
 function projectRecordMetadata(value: unknown): { metadata?: JsonValue; metadataOmittedFields?: string[] } {
@@ -2311,7 +2415,7 @@ type ConversationSourceBlock =
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
 
-function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): ConversationSourceBlock[] {
+function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array): ConversationSourceBlock[] {
   const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
   const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock | undefined => (
     typeof value === "string" && value.length > 0 ? { type, text: value } : undefined
@@ -2322,8 +2426,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
   };
   if (entry.type === "compaction" || entry.type === "branch_summary") return textBlocks("text", entry.summary);
   if (entry.type === "thinking_level_change" || entry.type === "model_change" || entry.type === "session_info") {
-    const value = typeof projected.content === "string" ? projected.content : String(projected.content ?? "");
-    return textBlocks("text", value);
+    return [];
   }
   let content = entry.type === "custom_message"
     ? entry.content
@@ -2343,20 +2446,18 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
       const toolCallId = typeof message.toolCallId === "string" ? boundedString(message.toolCallId, 128, "unknown") : "unknown";
       const toolName = typeof message.toolName === "string" ? boundedString(message.toolName, 256, "tool") : "tool";
       const isError = message.isError === true;
-      const items = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content : [];
       const projectedToolResult = projected.content.find((block) => block.type === "tool_result");
-      return items.flatMap((item): ConversationSourceBlock[] => {
-        if (!isRecord(item)) return [];
-        if (item.type === "image") return [conversationImageSource(item, publishedFiles)];
-        if (item.type !== "text") return [];
-        return [{
-          type: "tool_result",
-          toolCallId,
-          toolName,
-          text: toolName === "show_image" ? projectedToolResult?.text ?? SHOW_IMAGE_UNAVAILABLE_MESSAGE : redactDockAttachmentToolResult(toolName, typeof item.text === "string" ? item.text : ""),
-          isError,
-          ...(projectedToolResult?.type !== "tool_result" || projectedToolResult.publishedFile === undefined ? {} : { publishedFile: projectedToolResult.publishedFile }),
-        }];
+      let firstText = true;
+      return toolResultParts(message.content).map((part): ConversationSourceBlock => {
+        if (part.type === "image") return conversationImageSource(part);
+        const attachMetadata = firstText;
+        firstText = false;
+        return {
+          type: "tool_result", toolCallId, toolName, isError,
+          text: redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, part.text as string),
+            projectedToolResult?.publishedFile, projectedToolResult?.text ?? SHOW_IMAGE_UNAVAILABLE_MESSAGE),
+          ...(attachMetadata && projectedToolResult?.publishedFile !== undefined ? { publishedFile: projectedToolResult.publishedFile } : {}),
+        };
       });
     }
     if (role === "user") content = stripDockAttachmentContext(content, attachmentContextKey);
@@ -2366,7 +2467,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
     if (!isRecord(item)) return [];
     if (item.type === "text") return textBlocks("text", item.text);
     if (item.type === "thinking") return textBlocks("thinking", item.thinking);
-    if (item.type === "image") return [conversationImageSource(item, publishedFiles)];
+    if (item.type === "image") return [conversationImageSource(item)];
     if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
       try {
         const argumentsJson = JSON.stringify(item.arguments ?? {});
@@ -2384,10 +2485,29 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
   });
 }
 
-function conversationImageSource(item: Record<string, unknown>, publishedFiles?: TransientFileRegistry): Extract<ConversationSourceBlock, { type: "image" }> {
+/** Preserve image/text ordering; only neighboring text items share a result block. */
+function toolResultParts(content: unknown): Record<string, unknown>[] {
+  const items = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
+  const parts: Record<string, unknown>[] = [];
+  let hasText = false;
+  for (const item of items) {
+    if (!isRecord(item)) continue;
+    if (item.type === "image") parts.push(item);
+    else if (item.type === "text" && typeof item.text === "string") {
+      const previous = parts.at(-1);
+      if (previous?.type === "text") previous.text = `${previous.text}${item.text}`;
+      else parts.push({ type: "text", text: item.text });
+      hasText = true;
+    }
+  }
+  // Image-only tools still need their tool-result identity, not invented text.
+  if (!hasText) parts.unshift({ type: "text", text: "" });
+  return parts;
+}
+
+function conversationImageSource(item: Record<string, unknown>): Extract<ConversationSourceBlock, { type: "image" }> {
   const mimeType = safeImageMimeType(item.mimeType);
   const data = typeof item.data === "string" ? item.data : "";
-  registerConversationImage(publishedFiles, data, mimeType);
   return { type: "image", mimeType, data };
 }
 
@@ -2401,15 +2521,30 @@ function stripDockAttachmentContext(content: unknown, attachmentContextKey: Uint
   ));
 }
 
-function conversationBlockCount(entry: SessionEntry, attachmentContextKey: Uint8Array): number {
-  const projected = projectHistoryEntry(entry, attachmentContextKey);
-  return projected === undefined ? 0 : conversationContentBlocks(entry, projected, attachmentContextKey).length;
-}
-
-function conversationPreviewIsComplete(_entry: SessionEntry, _projected: AgentHistoryEntry): boolean {
-  // Legacy history was not designed to prove exactness. New clients hydrate via
-  // contentRef; never claim a bounded preview is authoritative by inference.
-  return false;
+/** Exact content comparison after every preview transform; metadata is separate. */
+function conversationPreviewIsComplete(blocks: readonly ConversationSourceBlock[], entry: AgentHistoryEntry): boolean {
+  if (blocks.length !== entry.content.length) return false;
+  return blocks.every((source, index) => {
+    const preview = entry.content[index]!;
+    if (source.type !== preview.type) return false;
+    switch (source.type) {
+      case "text": case "thinking":
+        return (preview.type === "text" || preview.type === "thinking") && source.text === preview.text;
+      case "image":
+        // Legacy readers only fetch original image bytes when this is false.
+        // A descriptor enables the separate image path, but is not an inline
+        // complete preview for consumers of conversation.content.
+        return false;
+      case "tool_call":
+        return preview.type === "tool_call" && !preview.omittedFields?.length
+          && source.argumentsJson === JSON.stringify(preview.args);
+      case "tool_result":
+        return preview.type === "tool_result" && !preview.omittedFields?.length && source.text === preview.text
+          && JSON.stringify(source.publishedFile) === JSON.stringify(preview.publishedFile);
+      case "omitted":
+        return preview.type === "omitted" && preview.kind === source.kind && preview.description === source.description;
+    }
+  });
 }
 
 function unicodeSafeEnd(value: string, requestedEnd: number): number {
@@ -2819,22 +2954,27 @@ function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {
 function previewConversationEntry(entry: AgentHistoryEntry): AgentHistoryEntry {
   const content: AgentHistoryEntry["content"] = [];
   let remaining = 4_000;
-  for (const block of entry.content.slice(0, 16)) {
+  for (const [index, block] of entry.content.entries()) {
+    // Media identities remain visible even after text/block preview limits.
+    if (index >= 16 && block.type !== "image" && block.type !== "tool_call" && block.type !== "tool_result") continue;
     if (block.type === "text" || block.type === "thinking") {
       const text = block.text.length <= remaining ? block.text : block.text.slice(0, unicodeSafeEnd(block.text, remaining));
       if (text.length > 0) content.push({ type: block.type, text });
       remaining = Math.max(0, remaining - text.length);
     } else if (block.type === "tool_call") {
-      content.push({ type: "tool_call", toolCallId: block.toolCallId, toolName: block.toolName, args: {}, omittedFields: ["/"] });
+      const size = JSON.stringify(block.args).length;
+      if (size <= remaining) {
+        content.push(block);
+        remaining -= size;
+      } else content.push(slimSemanticHistoryBlock(block)!);
     } else if (block.type === "tool_result") {
       const text = block.text.length <= remaining ? block.text : block.text.slice(0, unicodeSafeEnd(block.text, remaining));
       const { presentation: _presentation, ...metadata } = block;
-      content.push({ ...metadata, text });
+      content.push(text === block.text ? block : { ...metadata, text });
       remaining = Math.max(0, remaining - text.length);
     } else {
       content.push(block);
     }
-    if (remaining === 0) break;
   }
   return { ...entry, content };
 }

@@ -325,8 +325,13 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     await instance.reloadSession("stable-image-refresh");
     const refreshed = await instance.getConversationHistory(undefined, 50);
     const refreshedImage = refreshed.entries.find(({ entry }) => entry.entryId === oldImage.entry.entryId);
+    assert.equal(refreshed.revision, conversation.revision, "resource reload does not replace the persisted branch");
     assert.equal(refreshedImage?.contentRef, oldImage.contentRef);
     assert.deepEqual(refreshedImage?.entry.content.find((block) => block.type === "image"), oldImage.entry.content.find((block) => block.type === "image"));
+    assert.equal((await instance.newSession("replace-image-session")).cancelled, false);
+    assert.notEqual((await instance.getConversationHistory()).revision, refreshed.revision);
+    await assert.rejects(instance.getConversationContent(oldImage.contentRef));
+    await assert.rejects(instance.getConversationImage(imageRef));
   } finally {
     await instance.disposeUnpublished();
   }

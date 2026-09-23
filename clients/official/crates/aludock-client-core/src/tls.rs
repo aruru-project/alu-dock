@@ -8,7 +8,7 @@ use rustls::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     time::timeout,
 };
@@ -20,15 +20,17 @@ use crate::{
     timing::{CONNECT_PHASE_TIMEOUT, PROTOCOL_WRITE_TIMEOUT},
 };
 
-pub(crate) trait ControlStream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T> ControlStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait ControlStream: AsyncBufRead + AsyncWrite + Unpin + Send {}
+impl<T> ControlStream for T where T: AsyncBufRead + AsyncWrite + Unpin + Send {}
 
 pub(crate) struct ConnectedTransport {
     pub stream: Box<dyn ControlStream>,
 }
 
+// Buffer once, after certificate verification, including direct pairing reads.
+// BufReader forwards writes/flushes; it does not add a write buffer.
 pub(crate) struct ConnectedTls {
-    pub stream: TlsStream<TcpStream>,
+    pub stream: BufReader<TlsStream<TcpStream>>,
     pub host_certificate: Vec<u8>,
 }
 
@@ -113,7 +115,7 @@ impl PinnedTlsConnector {
             return Err(ClientError::HostCertificateMismatch);
         }
         Ok(ConnectedTls {
-            stream,
+            stream: BufReader::new(stream),
             host_certificate,
         })
     }
@@ -148,26 +150,42 @@ where
 pub(crate) async fn read_json_line<T, R>(stream: &mut R, maximum_bytes: usize) -> Result<T>
 where
     T: DeserializeOwned,
-    R: AsyncReadExt + Unpin,
+    R: AsyncBufRead + Unpin,
 {
     let mut bytes = Vec::new();
     loop {
+        // The limit includes the newline. In particular, reject zero before
+        // waiting for input, and retain all bytes after this frame in the
+        // connection-owned buffer for the next frame or terminal EOF check.
         if bytes.len() >= maximum_bytes {
             return Err(ClientError::Protocol(format!(
                 "JSONL response exceeded {maximum_bytes} bytes"
             )));
         }
-        let mut byte = [0_u8; 1];
-        let count = stream.read(&mut byte).await?;
-        if count == 0 {
+        let available = stream.fill_buf().await?;
+        if available.is_empty() {
             return Err(ClientError::Protocol(
                 "TLS connection closed before a complete JSONL response".into(),
             ));
         }
-        if byte[0] == b'\n' {
+        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+            if bytes.len().saturating_add(newline) >= maximum_bytes {
+                return Err(ClientError::Protocol(format!(
+                    "JSONL response exceeded {maximum_bytes} bytes"
+                )));
+            }
+            bytes.extend_from_slice(&available[..newline]);
+            stream.consume(newline + 1);
             break;
         }
-        bytes.push(byte[0]);
+        if bytes.len().saturating_add(available.len()) >= maximum_bytes {
+            return Err(ClientError::Protocol(format!(
+                "JSONL response exceeded {maximum_bytes} bytes"
+            )));
+        }
+        let consumed = available.len();
+        bytes.extend_from_slice(available);
+        stream.consume(consumed);
     }
     serde_json::from_slice(&bytes).map_err(ClientError::from)
 }
@@ -228,5 +246,89 @@ impl ServerCertVerifier for PinnedServerVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.supported.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tokio::io::AsyncReadExt;
+    use tokio::time::Duration;
+
+    // V2's maximum line bytes includes the newline: exceeding it must not
+    // become an unbounded allocation or a newly accepted protocol frame.
+    #[tokio::test]
+    async fn jsonl_frames_preserve_the_newline_inclusive_byte_limit() {
+        for capacity in [1, 2, 8192] {
+            for (wire, maximum, accepted) in [
+                ("0\n", 2, true),
+                ("0\n", 1, false),
+                ("1234\n", 5, true),
+                ("1234\n", 4, false),
+                ("\"é\"\n", 5, true),
+                ("\"é\"\n", 4, false),
+            ] {
+                let mut reader = BufReader::with_capacity(capacity, wire.as_bytes());
+                let result = read_json_line::<Value, _>(&mut reader, maximum).await;
+                if accepted {
+                    assert_eq!(
+                        result.unwrap(),
+                        serde_json::from_str::<Value>(wire).unwrap()
+                    );
+                } else {
+                    assert!(matches!(result, Err(ClientError::Protocol(_))));
+                }
+            }
+        }
+    }
+
+    // Connection read-ahead must survive across hello/response/event frames
+    // and remain visible to terminal EOF checks, even in a single buffer.
+    #[tokio::test]
+    async fn consecutive_jsonl_frames_leave_terminal_tail_bytes_visible() {
+        for capacity in [1, 2, 8192] {
+            let mut reader = BufReader::with_capacity(capacity, &b"{\"ok\":true}\n[1,2]\n!"[..]);
+            assert_eq!(
+                read_json_line::<Value, _>(&mut reader, 12).await.unwrap(),
+                json!({"ok":true})
+            );
+            assert_eq!(
+                read_json_line::<Value, _>(&mut reader, 6).await.unwrap(),
+                json!([1, 2])
+            );
+            let mut tail = Vec::new();
+            reader.read_to_end(&mut tail).await.unwrap();
+            assert_eq!(tail, b"!");
+        }
+    }
+
+    #[tokio::test]
+    async fn jsonl_requires_a_complete_frame_and_respects_the_callers_timeout() {
+        for wire in ["", "0", "{\"ok\":true}"] {
+            let mut reader = BufReader::with_capacity(2, wire.as_bytes());
+            assert!(matches!(
+                read_json_line::<Value, _>(&mut reader, 64).await,
+                Err(ClientError::Protocol(_))
+            ));
+        }
+        let (stream, _peer) = tokio::io::duplex(64);
+        let mut reader = BufReader::new(stream);
+        // A zero budget must fail without waiting for this silent peer.
+        let zero = timeout(
+            Duration::from_millis(250),
+            read_json_line::<Value, _>(&mut reader, 0),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(zero, Err(ClientError::Protocol(_))));
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                read_json_line::<Value, _>(&mut reader, 64)
+            )
+            .await
+            .is_err()
+        );
     }
 }

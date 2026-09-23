@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
-import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
+import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
@@ -230,20 +230,6 @@ const cancelledCompaction = projectConversation(bootstrap(state, [
 ]), { compact: true })
 assert.equal(cancelledCompaction.some((item) => item.kind === 'notice' && item.tone === 'warning' && item.text.includes('取消')), true, '用户中止上下文压缩后，简洁模式仍显示终止结果')
 
-for (const terminalState of ['disconnected', 'resync_required'] as const) {
-  const coordinator = new FollowActivationCoordinator()
-  const subscriptionId = `follow-${terminalState}`
-  const connected = coordinator.prepare(subscriptionId)
-  assert.equal(coordinator.handleStatus(subscriptionId, { state: 'connected' }), true)
-  await connected
-  assert.equal(coordinator.handleStatus(subscriptionId, { state: terminalState, message: terminalState }), true)
-  assert.deepEqual(
-    coordinator.activate(subscriptionId),
-    { state: terminalState, message: terminalState },
-    `${terminalState} is retained between waiter resolution and active publication`,
-  )
-}
-
 const watchedHostId = ref<string | null>('host-a')
 const watchedGeneration = ref<number | null>(4)
 const watchedWorks = ref<Work[]>([work])
@@ -275,16 +261,15 @@ assert.equal(draftAfterSubmit('original', 'original', false), 'original', 'faile
 assert.equal(draftAfterSubmit('typed while sending', 'original', true), 'typed while sending', 'successful admission preserves concurrent typing')
 assert.equal(draftAfterSubmit('original', 'original', true), '')
 const candidate = bootstrap(state, [])
-assert.equal(conversationSwapIsCorrelated({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate, false), false, 'delayed follow keeps old projection')
-assert.equal(conversationSwapIsCorrelated({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate, true), true)
+assert.equal(conversationReadMatches({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate), true)
 const wrongGeneration = bootstrap({ ...state, instance: { ...state.instance, runtimeGeneration: 2 } }, [])
 wrongGeneration.cursor.runtimeGeneration = 1
-assert.equal(conversationSwapIsCorrelated({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', wrongGeneration, true), false)
+assert.equal(conversationReadMatches({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', wrongGeneration), false)
 
-assert.equal(stopCanStart(work, false, false), true)
-assert.equal(stopCanStart(work, true, false), false, 'pending mutation locks Stop')
-assert.equal(stopCanStart(work, false, true), false, 'EffectUnknown locks Stop without replay')
-assert.equal(stopCanStart({ ...work, lifecycle: 'stopping' }, false, false), false, 'a Work already stopping cannot start Stop again')
+assert.equal(stopCanStart(work, false), true)
+assert.equal(stopCanStart(work, true), false, 'pending mutation locks Stop')
+// master-side review: unrelated unknown controls must not permanently block a new Stop intent.
+assert.equal(stopCanStart({ ...work, lifecycle: 'stopping' }, false), false, 'a Work already stopping cannot start Stop again')
 const confirmation = stopConfirmationText(work)
 assert.match(confirmation, /共享 Work/)
 assert.match(confirmation, /当前运行/)

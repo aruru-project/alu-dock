@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     time::timeout,
 };
 use uuid::Uuid;
@@ -396,7 +396,7 @@ async fn read_after_request<S, W, R, F>(
     on_progress: &mut F,
 ) -> Result<WorkspaceFileReadResult>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     R: FnMut(&WorkspaceFileEntry) -> Result<()>,
     F: FnMut(WorkspaceFileReadProgress),
@@ -510,7 +510,7 @@ where
 async fn read_workspace_line<T, R>(stream: &mut R, maximum_line_bytes: usize) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
-    R: AsyncRead + Unpin,
+    R: AsyncBufRead + Unpin,
 {
     timeout(
         READ_IDLE_TIMEOUT,
@@ -722,7 +722,8 @@ mod tests {
 
     #[tokio::test]
     async fn opening_a_workspace_file_accepts_the_exact_bytes_observed_during_the_read() {
-        let (mut client, mut host) = duplex(16 * 1024);
+        let (client, mut host) = duplex(16 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
         let host_task = tokio::spawn(async move {
             for frame in [
                 json!({
@@ -783,7 +784,8 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_policy_can_stop_a_grown_file_before_any_chunk_is_written() {
-        let (mut client, mut host) = duplex(4 * 1024);
+        let (client, mut host) = duplex(4 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
         let host_task = tokio::spawn(async move {
             write_json_line(
                 &mut host,

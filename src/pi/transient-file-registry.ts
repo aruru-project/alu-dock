@@ -24,6 +24,9 @@ interface FailureEntry { message: string }
 export class TransientFileRegistry {
   private readonly files = new Map<string, FileEntry>();
   private readonly images = new Map<string, ImageEntry>();
+  // Native image objects already belong to Pi. Weakly retain their validated
+  // registration fact so cold preview reads do not decode/hash the same bytes.
+  private imageSources = new WeakMap<object, ImageEntry>();
   private readonly imageCursors = new Map<string, ImageCursor>();
   private readonly failures = new Map<string, FailureEntry>();
 
@@ -60,7 +63,13 @@ export class TransientFileRegistry {
       && dto.mediaType === file.mediaType;
   }
 
-  registerImage(data: string, mimeType: string): ConversationImageMetadata {
+  registerImage(data: string, mimeType: string, source?: object): ConversationImageMetadata {
+    const cached = source === undefined ? undefined : this.imageSources.get(source);
+    if (cached?.data === data && cached.mimeType === mimeType) {
+      this.images.set(cached.contentRef, cached);
+      trim(this.images);
+      return { contentRef: cached.contentRef, mimeType, sizeBytes: cached.sizeBytes, sha256: cached.sha256 };
+    }
     const bytes = Buffer.from(data, "base64");
     if (data.length === 0 || bytes.byteLength > MAX_IMAGE_BYTES || bytes.toString("base64") !== data) {
       throw new PublishedFileUnavailableError("This conversation image is not valid bounded base64 data.");
@@ -68,12 +77,27 @@ export class TransientFileRegistry {
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const entry = { contentRef: `image-${sha256}`, mimeType, data, sizeBytes: bytes.byteLength, sha256 };
     this.images.set(entry.contentRef, entry);
+    if (source !== undefined) this.imageSources.set(source, entry);
     trim(this.images);
     return { contentRef: entry.contentRef, mimeType, sizeBytes: entry.sizeBytes, sha256 };
   }
 
-  image(contentRef: string): ImageEntry | undefined {
-    const entry = this.images.get(contentRef);
+  imageReference(source: object): string | undefined {
+    return this.imageSources.get(source)?.contentRef;
+  }
+
+  image(contentRef: string, source?: object): ImageEntry | undefined {
+    let entry = this.images.get(contentRef);
+    if (entry === undefined && source !== undefined) {
+      const registered = this.imageSources.get(source);
+      if (registered?.contentRef === contentRef) {
+        // The adapter supplies an authoritative current-branch source object.
+        // Reuse its validated bytes by reference, without decoding or hashing.
+        entry = registered;
+        this.images.set(contentRef, entry);
+        trim(this.images);
+      }
+    }
     return entry === undefined ? undefined : { ...entry };
   }
 
@@ -137,7 +161,7 @@ export class TransientFileRegistry {
     } finally { await handle?.close().catch(() => {}); }
   }
 
-  clear(): void { this.files.clear(); this.images.clear(); this.imageCursors.clear(); this.failures.clear(); }
+  clear(): void { this.files.clear(); this.images.clear(); this.imageSources = new WeakMap(); this.imageCursors.clear(); this.failures.clear(); }
 }
 
 function trim<T>(entries: Map<string, T>): void { while (entries.size > MAX_TRANSIENT_FILE_HANDLES) entries.delete(entries.keys().next().value as string); }

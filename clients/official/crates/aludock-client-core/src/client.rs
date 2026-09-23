@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, BufReader},
+    io::AsyncBufRead,
     time::{Instant, timeout, timeout_at},
 };
 use uuid::Uuid;
@@ -342,14 +342,13 @@ struct ResponseTransferFrame {
     data: String,
 }
 
-async fn read_response_envelope<R: AsyncRead + Unpin>(
+async fn read_response_envelope<R: AsyncBufRead + Unpin>(
     stream: &mut R,
     maximum_line_bytes: usize,
     request_id: &str,
     host_epoch: &str,
 ) -> Result<ResponseEnvelope> {
-    let mut reader = BufReader::new(stream);
-    let first: Value = read_response_line(&mut reader, maximum_line_bytes).await?;
+    let first: Value = read_response_line(stream, maximum_line_bytes).await?;
     if first.get("kind").and_then(Value::as_str) != Some("response_transfer") {
         let response: ResponseEnvelope = serde_json::from_value(first).map_err(|error| {
             ClientError::Protocol(format!("invalid response envelope: {error}"))
@@ -406,7 +405,7 @@ async fn read_response_envelope<R: AsyncRead + Unpin>(
         if next_index == count {
             break;
         }
-        raw = read_response_line(&mut reader, maximum_line_bytes).await?;
+        raw = read_response_line(stream, maximum_line_bytes).await?;
         if raw.get("kind").and_then(Value::as_str) != Some("response_transfer") {
             return Err(protocol(
                 "response transfer ended before all chunks arrived",
@@ -424,43 +423,16 @@ async fn read_response_envelope<R: AsyncRead + Unpin>(
     Ok(response)
 }
 
-async fn read_response_line<T: DeserializeOwned, R: AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
+async fn read_response_line<T: DeserializeOwned, R: AsyncBufRead + Unpin>(
+    reader: &mut R,
     maximum_bytes: usize,
 ) -> Result<T> {
-    let line = timeout(RESPONSE_TRANSFER_IDLE_TIMEOUT, async {
-        let mut bytes = Vec::new();
-        loop {
-            let available = reader.fill_buf().await?;
-            if available.is_empty() {
-                return Err(ClientError::Protocol(
-                    "TLS connection closed before a complete JSONL response".into(),
-                ));
-            }
-            if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
-                if bytes.len().saturating_add(newline) >= maximum_bytes {
-                    return Err(protocol(format!(
-                        "JSONL response exceeded {maximum_bytes} bytes"
-                    )));
-                }
-                bytes.extend_from_slice(&available[..newline]);
-                reader.consume(newline + 1);
-                break;
-            }
-            if bytes.len().saturating_add(available.len()) >= maximum_bytes {
-                return Err(protocol(format!(
-                    "JSONL response exceeded {maximum_bytes} bytes"
-                )));
-            }
-            let consumed = available.len();
-            bytes.extend_from_slice(available);
-            reader.consume(consumed);
-        }
-        serde_json::from_slice(&bytes).map_err(ClientError::from)
-    })
+    timeout(
+        RESPONSE_TRANSFER_IDLE_TIMEOUT,
+        read_json_line(reader, maximum_bytes),
+    )
     .await
-    .map_err(|_| protocol("timed out while receiving a response transfer"))??;
-    Ok(line)
+    .map_err(|_| protocol("timed out while receiving a response transfer"))?
 }
 
 fn protocol(message: impl Into<String>) -> ClientError {
@@ -854,7 +826,8 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&logical).unwrap();
         let chunks = bytes.chunks(48).collect::<Vec<_>>();
-        let (mut client, mut host) = tokio::io::duplex(16 * 1024);
+        let (client, mut host) = tokio::io::duplex(16 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
         for (index, chunk) in chunks.iter().enumerate() {
             write_json_line(
                 &mut host,
@@ -884,7 +857,8 @@ mod tests {
             "the caller receives one complete logical Tree instead of transport chunks"
         );
 
-        let (mut client, mut host) = tokio::io::duplex(4 * 1024);
+        let (client, mut host) = tokio::io::duplex(4 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
         write_json_line(&mut host, &logical).await.unwrap();
         drop(host);
         assert!(

@@ -46,5 +46,5 @@ export function useComposer(options: { read: () => string; write: (text: string)
   }, { flush: 'pre' })
   watch(options.identity, () => { transfer++; composing.value = false; selection.value = { start: 0, end: 0, direction: 'none' }; options.flush(); void nextTick(resize) })
   onUnmounted(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); options.flush() })
-  return { draft, compact, expandedTextarea, expanded, composing, selection, remember, composition, resize }
+  return { draft, compact, expandedTextarea, expanded, composing, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
 }

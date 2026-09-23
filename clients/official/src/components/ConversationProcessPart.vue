@@ -14,7 +14,7 @@ const props = defineProps<{
   imageResource: (part: ImagePart) => ConversationImageResource
   /** 正在流式增长的条目 id：这些条目按纯文本渲染，等 message.completed 后再做 markdown 排版，
    *  避免每个 token 都对全文跑一遍 marked + DOMPurify。 */
-  streamingParts?: Set<string>
+  streamingParts?: ReadonlySet<string>
 }>()
 const emit = defineEmits<{
   toolToggle: [id: string, event: Event]

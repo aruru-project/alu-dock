@@ -81,9 +81,7 @@ try {
   const { useConversationContent } = await server.ssrLoadModule('/src/lib/conversationContent.ts')
   const anchors: { preserve: boolean; ids?: Set<string> }[] = []
   const content = useConversationContent({
-    compact: { value: false }, native: false, getEpoch: () => 1,
-    getContext: () => ({ connectionId: 'host', selectionGeneration: 1 }),
-    isCurrent: () => true, reload: () => assert.fail('unexpected reload'),
+    compact: { value: false },
     beforeLayoutChange: (preserve: boolean, ids?: Set<string>) => { anchors.push({ preserve, ids }); return null }, afterLayoutChange: async () => {},
     isFollowing: () => false, layoutChanged: () => {}, projected: () => {},
   })
@@ -130,7 +128,8 @@ try {
   assert.equal(text(), 'Hello world!?. together', 'text and tool output share the same presentation frame')
   assert.equal(content.items.value.find((item: { kind: string }) => item.kind === 'tool')?.detailOutputText, 'workdir')
   delta(12, ' hydrated')
-  await content.appendHistoricalRecords([{ recordId: 'earlier', entryId: 'earlier', kind: 'message', source: 'user', visibility: 'conversation', content: [{ type: 'text', text: 'Earlier' }] }])
+  content.applyContent({ kind: 'record_chunk', entryId: 'earlier', first: true, complete: true,
+    text: JSON.stringify({ recordId: 'earlier', entryId: 'earlier', kind: 'message', source: 'user', visibility: 'conversation', content: [{ type: 'text', text: 'Earlier' }] }) })
   flush()
   assert.equal(text(), 'Hello world!?. together hydrated', 'history updates consume pending live text exactly once')
 
@@ -182,12 +181,6 @@ try {
   content.publish(bootstrap([event(1, 'message.delta', { messageId: 'm', block: 'text', delta: 'Reloaded' })]))
   flush()
   assert.equal(text(), 'Reloaded', 'reload replaces pending presentation from the previous conversation')
-  delta(2, ' discarded')
-  content.resetProjectionSchedule()
-  flush()
-  assert.equal(text(), 'Reloaded', 'switching away cancels the old presentation')
-  content.reproject(content.state.value)
-  assert.equal(text(), 'Reloaded discarded', 'cancelling paint does not discard canonical text')
   delta(3, ' cleared')
   content.clear()
   flush()
@@ -256,6 +249,44 @@ try {
   assert.equal(mergeLiveEvents(firstDelta, secondDelta)?.data.delta, 'ab', 'same-target contiguous deltas coalesce in order')
   assert.equal(mergeLiveEvents(firstDelta, event(2, 'message.completed', { messageId: 'merge' })), null)
   assert.equal(mergeLiveEvents(firstDelta, event(2, 'message.delta', { messageId: 'other', delta: 'b' })), null)
+  // Phase-two regression found in the real cut probe: seq2 was folded into
+  // seq1 and then lost by a delayed cut=1 handoff. Facts must break both folds.
+  const prefix = bootstrap([event(1, 'message.delta', { messageId: 'cut', block: 'text', delta: 'A' })])
+  prefix.cursor.sequence = 1
+  content.publish(structuredClone(prefix))
+  content.acceptReadCut(1)
+  content.applyConversationEvent(content.state.value, event(2, 'message.delta', { messageId: 'cut', block: 'text', delta: 'B' }), true)
+  flush()
+  assert.equal(text(), 'AB')
+  content.applyContent({ kind: 'checkpoint_begin', bootstrap: structuredClone(prefix) })
+  content.applyContent({ kind: 'checkpoint_end' })
+  assert.equal(text(), 'AB', 'delayed history handoff neither loses B nor repeats A')
+
+  const toolPrefix = bootstrap([event(1, 'tool.started', { toolCallId: 'cut-tool', toolName: 'read', args: {} }), event(2, 'tool.output_updated', { toolCallId: 'cut-tool', text: 'A' })])
+  toolPrefix.cursor.sequence = 2
+  content.publish(structuredClone(toolPrefix)); content.acceptReadCut(2)
+  content.applyConversationEvent(content.state.value, event(3, 'tool.output_updated', { toolCallId: 'cut-tool', text: 'AB' }), true)
+  flush()
+  content.applyContent({ kind: 'checkpoint_begin', bootstrap: structuredClone(toolPrefix) })
+  content.applyContent({ kind: 'checkpoint_end' })
+  assert.equal(content.items.value.find((item: { kind: string }) => item.kind === 'tool')?.detailOutputText, 'AB', 'cumulative tool output also respects the read cut')
+
+  // A retained view can rebind to an older checkpoint after observing a newer
+  // facts cut. Native post-cut replay, not the old folded log, rebuilds it.
+  content.publish(bootstrap([]))
+  content.applyConversationEvent(content.state.value, event(1, 'message.delta', { messageId: 'cut', block: 'text', delta: 'A' }), true)
+  content.applyConversationEvent(content.state.value, event(2, 'message.delta', { messageId: 'cut', block: 'text', delta: 'B' }), true)
+  content.acceptReadCut(2)
+  content.applyConversationEvent(content.state.value, event(3, 'message.delta', { messageId: 'cut', block: 'text', delta: 'C' }), true)
+  flush(); assert.equal(text(), 'ABC')
+  content.applyContent({ kind: 'checkpoint_begin', bootstrap: structuredClone(prefix), replay: true })
+  content.applyReplayEvent(event(2, 'message.delta', { messageId: 'cut', block: 'text', delta: 'B' }))
+  content.acceptReadCut(2)
+  content.applyReplayEvent(event(3, 'message.delta', { messageId: 'cut', block: 'text', delta: 'C' }))
+  assert.equal(text(), 'ABC', 'old surface remains until bounded replay is complete')
+  content.applyContent({ kind: 'checkpoint_end' })
+  assert.equal(text(), 'ABC', 'older checkpoint rebinding uses actual canonical tail instead of guessing a split in AB')
+
   content.dispose()
 } finally {
   if (previousWindow === undefined) Reflect.deleteProperty(globalThis, 'window')

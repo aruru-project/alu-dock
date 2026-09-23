@@ -57,3 +57,60 @@ assert.equal(scans, beforeRestore, 'an unchanged reading element is restored dir
 app.unmount()
 
 console.log('conversation viewport tests passed')
+
+// Reading intent survives a disposable view, while a user's new gesture and a
+// genuine Session replacement win over a delayed content seed. Geometry is a
+// DOM boundary fixture here; actual layout/interaction is checked in the browser.
+const { readConversationPosition, saveConversationPosition } = await import('../src/lib/localState.ts')
+const values = new Map<string, string>()
+const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value) } } as Storage
+const events = new Map<string, EventListener>()
+;(globalThis as any).window = { requestAnimationFrame: (fn: () => void) => setTimeout(fn, 0), cancelAnimationFrame: clearTimeout, addEventListener() {}, removeEventListener() {} }
+let loaded = false, top = 0, logicalTop = 1000
+const entry = { dataset: { conversationId: 'stable-entry' }, isConnected: true, getBoundingClientRect: () => ({ top: logicalTop - top, bottom: logicalTop - top + 100 }) }
+const scroller = {
+  ownerDocument: {},
+  get scrollTop() { return top }, set scrollTop(value: number) { top = Math.max(0, Math.min(3600, value)) }, scrollHeight: 4000, clientHeight: 400,
+  getBoundingClientRect: () => ({ top: 0, left: 0, width: 500, bottom: 400 }), contains: (value: unknown) => loaded && value === entry,
+  querySelector: (selector: string) => loaded && selector.includes('data-conversation-id') ? entry : null,
+  querySelectorAll: () => loaded ? [entry] : [],
+  addEventListener: (name: string, fn: EventListener) => events.set(name, fn), removeEventListener: (name: string) => events.delete(name),
+}
+const scope = { connectionId: 'host', workId: 'A', hostEpoch: 'epoch', sessionId: 'session-A' }
+const persistence = {
+  read: (s: typeof scope) => readConversationPosition(storage, s.connectionId, s.workId),
+  write: (s: typeof scope, position: Parameters<typeof saveConversationPosition>[3]) => saveConversationPosition(storage, s.connectionId, s.workId, position),
+}
+let reader: ReturnType<typeof useConversationViewport>
+function mountReader() {
+  const mounted = renderer.createApp({ setup() { reader = useConversationViewport(ref(scroller as unknown as HTMLElement), persistence); return () => null } })
+  mounted.mount({}); return mounted
+}
+const tick = async () => { await new Promise(resolve => setTimeout(resolve, 10)) }
+saveConversationPosition(storage, 'host', 'A', { hostEpoch: 'epoch', sessionId: 'session-A', following: false, id: 'stable-entry', offset: -25, scrollTop: 1025 })
+let mountedReader = mountReader()
+reader!.bindScope(scope); await tick()
+assert.equal(top, 0, 'a saved anchor waits for its own record, without a whole-history barrier')
+loaded = true; reader!.layoutChanged(); await tick()
+assert.equal(top, 1025, 'the stable entry restores before the rest of the seed finishes')
+reader!.seeded(); await tick()
+logicalTop += 90; reader!.layoutChanged(); await tick()
+assert.equal(top, 1115, 'image/body layout above the reading entry preserves its offset')
+reader!.savePosition(); mountedReader.unmount()
+loaded = false; top = 0
+mountedReader = mountReader(); reader!.bindScope(scope); loaded = true; reader!.seeded(); await tick()
+assert.equal(top, 1115, 'a newly mounted viewport consumes the DOM-free saved entry/offset')
+reader!.bindScope(null); reader!.bindScope({ ...scope, workId: 'B', sessionId: 'session-B' }); reader!.seeded(); await tick()
+assert.equal(top, 3600)
+reader!.bindScope(null); reader!.bindScope(scope); reader!.seeded(); await tick(); assert.equal(top, 1115)
+reader!.bindScope(null); loaded = false; top = 0; reader!.bindScope(scope); await tick()
+events.get('wheel')?.({ type: 'wheel' } as Event); top = 400; reader!.handleScroll()
+loaded = true; reader!.seeded(); await tick(); assert.equal(top, 400, 'new scrolling cancels the pending old restoration')
+reader!.bindScope({ ...scope, sessionId: 'new-session' }, true); reader!.seeded(); await tick()
+assert.equal(top, 3600, 'a different actual Session starts at its own end, not the old reading offset')
+const previous = [...values.entries()]
+const failing = { getItem: storage.getItem, setItem() { throw new Error('storage unavailable') } } as unknown as Storage
+assert.equal(saveConversationPosition(failing, 'host', 'A', { hostEpoch: 'epoch', sessionId: 'new-session', following: true, scrollTop: 3600 }), false)
+assert.deepEqual([...values.entries()], previous)
+mountedReader.unmount()
+console.log('reading position restore / Work and view rebuild / progressive layout / user precedence / new Session / small storage failure passed')

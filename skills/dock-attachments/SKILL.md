@@ -1,13 +1,15 @@
 ---
 name: dock-attachments
-description: Use files uploaded to Alu Dock through opaque file IDs. Use when a user message includes Dock attachment metadata or asks to inspect an uploaded file.
+description: Retrieve Dock attachment originals by fileId only when the task needs file-level reading or processing, such as extracting ZIPs, parsing PDFs, cropping images, converting formats, or verifying files. Do not load for ordinary image chat, describing a picture, or discussing a screenshot; attachment metadata alone is not a trigger.
 ---
 
 # Dock attachments
 
 Uploaded files are permanent Host-owned originals. A command may include an `alu_dock_attachments_v1` metadata block with one or more opaque `fileId` values.
 
-Image attachments included with the current chat message are already provided as native visual input. Do not resolve or read one merely to see it. Resolve it only when the original file is needed for copying, conversion, OCR, or another file-based tool.
+Use this skill only when the task requires the original file, not merely because an attachment exists or has a particular file type.
+
+Image attachments included with the current chat message are already provided as native visual input. Do not resolve or read one merely to see it. Resolve it only when the original file is needed for copying, cropping, conversion, verification, or another file-based tool required by the task.
 
 1. Use `dock_attachment_list` when the intended file or file ID is unclear.
 2. Use `dock_attachment_resolve` with the exact `fileId` to obtain a Host-local path.

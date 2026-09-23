@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AgentWorkerState } from "../src/core/agent-worker.js";
 
 import {
   ORDINARY_REVERSE_WORKER_CAPABILITIES,
@@ -21,7 +22,7 @@ const IDENTITY: WorkerIdentity = {
   workerIncarnation: "worker-test",
 };
 
-const STATE = {
+const STATE: AgentWorkerState = {
   sessionId: "session-test",
   sessionFile: "/tmp/session-test.jsonl",
   durableSessionFile: "/tmp/session-test.jsonl",
@@ -242,4 +243,159 @@ test("private Worker Dock tools keep source identity and accept supported result
     },
   });
   assert.equal(delivered.kind, "agent_control");
+});
+
+// Phase 4A incident: an otherwise valid image above 2M base64 characters was
+// rejected on both IPC sides before the existing 20 MiB image contract ran.
+test("large conversation images cross Worker IPC only for the locally requested image method", async () => {
+  const { createHash } = await import("node:crypto");
+  const bytes = Buffer.alloc(1_600_000, 9);
+  const image = { contentRef: "opaque", mimeType: "image/png", sizeBytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"), data: bytes.toString("base64") };
+  const response = { kind: "response", callId: "image-call", ok: true, result: image, state: STATE } as const;
+  const frames: WorkerFrame[] = [];
+  const sender = new OrderedWorkerSender(IDENTITY, (frame, callback) => { frames.push(frame); callback(null); return true; });
+  assert.throws(() => sender.sendEnvelope(response));
+  await sender.sendEnvelope(response, "conversation.image");
+  const receiver = new WorkerFrameReceiver(() => true, id => id === "image-call" ? { method: "conversation.image" } : undefined);
+  let actual;
+  for (const frame of frames) actual = receiver.accept(frame);
+  assert.deepEqual(actual, response);
+  // Unknown/non-image pending methods cannot borrow the data exception.
+  for (const method of [undefined, "conversation.content", "unknown"]) {
+    const rejected = new WorkerFrameReceiver(() => true, () => method ? { method } : undefined);
+    assert.throws(() => { for (const frame of frames) rejected.accept(frame); });
+  }
+  for (const result of [
+    { ...image, sizeBytes: 20 * 1024 * 1024 + 1 },
+    { ...image, data: "!!!!" }, { ...image, sizeBytes: 1 },
+    { ...image, sha256: "0".repeat(64) }, { ...image, extra: true },
+    // Computed keys create own JSON members, including __proto__.
+    ...["constructor", "toString", "__proto__"].map(key => ({ ...image, [key]: true })),
+  ]) {
+    assert.throws(() => sender.sendEnvelope({ ...response, result }, "conversation.image"));
+    // Reuse production frames to transport a malformed external result without
+    // having the sender's own parser mask receiver validation.
+    const json = JSON.stringify({ ...response, result });
+    const count = Math.ceil(json.length / 96_000);
+    const malformed = new WorkerFrameReceiver(() => true, () => ({ method: "conversation.image" }));
+    assert.throws(() => {
+      for (let i = 0; i < count; i++) malformed.accept({ ...frames[0], sequence: i + 1, index: i, count, payload: json.slice(i * 96_000, (i + 1) * 96_000) });
+    });
+  }
+  assert.throws(() => sender.sendEnvelope({ ...response, state: { ...STATE, metrics: { ...STATE.metrics, cost: image.data as unknown as number } } }, "conversation.image"));
+});
+
+test("discarded replies still enforce Worker structure, envelope and state boundaries", async () => {
+  const { MAX_WORKER_CHUNK_CHARS } = await import("../src/pi/worker-protocol.js");
+  const large = "x".repeat(2_000_001);
+  const response = { kind: "response", callId: "host-1", ok: true, result: { ignored: large } };
+  function receive(value: unknown, cancelled: boolean) {
+    const json = JSON.stringify(value), count = Math.ceil(json.length / MAX_WORKER_CHUNK_CHARS);
+    const receiver = new WorkerFrameReceiver(() => true, () => cancelled ? "cancelled" : undefined);
+    let result;
+    for (let index = 0; index < count; index++) result = receiver.accept({ protocol: "alu-dock-pi-worker", version: 1, identity: IDENTITY,
+      sequence: index + 1, transferId: "discard", index, count, payload: json.slice(index * MAX_WORKER_CHUNK_CHARS, (index + 1) * MAX_WORKER_CHUNK_CHARS) });
+    return result;
+  }
+  assert.equal(receive(response, true), undefined);
+  assert.throws(() => receive(response, false));
+  let deep: unknown = large;
+  for (let i = 0; i < 33; i++) deep = { deep };
+  for (const value of [
+    { ...response, result: deep },
+    { ...response, result: Object.fromEntries(Array.from({ length: 10_001 }, (_, i) => [String(i), 0])) },
+    { ...response, result: { ["k".repeat(257)]: 0 } },
+    { ...response, result: Array(2_000_001).fill(0) },
+    { ...response, state: { ...STATE, metrics: { payload: large } } },
+    { ...response, extra: "not an envelope field" },
+  ]) assert.throws(() => receive(value, true));
+});
+
+test("a cancelled image reply cannot kill the replacement Worker or overwrite its state", { timeout: 15_000 }, async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { AgentWorkerConnection } = await import("../src/pi/agent-worker-connection.js");
+  const { ExtensionUiBroker } = await import("../src/core/extension-ui-broker.js");
+  const root = await mkdtemp(join(tmpdir(), "worker-late-image-"));
+  const entry = join(root, "worker.mjs");
+  // Protocol peer only: a real subprocess, replacement event, delayed response
+  // and next call pass through production AgentWorkerConnection/pending fences.
+  await writeFile(entry, `
+    import { createHash } from 'node:crypto';
+    import { OrderedWorkerSender, WorkerFrameReceiver } from ${JSON.stringify(new URL("../src/pi/worker-protocol.js", import.meta.url).href)};
+    const identity = JSON.parse(process.env.ALU_DOCK_WORKER_IDENTITY);
+    const sender = new OrderedWorkerSender(identity, (frame, cb) => process.send(frame, cb));
+    const receiver = new WorkerFrameReceiver(() => true);
+    const state = ${JSON.stringify(STATE)};
+    const bytes = Buffer.alloc(1600000, 9);
+    let replied = Promise.resolve();
+    const image = {contentRef:'opaque',mimeType:'image/png',sizeBytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),data:bytes.toString('base64')};
+    process.on('message', async raw => {
+      const message = receiver.accept(raw); if (!message) return;
+      if (message.kind === 'agent_request') {
+        replied = (async () => {
+        if (process.env.REPLY_MODE !== 'pending-nonimage') {
+          await sender.sendEnvelope({kind:'event',event:{type:'dock_session_replaced',reason:'new',sessionFile:'/tmp/replaced.jsonl'},state:{...state,sessionId:'new-session'}});
+          sender.updateRuntimeGeneration(2);
+        }
+        const callId = process.env.REPLY_MODE === 'future' ? 'host-999999' : process.env.REPLY_MODE === 'noncanonical' ? 'host-01' : process.env.REPLY_MODE === 'unknown' ? 'stranger' : message.callId;
+        await sender.sendEnvelope({kind:'response',callId,ok:true,result:image,state:{...state,sessionId:'stale-session'}}, 'conversation.image');
+        })(); await replied;
+      } else if (message.kind === 'agent_control') {
+        await replied;
+        await sender.sendEnvelope({kind:'response',callId:message.callId,ok:true,result:message.control.type === 'dispose' ? {cleanupErrors:[]} : null});
+      }
+    });
+    await sender.sendEnvelope({kind:'ready',state,diagnostics:[],pid:process.pid});
+  `);
+  try {
+    for (const mode of ["late", "future", "noncanonical", "unknown", "pending-nonimage"]) {
+      const { session } = await AgentWorkerConnection.create({
+        identity: { hostEpoch: "host-test", instanceId: "instance-test", runtimeGeneration: 1 },
+        init: { cwd: root, agentDir: join(root, "pi"), projectTrusted: false },
+        extensionUiBroker: new ExtensionUiBroker(), workerEntry: entry,
+        workerEnvironment: { PATH: process.env.PATH, HOME: root, USERPROFILE: root, PI_OFFLINE: "1",
+          XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state"),
+          XDG_CACHE_HOME: join(root, "cache"), XDG_RUNTIME_DIR: join(root, "run"),
+          APPDATA: join(root, "appdata"), LOCALAPPDATA: join(root, "localappdata"),
+          npm_config_cache: join(root, "npm-cache"), npm_config_userconfig: join(root, "npmrc"), npm_config_globalconfig: join(root, "global-npmrc"),
+          TMPDIR: root, TMP: root, TEMP: root, REPLY_MODE: mode },
+        initialDockToolsEnabled: false,
+        dockToolsHostPort: { dockToolsEnabled: () => false, configureDockTools: async () => ({ enabled: false }),
+          invokeDockTool: async () => { throw new Error("unused fixture capability"); }, attachObservationSink: () => () => {} },
+        attachmentHostPort: { accessAttachments: async () => { throw new Error("unused fixture capability"); } },
+      });
+      const lost = new Promise<void>(resolve => session.subscribe(event => { if (event.type === "dock_runtime_lost") resolve(); }));
+      try {
+        await assert.rejects(session.invoke({ kind: "request", version: 2, requestId: "image", type: mode === "pending-nonimage" ? "conversation.content" : "conversation.image", params: { instanceId: "instance-test", contentRef: "opaque" } }));
+        if (mode === "late") {
+          assert.equal(await session.control({ type: "wait_for_idle" }), null);
+          assert.equal(session.state().sessionId, "new-session");
+        } else {
+          await lost;
+          await assert.rejects(session.control({ type: "wait_for_idle" }), `invalid reply mode: ${mode}`);
+        }
+      } finally { await session.dispose(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("image reassembly retains aggregate, ordered frames and identity fences", () => {
+  // IPC is an untrusted process boundary even when a pending image authorizes
+  // its data scalar. Aggregate checks run before parsing/hashing the result.
+  const frame = { protocol: "alu-dock-pi-worker", version: 1, identity: IDENTITY, sequence: 1, transferId: "bounded", index: 0, count: 2, payload: "{}" };
+  assert.throws(() => new WorkerFrameReceiver(() => false).accept(frame));
+  for (const override of [{ sequence: 2 }, { index: 1 }, { count: 4097 }]) {
+    assert.throws(() => new WorkerFrameReceiver(() => true).accept({ ...frame, ...override }));
+  }
+  const ordered = new WorkerFrameReceiver(() => true);
+  ordered.accept(frame);
+  assert.throws(() => ordered.accept({ ...frame, sequence: 2, index: 1, transferId: "interleaved" }));
+  const aggregate = new WorkerFrameReceiver(() => true, () => ({ method: "conversation.image" }));
+  const payload = "x".repeat(96_000);
+  assert.throws(() => {
+    for (let i = 0; i < 3000; i++) aggregate.accept({ ...frame, count: 3000, sequence: i + 1, index: i, payload });
+  });
 });

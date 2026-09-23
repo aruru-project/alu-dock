@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
+import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
 import { projectConversation } from '../src/lib/conversation.ts'
 import { draftAfterSubmit } from '../src/lib/uiBoundaries.ts'
 import { decodeLocalUiState, persistLocalUiState } from '../src/lib/localState.ts'
@@ -51,8 +51,8 @@ const attachment: AttachmentDto = {
     activeHostId: 'main-host',
     hosts: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
   }))
-  assert.deepEqual(restored?.connections['main-host']?.attachments['remote-work']?.[0]?.localUpload, target)
-  assert.equal(restored?.connections['main-host']?.attachments['remote-work']?.[0]?.localUpload?.sourceToken, undefined, 'native source handles must not survive a process restart')
+  assert.deepEqual(restored?.connections['main-host']?.attachments['remote-work']?.[0]?.localUpload, { ...target, jobId: 'native-token' })
+  assert.equal(Object.hasOwn(restored!.connections['main-host']!.attachments['remote-work']![0]!.localUpload!, 'sourceToken'), false, 'only the job association survives storage; native query must verify the current run')
 
   let serialized = ''
   assert.equal(persistLocalUiState({ setItem: (_key: string, value: string) => { serialized = value } } as Storage, {
@@ -60,7 +60,8 @@ const attachment: AttachmentDto = {
     activeConnectionId: 'main-host',
     connections: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
   }), true)
-  assert.equal(serialized.includes('native-token'), false)
+  assert.equal(serialized.includes('sourceToken'), false)
+  assert.equal(JSON.parse(serialized).connections['main-host'].attachments['remote-work'][0].localUpload.jobId, 'native-token')
 }
 
 {
@@ -101,22 +102,14 @@ const attachment: AttachmentDto = {
 }
 
 {
-  const localPreview = { url: 'blob:local', mediaType: 'image/png' }
+  const localPreview = { url: 'http://aludock-media.localhost/local', mediaType: 'image/png' }
   const migrated = moveAttachmentPreviewResource({ 'local-token': localPreview }, 'local-token', attachment.fileId)
   assert.equal(migrated.moved, localPreview)
-  assert.equal(migrated.replaced, undefined, 'a successful first upload has no destination preview to dereference')
   assert.deepEqual(migrated.resources, { [attachment.fileId]: localPreview })
 
-  const oldRemotePreview = { url: 'blob:old', mediaType: 'image/png' }
+  const oldRemotePreview = { url: 'http://aludock-media.localhost/old', mediaType: 'image/png' }
   const replaced = moveAttachmentPreviewResource({ 'local-token': localPreview, [attachment.fileId]: oldRemotePreview }, 'local-token', attachment.fileId)
-  assert.equal(replaced.replaced, oldRemotePreview, 'only a real replaced preview is returned for URL revocation')
   assert.deepEqual(replaced.resources, { [attachment.fileId]: localPreview })
-
-  assert.deepEqual(
-    displayedConversationImageResource(localPreview, { state: 'loading' }),
-    { state: 'ready', url: 'blob:local' },
-    'a sent image remains visible from its local preview while remote history is still loading',
-  )
 }
 
 {

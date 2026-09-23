@@ -55,7 +55,7 @@ function stateText() {
       </div>
     </component>
     <div v-if="retryable || cancellable || removable" class="attachment-actions">
-      <button v-if="retryable" type="button" :aria-label="`重试上传 ${name}`" :title="`重试上传 ${name}`" @click="emit('retry')"><RotateCcw :size="15" /></button>
+      <button v-if="retryable" type="button" :aria-label="`重试处理 ${name}`" :title="`重试处理 ${name}`" @click="emit('retry')"><RotateCcw :size="15" /></button>
       <button v-if="cancellable" type="button" :aria-label="`取消上传 ${name}`" :title="`取消上传 ${name}`" @click="emit('cancel')"><X :size="15" /></button>
       <button v-else-if="removable" type="button" :aria-label="`移除附件 ${name}`" :title="`移除附件 ${name}`" @click="emit('remove')"><X :size="15" /></button>
     </div>

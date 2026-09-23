@@ -25,15 +25,16 @@ function stopObserving() {
 
 function observeVisibility() {
   stopObserving()
-  if (!props.part.source) return
+  if (!props.part.source || props.resource.state !== 'idle') return
   const element = surface.value
   if (!element || typeof IntersectionObserver === 'undefined') {
-    if (props.resource.state === 'idle' || props.resource.state === 'ready') emit('request', props.part)
+    emit('request', props.part)
     return
   }
   observer = new IntersectionObserver((entries) => {
-    if (!entries.some((entry) => entry.isIntersecting)) return
-    if (props.resource.state === 'idle' || props.resource.state === 'ready') emit('request', props.part)
+    if (!entries.some((entry) => entry.isIntersecting) || props.resource.state !== 'idle') return
+    stopObserving()
+    emit('request', props.part)
   }, {
     root: element.closest('.alu-output'),
     rootMargin: '320px 0px',
@@ -43,7 +44,7 @@ function observeVisibility() {
 
 onMounted(observeVisibility)
 onBeforeUnmount(stopObserving)
-watch(() => [props.part.imageKey, props.part.source] as const, async () => {
+watch(() => [props.part.imageKey, props.part.source, props.resource.state] as const, async () => {
   await nextTick()
   observeVisibility()
 })

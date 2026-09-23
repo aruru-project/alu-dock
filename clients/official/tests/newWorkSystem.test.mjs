@@ -1,14 +1,14 @@
-// Card 271: real Vue buttons and TS bridge; only native IPC and the surrounding store are fixtures.
+// Card 271: real Vue buttons and TS bridge; only native IPC is a fixture.
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { build } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { createRenderer, h, reactive, nextTick } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const filename = join(root, 'src/components/NewWorkDialog.vue')
 const directory = await mkdtemp(join(root, '.system-check-'))
 const stateKey = '__aluSystemCheck'
 const node = (type, text = '') => ({ type, text, props: {}, children: [], parent: null, checked: false,
@@ -49,21 +49,32 @@ const project = { id: 'project', name: '项目 SYSTEM', kind: 'project-system', 
 const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template', path: '/home/.aludock/systems/chosen.json', workerConfig: { systemPrompt: { kind: 'dock-template', path: '/home/.aludock/systems/chosen.json' }, opaque: { keep: [1, '原样'] } } }
 const original = '\uFEFF{"identity":"逐字复制中文"}\n'
 try {
+  const entry = join(directory, 'entry.ts')
+  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app';`)
   await build({ root, configFile: false, logLevel: 'silent',
     build: { outDir: directory, emptyOutDir: false, minify: false,
-      lib: { entry: filename, formats: ['es'], fileName: () => 'component.mjs' },
-      rolldownOptions: { external: ['vue'] },
+      lib: { entry, formats: ['es'], fileName: () => 'component.mjs' },
+      rolldownOptions: { external: ['vue', 'pinia'] },
     },
-    plugins: [{ name: 'surrounding-store-fixture', enforce: 'pre',
-      resolveId(id) { if (id === '../stores/app') return '\0store-fixture' },
-      load(id) { if (id === '\0store-fixture') return `export const useAppStore = () => globalThis.${stateKey}.store;` },
-    }, vue()],
+    plugins: [vue()],
   })
-  const { default: NewWorkDialog } = await import(join(directory, 'component.mjs'))
+  const { default: NewWorkDialog, useAppStore } = await import(join(directory, 'component.mjs'))
+  async function createStore() {
+    setActivePinia(createPinia())
+    const store = useAppStore()
+    globalThis[stateKey] = { invoke: async command => {
+      if (command === 'get_host_catalog') return { revision: 1, selectionGeneration: 1, hosts: [], activeTarget: { kind: 'host', hostId: 'connection-a' } }
+      if (command === 'bootstrap') return { connectionId: 'connection-a', selectionGeneration: 1, host: { hostEpoch: 'epoch-a' }, works: [], total: 0 }
+      throw new Error(`Unexpected native setup call: ${command}`)
+    } }
+    await store.load()
+    store.rememberCreatedWorkspace('target', '/project', 'linux')
+    return store
+  }
+
   // A missing optional Host feature must not block the existing creation contract.
   for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
-    const store = reactive({ connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 },
-      recentWorkspaces: () => ['/project'], contextMatches: context => context.connectionId === store.connectionContext.connectionId && context.selectionGeneration === store.connectionContext.selectionGeneration })
+    const store = await createStore()
     const calls = [], created = [], unknown = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, preview: false, outcomeUnknown: false })
     let lateResolve, lateReject
@@ -114,7 +125,7 @@ try {
     if (scenario.startsWith('late-')) {
       if (scenario === 'late-directory') { await click('返回新建 Work'); await click('选择其他目录') }
       if (scenario === 'late-machine') props.machines = [{ ...props.machines[0], hostId: 'new-target' }]
-      if (scenario === 'late-connection' || scenario === 'late-unsupported') store.connectionContext.selectionGeneration++
+      if (scenario === 'late-connection' || scenario === 'late-unsupported') store.catalog.selectionGeneration++
       if (scenario === 'late-close') await click('关闭')
       await settle()
       if (scenario === 'late-unsupported') lateReject({ code: 'capability_missing', details: { missing: ['system.templates.v1'] } })
@@ -165,7 +176,7 @@ try {
       assert.equal(find(container, hasClass('new-work-back')), undefined, 'Reader owns the only back action')
       if (scenario === 'body-back') await click('返回 system 选择')
       if (scenario === 'body-close') await click('关闭')
-      if (scenario === 'body-connection') store.connectionContext.selectionGeneration++
+      if (scenario === 'body-connection') store.catalog.selectionGeneration++
       await settle()
       lateResolve({ text: 'STALE BODY', revision: 'old' })
       await settle()

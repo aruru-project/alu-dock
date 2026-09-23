@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 #[cfg(not(target_os = "android"))]
-use tokio::time::timeout;
+use tokio::{io::BufReader, time::timeout};
 
 #[cfg(not(target_os = "android"))]
 use crate::timing::CONNECT_PHASE_TIMEOUT;
@@ -119,7 +119,7 @@ impl LocalDockEndpoint {
                     ClientError::Protocol("timed out opening the local AluDock connection".into())
                 })??;
             Ok(ConnectedTransport {
-                stream: Box::new(stream),
+                stream: Box::new(BufReader::new(stream)),
             })
         }
 
@@ -142,7 +142,7 @@ impl LocalDockEndpoint {
                 ClientError::Protocol("timed out opening the local AluDock connection".into())
             })??;
             Ok(ConnectedTransport {
-                stream: Box::new(stream),
+                stream: Box::new(BufReader::new(stream)),
             })
         }
 

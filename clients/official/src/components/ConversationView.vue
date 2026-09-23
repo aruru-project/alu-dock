@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onUnmounted, type Directive } from 'vue'
 import { RefreshCw } from '@lucide/vue'
 import ConversationRow from './ConversationRow.vue'
 import { conversationRows } from '../lib/conversationPresentation'
@@ -8,13 +8,12 @@ import type { ConversationImageResource, ConversationItem, ConversationProcessIt
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 
 const props = defineProps<{
-  items: ConversationItem[]
+  items: readonly ConversationItem[]
   switching: boolean
-  streamingParts: Set<string>
+  streamingParts: ReadonlySet<string>
   historyLoading: boolean
   historyHydrating: boolean
   historyTruncated: boolean
-  historyCursor: string | null
   historyError: string | null
   attachmentPreviews: Record<string, { url: string; mediaType: string }>
   toolOpen: (id: string) => boolean
@@ -22,8 +21,10 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  readInterest: [entryIds: string[]]
   loadEarlier: []
   retryHistory: []
+  retryEntry: [entryId: string]
   toolToggle: [id: string, event: Event]
   imageRequest: [part: ImagePart]
   imagePreview: [part: ImagePart]
@@ -31,6 +32,34 @@ const emit = defineEmits<{
   attachmentPreview: [fileId: string, name: string]
   openText: [title: string, text: string, markdown?: boolean]
 }>()
+
+const sources = new Map<Element, string[]>()
+const visible = new Set<Element>()
+let interestQueued = false
+let lastInterest = ''
+function publishInterest() {
+  if (interestQueued) return
+  interestQueued = true
+  queueMicrotask(() => {
+    interestQueued = false
+    const ids = [...new Set([...visible].flatMap(element => sources.get(element) ?? []))]
+    const key = JSON.stringify(ids)
+    if (key !== lastInterest) { lastInterest = key; emit('readInterest', ids) }
+  })
+}
+const observer = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) visible.add(entry.target)
+    else visible.delete(entry.target)
+  }
+  publishInterest()
+}, { rootMargin: '200px' })
+const vReadInterest: Directive<HTMLElement, string[] | undefined> = {
+  mounted(element, binding) { sources.set(element, binding.value ?? []); observer?.observe(element) },
+  updated(element, binding) { sources.set(element, binding.value ?? []); if (visible.has(element)) publishInterest() },
+  unmounted(element) { observer?.unobserve(element); sources.delete(element); visible.delete(element); publishInterest() },
+}
+onUnmounted(() => observer?.disconnect())
 
 const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
   const prior = new Map(previous?.map((row) => [row.id, row]))
@@ -46,14 +75,14 @@ const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
 <template>
   <div class="conversation-flow" data-conversation-flow :class="{ 'is-switching': switching }" role="log" aria-live="polite" aria-relevant="additions text">
     <div v-if="historyLoading || historyHydrating || historyTruncated || historyError" class="history-loader">
-      <button v-if="historyTruncated" :disabled="historyLoading || !historyCursor" @click="emit('loadEarlier')"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : '加载更早记录' }}</button>
+      <button v-if="historyTruncated" :disabled="historyLoading" @click="emit('loadEarlier')"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : '加载更早记录' }}</button>
       <button v-if="historyError" :disabled="historyLoading" @click="emit('retryHistory')"><RefreshCw :size="14" />重试读取</button>
       <span v-if="historyHydrating">正在载入图片与较长内容…</span>
       <span v-if="historyError">{{ historyError }}</span>
     </div>
     <template v-for="row in rows" :key="row.id">
-      <ConversationRow :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
-        @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
+      <ConversationRow v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+        @retry-entry="emit('retryEntry', $event)" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
         @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
     </template>
   </div>

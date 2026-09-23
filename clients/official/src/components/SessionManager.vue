@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { OperationContext } from '../lib/operationBinding'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { ArrowLeft, BookOpen, ChevronRight } from '@lucide/vue'
 import {
@@ -21,10 +22,11 @@ import { useAppStore } from '../stores/app'
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
 const props = defineProps<{ work: Work; mode: SessionMode; preview: boolean; outcomeUnknown: boolean; hasDraft: boolean; compactionPending: boolean }>()
 const app = useAppStore()
+const nativePending = computed(() => [...app.nativeOperations.values()].some(operation => operation.state === 'pending'
+  && operation.connectionId === app.activeConnectionId && operation.instanceId === props.work.id && operation.kind !== 'submit_message'))
 const emit = defineEmits<{
-  snapshot: [work: Work]
   unknown: [cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext]
-  resync: [work: Work, draftText?: string]
+  finished: []
   compact: [customInstructions?: string]
   title: [title: string, body?: string]
   close: []
@@ -81,7 +83,7 @@ async function loadPromptTemplates() {
 }
 const reloadSummary = ref<SessionReloadResult | null>(null)
 const reloadScope = ref<SessionContext | null>(null)
-const trust = ref<(SessionTrustContinuation & { token: string }) | null>(null)
+const trust = ref<(SessionTrustContinuation & { token: string; capture: OperationContext }) | null>(null)
 const tree = ref<SessionTree | null>(null)
 const treeSearch = ref('')
 const treeFilter = ref<TreeFilter>(readTreeFilter(typeof window === 'undefined' ? null : window.localStorage))
@@ -366,83 +368,85 @@ async function createNew() {
   if (props.preview) { status.value = '浏览器预览仅作演示。'; return }
   if (pending.value || props.outcomeUnknown) return
   pending.value = 'new'; error.value = ''; status.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(scope, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消新建 Session。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消新建 Session。' }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
 async function resumeSelected(continuation?: SessionTrustContinuation) {
   const selected = selectedSession.value
-  if (!selected || selected.current || props.preview || pending.value || props.outcomeUnknown) return
+  if (!selected || selected.current || props.preview || pending.value || nativePending.value || props.outcomeUnknown) return
   const attempt = continuation ?? { operationId: operationId() }
+  let captured: OperationContext | undefined
   pending.value = 'switch'; error.value = ''; status.value = ''
   try {
-    const scope = { ...context.value }
+    const scope = continuation && trust.value?.operationId === continuation.operationId
+      ? trust.value.capture : app.captureOperation(context.value, context.value.instanceId)
+    captured = scope
     const result = await currentSessionCall(scope, () => switchSession(scope, selected.token, attempt), (reply) => reply.instance.runtimeGeneration)
     trust.value = null
-    if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消切换。'
+    if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消切换。'
   } catch (cause) {
     if (cause instanceof SessionCallFailure && !cause.current) { mutationFailure(cause, 'sessions'); return }
     const failure = (cause instanceof SessionCallFailure ? cause.original : cause) as { code?: string; details?: Record<string, unknown> }
     if (failure.code === 'project_trust_required') {
       const challenge = String(failure.details?.challengeId ?? '')
       const reported = String(failure.details?.operationId ?? '')
-      if (challenge && reported === attempt.operationId) trust.value = { token: selected.token, operationId: attempt.operationId, trustChallengeId: challenge }
+      if (challenge && captured && reported === attempt.operationId) trust.value = { token: selected.token, operationId: attempt.operationId, trustChallengeId: challenge, capture: captured }
       else error.value = 'Dock 返回的信任确认与当前操作对不上。请重试；若反复出现，请检查客户端和 Dock 版本。'
     } else mutationFailure(cause, 'sessions')
   } finally { pending.value = '' }
 }
 
 async function rename() {
-  if (props.preview || pending.value || props.outcomeUnknown) return
+  if (props.preview || pending.value || nativePending.value || props.outcomeUnknown) return
   pending.value = 'rename'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => nameSession(scope, renameDraft.value, operationId())); emit('snapshot', result.instance); status.value = 'Session 名称已更新。'; await loadSessionList() }
+  try { const scope = { ...context.value }; await currentSessionCall(scope, () => nameSession(app.captureOperationTarget(scope, scope.instanceId), renameDraft.value, operationId())); emit('finished'); status.value = 'Session 名称已更新。'; await loadSessionList() }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 function compact() {
-  if (props.preview || pending.value || props.outcomeUnknown || props.compactionPending || props.work.compacting) return
+  if (props.preview || pending.value || nativePending.value || props.outcomeUnknown || props.compactionPending || props.work.compacting) return
   emit('compact', compactDraft.value.trim() || undefined)
 }
 async function reload() {
-  if (props.preview || pending.value || props.outcomeUnknown) return
+  if (props.preview || pending.value || nativePending.value || props.outcomeUnknown) return
   pending.value = 'reload'; error.value = ''; status.value = ''; reloadSummary.value = null; reloadScope.value = null
   try {
     const scope = { ...context.value }
     // Accept only the generation returned by this Reload, not arbitrary replacements.
-    const result = await currentSessionCall(scope, () => reloadSession(scope, operationId()), (reply) => reply.instance.runtimeGeneration)
+    const result = await currentSessionCall(scope, () => reloadSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration)
     reloadScope.value = scope
     reloadSummary.value = result
     status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
-    emit('resync', result.instance)
+    emit('finished')
   }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
 async function navigate(summarize: boolean) {
   const node = selectedNode.value
-  if (!node || props.preview || pending.value || props.outcomeUnknown) return
+  if (!node || props.preview || pending.value || nativePending.value || props.outcomeUnknown) return
   pending.value = summarize ? 'navigate-summary' : 'navigate'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(scope, node.entryId, summarize, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance, result.editorText); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(app.captureOperation(scope, scope.instanceId), node.entryId, summarize, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function fork() {
   const node = selectedNode.value
-  if (!node || node.role !== 'user' || props.preview || pending.value || props.outcomeUnknown) return
+  if (!node || node.role !== 'user' || props.preview || pending.value || nativePending.value || props.outcomeUnknown) return
   pending.value = 'fork'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => forkSession(scope, node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance, result.selectedText); else status.value = 'Extension 已取消 Fork。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => forkSession(app.captureOperation(scope, scope.instanceId), node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消 Fork。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function clone() {
   const node = selectedNode.value
-  if (!node || props.preview || pending.value || props.outcomeUnknown) return
+  if (!node || props.preview || pending.value || nativePending.value || props.outcomeUnknown) return
   pending.value = 'clone'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => cloneSession(scope, node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消 Clone。' }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => cloneSession(app.captureOperation(scope, scope.instanceId), node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消 Clone。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 
 function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
   if (cause instanceof SessionCallFailure) {
-    // Store first: Vue discards emits from an unmounted initiating dialog.
-    app.recordMutationUnknown(cause.scope, domain, cause.original)
+    // Native retains this result independently; a late dialog error must not publish to another target.
     if (!cause.current) return
     const scope = cause.scope
     cause = cause.original

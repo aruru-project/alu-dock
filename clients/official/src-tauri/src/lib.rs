@@ -13,7 +13,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -23,11 +23,11 @@ use std::io::Read;
 #[cfg(any(target_os = "windows", test))]
 use aludock_client_core::InstanceExecution;
 use aludock_client_core::{
-    AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
+    AttachmentDto, AttachmentSource, AttachmentState, NativeAttachment, AttachmentUploadScope, AttachmentSnapshot,
     ClientError, ClientPreferences, ClientPreferencesStore, CommandArgumentCompletion,
     CommandCompletionItems, CommandCompletionsResult, CommandContentResult, CommandInfo,
-    CommandReference, CommandsResult, CompletedConversationEntry, ConnectionKind, ConnectionPolicy,
-    ConnectionRouter, ControllerEventData, ConversationPreviewPage, DeliverableDownloadProgress,
+    CommandReference, CommandsResult, ConnectionKind, ConnectionPolicy,
+    ConnectionRouter, ControllerEventData, DeliverableDownloadProgress,
     DeliverableDto, DeliveryMode, DiagnosticInfo, DockClient, Endpoint, EndpointState,
     EndpointTestResult, EventCursor, ExtensionControllerLease, ExtensionEvent, HistoryRecord,
     HostConnectionProfile, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
     Emitter, Manager,
-    ipc::{Channel, InvokeBody, Request, Response},
+    ipc::{InvokeBody, Request, Response},
 };
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_dialog::DialogExt;
@@ -63,8 +63,7 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Notify;
 
-const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
-const RENDER_IMAGE_IPC_CHUNK_BYTES: usize = 256 * 1_024;
+const MAX_RENDERABLE_IMAGE_BYTES: u64 = aludock_client_core::MAX_ATTACHMENT_PREVIEW_BYTES;
 const WORKSPACE_LARGE_FILE_CONFIRM_BYTES: u64 = 10 * 1_024 * 1_024;
 #[cfg(target_os = "windows")]
 const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -151,7 +150,6 @@ struct ConversationBootstrap {
     cursor: EventCursor,
     history_revision: u64,
     history_truncated: bool,
-    history_before_entry_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -211,21 +209,6 @@ struct SelectedAttachment {
     name: String,
     size_bytes: u64,
     media_type: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AttachmentProgressEmission {
-    connection_id: String,
-    selection_generation: u64,
-    work_id: String,
-    machine_host_id: String,
-    owner_host_epoch: String,
-    runtime_generation: u64,
-    token: String,
-    phase: String,
-    bytes_processed: u64,
-    total_bytes: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -489,60 +472,10 @@ impl WorkspaceFileState {
     }
 }
 
-#[derive(Clone, Default)]
-struct AttachmentState {
-    entries: Arc<Mutex<HashMap<String, NativeAttachment>>>,
-}
-
-struct NativeAttachment {
-    path: PathBuf,
-    temporary: bool,
-    connection_id: String,
-    selection_generation: u64,
-    work_id: String,
-    operation_id: String,
-    name: String,
-    size_bytes: u64,
-    media_type: Option<String>,
-    upload_scope: Option<AttachmentUploadScope>,
-    active_attempt: Option<AttachmentAttempt>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct AttachmentUploadScope {
-    machine_host_id: String,
-    owner_host_epoch: String,
-    runtime_generation: u64,
-}
-
-struct AttachmentAttempt {
-    id: String,
-    cancellation: AttachmentUploadCancellation,
-}
-
-impl Drop for NativeAttachment {
-    fn drop(&mut self) {
-        if self.temporary {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-impl AttachmentState {
-    fn clear(&self) {
-        if let Ok(mut entries) = self.entries.lock() {
-            for entry in entries.values() {
-                if let Some(attempt) = &entry.active_attempt {
-                    attempt.cancellation.cancel();
-                }
-            }
-            entries.clear();
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RestoredImageScope {
+    host_epoch: String,
+    runtime_generation: u64,
     connection_id: String,
     selection_generation: u64,
     work_id: String,
@@ -657,6 +590,8 @@ impl RestoredImageState {
         for (old_scope, bucket) in preserved {
             buckets.insert(
                 RestoredImageScope {
+                    host_epoch: old_scope.host_epoch,
+                    runtime_generation: old_scope.runtime_generation,
                     connection_id: old_scope.connection_id,
                     selection_generation: new_generation,
                     work_id: old_scope.work_id,
@@ -857,33 +792,17 @@ struct SafeDiagnostic {
     message: String,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct FollowEmission {
-    connection_id: String,
-    selection_generation: u64,
-    instance_id: String,
-    subscription_id: String,
-    event: ProjectedEvent,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct FollowStatus {
-    connection_id: String,
-    selection_generation: u64,
-    instance_id: String,
-    subscription_id: String,
-    state: String,
-    message: Option<String>,
-}
-
 #[derive(Clone, Default)]
 struct FollowState {
+    observation: aludock_client_core::ConversationObservation,
     task: Arc<Mutex<Option<FollowTask>>>,
 }
 
 struct FollowTask {
+    delivery: Arc<AtomicU64>,
+    acknowledge: tokio::sync::watch::Sender<u64>,
+    content_key: String,
+    host_epoch: String,
     handle: tauri::async_runtime::JoinHandle<()>,
     connection_id: String,
     selection_generation: u64,
@@ -911,6 +830,7 @@ impl FollowState {
         }
         if let Some(task) = guard.take() {
             task.handle.abort();
+            self.observation.pause(&task.content_key);
         }
         Ok(true)
     }
@@ -2044,7 +1964,7 @@ fn invalidate_connection_lifecycle(
     follow: &FollowState,
     extension: &ExtensionControlState,
     sessions: &SessionTokenState,
-    attachments: &AttachmentState,
+    _attachments: &AttachmentState,
     restored_images: &RestoredImageState,
     old_connection_id: Option<String>,
     new_connection_id: Option<String>,
@@ -2059,6 +1979,7 @@ fn invalidate_connection_lifecycle(
     if let Ok(mut guard) = follow.task.lock()
         && let Some(task) = guard.take()
     {
+        follow.observation.pause(&task.content_key);
         task.handle.abort();
     }
     if let Ok(mut guard) = extension.inner.lock() {
@@ -2085,7 +2006,6 @@ fn invalidate_connection_lifecycle(
     if let Ok(mut registry) = sessions.registry.lock() {
         registry.tokens.clear();
     }
-    attachments.clear();
     match (old_connection_id.as_deref(), new_connection_id.as_deref()) {
         (Some(old_connection_id), Some(new_connection_id))
             if old_connection_id == new_connection_id =>
@@ -2355,6 +2275,7 @@ fn remove_saved_host(
         .registry
         .remove_host(&host_id, expected_revision)
         .map_err(CommandError::from)?;
+    attachments.revoke_connection(&host_id);
     let new_connection_id = if snapshot.local_selected {
         Some(LOCAL_CONNECTION_SCOPE_ID.to_owned())
     } else {
@@ -2762,17 +2683,25 @@ fn discard_pairing(
         .map_err(CommandError::from)
 }
 
+// Route changes restart native observation tasks; dispatch inside Tauri's async
+// runtime, not directly on the WebView IPC thread (Android otherwise aborts).
 #[tauri::command]
-fn reselect_host_route(
+async fn reselect_host_route(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
     connection_id: String,
     selection_generation: u64,
 ) -> Result<bool, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .router()
-        .reselect_preferred_route()
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let changed = client.router().reselect_preferred_route().map_err(CommandError::from)?;
+    if let Some(task) = follow.task.lock().map_err(|_| follow_state_error())?.as_ref() {
+        if task.connection_id == connection_id && task.selection_generation == selection_generation {
+            follow.observation.pause(&task.content_key);
+            follow.observation.bind(task.content_key.clone(), client, task.instance_id.clone(), task.host_epoch.clone(), false).map_err(CommandError::from)?;
+        }
+    }
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -2788,18 +2717,7 @@ async fn bootstrap(
         Some(connection_profile(&store, &connection_id)?)
     };
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let connection_name = profile
-        .as_ref()
-        .map_or("本机 AluDock", |profile| profile.display_name.as_str());
-    let info = client.host_info().await.map_err(|error| CommandError {
-        code: "host_unreachable".into(),
-        message: format!("无法连接“{connection_name}”；当前选择保持不变。"),
-        details: Some(
-            serde_json::json!({ "connectionId": connection_id, "cause": error.to_string() }),
-        ),
-        outcome_unknown: false,
-        operation_id: None,
-    })?;
+    let info = client.host_info().await.map_err(CommandError::from)?;
     let (catalog, catalog_host_epoch) = client
         .list_instances_with_host_epoch(InstanceSelector::All)
         .await
@@ -2864,33 +2782,7 @@ async fn work_catalog(
     })
 }
 
-#[tauri::command]
-async fn conversation_bootstrap(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    connection_id: String,
-    selection_generation: u64,
-    instance_id: String,
-) -> Result<ConversationBootstrap, CommandError> {
-    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let read = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .read_instance(&instance_id, None, ReadReplay::ConversationBootstrap)
-        .await
-        .map_err(CommandError::from)?;
-    let history_before_entry_id = if read.history_truncated {
-        Some(
-            read.recent_history
-                .first()
-                .ok_or_else(|| {
-                    CommandError::from(ClientError::Protocol(
-                        "truncated conversation bootstrap omitted its history anchor".into(),
-                    ))
-                })?
-                .entry_id
-                .clone(),
-        )
-    } else {
-        None
-    };
+fn project_conversation_read(read: aludock_client_core::InstanceReadResult) -> Result<ConversationBootstrap, CommandError> {
     let active_events = read
         .page
         .events
@@ -2941,111 +2833,113 @@ async fn conversation_bootstrap(
         cursor: read.page.latest,
         history_revision: read.history_revision,
         history_truncated: read.history_truncated,
-        history_before_entry_id,
     })
 }
 
-const CONVERSATION_HISTORY_PAGE_LIMIT: u16 = 50;
-
 #[tauri::command]
-async fn conversation_history(
+async fn read_conversation_content(
+    state: tauri::State<'_, FollowState>,
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
-    cursor: Option<String>,
     expected_host_epoch: String,
-    expected_runtime_generation: u64,
-) -> Result<ConversationPreviewPage, CommandError> {
+    token: String,
+    intent: String,
+    entry_ids: Vec<String>,
+) -> Result<(), CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let page = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .preview_conversation_page(
-            &instance_id,
-            cursor.as_deref(),
-            CONVERSATION_HISTORY_PAGE_LIMIT,
-        )
-        .await
-        .map_err(CommandError::from)?;
-    if page.host_epoch != expected_host_epoch
-        || page.instance.owner_host_epoch.as_deref() != Some(expected_host_epoch.as_str())
-        || page.instance.runtime_generation != expected_runtime_generation
-    {
-        return Err(CommandError::from(ClientError::Protocol(
-            "conversation history changed; refresh the current Work before loading records".into(),
-        )));
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let content = &state.observation.content;
+    match intent.as_str() {
+        "earlier" => content.load_earlier(&key, &token, &client).await.map_err(CommandError::from),
+        "retry" => content.retry_content(&key, &token, &client, entry_ids).await.map_err(CommandError::from),
+        "interest" => { content.set_read_interest(&key, &token, client, entry_ids, false); Ok(()) }
+        _ => Err(CommandError::from(ClientError::Protocol("unknown local content intent".into()))),
     }
-    Ok(page)
-}
-
-#[tauri::command]
-async fn conversation_history_entry(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    connection_id: String,
-    selection_generation: u64,
-    instance_id: String,
-    cursor: Option<String>,
-    entry_id: String,
-    expected_revision: String,
-    expected_host_epoch: String,
-    expected_runtime_generation: u64,
-) -> Result<CompletedConversationEntry, CommandError> {
-    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let completed = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .complete_conversation_entry(
-            &instance_id,
-            cursor.as_deref(),
-            CONVERSATION_HISTORY_PAGE_LIMIT,
-            &entry_id,
-            &expected_revision,
-        )
-        .await
-        .map_err(CommandError::from)?;
-    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    if completed.host_epoch != expected_host_epoch
-        || completed.instance.id != instance_id
-        || completed.instance.owner_host_epoch.as_deref() != Some(expected_host_epoch.as_str())
-        || completed.instance.runtime_generation != expected_runtime_generation
-        || completed.revision != expected_revision
-        || completed.record.entry_id != entry_id
-    {
-        return Err(CommandError::from(ClientError::Protocol(
-            "conversation content changed; refresh the current Work before loading records".into(),
-        )));
-    }
-    Ok(completed)
 }
 
 #[tauri::command]
 async fn conversation_image(
+    state: tauri::State<'_, FollowState>,
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
+    expected_runtime_generation: u64,
     content_ref: String,
     mime_type: String,
-    on_chunk: Channel<Response>,
-) -> Result<usize, CommandError> {
+    file_id: Option<String>,
+) -> Result<aludock_client_core::MediaHandle, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let image = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .read_conversation_image(&instance_id, &content_ref, &mime_type)
-        .await
-        .map_err(CommandError::from)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let scope = aludock_client_core::MediaScope {
+        authority: observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?,
+        instance_id, host_epoch: expected_host_epoch, runtime_generation: expected_runtime_generation,
+    };
+    let image = state.observation.content.conversation_image(&client, scope, &content_ref, &mime_type, &attachment_authority(&runtime, &connection_id)?, file_id.as_deref()).await.map_err(CommandError::from)?;
+    // The validated old-domain file remains reusable, but a late IPC response
+    // cannot become a binding for a newly selected connection.
     resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    if image.host_epoch != expected_host_epoch || image.mime_type != mime_type {
-        return Err(CommandError::from(ClientError::Protocol(
-            "conversation image belonged to an obsolete Work state".into(),
-        )));
+    Ok(image)
+}
+
+#[tauri::command]
+async fn inline_conversation_image(
+    state: tauri::State<'_, FollowState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    mime_type: String,
+    data: String,
+) -> Result<aludock_client_core::MediaHandle, CommandError> {
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let scope = aludock_client_core::MediaScope {
+        authority: observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?,
+        instance_id, host_epoch: expected_host_epoch, runtime_generation: expected_runtime_generation,
+    };
+    let content = state.observation.content.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || content.inline_image(scope, &mime_type, &data))
+        .await.map_err(|_| image_error("image_transfer_failed", "图片读取中断，请重试。"))?.map_err(CommandError::from)?;
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    Ok(result)
+}
+
+fn conversation_media_response(
+    content: &aludock_client_core::SessionContent,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    use std::io::Read;
+    let missing = || tauri::http::Response::builder().status(404).body(Vec::new()).unwrap();
+    if request.method() != tauri::http::Method::GET && request.method() != tauri::http::Method::HEAD { return missing(); }
+    if request.uri().query().is_some() { return missing(); }
+    let handle = request.uri().path().strip_prefix('/').unwrap_or_default();
+    let Ok((media, mut file)) = content.open_media(handle) else { return missing(); };
+    let mut bytes = Vec::new();
+    if request.method() == tauri::http::Method::GET && file.read_to_end(&mut bytes).is_err() {
+        return tauri::http::Response::builder().status(500).body(Vec::new()).unwrap();
     }
-    validate_renderable_image(&image.bytes, Some(&mime_type))?;
-    send_render_image_chunks(&image.bytes, |chunk| {
-        on_chunk.send(Response::new(chunk.to_vec()))
-    })
-    .map_err(|_| image_error("image_transfer_failed", "图片传输中断，请重试。"))
+    let origin = request.headers().get("Origin").and_then(|value| value.to_str().ok());
+    let trusted_origin = origin.filter(|origin| matches!(*origin, "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost")
+        || (cfg!(debug_assertions) && *origin == "http://127.0.0.1:1420"));
+    let mut response = tauri::http::Response::builder().header("Vary", "Origin");
+    if let Some(origin) = trusted_origin { response = response.header("Access-Control-Allow-Origin", origin); }
+    response
+        .header("Content-Type", media.mime_type)
+        .header("Content-Length", media.size_bytes)
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(bytes).unwrap()
 }
 
 #[tauri::command]
 async fn published_image(
+    state: tauri::State<'_, FollowState>,
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
     selection_generation: u64,
@@ -3053,43 +2947,19 @@ async fn published_image(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     file: PublishedFileDto,
-    on_chunk: Channel<Response>,
-) -> Result<usize, CommandError> {
+) -> Result<aludock_client_core::MediaHandle, CommandError> {
     if file.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
-        return Err(image_error(
-            "image_too_large",
-            "这张图片太大，当前设备无法安全预览。",
-        ));
+        return Err(image_error("image_too_large", "这张图片太大，当前设备无法安全预览。"));
     }
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let image = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .read_published_file(&instance_id, &file)
-        .await
-        .map_err(CommandError::from)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let scope = aludock_client_core::MediaScope {
+        authority: observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?,
+        instance_id, host_epoch: expected_host_epoch, runtime_generation: expected_runtime_generation,
+    };
+    let media = state.observation.content.published_image(&client, scope, &file).await.map_err(CommandError::from)?;
     resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    if image.host_epoch != expected_host_epoch
-        || image.runtime_generation != expected_runtime_generation
-        || image.file != file
-    {
-        return Err(CommandError::from(ClientError::Protocol(
-            "published image belonged to an obsolete Work state".into(),
-        )));
-    }
-    validate_renderable_image(&image.bytes, file.media_type.as_deref())?;
-    send_render_image_chunks(&image.bytes, |chunk| {
-        on_chunk.send(Response::new(chunk.to_vec()))
-    })
-    .map_err(|_| image_error("image_transfer_failed", "图片传输中断，请重试。"))
-}
-
-fn send_render_image_chunks<E>(
-    bytes: &[u8],
-    mut send: impl FnMut(&[u8]) -> Result<(), E>,
-) -> Result<usize, E> {
-    for chunk in bytes.chunks(RENDER_IMAGE_IPC_CHUNK_BYTES) {
-        send(chunk)?;
-    }
-    Ok(bytes.len())
+    Ok(media)
 }
 
 fn validate_renderable_image(
@@ -3133,39 +3003,6 @@ fn image_error(code: &str, message: &str) -> CommandError {
         outcome_unknown: false,
         operation_id: None,
     }
-}
-
-fn percent_hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn decode_image_name(value: &str) -> Option<String> {
-    if value.is_empty() || value.len() > 2_048 {
-        return None;
-    }
-    let input = value.as_bytes();
-    let mut output = Vec::with_capacity(input.len());
-    let mut index = 0;
-    while index < input.len() {
-        if input[index] == b'%' {
-            let high = percent_hex(*input.get(index + 1)?)?;
-            let low = percent_hex(*input.get(index + 2)?)?;
-            output.push((high << 4) | low);
-            index += 3;
-        } else {
-            if !input[index].is_ascii() {
-                return None;
-            }
-            output.push(input[index]);
-            index += 1;
-        }
-    }
-    String::from_utf8(output).ok()
 }
 
 fn preview_image_save_name(requested: &str, media_type: &str) -> String {
@@ -3212,33 +3049,29 @@ fn preview_image_save_name(requested: &str, media_type: &str) -> String {
     format!("{cleaned}.{extension}")
 }
 
+// Only this save's staging file is removed on failure/cancel, never the media source.
+struct PreviewSaveStaging(PathBuf);
+impl Drop for PreviewSaveStaging {
+    fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+}
+
 #[tauri::command]
 async fn save_preview_image(
     app: tauri::AppHandle,
-    request: Request<'_>,
+    state: tauri::State<'_, FollowState>,
+    handle: String,
+    name: String,
 ) -> Result<LocalSaveResult, CommandError> {
-    let encoded_name = request
-        .headers()
-        .get("x-aludock-image-name")
-        .and_then(|value| value.to_str().ok())
-        .and_then(decode_image_name)
-        .ok_or_else(|| image_error("image_save_invalid", "无法使用这个图片名称。"))?;
-    let bytes = bounded_image_body(&request).map_err(|error| match error {
-        BoundedImageBodyError::Invalid => image_error(
-            "image_save_invalid",
-            "图片内容无法读取，请重新打开后再保存。",
-        ),
-        BoundedImageBodyError::TooLarge => {
-            image_error("image_save_too_large", "这张图片太大，当前设备无法保存。")
-        }
-    })?;
-    let media_type = raster_image_mime_type(&bytes).ok_or_else(|| {
-        image_error(
-            "unsupported_image",
-            "图片内容不是可保存的 PNG、JPEG、GIF 或 WebP 格式。",
-        )
-    })?;
-    let name = preview_image_save_name(&encoded_name, media_type);
+    let content = state.observation.content.clone();
+    // Once requested, losing the IPC waiter cannot interrupt a destination
+    // commit or release staging under its active platform copy.
+    tauri::async_runtime::spawn(async move { save_media_image(app, content, handle, name).await })
+        .await.map_err(|_| lifecycle_error())?
+}
+
+async fn save_media_image(app: tauri::AppHandle, content: aludock_client_core::SessionContent, handle: String, requested_name: String) -> Result<LocalSaveResult, CommandError> {
+    let (media, _) = content.open_media(&handle).map_err(CommandError::from)?;
+    let name = preview_image_save_name(&requested_name, &media.mime_type);
     #[cfg(not(mobile))]
     let destination = pick_save_destination(&app, &name).await?;
     #[cfg(mobile)]
@@ -3247,53 +3080,23 @@ async fn save_preview_image(
     if destination.is_none() {
         return Ok(LocalSaveResult::Cancelled);
     }
-    let staging_path = delivery_staging_path(&app, destination.as_ref())?;
-    let write_path = staging_path.clone();
-    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let mut target = create_delivery_staging_file(&write_path)
-            .map_err(|error| std::io::Error::other(error.message))?;
-        target.write_all(&bytes)?;
-        target.flush()?;
-        target.sync_all()
-    })
-    .await;
-    let write_result = match write_result {
-        Ok(result) => result,
-        Err(_) => {
-            let _ = fs::remove_file(&staging_path);
-            return Err(lifecycle_error());
-        }
-    };
-    if write_result.is_err() {
-        let _ = fs::remove_file(&staging_path);
-        return Err(image_error(
-            "image_save_failed",
-            "无法保存到所选位置。请检查可用空间和存储权限后重试。",
-        ));
-    }
+    let write_path = delivery_staging_path(&app, destination.as_ref())?;
+    let staging = tokio::task::spawn_blocking(move || -> Result<PreviewSaveStaging, CommandError> {
+        let mut target = create_delivery_staging_file(&write_path)?;
+        let staging = PreviewSaveStaging(write_path);
+        content.copy_media(&handle, &mut target).map_err(|_| image_error("image_save_failed", "图片未能完整保存。请检查存储空间并重新读取图片后重试。"))?;
+        target.flush().and_then(|_| target.sync_all()).map_err(|_| image_error(
+            "image_save_failed", "无法保存到所选位置。请检查可用空间和存储权限后重试。"))?;
+        Ok(staging)
+    }).await.map_err(|_| lifecycle_error())??;
     #[cfg(mobile)]
     {
-        destination = match pick_save_destination(&app, &name).await {
-            Ok(destination) => destination,
-            Err(error) => {
-                let _ = fs::remove_file(&staging_path);
-                return Err(error);
-            }
-        };
-        if destination.is_none() {
-            let _ = fs::remove_file(&staging_path);
-            return Ok(LocalSaveResult::Cancelled);
-        }
+        destination = pick_save_destination(&app, &name).await?;
+        if destination.is_none() { return Ok(LocalSaveResult::Cancelled); }
     }
     let destination = destination.expect("save cancellation returned before commit");
-    let saved_location = match describe_saved_location(&destination, &name) {
-        Ok(location) => location,
-        Err(error) => {
-            let _ = fs::remove_file(&staging_path);
-            return Err(error);
-        }
-    };
-    commit_verified_file(&app, staging_path, destination.clone()).await?;
+    let saved_location = describe_saved_location(&destination, &name)?;
+    commit_verified_file(&app, staging.0.clone(), destination.clone()).await?;
     #[cfg(target_os = "android")]
     if let FilePath::Url(url) = &destination {
         let _ = android_documents::retain_document_access(&app, url.as_str()).await;
@@ -3414,6 +3217,55 @@ fn stop_conversation_follow(
     )
 }
 
+fn attachment_authority(runtime: &ConnectionRuntimeState, connection_id: &str) -> Result<String, CommandError> {
+    let endpoint = if connection_id == LOCAL_CONNECTION_SCOPE_ID {
+        let snapshot = runtime.registry.snapshot().map_err(CommandError::from)?;
+        Some(LocalDockEndpoint::resolve(snapshot.local_endpoint_override.as_deref()).map_err(CommandError::from)?.display())
+    } else { None };
+    Ok(serde_json::to_string(&(connection_id, endpoint)).expect("authority tuple"))
+}
+
+fn observation_key(runtime: &ConnectionRuntimeState, connection_id: &str, instance_id: &str, host_epoch: &str) -> Result<String, CommandError> {
+    let local_endpoint = if connection_id == LOCAL_CONNECTION_SCOPE_ID {
+        let snapshot = runtime.registry.snapshot().map_err(CommandError::from)?;
+        Some(LocalDockEndpoint::resolve(snapshot.local_endpoint_override.as_deref()).map_err(CommandError::from)?.display())
+    } else { None };
+    Ok(serde_json::to_string(&(connection_id, local_endpoint, instance_id, host_epoch)).expect("string tuple"))
+}
+
+fn project_session_update(update: aludock_client_core::SessionUpdate) -> Result<Value, CommandError> {
+    use aludock_client_core::SessionUpdate;
+    Ok(match update {
+        SessionUpdate::ObservationCut(mut read) => {
+            read.recent_history.clear();
+            let mut bootstrap = project_conversation_read(read)?;
+            bootstrap.active_events.clear();
+            serde_json::json!({"kind":"facts", "bootstrap":bootstrap})
+        },
+        SessionUpdate::Read(read) => serde_json::json!({"kind": "read", "bootstrap": project_conversation_read(read)?}),
+        SessionUpdate::Content { token, update } => match update {
+            aludock_client_core::ContentUpdate::CheckpointBegin { read } => serde_json::json!({"kind":"content", "token":token, "change":{"kind":"checkpoint_begin", "bootstrap":project_conversation_read(read)?}}),
+            aludock_client_core::ContentUpdate::StoredRecord { .. } => return Err(CommandError::from(ClientError::Protocol("unresolved local content record".into()))),
+            update => serde_json::json!({"kind":"content", "token":token, "change":update}),
+        },
+        SessionUpdate::ReplayEvent { token, event } => serde_json::json!({"kind":"event", "replayToken":token, "event":project_event(event)?}),
+        SessionUpdate::Event(event) => serde_json::json!({"kind": "event", "event": project_event(event)?}),
+        SessionUpdate::Replaced(target) => serde_json::json!({"kind": "replaced", "target": target}),
+        SessionUpdate::Status { state, message } => serde_json::json!({"kind": "status", "state": state, "message": message}),
+    })
+}
+fn project_session_snapshot(snapshot: aludock_client_core::SessionSnapshot, replacement: bool) -> Result<Value, CommandError> {
+    let replacement = replacement || (snapshot.read.is_none() && snapshot.target.is_some());
+    let bootstrap = match snapshot.read.map(|read| project_conversation_read((*read).clone())).transpose() {
+        Ok(bootstrap) => bootstrap,
+        Err(error) if replacement => return Ok(serde_json::json!({"kind":"replacement_snapshot", "target":snapshot.target,
+            "state":"content_error", "message":error.message})),
+        Err(error) => return Err(error),
+    };
+    Ok(serde_json::json!({"kind": if replacement { "replacement_snapshot" } else { "snapshot" }, "bootstrap": bootstrap,
+        "target": snapshot.target, "state": snapshot.state, "message": snapshot.message, "contentToken": snapshot.content_token, "canLoadEarlier": snapshot.can_load_earlier}))
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn start_conversation_follow(
@@ -3422,116 +3274,147 @@ async fn start_conversation_follow(
     selection_generation: u64,
     app: tauri::AppHandle,
     state: tauri::State<'_, FollowState>,
+    restored_images: tauri::State<'_, RestoredImageState>,
     instance_id: String,
     subscription_id: String,
-    cursor: EventCursor,
+    host_epoch: String,
+    refresh: bool,
 ) -> Result<(), CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let key = observation_key(&runtime, &connection_id, &instance_id, &host_epoch)?;
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     let mut guard = state.task.lock().map_err(|_| follow_state_error())?;
-    if let Some(task) = guard.take() {
-        task.handle.abort();
-    }
+    if let Some(task) = guard.take() { task.handle.abort(); }
+    let observation = state.observation.clone();
+    let mut binding = match observation.bind(key.clone(), client, instance_id.clone(), host_epoch.clone(), refresh) {
+        Ok(binding) => binding,
+        Err(error) => {
+            let state = if matches!(&error, ClientError::Storage { .. }) { "storage_error" } else { "disconnected" };
+            let _ = app.emit("aludock://observation", serde_json::json!({"connectionId": connection_id,
+                "selectionGeneration": selection_generation, "instanceId": instance_id, "subscriptionId": subscription_id,
+                "revision": 0, "update": {"kind":"binding_error", "state":state, "message":"对话暂时无法恢复，请检查连接和本地空间后重试。"}}));
+            return Err(CommandError::from(error));
+        }
+    };
     let followed_host = connection_id.clone();
     let followed_instance = instance_id.clone();
     let followed_subscription = subscription_id.clone();
+    let content_key = key.clone();
+    let restored_images = restored_images.inner().clone();
+    let (acknowledge, mut acknowledged) = tokio::sync::watch::channel(0u64);
+    let delivery = Arc::new(AtomicU64::new(0));
+    let issued_delivery = delivery.clone();
     let task = tauri::async_runtime::spawn(async move {
-        let status = |state: &str, message: Option<String>| FollowStatus {
-            connection_id: followed_host.clone(),
-            selection_generation,
-            instance_id: followed_instance.clone(),
-            subscription_id: followed_subscription.clone(),
-            state: state.to_owned(),
-            message,
+        let emit = |delivery: u64, revision: u64, update: Result<Value, CommandError>| {
+            issued_delivery.store(delivery, Ordering::Release);
+            let valid = update.is_ok();
+            let update = update.unwrap_or_else(|error| serde_json::json!({"kind":"binding_error", "state":"content_error", "message":error.message}));
+            let _ = app.emit("aludock://observation", serde_json::json!({
+                "connectionId": followed_host, "selectionGeneration": selection_generation,
+                "instanceId": followed_instance, "subscriptionId": followed_subscription,
+                "revision": revision, "deliveryId": delivery, "update": update,
+            }));
+            valid
         };
-        let (initial, mut stream) = match client.follow_instance(&followed_instance, &cursor).await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = app.emit(
-                    "aludock://follow-status",
-                    status("disconnected", Some(error.to_string())),
-                );
-                return;
+        let clear_replaced_images = |snapshot: &aludock_client_core::SessionSnapshot| {
+            if let Some(target) = &snapshot.target {
+                restored_images.clear_scope(&restored_image_scope(&followed_host, selection_generation, &followed_instance,
+                    target.owner_host_epoch.as_deref().unwrap_or_default(), target.runtime_generation));
             }
         };
-        if initial.truncated || initial.epoch_changed || initial.generation_changed {
-            let _ = app.emit("aludock://follow-status", status("resync_required", None));
-            return;
-        }
-        let _ = app.emit("aludock://follow-status", status("connected", None));
-        for event in initial.events {
-            let projected = match project_event(event) {
-                Ok(event) => event,
-                Err(error) => {
-                    let _ = app.emit(
-                        "aludock://follow-status",
-                        status("disconnected", Some(error.to_string())),
-                    );
-                    return;
-                }
-            };
-            let _ = app.emit(
-                "aludock://conversation-event",
-                FollowEmission {
-                    connection_id: followed_host.clone(),
-                    selection_generation,
-                    instance_id: followed_instance.clone(),
-                    subscription_id: followed_subscription.clone(),
-                    event: projected,
-                },
-            );
-        }
+        let mut delivery = 1;
+        let mut replay_failed = !emit(delivery, binding.snapshot.revision, project_session_snapshot(binding.snapshot.clone(), false));
+        let mut priority_in_flight = false;
         loop {
-            match stream.next_event().await {
-                Ok(event) => {
-                    let replacement = event.event_type == "session.replaced";
-                    let projected = match project_event(event) {
-                        Ok(event) => event,
-                        Err(error) => {
-                            let _ = app.emit(
-                                "aludock://follow-status",
-                                status("disconnected", Some(error.to_string())),
-                            );
-                            return;
+            if replay_failed {
+                // A bad local body stream remains visibly failed, but cannot
+                // hide a later authoritative /new behind that broken stream.
+                // Wait for an actual replacement, never retry/rebind the same tail.
+                if !binding.replacement_changed().await { return; }
+                if let Some(snapshot) = binding.take_replacement() {
+                    clear_replaced_images(&snapshot);
+                    delivery += 1; priority_in_flight = true;
+                    replay_failed = !emit(delivery, snapshot.revision, project_session_snapshot(snapshot, true));
+                }
+                continue;
+            }
+            // One data batch in flight. A new Session/branch may preempt that
+            // obsolete batch with one priority checkpoint; further replacements
+            // coalesce until its ACK. Ordinary lag never restarts replay.
+            while *acknowledged.borrow_and_update() < delivery {
+                if priority_in_flight {
+                    if acknowledged.changed().await.is_err() { return; }
+                } else {
+                    tokio::select! {
+                        result = acknowledged.changed() => { if result.is_err() { return; } }
+                        ready = binding.replacement_changed() => {
+                            if !ready { return; }
+                            if let Some(snapshot) = binding.take_replacement() {
+                                clear_replaced_images(&snapshot);
+                                delivery += 1; priority_in_flight = true;
+                                if !emit(delivery, snapshot.revision, project_session_snapshot(snapshot, true)) { return; }
+                            }
                         }
-                    };
-                    let _ = app.emit(
-                        "aludock://conversation-event",
-                        FollowEmission {
-                            connection_id: followed_host.clone(),
-                            selection_generation,
-                            instance_id: followed_instance.clone(),
-                            subscription_id: followed_subscription.clone(),
-                            event: projected,
-                        },
-                    );
-                    if replacement {
-                        let _ =
-                            app.emit("aludock://follow-status", status("resync_required", None));
-                        return;
                     }
                 }
+            }
+            priority_in_flight = false;
+            if let Some(snapshot) = binding.take_replacement() {
+                clear_replaced_images(&snapshot);
+                delivery += 1; priority_in_flight = true;
+                if !emit(delivery, snapshot.revision, project_session_snapshot(snapshot, true)) { return; }
+                continue;
+            }
+            let replay = binding.next_batch().await;
+            // A replacement can arrive while this one bounded batch is being
+            // read. It supersedes both obsolete data and an obsolete read error.
+            if let Some(snapshot) = binding.take_replacement() {
+                clear_replaced_images(&snapshot);
+                delivery += 1; priority_in_flight = true;
+                replay_failed = !emit(delivery, snapshot.revision, project_session_snapshot(snapshot, true));
+                continue;
+            }
+            match replay {
+                Ok(commits) if commits.is_empty() => break,
+                Ok(commits) => {
+                    let revision = commits.last().unwrap().revision;
+                    let updates = commits.into_iter().map(|commit| {
+                        if let aludock_client_core::SessionUpdate::Replaced(target) = &commit.update {
+                            restored_images.clear_scope(&restored_image_scope(&followed_host, selection_generation, &followed_instance,
+                                target.owner_host_epoch.as_deref().unwrap_or_default(), target.runtime_generation));
+                        }
+                        Ok(serde_json::json!({"revision":commit.revision,"update":project_session_update(commit.update)?}))
+                    }).collect::<Result<Vec<Value>, CommandError>>();
+                    delivery += 1;
+                    replay_failed = !emit(delivery, revision, updates.map(|updates| serde_json::json!({"kind":"batch","updates":updates})));
+                }
                 Err(error) => {
-                    let _ = app.emit(
-                        "aludock://follow-status",
-                        status("disconnected", Some(error.to_string())),
-                    );
-                    return;
+                    let state = if matches!(&error, ClientError::Storage { .. }) { "storage_error" } else { "disconnected" };
+                    // Display-binding failure is separate from accepted content
+                    // revision: never invent a revision that could hide a commit.
+                    let _ = app.emit("aludock://observation", serde_json::json!({"connectionId":followed_host,
+                        "selectionGeneration":selection_generation,"instanceId":followed_instance,"subscriptionId":followed_subscription,
+                        "revision":0,"update":{"kind":"binding_error","state":state,"message":"本地对话暂时无法读取，请检查可用空间后重试。"}}));
+                    replay_failed = true;
                 }
             }
         }
     });
-    *guard = Some(FollowTask {
-        handle: task,
-        connection_id,
-        selection_generation,
-        instance_id,
-        subscription_id,
-    });
+    *guard = Some(FollowTask { delivery, acknowledge, content_key, host_epoch, handle: task, connection_id, selection_generation, instance_id, subscription_id });
     drop(lifecycle);
+    Ok(())
+}
+
+#[tauri::command]
+fn acknowledge_conversation_follow(state: tauri::State<'_, FollowState>, connection_id: String, selection_generation: u64,
+    instance_id: String, subscription_id: String, delivery_id: u64) -> Result<(), CommandError> {
+    let guard = state.task.lock().map_err(|_| follow_state_error())?;
+    if let Some(task) = guard.as_ref().filter(|task| task.connection_id == connection_id && task.selection_generation == selection_generation
+        && task.instance_id == instance_id && task.subscription_id == subscription_id && task.delivery.load(Ordering::Acquire) == delivery_id) {
+        task.acknowledge.send_if_modified(|accepted| { if delivery_id > *accepted { *accepted = delivery_id; true } else { false } });
+    }
     Ok(())
 }
 
@@ -3928,39 +3811,7 @@ async fn set_extension_widget_viewport(
     Ok(result)
 }
 
-#[tauri::command]
-async fn set_extension_tools_expanded(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    connection_id: String,
-    selection_generation: u64,
-    instance_id: String,
-    expected_host_epoch: String,
-    expected_runtime_generation: u64,
-    expanded: bool,
-) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let operation_id = uuid::Uuid::new_v4().to_string();
-    let snapshot = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .set_tools_expanded(
-            &instance_id,
-            expected_runtime_generation,
-            expanded,
-            Some(&operation_id),
-        )
-        .await
-        .map_err(CommandError::from)?;
-    if snapshot.owner_host_epoch.as_deref() != Some(expected_host_epoch.as_str()) {
-        return Err(CommandError::from(ClientError::EffectUnknown {
-            operation_id,
-            message: "tools-expanded result changed Host epoch".into(),
-        }));
-    }
-    Ok(snapshot)
-}
-
 const MSG_ATTACHMENT_SOURCE_UNAVAILABLE: &str = "无法读取所选附件。";
-#[cfg(target_os = "android")]
-const MSG_ATTACHMENT_STAGE_FAILED: &str = "无法暂存所选附件。";
 const MSG_ATTACHMENT_NOT_PLAIN_FILE: &str = "只能选择本机普通文件。";
 fn msg_attachment_too_large() -> String {
     format!(
@@ -3970,7 +3821,7 @@ fn msg_attachment_too_large() -> String {
 }
 fn msg_attachment_selection_full() -> String {
     format!(
-        "每个工作最多选择 {} 个待上传附件。",
+        "本次最多选择 {} 个附件，请减少选择后重试。",
         MAX_ATTACHMENTS_PER_MESSAGE
     )
 }
@@ -3978,7 +3829,6 @@ const MSG_PASTE_CONTEXT_LOST: &str = "无法读取粘贴图片的上下文，请
 const MSG_CLIPBOARD_IMAGE_INVALID: &str = "剪贴板中的图片数据无效，请重新复制。";
 const MSG_PASTE_STAGE_FAILED: &str = "无法暂存粘贴的图片，请重试或使用附件按钮。";
 const MSG_ATTACHMENT_PREVIEW_LOST: &str = "这个附件已无法预览，请重新选择。";
-const MSG_ATTACHMENT_SOURCE_CHANGED: &str = "附件源文件发生了变化，请重新选择。";
 
 fn attachment_command_error(code: &str, message: &str) -> CommandError {
     CommandError {
@@ -4050,21 +3900,21 @@ async fn verify_attachment_target(
 fn attachment_scope_matches(
     entry: &NativeAttachment,
     connection_id: &str,
-    selection_generation: u64,
+    authority: &str,
     work_id: &str,
 ) -> bool {
     entry.connection_id == connection_id
-        && entry.selection_generation == selection_generation
+        && entry.authority == authority
         && entry.work_id == work_id
 }
 
 fn ensure_attachment_scope(
     entry: &NativeAttachment,
     connection_id: &str,
-    selection_generation: u64,
+    authority: &str,
     work_id: &str,
 ) -> Result<(), CommandError> {
-    if attachment_scope_matches(entry, connection_id, selection_generation, work_id) {
+    if attachment_scope_matches(entry, connection_id, authority, work_id) {
         Ok(())
     } else {
         Err(attachment_command_error(
@@ -4097,15 +3947,6 @@ fn fallback_attachment_name(media_type: Option<&str>) -> String {
         Some(extension) => format!("附件-{}.{}", uuid::Uuid::new_v4(), extension),
         None => format!("附件-{}", uuid::Uuid::new_v4()),
     }
-}
-
-#[cfg(target_os = "android")]
-fn copy_bounded_attachment(
-    source: &mut impl Read,
-    target: &mut impl Write,
-    maximum_bytes: u64,
-) -> std::io::Result<u64> {
-    std::io::copy(&mut source.take(maximum_bytes.saturating_add(1)), target)
 }
 
 #[cfg(target_os = "android")]
@@ -4201,7 +4042,8 @@ async fn describe_android_picked_file(
 async fn stage_android_picked_file(
     app: &tauri::AppHandle,
     file: FilePath,
-) -> Result<(PathBuf, String, u64, Option<String>), CommandError> {
+    content: aludock_client_core::SessionContent,
+) -> Result<(Arc<AttachmentSource>, String, Option<String>), CommandError> {
     let description = describe_android_picked_file(app, &file).await?;
     let media_type = normalized_media_type(description.media_type.as_deref());
     let name = description
@@ -4212,85 +4054,25 @@ async fn stage_android_picked_file(
         .unwrap_or_else(|| fallback_attachment_name(media_type.as_deref()));
     let media_type =
         media_type.or_else(|| mime_guess::from_path(&name).first_raw().map(str::to_owned));
-    let staging_directory = app
-        .path()
-        .app_cache_dir()
-        .map_err(|_| {
-            attachment_command_error(
-                "attachment_source_unavailable",
-                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
-            )
-        })?
-        .join("attachment-staging");
-    let staging_path =
-        staging_directory.join(format!("aludock-selection-{}.part", uuid::Uuid::new_v4()));
     let staging_app = app.clone();
-    let copied_path = staging_path.clone();
-    let size_bytes = tokio::task::spawn_blocking(move || {
-        fs::create_dir_all(&staging_directory).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_STAGE_FAILED)
+    let source = tokio::task::spawn_blocking(move || {
+        let mut options = PluginOpenOptions::new();
+        options.read(true);
+        let reader = staging_app.fs().open(file, options).map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?;
-        let mut source_options = PluginOpenOptions::new();
-        source_options.read(true);
-        let mut source = staging_app.fs().open(file, source_options).map_err(|_| {
-            attachment_command_error(
-                "attachment_source_unavailable",
-                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
-            )
-        })?;
-        let mut target_options = OpenOptions::new();
-        target_options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            target_options.mode(0o600);
-        }
-        let mut target = target_options.open(&copied_path).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_STAGE_FAILED)
-        })?;
-        let copied = match copy_bounded_attachment(&mut source, &mut target, MAX_ATTACHMENT_BYTES) {
-            Ok(copied) => copied,
-            Err(_) => {
-                drop(target);
-                let _ = fs::remove_file(&copied_path);
-                return Err(attachment_command_error(
-                    "attachment_source_unavailable",
-                    MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
-                ));
-            }
-        };
-        if copied > MAX_ATTACHMENT_BYTES {
-            drop(target);
-            let _ = fs::remove_file(&copied_path);
-            return Err(attachment_command_error(
-                "attachment_too_large",
-                &msg_attachment_too_large(),
-            ));
-        }
-        if target.flush().is_err() {
-            drop(target);
-            let _ = fs::remove_file(&copied_path);
-            return Err(attachment_command_error(
-                "attachment_source_unavailable",
-                MSG_ATTACHMENT_STAGE_FAILED,
-            ));
-        }
-        Ok(copied)
-    })
-    .await
-    .map_err(|_| lifecycle_error())??;
-    Ok((staging_path, name, size_bytes, media_type))
+        // The blocking task returns a lease, not a naked staging path. If its
+        // IPC waiter disappears, dropping the result cleans this private source.
+        content.import_attachment(reader).map_err(CommandError::from)
+    }).await.map_err(|_| lifecycle_error())??;
+    Ok((source, name, media_type))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_native_attachment(
-    path: PathBuf,
-    temporary: bool,
+    source: Arc<AttachmentSource>,
     connection_id: String,
-    selection_generation: u64,
     work_id: String,
     name: String,
-    size_bytes: u64,
     media_type: Option<String>,
 ) -> PreparedAttachment {
     let token = uuid::Uuid::new_v4().to_string();
@@ -4299,22 +4081,10 @@ fn prepare_native_attachment(
         SelectedAttachment {
             token,
             name: name.clone(),
-            size_bytes,
+            size_bytes: source.size_bytes(),
             media_type: media_type.clone(),
         },
-        NativeAttachment {
-            path,
-            temporary,
-            connection_id,
-            selection_generation,
-            work_id,
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            name,
-            size_bytes,
-            media_type,
-            upload_scope: None,
-            active_attempt: None,
-        },
+        NativeAttachment::new(source, connection_id, work_id, name, media_type),
     )
 }
 
@@ -4367,9 +4137,9 @@ fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
 }
 
 fn prepare_clipboard_image(
+    content: &aludock_client_core::SessionContent,
     bytes: Vec<u8>,
     connection_id: String,
-    selection_generation: u64,
     work_id: String,
     image_index: usize,
 ) -> Result<PreparedAttachment, CommandError> {
@@ -4391,39 +4161,10 @@ fn prepare_clipboard_image(
     } else {
         format!("粘贴的图片-{image_index}.{extension}")
     };
-    let path = std::env::temp_dir().join(format!(
-        "aludock-client-clipboard-{}.{}",
-        uuid::Uuid::new_v4(),
-        extension
-    ));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&path).map_err(|_| {
+    let source = content.import_attachment(bytes.as_slice()).map_err(|_| {
         attachment_command_error("clipboard_image_unavailable", MSG_PASTE_STAGE_FAILED)
     })?;
-    if file.write_all(&bytes).and_then(|_| file.flush()).is_err() {
-        let _ = fs::remove_file(&path);
-        return Err(attachment_command_error(
-            "clipboard_image_unavailable",
-            MSG_PASTE_STAGE_FAILED,
-        ));
-    }
-    drop(file);
-    Ok(prepare_native_attachment(
-        path,
-        true,
-        connection_id,
-        selection_generation,
-        work_id,
-        name,
-        bytes.len() as u64,
-        Some(media_type.to_owned()),
-    ))
+    Ok(prepare_native_attachment(source, connection_id, work_id, name, Some(media_type.to_owned())))
 }
 
 fn publish_selected_attachments(
@@ -4431,29 +4172,20 @@ fn publish_selected_attachments(
     state: &AttachmentState,
     connection_id: &str,
     selection_generation: u64,
-    work_id: &str,
     prepared: Vec<PreparedAttachment>,
+    authority: &str,
 ) -> Result<Vec<SelectedAttachment>, CommandError> {
     // Match set_active_host's lock order so generation validation and native-path
     // publication form one atomic lifecycle operation.
     let lifecycle = lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_connection_selection(&lifecycle, connection_id, selection_generation)?;
-    let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
-    let current = entries
-        .values()
-        .filter(|entry| {
-            attachment_scope_matches(entry, connection_id, selection_generation, work_id)
-        })
-        .count();
-    if prepared.len() > MAX_ATTACHMENTS_PER_MESSAGE.saturating_sub(current) {
-        return Err(attachment_command_error(
-            "attachment_limit_exceeded",
-            &msg_attachment_selection_full(),
-        ));
+    if prepared.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(attachment_command_error("attachment_limit_exceeded", &msg_attachment_selection_full()));
     }
     let mut selected = Vec::with_capacity(prepared.len());
-    for (token, item, entry) in prepared {
-        entries.insert(token, entry);
+    for (token, item, mut entry) in prepared {
+        entry.authority = authority.to_owned();
+        state.insert(token, entry);
         selected.push(item);
     }
     Ok(selected)
@@ -5163,22 +4895,6 @@ async fn pick_attachments(
         &connection_id,
         selection_generation,
     )?);
-    let existing = state
-        .entries
-        .lock()
-        .map_err(|_| lifecycle_error())?
-        .values()
-        .filter(|entry| {
-            attachment_scope_matches(entry, &connection_id, selection_generation, &work_id)
-        })
-        .count();
-    if existing >= MAX_ATTACHMENTS_PER_MESSAGE {
-        return Err(attachment_command_error(
-            "attachment_limit_exceeded",
-            &msg_attachment_selection_full(),
-        ));
-    }
-
     #[cfg(target_os = "android")]
     let files = android_documents::pick_recent_files(&app)
         .await
@@ -5197,7 +4913,7 @@ async fn pick_attachments(
         };
         files
     };
-    if files.len() > MAX_ATTACHMENTS_PER_MESSAGE - existing {
+    if files.len() > MAX_ATTACHMENTS_PER_MESSAGE {
         return Err(attachment_command_error(
             "attachment_limit_exceeded",
             &msg_attachment_selection_full(),
@@ -5207,7 +4923,7 @@ async fn pick_attachments(
     let mut prepared = Vec::with_capacity(files.len());
     for file in files {
         let local_path = file.clone().into_path();
-        let (path, temporary, name, size_bytes, media_type) = match local_path {
+        let (source, name, media_type) = match local_path {
             Ok(path) => {
                 let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
                     attachment_command_error(
@@ -5236,14 +4952,16 @@ async fn pick_attachments(
                     })?
                     .to_owned();
                 let media_type = mime_guess::from_path(&path).first_raw().map(str::to_owned);
-                (path, false, name, metadata.len(), media_type)
+                let content = state.content.clone();
+                let source = tokio::task::spawn_blocking(move || {
+                    content.import_attachment_file(&path).map_err(CommandError::from)
+                }).await.map_err(|_| lifecycle_error())??;
+                (source, name, media_type)
             }
             Err(_) => {
                 #[cfg(target_os = "android")]
                 {
-                    let (path, name, size_bytes, media_type) =
-                        stage_android_picked_file(&app, file).await?;
-                    (path, true, name, size_bytes, media_type)
+                    stage_android_picked_file(&app, file, state.content.clone()).await?
                 }
                 #[cfg(not(target_os = "android"))]
                 {
@@ -5255,13 +4973,10 @@ async fn pick_attachments(
             }
         };
         prepared.push(prepare_native_attachment(
-            path,
-            temporary,
+            source,
             connection_id.clone(),
-            selection_generation,
             work_id.clone(),
             name,
-            size_bytes,
             media_type,
         ));
     }
@@ -5271,8 +4986,8 @@ async fn pick_attachments(
         &state,
         &connection_id,
         selection_generation,
-        &work_id,
         prepared,
+        &attachment_authority(&runtime, &connection_id)?,
     )
 }
 
@@ -5302,11 +5017,12 @@ async fn stage_clipboard_image(
     let bytes = request_image_bytes(&request)?;
     let prepared_connection = connection_id.clone();
     let prepared_work = work_id.clone();
+    let content = state.content.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_clipboard_image(
+            &content,
             bytes,
             prepared_connection,
-            selection_generation,
             prepared_work,
             image_index,
         )
@@ -5318,8 +5034,8 @@ async fn stage_clipboard_image(
         &state,
         &connection_id,
         selection_generation,
-        &work_id,
         vec![prepared],
+        &attachment_authority(&runtime, &connection_id)?,
     )?
     .into_iter()
     .next()
@@ -5334,13 +5050,13 @@ async fn attachment_preview(
     selection_generation: u64,
     work_id: String,
     token: String,
-) -> Result<Response, CommandError> {
+) -> Result<aludock_client_core::MediaHandle, CommandError> {
     drop(resolve_connection_store(
         &runtime,
         &connection_id,
         selection_generation,
     )?);
-    let (path, operation_id, size_bytes, media_type) = {
+    let (source, operation_id, media_type) = {
         let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
         let entry = entries.get(&token).ok_or_else(|| {
             attachment_command_error(
@@ -5348,7 +5064,7 @@ async fn attachment_preview(
                 MSG_ATTACHMENT_PREVIEW_LOST,
             )
         })?;
-        ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
+        ensure_attachment_scope(entry, &connection_id, &attachment_authority(&runtime, &connection_id)?, &work_id)?;
         if entry.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
             return Err(attachment_command_error(
                 "attachment_preview_too_large",
@@ -5356,28 +5072,15 @@ async fn attachment_preview(
             ));
         }
         (
-            entry.path.clone(),
+            entry.source.clone(),
             entry.operation_id.clone(),
-            entry.size_bytes,
             entry.media_type.clone(),
         )
     };
-    let bytes = tokio::task::spawn_blocking(move || fs::read(path))
-        .await
-        .map_err(|_| lifecycle_error())?
-        .map_err(|_| {
-            attachment_command_error(
-                "attachment_preview_unavailable",
-                "无法读取这个图片附件，但仍可发送。",
-            )
-        })?;
-    if bytes.len() as u64 != size_bytes {
-        return Err(attachment_command_error(
-            "attachment_source_changed",
-            MSG_ATTACHMENT_SOURCE_CHANGED,
-        ));
-    }
-    validate_renderable_image(&bytes, media_type.as_deref())?;
+    let content = state.content.clone();
+    let media = tokio::task::spawn_blocking(move || content.attachment_preview(source, media_type.as_deref().unwrap_or_default()))
+        .await.map_err(|_| lifecycle_error())?.map_err(|_| attachment_command_error(
+            "attachment_preview_unavailable", "无法预览这个图片附件，但仍可发送。"))?;
     drop(resolve_connection_store(
         &runtime,
         &connection_id,
@@ -5390,7 +5093,7 @@ async fn attachment_preview(
             MSG_ATTACHMENT_PREVIEW_LOST,
         )
     })?;
-    ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
+    ensure_attachment_scope(entry, &connection_id, &attachment_authority(&runtime, &connection_id)?, &work_id)?;
     if entry.operation_id != operation_id {
         return Err(attachment_command_error(
             "attachment_preview_unavailable",
@@ -5398,7 +5101,17 @@ async fn attachment_preview(
         ));
     }
     drop(entries);
-    Ok(Response::new(bytes))
+    Ok(media)
+}
+
+#[tauri::command]
+fn attachment_snapshot(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    state: tauri::State<'_, AttachmentState>,
+    connection_id: String, selection_generation: u64, work_id: String,
+) -> Result<AttachmentSnapshot, CommandError> {
+    drop(resolve_connection_store(&runtime, &connection_id, selection_generation)?);
+    Ok(state.snapshot(&attachment_authority(&runtime, &connection_id)?, &work_id))
 }
 
 #[tauri::command]
@@ -5406,211 +5119,100 @@ async fn upload_attachment(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
-    connection_id: String,
-    selection_generation: u64,
-    work_id: String,
-    target_machine_host_id: String,
-    expected_host_epoch: String,
-    expected_runtime_generation: u64,
-    token: String,
-) -> Result<AttachmentUploadResult, CommandError> {
+    connection_id: String, selection_generation: u64, work_id: String,
+    target_machine_host_id: String, expected_host_epoch: String,
+    expected_runtime_generation: u64, token: String,
+) -> Result<(), CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let upload_scope = AttachmentUploadScope {
-        machine_host_id: target_machine_host_id,
-        owner_host_epoch: expected_host_epoch,
-        runtime_generation: expected_runtime_generation,
-    };
+    let upload_scope = AttachmentUploadScope { machine_host_id: target_machine_host_id,
+        owner_host_epoch: expected_host_epoch, runtime_generation: expected_runtime_generation };
     verify_attachment_target(&client, &work_id, &upload_scope).await?;
-    let (path, operation_id, name, media_type, cancellation, attempt_id) = {
-        let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
-        let entry = entries.get_mut(&token).ok_or_else(|| {
-            attachment_command_error("attachment_not_found", "附件选择已失效，请重新选择。")
-        })?;
-        ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
-        if entry.active_attempt.is_some() {
-            return Err(attachment_command_error(
-                "attachment_upload_in_progress",
-                "此附件正在上传。",
-            ));
-        }
-        if entry.upload_scope.as_ref() != Some(&upload_scope) {
-            entry.operation_id = uuid::Uuid::new_v4().to_string();
-            entry.upload_scope = Some(upload_scope.clone());
-        }
-        let metadata = std::fs::symlink_metadata(&entry.path).map_err(|_| {
-            attachment_command_error(
-                "attachment_source_unavailable",
-                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
-            )
-        })?;
-        if !metadata.file_type().is_file() || metadata.len() != entry.size_bytes {
-            return Err(attachment_command_error(
-                "attachment_source_changed",
-                MSG_ATTACHMENT_SOURCE_CHANGED,
-            ));
-        }
-        let cancellation = AttachmentUploadCancellation::new();
-        let attempt_id = uuid::Uuid::new_v4().to_string();
-        entry.active_attempt = Some(AttachmentAttempt {
-            id: attempt_id.clone(),
-            cancellation: cancellation.clone(),
-        });
-        (
-            entry.path.clone(),
-            entry.operation_id.clone(),
-            entry.name.clone(),
-            entry.media_type.clone(),
-            cancellation,
-            attempt_id,
-        )
-    };
-
-    let progress_app = app.clone();
-    let progress_host = connection_id.clone();
-    let progress_work = work_id.clone();
-    let progress_token = token.clone();
-    let progress_scope = upload_scope.clone();
-    let result = client
-        .upload_attachment_file(
-            path,
-            &operation_id,
-            &work_id,
-            &name,
-            media_type.as_deref(),
-            &cancellation,
-            move |progress| {
-                let phase = match progress.phase {
-                    AttachmentUploadPhase::Hashing => "hashing",
-                    AttachmentUploadPhase::Uploading => "uploading",
-                    AttachmentUploadPhase::Finalizing => "finalizing",
-                };
-                let _ = progress_app.emit(
-                    "aludock://attachment-progress",
-                    AttachmentProgressEmission {
-                        connection_id: progress_host.clone(),
-                        selection_generation,
-                        work_id: progress_work.clone(),
-                        machine_host_id: progress_scope.machine_host_id.clone(),
-                        owner_host_epoch: progress_scope.owner_host_epoch.clone(),
-                        runtime_generation: progress_scope.runtime_generation,
-                        token: progress_token.clone(),
-                        phase: phase.into(),
-                        bytes_processed: progress.bytes_processed,
-                        total_bytes: progress.total_bytes,
-                    },
-                );
-            },
-        )
-        .await;
-    let result = match result {
-        Ok(result) => verify_attachment_target(&client, &work_id, &upload_scope)
-            .await
-            .map(|()| result),
-        Err(error) => Err(attachment_upload_error(error)),
-    };
-
-    let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
-    let still_current = entries.get(&token).is_some_and(|entry| {
-        attachment_scope_matches(entry, &connection_id, selection_generation, &work_id)
-            && entry.operation_id == operation_id
-            && entry.upload_scope.as_ref() == Some(&upload_scope)
-            && entry
-                .active_attempt
-                .as_ref()
-                .is_some_and(|attempt| attempt.id == attempt_id)
-    });
-    if !still_current {
-        return Err(attachment_command_error(
-            "stale_attachment_context",
-            "附件上下文已失效。",
-        ));
+    // Keep lifecycle validation and starting the owned task in the same admission window.
+    let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+    ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
+    {
+        let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
+        let entry = entries.get(&token).ok_or_else(|| attachment_command_error("attachment_not_found", "附件选择已失效，请重新选择。"))?;
+        ensure_attachment_scope(entry, &connection_id, &attachment_authority(&runtime, &connection_id)?, &work_id)?;
     }
-    match result {
-        Ok(result) => {
-            if let Some(entry) = entries.get_mut(&token) {
-                entry.active_attempt = None;
-            }
-            Ok(result)
-        }
-        Err(error) => {
-            if let Some(entry) = entries.get_mut(&token) {
-                entry.active_attempt = None;
-            }
-            Err(error)
-        }
-    }
+    state.start(&token, upload_scope, client, move |snapshot| {
+        let _ = app.emit("aludock://attachment-progress", snapshot);
+    }).map_err(attachment_upload_error)
 }
 
 #[tauri::command]
 fn cancel_attachment_upload(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    state: tauri::State<'_, AttachmentState>,
-    connection_id: String,
-    selection_generation: u64,
-    work_id: String,
-    token: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>, state: tauri::State<'_, AttachmentState>,
+    connection_id: String, selection_generation: u64, work_id: String, token: String,
 ) -> Result<bool, CommandError> {
-    drop(resolve_connection_store(
-        &runtime,
-        &connection_id,
-        selection_generation,
-    )?);
-    let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
-    let Some(entry) = entries.get(&token) else {
-        return Ok(false);
-    };
-    ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
-    if let Some(attempt) = &entry.active_attempt {
-        attempt.cancellation.cancel();
-        Ok(true)
-    } else {
-        Ok(false)
+    drop(resolve_connection_store(&runtime, &connection_id, selection_generation)?);
+    {
+        let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
+        let Some(entry) = entries.get(&token) else { return Ok(false); };
+        ensure_attachment_scope(entry, &connection_id, &attachment_authority(&runtime, &connection_id)?, &work_id)?;
     }
+    Ok(state.cancel(&token))
 }
 
 #[tauri::command]
 fn remove_attachment(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    state: tauri::State<'_, AttachmentState>,
-    connection_id: String,
-    selection_generation: u64,
-    work_id: String,
-    token: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>, state: tauri::State<'_, AttachmentState>,
+    connection_id: String, selection_generation: u64, work_id: String, token: String,
 ) -> Result<bool, CommandError> {
-    drop(resolve_connection_store(
-        &runtime,
-        &connection_id,
-        selection_generation,
-    )?);
-    let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
-    let Some(entry) = entries.get(&token) else {
-        return Ok(false);
-    };
-    ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
-    if let Some(attempt) = &entry.active_attempt {
-        attempt.cancellation.cancel();
+    drop(resolve_connection_store(&runtime, &connection_id, selection_generation)?);
+    {
+        let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
+        let Some(entry) = entries.get(&token) else { return Ok(false); };
+        ensure_attachment_scope(entry, &connection_id, &attachment_authority(&runtime, &connection_id)?, &work_id)?;
     }
-    entries.remove(&token);
-    Ok(true)
+    Ok(state.remove(&token))
 }
 
 fn restored_image_scope(
     connection_id: &str,
     selection_generation: u64,
     work_id: &str,
+    host_epoch: &str,
+    runtime_generation: u64,
 ) -> RestoredImageScope {
     RestoredImageScope {
+        host_epoch: host_epoch.into(), runtime_generation,
         connection_id: connection_id.to_owned(),
         selection_generation,
         work_id: work_id.to_owned(),
     }
 }
 
+fn operation_association(id: &str, kind: &str, connection: &str, instance: &str, host_epoch: &str,
+    runtime_generation: u64, editor: Value) -> aludock_client_core::OperationAssociation {
+    aludock_client_core::OperationAssociation {
+        operation_id: id.into(), kind: kind.into(), connection_id: connection.into(), instance_id: instance.into(),
+        host_epoch: host_epoch.into(), runtime_generation,
+        session_id: editor["sessionId"].as_str().unwrap_or_default().into(), editor,
+        state: "pending".into(), result: None, error: None,
+    }
+}
+
+#[tauri::command]
+fn pending_operations(operations: tauri::State<'_, aludock_client_core::OperationAssociations>) -> Vec<aludock_client_core::OperationAssociation> {
+    operations.pending()
+}
+#[tauri::command]
+fn consume_operation(operations: tauri::State<'_, aludock_client_core::OperationAssociations>, operation_id: String) {
+    operations.consume(&operation_id);
+}
+
 #[tauri::command]
 async fn submit_message(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_id: String,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
     restored_images: tauri::State<'_, RestoredImageState>,
+    attachments: tauri::State<'_, AttachmentState>,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -5619,53 +5221,89 @@ async fn submit_message(
 ) -> Result<SubmitResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let scope = restored_image_scope(&connection_id, selection_generation, &instance_id);
+    let scope = restored_image_scope(&connection_id, selection_generation, &instance_id, &expected_host_epoch, expected_runtime_generation);
     let captured = restored_images.capture(&scope);
     let attachment_file_ids = attachment_file_ids.unwrap_or_default();
-    let images = captured
-        .as_ref()
-        .map_or(&[][..], |bucket| bucket.images.as_slice());
-    let result = client
-        .submit_message_with_attachments_and_images(
-            &instance_id,
-            &message,
-            &attachment_file_ids,
-            images,
-            DeliveryMode::Auto,
-            None,
-        )
-        .await
-        .map_err(CommandError::from)?;
-    if let Some(bucket) = captured {
-        restored_images.clear_after_success(&scope, &bucket.tokens);
-    }
-    Ok(result)
+    // Freeze these job identities before dispatch. A successful direct/Queue receipt
+    // ends their draft lifetime, but must not retire files selected during this send.
+    let submitted_uploads: Vec<_> = attachments
+        .snapshot(&attachment_authority(&runtime, &connection_id)?, &instance_id)
+        .jobs.into_iter()
+        .filter(|job| job.state == "succeeded"
+            && job.target.as_ref().is_some_and(|target| target.owner_host_epoch == expected_host_epoch
+                && target.runtime_generation == expected_runtime_generation)
+            && job.result.as_ref().is_some_and(|result| attachment_file_ids.contains(&result.attachment.file_id)))
+        .map(|job| job.token).collect();
+    let attachments = attachments.inner().clone();
+    let restored_images = restored_images.inner().clone();
+    let association = operation_association(&operation_id, "submit_message", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        verify_session_scope(&client, &instance_id, &expected_host_epoch, expected_runtime_generation).await?;
+        let images = captured
+            .as_ref()
+            .map_or(&[][..], |bucket| bucket.images.as_slice());
+        let result = client
+            .submit_message_with_attachments_and_images(
+                &instance_id,
+                &message,
+                &attachment_file_ids,
+                images,
+                DeliveryMode::Auto,
+                Some(&operation_id),
+            )
+            .await
+            .map_err(CommandError::from)?;
+        if let Some(bucket) = captured {
+            restored_images.clear_after_success(&scope, &bucket.tokens);
+        }
+        for token in submitted_uploads {
+            attachments.remove(&token);
+        }
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 async fn dequeue_messages(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     restored_images: tauri::State<'_, RestoredImageState>,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SafeQueueDequeueResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let result = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .dequeue_messages(&instance_id, None)
-        .await
-        .map_err(CommandError::from)?;
-    let images = result
-        .receipt
-        .restored
-        .iter()
-        .flat_map(|item| item.images.iter().cloned())
-        .collect();
-    restored_images.append(
-        restored_image_scope(&connection_id, selection_generation, &instance_id),
-        images,
-    );
-    Ok(project_queue_dequeue(result))
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let restored_images = restored_images.inner().clone();
+    let association = operation_association(&operation_id, "dequeue_messages", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        let result = client
+            .dequeue_messages(&instance_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        let images = result
+            .receipt
+            .restored
+            .iter()
+            .flat_map(|item| item.images.iter().cloned())
+            .collect();
+        restored_images.append(
+            restored_image_scope(&connection_id, selection_generation, &instance_id, &expected_host_epoch, expected_runtime_generation),
+            images,
+        );
+        Ok(project_queue_dequeue(result))
+    }).await.map_err(CommandError::from)?
+}
+
+#[tauri::command]
+fn restored_image_count(expected_host_epoch: String, expected_runtime_generation: u64, restored_images: tauri::State<'_, RestoredImageState>, connection_id: String, selection_generation: u64, instance_id: String) -> usize {
+    restored_images.capture(&restored_image_scope(&connection_id, selection_generation, &instance_id, &expected_host_epoch, expected_runtime_generation)).map_or(0, |bucket| bucket.images.len())
 }
 
 #[tauri::command]
@@ -5675,6 +5313,8 @@ fn clear_restored_images(
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
 ) -> Result<RestoredImageCount, CommandError> {
     drop(resolve_connection_store(
         &runtime,
@@ -5686,6 +5326,7 @@ fn clear_restored_images(
             &connection_id,
             selection_generation,
             &instance_id,
+            &expected_host_epoch, expected_runtime_generation,
         )),
     })
 }
@@ -5693,16 +5334,25 @@ fn clear_restored_images(
 #[tauri::command]
 async fn abort_run(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    client
-        .abort_run(&instance_id, None)
-        .await
-        .map_err(CommandError::from)
+    let association = operation_association(&operation_id, "abort_run", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        client
+            .abort_run(&instance_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 fn detach_work_runtime(
@@ -5730,6 +5380,11 @@ fn detach_work_runtime(
 #[tauri::command]
 async fn stop_work(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     follow: tauri::State<'_, FollowState>,
     extension: tauri::State<'_, ExtensionControlState>,
     connection_id: String,
@@ -5737,18 +5392,25 @@ async fn stop_work(
     instance_id: String,
 ) -> Result<StopResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let result = dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .stop_instance(&instance_id, None)
-        .await
-        .map_err(CommandError::from)?;
-    detach_work_runtime(
-        &follow,
-        &extension,
-        &connection_id,
-        selection_generation,
-        &instance_id,
-    );
-    Ok(result)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let follow = follow.inner().clone();
+    let extension = extension.inner().clone();
+    let association = operation_association(&operation_id, "stop_work", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        let result = client
+            .stop_instance(&instance_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        detach_work_runtime(
+            &follow,
+            &extension,
+            &connection_id,
+            selection_generation,
+            &instance_id,
+        );
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -5843,6 +5505,10 @@ async fn command_completions(
 #[tauri::command]
 async fn run_catalog_command(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -5852,40 +5518,44 @@ async fn run_catalog_command(
 ) -> Result<SubmitResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let catalog = client
-        .commands(&instance_id, None)
-        .await
-        .map_err(CommandError::from)?;
-    let valid_name = !name.is_empty()
-        && !name.contains('/')
-        && !name
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
-        && catalog.commands.iter().any(|command| command.name == name);
-    if !valid_name {
-        return Err(CommandError {
-            code: "command_not_in_catalog".into(),
-            message: "所选命令已不在当前 Dock 命令目录中，请刷新后重新选择。".into(),
-            details: None,
-            outcome_unknown: false,
-            operation_id: None,
-        });
-    }
-    let arguments = arguments.trim();
-    let message = if arguments.is_empty() {
-        format!("/{name}")
-    } else {
-        format!("/{name} {arguments}")
-    };
-    client
-        .submit_message(
-            &instance_id,
-            &message,
-            DeliveryMode::Auto,
-            Some(&operation_id),
-        )
-        .await
-        .map_err(CommandError::from)
+    let association = operation_association(&operation_id, "run_catalog_command", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        let catalog = client
+            .commands(&instance_id, None)
+            .await
+            .map_err(CommandError::from)?;
+        let valid_name = !name.is_empty()
+            && !name.contains('/')
+            && !name
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+            && catalog.commands.iter().any(|command| command.name == name);
+        if !valid_name {
+            return Err(CommandError {
+                code: "command_not_in_catalog".into(),
+                message: "所选命令已不在当前 Dock 命令目录中，请刷新后重新选择。".into(),
+                details: None,
+                outcome_unknown: false,
+                operation_id: None,
+            });
+        }
+        let arguments = arguments.trim();
+        let message = if arguments.is_empty() {
+            format!("/{name}")
+        } else {
+            format!("/{name} {arguments}")
+        };
+        client
+            .submit_message(
+                &instance_id,
+                &message,
+                DeliveryMode::Auto,
+                Some(&operation_id),
+            )
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -5905,6 +5575,11 @@ async fn list_models(
 #[tauri::command]
 async fn set_model(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -5912,25 +5587,40 @@ async fn set_model(
     model_id: String,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .set_model(&instance_id, &provider, &model_id, None)
-        .await
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let association = operation_association(&operation_id, "set_model", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        client
+            .set_model(&instance_id, &provider, &model_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 async fn set_thinking(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
     level: ThinkingLevel,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .set_thinking(&instance_id, level, None)
-        .await
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let association = operation_association(&operation_id, "set_thinking", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        client
+            .set_thinking(&instance_id, level, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -5951,17 +5641,27 @@ async fn list_tools(
 #[tauri::command]
 async fn set_active_tools(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
     names: Vec<String>,
 ) -> Result<SafeToolsResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .set_active_tools(&instance_id, &names, None)
-        .await
-        .map(project_tools)
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let association = operation_association(&operation_id, "set_active_tools", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        client
+            .set_active_tools(&instance_id, &names, Some(&operation_id))
+            .await
+            .map(project_tools)
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -5981,16 +5681,26 @@ async fn get_settings(
 #[tauri::command]
 async fn update_setting(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
     update: SettingUpdate,
 ) -> Result<SettingUpdateResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .update_setting(&instance_id, &update, None)
-        .await
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let association = operation_association(&operation_id, "update_setting", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        client
+            .update_setting(&instance_id, &update, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -6116,41 +5826,58 @@ fn project_resources(result: ResourcesResult) -> SafeResourcesResult {
 #[tauri::command]
 async fn reopen_work(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
-    operation_id: Option<String>,
+    operation_id: String,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let continuation = parse_trust_continuation(
-        trust_challenge_id.as_deref(),
-        project_trust_decision.as_deref(),
-        operation_id.clone(),
-    )?;
-    let result = client
-        .reopen_instance(&instance_id, continuation, operation_id.as_deref())
-        .await
-        .map_err(CommandError::from)?;
-    Ok(result.instance)
+    let association = operation_association(&operation_id, "reopen_work", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        let continuation = parse_trust_continuation(
+            trust_challenge_id.as_deref(),
+            project_trust_decision.as_deref(),
+            Some(operation_id.clone()),
+        )?;
+        let result = client
+            .reopen_instance(&instance_id, continuation, Some(operation_id.as_str()))
+            .await
+            .map_err(CommandError::from)?;
+        Ok(result.instance)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 async fn forget_work(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<(), CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    client
-        .forget_instance(&instance_id, None)
-        .await
-        .map_err(CommandError::from)?;
-    Ok(())
+    let association = operation_association(&operation_id, "forget_work", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        client
+            .forget_instance(&instance_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        Ok(())
+    }).await.map_err(CommandError::from)?
 }
 
 fn parse_connection_kind(kind: &str) -> Result<ConnectionKind, CommandError> {
@@ -6962,17 +6689,24 @@ async fn system_content(
 #[tauri::command]
 async fn set_system_default(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
     connection_id: String,
+    expected_host_epoch: String,
     selection_generation: u64,
     cwd: String,
     id: String,
     target_host_id: Option<String>,
 ) -> Result<SystemDefaultSetResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .set_system_default(&cwd, &id, target_host_id.as_deref(), None)
-        .await
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let association = operation_association(&operation_id, "set_system_default", &connection_id, "global", &expected_host_epoch, 0, Value::Null);
+    operations.execute(association, async move {
+        client
+            .set_system_default(&cwd, &id, target_host_id.as_deref(), Some(&operation_id))
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -7317,6 +7051,9 @@ fn resolve_machine_session_token(
 #[tauri::command]
 async fn new_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7326,31 +7063,41 @@ async fn new_session(
 ) -> Result<SessionReplacementResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .new_session(&instance_id, None, Some(&operation_id))
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        !result.cancelled,
-        &operation_id,
-    )?;
-    Ok(result)
+    let association = operation_association(&operation_id, "new_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    let content_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let observation = follow.observation.clone();
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
+            &instance_id,
+            &expected_host_epoch,
+            expected_runtime_generation,
+        )
+        .await?;
+        let result = client
+            .new_session(&instance_id, None, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            !result.cancelled,
+            &operation_id,
+        )?;
+        if !result.cancelled { observation.replace(&content_key, client.clone(), result.instance.clone(), false).map_err(CommandError::from)?; }
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn switch_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, SessionTokenState>,
@@ -7373,36 +7120,45 @@ async fn switch_session(
     )?;
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let continuation = parse_trust_continuation(
-        trust_challenge_id.as_deref(),
-        project_trust_decision.as_deref(),
-        Some(operation_id.clone()),
-    )?;
-    let result = client
-        .switch_session(&instance_id, &session_file, continuation, &operation_id)
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        !result.cancelled,
-        &operation_id,
-    )?;
-    Ok(result)
+    let association = operation_association(&operation_id, "switch_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    let content_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let observation = follow.observation.clone();
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
+            &instance_id,
+            &expected_host_epoch,
+            expected_runtime_generation,
+        )
+        .await?;
+        let continuation = parse_trust_continuation(
+            trust_challenge_id.as_deref(),
+            project_trust_decision.as_deref(),
+            Some(operation_id.clone()),
+        )?;
+        let result = client
+            .switch_session(&instance_id, &session_file, continuation, &operation_id)
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            !result.cancelled,
+            &operation_id,
+        )?;
+        if !result.cancelled { observation.replace(&content_key, client.clone(), result.instance.clone(), false).map_err(CommandError::from)?; }
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn name_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7413,25 +7169,29 @@ async fn name_session(
 ) -> Result<SessionNameResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .name_session(&instance_id, &name, Some(&operation_id))
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        false,
-        &operation_id,
-    )?;
-    Ok(result)
+    let association = operation_association(&operation_id, "name_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
+            &instance_id,
+            &expected_host_epoch,
+            expected_runtime_generation,
+        )
+        .await?;
+        let result = client
+            .name_session(&instance_id, &name, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            false,
+            &operation_id,
+        )?;
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
@@ -7462,6 +7222,8 @@ async fn compaction_prompts(
 #[allow(clippy::too_many_arguments)]
 async fn compact_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7472,34 +7234,41 @@ async fn compact_session(
 ) -> Result<SessionCompactionResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .compact_session(
+    let association = operation_association(&operation_id, "compact_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
             &instance_id,
-            custom_instructions.as_deref(),
-            Some(&operation_id),
+            &expected_host_epoch,
+            expected_runtime_generation,
         )
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        false,
-        &operation_id,
-    )?;
-    Ok(result)
+        .await?;
+        let result = client
+            .compact_session(
+                &instance_id,
+                custom_instructions.as_deref(),
+                Some(&operation_id),
+            )
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            false,
+            &operation_id,
+        )?;
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 async fn reload_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7509,25 +7278,32 @@ async fn reload_session(
 ) -> Result<SafeSessionReload, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .reload_session(&instance_id, Some(&operation_id))
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        true,
-        &operation_id,
-    )?;
-    Ok(project_session_reload(result))
+    let association = operation_association(&operation_id, "reload_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    let content_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let observation = follow.observation.clone();
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
+            &instance_id,
+            &expected_host_epoch,
+            expected_runtime_generation,
+        )
+        .await?;
+        let result = client
+            .reload_session(&instance_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            true,
+            &operation_id,
+        )?;
+        observation.replace(&content_key, client.clone(), result.instance.clone(), false).map_err(CommandError::from)?;
+        Ok(project_session_reload(result))
+    }).await.map_err(CommandError::from)?
 }
 
 fn project_session_reload(result: SessionReloadResult) -> SafeSessionReload {
@@ -7593,6 +7369,9 @@ async fn session_tree(
 #[allow(clippy::too_many_arguments)]
 async fn navigate_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7605,41 +7384,51 @@ async fn navigate_session(
 ) -> Result<SessionNavigateResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .navigate_session(
+    let association = operation_association(&operation_id, "navigate_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    let content_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let observation = follow.observation.clone();
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
             &instance_id,
-            &target_id,
-            NavigateOptions {
-                summarize,
-                custom_instructions: custom_instructions.as_deref(),
-                replace_instructions: false,
-                label: None,
-            },
-            Some(&operation_id),
+            &expected_host_epoch,
+            expected_runtime_generation,
         )
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        false,
-        &operation_id,
-    )?;
-    Ok(result)
+        .await?;
+        let result = client
+            .navigate_session(
+                &instance_id,
+                &target_id,
+                NavigateOptions {
+                    summarize,
+                    custom_instructions: custom_instructions.as_deref(),
+                    replace_instructions: false,
+                    label: None,
+                },
+                Some(&operation_id),
+            )
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            false,
+            &operation_id,
+        )?;
+        if !result.cancelled { observation.replace(&content_key, client.clone(), result.instance.clone(), true).map_err(CommandError::from)?; }
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn fork_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7650,31 +7439,41 @@ async fn fork_session(
 ) -> Result<SessionForkResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .fork_session(&instance_id, &entry_id, Some(&operation_id))
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        !result.cancelled,
-        &operation_id,
-    )?;
-    Ok(result)
+    let association = operation_association(&operation_id, "fork_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    let content_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let observation = follow.observation.clone();
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
+            &instance_id,
+            &expected_host_epoch,
+            expected_runtime_generation,
+        )
+        .await?;
+        let result = client
+            .fork_session(&instance_id, &entry_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            !result.cancelled,
+            &operation_id,
+        )?;
+        if !result.cancelled { observation.replace(&content_key, client.clone(), result.instance.clone(), false).map_err(CommandError::from)?; }
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn clone_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
@@ -7685,32 +7484,41 @@ async fn clone_session(
 ) -> Result<SessionReplacementResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    verify_session_scope(
-        &client,
-        &instance_id,
-        &expected_host_epoch,
-        expected_runtime_generation,
-    )
-    .await?;
-    let result = client
-        .clone_session(&instance_id, &entry_id, Some(&operation_id))
-        .await
-        .map_err(CommandError::from)?;
-    validate_session_mutation_scope(
-        &result.instance,
-        &expected_host_epoch,
-        expected_runtime_generation,
-        !result.cancelled,
-        &operation_id,
-    )?;
-    Ok(result)
+    let association = operation_association(&operation_id, "clone_session", &connection_id, &instance_id,
+        &expected_host_epoch, expected_runtime_generation, operation_editor);
+    let content_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let observation = follow.observation.clone();
+    operations.execute(association, async move {
+        verify_session_scope(
+            &client,
+            &instance_id,
+            &expected_host_epoch,
+            expected_runtime_generation,
+        )
+        .await?;
+        let result = client
+            .clone_session(&instance_id, &entry_id, Some(&operation_id))
+            .await
+            .map_err(CommandError::from)?;
+        validate_session_mutation_scope(
+            &result.instance,
+            &expected_host_epoch,
+            expected_runtime_generation,
+            !result.cancelled,
+            &operation_id,
+        )?;
+        if !result.cancelled { observation.replace(&content_key, client.clone(), result.instance.clone(), false).map_err(CommandError::from)?; }
+        Ok(result)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn adopt_session(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
     connection_id: String,
+    expected_host_epoch: String,
     selection_generation: u64,
     state: tauri::State<'_, SessionTokenState>,
     machine_host_id: String,
@@ -7729,29 +7537,35 @@ async fn adopt_session(
     )?;
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let continuation = parse_trust_continuation(
-        trust_challenge_id.as_deref(),
-        project_trust_decision.as_deref(),
-        operation_id.clone(),
-    )?;
-    client
-        .adopt_instance_for_machine(
-            &session_file,
-            name.as_deref(),
-            continuation,
-            operation_id.as_deref(),
-            Some(&machine_host_id),
-            &inventory_host_epoch,
-        )
-        .await
-        .map_err(CommandError::from)
+    let operation_id = Some(operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+    let association = operation_association(operation_id.as_deref().unwrap(), "adopt_session", &connection_id, "global", &expected_host_epoch, 0, Value::Null);
+    operations.execute(association, async move {
+        let continuation = parse_trust_continuation(
+            trust_challenge_id.as_deref(),
+            project_trust_decision.as_deref(),
+            operation_id.clone(),
+        )?;
+        client
+            .adopt_instance_for_machine(
+                &session_file,
+                name.as_deref(),
+                continuation,
+                operation_id.as_deref(),
+                Some(&machine_host_id),
+                &inventory_host_epoch,
+            )
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn create_work(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
     connection_id: String,
+    expected_host_epoch: String,
     selection_generation: u64,
     cwd: String,
     name: Option<String>,
@@ -7763,22 +7577,26 @@ async fn create_work(
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let continuation = parse_trust_continuation(
-        trust_challenge_id.as_deref(),
-        project_trust_decision.as_deref(),
-        operation_id.clone(),
-    )?;
-    client
-        .create_instance_for_machine(
-            &cwd,
-            name.as_deref(),
-            continuation,
-            operation_id.as_deref(),
-            target_host_id.as_deref(),
-            worker_config.as_ref(),
-        )
-        .await
-        .map_err(CommandError::from)
+    let operation_id = Some(operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()));
+    let association = operation_association(operation_id.as_deref().unwrap(), "create_work", &connection_id, "global", &expected_host_epoch, 0, Value::Null);
+    operations.execute(association, async move {
+        let continuation = parse_trust_continuation(
+            trust_challenge_id.as_deref(),
+            project_trust_decision.as_deref(),
+            operation_id.clone(),
+        )?;
+        client
+            .create_instance_for_machine(
+                &cwd,
+                name.as_deref(),
+                continuation,
+                operation_id.as_deref(),
+                target_host_id.as_deref(),
+                worker_config.as_ref(),
+            )
+            .await
+            .map_err(CommandError::from)
+    }).await.map_err(CommandError::from)?
 }
 
 fn parse_trust_continuation<'a>(
@@ -7857,25 +7675,48 @@ pub fn run() {
         });
 
     builder
+        .register_asynchronous_uri_scheme_protocol("aludock-media", |context, request, responder| {
+            let content = context.app_handle().state::<FollowState>().observation.content.clone();
+            // File delivery is off the WebView/UI thread, bypasses binary IPC,
+            // and resolves only this App's opaque, verified index entries.
+            tauri::async_runtime::spawn_blocking(move || responder.respond(conversation_media_response(&content, request)));
+        })
         .setup(|app| {
             #[cfg(mobile)]
             let application_data_dir = Some(app.path().app_local_data_dir()?);
             #[cfg(not(mobile))]
             let application_data_dir = None;
             app.manage(ConnectionRuntimeState::open(application_data_dir)?);
+            let content = aludock_client_core::SessionContent::in_directory(app.path().app_cache_dir()?.join("conversation-observation"))?;
+            app.manage(AttachmentState::new(content.clone()));
+            app.manage(FollowState { observation: aludock_client_core::ConversationObservation::new(content), ..Default::default() });
             let desktop_shell = desktop_shell::DesktopShellState::initialize(app);
             app.manage(desktop_shell);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);
+            let operations = aludock_client_core::OperationAssociations::default();
+            let mut updates = operations.subscribe();
+            let handle = app.handle().clone();
+            let retained = operations.clone();
+            app.manage(operations);
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match updates.recv().await {
+                        Ok(operation) => { let _ = handle.emit("aludock://operation", operation); }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            for operation in retained.pending() { let _ = handle.emit("aludock://operation", operation); }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
             desktop_shell::finish_setup(app)?;
             Ok(())
         })
-        .manage(FollowState::default())
         .manage(ExtensionControlState::default())
         .manage(PairingTaskState::default())
         .manage(SessionTokenState::default())
-        .manage(AttachmentState::default())
         .manage(RestoredImageState::default())
         .manage(CommandReferenceState::default())
         .invoke_handler(tauri::generate_handler![
@@ -7900,31 +7741,34 @@ pub fn run() {
             reselect_host_route,
             bootstrap,
             work_catalog,
-            conversation_bootstrap,
-            conversation_history,
-            conversation_history_entry,
+            read_conversation_content,
             conversation_image,
+            inline_conversation_image,
             published_image,
             save_preview_image,
             list_deliverables,
             download_deliverable,
             open_saved_deliverable,
             start_conversation_follow,
+            acknowledge_conversation_follow,
             stop_conversation_follow,
             acquire_extension_control,
             release_extension_control,
             respond_extension_interaction,
             set_extension_widget_viewport,
-            set_extension_tools_expanded,
             pick_attachments,
             stage_clipboard_image,
             attachment_preview,
             upload_attachment,
+            attachment_snapshot,
             cancel_attachment_upload,
             remove_attachment,
             submit_message,
+            pending_operations,
+            consume_operation,
             dequeue_messages,
             clear_restored_images,
+            restored_image_count,
             abort_run,
             stop_work,
             command_catalog,
@@ -7987,6 +7831,47 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn media_uri_serves_only_verified_opaque_handles_not_paths() {
+        let root = std::env::temp_dir().join(format!("aludock-media-uri-{}", uuid::Uuid::new_v4()));
+        let content = aludock_client_core::SessionContent::in_directory(root.clone()).unwrap();
+        let scope = aludock_client_core::MediaScope { authority: "local:test".into(), instance_id: "work".into(), host_epoch: "epoch".into(), runtime_generation: 1 };
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        let media = content.inline_image(scope.clone(), "image/png", data).unwrap();
+        let other_domain = aludock_client_core::MediaScope { host_epoch: "later-epoch".into(), ..scope };
+        assert_eq!(content.inline_image(other_domain, "image/png", data).unwrap().handle, media.handle, "verified bytes outlive request domains");
+        let response = conversation_media_response(&content, tauri::http::Request::builder().uri(format!("aludock-media://localhost/{}", media.handle)).body(Vec::new()).unwrap());
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.body().len(), 68);
+        assert!(response.body().starts_with(b"\x89PNG\r\n\x1a\n"));
+        // Frozen-media regression: <img> worked but save's fetch lacked both
+        // connect-src permission and an exact App-origin CORS response.
+        for origin in ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"] {
+            let response = conversation_media_response(&content, tauri::http::Request::builder()
+                .uri(format!("aludock-media://localhost/{}", media.handle)).header("Origin", origin).body(Vec::new()).unwrap());
+            assert_eq!(response.headers()["access-control-allow-origin"], origin);
+            assert_eq!(response.headers()["vary"], "Origin");
+            assert_eq!(response.body().len(), 68);
+        }
+        let untrusted = conversation_media_response(&content, tauri::http::Request::builder()
+            .uri(format!("aludock-media://localhost/{}", media.handle)).header("Origin", "https://untrusted.example").body(Vec::new()).unwrap());
+        assert!(!untrusted.headers().contains_key("access-control-allow-origin"), "a web page cannot read App-private media");
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let connect = config["app"]["security"]["csp"].as_str().unwrap().split(';').find(|rule| rule.trim().starts_with("connect-src ")).unwrap();
+        for source in ["aludock-media:", "http://aludock-media.localhost", "https://aludock-media.localhost"] {
+            assert!(connect.split_whitespace().any(|allowed| allowed == source));
+        }
+        // Arbitrary file access is a security boundary, not a path sanitiser.
+        for path in ["/etc/passwd", "/../owner", "/unknown-handle"] {
+            let response = conversation_media_response(&content, tauri::http::Request::builder().uri(path).body(Vec::new()).unwrap());
+            assert_eq!(response.status(), 404);
+            assert!(response.body().is_empty());
+        }
+        drop(content);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn command_errors_keep_safe_decoding_reason_for_diagnostics() {
@@ -8203,25 +8088,8 @@ mod tests {
     }
 
     #[test]
-    fn render_image_ipc_reassembles_images_larger_than_the_reported_failure() {
-        let bytes = vec![42_u8; 6 * 1_024 * 1_024 + 17];
-        let mut received = Vec::new();
-        let mut chunks = 0;
-        let size = send_render_image_chunks(&bytes, |chunk| {
-            assert!(chunk.len() <= RENDER_IMAGE_IPC_CHUNK_BYTES);
-            received.extend_from_slice(chunk);
-            chunks += 1;
-            Ok::<_, ()>(())
-        })
-        .unwrap();
-        assert!(chunks > 1);
-        assert_eq!(size, bytes.len());
-        assert_eq!(received, bytes);
-    }
-
-    #[test]
     fn saving_a_preview_uses_its_visible_name_and_actual_image_format() {
-        let decoded = decode_image_name("%E7%BB%93%E6%9E%9C%20%E5%9B%BE.png").unwrap();
+        let decoded = "结果 图.png";
         assert_eq!(
             preview_image_save_name(&decoded, "image/png"),
             "结果 图.png"
@@ -8272,6 +8140,69 @@ mod tests {
             selected_client: Arc::new(Mutex::new(None)),
         };
         (path, runtime, host_id)
+    }
+
+    // Android staging regression: both network notifications and manual LAN/WAN
+    // selection invoke this command from a thread without an entered Tokio runtime.
+    // Do not use #[tokio::test], which would hide the crashing IPC boundary.
+    #[test]
+    fn switching_host_addresses_through_ipc_rebinds_without_crashing() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (path, runtime, host_id) = endpoint_runtime("route-ipc");
+        let lan = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let wan = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let store = runtime.registry.resolve_store(Some(&host_id)).unwrap();
+        let original = store.load_connection_profile().unwrap().unwrap();
+        let mut profile = store.update_connection_profile_at(original.revision, |profile| {
+            profile.endpoints[0].endpoint = lan.local_addr().unwrap().to_string().parse().unwrap();
+            let mut remote = profile.endpoints[0].clone();
+            remote.id = uuid::Uuid::new_v4().to_string();
+            remote.kind = ConnectionKind::Remote;
+            remote.endpoint = wan.local_addr().unwrap().to_string().parse().unwrap();
+            profile.endpoints.push(remote);
+            Ok(())
+        }).unwrap();
+        let content = aludock_client_core::SessionContent::in_directory(path.join("content")).unwrap();
+        let key = observation_key(&runtime, &host_id, "work", "epoch").unwrap();
+        let follow = FollowState { observation: aludock_client_core::ConversationObservation::new(content), ..Default::default() };
+        *follow.task.lock().unwrap() = Some(FollowTask {
+            delivery: Arc::new(AtomicU64::new(0)), acknowledge: tokio::sync::watch::channel(0).0,
+            content_key: key.clone(), host_epoch: "epoch".into(),
+            handle: tauri::async_runtime::spawn(std::future::pending()),
+            connection_id: host_id.clone(), selection_generation: 1,
+            instance_id: "work".into(), subscription_id: "view".into(),
+        });
+        let app = tauri::test::mock_builder().manage(runtime).manage(follow.clone())
+            .invoke_handler(tauri::generate_handler![set_connection_policy, reselect_host_route])
+            .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        let invoke = |command: &str, body: Value| {
+            tauri::test::get_ipc_response(&webview, tauri::webview::InvokeRequest {
+                cmd: command.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+                url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+                body: tauri::ipc::InvokeBody::Json(body), headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.into(),
+            }).unwrap()
+        };
+        // Automatic network change, then manual WAN and LAN selection. Only
+        // loopback listeners owned by this test can receive connection attempts.
+        for endpoint in [None, Some(profile.endpoints[1].id.clone()), Some(profile.endpoints[0].id.clone())] {
+            if let Some(endpoint_id) = endpoint {
+                profile = invoke("set_connection_policy", serde_json::json!({
+                    "connectionId": host_id, "selectionGeneration": 1,
+                    "expectedRevision": profile.revision, "mode": "fixed", "endpointId": endpoint_id,
+                })).deserialize().unwrap();
+            }
+            let _: bool = invoke("reselect_host_route", serde_json::json!({
+                "connectionId": host_id, "selectionGeneration": 1,
+            })).deserialize().unwrap();
+            assert!(follow.task.lock().unwrap().is_some());
+            assert!(follow.observation.content.bind(&key).is_ok());
+            assert!(tokio::runtime::Handle::try_current().is_err());
+        }
+        follow.abort_matching(&host_id, 1, "work", None).unwrap();
+        drop(webview); drop(app); drop(follow);
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -8346,13 +8277,14 @@ mod tests {
     #[test]
     fn restored_images_are_retained_until_matching_submit_success_or_explicit_clear() {
         let state = RestoredImageState::default();
-        let scope = restored_image_scope("host", 3, "work");
+        let scope = restored_image_scope("host", 3, "work", "epoch", 1);
         let first = ImagePath {
             path: "/native/first.png".into(),
             mime_type: "image/png".into(),
         };
         assert_eq!(state.append(scope.clone(), vec![first]), 1);
         let captured = state.capture(&scope).expect("captured restored image");
+        assert!(state.capture(&restored_image_scope("host", 3, "work", "epoch", 2)).is_none(), "a new Session cannot reuse restored images from the previous runtime");
 
         // A failed submit performs no clear, so the same batch remains available.
         assert_eq!(state.capture(&scope).unwrap().tokens, captured.tokens);
@@ -8386,9 +8318,9 @@ mod tests {
     #[test]
     fn same_host_generation_rebind_preserves_only_that_hosts_restored_images() {
         let state = RestoredImageState::default();
-        let old_scope = restored_image_scope("host-a", 3, "work");
-        let new_scope = restored_image_scope("host-a", 4, "work");
-        let other_scope = restored_image_scope("host-b", 3, "work");
+        let old_scope = restored_image_scope("host-a", 3, "work", "epoch", 1);
+        let new_scope = restored_image_scope("host-a", 4, "work", "epoch", 1);
+        let other_scope = restored_image_scope("host-b", 3, "work", "epoch", 1);
         state.append(
             old_scope.clone(),
             vec![ImagePath {
@@ -8456,25 +8388,15 @@ mod tests {
                 size_bytes: 1,
                 media_type: Some("image/png".into()),
             },
-            NativeAttachment {
-                path: PathBuf::from("/native/stale.png"),
-                temporary: false,
-                connection_id: host_id.clone(),
-                selection_generation: 7,
-                work_id: "work".into(),
-                operation_id: "native-operation".into(),
-                name: "stale.png".into(),
-                size_bytes: 1,
-                media_type: Some("image/png".into()),
-                upload_scope: None,
-                active_attempt: None,
-            },
+            NativeAttachment::new(state.content.import_attachment(&b"x"[..]).unwrap(), host_id.clone(), "work".into(), "stale.png".into(), Some("image/png".into())),
         )];
 
-        let error = publish_selected_attachments(&lifecycle, &state, &host_id, 7, "work", prepared)
+        let private_path = prepared[0].2.source.path().to_owned();
+        let error = publish_selected_attachments(&lifecycle, &state, &host_id, 7, prepared, "authority")
             .unwrap_err();
         assert_eq!(error.code, "stale_connection_selection");
         assert!(state.entries.lock().unwrap().is_empty());
+        assert!(!private_path.exists(), "an obsolete picker must release its unaccepted import");
     }
 
     #[test]
@@ -8601,6 +8523,10 @@ mod tests {
     fn stale_background_detach_keeps_the_new_foreground_follow() {
         let state = FollowState::default();
         *state.task.lock().unwrap() = Some(FollowTask {
+            delivery: Arc::new(AtomicU64::new(0)),
+            acknowledge: tokio::sync::watch::channel(0).0,
+            content_key: "test".into(),
+            host_epoch: "epoch".into(),
             handle: tauri::async_runtime::spawn(std::future::pending()),
             connection_id: "host-a".into(),
             selection_generation: 3,
@@ -8631,15 +8557,16 @@ mod tests {
 
     #[test]
     fn pasted_image_becomes_a_path_free_attachment_and_removes_its_temporary_file() {
+        let content = aludock_client_core::SessionContent::default();
         let prepared = prepare_clipboard_image(
+            &content,
             b"\x89PNG\r\n\x1a\npasted".to_vec(),
             "host-a".into(),
-            7,
             "work-a".into(),
             1,
         )
         .unwrap();
-        let path = prepared.2.path.clone();
+        let path = prepared.2.source.path().to_owned();
         assert!(path.is_file());
         assert_eq!(prepared.1.name, "粘贴的图片.png");
         assert_eq!(prepared.1.media_type.as_deref(), Some("image/png"));
@@ -8657,23 +8584,11 @@ mod tests {
 
     #[test]
     fn attachment_tokens_are_context_scoped_and_serialization_is_path_free() {
-        let entry = NativeAttachment {
-            path: PathBuf::from("/home/private/secret.txt"),
-            temporary: false,
-            connection_id: "host-a".into(),
-            selection_generation: 7,
-            work_id: "work-a".into(),
-            operation_id: "native-operation".into(),
-            name: "secret.txt".into(),
-            size_bytes: 12,
-            media_type: Some("text/plain".into()),
-            upload_scope: None,
-            active_attempt: None,
-        };
-        assert!(attachment_scope_matches(&entry, "host-a", 7, "work-a"));
-        assert!(!attachment_scope_matches(&entry, "host-b", 7, "work-a"));
-        assert!(!attachment_scope_matches(&entry, "host-a", 8, "work-a"));
-        assert!(!attachment_scope_matches(&entry, "host-a", 7, "work-b"));
+        let entry = NativeAttachment::new(aludock_client_core::SessionContent::default().import_attachment(&b"private text"[..]).unwrap(), "host-a".into(), "work-a".into(), "secret.txt".into(), Some("text/plain".into()));
+        assert!(attachment_scope_matches(&entry, "host-a", "", "work-a"));
+        assert!(!attachment_scope_matches(&entry, "host-b", "", "work-a"));
+        assert!(!attachment_scope_matches(&entry, "host-a", "other-authority", "work-a"));
+        assert!(!attachment_scope_matches(&entry, "host-a", "", "work-b"));
 
         let target = AttachmentUploadScope {
             machine_host_id: "machine-a".into(),

@@ -612,6 +612,7 @@ mod tests {
     #[derive(Clone)]
     enum ServerMode {
         CloseBeforeHello,
+        PairingClosed,
         HelloThenClose,
         HelloWithoutCapabilities,
         MissingSystemCapability,
@@ -665,9 +666,10 @@ mod tests {
                 let mode = mode.clone();
                 let requests = task_requests.clone();
                 tokio::spawn(async move {
-                    let Ok(mut stream) = acceptor.accept(tcp).await else {
+                    let Ok(stream) = acceptor.accept(tcp).await else {
                         return;
                     };
+                    let mut stream = tokio::io::BufReader::new(stream);
                     if matches!(mode, ServerMode::CloseBeforeHello) {
                         return;
                     }
@@ -675,6 +677,14 @@ mod tests {
                     else {
                         return;
                     };
+                    if matches!(mode, ServerMode::PairingClosed) {
+                        assert_eq!(hello["type"], "pairing.begin.v1");
+                        write_json_line(&mut stream, &serde_json::json!({
+                            "type": "pairing.error.v1", "code": "pairing_closed",
+                            "message": "Pairing window is closed"
+                        })).await.unwrap();
+                        return;
+                    }
                     let request_id = hello
                         .get("requestId")
                         .and_then(Value::as_str)
@@ -796,6 +806,33 @@ mod tests {
                 acquisition: tokio::sync::Mutex::new(()),
             }),
         }
+    }
+
+    // Trust boundary: direct pairing reads use the same buffered TLS owner;
+    // pin verification still precedes any application data on pinned connects.
+    #[tokio::test]
+    async fn pairing_reads_the_host_reply_and_a_different_pin_cannot_connect() {
+        let host = ClientIdentity::generate().unwrap();
+        let endpoint = spawn_test_host(&host, ServerMode::PairingClosed).await;
+        let directory =
+            std::env::temp_dir().join(format!("aludock-pairing-read-{}", uuid::Uuid::new_v4()));
+        let store = IdentityStore::new(&directory);
+        let error = crate::pair(endpoint.endpoint.clone(), "reader-test", &store, |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ClientError::PairingRejected { code, .. } if code == "pairing_closed")
+        );
+        assert!(!store.is_paired());
+        let client = store.load_or_create_identity().unwrap();
+        let error =
+            crate::tls::connect_tls(&endpoint.endpoint, &client, Some(client.certificate_der()))
+                .await
+                .err()
+                .expect("a different Host pin must fail");
+        assert!(matches!(error, ClientError::HostCertificateMismatch));
+        endpoint.stop();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     // New Client / old Host: optional system discovery must not make the

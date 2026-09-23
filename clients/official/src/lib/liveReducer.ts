@@ -26,6 +26,8 @@ const conversationEvents = new Set([
   'resources.reloaded', 'settings.write_failed',
   'extension.notification', 'extension.error',
 ])
+export function conversationEventChanged(event: ProjectedEvent) { return conversationEvents.has(event.eventType) }
+
 const configEvents = new Set([
   'model.changed', 'thinking.changed', 'settings.changed', 'settings.write_failed',
   'resources.reloaded', 'extension.status_changed', 'extension.tools_expanded_changed',
@@ -214,7 +216,7 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
   return {
     kind: 'applied',
     state: { ...state, instance, queue, sequence: event.sequence },
-    conversationChanged: conversationEvents.has(event.eventType),
+    conversationChanged: conversationEventChanged(event),
     configChanged: configEvents.has(event.eventType),
   }
 }

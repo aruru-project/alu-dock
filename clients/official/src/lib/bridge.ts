@@ -1,16 +1,12 @@
-import { Channel, invoke } from '@tauri-apps/api/core'
-import { BinaryChunkCollector } from './binaryChunkCollector'
+import { type OperationContext, type OperationTarget, type HostOperationContext, type NativeOperation } from './operationBinding'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import type {
-  AttachmentUploadResult,
   BootstrapPayload,
   CommandCompletionsResult,
   CommandContentResult,
   CommandsResult,
-  CompletedConversationEntry,
   ClientPreferences,
   ConnectionKind,
-  ConversationBootstrap,
-  ConversationHistoryPage,
   DeliverableDto,
   DeliverableSaveResult,
   DesktopShellStatus,
@@ -23,6 +19,7 @@ import type {
   InteractionResponse,
   MachineDto,
   ModelsResult,
+  NativeMedia,
   PublishedFileDto,
   QueueDequeueResult,
   SavedDeliverableLocation,
@@ -243,9 +240,8 @@ export async function workCatalog(context: ConnectionContext): Promise<WorkCatal
 export async function startConversationFollow(
   instanceId: string,
   subscriptionId: string,
-  cursor: ConversationBootstrap['cursor'],
-  context: ConnectionContext): Promise<void> {
-  if (isTauri) await invoke('start_conversation_follow', { ...context, instanceId, subscriptionId, cursor })
+  context: ConnectionContext, hostEpoch: string, refresh = false): Promise<void> {
+  if (isTauri) await invoke('start_conversation_follow', { ...context, instanceId, subscriptionId, hostEpoch, refresh })
 }
 
 export async function stopConversationFollow(instanceId: string, subscriptionId: string, context: ConnectionContext): Promise<boolean> {
@@ -275,10 +271,6 @@ export async function reportExtensionViewport(handle: string, width: number, hei
   if (isTauri) await invoke('set_extension_widget_viewport', { ...context, handle, width, height })
 }
 
-export async function setExtensionToolsExpanded(instanceId: string, expectedHostEpoch: string, expectedRuntimeGeneration: number, expanded: boolean, context: ConnectionContext): Promise<Work> {
-  if (isTauri) return invoke<Work>('set_extension_tools_expanded', { ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, expanded })
-  throw new Error('浏览器设计预览不会修改 Extension UI')
-}
 
 export async function pickAttachments(workId: string, context: ConnectionContext): Promise<SelectedAttachment[]> {
   if (isTauri) return invoke('pick_attachments', { ...context, workId })
@@ -297,22 +289,23 @@ export async function stageClipboardImage(workId: string, bytes: Uint8Array, ima
   })
 }
 
-export async function loadAttachmentPreviewBytes(workId: string, token: string, context: ConnectionContext): Promise<Uint8Array> {
+export async function loadAttachmentPreview(workId: string, token: string, context: ConnectionContext): Promise<NativeMedia> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取本机附件')
-  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('attachment_preview', { ...context, workId, token })
-  return binaryBytes(value)
+  return invoke('attachment_preview', { ...context, workId, token })
 }
 
 export type PreviewImageSaveResult = { status: 'cancelled' } | { status: 'saved'; label: string }
 
-export async function savePreviewImage(name: string, bytes: Uint8Array): Promise<PreviewImageSaveResult> {
+export async function savePreviewImage(name: string, handle: string): Promise<PreviewImageSaveResult> {
   if (!isTauri) throw new Error('浏览器设计预览不会保存图片')
-  return invoke<PreviewImageSaveResult>('save_preview_image', bytes, {
-    headers: { 'x-aludock-image-name': encodeURIComponent(name) },
-  })
+  return invoke<PreviewImageSaveResult>('save_preview_image', { name, handle })
 }
 
-export async function uploadAttachment(work: Work, token: string, context: ConnectionContext): Promise<AttachmentUploadResult> {
+export async function attachmentSnapshot(workId: string, context: ConnectionContext): Promise<{ revision: number; jobs: import('./types').AttachmentJobSnapshot[] }> {
+  return isTauri ? invoke('attachment_snapshot', { ...context, workId }) : { revision: 0, jobs: [] }
+}
+
+export async function uploadAttachment(work: Work, token: string, context: ConnectionContext): Promise<void> {
   if (isTauri) return invoke('upload_attachment', {
     ...context,
     workId: work.id,
@@ -334,30 +327,32 @@ export async function removeAttachment(workId: string, token: string, context: C
   return false
 }
 
-export async function dequeueMessages(instanceId: string, context: ConnectionContext): Promise<QueueDequeueResult> {
-  if (isTauri) return invoke('dequeue_messages', { ...context, instanceId })
+export async function dequeueMessages(instanceId: string, context: OperationContext): Promise<QueueDequeueResult> {
+  if (isTauri) return invoke('dequeue_messages', { ...context, operationId: crypto.randomUUID(), instanceId })
   throw new Error('浏览器设计预览不会取回 Queue')
 }
 
-export async function clearRestoredImages(instanceId: string, context: ConnectionContext): Promise<{ imageCount: number }> {
-  if (isTauri) return invoke('clear_restored_images', { ...context, instanceId })
+export async function clearRestoredImages(work: Work, context: ConnectionContext): Promise<{ imageCount: number }> {
+  if (isTauri) return invoke('clear_restored_images', { ...context, instanceId: work.id, expectedHostEpoch: work.ownerHostEpoch, expectedRuntimeGeneration: work.runtimeGeneration })
   return { imageCount: 0 }
 }
 
-export async function submitMessage(instanceId: string, message: string, attachmentFileIds: string[], context: ConnectionContext): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
-  if (isTauri) return invoke('submit_message', { ...context, instanceId, message, attachmentFileIds })
+export async function submitMessage(instanceId: string, message: string, attachmentFileIds: string[], context: OperationContext): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
+  if (isTauri) {
+    return invoke('submit_message', { ...context, instanceId, message, attachmentFileIds, operationId: crypto.randomUUID() })
+  }
   await delay(180)
   throw new Error('浏览器设计预览不会发送消息')
 }
 
-export async function abortRun(instanceId: string, context: ConnectionContext): Promise<Work> {
-  if (isTauri) return invoke<Work>('abort_run', { ...context, instanceId })
+export async function abortRun(instanceId: string, context: OperationTarget): Promise<Work> {
+  if (isTauri) return invoke<Work>('abort_run', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
   await delay(180)
   throw new Error('浏览器设计预览不会中止 Work')
 }
 
-export async function stopWork(instanceId: string, context: ConnectionContext): Promise<StopResult> {
-  if (isTauri) return invoke<StopResult>('stop_work', { ...context, instanceId })
+export async function stopWork(instanceId: string, context: OperationTarget): Promise<StopResult> {
+  if (isTauri) return invoke<StopResult>('stop_work', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
   throw new Error('浏览器设计预览不会停止 Work')
 }
 
@@ -377,8 +372,8 @@ export async function getCommandCompletions(instanceId: string, referenceId: str
   throw new Error('浏览器设计预览不会读取命令参数候选')
 }
 
-export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, operationId: string, context: ConnectionContext): Promise<{ receipt: { operationId: string; kind: 'prompt' | 'extension_command'; queued: boolean; delivery: string }; instance: Work }> {
-  if (isTauri) return invoke('run_catalog_command', { ...context, instanceId, name, arguments: argumentsText, operationId })
+export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, operationId: string, context: OperationTarget): Promise<{ receipt: { operationId: string; kind: 'prompt' | 'extension_command'; queued: boolean; delivery: string }; instance: Work }> {
+  if (isTauri) return invoke('run_catalog_command', { ...context, operationEditor: null, instanceId, name, arguments: argumentsText, operationId })
   throw new Error('浏览器设计预览不会运行命令')
 }
 
@@ -388,13 +383,13 @@ export async function listModels(instanceId: string, context: ConnectionContext)
   return { ...previewModels, instance: previewBootstrap.works.find((work) => work.id === instanceId) ?? previewBootstrap.works[0]! }
 }
 
-export async function setModel(instanceId: string, provider: string, modelId: string, context: ConnectionContext): Promise<Work> {
-  if (isTauri) return invoke<Work>('set_model', { ...context, instanceId, provider, modelId })
+export async function setModel(instanceId: string, provider: string, modelId: string, context: OperationTarget): Promise<Work> {
+  if (isTauri) return invoke<Work>('set_model', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId, provider, modelId })
   throw new Error('浏览器设计预览不会切换模型')
 }
 
-export async function setThinking(instanceId: string, level: ThinkingLevel, context: ConnectionContext): Promise<Work> {
-  if (isTauri) return invoke<Work>('set_thinking', { ...context, instanceId, level })
+export async function setThinking(instanceId: string, level: ThinkingLevel, context: OperationTarget): Promise<Work> {
+  if (isTauri) return invoke<Work>('set_thinking', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId, level })
   throw new Error('浏览器设计预览不会修改 Thinking')
 }
 
@@ -404,8 +399,8 @@ export async function listTools(instanceId: string, context: ConnectionContext):
   return { ...previewTools, instance: previewBootstrap.works.find((work) => work.id === instanceId) ?? previewBootstrap.works[0]! }
 }
 
-export async function setActiveTools(instanceId: string, names: string[], context: ConnectionContext): Promise<ToolsResult> {
-  if (isTauri) return invoke<ToolsResult>('set_active_tools', { ...context, instanceId, names })
+export async function setActiveTools(instanceId: string, names: string[], context: OperationTarget): Promise<ToolsResult> {
+  if (isTauri) return invoke<ToolsResult>('set_active_tools', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId, names })
   throw new Error('浏览器设计预览不会修改工具状态')
 }
 
@@ -415,8 +410,8 @@ export async function getSettings(instanceId: string, context: ConnectionContext
   return previewSettings
 }
 
-export async function updateSetting(instanceId: string, key: SettingKey, value: SettingValue, context: ConnectionContext): Promise<SettingUpdateResult> {
-  if (isTauri) return invoke<SettingUpdateResult>('update_setting', { ...context, instanceId, update: { key, value } })
+export async function updateSetting(instanceId: string, key: SettingKey, value: SettingValue, context: OperationTarget): Promise<SettingUpdateResult> {
+  if (isTauri) return invoke<SettingUpdateResult>('update_setting', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId, update: { key, value } })
   throw new Error('浏览器设计预览不会修改设置')
 }
 
@@ -431,16 +426,16 @@ export async function getResources(instanceId: string, context: ConnectionContex
   return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
 }
 
-export async function forgetWork(instanceId: string, context: ConnectionContext): Promise<void> {
-  if (isTauri) return invoke('forget_work', { ...context, instanceId })
+export async function forgetWork(instanceId: string, context: OperationTarget): Promise<void> {
+  if (isTauri) return invoke('forget_work', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
   throw new Error('浏览器设计预览不会移除 Work')
 }
 
-export async function reopenWork(instanceId: string, context: ConnectionContext, continuation?: CreateWorkContinuation): Promise<Work> {
+export async function reopenWork(instanceId: string, context: OperationTarget, continuation?: CreateWorkContinuation): Promise<Work> {
   if (isTauri) {
     return invoke<Work>('reopen_work', {
-      ...context, instanceId,
-      operationId: continuation?.operationId ?? null,
+      ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId,
+      ...(continuation ? { operationId: continuation.operationId } : {}),
       trustChallengeId: continuation?.trustChallengeId ?? null,
       projectTrustDecision: continuation?.projectTrustDecision ?? null,
     })
@@ -448,95 +443,57 @@ export async function reopenWork(instanceId: string, context: ConnectionContext,
   throw new Error('浏览器设计预览不会继续 Work')
 }
 
-export async function loadConversation(instanceId: string, context: ConnectionContext): Promise<ConversationBootstrap> {
-  if (isTauri) return invoke<ConversationBootstrap>('conversation_bootstrap', { ...context, instanceId })
-  await delay(120)
-  const instance = previewBootstrap.works.find((work) => work.id === instanceId) ?? previewBootstrap.works[0]!
-  return {
-    instance,
-    records: [],
-    activeEvents: [],
-    extensionUi: { status: {}, toolsExpanded: false, events: [] },
-    queue: instance.pending.total ? [{
-      queueItemId: 'preview-queue-1',
-      delivery: 'followUp',
-      text: '请在确认桌面布局后，再检查窄屏 Queue 与附件操作。',
-      attachments: [{
-        fileId: 'd729a77f-69f0-4f12-ac4c-2badf5750220',
-        name: '窄屏验收清单.txt',
-        sizeBytes: 1864,
-        mediaType: 'text/plain',
-        sha256: 'b'.repeat(64),
-        storedAt: now,
-      }],
-      imageCount: 1,
-      acceptedAt: now,
-    }] : [],
-    cursor: { hostEpoch: 'preview', instanceId, runtimeGeneration: 1, sequence: 0 },
-    historyRevision: 1,
-    historyTruncated: false,
-  }
+export async function readConversationContent(context: ConnectionContext, instanceId: string, expectedHostEpoch: string, token: string, intent: 'earlier' | 'retry' | 'interest', entryIds: string[] = []): Promise<void> {
+  if (isTauri) await invoke('read_conversation_content', { ...context, instanceId, expectedHostEpoch, token, intent, entryIds })
 }
 
-export async function loadConversationHistory(
+export function nativeMediaUrl(media: { handle: string; sizeBytes: number }) {
+  return { handle: media.handle, url: convertFileSrc(media.handle, 'aludock-media'), sizeBytes: media.sizeBytes }
+}
+
+export async function loadConversationImage(
   instanceId: string,
-  cursor: string | undefined,
   expectedHostEpoch: string,
   expectedRuntimeGeneration: number,
-  context: ConnectionContext,
-): Promise<ConversationHistoryPage> {
-  if (isTauri) return invoke<ConversationHistoryPage>('conversation_history', {
-    ...context, instanceId, cursor, expectedHostEpoch, expectedRuntimeGeneration,
-  })
-  await delay(100)
-  return { records: [], incompleteEntryIds: [], revision: 'browser-preview', hasEarlier: false, instance: previewBootstrap.works[0]!, hostEpoch: 'browser-preview' }
-}
-
-export async function loadConversationHistoryEntry(
-  instanceId: string,
-  cursor: string | undefined,
-  entryId: string,
-  expectedRevision: string,
-  expectedHostEpoch: string,
-  expectedRuntimeGeneration: number,
-  context: ConnectionContext,
-): Promise<CompletedConversationEntry> {
-  if (!isTauri) throw new Error('浏览器设计预览不会读取完整会话内容')
-  return invoke<CompletedConversationEntry>('conversation_history_entry', {
-    ...context,
-    instanceId,
-    cursor,
-    entryId,
-    expectedRevision,
-    expectedHostEpoch,
-    expectedRuntimeGeneration,
-  })
-}
-
-export async function loadConversationImageBytes(
-  instanceId: string,
-  expectedHostEpoch: string,
   contentRef: string,
   mimeType: string,
   context: ConnectionContext,
-): Promise<Uint8Array> {
+  fileId?: string,
+): Promise<{ handle: string; url: string; sizeBytes: number }> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
-  return invokeChunkedBinary('conversation_image', {
-    ...context, instanceId, expectedHostEpoch, contentRef, mimeType,
+  const media = await invoke<NativeMedia>('conversation_image', {
+    ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, contentRef, mimeType, fileId,
   })
+  return nativeMediaUrl(media)
 }
 
-export async function loadPublishedImageBytes(
+export async function registerInlineConversationImage(
+  instanceId: string,
+  expectedHostEpoch: string,
+  expectedRuntimeGeneration: number,
+  data: string,
+  mimeType: string,
+  context: ConnectionContext,
+): Promise<{ handle: string; url: string; sizeBytes: number }> {
+  if (!isTauri) throw new Error('浏览器设计预览不会注册会话图片')
+  const media = await invoke<NativeMedia>('inline_conversation_image', {
+    ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, data, mimeType,
+  })
+  return nativeMediaUrl(media)
+}
+
+export async function loadPublishedImage(
   instanceId: string,
   expectedHostEpoch: string,
   expectedRuntimeGeneration: number,
   file: PublishedFileDto,
   context: ConnectionContext,
-): Promise<Uint8Array> {
+): Promise<{ handle: string; url: string; sizeBytes: number }> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
-  return invokeChunkedBinary('published_image', {
+  const media = await invoke<NativeMedia>('published_image', {
     ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, file,
   })
+  return nativeMediaUrl(media)
 }
 
 export async function listDeliverables(instanceId: string, context: ConnectionContext): Promise<DeliverableDto[]> {
@@ -559,25 +516,6 @@ export async function downloadDeliverable(
 export async function openSavedDeliverable(location: SavedDeliverableLocation): Promise<void> {
   if (isTauri) return invoke<void>('open_saved_deliverable', { location })
   throw new Error('浏览器预览无法打开设备上的文件。请在 AluDock 客户端中操作。')
-}
-
-async function invokeChunkedBinary(command: string, args: Record<string, unknown>): Promise<Uint8Array> {
-  const collector = new BinaryChunkCollector()
-  const onChunk = new Channel<ArrayBuffer | Uint8Array | number[]>((value) => {
-    try {
-      collector.push(binaryBytes(value))
-    } catch (cause) {
-      collector.abort(cause)
-    }
-  })
-  let sizeBytes: number
-  try {
-    sizeBytes = await invoke<number>(command, { ...args, onChunk })
-  } catch (cause) {
-    collector.abort(cause)
-    throw cause
-  }
-  return collector.finish(sizeBytes)
 }
 
 function binaryBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {
@@ -607,27 +545,27 @@ export async function listSessionInventory(context: ConnectionContext, machineHo
   if (isTauri) return invoke<SessionInventoryResult>('session_inventory', { ...context, machineHostId, cwd })
   throw new Error('浏览器设计预览不会读取保存的 Session')
 }
-export async function newSession(context: SessionContext, operationId: string): Promise<SessionReplacementResult> {
+export async function newSession(context: OperationContext, operationId: string): Promise<SessionReplacementResult> {
   if (isTauri) return invoke('new_session', { ...context, operationId })
   throw new Error('浏览器设计预览不会新建 Session')
 }
-export async function switchSession(context: SessionContext, sessionToken: string, continuation: SessionTrustContinuation): Promise<SessionReplacementResult> {
+export async function switchSession(context: OperationContext, sessionToken: string, continuation: SessionTrustContinuation): Promise<SessionReplacementResult> {
   if (isTauri) return invoke('switch_session', { ...context, sessionToken, operationId: continuation.operationId, trustChallengeId: continuation.trustChallengeId || null, projectTrustDecision: continuation.projectTrustDecision || null })
   throw new Error('浏览器设计预览不会切换 Session')
 }
-export async function nameSession(context: SessionContext, name: string, operationId: string): Promise<SessionNameResult> {
-  if (isTauri) return invoke('name_session', { ...context, name, operationId })
+export async function nameSession(context: OperationTarget, name: string, operationId: string): Promise<SessionNameResult> {
+  if (isTauri) return invoke('name_session', { ...context, operationEditor: null, name, operationId })
   throw new Error('浏览器设计预览不会重命名 Session')
 }
 export async function compactionPrompts(context: SessionContext): Promise<CompactionPromptTemplatesResult> {
   if (isTauri) return invoke('compaction_prompts', { ...context })
   throw new Error('请连接 Dock 后读取默认压缩模板。')
 }
-export async function compactSession(context: SessionContext, customInstructions: string | undefined, operationId: string): Promise<SessionCompactionResult> {
-  if (isTauri) return invoke('compact_session', { ...context, customInstructions: customInstructions || null, operationId })
+export async function compactSession(context: OperationTarget, customInstructions: string | undefined, operationId: string): Promise<SessionCompactionResult> {
+  if (isTauri) return invoke('compact_session', { ...context, operationEditor: null, customInstructions: customInstructions || null, operationId })
   throw new Error('浏览器设计预览不会压缩 Session')
 }
-export async function reloadSession(context: SessionContext, operationId: string): Promise<SessionReloadResult> {
+export async function reloadSession(context: OperationContext, operationId: string): Promise<SessionReloadResult> {
   if (isTauri) return invoke('reload_session', { ...context, operationId })
   throw new Error('浏览器设计预览不会 Reload Session')
 }
@@ -636,15 +574,15 @@ export async function loadSessionTree(context: SessionContext): Promise<SessionT
   await delay(100)
   return previewTree
 }
-export async function navigateSession(context: SessionContext, targetId: string, summarize: boolean, operationId: string): Promise<SessionNavigateResult> {
+export async function navigateSession(context: OperationContext, targetId: string, summarize: boolean, operationId: string): Promise<SessionNavigateResult> {
   if (isTauri) return invoke('navigate_session', { ...context, targetId, summarize, customInstructions: null, operationId })
   throw new Error('浏览器设计预览不会切换 Tree 节点')
 }
-export async function forkSession(context: SessionContext, entryId: string, operationId: string): Promise<SessionForkResult> {
+export async function forkSession(context: OperationContext, entryId: string, operationId: string): Promise<SessionForkResult> {
   if (isTauri) return invoke('fork_session', { ...context, entryId, operationId })
   throw new Error('浏览器设计预览不会 Fork Session')
 }
-export async function cloneSession(context: SessionContext, entryId: string, operationId: string): Promise<SessionReplacementResult> {
+export async function cloneSession(context: OperationContext, entryId: string, operationId: string): Promise<SessionReplacementResult> {
   if (isTauri) return invoke('clone_session', { ...context, entryId, operationId })
   throw new Error('浏览器设计预览不会 Clone Session')
 }
@@ -752,7 +690,7 @@ export async function systemContent(cwd: string, id: string, context: Connection
   throw new Error('请在已连接 Dock 的客户端中读取 system。')
 }
 
-export async function setSystemDefault(cwd: string, id: string, context: ConnectionContext, targetHostId: string): Promise<SystemDefaultSetResult> {
+export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string): Promise<SystemDefaultSetResult> {
   if (isTauri) return invoke<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId })
   throw new Error('请在已连接 Dock 的客户端中保存目录默认。')
 }
@@ -765,7 +703,7 @@ export interface CreateWorkContinuation {
 
 export async function adoptSession(
   sessionToken: string,
-  context: ConnectionContext,
+  context: HostOperationContext,
   machineHostId: string,
   name?: string,
   continuation?: CreateWorkContinuation,
@@ -786,7 +724,7 @@ export async function adoptSession(
 
 export async function createWork(
   cwd: string,
-  context: ConnectionContext,
+  context: HostOperationContext,
   name?: string,
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
@@ -964,4 +902,19 @@ function previewWork(
     createdAt: now,
     updatedAt: now,
   }
+}
+
+export function pendingOperations(): Promise<NativeOperation[]> {
+  return isTauri ? invoke('pending_operations') : Promise.resolve([])
+}
+export function consumeOperation(operationId: string): Promise<void> {
+  return isTauri ? invoke('consume_operation', { operationId }) : Promise.resolve()
+}
+
+export function restoredImageCount(work: Work, context: ConnectionContext): Promise<number> {
+  return isTauri ? invoke('restored_image_count', { ...context, instanceId: work.id, expectedHostEpoch: work.ownerHostEpoch, expectedRuntimeGeneration: work.runtimeGeneration }) : Promise.resolve(0)
+}
+
+export function acknowledgeConversationFollow(context: ConnectionContext, instanceId: string, subscriptionId: string, deliveryId: number): Promise<void> {
+  return isTauri ? invoke('acknowledge_conversation_follow', { connectionId: context.connectionId, selectionGeneration: context.selectionGeneration, instanceId, subscriptionId, deliveryId }) : Promise.resolve()
 }

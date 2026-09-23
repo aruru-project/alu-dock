@@ -2,7 +2,7 @@ import type { ConversationItem, ConversationProcessItem } from './types'
 
 export type GroupedProcessItem = ConversationProcessItem & { groupId: string }
 export type StandaloneConversationRow = Extract<ConversationItem, { kind: 'user' | 'activity' | 'record' }> | Extract<ConversationProcessItem, { kind: 'notice' }>
-export type AssistantGroupRow = { id: string; kind: 'assistant-group'; parts: GroupedProcessItem[]; time: string }
+export type AssistantGroupRow = { id: string; kind: 'assistant-group'; parts: GroupedProcessItem[]; time: string; sourceEntryIds?: string[] }
 export type ConversationRow = StandaloneConversationRow | AssistantGroupRow
 
 export function assistantMarkdownSource(parts: readonly ConversationProcessItem[]): string {
@@ -23,6 +23,7 @@ export function conversationRows(items: readonly ConversationItem[]): Conversati
         groups.set(item.groupId, group)
         rows.push(group)
       }
+      group.sourceEntryIds = [...new Set([...(group.sourceEntryIds ?? []), ...(item.sourceEntryIds ?? [])])]
       group.parts.push(item)
       group.time ||= item.groupTime || (item.kind === 'assistant' ? item.time : '')
     } else {

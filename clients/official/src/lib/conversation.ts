@@ -113,15 +113,7 @@ export function hasCompactConversationContent(parts: ConversationProcessItem[]) 
     || (part.kind === 'notice' && part.tone !== 'info'))
 }
 
-export function mergeHydratedConversationRecords(previews: ConversationRecord[], completed: ConversationRecord[]) {
-  const replacements = new Map(completed.map((record) => [record.entryId, record]))
-  return previews.map((record) => replacements.get(record.entryId) ?? record)
-}
 
-// The folded replay log is separate from the incremental, indexed projector.
-// Only explicit presentation-mode changes/bootstrap replay it; Follow applies once.
-
-/** delta 事件的归并键，与 projector 里 messageItems 的键方案一致（messageId:block）。 */
 export function liveDeltaKey(data: Record<string, unknown>): string | null {
   const messageId = typeof data.messageId === 'string' ? data.messageId : ''
   if (!messageId) return null
@@ -442,7 +434,16 @@ export function createLiveConversationProjector(
 
 export function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {
   const output: ConversationItem[] = []
-  for (const group of groupRecords(records)) projectGroup(group, output)
+  for (const group of groupRecords(records)) {
+    const start = output.length
+    projectGroup(group, output)
+    const entryIds = group.records.map(record => record.entryId)
+    for (let index = start; index < output.length; index++) {
+      const item = output[index]!
+      item.sourceEntryIds = entryIds
+      if (item.kind === 'record') for (const part of item.parts) part.sourceEntryIds = entryIds
+    }
+  }
   return output
 }
 
@@ -633,7 +634,9 @@ function ensureContentImage(
       imageKey,
       mimeType: block.mimeType,
       fileId: block.fileId,
-      source: contentRef
+      source: block.nativeMedia
+        ? { type: 'native', media: block.nativeMedia }
+        : contentRef
         ? { type: 'conversation', contentRef, mimeType: block.mimeType }
         : data
           ? { type: 'inline', data, mimeType: block.mimeType }

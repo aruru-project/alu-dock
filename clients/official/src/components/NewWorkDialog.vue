@@ -43,7 +43,7 @@ type TrustAttempt = {
 }
 
 const props = defineProps<{
-  machines: MachineDto[]
+  machines: readonly MachineDto[]
   machinesLoading: boolean
   machineError?: string
   preview: boolean
@@ -258,7 +258,7 @@ async function confirmSystem() {
     clearError()
     saveFailed.value = false
     try {
-      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, context, hostId))
+      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId))
       if (epoch !== systemEpoch) return
       savedDefaultId.value = selection.id
     } catch (cause) {
@@ -420,7 +420,7 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const work = await createWork(path, context, undefined, continuation, machineId, workerConfig)
+    const work = await createWork(path, app.captureHostOperation(context), undefined, continuation, machineId, workerConfig)
     if (!app.contextMatches(context) || epoch !== systemEpoch) return
     trust.value = null
     emit('created', work)
@@ -442,7 +442,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const work = await adoptSession(sessionToken, context, machineId, undefined, continuation)
+    const work = await adoptSession(sessionToken, app.captureHostOperation(context), machineId, undefined, continuation)
     if (!app.contextMatches(context)) return
     trust.value = null
     emit('created', work)

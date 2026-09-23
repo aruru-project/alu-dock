@@ -648,6 +648,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
    ═══════════════════════════════════════════════════════ */
 
 .alu-bottom-bar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2438,3 +2439,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   }
 
 }
+
+/* Existing Work operation results, not a connection/recovery banner. */
+.alu-work-operation-results { width: min(calc(100% - 32px), 760px); margin: 6px auto; flex: none; }
+.alu-operation-count { margin-left: 3px; color: var(--alu-rose); font-size: 10px; }

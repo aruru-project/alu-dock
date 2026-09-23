@@ -133,10 +133,11 @@ export class OrderedWorkerSender {
 
   close(): void { this.closed = true; }
 
-  sendEnvelope(envelope: WorkerEnvelope): Promise<void> {
+  sendEnvelope(envelope: WorkerEnvelope, method?: "conversation.image"): Promise<void> {
     const json = JSON.stringify(envelope);
     if (json === undefined) return Promise.reject(new Error("Worker envelope is not JSON serializable"));
-    validateJsonValue(JSON.parse(json));
+    const parsed: unknown = JSON.parse(json);
+    validateEnvelopeJson(parsed, method === undefined ? undefined : { method });
     const bytes = Buffer.byteLength(json, "utf8");
     if (bytes > MAX_WORKER_TRANSFER_BYTES) return Promise.reject(new Error("Worker envelope exceeds aggregate transfer bound"));
     const chunks: string[] = [];
@@ -175,7 +176,10 @@ export class WorkerFrameReceiver {
   lastIdentity: WorkerIdentity | undefined;
   private active: { transferId: string; count: number; chunks: string[]; bytes: number } | undefined;
 
-  constructor(private readonly acceptIdentity: (identity: WorkerIdentity) => boolean) {}
+  constructor(
+    private readonly acceptIdentity: (identity: WorkerIdentity) => boolean,
+    private readonly responseContext?: (callId: string) => WorkerResponseContext | undefined,
+  ) {}
 
   accept(raw: unknown): WorkerEnvelope | undefined {
     const frame = parseWorkerFrame(raw);
@@ -199,8 +203,12 @@ export class WorkerFrameReceiver {
     let parsed: unknown;
     try { parsed = JSON.parse(active.chunks.join("")); }
     catch { throw new Error("Worker IPC payload is not valid JSON"); }
-    validateJsonValue(parsed);
-    return parseWorkerEnvelope(parsed);
+    const value = record(parsed, "Worker envelope");
+    const context = value.kind === "response"
+      ? this.responseContext?.(boundedString(value.callId, 128, "Worker call ID")) : undefined;
+    validateEnvelopeJson(parsed, context);
+    const envelope = parseWorkerEnvelope(parsed);
+    return context === "cancelled" ? undefined : envelope;
   }
 }
 
@@ -443,7 +451,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
       parseConversationContentBody(raw);
       return;
     }
-    case "conversation.image": parseConversationImageBody(raw); return;
+    case "conversation.image": assertNoUnknownFields(raw, parseConversationImageBody(raw), "Worker conversation image"); return;
     case "file.read": parseFileReadBody(raw); return;
     case "model.list": parseModelListBody(raw); return;
     case "session.compact": parseCompactionBody(raw); return;
@@ -719,11 +727,25 @@ function validateDialogOptions(raw: unknown): void {
   if (value.signalAborted !== undefined && typeof value.signalAborted !== "boolean") throw new Error("Dialog signal state is invalid");
 }
 
-function validateJsonValue(root: unknown): void {
+/** Local dispatch/pending facts only; never supplied by the wire. */
+export type WorkerResponseContext = { method: string } | "cancelled";
+
+function validateEnvelopeJson(root: unknown, context?: WorkerResponseContext): void {
+  const envelope = record(root, "Worker envelope");
+  const image = envelope.kind === "response" && envelope.ok === true
+    && context !== "cancelled" && context?.method === "conversation.image";
+  // Traverse all structure before the method parser. Only its data scalar has
+  // a different bound; the single V2 parser owns bytes/base64/length/SHA checks.
+  const result = envelope.kind === "response" ? envelope.result : undefined;
+  validateJsonValue(root, image ? result : undefined, context === "cancelled" ? result : undefined);
+  if (image) validateAgentWorkerResult("conversation.image", result);
+}
+
+function validateJsonValue(root: unknown, imageResult?: unknown, cancelledResult?: unknown): void {
   let nodes = 0;
-  const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
+  const stack: Array<{ value: unknown; depth: number; discarded?: boolean; imageData?: boolean }> = [{ value: root, depth: 0 }];
   while (stack.length > 0) {
-    const { value, depth } = stack.pop()!;
+    const { value, depth, discarded, imageData } = stack.pop()!;
     nodes += 1;
     if (nodes > 2_000_000 || depth > 32) throw new Error("Worker IPC JSON structure exceeds bounds");
     if (value === null || typeof value === "boolean" || typeof value === "number") {
@@ -731,11 +753,11 @@ function validateJsonValue(root: unknown): void {
       continue;
     }
     if (typeof value === "string") {
-      if (value.length > 2_000_000) throw new Error("Worker IPC JSON string exceeds bounds");
+      if (!discarded && !imageData && value.length > 2_000_000) throw new Error("Worker IPC JSON string exceeds bounds");
       continue;
     }
     if (Array.isArray(value)) {
-      for (const item of value) stack.push({ value: item, depth: depth + 1 });
+      for (const item of value) stack.push({ value: item, depth: depth + 1, discarded });
       continue;
     }
     if (typeof value !== "object" || value === undefined) throw new Error("Worker IPC contains a non-JSON value");
@@ -743,7 +765,7 @@ function validateJsonValue(root: unknown): void {
     if (entries.length > 10_000) throw new Error("Worker IPC JSON object exceeds bounds");
     for (const [key, child] of entries) {
       if (key.length > 256 || child === undefined) throw new Error("Worker IPC JSON member is invalid");
-      stack.push({ value: child, depth: depth + 1 });
+      stack.push({ value: child, depth: depth + 1, discarded: discarded || (value === root && key === "result" && cancelledResult !== undefined), imageData: value === imageResult && key === "data" });
     }
   }
 }
@@ -763,7 +785,7 @@ function assertNoUnknownFields(raw: unknown, parsed: unknown, label: string): vo
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
   const canonical = parsed as Record<string, unknown>;
   for (const [key, item] of Object.entries(raw)) {
-    if (!(key in canonical)) throw new Error(`${label} contains unknown field ${key}`);
+    if (!Object.hasOwn(canonical, key)) throw new Error(`${label} contains unknown field ${key}`);
     assertNoUnknownFields(item, canonical[key], `${label}.${key}`);
   }
 }

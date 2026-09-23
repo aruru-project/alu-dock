@@ -1,4 +1,4 @@
-import type { AttachmentDto, ConversationImageResource, ConnectionContext, LocalAttachmentUpload, QueueItem, Work } from './types'
+import type { AttachmentDto, ConnectionContext, LocalAttachmentUpload, QueueItem, Work } from './types'
 
 export function attachmentUploadTarget(work: Work, context: ConnectionContext): LocalAttachmentUpload {
   return {
@@ -13,15 +13,14 @@ export function attachmentUploadTarget(work: Work, context: ConnectionContext): 
 export function attachmentUploadMatches(left: LocalAttachmentUpload | undefined, right: LocalAttachmentUpload): boolean {
   return !!left
     && left.connectionId === right.connectionId
-    && left.selectionGeneration === right.selectionGeneration
     && left.instanceId === right.instanceId
     && left.machineHostId === right.machineHostId
     && left.ownerHostEpoch === right.ownerHostEpoch
     && left.runtimeGeneration === right.runtimeGeneration
 }
 
-export function bindLocalAttachment(attachment: AttachmentDto, sourceToken: string, target: LocalAttachmentUpload): AttachmentDto {
-  return { ...attachment, localUpload: { ...target, sourceToken } }
+export function bindLocalAttachment(attachment: AttachmentDto, jobId: string, target: LocalAttachmentUpload): AttachmentDto {
+  return { ...attachment, localUpload: { ...target, jobId } }
 }
 
 export function attachmentsAfterSubmit(
@@ -38,21 +37,13 @@ export function moveAttachmentPreviewResource<T extends { url: string }>(
   current: Record<string, T>,
   from: string,
   to: string,
-): { resources: Record<string, T>; moved?: T; replaced?: T } {
+): { resources: Record<string, T>; moved?: T } {
   const moved = current[from]
   if (!moved || from === to) return { resources: current }
   const resources = { ...current }
   delete resources[from]
-  const replaced = resources[to]
   resources[to] = moved
-  return { resources, moved, replaced }
-}
-
-export function displayedConversationImageResource(
-  localPreview: { url: string } | undefined,
-  remoteResource: ConversationImageResource | undefined,
-): ConversationImageResource | undefined {
-  return localPreview ? { state: 'ready', url: localPreview.url } : remoteResource
+  return { resources, moved }
 }
 
 export function appendRestoredQueue(

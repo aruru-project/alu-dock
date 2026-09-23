@@ -1,17 +1,16 @@
 // #275: exercise the real Reload confirmation button with event/reply reordering.
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { build } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { createRenderer, h, reactive, nextTick } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const filename = join(root, 'src/components/SessionManager.vue')
-const directory = await mkdtemp(join(root, '.reload-check-'))
+const directory = await mkdtemp(join(process.env.ALUDOCK_TEST_ARTIFACT_DIR ?? root, '.reload-check-'))
 const stateKey = '__aluReloadCheck'
-const recordMutationUnknown = () => {}
 const previousDocument = globalThis.Document, previousShadowRoot = globalThis.ShadowRoot
 globalThis.Document ??= class Document {}
 globalThis.ShadowRoot ??= class ShadowRoot {}
@@ -43,34 +42,81 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); await nextTick() }
 let copied = ''
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async value => { copied = value } } } })
-globalThis.window = { clearTimeout, setTimeout, __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
+const storage = new Map()
+let failStorage = false
+globalThis.window = { clearTimeout, setTimeout, localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (failStorage) throw new Error('fixture storage full'); storage.set(key, value) }, removeItem: key => storage.delete(key) }, __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
 const hasClass = (name) => (item) => String(item.props.class ?? '').split(' ').includes(name)
 
 try {
   const outfile = join(directory, 'component.mjs')
+  const entry = join(directory, 'entry.ts')
+  await writeFile(entry, `export { default } from '${root}src/components/SessionManager.vue'; export { useAppStore } from '${root}src/stores/app';`)
   await build({
     root, configFile: false, logLevel: 'silent',
     build: { outDir: directory, emptyOutDir: false, minify: false,
-      lib: { entry: filename, formats: ['es'], fileName: () => 'component.mjs' },
-      rolldownOptions: { external: ['vue'] },
+      lib: { entry, formats: ['es'], fileName: () => 'component.mjs' },
+      rolldownOptions: { external: ['vue', 'pinia'] },
     },
     plugins: [{ name: 'static-transport-fixture', enforce: 'pre',
       resolveId(id) {
-        if (id === '../stores/app') return '\0store-fixture'
         if (id === './MarkdownContent.vue') return '\0browser-markdown'
       },
       load(id) {
-        if (id === '\0store-fixture') return `export const useAppStore = () => globalThis.${stateKey}.store;`
         // This renderer has no HTML document. Only the browser-rendered leaf is
         // replaced; sanitization/visual layout are not claimed by this test.
         if (id === '\0browser-markdown') return `import { h } from 'vue'; export default { props: ['source'], render() { return h('div', this.source) } };`
       },
     }, vue()],
   })
-  const { default: SessionManager } = await import(outfile)
+  const { default: SessionManager, useAppStore } = await import(outfile)
+  async function createStore(work) {
+    storage.clear(); failStorage = false
+    work.executor ??= { kind: 'pi', piSessionId: 'original-session' }
+    setActivePinia(createPinia())
+    const store = useAppStore()
+    globalThis[stateKey] = { invoke: async (command) => {
+      if (command === 'get_host_catalog') return { revision: 1, selectionGeneration: 1, hosts: [], activeTarget: { kind: 'host', hostId: 'connection-a' } }
+      if (command === 'bootstrap') return { connectionId: 'connection-a', selectionGeneration: 1, host: { hostEpoch: 'epoch-a' }, works: [work], total: 1 }
+      throw new Error(`Unexpected native setup call: ${command}`)
+    } }
+    await store.load(); store.selectWork(work.id)
+    return store
+  }
+  // Upload-state review P1: rename needs only the target; Reload still owns
+  // a potential editor handoff, so it must retain its durable capture gate.
+  for (const mode of ['rename-session', 'reload-session']) {
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original name' })
+    const store = await createStore(work)
+    store.setCurrentDraft('original editor'); store.flushLocalState()
+    const calls = []
+    globalThis[stateKey] = { invoke: async (command, args) => {
+      if (command === 'list_sessions') return { sessions: [], truncated: false, total: 0 }
+      calls.push({ command, args })
+      assert.equal(command, 'name_session')
+      return { instance: { ...work, name: 'Renamed' } }
+    } }
+    const container = node('storage-session')
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode, preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
+    mounted.mount(container); await settle()
+    failStorage = true
+    const rename = find(container, item => item.type === 'input')
+    if (rename) rename.props['onUpdate:modelValue']('Renamed')
+    await find(container, item => item.type === 'button' && text(item) === '确认').props.onClick(); await settle()
+    if (mode === 'rename-session') {
+      assert.equal(calls.length, 1)
+      assert.deepEqual({ ...calls[0].args, operationId: 'generated' }, { connectionId: 'connection-a', selectionGeneration: 1, instanceId: 'work-a',
+        expectedHostEpoch: 'epoch-a', expectedRuntimeGeneration: 4, operationEditor: null, name: 'Renamed', operationId: 'generated' })
+    } else {
+      assert.equal(calls.length, 0, 'returning/replacing the editor still needs a saved original capture')
+      assert.ok(find(container, hasClass('alu-dialog-error')))
+    }
+    assert.equal(store.currentDraft, 'original editor')
+    mounted.unmount(); failStorage = false
+  }
+  console.log('PASS: storage failure permits Session rename but gates Reload/editor handoff; original input remains unchanged')
   for (const scenario of ['event-before-reply', 'reply-before-event', 'different-work', 'different-connection', 'different-host', 'newer-runtime', 'failure']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original work' })
-    const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+    const store = await createStore(work)
     let resolveReply, rejectReply, requests = 0
     const reply = new Promise((resolve, reject) => { resolveReply = resolve; rejectReply = reject })
     globalThis[stateKey] = { store, invoke: (command) => { assert.equal(command, 'reload_session'); requests++; return reply } }
@@ -78,7 +124,7 @@ try {
     const container = node('root')
     const app = renderer.createApp({ render: () => h(SessionManager, {
       work, mode: 'reload-session', preview: false, outcomeUnknown: false, hasDraft: false, compactionPending: false,
-      onResync: (result) => { resync.push(result); Object.assign(work, result) },
+      onFinished: () => resync.push(true),
     }) })
     app.mount(container)
     const confirm = find(container, (item) => item.type === 'button' && 'data-modal-initial' in item.props)
@@ -90,7 +136,7 @@ try {
     const result = { instance: { ...work, runtimeGeneration: 5 }, resources: [], diagnostics: [], resourceTotal: 3, diagnosticTotal: 0, resourcesTruncated: false, diagnosticsTruncated: false }
     if (scenario === 'event-before-reply') work.runtimeGeneration = 5
     if (scenario === 'different-work') work.id = 'work-b'
-    if (scenario === 'different-connection') store.connectionContext.selectionGeneration = 2
+    if (scenario === 'different-connection') store.catalog.selectionGeneration = 2
     if (scenario === 'different-host') work.ownerHostEpoch = 'epoch-b'
     if (scenario === 'newer-runtime') work.runtimeGeneration = 6
     await nextTick()
@@ -99,8 +145,8 @@ try {
     await pending
     await nextTick()
     if (scenario === 'event-before-reply' || scenario === 'reply-before-event') {
-      assert.equal(resync.length, 1, `${scenario}: successful Reload must resync the same Work`)
-      assert.ok(find(container, hasClass('reload-summary')), `${scenario}: completion remains visible after resync`)
+      assert.equal(resync.length, 1, `${scenario}: successful Reload reports completion in its initiating surface`)
+      assert.ok(find(container, hasClass('reload-summary')), `${scenario}: completion remains visible after the receipt`)
       assert.equal(find(container, hasClass('alu-dialog-error')), undefined, `${scenario}: no false target-switch error`)
     } else {
       assert.equal(resync.length, 0, `${scenario}: do not apply an old or failed result`)
@@ -116,7 +162,7 @@ try {
   // the real native-edge command is held until Follow has published its runtime.
   for (const operation of ['new', 'switch', 'navigate', 'fork', 'clone']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
-    const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+    const store = await createStore(work)
     const nodes = [
       { entryId: 'selected-user', kind: 'message', role: 'user', displayClass: 'content', summary: 'Selected user', hasChildren: true, depth: 0 },
       { entryId: 'current-leaf', parentId: 'selected-user', kind: 'message', role: 'assistant', displayClass: 'content', summary: 'Current reply', depth: 1 },
@@ -132,7 +178,7 @@ try {
     const container = node('root')
     const mounted = renderer.createApp({ render: () => h(SessionManager, {
       work, mode: operation === 'new' ? 'new-session' : operation === 'switch' ? 'sessions' : 'tree', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false,
-      onResync: (...args) => resync.push(args),
+      onFinished: () => resync.push(true),
     }) })
     mounted.mount(container)
     await settle()
@@ -155,44 +201,14 @@ try {
     resolveReply({ cancelled: false, instance: { ...work }, editorText: 'navigation draft', selectedText: 'fork draft' })
     await settle()
     assert.equal(resync.length, 1, `${operation} accepts its own returned generation`)
-    assert.equal(resync[0][0].id, 'work-a', 'replacement remains in the same Work')
-    assert.equal(resync[0][1], operation === 'navigate' ? 'navigation draft' : operation === 'fork' ? 'fork draft' : undefined)
     assert.equal(find(container, hasClass('alu-dialog-error')), undefined)
     mounted.unmount()
-    console.log(`PASS: ${operation} / event-before-reply / editor restoration`)
+    console.log(`PASS: ${operation} / event-before-reply / initiating surface completion`)
   }
 
-  // Keep an unknown on its initiating target even if the native rejection
-  // arrives after another Work/Host is visible, or after this dialog unmounts.
-  for (const target of ['work', 'host', 'unmount']) {
-    const unknowns = []
-    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
-    const store = reactive({ activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 },
-      recordMutationUnknown: (scope, domain, cause) => { if (cause.outcomeUnknown) unknowns.push({ scope, domain, cause }) } })
-    let rejectReply
-    globalThis[stateKey] = { store, invoke: () => new Promise((_resolve, reject) => { rejectReply = reject }) }
-    const container = node('root')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'reload-session', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
-    mounted.mount(container)
-    const pending = find(container, item => item.type === 'button' && 'data-modal-initial' in item.props).props.onClick()
-    await settle()
-    if (target === 'work') work.id = 'work-b'
-    if (target === 'host') { store.activeConnectionId = 'connection-b'; store.connectionContext = { connectionId: 'connection-b', selectionGeneration: 2 } }
-    if (target === 'unmount') mounted.unmount()
-    await settle()
-    rejectReply({ code: 'effect_unknown', outcomeUnknown: true, operationId: 'original-op', message: 'uncertain original call' })
-    await pending; await settle()
-    assert.equal(unknowns.length, 1)
-    assert.equal(unknowns[0].scope.connectionId, 'connection-a')
-    assert.equal(unknowns[0].scope.instanceId, 'work-a')
-    assert.equal(unknowns[0].scope.expectedRuntimeGeneration, 4)
-    assert.equal(unknowns[0].cause.operationId, 'original-op')
-    assert.equal(find(container, hasClass('alu-dialog-error')), undefined, 'late error cannot replace the current target UI')
-    if (target !== 'unmount') mounted.unmount()
-  }
   {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
-    const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+    const store = await createStore(work)
     let rejectReply, operationId
     globalThis[stateKey] = { store, invoke: (command, args) => command === 'list_sessions'
       ? Promise.resolve({ sessions: [{ token: 'saved', name: 'saved', cwd: '/project' }], total: 1, truncated: false })
@@ -207,10 +223,39 @@ try {
     assert.equal(find(container, hasClass('session-trust')), undefined, 'old trust challenge is never shown for another Work')
     mounted.unmount()
   }
-  console.log('PASS: Session native rejection keeps original unknown across Work/Host/unmount; late trust is fenced')
+  console.log('PASS: late Session trust continuation is fenced')
 
-  const store = reactive({ recordMutationUnknown, activeConnectionId: 'connection-a', connectionContext: { connectionId: 'connection-a', selectionGeneration: 1 } })
+  {
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
+    const store = await createStore(work)
+    store.setCurrentDraft('original before trust')
+    const attempts = []
+    globalThis[stateKey] = { store, invoke: async (command, args) => {
+      if (command === 'list_sessions') return { sessions: [{ token: 'saved', name: 'Saved', cwd: '/project' }], total: 1, truncated: false }
+      assert.equal(command, 'switch_session')
+      attempts.push(args)
+      if (attempts.length === 1) throw { code: 'project_trust_required', details: { operationId: args.operationId, challengeId: 'trust-original' } }
+      return { cancelled: false, instance: { ...work, runtimeGeneration: 5 } }
+    } }
+    const container = node('root')
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
+    mounted.mount(container); await settle()
+    await find(container, hasClass('ui-dialog-option')).props.onClick(); await settle()
+    store.setCurrentDraft('edited during trust')
+    const confirmTrust = find(container, item => item.type === 'button' && text(item) === '仅本次信任')
+    assert.ok(confirmTrust)
+    await confirmTrust.props.onClick(); await settle()
+    assert.equal(attempts.length, 2)
+    assert.equal(attempts[1].operationId, attempts[0].operationId)
+    assert.deepEqual(attempts[1].operationEditor, attempts[0].operationEditor, 'trust continuation carries the original frozen capture, not the later editor')
+    assert.equal(attempts[1].operationEditor.text, 'original before trust')
+    assert.equal(store.currentDraft, 'edited during trust', 'the initiating promise does not claim a draft')
+    mounted.unmount()
+  }
+  console.log('PASS: Session trust continuation retains its original editor capture while local editing continues')
+
   const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
+  const store = await createStore(work)
   const templates = { system: '系统全文\n' + '长内容'.repeat(1000), summarize: '首次摘要\n', update: '已有摘要更新\n', turnPrefix: '跨轮次片段\n' }
   let resolveTemplates, rejectTemplates
   const compactCalls = [], submitted = []

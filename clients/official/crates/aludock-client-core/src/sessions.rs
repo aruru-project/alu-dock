@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     time::timeout,
 };
 use uuid::Uuid;
@@ -207,31 +207,9 @@ pub struct ConversationContentPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConversationPreviewPage {
-    pub records: Vec<HistoryRecord>,
-    pub incomplete_entry_ids: Vec<String>,
-    pub revision: String,
-    pub has_earlier: bool,
-    pub next_cursor: Option<String>,
-    pub instance: InstanceSnapshot,
-    pub host_epoch: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CompletedConversationEntry {
-    pub record: HistoryRecord,
-    pub revision: String,
-    pub instance: InstanceSnapshot,
-    pub host_epoch: String,
-}
-
 #[derive(Clone, Debug)]
-pub struct ConversationImageBytes {
+pub struct ConversationImageTransfer {
     pub mime_type: String,
-    pub bytes: Vec<u8>,
     pub chunks: u64,
     pub size_bytes: u64,
     pub sha256: String,
@@ -644,12 +622,15 @@ impl DockClient {
         Ok((page, epoch))
     }
 
-    pub async fn read_conversation_image(
+    /// Stream into a provisional sink. The caller must not publish it until this
+    /// returns successfully (including the terminal frame and stream closure).
+    pub async fn read_conversation_image<W: AsyncWrite + Unpin>(
         &self,
         instance_id: &str,
         content_ref: &str,
         expected_mime_type: &str,
-    ) -> Result<ConversationImageBytes> {
+        sink: &mut W,
+    ) -> Result<ConversationImageTransfer> {
         if instance_id.is_empty()
             || instance_id.len() > 128
             || content_ref.is_empty()
@@ -691,12 +672,15 @@ impl DockClient {
             instance_id,
             content_ref,
             expected_mime_type,
+            sink,
         )
         .await;
-        if result
-            .as_ref()
-            .is_err_and(|error| !matches!(error, ClientError::Host { .. }))
-        {
+        if result.as_ref().is_err_and(|error| {
+            !matches!(
+                error,
+                ClientError::Host { .. } | ClientError::Storage { .. }
+            )
+        }) {
             self.router()
                 .report_connection_failure(&endpoint_id, route_generation);
         } else {
@@ -705,102 +689,21 @@ impl DockClient {
         result
     }
 
-    pub async fn preview_conversation_page(
-        &self,
-        instance_id: &str,
-        cursor: Option<&str>,
-        limit: u16,
-    ) -> Result<ConversationPreviewPage> {
-        let (page, host_epoch) = self
-            .conversation_history(instance_id, cursor, limit)
-            .await?;
-        let mut records = Vec::with_capacity(page.entries.len());
-        let mut incomplete_entry_ids = Vec::new();
-        for item in page.entries {
-            if item.content_complete {
-                if item.entry.content.len() != item.total_blocks {
-                    return Err(protocol(
-                        "complete conversation preview block count was inconsistent",
-                    ));
-                }
-            } else {
-                incomplete_entry_ids.push(item.entry.entry_id.clone());
-            }
-            records.push(item.entry);
-        }
-        Ok(ConversationPreviewPage {
-            records,
-            incomplete_entry_ids,
-            revision: page.revision,
-            has_earlier: page.has_earlier,
-            next_cursor: page.next_cursor,
-            instance: page.instance,
-            host_epoch,
-        })
-    }
-
-    pub async fn complete_conversation_entry(
-        &self,
-        instance_id: &str,
-        cursor: Option<&str>,
-        limit: u16,
-        entry_id: &str,
-        expected_revision: &str,
-    ) -> Result<CompletedConversationEntry> {
-        let (page, host_epoch) = self
-            .conversation_history(instance_id, cursor, limit)
-            .await?;
-        if page.revision != expected_revision {
-            return Err(protocol(
-                "conversation history changed while an entry was loading",
-            ));
-        }
-        let generation = page.instance.runtime_generation;
-        let item = page
-            .entries
-            .iter()
-            .find(|item| item.entry.entry_id == entry_id)
-            .ok_or_else(|| protocol("conversation history entry was no longer on its page"))?;
-        let mut record = item.entry.clone();
-        if item.content_complete {
-            if record.content.len() != item.total_blocks {
-                return Err(protocol(
-                    "complete conversation preview block count was inconsistent",
-                ));
-            }
-        } else {
-            record.content = self
-                .hydrate_content(
-                    instance_id,
-                    &host_epoch,
-                    generation,
-                    expected_revision,
-                    item,
-                )
-                .await?;
-        }
-        Ok(CompletedConversationEntry {
-            record,
-            revision: page.revision,
-            instance: page.instance,
-            host_epoch,
-        })
-    }
-
-    async fn hydrate_content(
+    pub(crate) async fn hydrate_content(
         &self,
         instance_id: &str,
         host_epoch: &str,
         generation: u64,
         revision: &str,
-        item: &ConversationHistoryEntry,
+        content_ref: &str,
+        total_blocks: usize,
     ) -> Result<Vec<crate::ContentBlock>> {
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
         let mut assembler = ContentAssembler::default();
         loop {
             let (page, epoch) = self
-                .conversation_content(instance_id, &item.content_ref, cursor.as_deref())
+                .conversation_content(instance_id, content_ref, cursor.as_deref())
                 .await?;
             if epoch != host_epoch
                 || page.runtime_generation != generation
@@ -824,7 +727,7 @@ impl DockClient {
             }
             cursor = Some(next);
         }
-        assembler.finish(item.total_blocks)
+        assembler.finish(total_blocks)
     }
 
     pub async fn session_inventory(
@@ -1190,7 +1093,7 @@ impl DockClient {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
+async fn read_conversation_image_after_request<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     stream: &mut R,
     maximum_line_bytes: usize,
     request_id: &str,
@@ -1198,7 +1101,8 @@ async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
     instance_id: &str,
     content_ref: &str,
     expected_mime_type: &str,
-) -> Result<ConversationImageBytes> {
+    sink: &mut W,
+) -> Result<ConversationImageTransfer> {
     let first: Value = read_conversation_image_line(stream, maximum_line_bytes).await?;
     if first.get("kind").and_then(Value::as_str) == Some("response") {
         let response: ResponseEnvelope = serde_json::from_value(first)?;
@@ -1231,10 +1135,7 @@ async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
         }
     };
 
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(expected_size as usize)
-        .map_err(|_| protocol("conversation image buffer could not be reserved"))?;
+    let mut received = 0_u64;
     let mut digest = Sha256::new();
     let mut chunks = 0_u64;
     loop {
@@ -1261,15 +1162,19 @@ async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
                     MAX_CONVERSATION_IMAGE_CHUNK_BYTES,
                     "conversation image data",
                 )?;
-                if chunk.is_empty()
-                    || bytes.len().saturating_add(chunk.len()) > expected_size as usize
-                {
+                if chunk.is_empty() || received.saturating_add(chunk.len() as u64) > expected_size {
                     return Err(protocol(
                         "conversation image bytes exceeded the declared size",
                     ));
                 }
                 digest.update(&chunk);
-                bytes.extend_from_slice(&chunk);
+                sink.write_all(&chunk)
+                    .await
+                    .map_err(|source| ClientError::Storage {
+                        path: "conversation media provisional sink".into(),
+                        source,
+                    })?;
+                received += chunk.len() as u64;
                 chunks += 1;
             }
             ConversationImageFrame::Complete {
@@ -1280,7 +1185,7 @@ async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
             } => {
                 let actual_sha256 = hex::encode(digest.finalize());
                 if terminal_chunks != chunks
-                    || size_bytes != bytes.len() as u64
+                    || size_bytes != received
                     || size_bytes != expected_size
                     || sha256 != expected_sha256
                     || sha256 != actual_sha256
@@ -1290,9 +1195,12 @@ async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
                     ));
                 }
                 require_conversation_image_end(stream).await?;
-                return Ok(ConversationImageBytes {
+                sink.flush().await.map_err(|source| ClientError::Storage {
+                    path: "conversation media provisional sink".into(),
+                    source,
+                })?;
+                return Ok(ConversationImageTransfer {
                     mime_type,
-                    bytes,
                     chunks,
                     size_bytes,
                     sha256: actual_sha256,
@@ -1306,7 +1214,7 @@ async fn read_conversation_image_after_request<R: AsyncRead + Unpin>(
 async fn read_conversation_image_line<T, R>(stream: &mut R, maximum_line_bytes: usize) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
-    R: AsyncRead + Unpin,
+    R: AsyncBufRead + Unpin,
 {
     timeout(
         CONVERSATION_IMAGE_IDLE_TIMEOUT,
@@ -1446,7 +1354,6 @@ fn validate_history_page(page: &ConversationHistoryPage, instance_id: &str) -> R
         || page.revision.is_empty()
         || page.revision.len() > 128
         || page.has_earlier != page.next_cursor.is_some()
-        || page.entries.len() > 50
     {
         return Err(protocol("conversation history result invariants failed"));
     }
@@ -2022,7 +1929,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loading_conversation_image_returns_exact_streamed_bytes() {
+    async fn loading_conversation_image_verifies_the_stream_and_reports_full_disk() {
         let sha256 = "6105d6cc76af400325e94d588ce511be5bfdbb73b437dc51eca43917d7a43e3d";
         let frames = concat!(
             "{\"kind\":\"conversation_image_ready\",\"version\":2,\"requestId\":\"request\",\"hostEpoch\":\"epoch\",\"instanceId\":\"work\",\"contentRef\":\"content\",\"mimeType\":\"image/png\",\"sizeBytes\":5,\"sha256\":\"$SHA\"}\n",
@@ -2030,12 +1937,15 @@ mod tests {
             "{\"kind\":\"conversation_image_complete\",\"version\":2,\"requestId\":\"request\",\"hostEpoch\":\"epoch\",\"instanceId\":\"work\",\"contentRef\":\"content\",\"chunks\":1,\"sizeBytes\":5,\"sha256\":\"$SHA\"}\n"
         )
         .replace("$SHA", sha256);
-        let (mut client, mut host) = tokio::io::duplex(4_096);
+        let complete_frames = frames.clone();
+        let (client, mut host) = tokio::io::duplex(4_096);
+        let mut client = tokio::io::BufReader::new(client);
         let writer = tokio::spawn(async move {
             host.write_all(frames.as_bytes()).await.unwrap();
             host.shutdown().await.unwrap();
         });
 
+        let mut bytes = Vec::new();
         let image = read_conversation_image_after_request(
             &mut client,
             1_024 * 1_024,
@@ -2044,15 +1954,55 @@ mod tests {
             "work",
             "content",
             "image/png",
+            &mut bytes,
         )
         .await
         .unwrap();
         writer.await.unwrap();
 
-        assert_eq!(image.bytes, b"image");
+        assert_eq!(bytes, b"image");
         assert_eq!(image.mime_type, "image/png");
         assert_eq!(image.sha256, sha256);
         assert_eq!(image.size_bytes, 5);
+        // V2 terminal framing is a transport integrity boundary. A buffered
+        // read must not hide bytes after complete, or accept a truncated frame.
+        for invalid in [
+            format!("{complete_frames}!"),
+            complete_frames.trim_end_matches('\n').to_owned(),
+            complete_frames.replace("\"chunks\":1", "\"chunks\":2"),
+        ] {
+            let mut reader = tokio::io::BufReader::new(invalid.as_bytes());
+            let mut partial = Vec::new();
+            assert!(matches!(
+                read_conversation_image_after_request(
+                    &mut reader, 1_024 * 1_024, "request", "epoch", "work", "content",
+                    "image/png", &mut partial,
+                ).await,
+                Err(ClientError::Protocol(_))
+            ));
+        }
+        // Explicit disk-full boundary: a completed wire transfer cannot become
+        // valid cache content when its provisional sink cannot flush the bytes.
+        #[cfg(target_os = "linux")]
+        {
+            let mut full = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .await
+                .unwrap();
+            let result = read_conversation_image_after_request(
+                &mut complete_frames.as_bytes(),
+                1_024 * 1_024,
+                "request",
+                "epoch",
+                "work",
+                "content",
+                "image/png",
+                &mut full,
+            )
+            .await;
+            assert!(matches!(result, Err(ClientError::Storage { .. })));
+        }
     }
 
     #[test]

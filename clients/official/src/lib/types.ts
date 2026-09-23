@@ -291,9 +291,11 @@ export interface DeliverableDownloadProgress extends ConnectionContext {
   totalBytes: number
 }
 
+export interface NativeMedia { handle: string; mimeType: string; sizeBytes: number; sha256: string }
+
 export type ContentBlock =
   | { type: 'text' | 'thinking'; text: string }
-  | { type: 'image'; mimeType: string; contentRef?: string; data?: string; fileId?: string }
+  | { type: 'image'; mimeType: string; contentRef?: string; data?: string; fileId?: string; nativeMedia?: NativeMedia }
   | { type: 'tool_call'; toolCallId: string; toolName: string; args: unknown; omittedFields?: string[] }
   | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { type: 'omitted'; kind: string; description: string }
@@ -305,8 +307,8 @@ export interface LocalAttachmentUpload {
   machineHostId: string
   ownerHostEpoch: string
   runtimeGeneration: number
-  /** Process-local source handle. It is deliberately removed when state is restored from storage. */
-  sourceToken?: string
+  /** Editing association only; native scoped query must verify this run. */
+  jobId?: string
 }
 
 export interface AttachmentDto {
@@ -356,15 +358,20 @@ export interface SelectedAttachment {
   mediaType?: string
 }
 export type AttachmentUploadPhase = 'hashing' | 'uploading' | 'finalizing'
-export interface AttachmentUploadProgress extends ConnectionContext {
+export interface PendingAttachmentSelection {
+  jobId: string
+  revision: string
+  sessionId: string
+}
+export interface AttachmentJobSnapshot extends SelectedAttachment {
+  revision: number
+  connectionId: string
   workId: string
-  machineHostId: string
-  ownerHostEpoch: string
-  runtimeGeneration: number
-  token: string
-  phase: AttachmentUploadPhase
-  bytesProcessed: number
-  totalBytes: number
+  target?: { machineHostId: string; ownerHostEpoch: string; runtimeGeneration: number }
+  state: 'selected' | AttachmentUploadPhase | 'succeeded' | 'failed' | 'unknown'
+  progress?: { phase: AttachmentUploadPhase; bytesProcessed: number; totalBytes: number }
+  result?: AttachmentUploadResult
+  error?: { message: string; outcomeUnknown: boolean }
 }
 export interface AttachmentUploadResult {
   attachment: AttachmentDto
@@ -391,25 +398,8 @@ export interface ConversationBootstrap {
   cursor: { hostEpoch: string; instanceId: string; runtimeGeneration: number; sequence: number }
   historyRevision: number
   historyTruncated: boolean
-  historyBeforeEntryId?: string
 }
 
-export interface ConversationHistoryPage {
-  records: ConversationRecord[]
-  incompleteEntryIds: string[]
-  revision: string
-  hasEarlier: boolean
-  nextCursor?: string
-  instance: Work
-  hostEpoch: string
-}
-
-export interface CompletedConversationEntry {
-  record: ConversationRecord
-  revision: string
-  instance: Work
-  hostEpoch: string
-}
 
 export type InteractionRequest =
   | { method: 'select'; interactionId: string; title: string; options: string[]; issuedAt: string; expiresAt?: string }
@@ -569,11 +559,13 @@ export interface ResourcesResult {
 }
 
 export type ConversationImageSource =
+  | { type: 'native'; media: NativeMedia }
   | { type: 'conversation'; contentRef: string; mimeType: string }
   | { type: 'inline'; data: string; mimeType: string }
   | { type: 'published'; file: PublishedFileDto }
 
 export interface ConversationImageResource {
+  handle?: string
   state: 'idle' | 'loading' | 'ready' | 'error'
   url?: string
   message?: string
@@ -586,18 +578,22 @@ export interface ToolCallPreview {
   truncated: boolean
 }
 
-export type ConversationProcessItem =
+export type ConversationProcessItem = (
   | { id: string; kind: 'assistant'; groupId: string; text: string; time: string; groupTime?: string }
   | { id: string; kind: 'thinking'; groupId: string; title: string; text: string; open?: boolean; groupTime?: string }
   | { id: string; kind: 'tool'; groupId: string; toolCallId?: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; preview?: ToolCallPreview; detailArgs?: unknown; detailOutputText?: string; detailOmittedFields?: string[]; groupTime?: string }
   | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; historyEntryId?: string; groupTime?: string }
-  | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
+  | { id: string; kind: 'notice'; groupId?: string; retryEntryId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 
-export type ConversationItem =
+) & { sourceEntryIds?: string[] }
+
+export type ConversationItem = (
   | { id: string; kind: 'user'; text: string; time: string; attachments?: AttachmentDto[]; images?: Array<Extract<ConversationProcessItem, { kind: 'image' }>> }
   | { id: string; kind: 'activity' }
   | ConversationProcessItem
   | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[] }
+
+) & { sourceEntryIds?: string[] }
 
 export interface SystemCandidate {
   id: string

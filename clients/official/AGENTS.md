@@ -2,6 +2,10 @@
 
 本文件只约束 `clients/official/`。根 [`STORY.md`](../../STORY.md) 与 [`AGENTS.md`](../../AGENTS.md) 继续分别是整个产品和整个 monorepo 的最高权威。
 
+## 工程入口
+
+先按 [官方客户端图谱](../../docs/agent_maps/official-client.md) 定位要改的用户流程、事实 owner 与验证入口；[客户端设计理念](../../docs/client-design-principles.md) 只在该正式文本维护一份。[Conversation ownership](CONVERSATION_ARCHITECTURE.md) 记录会话/文件/编辑的具体接纳和回放边界。不要把连接变化、内容加载与本地编辑重新合成页面级恢复器。
+
 ## 产品语义与权威顺序
 
 - 产品语义以主人明确表达为准，其次是根 `STORY.md`、Protocol V2 与对应 agent map。当前实现用于了解现状；`UI_UX_REFERENCE.md` 按头部声明的优先级作为历史参考使用。

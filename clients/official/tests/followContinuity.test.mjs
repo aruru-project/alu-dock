@@ -37,27 +37,16 @@ try {
     assert.equal(reduced.state.queue, state.queue, `${eventType}: output does not copy Queue`)
     state = reduced.state
   }
-  const { createConversationRecovery } = await server.ssrLoadModule('/src/lib/conversationRecovery.ts')
-  const { run: recover } = createConversationRecovery()
-  let release, requests = 0
-  const operation = () => { requests++; return new Promise(resolve => { release = resolve }) }
-  const first = recover('host:work:runtime', 'old-follow', operation)
-  assert.equal(recover('host:work:runtime', 'old-follow', operation), first)
-  await Promise.resolve()
-  assert.equal(requests, 1, 'one old subscription can only start one in-flight bootstrap')
-  assert.equal(recover('host:work:runtime', null, operation), first)
-  let nextRequests = 0
-  recover('host:work:runtime', 'new-follow', async () => { nextRequests++; return true })
-  release(true)
-  assert.equal(await first, true)
-  assert.equal(nextRequests, 1, 'a boundary in newly activated buffered Follow is recovered, not swallowed')
-  const oldTarget = recover('old-host:work', null, operation)
-  await Promise.resolve()
-  const finishOld = release
-  assert.equal(await recover('new-host:work', null, async () => true), true)
-  finishOld(true)
-  assert.equal(await oldTarget, false, 'a late recovery cannot publish success for a superseded target')
-  console.log('PASS: visible Follow continues across controller-only event numbers in conversation and Extension UI; scoped recovery and output fact isolation')
+  const request = { interactionId: 'same-question', method: 'input', title: 'Question', prefill: 'original' }
+  extension.activeRequest = request
+  const retainedRequest = extension.activeRequest
+  await extension.bootstrap(context, 'rebound', {
+    instance, records: [], activeEvents: [], queue: [], historyRevision: 1, historyTruncated: false,
+    cursor: { instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1, sequence: state.sequence },
+    extensionUi: { status: {}, toolsExpanded: false, events: [], activeInteraction: { id: 'same-question' } },
+  })
+  assert.equal(extension.activeRequest, retainedRequest, 'same-domain recovery preserves the interaction object used by local inputs and focus')
+  console.log('PASS: visible Follow continues across controller-only event numbers in conversation and Extension UI; output fact isolation')
 } finally {
   await server.close()
   delete globalThis.window

@@ -194,11 +194,25 @@ pub struct HistoryRecord {
     pub is_error: Option<bool>,
     pub custom_type: Option<String>,
     pub display: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_metadata", skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_omitted_fields: Vec<String>,
     pub command: Option<String>,
     pub exit_code: Option<i64>,
     pub cancelled: Option<bool>,
     pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_output_path: Option<String>,
     pub exclude_from_context: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_kept_entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_entry_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_entry_id: Option<String>,
     pub label: Option<String>,
     pub provider: Option<String>,
     pub model_id: Option<String>,
@@ -222,6 +236,11 @@ pub struct PendingMessage {
     )]
     pub attachments: Vec<AttachmentDto>,
     pub accepted_at: String,
+}
+
+fn deserialize_metadata<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
+where D: Deserializer<'de> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_attachment_list<'de, D>(
@@ -253,7 +272,7 @@ pub struct ImagePath {
     pub mime_type: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceReadResult {
     pub instance: InstanceSnapshot,
@@ -395,7 +414,8 @@ mod tests {
         let endpoint = directory.join("dock.sock");
         let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
         let peer = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio::io::BufReader::new(socket);
             let hello: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
             write_json_line(
                 &mut socket,

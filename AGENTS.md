@@ -49,7 +49,7 @@ Official Desktop/Android / Hub TUI / Work TUI / custom clients
 | Agent Worker、Pi adapter、session 与 Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
 | Pi SDK 依赖升级与独立兼容门 | [`docs/pi-sdk-upgrades.md`](docs/pi-sdk-upgrades.md) |
 | Hub 与 Session Work TUI | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
-| 官方 Desktop/Android Client | [`clients/official/AGENTS.md`](clients/official/AGENTS.md) |
+| 官方 Desktop/Android Client | [模块图谱](docs/agent_maps/official-client.md) · [设计理念](docs/client-design-principles.md) · [开发约定](clients/official/AGENTS.md) |
 | Managed service 与部署 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
 | 测试配额、用户可见文案与验证层次 | [`docs/qa.md`](docs/qa.md) |
 | 本地安装和运维 | [`docs/local-install.md`](docs/local-install.md) |

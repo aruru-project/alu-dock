@@ -215,7 +215,7 @@ async function runWorker(): Promise<void> {
         result = dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
       }
       const disposed = envelope.kind === "agent_control" && envelope.control.type === "dispose";
-      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed ? {} : { state: captureState(runtime!) }) });
+      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed ? {} : { state: captureState(runtime!) }) }, envelope.kind === "agent_request" && envelope.request.type === "conversation.image" ? "conversation.image" : undefined);
       if (disposed) setTimeout(() => process.exit(0), 0);
     } catch (error) {
       const state = tryCaptureState(runtime!);

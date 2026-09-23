@@ -59,10 +59,11 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       || binding.hostEpoch !== cursor.hostEpoch
       || binding.runtimeGeneration !== cursor.runtimeGeneration)) {
       suspendController(binding.handle, false)
-      if (!await releaseController(binding.handle, 'detached', false)) {
-        controllerEnded(binding.handle, 'disconnected', false)
-        return false
-      }
+      // The new interaction's binding is installed synchronously. Releasing an
+      // obsolete controller must not delay the new content or clear its request.
+      void releaseController(binding.handle, 'detached', false).then((released) => {
+        if (!released) controllerEnded(binding.handle, 'disconnected', false)
+      })
     }
     if (revision !== lifecycleRevision) return false
     const sameGeneration = previousIdentity.connectionId === connection.connectionId
@@ -97,7 +98,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     return true
   }
 
-  function resumeFollow(
+  function bindSubscription(
     connection: { connectionId: string; selectionGeneration: number },
     subscription: string,
     cursor: ConversationBootstrap['cursor'],
@@ -107,12 +108,11 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       || instanceId.value !== cursor.instanceId
       || hostEpoch.value !== cursor.hostEpoch
       || runtimeGeneration.value !== cursor.runtimeGeneration
-      || lastSequence.value !== cursor.sequence
-      || controller.value) return false
+      || lastSequence.value !== cursor.sequence) return false
     lifecycleRevision++
     acquisitionRevision++
     subscriptionId.value = subscription
-    controllerState.value = 'detached'
+    if (!controller.value) controllerState.value = 'detached'
     return true
   }
 
@@ -156,7 +156,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       && binding.runtimeGeneration === runtimeGeneration.value
   }
 
-  // App's live reducer has already authenticated generation and monotonic order.
+  // The shared Work observation reducer has already authenticated generation and monotonic order.
   // Keep our own binding/cursor for resume, without a second event validator or
   // an unreachable session.replaced branch (that boundary always bootstraps).
   function applyLive(instance: string, subscription: string, event: ProjectedEvent): boolean {
@@ -325,7 +325,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     connectionId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
     status, aboveWidgets, belowWidgets, toolsExpanded, toolsResetRevision,
     activeSummary, activeRequest, controller, controllerState,
-    hasAttention, isCurrent, bootstrap, resumeFollow, clear, applyLive, beginAcquire,
+    hasAttention, isCurrent, bootstrap, bindSubscription, clear, applyLive, beginAcquire,
     attachController, failAcquire, suspendController, controllerEnded, releaseController, applyControllerEvent,
     markInteractionUnknown, clearInteractionUnknown, hideControllerRequest, resolveLocally,
     applyAuthoritativeSnapshot,

@@ -1,14 +1,27 @@
-import type { AttachmentDto, MachinePlatform } from './types'
+import type { AttachmentDto, MachinePlatform, PendingAttachmentSelection } from './types'
 
 export const LOCAL_UI_STATE_KEY = 'aludock.uiState'
 export const LEGACY_SELECTED_WORK_KEY = 'aludock.selectedWork'
 export const LEGACY_DRAFT_KEY = 'aludock.draft'
 export const LOCAL_UI_STATE_SCHEMA_VERSION = 4 as const
 
+export interface ConversationReadingPosition {
+  hostEpoch: string
+  sessionId: string
+  following: boolean
+  id?: string
+  offset?: number
+  scrollTop: number
+  text?: { quote: string; quoteOffset: number; quoteOccurrence: number; viewportOffset: number }
+}
+
 export interface ConnectionLocalUiState {
   selectedWorkId: string | null
   drafts: Record<string, string>
+  editorRevisions: Record<string, string>
+  attachmentRevisions: Record<string, string>
   attachments: Record<string, AttachmentDto[]>
+  pendingAttachments: Record<string, PendingAttachmentSelection[]>
   recentWorkspaces: Record<string, string[]>
   detailMode: boolean
 }
@@ -16,6 +29,7 @@ export interface ConnectionLocalUiState {
 export interface LocalUiState {
   schemaVersion: typeof LOCAL_UI_STATE_SCHEMA_VERSION
   activeConnectionId: string | null
+  appliedOperationIds: string[]
   connections: Record<string, ConnectionLocalUiState>
 }
 
@@ -30,7 +44,7 @@ const MAX_WORKSPACE_PATH_LENGTH = 16_384
 const MAX_RECENT_MACHINES = 64
 export const MAX_RECENT_WORKSPACES_PER_MACHINE = 8
 export function emptyLocalUiState(): LocalUiState {
-  return { schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION, activeConnectionId: null, connections: dictionary<ConnectionLocalUiState>() }
+  return { schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION, activeConnectionId: null, appliedOperationIds: [], connections: dictionary<ConnectionLocalUiState>() }
 }
 
 /** Pure, fail-soft decoder that upgrades supported historical schemas in memory. */
@@ -60,7 +74,10 @@ export function migrateLocalUiState(
     next.connections[connectionId] = {
       selectedWorkId,
       drafts,
+      editorRevisions: dictionary<string>(),
+      attachmentRevisions: dictionary<string>(),
       attachments: dictionary<AttachmentDto[]>(),
+      pendingAttachments: dictionary<PendingAttachmentSelection[]>(),
       recentWorkspaces: dictionary<string[]>(),
       detailMode: true,
     }
@@ -95,7 +112,7 @@ export function readAndMigrateLocalUiState(storage: Storage | null, connectionId
 export function persistLocalUiState(storage: Storage | null, state: LocalUiState): boolean {
   try {
     if (!storage) return false
-    storage.setItem(LOCAL_UI_STATE_KEY, JSON.stringify(state, (key, value) => key === 'sourceToken' ? undefined : value))
+    storage.setItem(LOCAL_UI_STATE_KEY, JSON.stringify(state))
     return true
   } catch {
     return false
@@ -133,7 +150,10 @@ function normalizeLocalUiState(value: unknown): LocalUiState | null {
     connections[connectionId] = {
       selectedWorkId: safeId(hostValue.selectedWorkId),
       drafts,
+      editorRevisions: revisionDictionary(hostValue.editorRevisions),
+      attachmentRevisions: revisionDictionary(hostValue.attachmentRevisions),
       attachments,
+      pendingAttachments: normalizePendingAttachments(hostValue.pendingAttachments),
       recentWorkspaces,
       detailMode: typeof hostValue.detailMode === 'boolean' ? hostValue.detailMode : true,
     }
@@ -141,8 +161,38 @@ function normalizeLocalUiState(value: unknown): LocalUiState | null {
   return {
     schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION,
     activeConnectionId: safeId(value.schemaVersion === 4 ? value.activeConnectionId : value.activeHostId),
+    appliedOperationIds: Array.isArray(value.appliedOperationIds) ? [...new Set(value.appliedOperationIds.filter((id): id is string => !!safeId(id)))] : [],
     connections,
   }
+}
+
+// Reading metadata is independent of editor transactions. A scroll save writes
+// one small position, not the JSON for every Work's drafts and attachments.
+function readingKey(connectionId: string, workId: string) { return `aludock.reading:${JSON.stringify([connectionId, workId])}` }
+export function readConversationPosition(storage: Storage | null, connectionId: string, workId: string): ConversationReadingPosition | undefined {
+  try {
+    const raw = JSON.parse(storage?.getItem(readingKey(connectionId, workId)) ?? 'null')
+    if (!isRecord(raw) || !safeId(raw.hostEpoch) || !safeId(raw.sessionId)
+      || typeof raw.following !== 'boolean' || typeof raw.scrollTop !== 'number' || !Number.isFinite(raw.scrollTop) || raw.scrollTop < 0) return
+    const text = raw.text
+    return {
+      hostEpoch: raw.hostEpoch as string, sessionId: raw.sessionId as string, following: raw.following, scrollTop: raw.scrollTop,
+      ...(typeof raw.id === 'string' && raw.id ? { id: raw.id } : {}),
+      ...(typeof raw.offset === 'number' && Number.isFinite(raw.offset) ? { offset: raw.offset } : {}),
+      ...(isRecord(text) && typeof text.quote === 'string' && text.quote.length > 0
+        && typeof text.quoteOffset === 'number' && Number.isSafeInteger(text.quoteOffset) && text.quoteOffset >= 0
+        && typeof text.quoteOccurrence === 'number' && Number.isSafeInteger(text.quoteOccurrence) && text.quoteOccurrence >= 0
+        && typeof text.viewportOffset === 'number' && Number.isFinite(text.viewportOffset)
+        ? { text: { quote: text.quote, quoteOffset: text.quoteOffset, quoteOccurrence: text.quoteOccurrence, viewportOffset: text.viewportOffset } } : {}),
+    }
+  } catch { return }
+}
+export function saveConversationPosition(storage: Storage | null, connectionId: string, workId: string, position: ConversationReadingPosition): boolean {
+  try {
+    if (!storage) return false
+    storage.setItem(readingKey(connectionId, workId), JSON.stringify(position))
+    return true
+  } catch { return false }
 }
 
 function normalizeAttachment(value: unknown): AttachmentDto | null {
@@ -181,6 +231,7 @@ function normalizeLocalAttachmentUpload(value: unknown): AttachmentDto['localUpl
     machineHostId: value.machineHostId,
     ownerHostEpoch: value.ownerHostEpoch,
     runtimeGeneration: value.runtimeGeneration,
+    ...(safeId(value.jobId) ? { jobId: value.jobId as string } : {}),
   }
 }
 
@@ -189,7 +240,7 @@ function uniqueAttachments(items: AttachmentDto[]) {
   return items.filter((item) => !seen.has(item.fileId) && seen.add(item.fileId))
 }
 
-function cloneLocalUiState(state: LocalUiState): LocalUiState {
+export function cloneLocalUiState(state: LocalUiState): LocalUiState {
   const connections = dictionary<ConnectionLocalUiState>()
   for (const [connectionId, connection] of Object.entries(state.connections)) {
     const attachments = dictionary<AttachmentDto[]>()
@@ -199,7 +250,10 @@ function cloneLocalUiState(state: LocalUiState): LocalUiState {
     connections[connectionId] = {
       selectedWorkId: connection.selectedWorkId,
       drafts: Object.assign(dictionary<string>(), connection.drafts),
+      editorRevisions: Object.assign(dictionary<string>(), connection.editorRevisions),
+      attachmentRevisions: Object.assign(dictionary<string>(), connection.attachmentRevisions),
       attachments,
+      pendingAttachments: normalizePendingAttachments(connection.pendingAttachments),
       recentWorkspaces,
       detailMode: connection.detailMode,
     }
@@ -207,6 +261,7 @@ function cloneLocalUiState(state: LocalUiState): LocalUiState {
   return {
     schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION,
     activeConnectionId: state.activeConnectionId,
+    appliedOperationIds: [...state.appliedOperationIds],
     connections,
   }
 }
@@ -265,4 +320,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function dictionary<T>(): Record<string, T> {
   return Object.create(null) as Record<string, T>
+}
+
+function revisionDictionary(value: unknown): Record<string, string> {
+  const result = dictionary<string>()
+  if (isRecord(value)) for (const [key, token] of Object.entries(value)) {
+    if (typeof token === 'string' && token.length <= 64) result[key] = token
+  }
+  return result
+}
+
+function normalizePendingAttachments(value: unknown): Record<string, PendingAttachmentSelection[]> {
+  const result = dictionary<PendingAttachmentSelection[]>()
+  if (isRecord(value)) for (const [workId, items] of Object.entries(value)) {
+    if (!safeId(workId) || !Array.isArray(items)) continue
+    result[workId] = items.filter(item => isRecord(item) && safeId(item.jobId) && safeId(item.revision) && typeof item.sessionId === 'string')
+      .map(item => ({ jobId: item.jobId, revision: item.revision, sessionId: item.sessionId }))
+  }
+  return result
 }

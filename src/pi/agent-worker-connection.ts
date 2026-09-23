@@ -81,7 +81,15 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       onSpawn: options.onWorkerSpawn,
     });
     this.sender = new OrderedWorkerSender(identity, (message, callback) => this.process.child.send(message, callback));
-    this.receiver = new WorkerFrameReceiver((received) => this.acceptIdentity(received, identity));
+    this.receiver = new WorkerFrameReceiver((received) => this.acceptIdentity(received, identity), (callId) => {
+      const pending = this.pending.get(callId);
+      if (pending) return { method: pending.label };
+      // Generation replacement cancels pending consumers, but an already running
+      // dispatch can legally reply using the new generation. No second call log.
+      const issued = /^host-([1-9][0-9]*)$/.exec(callId);
+      const sequence = issued ? Number(issued[1]) : NaN;
+      return Number.isSafeInteger(sequence) && sequence <= this.nextCall ? "cancelled" : undefined;
+    });
     this.readyPromise = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
     this.process.child.on("message", (raw) => this.receive(raw));
     this.process.child.on("error", (error) => this.failTransport(error));
@@ -196,8 +204,9 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     }
     if (envelope.kind === "response") {
       const pending = this.pending.get(envelope.callId); if (!pending) return;
+      // Images were validated at reassembly using this same pending association.
+      if (envelope.ok && pending.label !== "conversation.image") validateAgentWorkerResult(pending.label, envelope.result);
       if (envelope.state) this.applyState(envelope.state);
-      if (envelope.ok) validateAgentWorkerResult(pending.label, envelope.result);
       this.pending.delete(envelope.callId); if (pending.timer) clearTimeout(pending.timer);
       if (envelope.ok) pending.resolve(envelope.result);
       else pending.reject(decodeWorkerError(envelope.error));

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::{
     ClientError, DockClient, Result, capabilities::PUBLISHED_FILES as PUBLISHED_FILE_CAPABILITIES,
@@ -11,7 +13,7 @@ pub const MAX_PUBLISHED_FILE_MEDIA_TYPE_CHARS: usize = 256;
 pub const MAX_PUBLISHED_FILE_CHUNK_BYTES: usize = 256 * 1_024;
 pub const MAX_PUBLISHED_FILE_BYTES: usize = 512 * 1_024 * 1_024;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedFileDto {
     pub presentation: String,
@@ -70,9 +72,11 @@ impl PublishedFileDto {
 }
 
 #[derive(Clone, Debug)]
-pub struct PublishedFileBytes {
+pub struct PublishedFileTransfer {
     pub file: PublishedFileDto,
-    pub bytes: Vec<u8>,
+    pub size_bytes: u64,
+    /// Local digest of the received bytes; file.read does not provide a remote digest.
+    pub sha256: String,
     pub host_epoch: String,
     pub runtime_generation: u64,
 }
@@ -98,15 +102,15 @@ struct FileReadParams<'a> {
 }
 
 impl DockClient {
-    pub async fn read_published_file(
+    pub async fn read_published_file<W: AsyncWrite + Unpin>(
         &self,
         instance_id: &str,
         expected_file: &PublishedFileDto,
-    ) -> Result<PublishedFileBytes> {
+        sink: &mut W,
+    ) -> Result<PublishedFileTransfer> {
         expected_file.validate()?;
-        let capacity = usize::try_from(expected_file.size_bytes)
-            .map_err(|_| protocol("published file size was unsupported on this device"))?;
-        let mut bytes = Vec::with_capacity(capacity);
+        let mut digest = Sha256::new();
+        let mut size_bytes = 0_u64;
         let mut offset = 0_u64;
         let mut expected_epoch: Option<String> = None;
         let mut expected_generation: Option<u64> = None;
@@ -136,17 +140,22 @@ impl DockClient {
             }
             expected_epoch.get_or_insert(host_epoch);
             expected_generation.get_or_insert(page.runtime_generation);
-            bytes.extend_from_slice(&chunk);
+            sink.write_all(&chunk).await.map_err(|e| {
+                crate::private_fs::storage_error(std::path::Path::new("published image sink"), e)
+            })?;
+            digest.update(&chunk);
+            size_bytes += chunk.len() as u64;
 
             if page.complete {
-                if bytes.len() as u64 != expected_file.size_bytes {
+                if size_bytes != expected_file.size_bytes {
                     return Err(protocol(
                         "published file completed with an inconsistent size",
                     ));
                 }
-                return Ok(PublishedFileBytes {
+                return Ok(PublishedFileTransfer {
                     file: page.file,
-                    bytes,
+                    size_bytes,
+                    sha256: hex::encode(digest.finalize()),
                     host_epoch: expected_epoch.unwrap_or_default(),
                     runtime_generation: expected_generation.unwrap_or_default(),
                 });
@@ -241,5 +250,103 @@ mod tests {
             ..second
         };
         assert!(validate_file_page(&drifted, "work-1", &file(), 3).is_err());
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "android")))]
+mod native_file_test {
+    use super::*;
+    use crate::{
+        ConnectionRouter, IdentityStore, LocalDockEndpoint, MediaScope, SessionContent,
+        tls::{read_json_line, write_json_line},
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use serde_json::{Value, json};
+
+    // Published images now use the same opaque native file for viewing and
+    // saving. The peer only supplies ordinary file.read pages, no image DTOs.
+    #[tokio::test]
+    async fn published_image_pages_are_saved_from_the_verified_local_handle() {
+        let directory = std::env::temp_dir().join(format!(
+            "pf{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("s");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let file = PublishedFileDto {
+            presentation: "image".into(),
+            file_ref: "published-original".into(),
+            name: "result.png".into(),
+            size_bytes: 12,
+            media_type: Some("image/png".into()),
+        };
+        let expected = file.clone();
+        let peer = tokio::spawn(async move {
+            for (offset, bytes, complete) in [
+                (0, &b"\x89PNG\r"[..], false),
+                (5, &b"\n\x1a\nbody"[..], true),
+            ] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio::io::BufReader::new(socket);
+                let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                write_json_line(&mut socket, &json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,
+                    "host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
+                let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                assert_eq!(request["type"], "file.read");
+                assert_eq!(request["params"]["offset"], offset);
+                write_json_line(&mut socket, &json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":true,
+                    "result":{"instanceId":"work","runtimeGeneration":1,"file":expected,"offset":offset,"data":STANDARD.encode(bytes),"complete":complete,
+                        "nextOffset": if complete { None } else { Some(5) }}})).await.unwrap();
+            }
+        });
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(socket.to_str().unwrap()).unwrap(),
+                "published-test".into(),
+            )
+            .unwrap(),
+        );
+        let content = SessionContent::in_directory(directory.join("media")).unwrap();
+        let scope = MediaScope {
+            authority: "native-authority".into(),
+            instance_id: "work".into(),
+            host_epoch: "epoch".into(),
+            runtime_generation: 1,
+        };
+        let handle = content
+            .published_image(&client, scope.clone(), &file)
+            .await
+            .unwrap();
+        peer.await.unwrap();
+        client.router().close();
+        assert_eq!(
+            content
+                .clone()
+                .published_image(&client, scope, &file)
+                .await
+                .unwrap()
+                .handle,
+            handle.handle
+        );
+        let destination = directory.join("saved.png");
+        let mut sink = std::fs::File::create(&destination).unwrap();
+        content.copy_media(&handle.handle, &mut sink).unwrap();
+        sink.sync_all().unwrap();
+        drop(sink);
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"\x89PNG\r\n\x1a\nbody"
+        );
+        // file.read has no remote digest; the recorded digest describes the
+        // actual locally received/copied file, not a claimed remote SHA check.
+        assert_eq!(
+            handle.sha256,
+            "776f30dcc133299a75c28d425a30a09788b4a3ca62ce3349d27815888ce5262f"
+        );
+        assert!(content.copy_media("/etc/passwd", std::io::sink()).is_err());
+        drop(content);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

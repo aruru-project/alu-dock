@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     time::timeout,
 };
 use uuid::Uuid;
@@ -289,7 +289,7 @@ async fn download_after_request<S, W, F>(
     on_progress: &mut F,
 ) -> Result<DeliverableDownloadResult>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
     F: FnMut(DeliverableDownloadProgress),
 {
@@ -396,7 +396,7 @@ where
 async fn read_download_line<T, R>(stream: &mut R, maximum_line_bytes: usize) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
-    R: AsyncRead + Unpin,
+    R: AsyncBufRead + Unpin,
 {
     timeout(
         DOWNLOAD_IDLE_TIMEOUT,
@@ -613,7 +613,8 @@ mod tests {
 
     #[tokio::test]
     async fn downloading_a_delivery_writes_the_exact_verified_file() {
-        let (mut client, mut host) = duplex(16 * 1024);
+        let (client, mut host) = duplex(16 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
         let host_task = tokio::spawn(async move {
             send_download(
                 &mut host,
@@ -645,7 +646,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_delivery_with_the_wrong_digest_is_not_accepted() {
-        let (mut client, mut host) = duplex(16 * 1024);
+        let (client, mut host) = duplex(16 * 1024);
+        let mut client = tokio::io::BufReader::new(client);
         let host_task = tokio::spawn(async move {
             send_download(&mut host, &"0".repeat(64)).await;
         });

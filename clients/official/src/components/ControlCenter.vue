@@ -55,11 +55,10 @@ const commandConsole = useCommandConsoleStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
   snapshot: [work: Work]
-  unknown: [cause: unknown, domain: ControlMutationDomain, scope?: SessionContext]
+  unknown: [cause: unknown, domain: ControlMutationDomain, scope: SessionContext]
   reconcile: [domain: ControlMutationDomain]
   section: [section: ControlSection]
   prefill: [name: string]
-  resync: [work: Work, draftText?: string]
   compact: [customInstructions?: string]
   close: []
   stop: []
@@ -251,15 +250,7 @@ function forwardSessionTitle(title: string, body?: string) {
   emit('title', title, body)
 }
 
-function forwardSessionSnapshot(work: Work) {
-  emit('snapshot', work)
-  emit('close')
-}
-
-function forwardSessionResync(work: Work, draftText?: string) {
-  emit('resync', work, draftText)
-  emit('close')
-}
+function sessionActionFinished() { emit('close') }
 
 function forwardSessionCompact(customInstructions?: string) {
   emit('compact', customInstructions)
@@ -574,15 +565,16 @@ async function executeCatalogCommand(command: CommandInfo, argumentsText: string
   error.value = ''
   commandConsole.beginOperation(operationId, command.name, argumentsText)
   if (command.name === 'dock-tools') dockToolsOperationId.value = operationId
+  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
+    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
   try {
-    const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, context))
-    emit('snapshot', result.instance)
+    const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, app.captureOperationTarget(context, props.work.id)))
     commandConsole.receiveReceipt(operationId, result.receipt)
     return true
   } catch (cause) {
     if (commandConsole.operationSucceeded(operationId)) return true
     commandConsole.failOperation(operationId, errorMessage(cause))
-    if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, 'conversation')
+    if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, 'conversation', scope)
     return false
   } finally {
     pending.value = ''
@@ -605,13 +597,14 @@ async function chooseModel(model: ModelInfo) {
   if (props.preview || pending.value || props.outcomeUnknown || isCurrentModel(model)) return
   pending.value = `model:${model.provider}/${model.id}`
   error.value = ''
+  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
+    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
   try {
-    const snapshot = await currentConnectionCall(app, (context) => setModel(props.work.id, model.provider, model.id, context))
-    emit('snapshot', snapshot)
+    const snapshot = await currentConnectionCall(app, (context) => setModel(props.work.id, model.provider, model.id, app.captureOperationTarget(context, props.work.id)))
     if (models.value) models.value.instance = snapshot
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'models')
+    mutationFailure(cause, 'models', scope)
   } finally {
     pending.value = ''
   }
@@ -621,13 +614,14 @@ async function chooseThinking(level: ThinkingLevel) {
   if (props.preview || pending.value || props.outcomeUnknown || props.work.executor.thinkingLevel === level) return
   pending.value = `thinking:${level}`
   error.value = ''
+  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
+    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
   try {
-    const snapshot = await currentConnectionCall(app, (context) => setThinking(props.work.id, level, context))
-    emit('snapshot', snapshot)
+    const snapshot = await currentConnectionCall(app, (context) => setThinking(props.work.id, level, app.captureOperationTarget(context, props.work.id)))
     if (models.value) models.value.instance = snapshot
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'models')
+    mutationFailure(cause, 'models', scope)
   } finally {
     pending.value = ''
   }
@@ -638,13 +632,14 @@ async function toggleTool(tool: ToolInfo) {
   const names = tools.value.tools.filter((item) => item.name === tool.name ? !tool.active : item.active).map((item) => item.name)
   pending.value = `tool:${tool.name}`
   error.value = ''
+  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
+    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
   try {
-    const result = await currentConnectionCall(app, (context) => setActiveTools(props.work.id, names, context))
+    const result = await currentConnectionCall(app, (context) => setActiveTools(props.work.id, names, app.captureOperationTarget(context, props.work.id)))
     tools.value = result
-    emit('snapshot', result.instance)
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'tools')
+    mutationFailure(cause, 'tools', scope)
   } finally {
     pending.value = ''
   }
@@ -693,22 +688,23 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
   if (!settings.value || !setting.writable || props.preview || pending.value || props.outcomeUnknown) return
   pending.value = `setting:${setting.key}`
   error.value = ''
+  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
+    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
   try {
-    const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, context))
+    const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, app.captureOperationTarget(context, props.work.id)))
     const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
     if (index >= 0) settings.value.settings[index] = result.setting
-    emit('snapshot', result.instance)
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'settings')
+    mutationFailure(cause, 'settings', scope)
   } finally {
     pending.value = ''
   }
 }
 
-function mutationFailure(cause: unknown, domain: ControlMutationDomain) {
+function mutationFailure(cause: unknown, domain: ControlMutationDomain, scope: SessionContext) {
   error.value = errorMessage(cause)
-  if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain)
+  if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain, scope)
 }
 
 function sectionDomain(section: ControlSection): ControlMutationDomain {
@@ -834,9 +830,8 @@ function isCurrentModel(model: ModelInfo) {
       :outcome-unknown="outcomeUnknown"
       :has-draft="hasDraft"
       :compaction-pending="compactionPending"
-      @snapshot="forwardSessionSnapshot"
       @unknown="forwardSessionUnknown"
-      @resync="forwardSessionResync"
+      @finished="sessionActionFinished"
       @compact="forwardSessionCompact"
       @title="forwardSessionTitle"
       @close="$emit('close')"

@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+mod attachment_jobs;
 mod capabilities;
 mod client;
 mod config;
@@ -15,11 +16,19 @@ mod host_registry;
 mod identity;
 mod instances;
 mod local_transport;
+mod observation;
+mod operations;
 mod pairing;
 mod private_fs;
 mod protocol;
 mod published_files;
 mod sessions;
+mod session_content;
+mod session_records;
+mod session_content_reader;
+mod session_journal;
+mod session_media;
+mod run_cache;
 mod srp;
 mod storage;
 mod systems;
@@ -33,6 +42,7 @@ mod workspace_files;
 pub use actions::{
     DeliveryMode, QueueDequeueReceipt, QueueDequeueResult, SubmitReceipt, SubmitResult,
 };
+pub use attachment_jobs::{AttachmentSource, AttachmentState, NativeAttachment, AttachmentUploadScope, AttachmentSnapshot};
 pub use attachments::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadProgress,
     AttachmentUploadResult, AttachmentUploadStatus, MAX_ATTACHMENT_BYTES,
@@ -85,15 +95,19 @@ pub use instances::{
     WorkspaceCursor, WorkspaceEntry, WorkspaceEntryKind, WorkspacePage,
 };
 pub use local_transport::LocalDockEndpoint;
+pub use operations::{OperationAssociation, OperationAssociations};
+pub use observation::ConversationObservation;
+pub use session_media::{MediaHandle, MediaScope, MAX_ATTACHMENT_PREVIEW_BYTES};
+pub use session_content::{SessionContent, SessionSnapshot, SessionCommit, SessionUpdate, SessionBinding, ContentUpdate};
 pub use pairing::{PairingOutcome, PairingProgress, pair, validate_device_name};
 pub use protocol::{HostIdentity, HostInfo, host_info, host_info_for_profile};
 pub use published_files::{
-    MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES, PublishedFileBytes, PublishedFileDto,
+    MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES, PublishedFileTransfer, PublishedFileDto,
 };
 pub use sessions::{
-    CompactionPromptTemplatesResult, CompletedConversationEntry, ConversationContentChunk,
+    CompactionPromptTemplatesResult, ConversationContentChunk,
     ConversationContentPage, ConversationHistoryEntry, ConversationHistoryPage,
-    ConversationImageBytes, ConversationPreviewPage, MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions,
+    ConversationImageTransfer, MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions,
     SessionCompaction, SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
     SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
     SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
