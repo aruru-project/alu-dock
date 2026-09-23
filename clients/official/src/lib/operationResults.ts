@@ -36,7 +36,6 @@ export function useOperationResults(options: {
   function hasReturnedContent(operation: NativeOperation) {
     const result = operation.result
     if (!result) return false
-    if ('receipt' in result && result.receipt && 'restored' in result.receipt) return result.receipt.restored.length > 0
     return !!('editorText' in result ? result.editorText : 'selectedText' in result ? result.selectedText : undefined)
   }
   function acknowledge(operation: NativeOperation, refreshImages = false): Promise<void> {
@@ -60,7 +59,7 @@ export function useOperationResults(options: {
   }
   const consumeNativeOperation = async (operation: NativeOperation) => {
     if (operation.state === 'succeeded' && !appliedOperations.value.has(operation.operationId)
-      && (operation.kind === 'submit_message' || returnedContentErrors.value[operation.operationId])) {
+      && (operation.kind === 'submit_message' || operation.kind === 'dequeue_messages' || returnedContentErrors.value[operation.operationId])) {
       await acceptNativeOperation(operation)
       return
     }
@@ -102,9 +101,12 @@ export function useOperationResults(options: {
           acknowledgementErrors.value.add(operation.operationId)
           return
         }
-      } else if (operation.kind === 'dequeue_messages' && operation.editor && result && 'receipt' in result && result.receipt && 'restored' in result.receipt) {
-        options.queueRetrieved(operation, result.receipt.restored.map(item => item.queueItemId))
-        if (result.receipt.restored.length && !acceptEditorResult(operation, app.restoreOperationQueue(operation.editor, result.receipt.restored, operation.operationId))) return
+      } else if (operation.kind === 'dequeue_messages' && result && 'receipt' in result && result.receipt && 'restored' in result.receipt) {
+        options.queueRetrieved({ ...operation, sessionId: result.instance.executor.piSessionId ?? '' }, result.receipt.restored.map(item => item.queueItemId))
+        if (result.receipt.restored.length && !app.restoreOperationQueue(operation.connectionId, operation.instanceId, result.receipt.restored, operation.operationId)) {
+          acknowledgementErrors.value.add(operation.operationId)
+          return
+        }
       } else if (result && 'instance' in result && (!('cancelled' in result) || !result.cancelled)
         && ['new_session', 'switch_session', 'reload_session', 'navigate_session', 'fork_session', 'clone_session'].includes(operation.kind) && operation.editor) {
         const returned = 'editorText' in result ? result.editorText : 'selectedText' in result ? result.selectedText : undefined
@@ -136,12 +138,8 @@ export function useOperationResults(options: {
       try { await consumeNativeOperation(operation) } catch { /* Keep the retry entry visible. */ }
       return
     }
-    if ('receipt' in result && result.receipt && 'restored' in result.receipt) {
-      if (!acceptEditorResult(operation, app.restoreOperationQueue(operation.editor, result.receipt.restored, operation.operationId, true))) return
-    } else {
-      const text = 'editorText' in result ? result.editorText : 'selectedText' in result ? result.selectedText : undefined
-      if (!text || !acceptEditorResult(operation, app.appendOperationText(operation.editor, text, operation.operationId))) return
-    }
+    const text = 'editorText' in result ? result.editorText : 'selectedText' in result ? result.selectedText : undefined
+    if (!text || !acceptEditorResult(operation, app.appendOperationText(operation.editor, text, operation.operationId))) return
     appliedOperations.value.add(operation.operationId)
     await acknowledgeApplied(operation)
   }

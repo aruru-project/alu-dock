@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
+import { prependRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
 import { projectConversation } from '../src/lib/conversation.ts'
 import { draftAfterSubmit } from '../src/lib/uiBoundaries.ts'
 import { decodeLocalUiState, persistLocalUiState } from '../src/lib/localState.ts'
@@ -83,11 +83,13 @@ const attachment: AttachmentDto = {
 }
 
 {
-  const restoredItem: QueueItem = { queueItemId: 'q1', delivery: 'followUp', text: 'queued text', attachments: [attachment], imageCount: 2, acceptedAt: '2026-08-17T00:00:00.000Z' }
-  const result = appendRestoredQueue('new typing', [], [restoredItem])
-  assert.equal(result.text, 'new typing\n\nqueued text')
-  assert.deepEqual(result.attachments, [attachment])
-  assert.equal(result.restoredImageCount, 2)
+  const restoredItem: QueueItem = { queueItemId: 'q1', delivery: 'followUp', text: 'queued 1', attachments: [attachment], imageCount: 2, acceptedAt: '2026-08-17T00:00:00.000Z' }
+  const currentAttachment = { ...attachment, fileId: 'current-file', name: 'current.txt' }
+  const result = prependRestoredQueue('current draft', [currentAttachment], [restoredItem,
+    { ...restoredItem, queueItemId: 'q2', text: 'queued 2', imageCount: 0 },
+    { ...restoredItem, queueItemId: 'q3', text: 'queued 3', attachments: [], imageCount: 0 }])
+  assert.equal(result.text, 'queued 1\n\nqueued 2\n\nqueued 3\n\ncurrent draft')
+  assert.deepEqual(result.attachments, [currentAttachment, attachment])
 }
 
 {

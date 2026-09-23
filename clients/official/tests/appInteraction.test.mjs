@@ -36,7 +36,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, extensionBinding, allowExtension = false
-let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled'
+let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 const emit = (name, payload) => listeners.get(name)?.({ payload })
 const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
 const contentChange = change => observation({ kind: 'content', token: 'native-content', change })
@@ -69,7 +69,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); if (immediateAck) assert.equal(frames, beforeBatchFrame, 'cached data does not wait for a visible frame'); else assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
   if (command === 'start_conversation_follow') { binding = { ...args }; return }
   if (command === 'list_deliverables') return []
-  if (command === 'restored_image_count') return 0
+  if (command === 'restored_image_count') return restoredImageCount
   if (command === 'attachment_snapshot') {
     const cut = { revision: ++jobsRevision, jobs: structuredClone([...nativeJobs.values()].filter(job => job.workId === args.workId)) }
     if (deferJobSnapshot) { deferJobSnapshot = false; return new Promise(resolve => { releaseJobSnapshot = () => resolve(cut) }) }
@@ -460,17 +460,23 @@ try {
   assert.equal(nativeResults.has(visibleSendFailure.operationId), false, 'current, still-visible inline failure can acknowledge after a frame')
   assert.equal(app.currentDraft, 'later input')
   assert.ok(all(container, item => item.type === 'textarea').includes(expanded))
-  // Phase 3: the real Queue button receives either ordering of the native result
-  // and queue.cleared. New queued IDs and unrelated conversation events survive.
+  // User-reported Queue order: retrieve 1/2/3 before the current draft, together
+  // with attachments, in one edit. Both existing event orders use this result.
   const currentWork = JSON.parse(JSON.stringify(app.selectedWork))
   const queueItem = id => ({ queueItemId: id, delivery: 'followUp', text: `text-${id}`, attachments: [], imageCount: 0, acceptedAt: '2026-09-19' })
+  const queueAttachment = { fileId: '24077798-dfe5-41e8-9b6c-5216f492c180', name: 'queued.png', mediaType: 'image/png', sizeBytes: 68, sha256: 'a'.repeat(64), storedAt: '2026-09-19T00:00:00Z' }
+  const currentAttachment = { ...queueAttachment, fileId: 'fdc6b4d2-4121-40c3-85cf-d82a0040503b', name: 'current.png' }
   let remoteSequence = 100
   for (const ordering of ['receipt-first', 'event-first']) {
     const oldId = `${ordering}-old`, newId = `${ordering}-new`
-    const queueWork = { ...currentWork, pending: { steering: 0, followUp: 1, total: 1 }, updatedAt: '2026-09-19' }
-    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: queueWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: [queueItem(oldId)] }, contentToken: `queue-${ordering}`, state: 'connected' })
+    const queueWork = { ...currentWork, pending: { steering: 0, followUp: 3, total: 3 }, updatedAt: '2026-09-19' }
+    const restored = [{ ...queueItem(oldId), text: 'queued 1', attachments: [queueAttachment] },
+      { ...queueItem(`${oldId}-2`), text: 'queued 2' }, { ...queueItem(`${oldId}-3`), text: 'queued 3', imageCount: 1 }]
+    const oldIds = restored.map(item => item.queueItemId)
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: queueWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: `queue-${ordering}`, state: 'connected' })
     observation({ kind: 'content', token: `queue-${ordering}`, change: { kind: 'checkpoint_end' } })
     compact.props['onUpdate:modelValue']('original editor')
+    app.setCurrentAttachments([currentAttachment])
     await settle()
     let resolveQueue, capturedQueue
     dequeueNative = args => { capturedQueue = args; return new Promise(resolve => { resolveQueue = resolve }) }
@@ -478,38 +484,36 @@ try {
     assert.ok(queueButton)
     const queueAwait = queueButton.props.onClick()
     await settle()
-    assert.equal(capturedQueue.operationEditor.text, 'original editor')
-    assert.equal(capturedQueue.operationEditor.sessionId, 'new')
-    const result = { instance: { ...queueWork, pending: { steering: 0, followUp: 0, total: 0 } }, receipt: { instanceId: 'work', restored: [queueItem(oldId)] } }
-    const receipt = { ...base, operationId: capturedQueue.operationId, kind: 'dequeue_messages', runtimeGeneration: 2, sessionId: 'new', editor: capturedQueue.operationEditor, state: 'succeeded', result }
-    const deliverReceipt = () => { nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt) }
+    assert.equal(capturedQueue.operationEditor, null, 'retrieval does not capture the editor before dispatch')
+    const result = { instance: { ...queueWork, pending: { steering: 0, followUp: 0, total: 0 } }, receipt: { instanceId: 'work', restored } }
+    const receipt = { ...base, operationId: capturedQueue.operationId, kind: 'dequeue_messages', runtimeGeneration: 2, sessionId: '', editor: capturedQueue.operationEditor, state: 'succeeded', result }
+    const deliverReceipt = () => { restoredImageCount = 1; nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt) }
     const event = (eventType, data) => observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: '2026-09-20T00:00:00Z', eventType, data } })
     if (ordering === 'receipt-first') deliverReceipt()
-    else event('queue.cleared', { reason: 'dequeued', queueItemIds: [oldId], steering: 0, followUp: 1, total: 1 })
+    else event('queue.cleared', { reason: 'dequeued', queueItemIds: oldIds, steering: 0, followUp: 1, total: 1 })
     event('message.queued', { ...queueItem(newId), images: [] })
-    if (ordering === 'receipt-first') event('queue.cleared', { reason: 'dequeued', queueItemIds: [oldId], steering: 0, followUp: 1, total: 1 })
-    else { compact.props['onUpdate:modelValue']('edited while retrieving'); deliverReceipt() }
+    if (ordering === 'receipt-first') event('queue.cleared', { reason: 'dequeued', queueItemIds: oldIds, steering: 0, followUp: 1, total: 1 })
+    else {
+      compact.props['onUpdate:modelValue']('current editor at success')
+      consumeFailures.add(receipt.operationId)
+      deliverReceipt()
+    }
     event('message.completed', { messageId: ordering, role: 'assistant', content: [{ type: 'text', text: `visible-${ordering}` }] })
     resolveQueue(result); await queueAwait; await settle()
     emit('aludock://operation', receipt); await settle()
     const queuePreview = find(container, item => String(item.props.class).includes('alu-queue-preview'))
     assert.equal(text(queuePreview), `text-${newId}`, 'a receipt never clears later Queue items')
     assert.ok(text(container).includes(`visible-${ordering}`), 'Queue result acceptance never advances past an undisplayed conversation event')
-    if (ordering === 'receipt-first') assert.equal(app.currentDraft, `original editor\n\ntext-${oldId}`, 'one native operation restores the captured draft exactly once')
-    else {
-      assert.equal(app.currentDraft, 'edited while retrieving')
-      assert.ok(nativeResults.has(receipt.operationId), 'unclaimed returned content remains native')
-      const append = find(container, item => item.type === 'button' && text(item) === '追加到编辑器')
-      assert.ok(append)
-      // Review P2: an applied editor change survives failed confirmation. Retry
-      // only the local acknowledgement, never the append or remote dequeue.
-      consumeFailures.add(receipt.operationId)
-      await Promise.allSettled([append.props.onClick(), append.props.onClick()]); await settle()
+    const expectedDraft = ordering === 'receipt-first' ? 'queued 1\n\nqueued 2\n\nqueued 3\n\noriginal editor' : 'queued 1\n\nqueued 2\n\nqueued 3\n\ncurrent editor at success'
+    assert.equal(app.currentDraft, expectedDraft, 'retrieved order precedes the editor contents at success')
+    assert.deepEqual(app.currentAttachments.map(item => item.fileId), [currentAttachment.fileId, queueAttachment.fileId])
+    assert.ok(text(container).includes('queued.png') && text(container).includes('current.png'))
+    assert.ok(text(container).includes('已取回 1 个附件'))
+    assert.equal(find(container, item => item.type === 'button' && text(item) === '追加到编辑器'), undefined, 'retrieval completes without a second editing action')
+    if (ordering === 'event-first') {
       assert.equal(nativeResults.has(receipt.operationId), true)
-      assert.ok(text(container).includes('操作已完成，本机保存或确认尚未完成'), 'failed acknowledgement has visible local feedback without implying an unknown operation outcome')
       const retry = find(container, item => item.type === 'button' && text(item) === '重试关闭')
-      assert.ok(retry, 'the applied result offers confirmation retry, not another append')
-      assert.equal(find(container, item => item.type === 'button' && text(item) === '追加到编辑器'), undefined)
+      assert.ok(retry, 'existing acknowledgement retry does not repeat retrieval or insertion')
       const dequeues = calls.filter(call => call.command === 'dequeue_messages').length
       emit('aludock://operation', receipt); await settle()
       consumeFailures.delete(receipt.operationId)
@@ -517,8 +521,10 @@ try {
       assert.equal(nativeResults.has(receipt.operationId), false)
       assert.equal(calls.filter(call => call.command === 'consume_operation' && call.args.operationId === receipt.operationId).length, 2)
       assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues)
-      assert.equal(app.currentDraft, `edited while retrieving\n\ntext-${oldId}`, 'explicit double click also claims a returned result once')
+      assert.equal(app.currentDraft, expectedDraft)
     }
+    app.setCurrentAttachments([])
+    restoredImageCount = 0
     remoteSequence += 10
   }
   // A click/await result is not the draft claimant. The operation event is, even
@@ -553,7 +559,7 @@ try {
   assert.equal(nativeResults.has(sentOperation.operationId), false)
   assert.equal(calls.filter(call => call.command === 'consume_operation' && call.args.operationId === sentOperation.operationId).length, 2)
   assert.equal(calls.filter(call => call.command === 'submit_message').length, sendCount)
-  console.log('PASS: manual Queue append and automatic send success / failed confirmation / retry acknowledgement only')
+  console.log('PASS: Queue insertion and automatic send success / failed confirmation / retry acknowledgement only')
   // Review P2: action feedback belongs to its initiating Work, including a
   // failure delivered after selection changes. Native failures stay retained.
   for (const timing of ['failed-before-switch', 'failed-after-switch']) {
@@ -860,12 +866,14 @@ try {
   assert.equal(countCalls('abort_run'), abortsBefore + 1)
   assertControlTarget('abort_run')
   assert.equal(uploadApp.currentDraft, 'draft must survive control buttons')
-  // Abort still retrieves pending Queue first; failed capture must not skip it.
+  // Abort still retrieves pending Queue first, without capturing the editor.
   observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: { ...work, execution: 'running', pending: { steering: 1, followUp: 0, total: 1 } } }, contentToken: 'queued-storage-controls', state: 'connected' }); await settle()
+  dequeueNative = () => { throw { code: 'connection_failed', message: 'fixture dequeue unavailable' } }
   const dequeuesBefore = countCalls('dequeue_messages')
   await find(uploadContainer, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort')).props.onClick(); await settle()
-  assert.equal(countCalls('dequeue_messages'), dequeuesBefore, 'Queue retrieval still requires a durable original editor capture')
-  assert.equal(countCalls('abort_run'), abortsBefore + 1, 'do not bypass the Queue retrieval prerequisite')
+  assert.equal(countCalls('dequeue_messages'), dequeuesBefore + 1, 'Queue retrieval does not require a pre-dispatch editor save')
+  assertControlTarget('dequeue_messages')
+  assert.equal(countCalls('abort_run'), abortsBefore + 1, 'a failed retrieval still prevents the dependent Abort')
   contentSnapshot(); await settle()
   modelNative = args => controlResult('set_model', args, work)
   find(uploadContainer, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
@@ -901,7 +909,7 @@ try {
   assert.equal(uploadApp.currentDraft, '/stop', 'if optional command-text cleanup cannot be saved, Stop still runs and preserves that text')
   failStorage = false; modelNative = undefined
   await rebuildUploadView()
-  console.log('PASS: full storage still permits actual Abort/model/Stop-confirm controls with frozen targets; draft preserved; ordinary send and Queue-before-Abort keep durable capture')
+  console.log('PASS: full storage permits target-only controls and Queue retrieval; ordinary send keeps durable capture; failed Queue retrieval still stops dependent Abort')
   const uploadsBefore = calls.filter(call => call.command === 'upload_attachment').length
   await chooseJob('first')
   uploadEditor().props['onUpdate:modelValue']('keep typing while uploading'); await settle()

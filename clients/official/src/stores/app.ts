@@ -13,7 +13,7 @@ import {
 import type { AttachmentDto, PendingAttachmentSelection, BootstrapPayload, HostCatalog, HostConnectionProfile, ConnectionContext, MachinePlatform, Work } from '../lib/types'
 import { userErrorMessage as humanError } from '../lib/userError'
 import { draftAfterSubmit } from '../lib/uiBoundaries'
-import { appendRestoredQueue, attachmentsAfterSubmit } from '../lib/attachmentDraft'
+import { prependRestoredQueue, attachmentsAfterSubmit } from '../lib/attachmentDraft'
 
 export function mutationScopeKey(connectionId: string, instanceId: string, domain: string) {
   return JSON.stringify([connectionId, instanceId, domain])
@@ -485,16 +485,16 @@ export const useAppStore = defineStore('app', () => {
     }) || null
   }
 
-  function restoreOperationQueue(captured: EditorCapture, items: import('../lib/types').QueueItem[], operationId: string, explicit = false) {
-    const connection = localUiState.value.connections[captured.connectionId]
-    if (!connection || (!explicit && (!captured.textRevision || connection.editorRevisions[captured.workId] !== captured.textRevision))) return false
+  function restoreOperationQueue(connectionId: string, workId: string, items: import('../lib/types').QueueItem[], operationId: string) {
+    if (!localUiState.value.connections[connectionId]) return false
     return commitEditor(state => {
-      const connection = state.connections[captured.connectionId]!
-      const restored = appendRestoredQueue(connection.drafts[captured.workId] ?? '', connection.attachments[captured.workId] ?? [], items)
-      connection.drafts[captured.workId] = restored.text
-      connection.attachments[captured.workId] = restored.attachments
-      connection.editorRevisions[captured.workId] = crypto.randomUUID()
-      for (const item of restored.attachments) connection.attachmentRevisions[editorKey(captured.connectionId, captured.workId, item.fileId)] = crypto.randomUUID()
+      const connection = state.connections[connectionId]!
+      // Retrieval is one insertion into the editor as it exists at success.
+      const restored = prependRestoredQueue(connection.drafts[workId] ?? '', connection.attachments[workId] ?? [], items)
+      connection.drafts[workId] = restored.text
+      connection.attachments[workId] = restored.attachments
+      connection.editorRevisions[workId] = crypto.randomUUID()
+      for (const item of restored.attachments) connection.attachmentRevisions[editorKey(connectionId, workId, item.fileId)] = crypto.randomUUID()
       state.appliedOperationIds.push(operationId)
     }) || null
   }

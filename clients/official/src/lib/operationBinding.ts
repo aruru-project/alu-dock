@@ -29,7 +29,7 @@ export interface OperationTarget {
   expectedHostEpoch: string
   expectedRuntimeGeneration: number
 }
-/** Actions that claim or return editor content also require a durable capture. */
+/** Actions that consume or replace the original editor require a durable capture. */
 export interface OperationContext extends OperationTarget {
   operationEditor: EditorCapture
 }

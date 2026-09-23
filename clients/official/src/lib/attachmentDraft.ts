@@ -46,13 +46,13 @@ export function moveAttachmentPreviewResource<T extends { url: string }>(
   return { resources, moved }
 }
 
-export function appendRestoredQueue(
+export function prependRestoredQueue(
   currentText: string,
   currentAttachments: AttachmentDto[],
   restored: QueueItem[],
 ) {
   const restoredText = restored.map((item) => item.text).filter((text) => text.length > 0).join('\n\n')
-  const text = restoredText ? [currentText, restoredText].filter(Boolean).join('\n\n') : currentText
+  const text = restoredText ? [restoredText, currentText].filter(Boolean).join('\n\n') : currentText
   const attachments = [...currentAttachments]
   const seen = new Set(attachments.map((item) => item.fileId))
   for (const item of restored) {
@@ -66,6 +66,5 @@ export function appendRestoredQueue(
   return {
     text,
     attachments,
-    restoredImageCount: restored.reduce((total, item) => total + item.imageCount, 0),
   }
 }

@@ -327,8 +327,8 @@ export async function removeAttachment(workId: string, token: string, context: C
   return false
 }
 
-export async function dequeueMessages(instanceId: string, context: OperationContext): Promise<QueueDequeueResult> {
-  if (isTauri) return invoke('dequeue_messages', { ...context, operationId: crypto.randomUUID(), instanceId })
+export async function dequeueMessages(instanceId: string, context: OperationTarget): Promise<QueueDequeueResult> {
+  if (isTauri) return invoke('dequeue_messages', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
   throw new Error('浏览器设计预览不会取回 Queue')
 }
 

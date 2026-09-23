@@ -286,7 +286,7 @@ export function useInputEditor(options: {
     submissionError.value = null
     clearQueueNotice()
     try {
-      const result = await dequeueMessages(work.id, app.captureOperation(context, work.id))
+      const result = await dequeueMessages(work.id, app.captureOperationTarget(context, work.id))
       if (!app.contextMatches(context) || submitViewRevision !== viewRevision || selected.value?.id !== work.id || result.receipt.instanceId !== work.id || result.instance.id !== work.id) return false
       showQueueNotice(result.receipt.restored.length
         ? `已取回 ${result.receipt.restored.length} 条消息。`
@@ -364,11 +364,7 @@ export function useInputEditor(options: {
     }
     if (command.action === 'restoreQueue') {
       if (draft.value === captured) draft.value = ''
-      const context = requireConnectionContext(app)
-      const emptyDraft = app.captureSubmitDraft(context.connectionId, selected.value.id, [])
-      const restored = await restoreQueue()
-      if (!restored) app.applyReturnedDraft(emptyDraft, captured)
-      return restored
+      return restoreQueue()
     }
     if (command.action === 'stop') {
       const context = requireConnectionContext(app)
