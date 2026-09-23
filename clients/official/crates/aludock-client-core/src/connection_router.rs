@@ -679,10 +679,15 @@ mod tests {
                     };
                     if matches!(mode, ServerMode::PairingClosed) {
                         assert_eq!(hello["type"], "pairing.begin.v1");
-                        write_json_line(&mut stream, &serde_json::json!({
-                            "type": "pairing.error.v1", "code": "pairing_closed",
-                            "message": "Pairing window is closed"
-                        })).await.unwrap();
+                        write_json_line(
+                            &mut stream,
+                            &serde_json::json!({
+                                "type": "pairing.error.v1", "code": "pairing_closed",
+                                "message": "Pairing window is closed"
+                            }),
+                        )
+                        .await
+                        .unwrap();
                         return;
                     }
                     let request_id = hello

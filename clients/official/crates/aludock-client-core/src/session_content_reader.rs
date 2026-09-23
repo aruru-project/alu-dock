@@ -40,12 +40,17 @@ impl BodyReads {
             && (!record.complete || self.unavailable.contains_key(&record.entry_id))
             && (self.full_requests.contains(&record.entry_id)
                 || self.unavailable.contains_key(&record.entry_id)
-                || self.descriptors.get(&record.entry_id).is_none_or(|descriptor| descriptor.needs_body))
+                || self
+                    .descriptors
+                    .get(&record.entry_id)
+                    .is_none_or(|descriptor| descriptor.needs_body))
     }
 
     pub(crate) fn errors_remove(&mut self, id: &str, complete: bool) {
         self.errors.remove(id);
-        if complete { self.full_requests.remove(id); }
+        if complete {
+            self.full_requests.remove(id);
+        }
     }
     pub(crate) fn file_error(&mut self, id: &str) {
         self.errors.insert(id.into());
@@ -94,11 +99,16 @@ enum BodyResult {
 // tool's empty result block is identity, not a demand for image base64.
 fn descriptor_needs_body(item: &crate::ConversationHistoryEntry) -> bool {
     use crate::ContentBlock;
-    item.total_blocks > item.entry.content.len() || item.entry.content.iter().any(|block| match block {
-        ContentBlock::Image { .. } => false,
-        ContentBlock::ToolResult { text, omitted_fields, .. } => !text.is_empty() || !omitted_fields.is_empty(),
-        _ => true,
-    })
+    item.total_blocks > item.entry.content.len()
+        || item.entry.content.iter().any(|block| match block {
+            ContentBlock::Image { .. } => false,
+            ContentBlock::ToolResult {
+                text,
+                omitted_fields,
+                ..
+            } => !text.is_empty() || !omitted_fields.is_empty(),
+            _ => true,
+        })
 }
 
 async fn cache_records(
@@ -138,13 +148,16 @@ impl SessionContent {
         let start = self
             .body_access(key, token, |reads, members| {
                 reads.paused = false;
-                let entry_ids: Vec<_> = entry_ids.into_iter()
+                let entry_ids: Vec<_> = entry_ids
+                    .into_iter()
                     .filter(|id| members.iter().any(|record| &record.entry_id == id))
                     .collect();
                 if retry {
                     reads.full_requests.extend(if entry_ids.is_empty() {
                         reads.errors.iter().cloned().collect()
-                    } else { entry_ids.clone() });
+                    } else {
+                        entry_ids.clone()
+                    });
                     cleared = reads
                         .errors
                         .iter()
@@ -964,8 +977,10 @@ mod tests {
     #[tokio::test]
     async fn unproven_checkpoint_keeps_raw_tail_and_proven_interval_rebinds_without_duplicates() {
         // Keep the Unix socket below SUN_LEN with an isolated, longer TMPDIR.
-        let root = std::env::temp_dir()
-            .join(format!("gap-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        let root = std::env::temp_dir().join(format!(
+            "gap-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         std::fs::create_dir(&root).unwrap();
         let socket = root.join("s");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -1111,17 +1126,32 @@ mod tests {
     fn visible_mixed_or_missing_text_still_demands_a_complete_body() {
         // Master-side review: image-only tools carry an empty result identity;
         // a missing later block or any nonempty text must still be readable.
-        let descriptor = |content: Value, total_blocks| serde_json::from_value::<crate::ConversationHistoryEntry>(json!({
+        let descriptor = |content: Value, total_blocks| {
+            serde_json::from_value::<crate::ConversationHistoryEntry>(json!({
             "entry": {"recordId":"r","entryId":"e","kind":"message","source":"tool_result","visibility":"visible","content":content},
             "contentRef":"opaque", "contentComplete":false,"totalBlocks":total_blocks
-        })).unwrap();
+        })).unwrap()
+        };
         let image = json!({"type":"image","mimeType":"image/png","contentRef":"opaque-image"});
         let empty = json!({"type":"tool_result","toolCallId":"tool","toolName":"read","text":"","isError":false});
-        assert!(!descriptor_needs_body(&descriptor(json!([empty, image]), 2)));
-        assert!(descriptor_needs_body(&descriptor(json!([empty, image]), 3)), "missing blocks might contain necessary text");
-        assert!(descriptor_needs_body(&descriptor(json!([{"type":"text","text":"not provably complete"}, image]), 2)));
-        let mut omitted = empty.clone(); omitted["omittedFields"] = json!(["text"]);
-        assert!(descriptor_needs_body(&descriptor(json!([omitted, image]), 2)));
+        assert!(!descriptor_needs_body(&descriptor(
+            json!([empty, image]),
+            2
+        )));
+        assert!(
+            descriptor_needs_body(&descriptor(json!([empty, image]), 3)),
+            "missing blocks might contain necessary text"
+        );
+        assert!(descriptor_needs_body(&descriptor(
+            json!([{"type":"text","text":"not provably complete"}, image]),
+            2
+        )));
+        let mut omitted = empty.clone();
+        omitted["omittedFields"] = json!(["text"]);
+        assert!(descriptor_needs_body(&descriptor(
+            json!([omitted, image]),
+            2
+        )));
     }
 
     #[test]

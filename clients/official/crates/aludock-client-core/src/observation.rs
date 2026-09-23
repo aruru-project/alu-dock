@@ -45,7 +45,9 @@ impl ConversationObservation {
             .is_some_and(|(target, task)| target == &key && !task.is_finished());
         if !continuing || refresh {
             if let Some((previous, task)) = active.take() {
-                if previous != key { self.content.pause_content_reads(&previous); }
+                if previous != key {
+                    self.content.pause_content_reads(&previous);
+                }
                 self.content.claim(&previous); // revoke before abort (also fences a running publish)
                 task.abort();
             }
@@ -60,7 +62,9 @@ impl ConversationObservation {
             *active = Some((key.clone(), task));
         }
         let binding = self.content.bind(&key)?;
-        if let Some(token) = self.content.content_token(&key) { self.content.wake_body_reader(&key, &token, body_client); }
+        if let Some(token) = self.content.content_token(&key) {
+            self.content.wake_body_reader(&key, &token, body_client);
+        }
         Ok(binding)
     }
     pub fn pause(&self, key: &str) {
@@ -143,10 +147,18 @@ impl ConversationObservation {
             Admission::Continue
         })
     }
-    async fn accept_read(&self, key: &str, owner: u64, read: crate::InstanceReadResult) -> Result<Admission> {
+    async fn accept_read(
+        &self,
+        key: &str,
+        owner: u64,
+        read: crate::InstanceReadResult,
+    ) -> Result<Admission> {
         let (service, key) = (self.clone(), key.to_owned());
         tokio::task::spawn_blocking(move || service.accept(&key, owner, SessionUpdate::Read(read)))
-            .await.map_err(|error| ClientError::Protocol(format!("local content commit task failed: {error}")))?
+            .await
+            .map_err(|error| {
+                ClientError::Protocol(format!("local content commit task failed: {error}"))
+            })?
     }
     async fn run(
         &self,
@@ -191,12 +203,15 @@ impl ConversationObservation {
                     Ok(read) => match self.accept_read(&key, owner, read).await {
                         Ok(Admission::Continue) => {
                             read_required = false;
-                            let (content, key, client) = (self.content.clone(), key.clone(), client.clone());
+                            let (content, key, client) =
+                                (self.content.clone(), key.clone(), client.clone());
                             tokio::spawn(async move {
                                 let _ = content.reconcile_checkpoint(&key, &client).await;
-                                if let Some(token) = content.owned_content_token(&key, owner) { content.wake_body_reader(&key, &token, client); }
+                                if let Some(token) = content.owned_content_token(&key, owner) {
+                                    content.wake_body_reader(&key, &token, client);
+                                }
                             });
-                        },
+                        }
                         Ok(Admission::ReadRequired) => {
                             read_required = true;
                             continue;
@@ -254,7 +269,10 @@ impl ConversationObservation {
                     loop {
                         match stream.next_event().await {
                             Ok(event) => {
-                                let settled = matches!(event.event_type.as_str(), "run.settled" | "compaction.completed");
+                                let settled = matches!(
+                                    event.event_type.as_str(),
+                                    "run.settled" | "compaction.completed"
+                                );
                                 match self.accept(&key, owner, SessionUpdate::Event(event)) {
                                     Ok(Admission::Continue) => {}
                                     Ok(Admission::Replacement) => {
@@ -291,8 +309,12 @@ impl ConversationObservation {
                                                 if read.page.latest.host_epoch
                                                     == expected_epoch =>
                                             {
-                                                let _ = service.accept_read(&key, owner, read).await;
-                                                let _ = service.content.reconcile_checkpoint(&key, &client).await;
+                                                let _ =
+                                                    service.accept_read(&key, owner, read).await;
+                                                let _ = service
+                                                    .content
+                                                    .reconcile_checkpoint(&key, &client)
+                                                    .await;
                                             }
                                             Err(error)
                                                 if failure_state(&error) == "unavailable" =>
@@ -406,10 +428,24 @@ mod tests {
         let mut text = String::new();
         loop {
             for commit in binding.next_batch().await.unwrap() {
-                if let SessionUpdate::Content { update: crate::ContentUpdate::RecordChunk { text: chunk, first, complete, .. }, .. } = commit.update {
-                    if first { text.clear(); }
+                if let SessionUpdate::Content {
+                    update:
+                        crate::ContentUpdate::RecordChunk {
+                            text: chunk,
+                            first,
+                            complete,
+                            ..
+                        },
+                    ..
+                } = commit.update
+                {
+                    if first {
+                        text.clear();
+                    }
                     text.push_str(&chunk);
-                    if complete { return serde_json::from_str(&text).unwrap(); }
+                    if complete {
+                        return serde_json::from_str(&text).unwrap();
+                    }
                 }
             }
         }
@@ -420,8 +456,10 @@ mod tests {
     #[tokio::test]
     async fn observation_and_operation_survive_view_rebind_without_replay() {
         // Keep the Unix socket below SUN_LEN with an isolated, longer TMPDIR.
-        let directory = std::env::temp_dir()
-            .join(format!("ao-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        let directory = std::env::temp_dir().join(format!(
+            "ao-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         std::fs::create_dir(&directory).unwrap();
         let endpoint = directory.join("s");
         let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
@@ -651,7 +689,9 @@ mod tests {
             "session-2"
         );
         assert_eq!(
-            next_content_record(&mut service.content.bind("authority:work:epoch").unwrap()).await.entry_id,
+            next_content_record(&mut service.content.bind("authority:work:epoch").unwrap())
+                .await
+                .entry_id,
             "new-entry"
         );
         let owner = service.content.claim("branch");
@@ -871,18 +911,39 @@ mod tests {
             loop {
                 let batch = binding.next_batch().await.unwrap();
                 let encoded = serde_json::to_vec(&batch).unwrap().len();
-                if encoded > 270_000 { assert_eq!(batch.len(),1); }
-                else { max_small_batch = max_small_batch.max(encoded); }
+                if encoded > 270_000 {
+                    assert_eq!(batch.len(), 1);
+                } else {
+                    max_small_batch = max_small_batch.max(encoded);
+                }
                 for commit in &batch {
-                    assert!(commit.revision > last_revision || (commit.revision == last_revision && matches!(commit.update, SessionUpdate::Content { .. }))); last_revision = commit.revision;
-                    if let SessionUpdate::Event(event) | SessionUpdate::ReplayEvent { event, .. } = &commit.update { events += 1; if event.sequence == 9523 { assert_eq!(event.data["text"].as_str().unwrap().len(),600_000); } }
+                    assert!(
+                        commit.revision > last_revision
+                            || (commit.revision == last_revision
+                                && matches!(commit.update, SessionUpdate::Content { .. }))
+                    );
+                    last_revision = commit.revision;
+                    if let SessionUpdate::Event(event) | SessionUpdate::ReplayEvent { event, .. } =
+                        &commit.update
+                    {
+                        events += 1;
+                        if event.sequence == 9523 {
+                            assert_eq!(event.data["text"].as_str().unwrap().len(), 600_000);
+                        }
+                    }
                 }
                 peak_rss = peak_rss.max(rss());
-                if completed.try_recv().is_ok() { completed_before_replay_end = events < 9000; }
-                if events == 9513 { break; }
+                if completed.try_recv().is_ok() {
+                    completed_before_replay_end = events < 9000;
+                }
+                if events == 9513 {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         writer.join().unwrap();
         assert_eq!(
             events, 9513,
@@ -929,11 +990,19 @@ mod tests {
             )
             .unwrap();
         let next = held_display.next_batch().await.unwrap();
-        assert!(next.iter().all(|commit| match &commit.update {
-            SessionUpdate::Read(read) | SessionUpdate::ObservationCut(read) | SessionUpdate::Content { update: crate::ContentUpdate::CheckpointBegin { read }, .. } => read.instance.runtime_generation == 2,
-            SessionUpdate::Content { .. } => true,
-            _ => false,
-        }), "old Session replay cannot delay or follow a committed replacement");
+        assert!(
+            next.iter().all(|commit| match &commit.update {
+                SessionUpdate::Read(read)
+                | SessionUpdate::ObservationCut(read)
+                | SessionUpdate::Content {
+                    update: crate::ContentUpdate::CheckpointBegin { read },
+                    ..
+                } => read.instance.runtime_generation == 2,
+                SessionUpdate::Content { .. } => true,
+                _ => false,
+            }),
+            "old Session replay cannot delay or follow a committed replacement"
+        );
         drop(held_display);
         drop(binding);
         drop(content);
@@ -1039,7 +1108,13 @@ mod tests {
             let root = std::env::temp_dir().join(format!("read-fault-{}", uuid::Uuid::new_v4()));
             let content = SessionContent::in_directory(root.clone()).unwrap();
             let owner = content.claim("work");
-            content.commit("work", owner, SessionUpdate::Read(serde_json::from_value(read()).unwrap())).unwrap();
+            content
+                .commit(
+                    "work",
+                    owner,
+                    SessionUpdate::Read(serde_json::from_value(read()).unwrap()),
+                )
+                .unwrap();
             let mut binding = content.bind("work").unwrap();
             let old_token = binding.snapshot.content_token.clone();
             let run = content.content_root();
@@ -1053,20 +1128,53 @@ mod tests {
                 replacement["recentHistory"] = json!([{"recordId":"b","entryId":"b","kind":"message","source":"user","visibility":"visible","content":[{"type":"text","text":"new session"}]}]);
             }
             // An old owner or another Host/Work cannot exploit the storage-failure path.
-            assert!(!content.commit("work", owner + 1, SessionUpdate::Read(serde_json::from_value(replacement.clone()).unwrap())).unwrap());
+            assert!(
+                !content
+                    .commit(
+                        "work",
+                        owner + 1,
+                        SessionUpdate::Read(serde_json::from_value(replacement.clone()).unwrap())
+                    )
+                    .unwrap()
+            );
             let mut wrong_host = replacement.clone();
             wrong_host["page"]["latest"]["hostEpoch"] = json!("another");
-            assert!(!content.commit("work", owner, SessionUpdate::Read(serde_json::from_value(wrong_host).unwrap())).unwrap());
+            assert!(
+                !content
+                    .commit(
+                        "work",
+                        owner,
+                        SessionUpdate::Read(serde_json::from_value(wrong_host).unwrap())
+                    )
+                    .unwrap()
+            );
             assert!(binding.take_replacement().is_none());
-            assert!(matches!(content.commit("work", owner, SessionUpdate::Read(serde_json::from_value(replacement).unwrap())), Err(ClientError::Storage { .. })));
-            let priority = binding.take_replacement().expect("new identity bypasses old unread content");
+            assert!(matches!(
+                content.commit(
+                    "work",
+                    owner,
+                    SessionUpdate::Read(serde_json::from_value(replacement).unwrap())
+                ),
+                Err(ClientError::Storage { .. })
+            ));
+            let priority = binding
+                .take_replacement()
+                .expect("new identity bypasses old unread content");
             assert_ne!(priority.content_token, old_token);
-            assert_eq!(priority.target.as_ref().unwrap().executor.pi_session_id, "session-2");
-            assert!(priority.read.is_none(), "failed body is not accepted as a successful read");
+            assert_eq!(
+                priority.target.as_ref().unwrap().executor.pi_session_id,
+                "session-2"
+            );
+            assert!(
+                priority.read.is_none(),
+                "failed body is not accepted as a successful read"
+            );
             let rebound = content.bind("work").unwrap();
             assert_eq!(rebound.snapshot.state, "storage_error");
             assert!(rebound.snapshot.read.is_none());
-            drop(rebound); drop(binding); drop(content);
+            drop(rebound);
+            drop(binding);
+            drop(content);
             std::fs::remove_dir_all(root).unwrap();
         }
     }
@@ -1076,7 +1184,10 @@ mod tests {
     // silently downloads all image bodies again.
     #[tokio::test]
     async fn observation_reads_visible_text_but_not_unrequested_or_image_only_bodies() {
-        let directory = std::env::temp_dir().join(format!("demand-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        let directory = std::env::temp_dir().join(format!(
+            "demand-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         std::fs::create_dir(&directory).unwrap();
         let endpoint = directory.join("s");
         let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
@@ -1085,29 +1196,38 @@ mod tests {
         let image = json!({"recordId":"image","entryId":"image","kind":"message","source":"tool_result","visibility":"visible","toolCallId":"tool","toolName":"read","content":[{"type":"tool_result","toolCallId":"tool","toolName":"read","text":"","isError":false},{"type":"image","mimeType":"image/png","contentRef":"opaque-image"}]});
         let text = json!({"recordId":"text","entryId":"text","kind":"message","source":"user","visibility":"visible","content":[{"type":"text","text":"preview"}]});
         let peer = {
-            let histories = histories.clone(); let bodies = bodies.clone();
+            let histories = histories.clone();
+            let bodies = bodies.clone();
             tokio::spawn(async move {
                 loop {
                     let (socket, _) = listener.accept().await.unwrap();
-                    let image = image.clone(); let text = text.clone();
-                    let histories = histories.clone(); let bodies = bodies.clone();
+                    let image = image.clone();
+                    let text = text.clone();
+                    let histories = histories.clone();
+                    let bodies = bodies.clone();
                     tokio::spawn(async move {
                         let mut socket = tokio::io::BufReader::new(socket);
                         let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
                         write_json_line(&mut socket, &json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
                         let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
                         let result = match request["type"].as_str().unwrap() {
-                            "instance.read" => { let mut r = read(); r["recentHistory"] = json!([image, text]); r },
+                            "instance.read" => {
+                                let mut r = read();
+                                r["recentHistory"] = json!([image, text]);
+                                r
+                            }
                             "instance.follow" => {
                                 write_json_line(&mut socket, &json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":true,"result":{"page":{"events":[],"earliest":cursor(10,1),"latest":cursor(10,1),"truncated":false,"epochChanged":false,"generationChanged":false}}})).await.unwrap();
-                                std::future::pending::<()>().await; return;
-                            },
+                                std::future::pending::<()>().await;
+                                return;
+                            }
                             "conversation.history" => {
                                 histories.fetch_add(1, Ordering::SeqCst);
                                 json!({"instance":instance(1),"revision":"revision","entries":[{"entry":image,"contentRef":"image-body","contentComplete":false,"totalBlocks":2},{"entry":text,"contentRef":"text-body","contentComplete":false,"totalBlocks":1}],"hasEarlier":false,"nextCursor":null})
-                            },
+                            }
                             "conversation.content" => {
-                                let reference = request["params"]["contentRef"].as_str().unwrap().to_owned();
+                                let reference =
+                                    request["params"]["contentRef"].as_str().unwrap().to_owned();
                                 bodies.lock().unwrap().push(reference.clone());
                                 if reference == "image-body" {
                                     // Explicit full-record retry reached the native reader;
@@ -1116,7 +1236,7 @@ mod tests {
                                     return;
                                 }
                                 json!({"instanceId":"work","runtimeGeneration":1,"revision":"revision","contentRef":reference,"chunks":[{"type":"text","blockIndex":0,"text":"complete necessary text".repeat(300),"offset":0,"blockComplete":true}],"complete":true,"nextCursor":null})
-                            },
+                            }
                             other => panic!("unexpected request {other}"),
                         };
                         write_json_line(&mut socket, &json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":true,"result":result})).await.unwrap();
@@ -1124,26 +1244,76 @@ mod tests {
                 }
             })
         };
-        let client = DockClient::new(ConnectionRouter::local(&IdentityStore::new(directory.join("identity")), LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(), "demand".into()).unwrap());
-        let service = ConversationObservation::new(SessionContent::in_directory(directory.join("cache")).unwrap());
-        let mut binding = service.bind("work".into(), client.clone(), "work".into(), "epoch".into(), false).unwrap();
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "demand".into(),
+            )
+            .unwrap(),
+        );
+        let service = ConversationObservation::new(
+            SessionContent::in_directory(directory.join("cache")).unwrap(),
+        );
+        let mut binding = service
+            .bind(
+                "work".into(),
+                client.clone(),
+                "work".into(),
+                "epoch".into(),
+                false,
+            )
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while service.content.content_token("work").is_none() || service.content.body_target("work", &service.content.content_token("work").unwrap()).is_none() {
+            while service.content.content_token("work").is_none()
+                || service
+                    .content
+                    .body_target("work", &service.content.content_token("work").unwrap())
+                    .is_none()
+            {
                 tokio::task::yield_now().await;
             }
-            while binding.snapshot.read.is_none() { binding.next_batch().await.unwrap(); binding = service.content.bind("work").unwrap(); }
-        }).await.unwrap();
+            while binding.snapshot.read.is_none() {
+                binding.next_batch().await.unwrap();
+                binding = service.content.bind("work").unwrap();
+            }
+        })
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(60)).await;
-        assert_eq!(histories.load(Ordering::SeqCst), 0, "opening Work does not scan every incomplete record");
+        assert_eq!(
+            histories.load(Ordering::SeqCst),
+            0,
+            "opening Work does not scan every incomplete record"
+        );
         assert!(bodies.lock().unwrap().is_empty());
         let token = service.content.content_token("work").unwrap();
-        service.content.set_read_interest("work", &token, client.clone(), vec!["image".into()], false);
+        service.content.set_read_interest(
+            "work",
+            &token,
+            client.clone(),
+            vec!["image".into()],
+            false,
+        );
         tokio::time::timeout(Duration::from_secs(3), async {
-            while histories.load(Ordering::SeqCst) == 0 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while histories.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(60)).await;
-        assert!(bodies.lock().unwrap().is_empty(), "the image-only tool identity does not demand full image base64");
-        service.content.set_read_interest("work", &token, client.clone(), vec!["text".into()], false);
+        assert!(
+            bodies.lock().unwrap().is_empty(),
+            "the image-only tool identity does not demand full image base64"
+        );
+        service.content.set_read_interest(
+            "work",
+            &token,
+            client.clone(),
+            vec!["text".into()],
+            false,
+        );
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let record = next_content_record(&mut binding).await;
@@ -1151,12 +1321,21 @@ mod tests {
             }
         }).await.unwrap();
         assert_eq!(*bodies.lock().unwrap(), ["text-body"]);
-        service.content.set_read_interest("work", &token, client, vec!["image".into()], true);
+        service
+            .content
+            .set_read_interest("work", &token, client, vec!["image".into()], true);
         tokio::time::timeout(Duration::from_secs(3), async {
-            while bodies.lock().unwrap().len() < 2 { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while bodies.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(*bodies.lock().unwrap(), ["text-body", "image-body"]);
-        service.pause("work"); peer.abort(); drop(binding); drop(service);
+        service.pause("work");
+        peer.abort();
+        drop(binding);
+        drop(service);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1352,7 +1531,12 @@ mod tests {
             );
             let following = display.next_batch().await.unwrap();
             assert!(following.iter().all(|commit| match &commit.update {
-                SessionUpdate::Read(read) | SessionUpdate::ObservationCut(read) | SessionUpdate::Content { update: crate::ContentUpdate::CheckpointBegin { read }, .. } => read.instance.executor.pi_session_id == session_id,
+                SessionUpdate::Read(read)
+                | SessionUpdate::ObservationCut(read)
+                | SessionUpdate::Content {
+                    update: crate::ContentUpdate::CheckpointBegin { read },
+                    ..
+                } => read.instance.executor.pi_session_id == session_id,
                 SessionUpdate::Content { .. } => true,
                 _ => false,
             }));

@@ -1975,9 +1975,16 @@ mod tests {
             let mut partial = Vec::new();
             assert!(matches!(
                 read_conversation_image_after_request(
-                    &mut reader, 1_024 * 1_024, "request", "epoch", "work", "content",
-                    "image/png", &mut partial,
-                ).await,
+                    &mut reader,
+                    1_024 * 1_024,
+                    "request",
+                    "epoch",
+                    "work",
+                    "content",
+                    "image/png",
+                    &mut partial,
+                )
+                .await,
                 Err(ClientError::Protocol(_))
             ));
         }

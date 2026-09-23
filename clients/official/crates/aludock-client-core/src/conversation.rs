@@ -194,7 +194,11 @@ pub struct HistoryRecord {
     pub is_error: Option<bool>,
     pub custom_type: Option<String>,
     pub display: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_metadata", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_metadata",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_omitted_fields: Vec<String>,
@@ -239,7 +243,9 @@ pub struct PendingMessage {
 }
 
 fn deserialize_metadata<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
-where D: Deserializer<'de> {
+where
+    D: Deserializer<'de>,
+{
     Value::deserialize(deserializer).map(Some)
 }
 

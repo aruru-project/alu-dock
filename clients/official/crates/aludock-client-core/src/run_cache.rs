@@ -43,7 +43,8 @@ impl RunCache {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     // Creation is serialized by startup: no active creator can
                     // be between mkdir and acquiring this run's owner lease.
-                    fs::remove_dir_all(entry.path()).map_err(|e| storage_error(&entry.path(), e))?;
+                    fs::remove_dir_all(entry.path())
+                        .map_err(|e| storage_error(&entry.path(), e))?;
                     continue;
                 }
                 _ => continue,

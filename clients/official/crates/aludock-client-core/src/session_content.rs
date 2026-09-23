@@ -383,7 +383,11 @@ impl SessionContent {
             let cursor = &read.page.latest;
             if cursor.instance_id != read.instance.id
                 || cursor.runtime_generation != read.instance.runtime_generation
-                || read.instance.owner_host_epoch.as_deref().is_some_and(|epoch| epoch != cursor.host_epoch)
+                || read
+                    .instance
+                    .owner_host_epoch
+                    .as_deref()
+                    .is_some_and(|epoch| epoch != cursor.host_epoch)
                 || entry.snapshot.cursor.as_ref().is_some_and(|current| {
                     current.instance_id != cursor.instance_id
                         || current.host_epoch != cursor.host_epoch
