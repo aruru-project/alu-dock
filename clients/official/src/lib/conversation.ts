@@ -423,13 +423,19 @@ export function createLiveConversationProjector(
     // layout changes/hydration use the separate unconditional anchor path.
     return ids
   }
+  function reconcileActivity(instance: ConversationBootstrap['instance']) {
+    // A recovery read can confirm completion without replaying run.settled.
+    // Running facts contain no output: do not revive a placeholder that already
+    // yielded to visible content. New output keeps its existing event/seed path.
+    if (instance.execution !== 'running') activityVisible = false
+  }
   let activity: ConversationItem | undefined
   function snapshot(): ConversationItem[] {
     if (!activityVisible) return items
     if (activity?.id !== activityId) activity = observe<ConversationItem>({ id: activityId, kind: 'activity' })
     return [...items, activity!]
   }
-  return { apply, snapshot, affectedIds, structureKey: () => `${items.length}:${activityVisible ? activityId : ""}` }
+  return { apply, snapshot, affectedIds, reconcileActivity, structureKey: () => `${items.length}:${activityVisible ? activityId : ""}` }
 }
 
 export function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {

@@ -187,6 +187,37 @@ try {
   await settle()
   app.selectWork('work'); await settle()
   contentSnapshot(); await settle()
+  // User report: after a long absence, fresh idle facts must stop the cached
+  // reply spinner without requiring a replayed run.settled or a content reload.
+  const activityVisible = () => !!find(container, item => item.props['aria-label'] === '正在处理')
+  const cachedRunning = { ...bootstrap, instance: { ...work, execution: 'running' }, records: [], activeEvents: [], cursor: { ...cursor, sequence: 20 } }
+  observation({ kind: 'snapshot', bootstrap: cachedRunning, contentToken: 'resume-activity', state: 'connected' })
+  for (const record of bootstrap.records) observation({ kind: 'content', token: 'resume-activity', change: { kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true } })
+  observation({ kind: 'content', token: 'resume-activity', change: { kind: 'checkpoint_end' } }); await settle()
+  assert.equal(activityVisible(), true)
+  const retainedReply = find(container, item => item.props['data-conversation-id'] === 'old-message')
+  const freshIdle = { ...cachedRunning, instance: { ...work, execution: 'idle' }, cursor: { ...cursor, sequence: 30 } }
+  observation({ kind: 'facts', bootstrap: freshIdle }); await settle()
+  assert.equal(app.selectedWork.execution, 'idle')
+  assert.equal(activityVisible(), false, 'fresh idle status stops the reply spinner before any history handoff')
+  assert.equal(find(container, item => item.props['data-conversation-id'] === 'old-message'), retainedReply, 'status correction leaves the displayed messages in place')
+  observation({ kind: 'content', token: 'resume-activity', change: { kind: 'checkpoint_begin', bootstrap: freshIdle } })
+  for (const record of bootstrap.records) observation({ kind: 'content', token: 'resume-activity', change: { kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true } })
+  observation({ kind: 'content', token: 'resume-activity', change: { kind: 'checkpoint_end' } }); await settle()
+  assert.equal(activityVisible(), false, 'finishing the history handoff does not revive an old running status')
+  const freshRunning = { ...freshIdle, instance: { ...work, execution: 'running' }, cursor: { ...cursor, sequence: 40 } }
+  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 1, sequence: 40, occurredAt: 'now', eventType: 'run.started', data: {} } }); await settle()
+  assert.equal(activityVisible(), true, 'a new run still shows its activity through the existing event path')
+  observation({ kind: 'facts', bootstrap: freshIdle }); await settle()
+  assert.equal(app.selectedWork.execution, 'running')
+  assert.equal(activityVisible(), true, 'an older idle read cannot overwrite a newer running state')
+  const textDelta = { instanceId: 'work', runtimeGeneration: 1, sequence: 41, occurredAt: 'now', eventType: 'message.delta', data: { messageId: 'resumed-answer', block: 'text', delta: 'Visible answer' } }
+  observation({ kind: 'event', event: textDelta }); await settle()
+  assert.equal(activityVisible(), false, 'normal visible output still replaces the placeholder')
+  // Tauri facts deliberately contain no activeEvents, unlike the content seed.
+  observation({ kind: 'facts', bootstrap: { ...freshRunning, cursor: { ...cursor, sequence: 42 }, activeEvents: [] } }); await settle()
+  assert.equal(activityVisible(), false, 'running facts do not revive the placeholder after visible output')
+  contentSnapshot(); await settle()
   assert.ok(text(container).includes('OLD SESSION MESSAGE'), 'actual ConversationView displays the original Session')
   assert.ok(find(container, item => item.type === 'img' && item.props.src === 'http://aludock-media.localhost/verified-local-handle'), 'descriptor image displays through a native opaque handle while unrelated history/body loading is held')
   const imageCall = calls.find(call => call.command === 'conversation_image')

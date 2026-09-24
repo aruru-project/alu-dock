@@ -114,11 +114,24 @@ export function useConversationContent(options: ConversationContentOptions) {
     ids.splice(before >= 0 ? before : ids.length, 0, entryId)
     recordOrder = new Map(ids.map((id, index) => [id, index]))
   }
-  function acceptReadCut(sequence: number) {
+  function acceptReadCut(sequence: number, latest?: ConversationBootstrap) {
     freshRead = false
     foldCut = Math.max(foldCut, sequence)
     const current = state.value
-    if (current) { const cache = streamCache(current); cache.fold.clear(); cache.tools.clear() }
+    if (current) {
+      const cache = streamCache(current); cache.fold.clear(); cache.tools.clear()
+      if (latest) {
+        current.instance = latest.instance
+        if (live && liveState === current) {
+          drainEvents(current)
+          live.reconcileActivity(latest.instance)
+          // Also remove a local send placeholder, which is outside live's key.
+          if (latest.instance.execution !== 'running') publishedStructure = ''
+          publishLive()
+          options.layoutChanged()
+        }
+      }
+    }
   }
 
   function rebuildProjection(current: ConversationBootstrap) {

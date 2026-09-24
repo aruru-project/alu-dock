@@ -28,7 +28,7 @@ export interface ConversationSink {
   failed(): void
   replay(event: ProjectedEvent): boolean
   event(event: ProjectedEvent, instance: Work, changed: boolean): void
-  readCut(sequence: number): void
+  readCut(sequence: number, latest?: ConversationBootstrap): void
   read(bootstrap: ConversationBootstrap, sameDomain: boolean, canLoadEarlier?: boolean): void
   replace(snapshot: Work): void
 }
@@ -152,8 +152,9 @@ export function useWorkObservation(display: ConversationSink, options: {
   function readFacts(payload: ConnectionContext & { subscriptionId: string }, next: ConversationBootstrap) {
     const current = facts.value
     if (!current || !sameDomain(current, next)) return
-    display.readCut(next.cursor.sequence)
-    if (current.cursor.sequence <= next.cursor.sequence) {
+    const latest = current.cursor.sequence <= next.cursor.sequence
+    display.readCut(next.cursor.sequence, latest ? next : undefined)
+    if (latest) {
       facts.value = { instance: next.instance, cursor: { ...next.cursor }, queue: [...next.queue] }
       acceptWork(next.instance, payload, false)
       void extensionUi.bootstrap(payload, payload.subscriptionId, next)
