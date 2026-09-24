@@ -3,7 +3,6 @@ import { computed } from 'vue'
 const props = defineProps<{ state: string; label: string }>()
 const emit = defineEmits<{ reconnect: []; settings: []; works: [] }>()
 const attention = computed(() => ({
-  storage_error: { short: '存储', message: '本地对话暂时无法读取或保存。请检查设备可用空间和文件访问权限后重试。', action: '重新读取', target: 'reconnect' },
   identity_error: { short: '身份', message: '无法确认 Host 的身份或连接授权。请核对保存的地址与 Host 设置，不要直接覆盖原有配对。', action: 'Host 设置', target: 'settings' },
   host_changed: { short: 'Host', message: 'Host 状态已经变化。请刷新工作列表后继续；本地编辑内容仍保留。', action: '刷新状态', target: 'reconnect' },
   content_error: { short: '正文', message: '对话暂时无法显示。请重新读取；本地编辑内容仍保留。', action: '重新读取', target: 'reconnect' },

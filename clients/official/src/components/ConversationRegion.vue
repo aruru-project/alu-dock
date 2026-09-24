@@ -60,7 +60,6 @@ const { openMessageText } = props.page
       @read-interest="conversationSession.setInterest"
       @load-earlier="loadEarlierHistory"
       @retry-history="retryConversationHydration"
-      @retry-entry="conversationSession.retry"
       @tool-toggle="rememberToolDetail"
       @image-request="requestConversationImage"
       @image-preview="openImagePreview"

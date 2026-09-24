@@ -17,7 +17,7 @@ const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, PI_CODING_A
   XDG_STATE_HOME: join(root, 'state'), XDG_RUNTIME_DIR: join(root, 'run'), APPDATA: join(root, 'appdata'), LOCALAPPDATA: join(root, 'localappdata'),
   npm_config_cache: join(root, 'npm-cache'), npm_config_userconfig: join(root, 'npmrc'), npm_config_globalconfig: join(root, 'global-npmrc'), TMPDIR: root, TMP: root, TEMP: root }
 let host, reader, proxy
-let blockContent = false, offlineSeen = false, onlineSeen = false
+let blockContent = false, offlineSeen = false, onlineSeen = false, offlineRequests
 const sockets = new Set(), counts = {}, errors = {}
 let heldContent, heldFast, heldEarlier, earlierWaiterDropped = false, appended = false, slowReference, fastReference, fastBodySeen = false, fastWhileHeld = false, slowHeld = false
 const appendWhenFast = () => { if (slowHeld && fastBodySeen && !appended) host.stdin.write('append\n') }
@@ -83,7 +83,7 @@ try {
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)
         const frame = JSON.parse(line)
         if (frame.kind === 'request') { method = frame.type; counts[method] = (counts[method] || 0) + 1 }
-        if (frame.kind === 'request' && blockContent && ['conversation.history', 'conversation.content'].includes(method)) { incoming.destroy(); outgoing.destroy(); continue }
+        if (frame.kind === 'request' && blockContent) { incoming.destroy(); outgoing.destroy(); continue }
         if (frame.kind === 'request' && method === 'session.history' && !earlierWaiterDropped) {
           heldEarlier = () => outgoing.write(line + '\n')
         } else if (frame.kind === 'request' && method === 'conversation.content' && frame.params.contentRef === fastReference && !slowHeld) {
@@ -115,11 +115,11 @@ try {
   })
   await new Promise((resolve, reject) => { proxy.once('error', reject); proxy.listen(proxySocket, resolve) })
   reader = spawn(join(repo, 'clients/official/target/debug/examples/protocol_content'), [proxySocket, join(root, 'identity'), target.id, join(root, 'content'), target.otherId], { cwd: repo, env, stdio: ['pipe', 'pipe', 'pipe'] })
-  let stdout = '', stderr = ''; reader.stdout.on('data', b => { stdout += b; if (!offlineSeen && stdout.includes('repair-offline')) { offlineSeen = true; blockContent = true; reader.stdin.write('continue\n') } if (!onlineSeen && stdout.includes('repair-online')) { onlineSeen = true; blockContent = false; reader.stdin.write('continue\n') } if (!earlierWaiterDropped && stdout.includes('earlier-waiter-dropped')) { earlierWaiterDropped = true; heldEarlier?.(); heldEarlier = null } if (!fastBodySeen && stdout.includes('fast-body.pass')) { fastBodySeen = true; fastWhileHeld = slowHeld && !appended; appendWhenFast() } }); reader.stderr.on('data', b => { stderr += b })
+  let stdout = '', stderr = ''; reader.stdout.on('data', b => { stdout += b; if (!offlineSeen && stdout.includes('cache-offline')) { offlineSeen = true; offlineRequests = { ...counts }; blockContent = true; reader.stdin.write('continue\n') } if (!onlineSeen && stdout.includes('cache-online')) { onlineSeen = true; assert.deepEqual(counts, offlineRequests, 'offline rebinding reads native content, not Host'); blockContent = false; reader.stdin.write('continue\n') } if (!earlierWaiterDropped && stdout.includes('earlier-waiter-dropped')) { earlierWaiterDropped = true; heldEarlier?.(); heldEarlier = null } if (!fastBodySeen && stdout.includes('fast-body.pass')) { fastBodySeen = true; fastWhileHeld = slowHeld && !appended; appendWhenFast() } }); reader.stderr.on('data', b => { stderr += b })
   const code = await new Promise((resolve, reject) => { const timer = setTimeout(() => { void stop(reader); reject(new Error('Rust content timeout')) }, 60000); reader.once('exit', c => { clearTimeout(timer); resolve(c) }); reader.once('error', reject) })
   assert.equal(code, 0, `${stderr}\nHost: ${hostErrors}\n${JSON.stringify({ counts, errors, appended })}`)
   const evidence = JSON.parse(stdout.trim().split('\n').at(-1)); assert.equal(evidence.kind, 'content.pass')
-  assert.equal(offlineSeen && onlineSeen, true, 'bad-record recovery covered unavailable and available source')
+  assert.equal(offlineSeen && onlineSeen, true, 'cached Work rebinding completed with the Host blocked')
   assert.equal(earlierWaiterDropped, true, 'the view waiter was dropped while the native history request remained owned')
   assert.equal(fastWhileHeld, true, 'another full body completed while the slow continuation was actually held')
   assert.equal(appended, true, 'a real Worker append occurred while an old descriptor body was queued')

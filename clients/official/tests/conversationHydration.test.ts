@@ -78,14 +78,16 @@ try {
   const retained = content.state.value.records[0]
   content.acceptReadCut(4)
   session.accept('native-content', { kind: 'checkpoint_begin', bootstrap: { ...checkpoint, cursor: { ...checkpoint.cursor, sequence: 4 } } })
-  session.accept('native-content', { kind: 'record_error', entryId: 'authoritative', error: '这条对话的本地副本无法读取，请重试这一条。' })
+  deliver(retained)
+  session.accept('native-content', { kind: 'entry_state', entryId: 'authoritative', loading: false, error: '这部分内容暂时无法读取，请重试。' })
   deliver(older)
   session.accept('native-content', { kind: 'checkpoint_end' })
-  assert.equal(content.state.value.records.find((record: ConversationRecord) => record.entryId === 'authoritative'), retained, 'an unavailable local file never replaces an already displayed complete record with a preview')
-  assert.ok(content.items.value.some((item: { retryEntryId?: string }) => item.retryEntryId === 'authoritative'))
-  assert.ok(content.items.value.some((item: { id: string }) => item.id === 'record-0'), 'other records still seed after one file error')
+  assert.deepEqual(content.state.value.records.find((record: ConversationRecord) => record.entryId === 'authoritative'), retained, 'a network body failure retains accepted content')
+  assert.ok(content.hydrationErrors.value.authoritative)
+  assert.ok(content.items.value.some((item: { id: string }) => item.id === 'record-0'), 'other records still seed after one body failure')
   deliver({ ...retained, content: [{ type: 'text', text: 'Re-read complete content' }] }); paint()
-  assert.equal(content.items.value.some((item: { retryEntryId?: string }) => item.retryEntryId === 'authoritative'), false)
+  session.accept('native-content', { kind: 'entry_state', entryId: 'authoritative', loading: false })
+  assert.equal(content.hydrationErrors.value.authoritative, undefined)
   session.bind('new-branch', false)
   deliver(preview)
   assert.equal(content.state.value.records.length, 2, 'a late old-domain body cannot enter a new binding')
@@ -102,33 +104,29 @@ try {
       paint()
     }
   }
-  await test('a never-displayed middle record returns to native order after partial UTF-8 seed failure', () => {
+  await test('long UTF-8 records retain native order across a batched seed', () => {
     const view = makeView(); view.publish(initial([]))
     const records = view.state.value.records
     const message = (id: string): ConversationRecord => ({ ...older, recordId: id, entryId: id, content: [{ type: 'text', text: '中文🦉'.repeat(15000) }] })
     view.applyContent({ kind: 'checkpoint_begin', bootstrap: initial([]), replay: true })
     chunks(view, message('oldest'))
-    view.applyContent({ kind: 'record_chunk', entryId: 'bad', first: true, complete: false, text: '{"recordId":' })
-    view.applyContent({ kind: 'record_error', entryId: 'bad', error: '这条对话暂时无法读取，请重试。' })
+    chunks(view, message('middle'))
     chunks(view, message('newest'))
     view.applyContent({ kind: 'checkpoint_end' })
     assert.equal(view.state.value.records, records)
-    assert.deepEqual(records.map((record: ConversationRecord) => record.entryId), ['oldest', 'newest'])
-    chunks(view, message('bad'))
-    assert.deepEqual(records.map((record: ConversationRecord) => record.entryId), ['oldest', 'bad', 'newest'])
-    assert.deepEqual(view.items.value.filter((item: { kind: string }) => item.kind === 'user').map((item: { id: string }) => item.id), ['oldest', 'bad', 'newest'])
+    assert.deepEqual(records.map((record: ConversationRecord) => record.entryId), ['oldest', 'middle', 'newest'])
+    assert.deepEqual(view.items.value.filter((item: { kind: string }) => item.kind === 'user').map((item: { id: string }) => item.id), ['oldest', 'middle', 'newest'])
     assert.ok(records.every((record: ConversationRecord) => record.content[0]?.type === 'text' && record.content[0].text === '中文🦉'.repeat(15000)))
     view.dispose()
   })
-  await test('a repaired tool caller precedes its already displayed result in the sole records array', () => {
+  await test('a seeded tool caller and result stay grouped in the sole records array', () => {
     const view = makeView(); view.publish(initial([]))
     const caller: ConversationRecord = { ...older, recordId: 'caller', entryId: 'caller', source: 'assistant', content: [{ type: 'tool_call', toolCallId: 'call-1', toolName: 'read', args: { path: 'saved' } }] }
     const result: ConversationRecord = { ...older, recordId: 'result', entryId: 'result', source: 'tool', toolCallId: 'call-1', toolName: 'read', content: [{ type: 'tool_result', toolCallId: 'call-1', toolName: 'read', text: 'saved output', isError: false }] }
     view.applyContent({ kind: 'checkpoint_begin', bootstrap: initial([]), replay: true })
-    view.applyContent({ kind: 'record_error', entryId: 'caller', error: '这条对话暂时无法读取，请重试。' })
+    chunks(view, caller)
     chunks(view, result); chunks(view, { ...older, recordId: 'newest', entryId: 'newest' })
     view.applyContent({ kind: 'checkpoint_end' })
-    chunks(view, caller)
     assert.deepEqual(view.state.value.records.map((record: ConversationRecord) => record.entryId), ['caller', 'result', 'newest'])
     const tools = view.items.value.filter((item: { kind: string }) => item.kind === 'tool')
     assert.equal(tools.length, 1)

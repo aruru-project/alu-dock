@@ -3384,7 +3384,7 @@ fn project_session_update(
             aludock_client_core::ContentUpdate::CheckpointBegin { read } => {
                 serde_json::json!({"kind":"content", "token":token, "change":{"kind":"checkpoint_begin", "bootstrap":project_conversation_read(read)?}})
             }
-            aludock_client_core::ContentUpdate::StoredRecord { .. } => {
+            aludock_client_core::ContentUpdate::MemoryRecord { .. } => {
                 return Err(CommandError::from(ClientError::Protocol(
                     "unresolved local content record".into(),
                 )));
@@ -3463,14 +3463,10 @@ async fn start_conversation_follow(
     ) {
         Ok(binding) => binding,
         Err(error) => {
-            let state = if matches!(&error, ClientError::Storage { .. }) {
-                "storage_error"
-            } else {
-                "disconnected"
-            };
+            let state = "disconnected";
             let _ = app.emit("aludock://observation", serde_json::json!({"connectionId": connection_id,
                 "selectionGeneration": selection_generation, "instanceId": instance_id, "subscriptionId": subscription_id,
-                "revision": 0, "update": {"kind":"binding_error", "state":state, "message":"对话暂时无法恢复，请检查连接和本地空间后重试。"}}));
+                "revision": 0, "update": {"kind":"binding_error", "state":state, "message":"对话暂时无法恢复，请重试。"}}));
             return Err(CommandError::from(error));
         }
     };
@@ -3604,17 +3600,13 @@ async fn start_conversation_follow(
                             .map(|updates| serde_json::json!({"kind":"batch","updates":updates})),
                     );
                 }
-                Err(error) => {
-                    let state = if matches!(&error, ClientError::Storage { .. }) {
-                        "storage_error"
-                    } else {
-                        "disconnected"
-                    };
+                Err(_) => {
+                    let state = "content_error";
                     // Display-binding failure is separate from accepted content
                     // revision: never invent a revision that could hide a commit.
                     let _ = app.emit("aludock://observation", serde_json::json!({"connectionId":followed_host,
                         "selectionGeneration":selection_generation,"instanceId":followed_instance,"subscriptionId":followed_subscription,
-                        "revision":0,"update":{"kind":"binding_error","state":state,"message":"本地对话暂时无法读取，请检查可用空间后重试。"}}));
+                        "revision":0,"update":{"kind":"binding_error","state":state,"message":"对话暂时无法显示，请重新打开这项工作。"}}));
                     replay_failed = true;
                 }
             }

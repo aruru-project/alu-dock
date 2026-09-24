@@ -14,7 +14,7 @@ pub(crate) struct RunCache {
     _lease: Option<File>,
 }
 impl RunCache {
-    // Tests/default observers may create the journal lazily. Production uses open.
+    // Tests/default observers may create media files lazily. Production uses open.
     pub fn lazy(path: PathBuf) -> Self {
         Self { path, _lease: None }
     }

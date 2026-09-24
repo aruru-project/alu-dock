@@ -25,7 +25,6 @@ export type ConversationContentChange =
   | { kind: 'record_chunk'; entryId: string; text: string; first: boolean; complete: boolean; beforeEntryId?: string }
   | { kind: 'checkpoint_begin'; bootstrap: ConversationBootstrap; replay?: boolean }
   | { kind: 'checkpoint_end' }
-  | { kind: 'record_error'; entryId: string; beforeEntryId?: string; error: string }
   | { kind: 'entry_state'; entryId: string; loading: boolean; error?: string }
   | { kind: 'state'; canLoadEarlier: boolean; loading: boolean; error?: string }
 
@@ -48,13 +47,11 @@ export function useConversationContent(options: ConversationContentOptions) {
     set: (value: string | null) => { readError.value = value },
   })
   let recordText = ''
-  let recordEntryId: string | null = null
   let foldCut = 0
   let freshRead = false
   let replaying = false
   let checkpointOrder: Map<string, number> | null = null
   let recordOrder = new Map<string, number>()
-  const recordErrors = ref<Record<string, string>>({})
   let checkpoint: Pick<ConversationBootstrap, 'historyRevision'> | null = null
   let preserveHandoff = false
   const preparingView = ref(false)
@@ -106,18 +103,9 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   function projectHistory(current: ConversationBootstrap) {
-    const projected = projectRecordGroups(current.records)
-    for (const [entryId, text] of Object.entries(recordErrors.value)) {
-      projected.push({ id: `local-record-error-${entryId}`, kind: 'notice', tone: 'error', text,
-        retryEntryId: entryId, sourceEntryIds: [entryId] })
-    }
-    if (Object.keys(recordErrors.value).length) projected.sort((a, b) => {
-      const position = (item: ConversationItem) => Math.min(...(item.sourceEntryIds ?? []).map(id => (checkpointOrder ?? recordOrder).get(id) ?? Number.MAX_SAFE_INTEGER))
-        + (item.kind === 'notice' && item.retryEntryId ? 0.5 : 0)
-      return position(a) - position(b)
-    })
-    return reactive(projected)
+    return reactive(projectRecordGroups(current.records))
   }
+
   function rememberRecord(entryId: string, beforeEntryId?: string) {
     if (checkpointOrder) { if (!checkpointOrder.has(entryId)) checkpointOrder.set(entryId, checkpointOrder.size); return }
     if (recordOrder.has(entryId)) return
@@ -271,14 +259,6 @@ export function useConversationContent(options: ConversationContentOptions) {
 
   function applyContent(change: ConversationContentChange) {
     const current = state.value
-    if (change.kind === 'record_error') {
-      if (change.beforeEntryId) prepending = true
-      rememberRecord(change.entryId, change.beforeEntryId)
-      recordErrors.value = { ...recordErrors.value, [change.entryId]: change.error }
-      if (recordEntryId === change.entryId) { recordText = ''; recordEntryId = null }
-      if (!checkpoint || !preserveHandoff) { historyDirty = true; requestProjectionFrame() }
-      return
-    }
     if (change.kind === 'entry_state') {
       const active = new Set(hydrationActiveEntries.value)
       if (change.loading) active.add(change.entryId)
@@ -288,10 +268,6 @@ export function useConversationContent(options: ConversationContentOptions) {
       if (change.error) errors[change.entryId] = change.error
       else delete errors[change.entryId]
       hydrationErrors.value = errors
-      if (change.error && recordErrors.value[change.entryId]) {
-        recordErrors.value = { ...recordErrors.value, [change.entryId]: change.error }
-        if (!checkpoint || !preserveHandoff) { historyDirty = true; requestProjectionFrame() }
-      }
       return
     }
     if (change.kind === 'state') {
@@ -324,7 +300,7 @@ export function useConversationContent(options: ConversationContentOptions) {
         if (foldableToolEvent(event)) cache.tools.set(`${event.eventType}:${event.data.toolCallId}`, index)
         resetFoldBoundary(current, event)
       }
-      recordText = ''; recordEntryId = null; freshRead = false
+      recordText = ''; freshRead = false
       return
     }
     if (change.kind === 'checkpoint_end') {
@@ -336,10 +312,9 @@ export function useConversationContent(options: ConversationContentOptions) {
       }
       current.records.sort((a, b) => checkpointOrder!.get(a.entryId)! - checkpointOrder!.get(b.entryId)!)
       recordOrder = checkpointOrder
-      recordErrors.value = Object.fromEntries(Object.entries(recordErrors.value).filter(([id]) => recordOrder.has(id)))
       current.historyRevision = checkpoint.historyRevision
       checkpoint = null; checkpointOrder = null; replaying = false
-      recordText = ''; recordEntryId = null
+      recordText = ''
       const anchor = options.beforeLayoutChange()
       const following = !prepending && options.isFollowing()
       prepending = false
@@ -348,12 +323,10 @@ export function useConversationContent(options: ConversationContentOptions) {
       void options.afterLayoutChange(anchor, following)
       return
     }
-    if (change.first) { recordText = ''; recordEntryId = change.entryId; rememberRecord(change.entryId, change.beforeEntryId) }
+    if (change.first) { recordText = ''; rememberRecord(change.entryId, change.beforeEntryId) }
     recordText += change.text
     if (!change.complete) return
     const record = JSON.parse(recordText) as ConversationRecord
-    const faults = { ...recordErrors.value }; delete faults[change.entryId]; recordErrors.value = faults
-    recordEntryId = null
     if (change.beforeEntryId) prepending = true
     recordText = ''
     const index = current.records.findIndex(old => old.entryId === change.entryId)
@@ -383,7 +356,6 @@ export function useConversationContent(options: ConversationContentOptions) {
     foldCut = bootstrap.cursor.sequence
     freshRead = true; replaying = false; checkpointOrder = null
     recordOrder = new Map(bootstrap.records.map((record, index) => [record.entryId, index]))
-    recordErrors.value = {}
     state.value = bootstrap
     if (!prepareView) rebuildProjection(state.value!)
     historyTruncated.value = bootstrap.historyTruncated
@@ -396,7 +368,7 @@ export function useConversationContent(options: ConversationContentOptions) {
     checkpoint = null
     recordText = ''
     state.value = null
-    checkpointOrder = null; replaying = false; freshRead = false; recordOrder.clear(); recordErrors.value = {}; recordEntryId = null
+    checkpointOrder = null; replaying = false; freshRead = false; recordOrder.clear()
     seeding.value = false
     hydrationActiveEntries.value = new Set()
     hydrationErrors.value = {}

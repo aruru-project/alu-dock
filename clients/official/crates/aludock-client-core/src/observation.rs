@@ -350,7 +350,6 @@ impl ConversationObservation {
         }
         let state = failure_state(error);
         let message = match state {
-            "storage_error" => "本地对话无法保存，请检查可用空间后重试。",
             "unavailable" => "这项工作当前不可用，请刷新工作列表。",
             "identity_error" => "无法确认 Host 身份或连接授权，请检查 Host 设置后重试。",
             _ => "连接暂时中断，正在尝试恢复。你可以继续编辑。",
@@ -392,7 +391,6 @@ fn failure_state(error: &ClientError) -> &'static str {
         {
             "unavailable"
         }
-        ClientError::Storage { .. } => "storage_error",
         _ => "disconnected",
     }
 }
@@ -449,6 +447,132 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Windows cold Work opens previously wrote and reread every body before
+    // display. Exercise the real Host read -> content admission -> binding path.
+    #[tokio::test]
+    async fn cold_host_history_and_native_rebind_display_complete_utf8_without_body_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "cold-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("s");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let expected = "中文🦉".repeat(18000);
+        let mut response = read();
+        response["recentHistory"] = json!((0..3).map(|i| json!({"recordId":format!("r{i}"),"entryId":format!("r{i}"),"kind":"message","source":"user","visibility":"conversation","content":[{"type":"text","text":expected}]})).collect::<Vec<_>>());
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio::io::BufReader::new(socket);
+            let hello: Value = read_json_line(&mut socket, 1024 * 1024).await.unwrap();
+            write_json_line(&mut socket, &json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
+            let request: Value = read_json_line(&mut socket, 1024 * 1024).await.unwrap();
+            assert_eq!(request["type"], "instance.read");
+            write_json_line(&mut socket, &json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":true,"result":response})).await.unwrap();
+        });
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "cold-open".into(),
+            )
+            .unwrap(),
+        );
+        let cache = directory.join("cache");
+        let content = SessionContent::in_directory(cache.clone()).unwrap();
+        let run = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.is_dir())
+            .unwrap();
+        let files = || {
+            std::fs::read_dir(&run)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = files();
+        let owner = content.claim("work");
+        let mut binding = content.bind("work").unwrap();
+        let read = client
+            .read_instance("work", None, ReadReplay::ConversationBootstrap)
+            .await
+            .unwrap();
+        content
+            .commit("work", owner, SessionUpdate::Read(read))
+            .unwrap();
+        peer.await.unwrap();
+        for _ in 0..2 {
+            let mut bodies = Vec::new();
+            let mut encoded = String::new();
+            let mut batches = 0;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let batch = binding.next_batch().await.unwrap();
+                    batches += 1;
+                    let mut ended = false;
+                    for commit in batch {
+                        match commit.update {
+                            SessionUpdate::Content {
+                                update:
+                                    crate::ContentUpdate::RecordChunk {
+                                        text,
+                                        first,
+                                        complete,
+                                        ..
+                                    },
+                                ..
+                            } => {
+                                assert!(text.len() <= 32768);
+                                if first {
+                                    encoded.clear();
+                                }
+                                encoded.push_str(&text);
+                                if complete {
+                                    bodies.push(
+                                        serde_json::from_str::<crate::HistoryRecord>(&encoded)
+                                            .unwrap(),
+                                    );
+                                }
+                            }
+                            SessionUpdate::Content {
+                                update: crate::ContentUpdate::CheckpointEnd,
+                                ..
+                            } => ended = true,
+                            _ => {}
+                        }
+                    }
+                    if ended {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                batches > 1,
+                "long history arrives in a first batch and continuations"
+            );
+            assert_eq!(
+                bodies
+                    .iter()
+                    .map(|record| record.entry_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["r0", "r1", "r2"]
+            );
+            assert!(bodies.iter().all(|record| matches!(&record.content[0], crate::ContentBlock::Text { text } if text == &expected)));
+            assert_eq!(
+                files(),
+                before,
+                "body and journal preparation must not add files before display or rebind"
+            );
+            binding = content.bind("work").unwrap();
+        }
+        drop(binding);
+        drop(content);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     // #301/#302: a rebuilt WebView reconnects to native facts, not to a new
@@ -837,17 +961,6 @@ mod tests {
                 )
                 .unwrap();
         }
-        let run_directory = std::fs::read_dir(&directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_dir())
-            .unwrap();
-        let tail_path = std::fs::read_dir(&run_directory)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .find(|path| std::fs::metadata(path).unwrap().len() > 64 * 1024 * 1024)
-            .unwrap();
-        let tail_bytes = std::fs::metadata(&tail_path).unwrap().len();
         let rss = || -> u64 {
             std::fs::read_to_string("/proc/self/status")
                 .ok()
@@ -864,9 +977,6 @@ mod tests {
         let mut binding = content.bind("work").unwrap();
         let mut held_display = content.bind("work").unwrap();
         let bind_micros = start.elapsed().as_micros();
-        // Unlink after bind: independent positional descriptor, not a reopened
-        // path or a dup sharing the append offset, must continue to work.
-        std::fs::remove_file(tail_path).unwrap();
         let publisher = content.clone();
         let (done, completed) = std::sync::mpsc::channel();
         let writer = std::thread::spawn(move || {
@@ -959,7 +1069,7 @@ mod tests {
             "replay memory must not grow by the 64MiB retained tail"
         );
         println!(
-            "tail_bytes={tail_bytes} bind_pair_us={bind_micros} max_small_batch_bytes={max_small_batch} replay_rss_delta_kib={} concurrent_events=513",
+            "bind_pair_us={bind_micros} max_small_batch_bytes={max_small_batch} replay_rss_delta_kib={} concurrent_events=513",
             peak_rss.saturating_sub(baseline_rss)
         );
         assert!(
@@ -1100,85 +1210,6 @@ mod tests {
             std::fs::remove_dir_all(directory).unwrap();
         }
     }
-    // Master-side review: recovery Read, not only an explicit replacement,
-    // must retire Session A even if B's body or journal cannot be saved.
-    #[tokio::test]
-    async fn recovery_read_retires_old_session_before_body_or_journal_storage_failure() {
-        for with_body in [false, true] {
-            let root = std::env::temp_dir().join(format!("read-fault-{}", uuid::Uuid::new_v4()));
-            let content = SessionContent::in_directory(root.clone()).unwrap();
-            let owner = content.claim("work");
-            content
-                .commit(
-                    "work",
-                    owner,
-                    SessionUpdate::Read(serde_json::from_value(read()).unwrap()),
-                )
-                .unwrap();
-            let mut binding = content.bind("work").unwrap();
-            let old_token = binding.snapshot.content_token.clone();
-            let run = content.content_root();
-            std::fs::remove_dir_all(&run).unwrap();
-            std::fs::write(&run, b"blocked").unwrap();
-            let mut replacement = read();
-            replacement["instance"] = instance(2);
-            replacement["page"]["earliest"] = cursor(10, 2);
-            replacement["page"]["latest"] = cursor(10, 2);
-            if with_body {
-                replacement["recentHistory"] = json!([{"recordId":"b","entryId":"b","kind":"message","source":"user","visibility":"visible","content":[{"type":"text","text":"new session"}]}]);
-            }
-            // An old owner or another Host/Work cannot exploit the storage-failure path.
-            assert!(
-                !content
-                    .commit(
-                        "work",
-                        owner + 1,
-                        SessionUpdate::Read(serde_json::from_value(replacement.clone()).unwrap())
-                    )
-                    .unwrap()
-            );
-            let mut wrong_host = replacement.clone();
-            wrong_host["page"]["latest"]["hostEpoch"] = json!("another");
-            assert!(
-                !content
-                    .commit(
-                        "work",
-                        owner,
-                        SessionUpdate::Read(serde_json::from_value(wrong_host).unwrap())
-                    )
-                    .unwrap()
-            );
-            assert!(binding.take_replacement().is_none());
-            assert!(matches!(
-                content.commit(
-                    "work",
-                    owner,
-                    SessionUpdate::Read(serde_json::from_value(replacement).unwrap())
-                ),
-                Err(ClientError::Storage { .. })
-            ));
-            let priority = binding
-                .take_replacement()
-                .expect("new identity bypasses old unread content");
-            assert_ne!(priority.content_token, old_token);
-            assert_eq!(
-                priority.target.as_ref().unwrap().executor.pi_session_id,
-                "session-2"
-            );
-            assert!(
-                priority.read.is_none(),
-                "failed body is not accepted as a successful read"
-            );
-            let rebound = content.bind("work").unwrap();
-            assert_eq!(rebound.snapshot.state, "storage_error");
-            assert!(rebound.snapshot.read.is_none());
-            drop(rebound);
-            drop(binding);
-            drop(content);
-            std::fs::remove_dir_all(root).unwrap();
-        }
-    }
-
     // Master-side review: run the production observation wake plus visibility
     // intent, rather than proving image API caching while a background reader
     // silently downloads all image bodies again.
@@ -1340,108 +1371,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_failures_preserve_content_report_status_and_keep_known_replacement() {
-        let root = std::env::temp_dir().join(format!("content-fault-{}", uuid::Uuid::new_v4()));
-        let content = SessionContent::in_directory(root.clone()).unwrap();
-        let owner = content.claim("work");
-        content
-            .commit(
-                "work",
-                owner,
-                SessionUpdate::Read(serde_json::from_value(read()).unwrap()),
-            )
-            .unwrap();
-        let mut binding = content.bind("work").unwrap();
-        let run = std::fs::read_dir(&root)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_dir())
-            .unwrap();
-        let file = std::fs::read_dir(&run)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.is_file() && path.file_name().unwrap() != "owner")
-            .unwrap();
-        let event = crate::DockEvent {
-            scope: "instance".into(),
-            instance_id: "work".into(),
-            runtime_generation: 1,
-            sequence: 11,
-            occurred_at: "now".into(),
-            event_type: "message.delta".into(),
-            data: json!({"messageId":"assistant", "block":"text", "delta":"accepted"}),
-        };
-        content
-            .commit("work", owner, SessionUpdate::Event(event))
-            .unwrap();
-        // Corrupt only this test's committed file, after pinning its descriptor.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(file)
-            .unwrap()
-            .set_len(0)
-            .unwrap();
-        assert!(
-            matches!(binding.next_batch().await, Err(ClientError::Storage { .. })),
-            "replay read errors retain the file boundary classification"
-        );
-        // Prevent new checkpoint files without changing machine permissions.
-        std::fs::remove_dir_all(&run).unwrap();
-        std::fs::write(&run, b"blocked").unwrap();
-        assert!(matches!(
-            content.commit(
-                "work",
-                owner,
-                SessionUpdate::Read(
-                    serde_json::from_value({
-                        let mut r = read();
-                        r["page"]["latest"] = cursor(11, 1);
-                        r
-                    })
-                    .unwrap()
-                )
-            ),
-            Err(ClientError::Storage { .. })
-        ));
-        assert_eq!(content.cursor("work", owner).unwrap().sequence, 11);
-        let before = content.bind("work").unwrap().snapshot;
-        assert!(
-            before.read.is_some(),
-            "a failed checkpoint does not replace accepted content"
-        );
-        // /new already succeeded remotely. Even disk failure must commit its
-        // small target fact and expose storage_error, not report mutation failure.
-        assert!(
-            content
-                .replace("work", serde_json::from_value(instance(2)).unwrap(), false)
-                .unwrap()
-        );
-        let priority = binding.take_replacement().unwrap();
-        assert_eq!(
-            priority.target.unwrap().runtime_generation,
-            2,
-            "a broken old replay still permits the new target to retire it"
-        );
-        let mut rebound = content.bind("work").unwrap();
-        assert_eq!(
-            rebound.snapshot.target.as_ref().unwrap().runtime_generation,
-            2
-        );
-        assert!(rebound.snapshot.read.is_none());
-        assert_eq!(rebound.snapshot.state, "storage_error");
-        assert!(rebound.next_batch().await.unwrap().iter().any(|commit|matches!(&commit.update,SessionUpdate::Status {state,..} if state=="storage_error")));
-        drop(rebound);
-        drop(binding);
-        drop(content);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-    #[tokio::test]
-    async fn recovery_read_prioritizes_new_identity_over_unread_or_broken_tail() {
-        for (generation, session_id, corrupt) in [
-            (2, "session-2", false),
-            (2, "session-2", true),
-            (1, "other-session", false),
-        ] {
+    async fn recovery_read_prioritizes_new_identity_over_unread_tail() {
+        for (generation, session_id) in [(2, "session-2"), (1, "other-session")] {
             let directory = std::env::temp_dir().join(format!("read-cut-{}", uuid::Uuid::new_v4()));
             let content = SessionContent::in_directory(directory.clone()).unwrap();
             let owner = content.claim("work");
@@ -1468,28 +1399,6 @@ mod tests {
                     }),
                 )
                 .unwrap();
-            if corrupt {
-                let run = std::fs::read_dir(&directory)
-                    .unwrap()
-                    .map(|entry| entry.unwrap().path())
-                    .find(|path| path.is_dir())
-                    .unwrap();
-                let file = std::fs::read_dir(run)
-                    .unwrap()
-                    .map(|entry| entry.unwrap().path())
-                    .find(|path| path.is_file() && path.file_name().unwrap() != "owner")
-                    .unwrap();
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(file)
-                    .unwrap()
-                    .set_len(0)
-                    .unwrap();
-                assert!(matches!(
-                    display.next_batch().await,
-                    Err(ClientError::Storage { .. })
-                ));
-            }
             let mut fresh = read();
             fresh["instance"] = instance(generation);
             fresh["instance"]["executor"]["piSessionId"] = json!(session_id);

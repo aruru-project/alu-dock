@@ -26,7 +26,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 | --- | --- | --- | --- |
 | 连接、配对、地址、切 Host、目录刷新 | core `host_registry.rs` / `connection_router.rs` / `pairing.rs`；Tauri `ConnectionRuntimeState`；Vue store 只保最后接纳的目录与本地选择 | `hostConnection.ts`、`stores/app.ts`、`ConnectionLanding.vue`、Host 设置；`bridge.ts` → `src-tauri/src/lib.rs` → core | core 连接/registry 测试；App native-boundary 门；真实配对/切网须设备检查 |
 | 进入 Work、断连续读、前后台恢复 | core `observation.rs` 续读；`SessionContent` 接纳内容与身份；Vue `workObservation.ts` 订阅和确认，不拥有另一份会话 | `start_conversation_follow` / `read_conversation_content` / ACK；`conversationSession.ts` → `conversationContent.ts` → `ConversationView.vue` | `contentProtocol.test.mjs`、core observation/content 测试；仅改局部时不要重复整条门 |
-| 历史、正文、记录错误和重试 | `session_content_reader.rs` 的分页/任务；`session_records.rs` 的版本文件；`session_content/binding.rs` 的有界显示回放 | `ConversationRegion.vue` 的加载更早/重试/可见条目；不直接调用远端正文分页 | content 门、记录版本测试；App 局部接线 |
+| 历史、正文、记录错误和重试 | `session_content_reader.rs` 的分页/任务；`session_records.rs` 的不可变内存正文；`session_content/binding.rs` 的有界显示回放 | `ConversationRegion.vue` 的加载更早/重试/可见条目；不直接调用远端正文分页 | content 门、冷打开/回放测试；App 局部接线 |
 | `/new`、Reload、Resume、Tree、Fork、Clone | `operations.rs` 持原 operationId、冻结目标、结果；`SessionContent` 先接纳真实替换，编辑认领另算 | `SessionManager.vue`、`command-console.ts`、`operationResults.ts`、`operationBinding.ts`；Tauri typed commands | `sessionReload.test.mjs`、`submitDraft.test.mjs`、core operation/observation 测试 |
 | 输入、Queue、发送、模型/Stop 等控制 | `composer.ts` / `inputEditor.ts` 拥有一个编辑器；core operation 是结果事实；`stores/app.ts` 保本地编辑 revision | `InputRegion.vue`、`OperationResults.vue`、`workActions.ts`；`captureOperationTarget` 与需要可靠编辑保存的 `captureOperation` 分开 | App 真实控件门；普通输入、展开输入及 IME 须实际交互检查 |
 | 上传原件、粘贴、取消、移除及重绑 | `attachment_jobs.rs` 持源、目标、进度、receipt/失败/unknown；`SessionMedia` 持文件；Vue 只保当前选择 | `attachmentUploads.ts`、`AttachmentCard.vue`；pick/stage/start/snapshot；typed attachment API | `attachmentMediaProtocol.test.mjs` + public Rust example；既有 upload-job 测试；本轮未改上传时不重跑 |
@@ -51,8 +51,8 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 - 原生根据真实稳定连接 authority、Machine、fileId、MIME 和源描述关联 receipt；opaque ref 不拆解，文件名不当身份，Vue 不用附件预览覆盖正式图片。请求域与文件寿命分开。
 - 所有对话/发布/附件图片都返回 `MediaHandle`。URL 只通过受限 `aludock-media` 解析注册的 handle，WebView 没有任意路径读权限。显示 prune、F5、Work 切换只释放显示资源，不删可信文件。
 - 图片保存传 `{handle, name}`，不 fetch URL 到 JS，不把 Uint8Array 再传回 Rust。core 流式复制并复核本地长度/SHA；Tauri 复用原 dialog、staging、atomic commit/Android URI copy。保存任务持有自己的临时文件直到完成；取消/错误只清自己的临时文件，不能删原件。Dialog/URI 的平台差异仍在 Tauri。
-- 当前成员、checkpoint、journal 和实际 binding 回放持有 record 版本的本地 lease；版本被替换后只要仍有读者就不删，最后引用释放才回收。lease 不序列化为协议或 IPC 数据。未接纳/失败版本同样回收。不能直接按“不是最新文件名”删除仍会被回放的正文。
-- 本次原生运行的可信内容仍保留；正常退出释放 RunCache，下次启动仅清无活动 lease 的私有残留，不动用户原文件、主动保存的文件或 Host 附件。不承诺异常退出后的永久内容恢复。
+- 正文与会话增量保留在原生内存，仍由 `SessionContent` 唯一持有。当前成员、checkpoint、Segment 和实际 binding 共享不可变正文引用，旧版本最后一个引用释放后回收；不再创建逐条正文文件或磁盘 journal。Host 返回历史后即可按原有分批接口显示，不以前置写盘/权限/摘要回读作为首屏条件。
+- 正文在本次原生生命周期内保留，支持 F5 和切 Work，不承诺重启持久化。媒体可信文件仍保留；正常退出释放 RunCache，下次启动仅清无活动 lease 的私有残留，不动用户原文件、主动保存的文件或 Host 附件。不承诺异常退出后的永久内容恢复。
 
 ## 阅读位置是本客户端的显示意图
 
@@ -68,10 +68,10 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 
 - 正文读取以实际可见 interest/显式重试为需求边界，不自动扫全部 incomplete；纯图（含空工具结果身份块）走媒体 owner，必要长文字继续自动补全。混合图文的整记录补全仍经过既有 V2 图片段，不能以局部 image API 的缓存命中推断整页正文无传图。
 - 永久上传 fileId 不依赖当前运行的 source/job，仍核原目标域并交 Host 接纳；未完成选择继续要求有效 job。成功发送或进入 Queue 后，只清理本次发送前捕获的已完成上传任务，不删除 Host 附件或可信媒体缓存；失败/未知不清理。未接纳的导入撤销，不另设“保留附件”或上传历史界面。
-- 正文在磁盘版本文件中，binding 按 `session_journal.rs` 定义的 batch 字节/条目预算回放；只组装当前一条记录。旧版本按实际引用释放，当前可信成员不为“达标”被丢弃。
+- 正文为共享 `Arc<str>` JSON，增量为 Segment 内存提交列表；binding 按 `session_journal.rs` 原有 256 KiB / 64 条预算回放，正文按 32 KiB UTF-8 边界切块，Vue 只组装当前一条记录。大单个源事件不截断。旧版本按实际引用释放，当前可信成员不为“达标”被丢弃。
 - 图片/发布文件共用现有三个传输许可；接收只保协议 chunk，不预分配整文件 Vec。文件长度、chunk 和协议限制由各产出端常量定义，入口复用，不再另设未经测量的 128 MiB Blob 预算。
 - 会话媒体的 Vue 层持 descriptor/handle URL，图片首次接近 viewport 时按需读取，已加载的 img 留在当前会话 DOM，不随滚动反复销毁/重建或替换占位；浏览器负责自身解码缓存，预览只持当前图。该链路的主线程不做图片字节拼装/复制/保存往返；workspace 预览仍归自己的文件 owner，不在这里另建通用文件平台。无用的显示引用和 Work 的工具展开状态在退场时释放。
-- Tauri URI API 的响应仍要求 Vec，WebView 解码像素和显示正文也占内存；这些不等于文件字节。没有虚构精确全 App/RSS 或磁盘硬上限。可信文件保留与任意硬磁盘上限不能同时保证，因此不静默淘汰文件再下载。存储失败沿本地正文/图片/保存入口明确反馈，原成功内容不倒退。
+- Tauri URI API 的响应仍要求 Vec，WebView 解码像素和显示正文也占内存；这些不等于文件字节。没有虚构精确全 App/RSS 或磁盘硬上限。可信文件保留与任意硬磁盘上限不能同时保证，因此不静默淘汰文件再下载。媒体存储失败沿图片/正文内媒体导入/保存入口明确反馈，原成功内容不倒退。
 - 后续若调整预算，应据真实设备的文件、像素和峰值证据，在对应 owner 内收敛；不能用不响应、删历史或抬协议上限替代修复。
 
 ## 验证与交付入口

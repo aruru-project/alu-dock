@@ -14,7 +14,6 @@ defineProps<{
   imageResource: (part: ImagePart) => ConversationImageResource
 }>()
 const emit = defineEmits<{
-  retryEntry: [entryId: string]
   toolToggle: [id: string, event: Event]
   imageRequest: [part: ImagePart]
   imagePreview: [part: ImagePart]
@@ -52,5 +51,5 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
 
       <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
 
-      <div v-else class="conversation-row alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}<button v-if="row.retryEntryId" type="button" @click="emit('retryEntry', row.retryEntryId)">重试这一条</button></div></div>
+      <div v-else class="conversation-row alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
 </template>

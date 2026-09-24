@@ -11,7 +11,7 @@ use crate::{
     session_media::{MediaHandle, MediaScope, SessionMedia},
     session_records::RecordVersion,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -19,22 +19,17 @@ use std::{
 };
 use tokio::sync::watch;
 
-pub(crate) const RECORD_READ_ERROR: &str = "这条对话的本地副本无法读取，请重试这一条。";
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
 pub enum ContentUpdate {
-    StoredRecord {
+    MemoryRecord {
         #[serde(skip)]
-        lease: Option<Arc<crate::session_records::RecordFile>>,
+        body: Arc<str>,
         entry_id: String,
-        file: String,
-        size_bytes: u64,
-        sha256: String,
         before_entry_id: Option<String>,
     },
     RecordChunk {
@@ -48,11 +43,6 @@ pub enum ContentUpdate {
         read: InstanceReadResult,
     },
     CheckpointEnd,
-    RecordError {
-        entry_id: String,
-        before_entry_id: Option<String>,
-        error: String,
-    },
     EntryState {
         entry_id: String,
         loading: bool,
@@ -64,7 +54,7 @@ pub enum ContentUpdate {
         error: Option<String>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub enum SessionUpdate {
     Read(InstanceReadResult),
     ObservationCut(InstanceReadResult),
@@ -83,7 +73,7 @@ pub enum SessionUpdate {
         message: Option<String>,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SessionCommit {
     pub revision: u64,
     pub update: SessionUpdate,
@@ -111,13 +101,11 @@ struct ReplacementCut {
     records_revision: u64,
     waterline: u64,
     journal_revision: u64,
-    unavailable: HashMap<String, String>,
 }
 #[derive(Clone, Default)]
 struct Signal {
     replacement: Option<Arc<ReplacementCut>>,
     revision: u64,
-    fault: Option<SessionCommit>,
     status: (String, Option<String>),
 }
 #[derive(Clone, Copy, Eq, PartialEq, Hash)]
@@ -160,7 +148,6 @@ pub(crate) struct PendingCheckpoint {
 struct Inner {
     entries: HashMap<String, Entry>,
     owner: u64,
-    root: Arc<RunCache>,
 }
 #[derive(Clone)]
 pub struct SessionContent(Arc<Mutex<Inner>>, Arc<SessionMedia>);
@@ -177,12 +164,11 @@ impl SessionContent {
     }
     fn with_run(run: RunCache) -> Self {
         let root = Arc::new(run);
-        let media = Arc::new(SessionMedia::new(root.clone()));
+        let media = Arc::new(SessionMedia::new(root));
         Self(
             Arc::new(Mutex::new(Inner {
                 entries: HashMap::new(),
                 owner: 0,
-                root,
             })),
             media,
         )
@@ -291,9 +277,8 @@ impl SessionContent {
         let mut inner = self.0.lock().unwrap();
         inner.owner += 1;
         let owner = inner.owner;
-        let root = inner.root.clone();
         let entry = inner.entries.entry(key.into()).or_insert_with(|| {
-            let segment = Segment::new(&root.path);
+            let segment = Segment::new();
             Entry {
                 snapshot: SessionSnapshot {
                     content_token: uuid::Uuid::new_v4().to_string(),
@@ -357,26 +342,24 @@ impl SessionContent {
             .filter(|e| e.owner == owner)
             .and_then(|e| e.snapshot.cursor.clone())
     }
-    /// Short critical section: Arc checkpoint, independent descriptor/length
-    /// waterline and notification subscription. No disk reading or decoding here.
+    /// Pin shared record bodies, the commit position and notifications.
+    /// No body decoding or copying under this lock.
     pub fn bind(&self, key: &str) -> Result<SessionBinding> {
         let mut inner = self.0.lock().unwrap();
-        let root = inner.root.clone();
         let entry = inner
             .entries
             .get_mut(key)
             .ok_or_else(|| ClientError::Protocol("observation target is not accepted".into()))?;
         entry.reads.paused = false;
-        Ok(SessionBinding::new(entry, root, self.clone(), key.into()))
+        Ok(SessionBinding::new(entry))
     }
 
     pub fn commit(&self, key: &str, owner: u64, mut update: SessionUpdate) -> Result<bool> {
         // Recovery Read can be the first proof of a new Session. Admit only
-        // its small identity fact before any fallible body storage, under the
+        // its small identity fact before body encoding, under the
         // same owner/domain/order fence used for the later read publication.
         if let SessionUpdate::Read(read) = &update {
             let mut inner = self.0.lock().unwrap();
-            let root = inner.root.clone();
             let Some(entry) = inner.entries.get_mut(key).filter(|e| e.owner == owner) else {
                 return Ok(false);
             };
@@ -406,39 +389,22 @@ impl SessionContent {
                 let mut target = read.instance.clone();
                 target.event_cursor = cursor.clone();
                 replace_snapshot(&mut next, target.clone());
-                publish(entry, next, SessionUpdate::Replaced(target), &root.path)?;
+                publish(entry, next, SessionUpdate::Replaced(target))?;
             }
         } else if !self.owns(key, owner) {
             return Ok(false);
         }
-        // Body/file preparation never holds the canonical commit lock. A late
+        // Body encoding never holds the canonical commit lock. A late
         // prepared version still has to pass the owner/domain checks below.
         let prepared = if let SessionUpdate::Read(read) = &update {
-            let root = self.content_root();
-            match read
-                .recent_history
+            read.recent_history
                 .iter()
-                .map(|record| RecordVersion::write(&root, record, false))
-                .collect::<Result<Vec<_>>>()
-            {
-                Ok(records) => records,
-                Err(error) => {
-                    let _ = self.commit(
-                        key,
-                        owner,
-                        SessionUpdate::Status {
-                            state: "storage_error".into(),
-                            message: Some("本地对话暂时无法保存，请检查可用空间后重试。".into()),
-                        },
-                    );
-                    return Err(error);
-                }
-            }
+                .map(|record| RecordVersion::new(record, false))
+                .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
         let mut inner = self.0.lock().unwrap();
-        let root = inner.root.clone();
         let Some(entry) = inner.entries.get_mut(key).filter(|e| e.owner == owner) else {
             return Ok(false);
         };
@@ -468,12 +434,7 @@ impl SessionContent {
                     next.target = Some(read.instance.clone());
                     let mut facts = read.clone();
                     facts.recent_history.clear();
-                    publish(
-                        entry,
-                        next,
-                        SessionUpdate::ObservationCut(facts),
-                        &root.path,
-                    )?;
+                    publish(entry, next, SessionUpdate::ObservationCut(facts))?;
                     entry.read_errors.remove(&ReadArea::Coverage);
                     entry.pending_checkpoint = Some(PendingCheckpoint {
                         read: read.clone(),
@@ -483,7 +444,7 @@ impl SessionContent {
                         records: prepared.clone(),
                     });
                     if !read.history_truncated {
-                        finish_checkpoint_entry(entry, prepared, false, &root.path)?;
+                        finish_checkpoint_entry(entry, prepared, false)?;
                     }
                     return Ok(true);
                 }
@@ -594,7 +555,7 @@ impl SessionContent {
             }
         }
         let initial_read = matches!(update, SessionUpdate::Read(_));
-        publish_with_checkpoint(entry, next, update, &root.path, None, incoming_records)?;
+        publish_with_checkpoint(entry, next, update, None, incoming_records)?;
         if initial_read {
             let read = (**entry.snapshot.read.as_ref().unwrap()).clone();
             let mut updates = vec![ContentUpdate::CheckpointBegin { read }];
@@ -602,7 +563,7 @@ impl SessionContent {
                 entry
                     .records
                     .iter()
-                    .map(|record| record_update(record, None, &entry.reads.unavailable)),
+                    .map(|record| record_update(record, None)),
             );
             updates.push(ContentUpdate::CheckpointEnd);
             updates.push(ContentUpdate::State {
@@ -631,9 +592,6 @@ impl SessionContent {
             .get(key)
             .filter(|entry| entry.owner == owner)
             .map(|entry| entry.snapshot.content_token.clone())
-    }
-    pub(crate) fn content_root(&self) -> PathBuf {
-        self.0.lock().unwrap().root.path.clone()
     }
     pub(crate) fn begin_coverage(&self, key: &str) -> Option<String> {
         let mut inner = self.0.lock().unwrap();
@@ -684,7 +642,6 @@ impl SessionContent {
         has_earlier: bool,
     ) -> Result<Option<String>> {
         let mut inner = self.0.lock().unwrap();
-        let root = inner.root.path.clone();
         let Some(entry) = inner
             .entries
             .get_mut(key)
@@ -703,7 +660,7 @@ impl SessionContent {
         if entry.records.first().map(|record| record.entry_id.as_str()) != oldest {
             return Ok(None);
         }
-        finish_checkpoint_entry(entry, records, has_earlier, &root)?;
+        finish_checkpoint_entry(entry, records, has_earlier)?;
         Ok(Some(entry.snapshot.content_token.clone()))
     }
     pub(crate) fn earlier_request(
@@ -774,7 +731,7 @@ impl SessionContent {
         }
         let mut updates: Vec<_> = records
             .iter()
-            .map(|record| record_update(record, Some(anchor.into()), &entry.reads.unavailable))
+            .map(|record| record_update(record, Some(anchor.into())))
             .collect();
         updates.push(ContentUpdate::State {
             can_load_earlier: has_earlier,
@@ -799,7 +756,6 @@ impl SessionContent {
         error: &ClientError,
     ) -> Result<bool> {
         let mut inner = self.0.lock().unwrap();
-        let root = inner.root.path.clone();
         let Some(entry) = inner
             .entries
             .get_mut(key)
@@ -830,7 +786,7 @@ impl SessionContent {
             }
         };
         if area == ReadArea::Earlier && !entry.snapshot.can_load_earlier {
-            publish_read_state(entry, &root)?;
+            publish_read_state(entry)?;
             return Ok(false);
         }
         let message = if matches!(error, ClientError::Storage { .. }) {
@@ -839,7 +795,7 @@ impl SessionContent {
             "这部分对话暂时无法读取，请重试。"
         };
         entry.read_errors.insert(area, message.into());
-        publish_read_state(entry, &root)?;
+        publish_read_state(entry)?;
         Ok(true)
     }
     pub(crate) fn clear_content_error(
@@ -849,7 +805,6 @@ impl SessionContent {
         area: Option<ReadArea>,
     ) -> Result<()> {
         let mut inner = self.0.lock().unwrap();
-        let root = inner.root.path.clone();
         let Some(entry) = inner
             .entries
             .get_mut(key)
@@ -864,7 +819,7 @@ impl SessionContent {
         } else {
             entry.read_errors.clear();
         }
-        publish_read_state(entry, &root)
+        publish_read_state(entry)
     }
     pub(crate) fn should_retry_earlier(&self, key: &str, token: &str) -> bool {
         self.0
@@ -927,56 +882,15 @@ impl SessionContent {
         else {
             return Ok(false);
         };
-        if entry.records[index].complete
-            && (!entry.reads.unavailable.contains_key(&record.entry_id) || !record.complete)
-        {
+        if entry.records[index].complete {
             return Ok(true);
         }
-        content_transaction(
-            entry,
-            vec![record_update(&record, None, &entry.reads.unavailable)],
-            |entry| {
-                entry.reads.unavailable.remove(&record.entry_id);
-                entry.reads.errors_remove(&record.entry_id, record.complete);
-                entry.records[index] = record;
-                entry.records_revision += 1;
-            },
-        )?;
+        content_transaction(entry, vec![record_update(&record, None)], |entry| {
+            entry.reads.errors_remove(&record.entry_id, record.complete);
+            entry.records[index] = record;
+            entry.records_revision += 1;
+        })?;
         Ok(true)
-    }
-    pub(crate) fn record_read_failed(&self, key: &str, token: &str, entry_id: &str, file: &str) {
-        let mut inner = self.0.lock().unwrap();
-        let root = inner.root.path.clone();
-        let Some(entry) = inner
-            .entries
-            .get_mut(key)
-            .filter(|entry| entry.snapshot.content_token == token)
-        else {
-            return;
-        };
-        if !entry
-            .records
-            .iter()
-            .any(|record| record.entry_id == entry_id && record.file == file)
-        {
-            return;
-        }
-        entry.reads.unavailable.insert(entry_id.into(), file.into());
-        entry.reads.file_error(entry_id);
-        entry.records_revision += 1;
-        let _ = publish(
-            entry,
-            entry.snapshot.clone(),
-            SessionUpdate::Content {
-                token: token.into(),
-                update: ContentUpdate::EntryState {
-                    entry_id: entry_id.into(),
-                    loading: false,
-                    error: Some(RECORD_READ_ERROR.into()),
-                },
-            },
-            &root,
-        );
     }
     pub(crate) fn body_status(
         &self,
@@ -987,7 +901,6 @@ impl SessionContent {
         error: Option<String>,
     ) -> Result<()> {
         let mut inner = self.0.lock().unwrap();
-        let root = inner.root.path.clone();
         let Some(entry) = inner
             .entries
             .get_mut(key)
@@ -1006,7 +919,6 @@ impl SessionContent {
                     error,
                 },
             },
-            &root,
         )
     }
     pub fn replace(
@@ -1047,14 +959,12 @@ impl SessionContent {
                 }
             }
         }
-        let root = inner.root.clone();
         inner.owner += 1;
         let owner = inner.owner;
         let entry = inner.entries.get_mut(key).unwrap();
         let mut next = entry.snapshot.clone();
         replace_snapshot(&mut next, target.clone());
-        // Publishing can fail without accepting the target or revoking its reader.
-        publish(entry, next, SessionUpdate::Replaced(target), &root.path)?;
+        publish(entry, next, SessionUpdate::Replaced(target))?;
         entry.owner = owner;
         Ok(true)
     }
@@ -1067,19 +977,13 @@ fn replace_snapshot(snapshot: &mut SessionSnapshot, target: InstanceSnapshot) {
     snapshot.cursor = Some(target.event_cursor.clone());
     snapshot.target = Some(target);
 }
-fn publish(
-    entry: &mut Entry,
-    next: SessionSnapshot,
-    update: SessionUpdate,
-    root: &std::path::Path,
-) -> Result<()> {
-    publish_with_checkpoint(entry, next, update, root, None, None)
+fn publish(entry: &mut Entry, next: SessionSnapshot, update: SessionUpdate) -> Result<()> {
+    publish_with_checkpoint(entry, next, update, None, None)
 }
 fn publish_with_checkpoint(
     entry: &mut Entry,
     mut next: SessionSnapshot,
     update: SessionUpdate,
-    root: &std::path::Path,
     replay: Option<(&Arc<Segment>, u64, &EventCursor, u64)>,
     records: Option<Vec<RecordVersion>>,
 ) -> Result<()> {
@@ -1098,41 +1002,11 @@ fn publish_with_checkpoint(
         update,
     };
     let segment = if rotate {
-        Segment::new(root)
+        Segment::new()
     } else {
         entry.segment.clone()
     };
-    let offset = match segment.append(&commit) {
-        Ok(offset) => offset,
-        Err(error) => {
-            if matches!(commit.update, SessionUpdate::Replaced(_)) {
-                let (memory, offset) = Segment::replacement_in_memory(root, &commit)?;
-                entry.segment.link(memory.clone());
-                entry.segment = memory;
-                install_records(entry, &next, records);
-                next.state = "storage_error".into();
-                next.message =
-                    Some("会话已切换，但本地内容无法保存，请检查可用空间后重试。".into());
-                entry.replacement_revision = commit.revision;
-                checkpoint_at(entry, &next, offset, replay);
-                next.revision += 1;
-                let fault = SessionCommit {
-                    revision: next.revision,
-                    update: SessionUpdate::Status {
-                        state: next.state.clone(),
-                        message: next.message.clone(),
-                    },
-                };
-                entry.snapshot = next;
-                entry
-                    .signal
-                    .send_replace(current_signal(entry, Some(fault)));
-                return Ok(());
-            }
-            storage_fault(entry, next.revision);
-            return Err(error);
-        }
-    };
+    let offset = segment.append(&commit)?;
     if replacement || records.is_some() {
         install_records(entry, &next, records);
     }
@@ -1147,7 +1021,7 @@ fn publish_with_checkpoint(
         checkpoint_at(entry, &next, offset, replay);
     }
     entry.snapshot = next;
-    entry.signal.send_replace(current_signal(entry, None));
+    entry.signal.send_replace(current_signal(entry));
     Ok(())
 }
 
@@ -1159,23 +1033,7 @@ fn install_records(entry: &mut Entry, next: &SessionSnapshot, records: Option<Ve
     }
     entry.records_revision += 1;
     let paused = entry.reads.paused;
-    let unavailable: HashMap<_, _> = entry
-        .reads
-        .unavailable
-        .iter()
-        .filter(|(id, file)| {
-            entry
-                .records
-                .iter()
-                .any(|record| &record.entry_id == *id && &record.file == *file)
-        })
-        .map(|(id, file)| (id.clone(), file.clone()))
-        .collect();
     entry.reads = Default::default();
-    for id in unavailable.keys() {
-        entry.reads.file_error(id);
-    }
-    entry.reads.unavailable = unavailable;
     entry.reads.paused = paused;
     entry.read_errors.clear();
     entry.pending_checkpoint = None;
@@ -1204,7 +1062,6 @@ fn finish_checkpoint_entry(
     entry: &mut Entry,
     mut records: Vec<RecordVersion>,
     has_earlier: bool,
-    root: &std::path::Path,
 ) -> Result<()> {
     let pending = entry
         .pending_checkpoint
@@ -1241,7 +1098,6 @@ fn finish_checkpoint_entry(
             entry,
             next,
             SessionUpdate::Replaced(read.instance.clone()),
-            root,
             Some((
                 &pending.segment,
                 pending.offset,
@@ -1252,11 +1108,7 @@ fn finish_checkpoint_entry(
         );
     }
     let mut updates = vec![ContentUpdate::CheckpointBegin { read: read.clone() }];
-    updates.extend(
-        records
-            .iter()
-            .map(|record| record_update(record, None, &entry.reads.unavailable)),
-    );
+    updates.extend(records.iter().map(|record| record_update(record, None)));
     updates.push(ContentUpdate::CheckpointEnd);
     let remaining_error = [ReadArea::Earlier, ReadArea::Descriptors]
         .into_iter()
@@ -1292,7 +1144,7 @@ fn read_error(entry: &Entry) -> Option<String> {
         .into_iter()
         .find_map(|area| entry.read_errors.get(&area).cloned())
 }
-fn publish_read_state(entry: &mut Entry, root: &std::path::Path) -> Result<()> {
+fn publish_read_state(entry: &mut Entry) -> Result<()> {
     publish(
         entry,
         entry.snapshot.clone(),
@@ -1304,7 +1156,6 @@ fn publish_read_state(entry: &mut Entry, root: &std::path::Path) -> Result<()> {
                 error: read_error(entry),
             },
         },
-        root,
     )
 }
 fn content_states(entry: &Entry) -> Vec<ContentUpdate> {
@@ -1322,24 +1173,10 @@ fn content_states(entry: &Entry) -> Vec<ContentUpdate> {
     states
 }
 
-fn record_update(
-    record: &RecordVersion,
-    before_entry_id: Option<String>,
-    unavailable: &HashMap<String, String>,
-) -> ContentUpdate {
-    if unavailable.get(&record.entry_id) == Some(&record.file) {
-        return ContentUpdate::RecordError {
-            entry_id: record.entry_id.clone(),
-            before_entry_id,
-            error: RECORD_READ_ERROR.into(),
-        };
-    }
-    ContentUpdate::StoredRecord {
-        lease: Some(record.lease.clone()),
+fn record_update(record: &RecordVersion, before_entry_id: Option<String>) -> ContentUpdate {
+    ContentUpdate::MemoryRecord {
+        body: record.body.clone(),
         entry_id: record.entry_id.clone(),
-        file: record.file.clone(),
-        size_bytes: record.size_bytes,
-        sha256: record.sha256.clone(),
         before_entry_id,
     }
 }
@@ -1360,33 +1197,12 @@ fn content_transaction(
             },
         })
         .collect();
-    if let Err(error) = entry.segment.append_many(&commits) {
-        storage_fault(entry, revision + 1);
-        return Err(error);
-    }
+    entry.segment.append_many(&commits)?;
     entry.snapshot.revision = commits.last().map_or(revision, |commit| commit.revision);
     apply(entry);
-    entry.signal.send_replace(current_signal(entry, None));
+    entry.signal.send_replace(current_signal(entry));
     Ok(())
 }
-fn storage_fault(entry: &mut Entry, revision: u64) {
-    // Storage failure remains visible even when its own journal cannot write.
-    // Neither a remote cursor nor an uncommitted record index advances here.
-    entry.snapshot.revision = revision;
-    entry.snapshot.state = "storage_error".into();
-    entry.snapshot.message = Some("本地对话内容无法保存，请检查可用空间后重试。".into());
-    let fault = SessionCommit {
-        revision,
-        update: SessionUpdate::Status {
-            state: entry.snapshot.state.clone(),
-            message: entry.snapshot.message.clone(),
-        },
-    };
-    entry
-        .signal
-        .send_replace(current_signal(entry, Some(fault)));
-}
-
 fn terminal_lifecycle(lifecycle: InstanceLifecycle) -> bool {
     matches!(
         lifecycle,
@@ -1394,11 +1210,10 @@ fn terminal_lifecycle(lifecycle: InstanceLifecycle) -> bool {
     )
 }
 
-fn current_signal(entry: &Entry, fault: Option<SessionCommit>) -> Signal {
+fn current_signal(entry: &Entry) -> Signal {
     Signal {
         replacement: replacement_cut(entry),
         revision: entry.snapshot.revision,
-        fault,
         status: (entry.snapshot.state.clone(), entry.snapshot.message.clone()),
     }
 }
@@ -1426,6 +1241,5 @@ fn replacement_cut(entry: &Entry) -> Option<Arc<ReplacementCut>> {
         records_revision: entry.records_revision,
         waterline: entry.snapshot.revision,
         journal_revision: entry.checkpoint_journal_revision,
-        unavailable: entry.reads.unavailable.clone(),
     }))
 }

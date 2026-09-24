@@ -24,7 +24,6 @@ const emit = defineEmits<{
   readInterest: [entryIds: string[]]
   loadEarlier: []
   retryHistory: []
-  retryEntry: [entryId: string]
   toolToggle: [id: string, event: Event]
   imageRequest: [part: ImagePart]
   imagePreview: [part: ImagePart]
@@ -82,7 +81,7 @@ const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
     </div>
     <template v-for="row in rows" :key="row.id">
       <ConversationRow v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
-        @retry-entry="emit('retryEntry', $event)" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
+        @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
         @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
     </template>
   </div>

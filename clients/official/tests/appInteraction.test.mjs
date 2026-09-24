@@ -389,13 +389,13 @@ try {
   assert.equal(calls.filter(call => call.command === 'acknowledge_conversation_follow' && call.args.deliveryId === 44).length, 1)
   assert.ok(all(container, item => item.type === 'textarea').includes(expanded))
   assert.ok(text(container).includes('OLD SESSION MESSAGE'), 'same-domain batched rebind never clears the current surface')
-  emit('aludock://observation', { ...binding, revision: 0, update: { kind: 'binding_error', state: 'storage_error', message: 'cannot read local tail' } }); await settle()
-  assert.ok(text(container).includes('本地内容无法保存'), 'replay errors are visible even below the accepted commit revision')
+  emit('aludock://observation', { ...binding, revision: 0, update: { kind: 'binding_error', state: 'content_error', message: 'cannot display content' } }); await settle()
+  assert.ok(text(container).includes('对话暂时无法显示'), 'replay errors are visible even below the accepted commit revision')
   const statusEntry = find(container, item => item.type === 'details' && item.props['aria-label'] === '连接状态')
-  assert.notEqual(statusEntry.open, true, 'network/storage changes do not auto-open details')
-  assert.ok(text(find(statusEntry, item => item.type === 'summary')).includes('存储'), 'intervention has a short visible label, not only a dot')
+  assert.notEqual(statusEntry.open, true, 'connection/content changes do not auto-open details')
+  assert.ok(text(find(statusEntry, item => item.type === 'summary')).includes('正文'), 'intervention has a short visible label, not only a dot')
   statusEntry.open = true // Native details disclosure is a deliberate user action.
-  assert.ok(text(statusEntry).includes('可用空间'))
+  assert.ok(text(statusEntry).includes('重新读取'))
   const readsBeforeAction = calls.filter(call => call.command === 'bootstrap').length
   await find(statusEntry, item => item.type === 'button' && text(item) === '重新读取').props.onClick(); await settle()
   assert.equal(calls.filter(call => call.command === 'bootstrap').length, readsBeforeAction + 1)
@@ -413,7 +413,7 @@ try {
   emit('aludock://operation', { ...base, operationId: 'cancelled', state: 'succeeded', result: { instance: work, cancelled: true } }); await settle()
   assert.ok(text(container).includes('OLD SESSION MESSAGE'))
   // Review regression: a newer header for the same native content must not
-  // discard complete rows while the bounded seed (or a bad middle file) waits.
+  // discard complete rows while the bounded seed waits.
   const oldRow = find(container, item => item.props['data-conversation-id'] === 'old-message')
   const retainedBody = text(oldRow)
   const refreshed = { ...work, name: 'Same Session refreshed' }
@@ -425,12 +425,13 @@ try {
   assert.equal(app.works.find(item => item.id === 'work').name, 'Same Session refreshed', 'newer header control facts still advance')
   assert.equal(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
   recordChunk({ ...bootstrap.records[0], recordId: 'earlier-record', entryId: 'earlier-record', content: [{ type: 'text', text: 'EARLIER NATIVE RECORD' }] })
-  contentChange({ kind: 'record_error', entryId: 'old-message', error: '这条对话暂时无法读取，请重试。' })
+  recordChunk({ ...bootstrap.records[0], content: [{ type: 'text', text: 'OLD SESSION MESSAGE — EXPANDED BODY' }] })
+  contentChange({ kind: 'entry_state', entryId: 'old-message', loading: false, error: '这部分内容暂时无法读取，请重试。' })
   recordChunk(bootstrap.records[1])
   recordChunk({ ...bootstrap.records[0], recordId: 'seed-good', entryId: 'seed-good', content: [{ type: 'text', text: 'NEW SEED RECORD' }] })
   contentChange({ kind: 'state', canLoadEarlier: false, loading: false })
   contentChange({ kind: 'checkpoint_end' }); await settle()
-  assert.ok(text(container).includes(retainedBody), 'RecordError after a retained header cannot erase its old complete row')
+  assert.ok(text(container).includes(retainedBody), 'a body-read failure after a retained header cannot erase its complete row')
   assert.ok(text(container).includes('NEW SEED RECORD'))
   assert.equal(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'read-to-start remains current after an older truncated checkpoint ends')
   assert.equal(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])

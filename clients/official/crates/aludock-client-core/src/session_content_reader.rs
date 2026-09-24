@@ -1,5 +1,5 @@
 //! Local content reads. No display state and no second record collection: only
-//! temporary request results and file versions awaiting SessionContent admission.
+//! temporary request results and shared versions awaiting SessionContent admission.
 use crate::{
     ClientError, DockClient, InstanceSnapshot, Result, SessionContent,
     session_records::RecordVersion,
@@ -21,7 +21,6 @@ struct Descriptor {
 pub(crate) struct BodyReads {
     running: bool,
     pub(crate) paused: bool,
-    pub(crate) unavailable: HashMap<String, String>,
     scanning: bool,
     cursor: Option<String>,
     scan_done: bool,
@@ -37,9 +36,8 @@ pub(crate) struct BodyReads {
 impl BodyReads {
     fn wants_body(&self, record: &RecordVersion) -> bool {
         (self.interest.contains(&record.entry_id) || self.full_requests.contains(&record.entry_id))
-            && (!record.complete || self.unavailable.contains_key(&record.entry_id))
+            && !record.complete
             && (self.full_requests.contains(&record.entry_id)
-                || self.unavailable.contains_key(&record.entry_id)
                 || self
                     .descriptors
                     .get(&record.entry_id)
@@ -51,10 +49,6 @@ impl BodyReads {
         if complete {
             self.full_requests.remove(id);
         }
-    }
-    pub(crate) fn file_error(&mut self, id: &str) {
-        self.errors.insert(id.into());
-        self.descriptors.remove(id);
     }
     pub(crate) fn locator_matches(&self, generation: u64) -> bool {
         self.locator_generation == generation
@@ -112,18 +106,17 @@ fn descriptor_needs_body(item: &crate::ConversationHistoryEntry) -> bool {
 }
 
 async fn cache_records(
-    root: std::path::PathBuf,
     records: Vec<crate::HistoryRecord>,
     complete: bool,
 ) -> Result<Vec<RecordVersion>> {
     tokio::task::spawn_blocking(move || {
         records
             .iter()
-            .map(|record| RecordVersion::write(&root, record, complete))
+            .map(|record| RecordVersion::new(record, complete))
             .collect()
     })
     .await
-    .map_err(|error| ClientError::Protocol(format!("local record writer interrupted: {error}")))?
+    .map_err(|error| ClientError::Protocol(format!("local record encoder interrupted: {error}")))?
 }
 fn same_target(actual: &InstanceSnapshot, expected: &InstanceSnapshot, epoch: &str) -> bool {
     actual.id == expected.id
@@ -262,7 +255,6 @@ impl SessionContent {
                 let Some(work) = work else { break };
                 let client = client.clone();
                 let target = target.clone();
-                let root = self.content_root();
                 match work {
                     BodyWork::Scan(cursor, generation) => {
                         jobs.spawn(async move {
@@ -286,7 +278,7 @@ impl SessionContent {
                             let id = version.entry_id.clone();
                             let result = async {
                                 let mut record =
-                                    tokio::task::spawn_blocking(move || version.read(&root))
+                                    tokio::task::spawn_blocking(move || version.read())
                                         .await
                                         .map_err(|error| {
                                             ClientError::Protocol(format!(
@@ -418,10 +410,7 @@ impl SessionContent {
                                         reads.locator_generation == generation
                                             && members.iter().any(|record| {
                                                 record.entry_id == item.entry.entry_id
-                                                    && (!record.complete
-                                                        || reads
-                                                            .unavailable
-                                                            .contains_key(&record.entry_id))
+                                                    && !record.complete
                                             })
                                     })
                                     .unwrap_or(false);
@@ -446,7 +435,7 @@ impl SessionContent {
                                     })
                                     .and_then(|result| result)
                                 } else {
-                                    cache_records(self.content_root(), vec![item.entry], false)
+                                    cache_records(vec![item.entry], false)
                                         .await
                                         .map(|mut records| records.remove(0))
                                 };
@@ -557,32 +546,6 @@ impl SessionContent {
                                     ReadFailure::Descriptors(generation),
                                     &error,
                                 );
-                                let failed = self
-                                    .body_access(&key, &token, |reads, _| {
-                                        if reads.locator_generation != generation {
-                                            return Vec::new();
-                                        }
-                                        let ids: Vec<_> = reads
-                                            .unavailable
-                                            .keys()
-                                            .filter(|id| !reads.active.contains(*id))
-                                            .cloned()
-                                            .collect();
-                                        for id in &ids {
-                                            reads.errors.insert(id.clone());
-                                        }
-                                        ids
-                                    })
-                                    .unwrap_or_default();
-                                for id in failed {
-                                    let _ = self.body_status(
-                                        &key,
-                                        &token,
-                                        &id,
-                                        false,
-                                        Some("这条对话暂时无法重新读取，请检查连接后重试。".into()),
-                                    );
-                                }
                             }
                         }
                     }
@@ -671,7 +634,7 @@ impl SessionContent {
             block.as_object_mut().unwrap().remove("data");
             block["nativeMedia"] = serde_json::to_value(image)?;
         }
-        RecordVersion::write_value(&self.content_root(), &record.entry_id, &value, true)
+        RecordVersion::from_value(&record.entry_id, &value, true)
     }
     pub async fn retry_content(
         &self,
@@ -746,8 +709,7 @@ impl SessionContent {
                     "history target changed during a local read".into(),
                 ));
             }
-            let root = self.content_root();
-            let records = cache_records(root, page.entries, false).await?;
+            let records = cache_records(page.entries, false).await?;
             self.finish_earlier(key, token, &anchor, records, page.has_earlier)?;
             self.wake_body_reader(key, token, client.clone());
             Ok(())
@@ -797,7 +759,6 @@ impl SessionContent {
         let result = async {
             let read = pending.read;
             let target = &read.instance;
-            let root = self.content_root();
             let mut records = pending.records;
             let mut has_earlier = read.history_truncated;
             // The oldest already seen member proves the whole retained range,
@@ -835,7 +796,7 @@ impl SessionContent {
                         "history did not advance its anchored interval".into(),
                     ));
                 }
-                let mut prefix = cache_records(root.clone(), page.entries, false).await?;
+                let mut prefix = cache_records(page.entries, false).await?;
                 prefix.extend(records);
                 records = prefix;
                 has_earlier = page.has_earlier;
@@ -1071,7 +1032,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
-    async fn a_proven_branch_replaces_a_broken_old_body_before_replay_and_keeps_its_new_tail() {
+    async fn a_proven_branch_replaces_old_content_before_replay_and_keeps_its_new_tail() {
         let root = std::env::temp_dir().join(format!("content-branch-{}", uuid::Uuid::new_v4()));
         let content = SessionContent::in_directory(root.clone()).unwrap();
         let owner = content.claim("work");
@@ -1079,21 +1040,8 @@ mod tests {
             .commit("work", owner, SessionUpdate::Read(read(10, 0, 1, false)))
             .unwrap();
         let old_token = content.content_token("work").unwrap();
-        let old = content
-            .body_access("work", &old_token, |_, members| members[1].clone())
-            .unwrap();
-        let late = RecordVersion::write(&content.content_root(), &record(1), true).unwrap();
+        let late = RecordVersion::new(&record(1), true).unwrap();
         let mut display = content.bind("work").unwrap();
-        // A damaged local body must be Storage, not a network failure or invalid
-        // JSON handed to Vue. A later authoritative branch bypasses this seed.
-        std::fs::write(
-            content.content_root().join(&old.file),
-            vec![b'x'; old.size_bytes as usize],
-        )
-        .unwrap();
-        let seed = display.next_batch().await.unwrap();
-        assert!(seed.iter().any(|commit| matches!(&commit.update, SessionUpdate::Content { update: ContentUpdate::RecordError { entry_id, .. }, .. } if entry_id == "h1")));
-        assert!(seed.iter().any(|commit| matches!(&commit.update, SessionUpdate::Content { update: ContentUpdate::RecordChunk { entry_id, complete: true, .. }, .. } if entry_id == "h0")), "one unreadable file does not stop a good record in the same seed");
         for sequence in 11..=400 {
             content.commit("work", owner, SessionUpdate::Event(serde_json::from_value(json!({"instanceId":"work","runtimeGeneration":1,"sequence":sequence,"scope":"instance","occurredAt":"now","type":"message.completed","data":{"messageId":format!("old-live-{sequence}"),"role":"assistant","content":[{"type":"text","text":"old branch"}]}})).unwrap())).unwrap();
         }
@@ -1201,13 +1149,13 @@ mod tests {
         let (_, anchor) = content.earlier_request("work", &token).unwrap().unwrap();
         assert_eq!(anchor, "h50");
         let earlier = (0..50)
-            .map(|n| RecordVersion::write(&content.content_root(), &record(n), false).unwrap())
+            .map(|n| RecordVersion::new(&record(n), false).unwrap())
             .collect();
         content
             .finish_earlier("work", &token, &anchor, earlier, false)
             .unwrap();
         let interval = (50..=400)
-            .map(|n| RecordVersion::write(&content.content_root(), &record(n), false).unwrap())
+            .map(|n| RecordVersion::new(&record(n), false).unwrap())
             .collect();
         assert!(
             content

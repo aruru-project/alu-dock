@@ -105,7 +105,7 @@ export function useWorkObservation(display: ConversationSink, options: {
     if (!matches(payload)) return
     const update = payload.update
     if (update.kind === 'binding_error') {
-      display.failed(); status.value = update.state ?? 'storage_error'; error.value = update.message ?? null
+      display.failed(); status.value = update.state ?? 'content_error'; error.value = update.message ?? null
       connected.value = false; loading.value = false
       return
     }
@@ -237,7 +237,7 @@ export function useWorkObservation(display: ConversationSink, options: {
   function reportRouteError(cause: unknown) { error.value = userErrorMessage(cause) }
   const connectionLabel = computed(() => {
     if (!isTauri) return '浏览器预览'
-    if (app.payload && app.selectedWork?.lifecycle === 'active') return ({ connected: '已连接', connecting: '正在连接', disconnected: '连接已中断', paused: '已暂停观察', identity_error: '身份验证失败', storage_error: '本地内容无法保存', content_error: '对话暂时无法显示', host_changed: 'Host 状态已变化', stopped: 'Work 已停止', unavailable: 'Work 当前不可用' } as Record<string, string>)[status.value] ?? '连接异常'
+    if (app.payload && app.selectedWork?.lifecycle === 'active') return ({ connected: '已连接', connecting: '正在连接', disconnected: '连接已中断', paused: '已暂停观察', identity_error: '身份验证失败', content_error: '对话暂时无法显示', host_changed: 'Host 状态已变化', stopped: 'Work 已停止', unavailable: 'Work 当前不可用' } as Record<string, string>)[status.value] ?? '连接异常'
     if (app.error) return '连接异常'
     if (app.loading) return '正在连接'
     return app.payload ? 'Dock 已连接' : '等待连接'

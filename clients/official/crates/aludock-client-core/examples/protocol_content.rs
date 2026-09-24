@@ -53,6 +53,18 @@ fn report_fast(record: &HistoryRecord) {
 fn complete_body(record: &HistoryRecord) -> bool {
     record.content.iter().any(|block| matches!(block, aludock_client_core::ContentBlock::Text { text } if text.starts_with("history-250 ") && text.len() == 150012))
 }
+fn cache_files(root: &std::path::Path) -> std::io::Result<std::collections::BTreeSet<PathBuf>> {
+    let mut files = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            files.extend(cache_files(&path)?);
+        } else {
+            files.insert(path);
+        }
+    }
+    Ok(files)
+}
 fn phase(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", serde_json::json!({"kind":name}));
     std::io::Write::flush(&mut std::io::stdout())?;
@@ -76,12 +88,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(read.recent_history.len(), 200);
     let anchor = read.recent_history.first().unwrap().entry_id.clone();
     let content = SessionContent::in_directory(PathBuf::from(&args[3]))?;
+    let initial_files = cache_files(&PathBuf::from(&args[3]))?;
     let owner = content.claim("work");
     content.commit("work", owner, SessionUpdate::Read(read))?;
     let token = content.content_token("work").unwrap();
     let mut binding = content.bind("work")?;
     let initial = records(&mut binding, 200).await?;
     assert_eq!(initial.len(), 200);
+    assert_eq!(
+        cache_files(&PathBuf::from(&args[3]))?,
+        initial_files,
+        "Host history is displayable without creating body or journal files"
+    );
     let known: HashSet<_> = initial
         .iter()
         .map(|record| record.entry_id.clone())
@@ -125,6 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     assert!(texts.contains(&"history-12"), "earlier texts: {texts:?}");
     assert!(texts.contains(&"history-61"));
+    // The real ConversationView supplies interest; a public-core gate must
+    // request these visible long records too, not rely on scanning all bodies.
+    let interest = expanded.iter().filter(|record| record.content.iter().any(|block|
+        matches!(block, aludock_client_core::ContentBlock::Text { text } if text.starts_with("history-250 ") || text.starts_with("fast-body "))
+    )).map(|record| record.entry_id.clone()).collect();
+    content.set_read_interest("work", &token, client.clone(), interest, false);
     let mut completed = expanded.iter().any(complete_body);
     let mut body = String::new();
     while !completed {
@@ -161,6 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let other_view = content.bind("other-work")?;
     assert_eq!(other_view.snapshot.target.as_ref().unwrap().id, args[4]);
     drop(other_view);
+    phase("cache-offline")?;
     content.claim("work");
     assert_eq!(
         content.content_token("work").as_deref(),
@@ -171,163 +196,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = records(&mut rebound, 250).await?;
     assert_eq!(restored.len(), 250);
     assert!(restored.iter().any(complete_body));
-    let bad_id = restored
-        .iter()
-        .find(|record| complete_body(record))
-        .unwrap()
-        .entry_id
-        .clone();
     drop(rebound);
-    // Corrupt this gate's record bytes, not a fixture-filled cache. All versions
-    // matching that one actual body are damaged so the test does not depend on
-    // the owner's private file naming or version-reclamation policy.
-    let mut damaged_files = 0;
-    for run in std::fs::read_dir(&args[3])? {
-        let run = run?.path();
-        if !run.is_dir() {
-            continue;
-        }
-        for file in std::fs::read_dir(run)? {
-            let path = file?.path();
-            if !path.is_file() {
-                continue;
-            }
-            let Ok(mut bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(record) = serde_json::from_slice::<HistoryRecord>(&bytes) else {
-                continue;
-            };
-            if record.entry_id == bad_id && complete_body(&record) {
-                bytes[0] = b'x';
-                std::fs::write(path, bytes)?;
-                damaged_files += 1;
-            }
-        }
-    }
-    assert!(damaged_files > 0);
-    let mut damaged = content.bind("work")?;
-    let mut good = HashSet::new();
-    let mut bad_seen = false;
-    let mut fault_recorded = false;
-    let mut encoded = String::new();
-    while good.len() < 249 || !bad_seen || !fault_recorded {
-        for commit in tokio::time::timeout(Duration::from_secs(15), damaged.next_batch()).await?? {
-            match commit.update {
-                SessionUpdate::Content {
-                    update: ContentUpdate::RecordError { entry_id, .. },
-                    ..
-                } => {
-                    assert_eq!(entry_id, bad_id);
-                    bad_seen = true;
-                    encoded.clear();
-                }
-                SessionUpdate::Content {
-                    update:
-                        ContentUpdate::EntryState {
-                            entry_id,
-                            error: Some(_),
-                            ..
-                        },
-                    ..
-                } if entry_id == bad_id => fault_recorded = true,
-                SessionUpdate::Content {
-                    update:
-                        ContentUpdate::RecordChunk {
-                            entry_id,
-                            text,
-                            first,
-                            complete,
-                            ..
-                        },
-                    ..
-                } => {
-                    if first {
-                        encoded.clear();
-                    }
-                    encoded.push_str(&text);
-                    if complete {
-                        assert_ne!(entry_id, bad_id);
-                        let _: HistoryRecord = serde_json::from_str(&encoded)?;
-                        good.insert(entry_id);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    phase("repair-offline")?;
-    content
-        .retry_content("work", &token, &client, vec![bad_id.clone()])
-        .await?;
-    let mut started = false;
-    'unavailable: loop {
-        for commit in tokio::time::timeout(Duration::from_secs(20), damaged.next_batch()).await?? {
-            if let SessionUpdate::Content {
-                update:
-                    ContentUpdate::EntryState {
-                        entry_id, error, ..
-                    },
-                ..
-            } = commit.update
-            {
-                if entry_id == bad_id {
-                    if error.is_none() {
-                        started = true;
-                    } else if started {
-                        break 'unavailable;
-                    }
-                }
-            }
-        }
-    }
     assert_eq!(
-        good.len(),
-        249,
-        "unavailable source does not clear other records"
+        cache_files(&PathBuf::from(&args[3]))?,
+        initial_files,
+        "cold read, body completion and Work rebinding add no body or journal files"
     );
-    phase("repair-online")?;
-    content
-        .retry_content("work", &token, &client, vec![bad_id.clone()])
-        .await?;
-    let mut repaired = false;
-    while !repaired {
-        for commit in tokio::time::timeout(Duration::from_secs(20), damaged.next_batch()).await?? {
-            if let SessionUpdate::Content {
-                update:
-                    ContentUpdate::RecordChunk {
-                        entry_id,
-                        text,
-                        first,
-                        complete,
-                        ..
-                    },
-                ..
-            } = commit.update
-            {
-                if first {
-                    encoded.clear();
-                }
-                encoded.push_str(&text);
-                if complete && entry_id == bad_id {
-                    let record: HistoryRecord = serde_json::from_str(&encoded)?;
-                    assert!(
-                        complete_body(&record),
-                        "repair never publishes a downgraded preview for an already complete record"
-                    );
-                    repaired = true;
-                }
-            }
-        }
-    }
-    drop(damaged);
-    let mut repaired_view = content.bind("work")?;
-    assert!(
-        records(&mut repaired_view, 250)
-            .await?
-            .iter()
-            .any(complete_body)
-    );
+    phase("cache-online")?;
     let mut cursor = None;
     let semantic_group_entries = loop {
         let (page, _) = client
@@ -352,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!(
         "{}",
-        serde_json::json!({"kind":"content.pass","initial":200,"firstEarlier":50,"rebound":250,"completeBodyBytes":150012,"semanticGroupEntries":semantic_group_entries,"workSwitchRetained":true,"badRecordIsolatedAndRepaired":true,"beforeEntryId":anchor})
+        serde_json::json!({"kind":"content.pass","initial":200,"firstEarlier":50,"rebound":250,"completeBodyBytes":150012,"semanticGroupEntries":semantic_group_entries,"workSwitchRetained":true,"offlineRebindComplete":true,"noBodyOrJournalFiles":true,"beforeEntryId":anchor})
     );
     Ok(())
 }
