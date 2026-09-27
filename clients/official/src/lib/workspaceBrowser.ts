@@ -1,13 +1,20 @@
-import type { WorkspaceFileCursor, WorkspaceFileEntry, WorkspacePage } from './types'
+import type { WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage } from './types'
+
+// UI input only. Each caller keeps its own request context and path rules.
+export type DirectoryPage = Pick<WorkspaceFilePage, 'path' | 'entries' | 'revision' | 'nextCursor'> & { parent?: string }
 
 export type WorkspacePreviewKind = 'text' | 'image' | 'unsupported'
 
 export interface WorkspaceDirectoryState {
+  path: string
+  parent?: string
   entries: WorkspaceFileEntry[]
   revision: string
   nextCursor?: WorkspaceFileCursor
   loading: boolean
   error: string
+  diagnostic?: string
+  diagnosticCopyState?: 'copied' | 'failed'
   loadToken: number
 }
 
@@ -17,7 +24,7 @@ export function workspaceDirectoryState(
 ): WorkspaceDirectoryState {
   if (!directories[path]) {
     directories[path] = {
-      entries: [], revision: '', nextCursor: undefined, loading: false, error: '', loadToken: 0,
+      path, entries: [], revision: '', nextCursor: undefined, loading: false, error: '', loadToken: 0,
     }
   }
   return directories[path]
@@ -34,6 +41,13 @@ const TEXT_EXTENSIONS = new Set([
 const TEXT_BASENAMES = new Set([
   'dockerfile', 'gemfile', 'license', 'makefile', 'readme', 'rakefile',
 ])
+
+export function formatWorkspaceBytes(value?: number): string {
+  if (value == null) return '—'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KiB`
+  return `${(value / 1024 / 1024).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MiB`
+}
 
 export function workspaceEntryIsDirectory(entry: WorkspaceFileEntry): boolean {
   return entry.kind === 'directory' || (entry.kind === 'symlink' && entry.targetKind === 'directory')
@@ -67,26 +81,6 @@ export function mergeWorkspaceDirectoryEntries(
     return pageEntries
   }
   return [...existingEntries, ...pageEntries]
-}
-
-export function workspaceDirectoryRefreshPaths(
-  mobile: boolean,
-  mobilePath: string,
-  expandedPaths: ReadonlySet<string>,
-  directories: Readonly<Record<string, WorkspaceDirectoryState>>,
-): string[] {
-  if (mobile) return [mobilePath]
-  return [...new Set(['.', ...expandedPaths])]
-    .filter((path) => path === '.' || directories[path] !== undefined)
-    .sort((left, right) => pathDepth(left) - pathDepth(right) || left.localeCompare(right))
-}
-
-export function appendWorkspacePage(current: WorkspacePage, next: WorkspacePage): WorkspacePage {
-  return { ...next, entries: [...current.entries, ...next.entries] }
-}
-
-function pathDepth(path: string): number {
-  return path === '.' ? 0 : path.split('/').length
 }
 
 function extensionOf(name: string): string {
