@@ -215,7 +215,8 @@ async function respond(cancelled = false) {
   const handle = extension.controller?.handle
   const response = responseForRequest()
   if (!current || !handle || !response || locked.value) return
-  const isCurrent = () => request.value === current && extension.controller?.handle === handle
+  // Reacquiring the same question changes its handle/object, not its interactionId.
+  const isCurrent = () => request.value?.interactionId === current.interactionId
   phase.value = 'submitting'
   responseError.value = ''
   try {
@@ -242,8 +243,7 @@ async function reconcile() {
   const handle = extension.controller?.handle
   const interactionId = unknownInteractionId
   if (!interactionId || phase.value !== 'unknown') return
-  const current = request.value
-  const isCurrent = () => request.value === current && unknownInteractionId === interactionId
+  const isCurrent = () => request.value?.interactionId === interactionId && unknownInteractionId === interactionId
   phase.value = 'reconciling'
   responseError.value = '正在确认这次回答的结果…'
   const refreshed = await props.reconcileInteraction()

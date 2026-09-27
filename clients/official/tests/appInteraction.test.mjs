@@ -50,7 +50,7 @@ const invoke = async (command, args = {}) => {
   calls.push({ command, args })
   if (command === 'acquire_extension_control') {
     if (!allowExtension) throw { code: 'controller_unavailable' }
-    extensionBinding = { ...context, handle: 'extension-focus', instanceId: args.instanceId, hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration }
+    extensionBinding = { ...context, handle: crypto.randomUUID(), instanceId: args.instanceId, hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration }
     return extensionBinding
   }
   if (command === 'set_extension_widget_viewport') return
@@ -68,6 +68,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'submit_message') return submitNative(args)
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
+  if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([work, otherWork]), total: 2 }
   if (command === 'get_host_catalog') return { revision: 1, hosts: [{ hostId: 'host', displayName: 'Host', profile: { revision: 1, hostId: 'host', displayName: 'Host', endpoints: [], policy: { mode: 'automatic' } } }], selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: 'host' } }
   if (command === 'bootstrap') {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
@@ -182,7 +183,7 @@ try {
     }, load(id) {
       if (id === '\0@tauri-apps/api/core') return 'export const invoke = (...args) => globalThis.__appBoundary.invoke(...args); export const convertFileSrc = (handle, scheme) => `http://${scheme}.localhost/${handle}`; export class Channel {}'
       if (id === '\0@tauri-apps/api/event') return 'export const listen = (...args) => globalThis.__appBoundary.listen(...args);'
-      if (id === '\0@tauri-apps/api/window') return 'export const getCurrentWindow = () => ({ isFocused: async () => true, onFocusChanged: async () => () => {}, onDragDropEvent: async () => () => {} });'
+      if (id === '\0@tauri-apps/api/window') return 'export const getCurrentWindow = () => ({ isFocused: async () => true, onFocusChanged: async handler => { globalThis.__appBoundary.focusChanged = handler; return () => { globalThis.__appBoundary.focusChanged = undefined } }, onDragDropEvent: async () => () => {} });'
       if (id === '\0markdown-leaf') return "import { h } from 'vue'; export default { props: ['source'], render() { return h('div', this.source) } };"
     } }, vue()],
   })
@@ -210,6 +211,21 @@ try {
   await settle()
   const initialSends = calls.filter(call => call.command === 'submit_message').length
   const initialAcknowledgements = calls.filter(call => call.command === 'consume_operation').length
+  // #306 pre-merge review: looking at Model must not cancel the editor's command lookup.
+  let completeEditorCatalog
+  catalogNative = () => new Promise(resolve => { completeEditorCatalog = resolve })
+  const initialEditor = find(container, item => item.type === 'textarea')
+  initialEditor.props['onUpdate:modelValue']('/side'); await settle()
+  find(container, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
+  find(container, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
+  completeEditorCatalog({ commands: [{ name: 'side-command', referenceId: 'side-command-ref', source: { kind: 'skill' }, contentAvailable: false }], total: 1, truncated: false })
+  await settle()
+  assert.equal(app.currentDraft, '/side')
+  const commandSuggestion = find(container, item => item.props.id === 'cmd-suggest-0')
+  assert.ok(commandSuggestion && text(commandSuggestion).includes('side-command'), 'command completion returns after viewing Model without editing the prefix again')
+  commandSuggestion.props.onClick(); await settle()
+  assert.equal(app.currentDraft, '/side-command ')
+  initialEditor.props['onUpdate:modelValue']('F5 draft preserved'); catalogNative = undefined
   contentSnapshot(); await settle()
   // User report: after a long absence, fresh idle facts must stop the cached
   // reply spinner without requiring a replayed run.settled or a content reload.
@@ -712,7 +728,8 @@ try {
   find(hostDialog, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
   assert.equal(toRaw(document.activeElement), answer)
   assert.equal(answer.value, 'unfinished extension answer')
-  // #306: static commands render before the catalog; resource/tool reads are independent.
+  // #306: static commands render before a refreshed catalog; resource/tool reads are independent.
+  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 202, occurredAt: 'now', eventType: 'resources.reloaded', data: {} } }); await settle()
   let resolveCatalog, rejectTools
   catalogNative = () => new Promise(resolve => { resolveCatalog = resolve })
   toolsNative = () => new Promise((_resolve, reject) => { rejectTools = reject })
@@ -749,9 +766,62 @@ try {
     assert.equal(nextAnswer.value, 'new answer')
     const nextSubmit = find(teleport, item => item.type === 'button' && text(item) === '提交')
     assert.equal(nextSubmit.props.disabled, false, `${outcome}: the next question remains usable`)
-    respondNative = async args => { assert.equal(args.interactionId, `new-${outcome}`); assert.equal(args.response.value, 'new answer'); return { interactionId: args.interactionId, state: 'resolved' } }
+    let submittedAnswer
+    respondNative = async args => { submittedAnswer = args; return { interactionId: args.interactionId, state: 'resolved' } }
     await nextSubmit.props.onClick(); await settle()
+    assert.equal(submittedAnswer?.interactionId, `new-${outcome}`)
+    assert.equal(submittedAnswer.value, 'new answer')
+    assert.equal(calls.filter(call => call.command === 'respond_extension_interaction' && call.args.interactionId === `new-${outcome}`).length, 1)
+    assert.equal(find(teleport, item => item.props.role === 'dialog'), undefined, 'successful answering closes the interaction, not just the submit promise')
   }
+  // #306 pre-merge review: background detach/reacquire keeps the same question, not the old connection object.
+  for (const outcome of ['success', 'failure', 'unknown']) {
+    const id = `resumed-${outcome}`
+    const question = { interactionId: id, method: 'input', issuedAt: 'now', title: id }
+    const ask = () => emit('aludock://extension-controller-event', { ...extensionBinding, event: { eventType: 'interaction.requested', data: question } })
+    ask(); await settle()
+    const replyInput = find(teleport, item => item.type === 'input')
+    replyInput.props['onUpdate:modelValue']('answer survives background'); await settle()
+    let resolveReply, rejectReply
+    respondNative = () => new Promise((resolve, reject) => { resolveReply = resolve; rejectReply = reject })
+    const replying = find(teleport, item => item.type === 'button' && text(item) === '提交').props.onClick(); await settle()
+    const oldHandle = extensionBinding.handle
+    globalThis.__appBoundary.focusChanged({ payload: false }); await settle()
+    assert.ok(calls.some(call => call.command === 'release_extension_control' && call.args.handle === oldHandle))
+    globalThis.__appBoundary.focusChanged({ payload: true }); await settle()
+    const resumedWork = { ...currentWork, activeInteraction: { id, method: 'input' } }
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: resumedWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: 220 }, records: [], activeEvents: [], queue: [], extensionUi: { status: {}, toolsExpanded: false, events: [], activeInteraction: resumedWork.activeInteraction } }, contentToken: 'resumed-interaction', state: 'connected' })
+    await settle(); ask(); await settle()
+    assert.notEqual(extensionBinding.handle, oldHandle)
+    assert.equal(replyInput.value, 'answer survives background')
+    assert.equal(replyInput.props.disabled, true, 'reacquiring alone does not permit resending a pending answer')
+    if (outcome === 'success') resolveReply({ interactionId: id, state: 'resolved' })
+    else rejectReply({ code: outcome === 'failure' ? 'interaction_wrong_lease' : 'connection_failed', outcomeUnknown: outcome === 'unknown' })
+    await replying; await settle()
+    assert.equal(calls.filter(call => call.command === 'respond_extension_interaction' && call.args.interactionId === id).length, 1, 'recovery does not replay the answer')
+    if (outcome === 'success') {
+      assert.equal(find(teleport, item => item.props.role === 'dialog'), undefined, 'the same question closes when its original answer succeeded')
+      continue
+    }
+    if (outcome === 'unknown') {
+      const refresh = find(teleport, item => item.type === 'button' && text(item) === '刷新确认')
+      assert.ok(refresh, 'an uncertain answer offers manual confirmation after reacquiring the same question')
+      assert.equal(replyInput.props.disabled, true)
+      await refresh.props.onClick(); await settle(); ask(); await settle()
+      assert.equal(calls.filter(call => call.command === 'respond_extension_interaction' && call.args.interactionId === id).length, 1)
+      replyInput.props['onUpdate:modelValue']('confirmed answer'); await settle()
+    }
+    const submitAgain = find(teleport, item => item.type === 'button' && text(item) === '提交')
+    assert.ok(submitAgain && !submitAgain.props.disabled, 'the same question can be answered after its old reply failed')
+    let submittedAnswer
+    respondNative = async args => { submittedAnswer = args; return { interactionId: args.interactionId, state: 'resolved' } }
+    await submitAgain.props.onClick(); await settle()
+    assert.equal(submittedAnswer?.interactionId, id)
+    assert.equal(submittedAnswer.value, outcome === 'unknown' ? 'confirmed answer' : 'answer survives background')
+    assert.equal(submittedAnswer.handle, extensionBinding.handle)
+    assert.equal(find(teleport, item => item.props.role === 'dialog'), undefined)
+  }
+  console.log('PASS: Model preserves command completion; same-question foreground recovery handles failure/unknown without replay; successful answers close their dialogs')
   console.log('PASS: ready command/resource sections and independent Extension answers; late success/failure/unknown stays with the original question')
   console.log('PASS: normal command modal / same Extension answer node and value / both Escape layers honor composition / Extension focus priority')
   console.log('PASS: real input Queue and send entrypoints / event-before-receipt and receipt-before-event / later Queue IDs / display events / double-claim / late edited send')

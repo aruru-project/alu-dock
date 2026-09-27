@@ -203,7 +203,6 @@ watch([
 ], () => {
   if (app.connectionContext) commandConsole.bindContext(app.connectionContext.connectionId, app.connectionContext.selectionGeneration, props.work)
   loadEpoch += 1
-  catalog.invalidate()
   models.value = null
   tools.value = null
   resources.value = null
