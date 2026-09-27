@@ -44,7 +44,9 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); await nextTick() }
 let copied = ''
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText: async value => { copied = value } } } })
-globalThis.window = { clearTimeout, setTimeout, __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
+globalThis.window = { clearTimeout, setTimeout,
+  matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
 const project = { id: 'project', name: '项目 SYSTEM', kind: 'project-system', path: '/project/SYSTEM.md', workerConfig: { systemPrompt: { kind: 'native', path: '/project/SYSTEM.md' } } }
 const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template', path: '/home/.aludock/systems/chosen.json', workerConfig: { systemPrompt: { kind: 'dock-template', path: '/home/.aludock/systems/chosen.json' }, opaque: { keep: [1, '原样'] } } }
 const original = '\uFEFF{"identity":"逐字复制中文"}\n'
@@ -277,7 +279,6 @@ try {
     build: { outDir: directory, emptyOutDir: false, minify: false,
       lib: { entry: join(root, 'src/components/WorkspaceBrowser.vue'), formats: ['es'], fileName: () => 'workspace.mjs' }, rolldownOptions: { external: ['vue'] } } })
   const { default: WorkspaceBrowser } = await import(join(directory, 'workspace.mjs'))
-  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
   window.__TAURI_INTERNALS__.transformCallback = () => 1
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
   const cleanup = []

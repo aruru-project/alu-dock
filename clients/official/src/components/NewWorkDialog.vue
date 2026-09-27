@@ -23,11 +23,12 @@ import {
   workspaceChildPath,
 } from '../lib/machines'
 import { treeNodeTime } from '../lib/sessionTree'
-import { appendWorkspacePage } from '../lib/workspaceBrowser'
-import type { MachineDto, SystemCandidate, SystemCatalogCursor, SessionInventoryInfo, SessionInventoryResult, Work, WorkspacePage } from '../lib/types'
+import type { DirectoryPage } from '../lib/workspaceBrowser'
+import type { MachineDto, SystemCandidate, SystemCatalogCursor, SessionInventoryInfo, SessionInventoryResult, Work, WorkspaceCursor } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import AluSelect from './AluSelect.vue'
+import DirectoryBrowser from './DirectoryBrowser.vue'
 import ResourceDocument from './ResourceDocument.vue'
 
 type View = 'launcher' | 'browse' | 'sessions' | 'systems' | 'system-content'
@@ -60,11 +61,9 @@ const app = useAppStore()
 
 const view = ref<View>('launcher')
 const machineHostId = ref('')
-const workspace = ref<WorkspacePage | null>(null)
+const browseStartPath = ref('')
+const browseVersion = ref(0)
 const workspacePath = ref('')
-const workspaceSearch = ref('')
-const workspaceLoading = ref(false)
-const workspaceLoadingMore = ref(false)
 const inventory = ref<SessionInventoryResult | null>(null)
 const sessionSearch = ref('')
 const inventoryLoading = ref(false)
@@ -82,7 +81,6 @@ const saveDefault = ref(false)
 const savedDefaultId = ref('')
 const saveFailed = ref(false)
 let systemEpoch = 0
-let workspaceEpoch = 0
 let inventoryEpoch = 0
 
 const machine = computed(() => props.machines.find((candidate) => candidate.hostId === machineHostId.value))
@@ -105,10 +103,6 @@ const workspaceRootOptions = computed(() => {
   ]
 })
 const recentWorkspaces = computed(() => machineHostId.value ? app.recentWorkspaces(machineHostId.value) : [])
-const filteredWorkspaceEntries = computed(() => {
-  const query = workspaceSearch.value.trim().toLocaleLowerCase()
-  return workspace.value?.entries.filter((entry) => !query || entry.name.toLocaleLowerCase().includes(query)) ?? []
-})
 const filteredSessions = computed(() => {
   const query = sessionSearch.value.trim().toLocaleLowerCase()
   return inventory.value?.sessions.filter((session) => !query || sessionSearchText(session).includes(query)) ?? []
@@ -116,10 +110,7 @@ const filteredSessions = computed(() => {
 const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
   if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
-  if (view.value === 'browse') {
-    if (!workspace.value) return workspacePath.value
-    return `${workspace.value.path}\n${workspace.value.truncated ? `显示前 ${workspace.value.entries.length} / ${workspace.value.total} 个目录` : `${workspace.value.total} 个子目录`}`
-  }
+  if (view.value === 'browse') return workspacePath.value
   if (view.value === 'sessions' && inventory.value) {
     return inventory.value.truncated
       ? `当前显示 ${inventory.value.sessions.length} / ${inventory.value.total} 个 Session`
@@ -144,16 +135,14 @@ watch([
   () => machineHostId.value,
 ], () => {
   resetSystems()
-  ++workspaceEpoch
   ++inventoryEpoch
-  workspace.value = null
   inventory.value = null
   trust.value = null
   view.value = 'launcher'
   clearError()
 }, { flush: 'sync' })
 
-onUnmounted(() => { ++workspaceEpoch; ++inventoryEpoch; ++systemEpoch })
+onUnmounted(() => { ++inventoryEpoch; ++systemEpoch })
 
 function resetSystems() {
   ++systemEpoch
@@ -306,78 +295,52 @@ async function selectMachine(value: string) {
   const previousView = view.value
   machineHostId.value = value
   clearError()
-  workspace.value = null
   inventory.value = null
-  if (previousView === 'browse') await startBrowsing()
+  if (previousView === 'browse') startBrowsing()
   else if (previousView === 'sessions') await loadInventory()
 }
 
 function requestClose() {
-  if (!pending.value) { ++systemEpoch; ++workspaceEpoch; ++inventoryEpoch; emit('close') }
+  if (!pending.value) { ++systemEpoch; ++inventoryEpoch; emit('close') }
 }
 
 function backToLauncher() {
   if (actionBusy.value) return
   resetSystems()
-  ++workspaceEpoch
   ++inventoryEpoch
   view.value = 'launcher'
-  workspace.value = null
   inventory.value = null
-  workspaceSearch.value = ''
   sessionSearch.value = ''
   clearError()
 }
 
-async function startBrowsing(path = machineWorkspaceStart(machine.value)) {
+function startBrowsing(path = machineWorkspaceStart(machine.value)) {
   if (!machine.value?.available || actionBusy.value) return
-  view.value = 'browse'
-  workspace.value = null
+  clearError()
+  browseStartPath.value = path
+  ++browseVersion.value
   workspacePath.value = path
-  await browse(path)
+  view.value = 'browse'
 }
 
-async function browse(path: string) {
-  const selectedMachine = machine.value
-  if (!selectedMachine?.available) return
-  const epoch = ++workspaceEpoch
-  workspaceLoading.value = true
-  workspaceLoadingMore.value = false
-  workspaceSearch.value = ''
-  clearError()
-  try {
-    const page = await currentConnectionCall(app, (context) => listWorkspace(path, context, selectedMachine.hostId))
-    if (epoch !== workspaceEpoch || selectedMachine.hostId !== machineHostId.value) return
-    workspace.value = page
-    workspacePath.value = page.path
-  } catch (cause) {
-    if (epoch === workspaceEpoch) setError(cause, '读取这台机器的目录', 'list_workspace')
-  } finally {
-    if (epoch === workspaceEpoch) workspaceLoading.value = false
-  }
+function describeDirectoryError(cause: unknown, path: string): UserErrorPresentation {
+  return userErrorPresentation(cause, undefined, {
+    action: `读取这台机器的目录 ${path}`,
+    request: 'list_workspace',
+  })
 }
 
-async function loadMoreWorkspace() {
+async function readDirectoryPage(path: string, cursor?: WorkspaceCursor): Promise<DirectoryPage> {
   const selectedMachine = machine.value
-  const current = workspace.value
-  const cursor = current?.nextCursor
-  if (!selectedMachine?.available || !current || !cursor || workspaceLoadingMore.value) return
-  const epoch = ++workspaceEpoch
-  workspaceLoadingMore.value = true
-  clearError()
-  try {
-    const page = await currentConnectionCall(app, (context) => listWorkspace(
-      current.path,
-      context,
-      selectedMachine.hostId,
-      cursor,
-    ))
-    if (epoch !== workspaceEpoch || selectedMachine.hostId !== machineHostId.value) return
-    workspace.value = appendWorkspacePage(current, page)
-  } catch (cause) {
-    if (epoch === workspaceEpoch) setError(cause, '读取更多目录', 'list_workspace')
-  } finally {
-    if (epoch === workspaceEpoch) workspaceLoadingMore.value = false
+  if (!selectedMachine?.available) throw new Error('这台机器暂不可用。请选择其他机器或稍后重试。')
+  const page = await currentConnectionCall(app, context => listWorkspace(path, context, selectedMachine.hostId, cursor))
+  return {
+    ...page,
+    entries: page.entries.map(entry => ({
+      ...entry,
+      path: workspaceChildPath(path, entry.name, selectedMachine.platform),
+      ...(entry.kind === 'symlink' ? { targetKind: 'directory' as const } : {}),
+    })),
   }
 }
 
@@ -541,17 +504,21 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
       <template v-else-if="view === 'browse'">
         <label v-if="showWorkspaceRoots" class="alu-directory-machine">
           <span>快速前往</span>
-          <AluSelect value="" :options="workspaceRootOptions" label="快速前往" placeholder="选择位置" :disabled="workspaceLoading || actionBusy || !machine.available" @select="startBrowsing" />
+          <AluSelect value="" :options="workspaceRootOptions" label="快速前往" placeholder="选择位置" :disabled="actionBusy || !machine.available" @select="startBrowsing" />
         </label>
-        <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索目录名称…" /></div>
-        <div v-if="workspaceLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取目录…</div>
-        <div v-else-if="workspace" class="ui-dialog-options" role="listbox">
-          <button class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="chooseDirectory(workspace.path)"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
-          <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
-          <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(workspaceChildPath(workspace.path, entry.name, machine.platform))"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
-          <button v-if="workspace.nextCursor" type="button" class="ui-dialog-option" :disabled="workspaceLoadingMore" @click="loadMoreWorkspace"><span class="ui-dialog-option-marker">…</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ workspaceLoadingMore ? '正在读取更多目录…' : '加载更多目录' }}</span></span></button>
-          <div v-if="!filteredWorkspaceEntries.length && !workspace.nextCursor" class="ui-dialog-empty">没有匹配项</div>
-        </div>
+        <DirectoryBrowser
+          :key="browseVersion"
+          :start-path="browseStartPath"
+          :load-page="readDirectoryPage"
+          :describe-error="describeDirectoryError"
+          :disabled="actionBusy || !machine.available"
+          picker
+          @directory="workspacePath = $event"
+        />
+        <footer class="directory-confirm">
+          <span :title="workspacePath">{{ workspacePath }}</span>
+          <button type="button" class="ui-dialog-btn session-primary" :disabled="preview || actionBusy || !machine.available" @click="chooseDirectory(workspacePath)">使用这个目录</button>
+        </footer>
       </template>
 
       <template v-else-if="view === 'systems'">
@@ -615,6 +582,9 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 }
 .new-work-back:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
 .new-work-dialog { position: relative; }
+.directory-confirm { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
+.directory-confirm > span { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.directory-confirm > button { flex-shrink: 0; min-height: 40px; }
 .system-option { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid var(--alu-border); }
 .system-option .ui-dialog-option { flex: 1; min-width: 0; border-bottom: 0; }
 .system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-active); }

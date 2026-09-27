@@ -1,18 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   ArrowLeft,
-  ChevronDown,
-  ChevronRight,
   Download,
   Eye,
   EyeOff,
   File,
-  FileImage,
-  Folder,
-  FolderOpen,
-  RefreshCw,
   X,
 } from '@lucide/vue'
 import {
@@ -29,23 +23,22 @@ import {
 } from '../lib/bridge'
 import { rasterImageMimeType } from '../lib/rasterImage'
 import { userErrorMessage } from '../lib/userError'
+import DirectoryBrowser from './DirectoryBrowser.vue'
 import ImageZoomSurface from './ImageZoomSurface.vue'
 import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 import {
   classifyWorkspacePreview as classifyPreview,
-  mergeWorkspaceDirectoryEntries,
-  workspaceDirectoryRefreshPaths,
-  workspaceDirectoryState,
-  workspaceEntryIsDirectory as entryIsDirectory,
+  formatWorkspaceBytes as formatBytes,
   workspaceEntryIsFile as entryIsFile,
   workspaceEntryIsMarkdown as entryIsMarkdown,
-  type WorkspaceDirectoryState,
+  type DirectoryPage,
   type WorkspacePreviewKind,
 } from '../lib/workspaceBrowser'
 import type {
   ConnectionContext,
   Work,
   WorkspaceFileCacheResult,
+  WorkspaceFileCursor,
   WorkspaceFileEntry,
   WorkspaceFileReadProgress,
 } from '../lib/types'
@@ -58,18 +51,16 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ close: [] }>()
 
-type TreeRow =
-  | { kind: 'entry'; entry: WorkspaceFileEntry; depth: number }
-  | { kind: 'more'; path: string; depth: number }
-  | { kind: 'status'; path: string; depth: number; text: string; retryable: boolean }
 type PreviewKind = WorkspacePreviewKind
 type PreviewPhase = 'empty' | 'metadata' | 'confirm' | 'reading' | 'ready' | 'unsupported' | 'error'
 type PendingIntent = 'preview' | 'save'
 
-const directories = reactive<Record<string, WorkspaceDirectoryState>>({})
-const expandedPaths = ref(new Set<string>(['.']))
+const directoryBrowser = ref<InstanceType<typeof DirectoryBrowser> | null>(null)
+const directoryKey = computed(() => JSON.stringify([
+  props.context?.connectionId, props.context?.selectionGeneration,
+  props.work?.id, props.work?.runtimeGeneration, props.hostEpoch,
+]))
 const showHidden = ref(false)
-const mobilePath = ref('.')
 const mobilePreview = ref(false)
 const selectedEntry = ref<WorkspaceFileEntry | null>(null)
 const previewKind = ref<PreviewKind>('unsupported')
@@ -83,13 +74,11 @@ const pendingIntent = ref<PendingIntent>('preview')
 const progressBytes = ref(0)
 const progressTotal = ref(0)
 const activeReadId = ref('')
-const refreshingDirectories = ref(false)
 const saving = ref(false)
 const saveStatus = ref('')
 const isMobile = ref(false)
 let operationEpoch = 0
 let unlistenProgress: UnlistenFn | null = null
-let mediaQuery: MediaQueryList | null = null
 let componentMounted = false
 let fileCleanup = Promise.resolve()
 
@@ -101,15 +90,6 @@ const progressPercent = computed(() => {
   if (!progressTotal.value) return 0
   return Math.max(0, Math.min(100, Math.round(progressBytes.value / progressTotal.value * 100)))
 })
-const currentMobileState = computed(() => directories[mobilePath.value])
-const mobileBreadcrumbs = computed(() => {
-  const parts = mobilePath.value === '.' ? [] : mobilePath.value.split('/')
-  return [
-    { name: '.', path: '.' },
-    ...parts.map((name, index) => ({ name, path: parts.slice(0, index + 1).join('/') })),
-  ]
-})
-
 function currentContext(): WorkspaceFileContext | null {
   if (!props.context || !props.work || props.work.lifecycle !== 'active' || !props.hostEpoch) return null
   return {
@@ -130,27 +110,6 @@ function contextMatches(context: WorkspaceFileContext): boolean {
     && current.expectedRuntimeGeneration === context.expectedRuntimeGeneration
 }
 
-function visibleEntries(path: string): WorkspaceFileEntry[] {
-  return (directories[path]?.entries ?? []).filter((entry) => showHidden.value || !entry.hidden)
-}
-
-const treeRows = computed<TreeRow[]>(() => {
-  const rows: TreeRow[] = []
-  const visit = (path: string, depth: number) => {
-    const state = directories[path]
-    if (!state) return
-    for (const entry of visibleEntries(path)) {
-      rows.push({ kind: 'entry', entry, depth })
-      if (entryIsDirectory(entry) && expandedPaths.value.has(entry.path)) visit(entry.path, depth + 1)
-    }
-    if (state.loading) rows.push({ kind: 'status', path, depth, text: '正在读取…', retryable: false })
-    else if (state.error) rows.push({ kind: 'status', path, depth, text: state.error, retryable: true })
-    else if (state.nextCursor) rows.push({ kind: 'more', path, depth })
-  }
-  if (expandedPaths.value.has('.')) visit('.', 0)
-  return rows
-})
-
 function displayPath(path: string): string {
   return path === '.' ? '.' : `./${path}`
 }
@@ -160,13 +119,6 @@ function parentPath(path: string): string {
   const parts = path.split('/')
   parts.pop()
   return parts.length ? parts.join('/') : '.'
-}
-
-function formatBytes(value?: number): string {
-  if (value == null) return '—'
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KiB`
-  return `${(value / 1024 / 1024).toFixed(value < 10 * 1024 * 1024 ? 1 : 0)} MiB`
 }
 
 function errorCode(cause: unknown): string {
@@ -220,98 +172,12 @@ async function invalidateFile(clearSelection: boolean): Promise<number> {
   return epoch
 }
 
-function resetDirectories() {
-  for (const key of Object.keys(directories)) delete directories[key]
-  expandedPaths.value = new Set(['.'])
-  mobilePath.value = '.'
-}
-
-async function resetBrowser() {
+async function readDirectoryPage(path: string, cursor?: WorkspaceFileCursor): Promise<DirectoryPage> {
   const context = currentContext()
-  if (!context) return
-  const epoch = await invalidateFile(true)
-  if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
-  resetDirectories()
-  await loadDirectory('.', true)
+  if (!context) throw new Error('当前工作暂时无法读取目录。请重新打开工作区后重试。')
+  const page = await listWorkspaceEntries(path, cursor, context)
+  return { ...page, parent: page.path === '.' ? undefined : parentPath(page.path) }
 }
-
-async function refreshDirectories() {
-  const context = currentContext()
-  if (!context || refreshingDirectories.value) return
-  const currentMobilePath = mobilePath.value
-  const expandedSnapshot = new Set(expandedPaths.value)
-  const paths = workspaceDirectoryRefreshPaths(
-    isMobile.value,
-    currentMobilePath,
-    expandedSnapshot,
-    directories,
-  )
-  refreshingDirectories.value = true
-  try {
-    const epoch = await invalidateFile(true)
-    if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
-    resetDirectories()
-    if (isMobile.value) mobilePath.value = currentMobilePath
-    else expandedPaths.value = expandedSnapshot
-    for (const path of paths) {
-      if (epoch !== operationEpoch || !contextMatches(context) || !props.open) return
-      await loadDirectory(path, true)
-    }
-  } finally {
-    refreshingDirectories.value = false
-  }
-}
-
-async function loadDirectory(path: string, reset = false) {
-  const context = currentContext()
-  if (!context) return
-  const state = workspaceDirectoryState(directories, path)
-  if (state.loading) return
-  const cursor = reset ? undefined : state.nextCursor
-  const token = state.loadToken + 1
-  state.loadToken = token
-  state.loading = true
-  state.error = ''
-  try {
-    const page = await listWorkspaceEntries(path, cursor, context)
-    if (!contextMatches(context) || state.loadToken !== token || !props.open) return
-    state.entries = mergeWorkspaceDirectoryEntries(
-      state.entries,
-      state.revision,
-      page.entries,
-      page.revision,
-      cursor,
-    )
-    state.revision = page.revision
-    state.nextCursor = page.nextCursor
-  } catch (cause) {
-    if (!contextMatches(context) || state.loadToken !== token || !props.open) return
-    state.error = userErrorMessage(cause, '无法读取这个目录。请检查连接后重试。')
-  } finally {
-    if (state.loadToken === token) state.loading = false
-  }
-}
-
-async function toggleDesktopDirectory(entry: WorkspaceFileEntry) {
-  if (!entryIsDirectory(entry)) return
-  const expanded = new Set(expandedPaths.value)
-  if (expanded.has(entry.path)) expanded.delete(entry.path)
-  else expanded.add(entry.path)
-  expandedPaths.value = expanded
-  if (expanded.has(entry.path) && !directories[entry.path]) await loadDirectory(entry.path, true)
-}
-
-async function openMobileDirectory(entry: WorkspaceFileEntry) {
-  if (!entryIsDirectory(entry)) return
-  mobilePath.value = entry.path
-  if (!directories[entry.path]) await loadDirectory(entry.path, true)
-}
-
-async function goToMobilePath(path: string) {
-  mobilePath.value = path
-  if (!directories[path]) await loadDirectory(path, true)
-}
-
 async function openFile(entry: WorkspaceFileEntry, saveAfterRead = false) {
   if (!entryIsFile(entry)) return
   const cleanup = invalidateFile(true)
@@ -470,12 +336,7 @@ async function handleMobileBack() {
     await invalidateFile(true)
     return
   }
-  if (mobilePath.value !== '.') await goToMobilePath(parentPath(mobilePath.value))
-  else emit('close')
-}
-
-function updateMobileMode() {
-  isMobile.value = mediaQuery?.matches ?? false
+  if (!directoryBrowser.value?.goBack()) emit('close')
 }
 
 watch(
@@ -493,24 +354,19 @@ watch(
     if (!props.open) {
       if (!changed && !previous?.[0]) return
       void invalidateFile(true)
-      resetDirectories()
       return
     }
     if (props.work?.lifecycle !== 'active' || !currentContext()) {
       emit('close')
       return
     }
-    if (changed || !directories['.']) void resetBrowser()
+    if (changed || !previous?.[0]) void invalidateFile(true)
   },
   { immediate: true },
 )
 
 onMounted(() => {
   componentMounted = true
-  mediaQuery = window.matchMedia('(max-width: 720px)')
-  updateMobileMode()
-  if (typeof mediaQuery.addEventListener === 'function') mediaQuery.addEventListener('change', updateMobileMode)
-  else mediaQuery.addListener(updateMobileMode)
   if (!isTauri) return
   void listen<WorkspaceFileReadProgress>('aludock://workspace-read-progress', ({ payload }) => {
     const context = currentContext()
@@ -531,10 +387,6 @@ onBeforeUnmount(() => {
   componentMounted = false
   operationEpoch += 1
   unlistenProgress?.()
-  if (mediaQuery) {
-    if (typeof mediaQuery.removeEventListener === 'function') mediaQuery.removeEventListener('change', updateMobileMode)
-    else mediaQuery.removeListener(updateMobileMode)
-  }
   revokePreviewImage()
   void clearWorkspaceFileState().catch(() => undefined)
 })
@@ -561,72 +413,18 @@ onBeforeUnmount(() => {
         </header>
 
         <div class="workspace-body" :class="{ 'mobile-preview-open': mobilePreview }">
-          <aside class="workspace-tree" aria-label="工作区目录">
-            <div class="workspace-tree-toolbar">
-              <div v-if="isMobile" class="workspace-breadcrumbs" aria-label="当前目录">
-                <template v-for="(crumb, index) in mobileBreadcrumbs" :key="crumb.path">
-                  <span v-if="index" aria-hidden="true">/</span>
-                  <button type="button" @click="goToMobilePath(crumb.path)">{{ crumb.name }}</button>
-                </template>
-              </div>
-              <span v-else>目录</span>
-              <button type="button" class="workspace-icon-button" :disabled="refreshingDirectories || directories[isMobile ? mobilePath : '.']?.loading" :aria-label="isMobile ? `刷新 ${displayPath(mobilePath)}` : '刷新工作区'" @click="refreshDirectories"><RefreshCw :size="15" :class="{ spinning: refreshingDirectories || directories[isMobile ? mobilePath : '.']?.loading }" /></button>
-            </div>
-
-            <div v-if="isMobile" class="workspace-mobile-list" role="list">
-              <button
-                v-for="entry in visibleEntries(mobilePath)"
-                :key="entry.path"
-                type="button"
-                class="workspace-mobile-row"
-                :class="{ selected: selectedEntry?.path === entry.path, unavailable: !entryIsDirectory(entry) && !entryIsFile(entry) }"
-                :disabled="!entryIsDirectory(entry) && !entryIsFile(entry)"
-                @click="entryIsDirectory(entry) ? openMobileDirectory(entry) : openFile(entry)"
-              >
-                <Folder v-if="entryIsDirectory(entry)" :size="19" />
-                <FileImage v-else-if="classifyPreview(entry) === 'image'" :size="19" />
-                <File v-else :size="19" />
-                <span><strong>{{ entry.name }}</strong><small>{{ entryIsDirectory(entry) ? '文件夹' : formatBytes(entry.sizeBytes) }}</small></span>
-                <ChevronRight v-if="entryIsDirectory(entry) || entryIsFile(entry)" :size="17" />
-              </button>
-              <div v-if="currentMobileState?.loading" class="workspace-directory-status"><span class="workspace-spinner" />正在读取目录…</div>
-              <button v-else-if="currentMobileState?.error" type="button" class="workspace-directory-status error" @click="loadDirectory(mobilePath, true)">{{ currentMobileState.error }}<span>重试</span></button>
-              <button v-else-if="currentMobileState?.nextCursor" type="button" class="workspace-load-more" @click="loadDirectory(mobilePath)">加载更多</button>
-              <div v-else-if="currentMobileState && !visibleEntries(mobilePath).length" class="workspace-directory-status">这个目录没有{{ showHidden ? '' : '可见'}}项目</div>
-            </div>
-
-            <div v-else class="workspace-tree-scroll" role="tree" aria-label="工作区文件树">
-              <button type="button" class="workspace-tree-root" :aria-expanded="expandedPaths.has('.')" @click="expandedPaths.has('.') ? expandedPaths = new Set() : expandedPaths = new Set(['.'])">
-                <FolderOpen :size="17" /><span>.</span>
-              </button>
-              <template v-for="(row, index) in treeRows" :key="row.kind === 'entry' ? row.entry.path : `${row.kind}:${row.path}:${index}`">
-                <button
-                  v-if="row.kind === 'entry'"
-                  type="button"
-                  class="workspace-tree-row"
-                  :class="{ selected: selectedEntry?.path === row.entry.path, unavailable: !entryIsDirectory(row.entry) && !entryIsFile(row.entry) }"
-                  :style="{ paddingLeft: `${18 + row.depth * 18}px` }"
-                  :disabled="!entryIsDirectory(row.entry) && !entryIsFile(row.entry)"
-                  role="treeitem"
-                  :aria-expanded="entryIsDirectory(row.entry) ? expandedPaths.has(row.entry.path) : undefined"
-                  @click="entryIsDirectory(row.entry) ? toggleDesktopDirectory(row.entry) : openFile(row.entry)"
-                >
-                  <ChevronDown v-if="entryIsDirectory(row.entry) && expandedPaths.has(row.entry.path)" :size="14" class="workspace-chevron" />
-                  <ChevronRight v-else-if="entryIsDirectory(row.entry)" :size="14" class="workspace-chevron" />
-                  <span v-else class="workspace-chevron" />
-                  <FolderOpen v-if="entryIsDirectory(row.entry) && expandedPaths.has(row.entry.path)" :size="16" />
-                  <Folder v-else-if="entryIsDirectory(row.entry)" :size="16" />
-                  <FileImage v-else-if="classifyPreview(row.entry) === 'image'" :size="16" />
-                  <File v-else :size="16" />
-                  <span class="workspace-tree-name">{{ row.entry.name }}</span>
-                  <span v-if="entryIsFile(row.entry)" class="workspace-tree-size">{{ formatBytes(row.entry.sizeBytes) }}</span>
-                </button>
-                <button v-else-if="row.kind === 'more'" type="button" class="workspace-tree-more" :style="{ paddingLeft: `${48 + row.depth * 18}px` }" @click="loadDirectory(row.path)">加载更多</button>
-                <button v-else-if="row.retryable" type="button" class="workspace-tree-message error" :style="{ paddingLeft: `${30 + row.depth * 18}px` }" @click="loadDirectory(row.path, true)">{{ row.text }} · 重试</button>
-                <div v-else class="workspace-tree-message" :style="{ paddingLeft: `${30 + row.depth * 18}px` }"><span class="workspace-spinner" />{{ row.text }}</div>
-              </template>
-            </div>
-          </aside>
+          <DirectoryBrowser
+            :key="directoryKey"
+            ref="directoryBrowser"
+            v-model:show-hidden="showHidden"
+            class="workspace-tree"
+            start-path="."
+            :load-page="readDirectoryPage"
+            :selected-path="selectedEntry?.path"
+            @file="openFile"
+            @mobile="isMobile = $event"
+            @refresh="invalidateFile(true)"
+          />
 
           <main class="workspace-preview" aria-label="文件预览">
             <div class="workspace-preview-toolbar">
@@ -742,8 +540,6 @@ onBeforeUnmount(() => {
 .workspace-toggle:hover,
 .workspace-secondary-button:hover { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-hover); }
 .workspace-body { display: grid; min-height: 0; grid-template-columns: minmax(280px, 38%) minmax(0, 1fr); }
-.workspace-tree { display: grid; min-width: 0; min-height: 0; grid-template-rows: 47px minmax(0, 1fr); border-right: 1px solid var(--alu-border); background: #0b111d; }
-.workspace-tree-toolbar,
 .workspace-preview-toolbar {
   display: flex;
   min-width: 0;
@@ -754,40 +550,6 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--alu-border);
   background: rgba(13, 21, 35, .94);
 }
-.workspace-tree-toolbar > span { color: var(--alu-text-muted); font-size: 9px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
-.workspace-tree-toolbar .workspace-icon-button { width: 32px; min-height: 32px; border-color: transparent; background: transparent; }
-.workspace-tree-scroll,
-.workspace-mobile-list { min-height: 0; overflow: auto; padding: 8px 7px 18px; scrollbar-color: var(--alu-border) transparent; }
-.workspace-tree-root,
-.workspace-tree-row,
-.workspace-tree-more,
-.workspace-tree-message {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  min-height: 34px;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 9px;
-  color: var(--alu-text-muted);
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  font-size: 10px;
-  text-align: left;
-}
-.workspace-tree-root { color: var(--alu-text); font-weight: 700; }
-.workspace-tree-row:hover,
-.workspace-tree-root:hover,
-.workspace-tree-more:hover { color: var(--alu-text); background: var(--alu-hover); }
-.workspace-tree-row.selected { color: var(--alu-text); background: var(--alu-blue-bg); box-shadow: inset 2px 0 var(--alu-blue); }
-.workspace-tree-row.unavailable { opacity: .5; }
-.workspace-chevron { width: 14px; flex: 0 0 14px; }
-.workspace-tree-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-tree-size { flex: 0 0 auto; color: var(--alu-text-faint); font-size: 8px; }
-.workspace-tree-more { color: var(--alu-blue); }
-.workspace-tree-message { color: var(--alu-text-faint); }
-.workspace-tree-message.error { color: var(--alu-rose); }
 .workspace-spinner {
   display: inline-block;
   width: 13px;
@@ -851,18 +613,6 @@ onBeforeUnmount(() => {
 .workspace-preview-state.error strong,
 .workspace-preview-state.error p { color: var(--alu-rose); }
 .workspace-save-status { position: absolute; right: 14px; bottom: 14px; max-width: calc(100% - 28px); padding: 9px 12px; color: var(--alu-text); border: 1px solid var(--alu-blue-border); border-radius: 8px; background: rgba(12, 29, 41, .96); box-shadow: 0 8px 28px rgba(0, 0, 0, .42); font-size: 9px; }
-.workspace-breadcrumbs { display: flex; min-width: 0; align-items: center; gap: 5px; overflow: auto; color: var(--alu-text-faint); }
-.workspace-breadcrumbs button { min-height: 30px; padding: 0 2px; color: var(--alu-blue); border: 0; background: transparent; font-size: 10px; }
-.workspace-mobile-list { display: none; }
-.workspace-mobile-row { display: grid; width: 100%; min-height: 52px; grid-template-columns: 22px minmax(0, 1fr) 18px; align-items: center; gap: 9px; padding: 7px 9px; color: var(--alu-text-muted); border: 0; border-bottom: 1px solid rgba(45, 57, 79, .55); background: transparent; text-align: left; }
-.workspace-mobile-row > span { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
-.workspace-mobile-row strong { overflow: hidden; color: var(--alu-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-mobile-row small { color: var(--alu-text-faint); font-size: 8px; }
-.workspace-directory-status,
-.workspace-load-more { display: flex; width: 100%; min-height: 48px; align-items: center; justify-content: center; gap: 8px; padding: 8px; color: var(--alu-text-muted); border: 0; background: transparent; font-size: 10px; text-align: center; }
-.workspace-directory-status.error { color: var(--alu-rose); }
-.workspace-directory-status.error span,
-.workspace-load-more { color: var(--alu-blue); }
 .workspace-mobile-back { display: none; }
 .workspace-fade-enter-active,
 .workspace-fade-leave-active { transition: opacity .16s ease; }
@@ -884,9 +634,6 @@ onBeforeUnmount(() => {
   .workspace-body { display: block; min-height: 0; }
   .workspace-tree,
   .workspace-preview { width: 100%; height: 100%; border: 0; }
-  .workspace-tree { grid-template-rows: 48px minmax(0, 1fr); }
-  .workspace-tree-scroll { display: none; }
-  .workspace-mobile-list { display: block; }
   .workspace-preview { display: none; grid-template-rows: 54px minmax(0, 1fr); }
   .workspace-body.mobile-preview-open .workspace-tree { display: none; }
   .workspace-body.mobile-preview-open .workspace-preview { display: grid; }
