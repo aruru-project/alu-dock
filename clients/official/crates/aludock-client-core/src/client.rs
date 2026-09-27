@@ -32,11 +32,24 @@ pub(crate) const CATALOG_SCHEMA_VERSION: u64 = 1;
 #[derive(Clone)]
 pub struct DockClient {
     router: ConnectionRouter,
+    expected_host_epoch: Option<String>,
 }
 
 impl DockClient {
     pub fn new(router: ConnectionRouter) -> Self {
-        Self { router }
+        Self {
+            router,
+            expected_host_epoch: None,
+        }
+    }
+
+    /// Freeze the intended Host incarnation for unary requests through this clone.
+    /// The existing handshake fence runs before any request bytes are sent.
+    pub fn with_host_epoch(&self, host_epoch: impl Into<String>) -> Self {
+        Self {
+            router: self.router.clone(),
+            expected_host_epoch: Some(host_epoch.into()),
+        }
     }
 
     pub fn router(&self) -> &ConnectionRouter {
@@ -124,6 +137,7 @@ impl DockClient {
         let request_deadline = Instant::now() + response_timeout_for(request_type);
         let routed = self.negotiate(required_capabilities).await?;
         if expected_host_epoch
+            .or(self.expected_host_epoch.as_deref())
             .is_some_and(|expected| routed.hello.host.host_epoch.as_str() != expected)
         {
             return Err(ClientError::Protocol(

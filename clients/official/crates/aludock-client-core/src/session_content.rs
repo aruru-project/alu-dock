@@ -120,6 +120,7 @@ pub(crate) enum ReadFailure {
     Descriptors(u64),
 }
 struct Entry {
+    restored_images: crate::RestoredImageState,
     snapshot: SessionSnapshot,
     checkpoint: SessionSnapshot,
     checkpoint_offset: u64,
@@ -150,7 +151,11 @@ struct Inner {
     owner: u64,
 }
 #[derive(Clone)]
-pub struct SessionContent(Arc<Mutex<Inner>>, Arc<SessionMedia>);
+pub struct SessionContent(
+    Arc<Mutex<Inner>>,
+    Arc<SessionMedia>,
+    crate::RestoredImageState,
+);
 impl Default for SessionContent {
     fn default() -> Self {
         Self::with_root(
@@ -171,8 +176,13 @@ impl SessionContent {
                 owner: 0,
             })),
             media,
+            crate::RestoredImageState::default(),
         )
     }
+    pub fn restored_images(&self) -> crate::RestoredImageState {
+        self.2.clone()
+    }
+
     pub fn in_directory(root: PathBuf) -> Result<Self> {
         Ok(Self::with_run(RunCache::open(&root)?))
     }
@@ -280,6 +290,7 @@ impl SessionContent {
         let entry = inner.entries.entry(key.into()).or_insert_with(|| {
             let segment = Segment::new();
             Entry {
+                restored_images: self.2.clone(),
                 snapshot: SessionSnapshot {
                     content_token: uuid::Uuid::new_v4().to_string(),
                     ..Default::default()
@@ -574,6 +585,55 @@ impl SessionContent {
             content_transaction(entry, updates, |_| {})?;
         }
         Ok(true)
+    }
+    pub(crate) fn report_display_error(&self, key: &str, message: &str) {
+        let mut inner = self.0.lock().unwrap();
+        if let Some(entry) = inner.entries.get_mut(key) {
+            let mut next = entry.snapshot.clone();
+            next.state = "content_error".into();
+            next.message = Some(message.into());
+            let _ = publish(
+                entry,
+                next,
+                SessionUpdate::Status {
+                    state: "content_error".into(),
+                    message: Some(message.into()),
+                },
+            );
+        }
+    }
+    /// Only newer accepted content from the same Host proves a request stale.
+    /// Older or missing content never requires a preflight read.
+    pub fn check_target(
+        &self,
+        key: &str,
+        host_epoch: &str,
+        runtime_generation: u64,
+    ) -> Result<Option<crate::InstanceSnapshot>> {
+        let inner = self.0.lock().unwrap();
+        let instance = inner.entries.get(key).and_then(|entry| {
+            entry.snapshot.target.clone().or_else(|| {
+                entry
+                    .snapshot
+                    .read
+                    .as_ref()
+                    .map(|read| read.instance.clone())
+            })
+        });
+        if instance.as_ref().is_some_and(|instance| {
+            instance.event_cursor.host_epoch == host_epoch
+                && instance.runtime_generation > runtime_generation
+        }) {
+            return Err(ClientError::Protocol(
+                "the action belongs to a replaced Work".into(),
+            ));
+        }
+        // Older or unrelated cached content cannot veto the caller's current target.
+        let instance = instance.filter(|instance| {
+            instance.event_cursor.host_epoch == host_epoch
+                && instance.runtime_generation == runtime_generation
+        });
+        Ok(instance)
     }
     /// Local content identity survives observation ownership and WebView rebinding.
     pub fn content_token(&self, key: &str) -> Option<String> {
@@ -1011,6 +1071,9 @@ fn publish_with_checkpoint(
         install_records(entry, &next, records);
     }
     if replacement {
+        if let Some(target) = &next.target {
+            entry.restored_images.session_changed(target);
+        }
         entry.replacement_revision = commit.revision;
     }
     if rotate {

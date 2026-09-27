@@ -46,6 +46,7 @@ impl Drop for AttachmentSource {
     }
 }
 
+#[derive(Clone)]
 pub struct NativeAttachment {
     pub source: Arc<AttachmentSource>,
     pub authority: String,
@@ -137,7 +138,7 @@ pub struct AttachmentSnapshot {
 }
 #[derive(Clone, Default)]
 pub struct AttachmentState {
-    pub entries: Arc<Mutex<HashMap<String, NativeAttachment>>>,
+    entries: Arc<Mutex<HashMap<String, NativeAttachment>>>,
     revision: Arc<AtomicU64>,
     pub content: SessionContent,
 }
@@ -147,6 +148,41 @@ impl AttachmentState {
             entries: Arc::default(),
             revision: Arc::default(),
             content,
+        }
+    }
+    pub fn get(&self, token: &str) -> Option<NativeAttachment> {
+        self.entries.lock().unwrap().get(token).cloned()
+    }
+    /// Freeze only completed jobs included in this send. New selections and
+    /// unknown uploads stay owned by the draft even if the send finishes later.
+    pub fn capture_submission(
+        &self,
+        authority: &str,
+        work_id: &str,
+        host_epoch: &str,
+        generation: u64,
+        file_ids: &[String],
+    ) -> Vec<String> {
+        self.snapshot(authority, work_id)
+            .jobs
+            .into_iter()
+            .filter(|job| {
+                job.state == "succeeded"
+                    && job.target.as_ref().is_some_and(|target| {
+                        target.owner_host_epoch == host_epoch
+                            && target.runtime_generation == generation
+                    })
+                    && job
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| file_ids.contains(&result.attachment.file_id))
+            })
+            .map(|job| job.token)
+            .collect()
+    }
+    pub fn finish_submission(&self, tokens: Vec<String>) {
+        for token in tokens {
+            self.remove(&token);
         }
     }
     pub fn insert(&self, token: String, entry: NativeAttachment) {

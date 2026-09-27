@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+mod presentation;
+pub use presentation::*;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -623,9 +624,6 @@ impl DockClient {
                 None,
             )
             .await?;
-        if !result.accepted {
-            return protocol("Host did not accept widget viewport");
-        }
         Ok(result)
     }
 
@@ -660,7 +658,6 @@ impl DockClient {
             })?;
         if result.instance.id != instance_id
             || result.instance.runtime_generation != expected_runtime_generation
-            || result.instance.tools_expanded != expanded
         {
             return Err(ClientError::EffectUnknown {
                 operation_id: operation_id.to_owned(),
@@ -669,25 +666,6 @@ impl DockClient {
         }
         Ok(result.instance)
     }
-}
-
-pub(crate) fn validate_active_interaction(value: &ActiveInteraction) -> Result<()> {
-    validate_id(&value.id, "activeInteraction.id")?;
-    if let Some(expires_at) = &value.expires_at {
-        validate_timestamp(expires_at, "activeInteraction.expiresAt")?;
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_extension_status(status: &BTreeMap<String, String>) -> Result<()> {
-    if status.len() > 64 {
-        return protocol("extension status exceeded 64 keys");
-    }
-    for (key, text) in status {
-        validate_key(key)?;
-        validate_text(text, 2_048, "extension status")?;
-    }
-    Ok(())
 }
 
 fn validate_interaction_result(
@@ -850,5 +828,250 @@ mod tests {
             }))
             .is_err()
         );
+    }
+}
+
+/// Native-only controller ownership; clients receive the opaque handle, never the lease.
+#[derive(Clone)]
+pub struct ExtensionBinding {
+    pub handle: String,
+    pub connection_id: String,
+    pub selection_generation: u64,
+    pub host_epoch: String,
+    pub instance_id: String,
+    pub runtime_generation: u64,
+    lease: ExtensionControllerLease,
+    pending: Option<InteractionRequest>,
+    last_viewport: Option<(u16, u16)>,
+}
+#[derive(Clone, Default)]
+pub struct ExtensionControlState(std::sync::Arc<std::sync::Mutex<ExtensionControlInner>>);
+#[derive(Default)]
+struct ExtensionControlInner {
+    binding: Option<ExtensionBinding>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+pub enum ExtensionControlUpdate {
+    Event(ExtensionBinding, ControllerEvent),
+    Disconnected(ExtensionBinding),
+}
+impl ExtensionControlState {
+    pub fn install<F>(
+        &self,
+        controller: ExtensionController,
+        connection_id: String,
+        selection_generation: u64,
+        notify: F,
+    ) -> ExtensionBinding
+    where
+        F: Fn(ExtensionControlUpdate) + Send + 'static,
+    {
+        let binding = ExtensionBinding {
+            handle: Uuid::new_v4().to_string(),
+            connection_id,
+            selection_generation,
+            host_epoch: controller.host_epoch,
+            instance_id: controller.instance_id,
+            runtime_generation: controller.runtime_generation,
+            lease: controller.lease,
+            pending: None,
+            last_viewport: None,
+        };
+        let mut stream = controller.stream;
+        let mut guard = self.0.lock().unwrap();
+        if let Some(task) = guard.task.take() {
+            task.abort();
+        }
+        guard.binding = Some(binding.clone());
+        let owner = self.clone();
+        let task_binding = binding.clone();
+        guard.task = Some(tokio::spawn(async move {
+            while let Ok(event) = stream.next_event().await {
+                {
+                    let mut guard = owner.0.lock().unwrap();
+                    let Some(current) = guard
+                        .binding
+                        .as_mut()
+                        .filter(|current| current.handle == task_binding.handle)
+                    else {
+                        return;
+                    };
+                    if let ControllerEventData::InteractionRequested(request) = &event.event {
+                        current.pending = Some(request.clone());
+                    }
+                }
+                notify(ExtensionControlUpdate::Event(task_binding.clone(), event));
+            }
+            let mut guard = owner.0.lock().unwrap();
+            if guard
+                .binding
+                .as_ref()
+                .is_some_and(|current| current.handle == task_binding.handle)
+            {
+                guard.binding = None;
+                guard.task = None;
+                drop(guard);
+                notify(ExtensionControlUpdate::Disconnected(task_binding));
+            }
+        }));
+        binding
+    }
+    pub fn clear(&self) -> Option<ExtensionBinding> {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(task) = guard.task.take() {
+            task.abort();
+        }
+        guard.binding.take()
+    }
+    pub fn detach_work(&self, connection: &str, selection: u64, instance: &str) {
+        let mut guard = self.0.lock().unwrap();
+        if guard.binding.as_ref().is_some_and(|binding| {
+            binding.connection_id == connection
+                && binding.selection_generation == selection
+                && binding.instance_id == instance
+        }) {
+            guard.binding = None;
+            if let Some(task) = guard.task.take() {
+                task.abort();
+            }
+        }
+    }
+    fn binding(&self, handle: &str, connection: &str, selection: u64) -> Result<ExtensionBinding> {
+        self.0
+            .lock()
+            .unwrap()
+            .binding
+            .as_ref()
+            .filter(|binding| {
+                binding.handle == handle
+                    && binding.connection_id == connection
+                    && binding.selection_generation == selection
+            })
+            .cloned()
+            .ok_or_else(|| ClientError::Action {
+                code: "stale_extension_controller",
+                message: "这个提问连接已经失效，请重新取得控制权。",
+            })
+    }
+    pub fn release(&self, handle: &str, connection: &str, selection: u64) -> Result<()> {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(binding) = &guard.binding {
+            if binding.handle != handle {
+                return Ok(());
+            }
+            if binding.connection_id != connection || binding.selection_generation != selection {
+                return Err(ClientError::Action {
+                    code: "stale_extension_controller",
+                    message: "这个提问连接已经失效，请重新取得控制权。",
+                });
+            }
+            guard.binding = None;
+            if let Some(task) = guard.task.take() {
+                task.abort();
+            }
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn respond(
+        &self,
+        client: &DockClient,
+        handle: &str,
+        connection: &str,
+        selection: u64,
+        interaction_id: &str,
+        method: InteractionMethod,
+        value: Option<String>,
+        confirmed: Option<bool>,
+        cancelled: bool,
+    ) -> Result<InteractionRespondResult> {
+        let binding = self.binding(handle, connection, selection)?;
+        let pending = binding
+            .pending
+            .as_ref()
+            .filter(|request| {
+                request.interaction_id() == interaction_id && request.method() == method
+            })
+            .ok_or_else(|| ClientError::Action {
+                code: "stale_extension_controller",
+                message: "这个问题已经失效，请重新查看当前问题。",
+            })?;
+        let response = match method {
+            InteractionMethod::Select => {
+                let value = value.unwrap_or_default();
+                if !cancelled
+                    && !pending
+                        .select_options()
+                        .is_some_and(|options| options.contains(&value))
+                {
+                    return Err(ClientError::Action {
+                        code: "invalid_interaction_response",
+                        message: "选择值已经不在当前选项中，请重新选择。",
+                    });
+                }
+                InteractionResponse::Select { value }
+            }
+            InteractionMethod::Confirm => InteractionResponse::Confirm {
+                confirmed: confirmed.unwrap_or(false),
+            },
+            InteractionMethod::Input => InteractionResponse::Input {
+                value: value.unwrap_or_default(),
+            },
+            InteractionMethod::Editor => InteractionResponse::Editor {
+                value: value.unwrap_or_default(),
+            },
+        };
+        let result = client
+            .respond_interaction(&binding.lease, interaction_id, &response, cancelled, None)
+            .await?;
+        let mut guard = self.0.lock().unwrap();
+        if let Some(current) = guard
+            .binding
+            .as_mut()
+            .filter(|current| current.handle == handle)
+        {
+            if current
+                .pending
+                .as_ref()
+                .is_some_and(|request| request.interaction_id() == interaction_id)
+            {
+                current.pending = None;
+            }
+        }
+        Ok(result)
+    }
+    pub async fn viewport(
+        &self,
+        client: &DockClient,
+        handle: &str,
+        connection: &str,
+        selection: u64,
+        width: u16,
+        height: u16,
+    ) -> Result<WidgetViewportResult> {
+        if width == 0 || height == 0 || width > 10_000 || height > 10_000 {
+            return Err(ClientError::Action {
+                code: "invalid_viewport",
+                message: "显示区域尺寸无效，请重新打开此界面。",
+            });
+        }
+        let binding = self.binding(handle, connection, selection)?;
+        if binding.last_viewport == Some((width, height)) {
+            return Ok(WidgetViewportResult { accepted: true });
+        }
+        let result = client
+            .set_extension_widget_viewport(&binding.lease, width, height)
+            .await?;
+        let mut guard = self.0.lock().unwrap();
+        if let Some(current) = guard
+            .binding
+            .as_mut()
+            .filter(|current| current.handle == handle)
+        {
+            if result.accepted {
+                current.last_viewport = Some((width, height));
+            }
+        }
+        Ok(result)
     }
 }

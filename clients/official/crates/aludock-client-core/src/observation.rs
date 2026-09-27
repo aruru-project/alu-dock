@@ -85,6 +85,23 @@ impl ConversationObservation {
             );
         }
     }
+    pub fn accept_session_result(
+        &self,
+        key: &str,
+        client: DockClient,
+        result: &impl crate::sessions::SessionChange,
+    ) {
+        let Some((target, branch_changed)) = result.replacement() else {
+            return;
+        };
+        if self
+            .replace(key, client, target.clone(), branch_changed)
+            .is_err()
+        {
+            self.content
+                .report_display_error(key, "操作已完成，但无法更新显示。请刷新当前工作。");
+        }
+    }
     pub fn replace(
         &self,
         key: &str,
@@ -401,7 +418,7 @@ mod tests {
     use crate::tls::{read_json_line, write_json_line};
     use crate::{
         ConnectionRouter, IdentityStore, LocalDockEndpoint, OperationAssociation,
-        OperationAssociations,
+        OperationAssociations, OperationState,
     };
     use serde_json::{Value, json};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -575,6 +592,111 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    // #319: cached content is not an admission authority, but the negotiated
+    // Host incarnation must match the caller before any Session request is sent.
+    #[tokio::test]
+    async fn session_actions_allow_newer_or_uncached_targets_and_fence_restarted_hosts() {
+        use tokio::io::AsyncBufReadExt;
+        let directory = std::env::temp_dir().join(format!(
+            "sf-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("s");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let peer = tokio::spawn(async move {
+            for host in ["restarted", "epoch", "epoch", "different-epoch"] {
+                let mut stream = tokio::io::BufReader::new(listener.accept().await.unwrap().0);
+                let hello: Value = read_json_line(&mut stream, 65536).await.unwrap();
+                write_json_line(&mut stream, &json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,
+                    "host":{"hostEpoch":host},"capabilities":["core.v2","extension_ui.tools-expanded.v1","git.branch-footer.v1","instance.keys.v1","instance.display-name.v1","session.commands.v1"],"limits":{"maxLineBytes":65536}})).await.unwrap();
+                let mut line = String::new();
+                let bytes = stream.read_line(&mut line).await.unwrap();
+                if host == "restarted" {
+                    assert_eq!(
+                        bytes, 0,
+                        "a stale page must send no Session mutation to the restarted Host"
+                    );
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "session.new");
+                let mut target = instance(2);
+                target["ownerHostEpoch"] = json!(host);
+                target["eventCursor"]["hostEpoch"] = json!(host);
+                write_json_line(&mut stream, &json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":host,"ok":true,"result":{"cancelled":false,"instance":target}})).await.unwrap();
+            }
+        });
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(socket.to_str().unwrap()).unwrap(),
+                "session-fence".into(),
+            )
+            .unwrap(),
+        );
+        let content = SessionContent::default();
+        let owner = content.claim("work");
+        content
+            .commit(
+                "work",
+                owner,
+                SessionUpdate::Read(serde_json::from_value(read()).unwrap()),
+            )
+            .unwrap();
+        assert!(content.check_target("work", "epoch", 1).unwrap().is_some());
+        assert!(matches!(
+            client
+                .with_host_epoch("epoch")
+                .new_session("work", None, Some("old-host"))
+                .await,
+            Err(ClientError::Protocol(_))
+        ));
+        assert!(content.check_target("work", "epoch", 2).unwrap().is_none());
+        assert!(
+            !client
+                .with_host_epoch("epoch")
+                .new_session("work", None, Some("newer-target"))
+                .await
+                .unwrap()
+                .cancelled
+        );
+        assert!(
+            content
+                .check_target("unobserved", "epoch", 1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !client
+                .with_host_epoch("epoch")
+                .new_session("work", None, Some("unobserved"))
+                .await
+                .unwrap()
+                .cancelled
+        );
+        content
+            .replace("work", serde_json::from_value(instance(2)).unwrap(), false)
+            .unwrap();
+        assert!(content.check_target("work", "epoch", 1).is_err());
+        assert!(
+            content
+                .check_target("work", "different-epoch", 1)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !client
+                .with_host_epoch("different-epoch")
+                .new_session("work", None, Some("other-host"))
+                .await
+                .unwrap()
+                .cancelled
+        );
+        peer.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     // #301/#302: a rebuilt WebView reconnects to native facts, not to a new
     // mutation. A long valid Follow is not stopped merely to bound hot memory.
     #[tokio::test]
@@ -718,7 +840,7 @@ mod tests {
             runtime_generation: 1,
             session_id: "session-1".into(),
             editor: json!({"textRevision":"original"}),
-            state: String::new(),
+            state: OperationState::Pending,
             result: None,
             error: None,
         };
@@ -727,10 +849,7 @@ mod tests {
         let waiter = tokio::spawn(async move {
             owner
                 .execute(metadata, async move {
-                    transport
-                        .new_session("work", None, Some("new-once"))
-                        .await
-                        .map_err(|error| json!({"message":error.to_string(),"outcomeUnknown":true}))
+                    transport.new_session("work", None, Some("new-once")).await
                 })
                 .await
         });
@@ -738,27 +857,38 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         waiter.abort(); // WebView/IPC waiter disappeared, not the native operation.
-        assert_eq!(operations.pending()[0].state, "pending");
+        assert_eq!(operations.pending()[0].state, OperationState::Pending);
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while operations.pending()[0].state == "pending" {
+            while operations.pending()[0].state == OperationState::Pending {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
         .unwrap();
         let result = operations.pending().remove(0);
-        assert_eq!(result.state, "succeeded");
+        assert_eq!(result.state, OperationState::Succeeded);
         assert_eq!(result.editor["textRevision"], "original");
         assert_eq!(sends.load(Ordering::SeqCst), 1);
-        service
-            .replace(
-                "authority:work:epoch",
-                client.clone(),
-                serde_json::from_value(result.result.unwrap()["instance"].clone()).unwrap(),
-                false,
-            )
-            .unwrap();
+        let images = service.content.restored_images();
+        let image_scope = crate::restored_image_scope("local", 1, "work", "epoch", 1);
+        images.append(
+            image_scope.clone(),
+            vec![crate::ImagePath {
+                path: "/old/image.png".into(),
+                mime_type: "image/png".into(),
+            }],
+        );
+        service.accept_session_result(
+            "authority:work:epoch",
+            client.clone(),
+            &serde_json::from_value::<crate::SessionReplacementResult>(result.result.unwrap())
+                .unwrap(),
+        );
+        assert!(
+            images.capture(&image_scope).is_none(),
+            "accepted replacement clears Queue images before any binding/ACK"
+        );
         let replaced = service
             .content
             .bind("authority:work:epoch")
@@ -827,6 +957,13 @@ mod tests {
                 SessionUpdate::Read(serde_json::from_value(read()).unwrap()),
             )
             .unwrap();
+        images.append(
+            image_scope.clone(),
+            vec![crate::ImagePath {
+                path: "/old/branch.png".into(),
+                mime_type: "image/png".into(),
+            }],
+        );
         let mut newer_branch = instance(1);
         newer_branch["eventCursor"] = cursor(30, 1);
         service
@@ -837,6 +974,17 @@ mod tests {
                 true,
             )
             .unwrap();
+        assert!(
+            images.capture(&image_scope).is_none(),
+            "same-generation navigation clears images without an observed view"
+        );
+        images.append(
+            image_scope.clone(),
+            vec![crate::ImagePath {
+                path: "/new/branch.png".into(),
+                mime_type: "image/png".into(),
+            }],
+        );
         let branch_revision = service.content.bind("branch").unwrap().snapshot.revision;
         newer_branch["eventCursor"] = cursor(20, 1);
         service
@@ -851,6 +999,34 @@ mod tests {
             service.content.bind("branch").unwrap().snapshot.revision,
             branch_revision,
             "same-domain navigation receipts follow authoritative positions"
+        );
+        assert_eq!(
+            images.capture(&image_scope).unwrap().images[0].path,
+            "/new/branch.png",
+            "late older receipt preserves new branch images"
+        );
+        let unobserved = ConversationObservation::default();
+        let unobserved_images = unobserved.content.restored_images();
+        unobserved_images.append(
+            image_scope.clone(),
+            vec![crate::ImagePath {
+                path: "/unobserved/old.png".into(),
+                mime_type: "image/png".into(),
+            }],
+        );
+        unobserved.accept_session_result(
+            "unobserved",
+            client.clone(),
+            &crate::SessionNavigateResult {
+                cancelled: false,
+                aborted: None,
+                editor_text: None,
+                instance: serde_json::from_value(instance(1)).unwrap(),
+            },
+        );
+        assert!(
+            unobserved_images.capture(&image_scope).is_none(),
+            "navigation clears old images even when no observation was ever opened"
         );
         operations.consume("new-once");
         assert!(operations.pending().is_empty());
@@ -902,27 +1078,37 @@ mod tests {
             runtime_generation: 1,
             session_id: "session-1".into(),
             editor: json!({"textRevision":"unchanged"}),
-            state: String::new(),
+            state: OperationState::Pending,
             result: None,
             error: None,
         };
         let duplicate = unknown_metadata.clone();
         let unknown_directory = directory.clone();
         let unknown_endpoint = endpoint.clone();
-        let unknown = operations.execute(unknown_metadata, async move {
-            // The isolated peer closes after receiving the mutation.
-            let transport = DockClient::new(ConnectionRouter::local(&IdentityStore::new(unknown_directory.join("unknown-identity")), LocalDockEndpoint::configured(unknown_endpoint.to_str().unwrap()).unwrap(), "unknown".into()).unwrap());
-            transport.new_session("work", None, Some("new-lost")).await.map_err(|error| json!({"outcomeUnknown":matches!(error, ClientError::EffectUnknown { .. })}))
-        }).await.unwrap();
+        let unknown = operations
+            .execute(unknown_metadata, async move {
+                // The isolated peer closes after receiving the mutation.
+                let transport = DockClient::new(
+                    ConnectionRouter::local(
+                        &IdentityStore::new(unknown_directory.join("unknown-identity")),
+                        LocalDockEndpoint::configured(unknown_endpoint.to_str().unwrap()).unwrap(),
+                        "unknown".into(),
+                    )
+                    .unwrap(),
+                );
+                transport.new_session("work", None, Some("new-lost")).await
+            })
+            .await
+            .unwrap();
         assert!(unknown.is_err());
-        assert_eq!(operations.pending()[0].state, "unknown");
+        assert_eq!(operations.pending()[0].state, OperationState::Unknown);
         operations.consume("new-lost");
         assert_eq!(
             operations.pending()[0].state,
-            "unknown",
+            OperationState::Unknown,
             "display refresh/consume cannot establish a missing operation result"
         );
-        let replay: crate::Result<std::result::Result<(), Value>> = operations
+        let replay: crate::Result<std::result::Result<(), ClientError>> = operations
             .execute(duplicate, async { panic!("mutation must not be replayed") })
             .await;
         assert!(replay.is_err());

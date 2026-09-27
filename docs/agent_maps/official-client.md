@@ -24,7 +24,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 
 | 要改什么 | 谁持有事实/状态 | 用户入口与关联文件 | 最接近的验证入口 |
 | --- | --- | --- | --- |
-| 连接、配对、地址、切 Host、目录刷新 | core `host_registry.rs` / `connection_router.rs` / `pairing.rs`；Tauri `ConnectionRuntimeState`；Vue store 只保最后接纳的目录与本地选择 | `hostConnection.ts`、`stores/app.ts`、`ConnectionLanding.vue`、Host 设置；`bridge.ts` → `src-tauri/src/lib.rs` → core | core 连接/registry 测试；App native-boundary 门；真实配对/切网须设备检查 |
+| 连接、配对、地址、切 Host、目录刷新 | core `host_registry.rs` / `connection_router.rs` / `pairing.rs`；Tauri `ConnectionRuntimeState`；Vue store 只保最后接纳的目录与本地选择 | `hostConnection.ts`、`stores/app.ts`、`ConnectionLanding.vue`、Host 设置；`bridge.ts` → Tauri `connection.rs` / `connection_state.rs` → core | core 连接/registry 测试；App native-boundary 门；真实配对/切网须设备检查 |
 | 进入 Work、断连续读、前后台恢复 | core `observation.rs` 续读；`SessionContent` 接纳内容与身份；Vue `workObservation.ts` 订阅和确认，不拥有另一份会话 | `start_conversation_follow` / `read_conversation_content` / ACK；`conversationSession.ts` → `conversationContent.ts` → `ConversationView.vue` | `contentProtocol.test.mjs`、core observation/content 测试；仅改局部时不要重复整条门 |
 | 历史、正文、记录错误和重试 | `session_content_reader.rs` 的分页/任务；`session_records.rs` 的不可变内存正文；`session_content/binding.rs` 的有界显示回放 | `ConversationRegion.vue` 的加载更早/重试/可见条目；不直接调用远端正文分页 | content 门、冷打开/回放测试；App 局部接线 |
 | `/new`、Reload、Resume、Tree、Fork、Clone | `operations.rs` 持原 operationId、冻结目标、结果；`SessionContent` 先接纳真实替换，编辑认领另算 | `SessionManager.vue`、`command-console.ts`、`operationResults.ts`、`operationBinding.ts`；Tauri typed commands | `sessionReload.test.mjs`、`submitDraft.test.mjs`、core operation/observation 测试 |
@@ -35,6 +35,22 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 | 面板、弹窗、Extension UI 与焦点 | `pageSurfaces.ts` 只管显示/focus；`controlPanel.ts` 管配置查询；Extension 状态/回调仍沿 core 控制连接 | `PageDialogs.vue`、`ControlCenter.vue`、`extension-ui` store；输入保持同一节点 | App/Session 门；OS IME、Android Back 和实际 WebView 另核 |
 | workspace、deliverables、文件打开 | core `workspace_files.rs` / `deliverables.rs`；Tauri `WorkspaceFileState` / 平台 staging / 下载记录 | `deliveries.ts`、Workspace browser、下载面板；用户保存位置只由 OS dialog 产生 | 对应 core / Tauri 文件测试；真实文件提供者检查 |
 | Windows 托盘/away、Android 后台与文档 URI | `desktop_shell.rs`、`windows_launch.rs`、`android_documents.rs`；Vue `platformLifecycle.ts` | 本地 lifecycle 与原生 pause/rebind；不以后台状态结束 Work 或清文件 | Linux 编译不等于 Windows/Android；按用户授权打 staging 包后进行真机验证 |
+
+## Native 入口与 core 业务接口
+
+`src-tauri/src/lib.rs` 只启动、装配状态和注册原有 IPC。连接选择保留在 `connection_state.rs`，配对和连接任务在 `connection.rs`；它们调用 core 的 registry、pairing 和 router，不实现认证或身份存储。其余入口分别在 `sessions.rs`、`work.rs`、`configuration.rs`、`observation.rs`、`extension.rs`、`attachment_import.rs`；`media.rs`、`file_delivery.rs`、`workspace_files.rs` 负责原生文件交付，`away.rs` 负责 Windows 离开提醒。
+
+内部依赖由入口指向连接选择和平台文件能力，不经过共享大对象或入口间循环调用。Tauri 的观察任务只负责投递和 ACK；正文、续读以及不暴露路径/凭据的显示结果由 core 产出。
+
+供其他原生入口复用的接口归各自业务模块：
+
+- `actions::RestoredImageState` 持有 Queue 取回图片及其目标，`dequeue` / `submit` 负责取回、发送和成功后的认领清理。它由 `SessionContent::restored_images()` 提供同一份状态；真实 Session/分支变化在 core 接纳时清理旧图片，不等待界面 Follow、回放或 ACK，变化前发出的迟到 Queue 回执也不能重新放回旧图片。`attachment_jobs::AttachmentState` 封装选择表，`capture_submission` / `finish_submission` 只回收本次发送捕获的已完成上传，不动新选择或未知结果。
+- `config::CommandReferenceState` 保存不暴露私有路径的命令引用；`DockClient::run_catalog_command` 组装命令并提交，不以重新读取目录为前置。设置直接使用 Host 返回的定义，客户端不保第二份定义表。
+- `sessions::SessionTokenState` 保存私有 Session 路径的本地引用。`SessionContent::check_target` 仅在同一 Host 的已接纳代数更新时拒绝旧目标；旧缓存、没有缓存及不同 Host 的缓存不能否决当前目标。Session 入口通过 `DockClient::with_host_epoch` 把原 Host 身份带到实际请求的握手检查，Host 重启后旧页面不会向新 Host 发送 Session 修改。Session 和工作区操作不再为核对目标拉整页对话或所有 Work；没有观察内容也不要求先读取。
+- `operations::OperationAssociations` 保存操作结果，`OperationState` 和 `OperationFailure` 提供类型化状态/错误分类；core 不解析界面错误 JSON 决定是否未知。任务异常结束会收尾为未知，关闭界面不取消任务。`ConversationObservation::accept_session_result` 根据 core 的 `SessionChange` 应用成功回执；显示失败不改判远端操作失败。
+- `extension_ui::ExtensionControlState` 持有控制连接、当前问题、回答和 viewport 状态；Tauri 只转交界面事件。迟到的回答回执不清除新问题，断线不代答。
+
+各业务模块的 `presentation` 子模块只做原有 IPC 的路径/凭据隔离和显示形状转换，复用 core 枚举；不是第二套 Host 协议。Vue IPC 名称、参数与结果形状不变。文件传输和本机存储的内部实现没有随这次拆分重写。
 
 ## 会话与编辑的长期规则
 

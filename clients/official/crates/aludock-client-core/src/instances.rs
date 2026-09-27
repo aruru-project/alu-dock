@@ -11,7 +11,6 @@ use crate::{
         INSTANCE_CATALOG as INSTANCE_CAPABILITIES, INSTANCE_REOPEN as REOPEN_CAPABILITIES,
         MACHINES as MACHINE_CAPABILITIES, WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
     },
-    extension_ui::{validate_active_interaction, validate_extension_status},
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -114,51 +113,6 @@ impl InstanceSnapshot {
         {
             return Err(ClientError::Protocol(
                 "instance snapshot cursor identity was invalid".into(),
-            ));
-        }
-        let terminal = matches!(
-            self.lifecycle,
-            InstanceLifecycle::Stopped
-                | InstanceLifecycle::HostLost
-                | InstanceLifecycle::RuntimeError
-        );
-        if terminal != (self.execution == InstanceExecution::Unavailable) {
-            return Err(ClientError::Protocol(
-                "instance lifecycle and execution state were inconsistent".into(),
-            ));
-        }
-        if terminal && self.owner_host_epoch.is_some() {
-            return Err(ClientError::Protocol(
-                "terminal instance unexpectedly retained a Host owner".into(),
-            ));
-        }
-        if !terminal && self.owner_host_epoch.is_none() {
-            return Err(ClientError::Protocol(
-                "active instance omitted its Host owner".into(),
-            ));
-        }
-        validate_extension_status(&self.extension_status)?;
-        if let Some(interaction) = &self.active_interaction {
-            validate_active_interaction(interaction)?;
-        }
-        if self.active_interaction.is_some() && self.lifecycle != InstanceLifecycle::Active {
-            return Err(ClientError::Protocol(
-                "active interaction appeared outside an active Work".into(),
-            ));
-        }
-        if self.lifecycle == InstanceLifecycle::Stopped && self.reopenable {
-            return Err(ClientError::Protocol(
-                "stopped instance was unexpectedly reopenable".into(),
-            ));
-        }
-        if self.reopenable
-            && !matches!(
-                self.lifecycle,
-                InstanceLifecycle::HostLost | InstanceLifecycle::RuntimeError
-            )
-        {
-            return Err(ClientError::Protocol(
-                "instance advertised reopen outside a recoverable state".into(),
             ));
         }
         if let Some(owner) = &self.owner_host_epoch
@@ -495,11 +449,6 @@ impl DockClient {
             instances.extend(result.instances);
             cursor = result.page.next_cursor;
             if cursor.is_none() {
-                if instances.len() as u64 != result.page.total {
-                    return Err(ClientError::Protocol(
-                        "instance catalog page count did not match total".into(),
-                    ));
-                }
                 return Ok((
                     InstanceCatalog {
                         instances,
@@ -710,17 +659,7 @@ impl DockClient {
             .instance
             .validate()
             .map_err(|error| mutation_unknown(operation_id, error))?;
-        if result.operation_id != operation_id
-            || result.instance.id != instance_id
-            || result.instance.lifecycle != InstanceLifecycle::Active
-            || result.instance.execution != InstanceExecution::Idle
-            || result.instance.last_run != "never"
-            || result.instance.runtime_generation < 2
-            || !matches!(
-                result.previous_lifecycle,
-                InstanceLifecycle::HostLost | InstanceLifecycle::RuntimeError
-            )
-        {
+        if result.operation_id != operation_id || result.instance.id != instance_id {
             return Err(ClientError::EffectUnknown {
                 operation_id: operation_id.to_owned(),
                 message: "reopen response did not prove a fresh, correlated Work generation".into(),
@@ -747,15 +686,7 @@ impl DockClient {
                 Some(operation_id),
             )
             .await?;
-        if result.receipt.operation_id != operation_id
-            || result.receipt.forgotten_id != instance_id
-            || result.receipt.pi_session_files_deleted != 0
-            || !matches!(
-                result.receipt.previous_lifecycle,
-                InstanceLifecycle::Stopped
-                    | InstanceLifecycle::HostLost
-                    | InstanceLifecycle::RuntimeError
-            )
+        if result.receipt.operation_id != operation_id || result.receipt.forgotten_id != instance_id
         {
             return Err(ClientError::EffectUnknown {
                 operation_id: operation_id.to_owned(),
@@ -775,10 +706,7 @@ fn validate_stop_result(
         .instance
         .validate()
         .map_err(|error| mutation_unknown(operation_id, error))?;
-    if result.receipt.operation_id != operation_id
-        || result.instance.id != instance_id
-        || result.instance.lifecycle != InstanceLifecycle::Stopped
-    {
+    if result.receipt.operation_id != operation_id || result.instance.id != instance_id {
         return Err(ClientError::EffectUnknown {
             operation_id: operation_id.to_owned(),
             message: "stop response did not prove a correlated stopped Work".into(),

@@ -2,6 +2,11 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("{message}")]
+    Action {
+        code: &'static str,
+        message: &'static str,
+    },
     #[error("invalid endpoint: {0}")]
     InvalidEndpoint(String),
     #[error("invalid pairing data: {0}")]

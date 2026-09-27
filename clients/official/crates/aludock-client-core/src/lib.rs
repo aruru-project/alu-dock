@@ -40,7 +40,8 @@ mod wire;
 mod workspace_files;
 
 pub use actions::{
-    DeliveryMode, QueueDequeueReceipt, QueueDequeueResult, SubmitReceipt, SubmitResult,
+    DeliveryMode, QueueDequeueReceipt, QueueDequeueResult, RestoredImageScope, RestoredImageState,
+    SubmitReceipt, SubmitResult,
 };
 pub use attachment_jobs::{
     AttachmentSnapshot, AttachmentSource, AttachmentState, AttachmentUploadScope, NativeAttachment,
@@ -53,11 +54,11 @@ pub use attachments::{
 pub use client::DockClient;
 pub use config::{
     CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
-    CommandContentResult, CommandInfo, CommandReference, CommandsResult, DiagnosticInfo,
-    DiagnosticSeverity, ModelInfo, ModelsResult, ResourceContentResult, ResourceInfo, ResourceKind,
-    ResourcesResult, SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult,
-    SettingValue, SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel,
-    ToolInfo, ToolsResult,
+    CommandContentResult, CommandInfo, CommandReference, CommandReferenceScope,
+    CommandReferenceState, CommandsResult, DiagnosticInfo, DiagnosticSeverity, ModelInfo,
+    ModelsResult, ResourceContentResult, ResourceInfo, ResourceKind, ResourcesResult, SettingInfo,
+    SettingKey, SettingSource, SettingUpdate, SettingUpdateResult, SettingValue, SettingValueType,
+    SettingsResult, SourceInfo, SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
 };
 pub use connection_router::{ConnectionRouter, RouteSnapshot};
 pub use connections::{
@@ -78,12 +79,13 @@ pub use deliverables::{
 pub use endpoint::Endpoint;
 pub use error::{ClientError, Result};
 pub use extension_ui::{
-    ActiveInteraction, ControllerEvent, ControllerEventData, EditorDirective,
-    ExtensionControlStream, ExtensionController, ExtensionControllerLease, ExtensionError,
-    ExtensionEvent, ExtensionNotification, InteractionCancellation, InteractionCancellationReason,
-    InteractionMethod, InteractionRequest, InteractionResolution, InteractionResolutionState,
-    InteractionRespondResult, InteractionResponse, NotificationLevel, StatusChanged,
-    TitleDirective, ToolsExpandedChanged, WidgetChanged, WidgetPlacement, WidgetViewportResult,
+    ActiveInteraction, ControllerEvent, ControllerEventData, EditorDirective, ExtensionBinding,
+    ExtensionControlState, ExtensionControlStream, ExtensionControlUpdate, ExtensionController,
+    ExtensionControllerLease, ExtensionError, ExtensionEvent, ExtensionNotification,
+    InteractionCancellation, InteractionCancellationReason, InteractionMethod, InteractionRequest,
+    InteractionResolution, InteractionResolutionState, InteractionRespondResult,
+    InteractionResponse, NotificationLevel, StatusChanged, TitleDirective, ToolsExpandedChanged,
+    WidgetChanged, WidgetPlacement, WidgetViewportResult,
 };
 pub use host_registry::{
     ClientPreferences, ClientPreferencesStore, HostRecord, HostRegistry, HostRegistrySnapshot,
@@ -98,7 +100,9 @@ pub use instances::{
 };
 pub use local_transport::LocalDockEndpoint;
 pub use observation::ConversationObservation;
-pub use operations::{OperationAssociation, OperationAssociations};
+pub use operations::{
+    OperationAssociation, OperationAssociations, OperationFailure, OperationState,
+};
 pub use pairing::{PairingOutcome, PairingProgress, pair, validate_device_name};
 pub use protocol::{HostIdentity, HostInfo, host_info, host_info_for_profile};
 pub use published_files::{
@@ -112,11 +116,13 @@ pub use session_media::{MAX_ATTACHMENT_PREVIEW_BYTES, MediaHandle, MediaScope};
 pub use sessions::{
     CompactionPromptTemplatesResult, ConversationContentChunk, ConversationContentPage,
     ConversationHistoryEntry, ConversationHistoryPage, ConversationImageTransfer,
-    MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionCompaction, SessionCompactionResult,
-    SessionForkResult, SessionHistoryPage, SessionInfo, SessionInventoryDiagnostic,
-    SessionInventoryResult, SessionListResult, SessionNameResult, SessionNavigateResult,
-    SessionReloadResult, SessionReplacementResult, SessionScope, SessionTree, TreeDisplayClass,
-    TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,
+    MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionChange, SessionCompaction,
+    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
+    SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
+    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
+    SessionTokenScope, SessionTokenState, SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind,
+    TreeNodeRole, TreeNodeState, begin_session_token_request, publish_session_tokens,
+    resolve_machine_session_token, resolve_work_session_token,
 };
 pub use storage::{IdentityStore, PairingMetadata, PendingPairing, StoredPairing};
 pub use workspace_files::{
@@ -130,3 +136,20 @@ pub use systems::{
     SystemCandidate, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
     SystemSourceKind,
 };
+
+pub use actions::{
+    SafeQueueDequeueReceipt, SafeQueueDequeueResult, project_queue_dequeue, restored_image_scope,
+};
+pub use config::{
+    SafeCommand, SafeCommandCompletionsResult, SafeCommandContentResult, SafeCommandsResult,
+    SafeDiagnostic, SafeResource, SafeResourcesResult, SafeSource, SafeTool, SafeToolsResult,
+    project_commands, project_resources, project_source, project_tools,
+};
+pub use conversation::{
+    ConversationBootstrap, ExtensionBootstrap, ProjectedEvent, ProjectedQueueItem,
+    project_conversation_read, project_event, project_extension_event, project_pending_message,
+    project_session_snapshot, project_session_update, strip_image_paths,
+};
+pub use extension_ui::safe_controller_event;
+pub use operations::operation_association;
+pub use sessions::{SafeSessionReload, project_session_reload};

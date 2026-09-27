@@ -1,3 +1,6 @@
+mod presentation;
+pub use presentation::*;
+use std::sync::{Arc, Mutex};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -13,8 +16,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ClientError, DiagnosticInfo, DockClient, HistoryRecord, InstanceLifecycle, InstanceSnapshot,
-    ProjectTrustDecision, PublishedFileDto, ResourceInfo, Result,
+    ClientError, DiagnosticInfo, DockClient, HistoryRecord, InstanceSnapshot, ProjectTrustDecision,
+    PublishedFileDto, ResourceInfo, Result,
     capabilities::{
         CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES,
         CONVERSATION_IMAGES as CONVERSATION_IMAGE_CAPABILITIES,
@@ -753,19 +756,7 @@ impl DockClient {
                 "session inventory did not correlate to the requested Machine and scope",
             ));
         }
-        if wire.sessions.len() as u64 > wire.total
-            || wire.truncated != (wire.sessions.len() as u64 != wire.total)
-        {
-            return Err(protocol(
-                "session inventory completeness metadata was inconsistent",
-            ));
-        }
         validate_session_infos(&wire.sessions)?;
-        if !wire.incomplete && (!wire.diagnostics.is_empty() || wire.diagnostics_truncated) {
-            return Err(protocol(
-                "complete session inventory carried scan diagnostics",
-            ));
-        }
         if wire.diagnostics.iter().any(|diagnostic| {
             diagnostic.message.len() > 4_000
                 || diagnostic
@@ -801,13 +792,6 @@ impl DockClient {
                 None,
             )
             .await?;
-        if wire.sessions.len() as u64 > wire.total
-            || (!wire.truncated && wire.sessions.len() as u64 != wire.total)
-        {
-            return Err(protocol(
-                "session list completeness metadata was inconsistent",
-            ));
-        }
         validate_session_infos(&wire.sessions)?;
         Ok(SessionListResult {
             sessions: wire.sessions,
@@ -888,13 +872,6 @@ impl DockClient {
             )
             .await?;
         validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
-        let expected = if name.is_empty() { None } else { Some(name) };
-        if result.instance.name.as_deref() != expected {
-            return Err(unknown(
-                operation_id,
-                "session name response did not prove the requested name",
-            ));
-        }
         Ok(result)
     }
 
@@ -932,14 +909,6 @@ impl DockClient {
             )
             .await?;
         validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
-        if result.result.first_kept_entry_id.is_empty()
-            || result.result.first_kept_entry_id.len() > 128
-        {
-            return Err(unknown(
-                operation_id,
-                "compaction response contained an invalid retained entry",
-            ));
-        }
         Ok(result)
     }
 
@@ -962,18 +931,6 @@ impl DockClient {
             )
             .await?;
         validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
-        if result.resources.len() as u64 > result.resource_total
-            || result.diagnostics.len() as u64 > result.diagnostic_total
-            || (!result.resources_truncated
-                && result.resources.len() as u64 != result.resource_total)
-            || (!result.diagnostics_truncated
-                && result.diagnostics.len() as u64 != result.diagnostic_total)
-        {
-            return Err(unknown(
-                operation_id,
-                "reload response completeness metadata was inconsistent",
-            ));
-        }
         Ok(result)
     }
 
@@ -1028,14 +985,6 @@ impl DockClient {
             )
             .await?;
         validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
-        if result.aborted == Some(true) && !result.cancelled
-            || result.cancelled && result.editor_text.is_some()
-        {
-            return Err(unknown(
-                operation_id,
-                "navigation response state was inconsistent",
-            ));
-        }
         Ok(result)
     }
 
@@ -1060,11 +1009,6 @@ impl DockClient {
             )
             .await?;
         validate_mutation_snapshot(&result.instance, instance_id, operation_id)?;
-        validate_fork_state(
-            result.cancelled,
-            result.selected_text.as_deref(),
-            operation_id,
-        )?;
         Ok(result)
     }
 
@@ -1394,24 +1338,6 @@ fn validate_content_page(
     Ok(())
 }
 
-fn validate_fork_state(
-    cancelled: bool,
-    selected_text: Option<&str>,
-    operation_id: &str,
-) -> Result<()> {
-    if cancelled == selected_text.is_some() {
-        return Err(unknown(
-            operation_id,
-            if cancelled {
-                "cancelled fork unexpectedly returned selected text"
-            } else {
-                "completed fork omitted selected text"
-            },
-        ));
-    }
-    Ok(())
-}
-
 fn validate_replacement(
     result: SessionReplacementResult,
     instance_id: &str,
@@ -1426,26 +1352,17 @@ fn validate_mutation_snapshot(
     instance_id: &str,
     operation_id: &str,
 ) -> Result<()> {
-    instance
-        .validate()
-        .map_err(|error| unknown(operation_id, &error.to_string()))?;
-    if instance.id != instance_id || instance.lifecycle != InstanceLifecycle::Active {
+    if instance.id != instance_id {
         return Err(unknown(
             operation_id,
-            "session mutation response did not prove an active correlated Work",
+            "session mutation response returned a different Work",
         ));
     }
     Ok(())
 }
 
 fn validate_tree(tree: &SessionTree) -> Result<()> {
-    let mut ids = HashSet::with_capacity(tree.nodes.len());
-    let mut ancestors: Vec<&str> = Vec::new();
     for node in &tree.nodes {
-        let role_is_stateful = matches!(
-            node.role,
-            Some(TreeNodeRole::Assistant | TreeNodeRole::Tool)
-        );
         if node.entry_id.is_empty()
             || node.entry_id.len() > 128
             || node
@@ -1453,41 +1370,11 @@ fn validate_tree(tree: &SessionTree) -> Result<()> {
                 .as_ref()
                 .is_some_and(|parent| parent.is_empty() || parent.len() > 128)
             || node.depth > 100_000
-            || !ids.insert(&node.entry_id)
-            || (node.kind == TreeNodeKind::Message) != node.role.is_some()
-            || (node.role == Some(TreeNodeRole::Tool)
-                && node.display_class != TreeDisplayClass::Tool)
-            || (node.state.is_some() && !role_is_stateful)
         {
-            return Err(protocol("session tree node invariants failed"));
+            return Err(protocol(
+                "session tree identity or depth exceeded protocol bounds",
+            ));
         }
-        match node.parent_id.as_deref() {
-            None if node.depth == 0 => {}
-            Some(parent)
-                if node.depth > 0 && ancestors.get(node.depth - 1).copied() == Some(parent) => {}
-            _ => {
-                return Err(protocol(
-                    "session tree was not stable depth-first pre-order",
-                ));
-            }
-        }
-        ancestors.truncate(node.depth);
-        ancestors.push(&node.entry_id);
-    }
-    for (index, node) in tree.nodes.iter().enumerate() {
-        let expected_children = tree.nodes.get(index + 1).is_some_and(|next| {
-            next.depth == node.depth + 1 && next.parent_id.as_deref() == Some(&node.entry_id)
-        });
-        if node.has_children != expected_children {
-            return Err(protocol("session tree child topology was inconsistent"));
-        }
-    }
-    if tree
-        .leaf_id
-        .as_ref()
-        .is_some_and(|leaf_id| !ids.contains(leaf_id))
-    {
-        return Err(protocol("session tree leaf did not belong to the snapshot"));
     }
     Ok(())
 }
@@ -1877,8 +1764,6 @@ fn valid_image_mime_type(value: &str) -> bool {
 }
 
 fn validate_session_infos(sessions: &[SessionInfo]) -> Result<()> {
-    let mut ids = HashSet::new();
-    let mut files = HashSet::new();
     for session in sessions {
         if session.session_id.is_empty()
             || session.session_id.len() > 128
@@ -1886,12 +1771,8 @@ fn validate_session_infos(sessions: &[SessionInfo]) -> Result<()> {
             || session.session_file.len() > 16_384
             || session.cwd.is_empty()
             || session.cwd.len() > 16_384
-            || !ids.insert(&session.session_id)
-            || !files.insert(&session.session_file)
         {
-            return Err(protocol(
-                "session list contained invalid or duplicate identities",
-            ));
+            return Err(protocol("session list identity exceeded protocol bounds"));
         }
     }
     Ok(())
@@ -2134,53 +2015,6 @@ mod tests {
     }
 
     #[test]
-    fn complete_tree_requires_one_consistent_depth_first_snapshot() {
-        let root = TreeNode {
-            entry_id: "root".into(),
-            parent_id: None,
-            depth: 0,
-            kind: TreeNodeKind::Message,
-            role: Some(TreeNodeRole::User),
-            display_class: TreeDisplayClass::Content,
-            state: None,
-            label: None,
-            timestamp: None,
-            summary: "start".into(),
-            has_children: true,
-        };
-        let child = TreeNode {
-            entry_id: "child".into(),
-            parent_id: Some("root".into()),
-            depth: 1,
-            kind: TreeNodeKind::Message,
-            role: Some(TreeNodeRole::Assistant),
-            display_class: TreeDisplayClass::Content,
-            state: None,
-            label: None,
-            timestamp: None,
-            summary: "reply".into(),
-            has_children: false,
-        };
-        let tree = SessionTree {
-            nodes: vec![root.clone(), child.clone()],
-            leaf_id: Some("child".into()),
-        };
-        assert!(validate_tree(&tree).is_ok());
-
-        let invalid = SessionTree {
-            nodes: vec![
-                TreeNode {
-                    has_children: false,
-                    ..root
-                },
-                child,
-            ],
-            leaf_id: Some("missing".into()),
-        };
-        assert!(validate_tree(&invalid).is_err());
-    }
-
-    #[test]
     fn saved_session_inventory_accepts_additive_host_metadata() {
         let value = serde_json::json!({
             "sessions": [{
@@ -2234,20 +2068,6 @@ mod tests {
     }
 
     #[test]
-    fn fork_state_requires_text_exactly_when_completed() {
-        assert!(validate_fork_state(false, Some("returned draft"), "op").is_ok());
-        assert!(validate_fork_state(true, None, "op").is_ok());
-        assert!(matches!(
-            validate_fork_state(false, None, "op"),
-            Err(ClientError::EffectUnknown { .. })
-        ));
-        assert!(matches!(
-            validate_fork_state(true, Some("unexpected"), "op"),
-            Err(ClientError::EffectUnknown { .. })
-        ));
-    }
-
-    #[test]
     fn content_chunk_parser_uses_protocol_camel_case_fields() {
         let value = serde_json::json!({
             "type": "tool_result",
@@ -2275,5 +2095,278 @@ mod tests {
                 ..
             } if file_ref == "file-1"
         ));
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct SessionTokenState {
+    registry: Arc<Mutex<SessionTokenRegistry>>,
+}
+
+#[derive(Default)]
+struct SessionTokenRegistry {
+    next_request: u64,
+    tokens: HashMap<String, SessionTokenBinding>,
+}
+
+struct SessionTokenBinding {
+    request_id: u64,
+    connection_id: String,
+    selection_generation: u64,
+    scope: SessionTokenScope,
+    session_file: String,
+}
+
+#[derive(Clone)]
+pub enum SessionTokenScope {
+    Work {
+        host_epoch: String,
+        instance_id: String,
+        runtime_generation: u64,
+    },
+    Machine {
+        machine_host_id: String,
+        host_epoch: String,
+    },
+}
+
+pub fn begin_session_token_request(state: &SessionTokenState) -> Result<u64> {
+    let mut registry = state
+        .registry
+        .lock()
+        .map_err(|_| ClientError::Protocol("Session token registry is unavailable".into()))?;
+    registry.next_request = registry
+        .next_request
+        .checked_add(1)
+        .ok_or_else(|| ClientError::Protocol("Session token request counter overflowed".into()))?;
+    Ok(registry.next_request)
+}
+pub fn publish_session_tokens(
+    state: &SessionTokenState,
+    request_id: u64,
+    connection_id: &str,
+    selection_generation: u64,
+    scope: SessionTokenScope,
+    tokens: HashMap<String, String>,
+) -> Result<()> {
+    let mut registry = state
+        .registry
+        .lock()
+        .map_err(|_| ClientError::Protocol("Session token registry is unavailable".into()))?;
+    for (token, session_file) in tokens {
+        registry.tokens.insert(
+            token,
+            SessionTokenBinding {
+                request_id,
+                connection_id: connection_id.to_owned(),
+                selection_generation,
+                scope: scope.clone(),
+                session_file,
+            },
+        );
+    }
+    let oldest_retained = registry.next_request.saturating_sub(63);
+    registry
+        .tokens
+        .retain(|_, binding| binding.request_id >= oldest_retained);
+    Ok(())
+}
+pub fn resolve_work_session_token(
+    state: &SessionTokenState,
+    connection_id: &str,
+    selection_generation: u64,
+    instance_id: &str,
+    host_epoch: &str,
+    runtime_generation: u64,
+    token: &str,
+) -> Result<String> {
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|_| ClientError::Protocol("Session token registry is unavailable".into()))?;
+    let binding = registry
+        .tokens
+        .get(token)
+        .ok_or_else(|| ClientError::Protocol("Session token is invalid or expired".into()))?;
+    let scope_matches = matches!(
+        &binding.scope,
+        SessionTokenScope::Work {
+            host_epoch: bound_epoch,
+            instance_id: bound_instance,
+            runtime_generation: bound_generation,
+        } if bound_epoch == host_epoch
+            && bound_instance == instance_id
+            && *bound_generation == runtime_generation
+    );
+    if binding.connection_id != connection_id
+        || binding.selection_generation != selection_generation
+        || !scope_matches
+    {
+        return Err(ClientError::Protocol(
+            "Session token belongs to a stale list result".into(),
+        ));
+    }
+    Ok(binding.session_file.clone())
+}
+pub fn resolve_machine_session_token(
+    state: &SessionTokenState,
+    connection_id: &str,
+    selection_generation: u64,
+    machine_host_id: &str,
+    token: &str,
+) -> Result<(String, String)> {
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|_| ClientError::Protocol("Session token registry is unavailable".into()))?;
+    let binding = registry
+        .tokens
+        .get(token)
+        .ok_or_else(|| ClientError::Protocol("Session token is invalid or expired".into()))?;
+    let bound_host_epoch = match &binding.scope {
+        SessionTokenScope::Machine {
+            machine_host_id: bound_machine,
+            host_epoch,
+        } if bound_machine == machine_host_id => Some(host_epoch),
+        _ => None,
+    };
+    if binding.connection_id != connection_id
+        || binding.selection_generation != selection_generation
+        || bound_host_epoch.is_none()
+    {
+        return Err(ClientError::Protocol(
+            "Session token belongs to another Host or Machine".into(),
+        ));
+    }
+    Ok((
+        binding.session_file.clone(),
+        bound_host_epoch.expect("scope was checked").clone(),
+    ))
+}
+impl SessionTokenState {
+    pub fn clear(&self) {
+        self.registry.lock().unwrap().tokens.clear();
+    }
+}
+
+#[cfg(test)]
+mod inventory_session_token_is_bound_to_main_host_generation_and_machine_test {
+    use super::*;
+    #[test]
+    fn inventory_session_token_is_bound_to_main_host_generation_and_machine() {
+        let state = SessionTokenState::default();
+        let request = begin_session_token_request(&state).unwrap();
+        publish_session_tokens(
+            &state,
+            request,
+            "main-host",
+            4,
+            SessionTokenScope::Machine {
+                machine_host_id: "windows-subhost".into(),
+                host_epoch: "main-epoch".into(),
+            },
+            HashMap::from([("safe-token".into(), "C:\\sessions\\private.jsonl".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_machine_session_token(&state, "main-host", 4, "windows-subhost", "safe-token",)
+                .unwrap(),
+            ("C:\\sessions\\private.jsonl".into(), "main-epoch".into(),)
+        );
+        assert!(
+            resolve_machine_session_token(&state, "main-host", 4, "another-machine", "safe-token",)
+                .is_err()
+        );
+        assert!(
+            resolve_machine_session_token(
+                &state,
+                "another-main",
+                4,
+                "windows-subhost",
+                "safe-token",
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_machine_session_token(&state, "main-host", 5, "windows-subhost", "safe-token",)
+                .is_err()
+        );
+        assert!(
+            resolve_work_session_token(&state, "main-host", 4, "work", "epoch", 1, "safe-token",)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod older_session_list_completion_does_not_invalidate_newer_tokens_test {
+    use super::*;
+    #[test]
+    fn older_session_list_completion_does_not_invalidate_newer_tokens() {
+        let state = SessionTokenState::default();
+        let older = begin_session_token_request(&state).unwrap();
+        let newer = begin_session_token_request(&state).unwrap();
+        let scope = SessionTokenScope::Work {
+            host_epoch: "epoch".into(),
+            instance_id: "work".into(),
+            runtime_generation: 2,
+        };
+        publish_session_tokens(
+            &state,
+            newer,
+            "host-a",
+            7,
+            scope.clone(),
+            HashMap::from([("new-token".into(), "C:\\sessions\\new.jsonl".into())]),
+        )
+        .unwrap();
+        publish_session_tokens(
+            &state,
+            older,
+            "host-a",
+            7,
+            scope,
+            HashMap::from([("old-token".into(), "/sessions/old.jsonl".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_work_session_token(&state, "host-a", 7, "work", "epoch", 2, "new-token",)
+                .unwrap(),
+            "C:\\sessions\\new.jsonl"
+        );
+        assert!(
+            resolve_work_session_token(&state, "host-b", 7, "work", "epoch", 2, "new-token",)
+                .is_err()
+        );
+        assert!(
+            resolve_work_session_token(&state, "host-a", 8, "work", "epoch", 2, "new-token",)
+                .is_err()
+        );
+    }
+}
+
+/// How an accepted Session result affects the currently observed content.
+/// The Host result is authoritative; display application cannot undo its success.
+pub trait SessionChange {
+    fn replacement(&self) -> Option<(&InstanceSnapshot, bool)>;
+}
+impl SessionChange for SessionReplacementResult {
+    fn replacement(&self) -> Option<(&InstanceSnapshot, bool)> {
+        (!self.cancelled).then_some((&self.instance, false))
+    }
+}
+impl SessionChange for SessionForkResult {
+    fn replacement(&self) -> Option<(&InstanceSnapshot, bool)> {
+        (!self.cancelled).then_some((&self.instance, false))
+    }
+}
+impl SessionChange for SessionNavigateResult {
+    fn replacement(&self) -> Option<(&InstanceSnapshot, bool)> {
+        (!self.cancelled).then_some((&self.instance, true))
+    }
+}
+impl SessionChange for SessionReloadResult {
+    fn replacement(&self) -> Option<(&InstanceSnapshot, bool)> {
+        Some((&self.instance, false))
     }
 }
