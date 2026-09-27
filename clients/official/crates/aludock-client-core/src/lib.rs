@@ -7,10 +7,12 @@ mod config;
 mod connection_router;
 mod connections;
 mod conversation;
+mod conversation_images;
 mod deliverables;
 mod endpoint;
 mod error;
 mod extension_ui;
+mod file_transfer;
 mod fs_publish;
 mod host_registry;
 mod identity;
@@ -71,6 +73,7 @@ pub use conversation::{
     ContentBlock, DockEvent, EventPage, FollowStream, HistoryRecord, ImagePath, InstanceReadResult,
     PendingMessage, ReadReplay,
 };
+pub use conversation_images::{ConversationImageTransfer, MAX_CONVERSATION_IMAGE_BYTES};
 pub use deliverables::{
     DeliverableDownloadProgress, DeliverableDownloadResult, DeliverableDto,
     MAX_DELIVERABLE_CHUNK_BYTES, MAX_TEMPORARY_DELIVERABLE_BYTES,
@@ -115,9 +118,8 @@ pub use session_content::{
 pub use session_media::{MAX_ATTACHMENT_PREVIEW_BYTES, MediaHandle, MediaScope};
 pub use sessions::{
     CompactionPromptTemplatesResult, ConversationContentChunk, ConversationContentPage,
-    ConversationHistoryEntry, ConversationHistoryPage, ConversationImageTransfer,
-    MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionChange, SessionCompaction,
-    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
+    ConversationHistoryEntry, ConversationHistoryPage, NavigateOptions, SessionChange,
+    SessionCompaction, SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
     SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
     SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
     SessionTokenScope, SessionTokenState, SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind,

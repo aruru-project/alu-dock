@@ -15,7 +15,10 @@ use crate::{
         CONTROL_RESPONSE_TIMEOUT, LONG_MUTATION_RESPONSE_TIMEOUT, RESPONSE_TRANSFER_IDLE_TIMEOUT,
     },
     tls::{ConnectedTransport, PinnedTlsConnector, read_json_line, write_json_line},
-    wire::decode_canonical_base64,
+    wire::{
+        MAX_CONTROL_BASE64_CHUNK_BYTES as MAX_RESPONSE_TRANSFER_CHUNK_BYTES,
+        decode_canonical_base64, read_timed_json_line,
+    },
 };
 
 pub(crate) const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
@@ -24,7 +27,6 @@ const CLIENT_VERSION: &str = match option_env!("ALUDOCK_RELEASE_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
-const MAX_RESPONSE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
     MAX_DOCK_TRANSFER_BYTES.div_ceil(MAX_RESPONSE_TRANSFER_CHUNK_BYTES);
 pub(crate) const CATALOG_SCHEMA_VERSION: u64 = 1;
@@ -362,7 +364,13 @@ async fn read_response_envelope<R: AsyncBufRead + Unpin>(
     request_id: &str,
     host_epoch: &str,
 ) -> Result<ResponseEnvelope> {
-    let first: Value = read_response_line(stream, maximum_line_bytes).await?;
+    let first: Value = read_timed_json_line(
+        stream,
+        maximum_line_bytes,
+        RESPONSE_TRANSFER_IDLE_TIMEOUT,
+        "response transfer",
+    )
+    .await?;
     if first.get("kind").and_then(Value::as_str) != Some("response_transfer") {
         let response: ResponseEnvelope = serde_json::from_value(first).map_err(|error| {
             ClientError::Protocol(format!("invalid response envelope: {error}"))
@@ -419,7 +427,13 @@ async fn read_response_envelope<R: AsyncBufRead + Unpin>(
         if next_index == count {
             break;
         }
-        raw = read_response_line(stream, maximum_line_bytes).await?;
+        raw = read_timed_json_line(
+            stream,
+            maximum_line_bytes,
+            RESPONSE_TRANSFER_IDLE_TIMEOUT,
+            "response transfer",
+        )
+        .await?;
         if raw.get("kind").and_then(Value::as_str) != Some("response_transfer") {
             return Err(protocol(
                 "response transfer ended before all chunks arrived",
@@ -435,18 +449,6 @@ async fn read_response_envelope<R: AsyncBufRead + Unpin>(
         ));
     }
     Ok(response)
-}
-
-async fn read_response_line<T: DeserializeOwned, R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    maximum_bytes: usize,
-) -> Result<T> {
-    timeout(
-        RESPONSE_TRANSFER_IDLE_TIMEOUT,
-        read_json_line(reader, maximum_bytes),
-    )
-    .await
-    .map_err(|_| protocol("timed out while receiving a response transfer"))?
 }
 
 fn protocol(message: impl Into<String>) -> ClientError {

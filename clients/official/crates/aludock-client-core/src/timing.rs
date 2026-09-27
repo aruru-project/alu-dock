@@ -6,3 +6,4 @@ pub(crate) const PROTOCOL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const LONG_MUTATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
 pub(crate) const RESPONSE_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const FILE_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);

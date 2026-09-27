@@ -1,30 +1,29 @@
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::timeout,
-};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
     capabilities::INSTANCE_DELIVERABLES as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
-    tls::{read_json_line, write_json_line},
-    wire::decode_canonical_base64,
+    file_transfer::FileTransfer,
+    timing::FILE_READ_IDLE_TIMEOUT,
+    tls::write_json_line,
+    wire::{read_timed_json_line, require_clean_end},
 };
 
-pub const MAX_TEMPORARY_DELIVERABLE_BYTES: u64 = 100 * 1024 * 1024;
+pub use crate::file_transfer::{
+    MAX_SOURCE_FILE_TRANSFER_BYTES as MAX_TEMPORARY_DELIVERABLE_BYTES,
+    MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES as MAX_DELIVERABLE_CHUNK_BYTES,
+};
 pub const MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE: usize = 1_024;
-pub const MAX_DELIVERABLE_CHUNK_BYTES: usize = 512 * 1_024;
 const MAX_INSTANCE_ID_CHARS: usize = 128;
 const MAX_DELIVERY_REF_CHARS: usize = 128;
 const MAX_DELIVERABLE_NAME_CHARS: usize = 512;
 const MAX_ERROR_MESSAGE_CHARS: usize = 2_048;
-const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Path-free metadata for one temporary file registered by an Agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -293,7 +292,13 @@ where
     W: AsyncWrite + Unpin,
     F: FnMut(DeliverableDownloadProgress),
 {
-    let first: Value = read_download_line(stream, maximum_line_bytes).await?;
+    let first: Value = read_timed_json_line(
+        stream,
+        maximum_line_bytes,
+        FILE_READ_IDLE_TIMEOUT,
+        "temporary file download",
+    )
+    .await?;
     if first.get("kind").and_then(Value::as_str) == Some("response") {
         let response: ResponseEnvelope = serde_json::from_value(first)?;
         validate_response_envelope(&response, request_id, host_epoch)?;
@@ -317,16 +322,20 @@ where
         }
     };
 
-    let mut digest = Sha256::new();
-    let mut chunks = 0_u64;
-    let mut size_bytes = 0_u64;
+    let mut transfer = FileTransfer::new(deliverable.size_bytes, "temporary file");
     on_progress(DeliverableDownloadProgress {
         bytes_received: 0,
         total_bytes: deliverable.size_bytes,
     });
 
     loop {
-        let raw: Value = read_download_line(stream, maximum_line_bytes).await?;
+        let raw: Value = read_timed_json_line(
+            stream,
+            maximum_line_bytes,
+            FILE_READ_IDLE_TIMEOUT,
+            "temporary file download",
+        )
+        .await?;
         if raw.get("kind").and_then(Value::as_str) == Some("response") {
             return Err(protocol(
                 "temporary file download returned an ordinary response after readiness",
@@ -338,26 +347,10 @@ where
             }
             DeliverableDownloadFrame::Error { error, .. } => return Err(download_error(error)),
             DeliverableDownloadFrame::Chunk { index, data, .. } => {
-                if index != chunks {
-                    return Err(protocol("temporary file chunks arrived out of order"));
-                }
-                let bytes = decode_canonical_base64(
-                    &data,
-                    MAX_DELIVERABLE_CHUNK_BYTES,
-                    "temporary file data",
-                )?;
-                let next_size = size_bytes
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| protocol("temporary file size overflowed"))?;
-                if next_size > deliverable.size_bytes {
-                    return Err(protocol("temporary file bytes exceeded the declared size"));
-                }
+                let bytes = transfer.decode_chunk(index, &data, MAX_DELIVERABLE_CHUNK_BYTES)?;
                 sink.write_all(&bytes).await?;
-                digest.update(&bytes);
-                size_bytes = next_size;
-                chunks += 1;
                 on_progress(DeliverableDownloadProgress {
-                    bytes_received: size_bytes,
+                    bytes_received: transfer.size_bytes(),
                     total_bytes: deliverable.size_bytes,
                 });
             }
@@ -367,56 +360,24 @@ where
                 sha256,
                 ..
             } => {
-                if terminal_chunks != chunks
-                    || terminal_size != size_bytes
-                    || size_bytes != deliverable.size_bytes
-                    || !lowercase_sha256(&sha256)
-                {
+                if terminal_size != deliverable.size_bytes {
                     return Err(protocol(
-                        "temporary file completion counts or digest were invalid",
+                        "temporary file completion did not match the declared size",
                     ));
                 }
-                let actual_digest = hex::encode(digest.finalize());
-                if sha256 != actual_digest {
-                    return Err(protocol("temporary file SHA-256 verification failed"));
-                }
+                let summary = transfer.finish(terminal_chunks, terminal_size, &sha256)?;
                 sink.flush().await?;
-                require_clean_end(stream).await?;
+                require_clean_end(stream, FILE_READ_IDLE_TIMEOUT, "temporary file download")
+                    .await?;
                 return Ok(DeliverableDownloadResult {
                     deliverable,
-                    chunks,
-                    size_bytes,
-                    sha256: actual_digest,
+                    chunks: summary.chunks,
+                    size_bytes: summary.size_bytes,
+                    sha256: summary.sha256,
                 });
             }
         }
     }
-}
-
-async fn read_download_line<T, R>(stream: &mut R, maximum_line_bytes: usize) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-    R: AsyncBufRead + Unpin,
-{
-    timeout(
-        DOWNLOAD_IDLE_TIMEOUT,
-        read_json_line(stream, maximum_line_bytes),
-    )
-    .await
-    .map_err(|_| protocol("temporary file download timed out"))?
-}
-
-async fn require_clean_end<R: AsyncRead + Unpin>(stream: &mut R) -> Result<()> {
-    let mut trailing = [0_u8; 1];
-    let read = timeout(DOWNLOAD_IDLE_TIMEOUT, stream.read(&mut trailing))
-        .await
-        .map_err(|_| protocol("temporary file download timed out before completion closed"))??;
-    if read != 0 {
-        return Err(protocol(
-            "temporary file download sent data after completion",
-        ));
-    }
-    Ok(())
 }
 
 fn parse_frame(
@@ -498,13 +459,6 @@ fn safe_deliverable_name(value: &str) -> bool {
         && !value
             .chars()
             .any(|character| matches!(character, '/' | '\\'))
-}
-
-fn lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn protocol(message: impl Into<String>) -> ClientError {

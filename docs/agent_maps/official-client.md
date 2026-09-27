@@ -30,7 +30,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 | `/new`、Reload、Resume、Tree、Fork、Clone | `operations.rs` 持原 operationId、冻结目标、结果；`SessionContent` 先接纳真实替换，编辑认领另算 | `SessionManager.vue`、`command-console.ts`、`operationResults.ts`、`operationBinding.ts`；Tauri typed commands | `sessionReload.test.mjs`、`submitDraft.test.mjs`、core operation/observation 测试 |
 | 输入、Queue、发送、模型/Stop 等控制 | `composer.ts` / `inputEditor.ts` 拥有一个编辑器；core operation 是结果事实；`stores/app.ts` 保本地编辑 revision | `InputRegion.vue`、`OperationResults.vue`、`workActions.ts`；`captureOperationTarget` 与需要可靠编辑保存的 `captureOperation` 分开 | App 真实控件门；普通输入、展开输入及 IME 须实际交互检查 |
 | 上传原件、粘贴、取消、移除及重绑 | `attachment_jobs.rs` 持源、目标、进度、receipt/失败/unknown；`SessionMedia` 持文件；Vue 只保当前选择 | `attachmentUploads.ts`、`AttachmentCard.vue`；pick/stage/start/snapshot；typed attachment API | `attachmentMediaProtocol.test.mjs` + public Rust example；既有 upload-job 测试；本轮未改上传时不重跑 |
-| 对话图片、Agent 发布图片、放大和保存 | `session_media.rs` 的文件、别名、flight；`sessions.rs` / `published_files.rs` 的传输校验；Tauri 只做平台交付 | `conversationRegion.ts`、`ConversationImage.vue`、`ImagePreviewDialog.vue`；`aludock-media`、`published_image`、`save_preview_image` | core `published_files` / media 测试；`appInteraction.test.mjs --files-reading`；Tauri save/URI helper |
+| 对话图片、Agent 发布图片、放大和保存 | `session_media.rs` 的文件、别名、flight；`conversation_images.rs` / `published_files.rs` 的传输校验；Tauri 只做平台交付 | `conversationRegion.ts`、`ConversationImage.vue`、`ImagePreviewDialog.vue`；`aludock-media`、`published_image`、`save_preview_image` | core `published_files` / media 测试；`appInteraction.test.mjs --files-reading`；Tauri save/URI helper |
 | 切 Work/F5 的阅读位置、跟随和布局变化 | 只有 `conversationViewport.ts` 写滚动；`localState.ts` 存小型 DOM-free 阅读意图 | 实际 read/replace 绑定 Host epoch/Work/Session；scroll、图片布局、加载更早、返回底部 | `conversationViewport.test.ts`；实际浏览器滚动/选择/渐进内容，不能用截图代替手感 |
 | 面板、弹窗、Extension UI 与焦点 | `pageSurfaces.ts` 只管显示/focus；`controlPanel.ts` 管配置查询；Extension 状态/回调仍沿 core 控制连接 | `PageDialogs.vue`、`ControlCenter.vue`、`extension-ui` store；输入保持同一节点 | App/Session 门；OS IME、Android Back 和实际 WebView 另核 |
 | workspace、deliverables、文件打开 | core `workspace_files.rs` / `deliverables.rs`；Tauri `WorkspaceFileState` / 平台 staging / 下载记录 | `deliveries.ts`、Workspace browser、下载面板；用户保存位置只由 OS dialog 产生 | 对应 core / Tauri 文件测试；真实文件提供者检查 |
@@ -63,7 +63,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 ## 文件从哪里来、活多久
 
 - 本地选取的文件与 clipboard/Android URI 导入同一个 `RunCache`，sync 后发布私有不可变源。上传、preview 和可信 receipt 关联的正式图片共享这个源。普通非图片文件仍可上传。
-- `conversation.image` 逐块验证完整性；`file.read` 沿既有分页/parser 写 sink，并核实例、offset、DTO、epoch/runtime 和完整长度。后者没有远端 SHA 字段，`PublishedFileTransfer.sha256` **只描述实际收到的本地字节**，不得称为远端摘要认证。
+- `conversation_images.rs` 持有 `conversation.image` 传输；它与交付、工作区读取复用 `file_transfer.rs` 的计数和远端摘要检查，`wire.rs` 提供超时读取与文件流结束检查，各入口保留不同的 readiness/完成条件。`file.read` 沿既有分页/parser 写 sink，并核实例、offset、DTO、epoch/runtime 和完整长度。后者没有远端 SHA 字段，`PublishedFileTransfer.sha256` **只描述实际收到的本地字节**，不得称为远端摘要认证。
 - 原生根据真实稳定连接 authority、Machine、fileId、MIME 和源描述关联 receipt；opaque ref 不拆解，文件名不当身份，Vue 不用附件预览覆盖正式图片。请求域与文件寿命分开。
 - 所有对话/发布/附件图片都返回 `MediaHandle`。URL 只通过受限 `aludock-media` 解析注册的 handle，WebView 没有任意路径读权限。显示 prune、F5、Work 切换只释放显示资源，不删可信文件。
 - 图片保存传 `{handle, name}`，不 fetch URL 到 JS，不把 Uint8Array 再传回 Rust。core 流式复制并复核本地长度/SHA；Tauri 复用原 dialog、staging、atomic commit/Android URI copy。保存任务持有自己的临时文件直到完成；取消/错误只清自己的临时文件，不能删原件。Dialog/URI 的平台差异仍在 Tauri。

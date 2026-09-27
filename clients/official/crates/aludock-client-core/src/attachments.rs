@@ -25,10 +25,10 @@ use crate::{
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
     timing::LONG_MUTATION_RESPONSE_TIMEOUT,
     tls::{read_json_line, write_json_line},
+    wire::MAX_CONTROL_BASE64_CHUNK_BYTES,
 };
 
 pub const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_CHUNK_BYTES: u64 = 512 * 1024;
 const MAX_ATTACHMENT_NAME_CHARS: usize = 1_024;
 const MAX_ATTACHMENT_MEDIA_TYPE_CHARS: usize = 512;
 pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 32;
@@ -374,7 +374,7 @@ where
         || ready.request_id != request_id
         || ready.host_epoch != host_epoch
         || ready.max_chunk_bytes == 0
-        || ready.max_chunk_bytes > MAX_CHUNK_BYTES
+        || ready.max_chunk_bytes > MAX_CONTROL_BASE64_CHUNK_BYTES as u64
     {
         return Err(ClientError::Protocol(
             "attachment readiness correlation or limits were invalid".into(),

@@ -1,31 +1,28 @@
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    time::timeout,
-};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
     capabilities::WORKSPACE_FILES as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
-    tls::{read_json_line, write_json_line},
-    wire::decode_canonical_base64,
+    file_transfer::FileTransfer,
+    timing::FILE_READ_IDLE_TIMEOUT,
+    tls::write_json_line,
+    wire::{read_timed_json_line, require_clean_end},
 };
 
-pub const MAX_WORKSPACE_FILE_BYTES: u64 = 100 * 1024 * 1024;
-pub const MAX_WORKSPACE_FILE_CHUNK_BYTES: usize = 512 * 1024;
+pub use crate::file_transfer::{
+    MAX_SOURCE_FILE_TRANSFER_BYTES as MAX_WORKSPACE_FILE_BYTES,
+    MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES as MAX_WORKSPACE_FILE_CHUNK_BYTES,
+};
 pub const MAX_WORKSPACE_ENTRY_LIST_ITEMS: usize = 200;
 const MAX_WORKSPACE_PATH_CHARS: usize = 4_096;
 const MAX_WORKSPACE_ENTRY_NAME_CHARS: usize = 1_024;
 const MAX_WORKSPACE_REVISION_CHARS: usize = 128;
 const MAX_INSTANCE_ID_CHARS: usize = 128;
 const MAX_ERROR_MESSAGE_CHARS: usize = 2_048;
-const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -401,7 +398,13 @@ where
     R: FnMut(&WorkspaceFileEntry) -> Result<()>,
     F: FnMut(WorkspaceFileReadProgress),
 {
-    let first: Value = read_workspace_line(stream, maximum_line_bytes).await?;
+    let first: Value = read_timed_json_line(
+        stream,
+        maximum_line_bytes,
+        FILE_READ_IDLE_TIMEOUT,
+        "workspace file read",
+    )
+    .await?;
     if first.get("kind").and_then(Value::as_str) == Some("response") {
         let response: ResponseEnvelope = serde_json::from_value(first)?;
         validate_response_envelope(&response, request_id, host_epoch)?;
@@ -430,16 +433,21 @@ where
         ));
     }
     validate_ready(&entry)?;
-    let mut digest = Sha256::new();
-    let mut chunks = 0_u64;
-    let mut size_bytes = 0_u64;
+    // Readiness is an observation, not a promise that the file cannot grow.
+    let mut transfer = FileTransfer::new(MAX_WORKSPACE_FILE_BYTES, "workspace file");
     on_progress(WorkspaceFileReadProgress {
         bytes_received: 0,
         observed_size_bytes,
     });
 
     loop {
-        let raw: Value = read_workspace_line(stream, maximum_line_bytes).await?;
+        let raw: Value = read_timed_json_line(
+            stream,
+            maximum_line_bytes,
+            FILE_READ_IDLE_TIMEOUT,
+            "workspace file read",
+        )
+        .await?;
         if raw.get("kind").and_then(Value::as_str) == Some("response") {
             return Err(protocol(
                 "workspace file read returned an ordinary response after readiness",
@@ -451,28 +459,10 @@ where
             }
             WorkspaceFileReadFrame::Error { error, .. } => return Err(read_error(error)),
             WorkspaceFileReadFrame::Chunk { index, data, .. } => {
-                if index != chunks {
-                    return Err(protocol("workspace file chunks arrived out of order"));
-                }
-                let bytes = decode_canonical_base64(
-                    &data,
-                    MAX_WORKSPACE_FILE_CHUNK_BYTES,
-                    "workspace file data",
-                )?;
-                if bytes.is_empty() {
-                    return Err(protocol("workspace file contained an empty chunk"));
-                }
-                size_bytes = size_bytes
-                    .checked_add(bytes.len() as u64)
-                    .ok_or_else(|| protocol("workspace file size overflowed"))?;
-                if size_bytes > MAX_WORKSPACE_FILE_BYTES {
-                    return Err(protocol("workspace file exceeded its transfer bound"));
-                }
+                let bytes = transfer.decode_chunk(index, &data, MAX_WORKSPACE_FILE_CHUNK_BYTES)?;
                 sink.write_all(&bytes).await?;
-                digest.update(&bytes);
-                chunks += 1;
                 on_progress(WorkspaceFileReadProgress {
-                    bytes_received: size_bytes,
+                    bytes_received: transfer.size_bytes(),
                     observed_size_bytes,
                 });
             }
@@ -482,53 +472,19 @@ where
                 sha256,
                 ..
             } => {
-                if terminal_chunks != chunks
-                    || terminal_size != size_bytes
-                    || terminal_size > MAX_WORKSPACE_FILE_BYTES
-                    || !lowercase_sha256(&sha256)
-                {
-                    return Err(protocol("workspace file completion was inconsistent"));
-                }
-                let actual_digest = hex::encode(digest.finalize());
-                if sha256 != actual_digest {
-                    return Err(protocol("workspace file SHA-256 verification failed"));
-                }
+                let summary = transfer.finish(terminal_chunks, terminal_size, &sha256)?;
                 sink.flush().await?;
-                require_clean_end(stream).await?;
+                require_clean_end(stream, FILE_READ_IDLE_TIMEOUT, "workspace file read").await?;
                 return Ok(WorkspaceFileReadResult {
                     entry,
-                    chunks,
-                    size_bytes,
-                    sha256: actual_digest,
+                    chunks: summary.chunks,
+                    size_bytes: summary.size_bytes,
+                    sha256: summary.sha256,
                     host_epoch: host_epoch.into(),
                 });
             }
         }
     }
-}
-
-async fn read_workspace_line<T, R>(stream: &mut R, maximum_line_bytes: usize) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-    R: AsyncBufRead + Unpin,
-{
-    timeout(
-        READ_IDLE_TIMEOUT,
-        read_json_line(stream, maximum_line_bytes),
-    )
-    .await
-    .map_err(|_| protocol("workspace file read timed out"))?
-}
-
-async fn require_clean_end<R: AsyncRead + Unpin>(stream: &mut R) -> Result<()> {
-    let mut trailing = [0_u8; 1];
-    let read = timeout(READ_IDLE_TIMEOUT, stream.read(&mut trailing))
-        .await
-        .map_err(|_| protocol("workspace file read timed out before completion closed"))??;
-    if read != 0 {
-        return Err(protocol("workspace file read sent data after completion"));
-    }
-    Ok(())
 }
 
 fn parse_frame(
@@ -637,13 +593,6 @@ fn safe_text(value: &str, maximum_chars: usize) -> bool {
     !value.is_empty()
         && value.chars().count() <= maximum_chars
         && !value.chars().any(char::is_control)
-}
-
-fn lowercase_sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn protocol(message: impl Into<String>) -> ClientError {
