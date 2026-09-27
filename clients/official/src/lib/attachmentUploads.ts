@@ -9,7 +9,7 @@ import { attachmentUploadMatches, attachmentUploadTarget, bindLocalAttachment, m
 import { isRasterImageMimeType, rasterImageMimeType } from './rasterImage'
 import { requireConnectionContext } from './hostResult'
 import { userErrorMessage as errorMessage } from './userError'
-import type { AttachmentDto, AttachmentJobSnapshot, ConnectionContext, SelectedAttachment } from './types'
+import type { AttachmentJobSnapshot, ConnectionContext, SelectedAttachment } from './types'
 import type { usePageSurfaces } from './pageSurfaces'
 import { useAppStore } from '../stores/app'
 type AttachmentPreviewResource = { handle: string; url: string; mediaType: string }
@@ -26,8 +26,11 @@ export function useAttachmentUploads(options: {
   const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
   const reportError = options.reportError
   const restoredImageCounts = ref<Record<string, number>>({})
-  const clearingRestoredImages = ref(false)
-  const attachmentPicking = ref(false)
+  const attachmentWorkKey = computed(() => JSON.stringify([app.activeConnectionId, selected.value?.id]))
+  const clearingImageWorks = ref(new Set<string>())
+  const pickingWorks = ref(new Set<string>())
+  const clearingRestoredImages = computed(() => clearingImageWorks.value.has(attachmentWorkKey.value))
+  const attachmentPicking = computed(() => pickingWorks.value.has(attachmentWorkKey.value))
   const jobs = ref<AttachmentJobSnapshot[]>([])
   const storageError = '无法保存附件选择，请检查本机存储后重试；原选择保持不变。'
   const localErrors = ref<Record<string, string>>({})
@@ -116,12 +119,6 @@ export function useAttachmentUploads(options: {
     }
   }
   watch(() => app.operationResultsReady, applyReceipts)
-  async function verifyForSubmit(items: AttachmentDto[]) {
-    const work = selected.value, context = app.connectionContext
-    // Permanent Host receipts outlive the process-local source/upload job.
-    return !!work && !!context && items.every(item => !item.localUpload
-      || attachmentUploadMatches(item.localUpload, attachmentUploadTarget(work, context)))
-  }
 
   function setAttachmentPreview(key: string, resource: AttachmentPreviewResource) {
     attachmentPreviews.value = { ...attachmentPreviews.value, [key]: resource }
@@ -206,7 +203,8 @@ export function useAttachmentUploads(options: {
     if (!work || !isTauri || work.lifecycle !== 'active' || options.pairing() || attachmentPicking.value) return
     const view = captureView()
     if (!viewMatches(view)) return
-    attachmentPicking.value = true
+    const pendingKey = attachmentWorkKey.value
+    pickingWorks.value.add(pendingKey)
     reportError(null)
     try {
       const picked = await pickAttachments(view.workId, view.context)
@@ -217,7 +215,7 @@ export function useAttachmentUploads(options: {
         for (const item of picked) await removeAttachment(view.workId, item.token, view.context)
       }
     } catch (cause) { reportViewError(view, cause) }
-    finally { attachmentPicking.value = false }
+    finally { pickingWorks.value.delete(pendingKey) }
   }
   async function handleComposerPaste(event: ClipboardEvent) {
     if (!isTauri) return
@@ -232,7 +230,8 @@ export function useAttachmentUploads(options: {
     }
     const view = captureView()
     if (!viewMatches(view)) return
-    attachmentPicking.value = true
+    const pendingKey = attachmentWorkKey.value
+    pickingWorks.value.add(pendingKey)
     try {
       for (const [index, file] of images.entries()) {
         const bytes = new Uint8Array(await file.arrayBuffer())
@@ -247,7 +246,7 @@ export function useAttachmentUploads(options: {
         void launchAttachmentUpload(item, view)
       }
     } catch (cause) { reportViewError(view, cause) }
-    finally { attachmentPicking.value = false }
+    finally { pickingWorks.value.delete(pendingKey) }
   }
   async function cancelUpload(item: SelectedAttachment) {
     const view = captureView()
@@ -288,7 +287,8 @@ export function useAttachmentUploads(options: {
     const work = selected.value
     if (!work || options.pairing() || clearingRestoredImages.value || options.sendingOrRestoring()) return
     const context = requireConnectionContext(app)
-    clearingRestoredImages.value = true
+    const pendingKey = attachmentWorkKey.value
+    clearingImageWorks.value.add(pendingKey)
     try {
       await clearRestoredImages(work, context)
       if (!app.contextMatches(context) || selected.value?.id !== work.id) return
@@ -296,7 +296,7 @@ export function useAttachmentUploads(options: {
     } catch (cause) {
       if (app.contextMatches(context) && selected.value?.id === work.id) reportError(errorMessage(cause))
     } finally {
-      clearingRestoredImages.value = false
+      clearingImageWorks.value.delete(pendingKey)
     }
   }
 
@@ -329,7 +329,7 @@ export function useAttachmentUploads(options: {
   return {
     draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount,
     hasRestoredImageDrafts: computed(() => Object.values(restoredImageCounts.value).some(count => count > 0)),
-    maxMessageAttachments, refreshRestoredImageCount, clearQueueImages, chooseAttachments, handleComposerPaste, verifyForSubmit,
+    maxMessageAttachments, refreshRestoredImageCount, clearQueueImages, chooseAttachments, handleComposerPaste,
     launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, removeAttachmentPreview, listenNative,
     previewFailed: () => reportError('这个图片附件无法预览，原附件仍保持不变。'),
   }

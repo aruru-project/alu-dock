@@ -21,7 +21,6 @@ export type ControlCenterHandle = {
 /** Work buttons and their local feedback. Results are claimed by operationResults. */
 export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'askConfirm' | 'closeModal'>>, options: {
   observation(): ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'load' | 'active' | 'connected' | 'acceptWork'>>
-  transitionBusy(): boolean
   restoreQueue(): Promise<boolean>
   panel(): Pick<ControlCenterHandle, 'reconcileDomain'> | null
 }) {
@@ -35,7 +34,8 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
   const compactionWorkIds = ref<Set<string>>(new Set())
   const compactionErrors = ref<Record<string, { scope: FeedbackScope; message: string }>>({})
 
-  const workMutating = ref(false)
+  const pendingWorkActions = ref(new Set<string>())
+  const workMutating = computed(() => pendingWorkActions.value.has(feedbackIdentity.value))
   const feedbackIdentity = computed(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration,
     app.payload?.host.hostEpoch, selected.value?.id]))
   const sessionIdentity = computed(() => JSON.stringify([selected.value?.runtimeGeneration, selected.value?.executor.piSessionId]))
@@ -57,8 +57,6 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
   const continuedUnknowns = ref(new Set<string>())
   const unresolvedMutations = computed(() => new Map([...app.unresolvedMutations].filter(([, id]) => !continuedUnknowns.value.has(id))))
 
-  const nativeMutationPending = computed(() => [...app.nativeOperations.values()].some(operation => operation.kind !== 'submit_message'
-    && operation.state === 'pending' && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id))
   const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
   const unresolvedDomain = computed<MutationDomain | null>(() => {
     const workId = selected.value?.id ?? 'global'
@@ -104,11 +102,11 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
   async function stopSelectedWork(): Promise<boolean> {
     const work = selected.value
     const capturedHost = app.connectionContext
-    if (!isTauri || options.transitionBusy() || !capturedHost || !stopCanStart(work, workMutating.value) || !work) return false
+    if (!isTauri || !capturedHost || !stopCanStart(work, workMutating.value) || !work) return false
     const feedbackScope = captureFeedback(false)
     if (!await page.askConfirm('停止当前工作？', stopConfirmationText(work))) return false
     if (!feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return false
-    workMutating.value = true
+    pendingWorkActions.value.add(feedbackScope.identity)
     reportAction(feedbackScope, null)
     try {
       const result = await stopWork(work.id, app.captureOperationTarget(capturedHost, work.id))
@@ -124,17 +122,17 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
       reportAction(feedbackScope, errorMessage(cause))
       return false
     } finally {
-      workMutating.value = false
+      pendingWorkActions.value.delete(feedbackScope.identity)
     }
   }
 
   async function reopenSelectedWork() {
     const work = selected.value
-    if (!isTauri || options.transitionBusy() || !work || !work.reopenable || workMutating.value || mutationOutcomeUnknown.value) return
+    if (!isTauri || !work || !work.reopenable || workMutating.value || mutationOutcomeUnknown.value) return
     const capturedHost = requireConnectionContext(app)
     const previousGeneration = work.runtimeGeneration
     const feedbackScope = captureFeedback(false)
-    workMutating.value = true
+    pendingWorkActions.value.add(feedbackScope.identity)
     reportAction(feedbackScope, null)
     try {
       await reopenWork(work.id, app.captureOperationTarget(capturedHost, work.id))
@@ -156,7 +154,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
         reportAction(feedbackScope, errorMessage(cause))
       }
     } finally {
-      workMutating.value = false
+      pendingWorkActions.value.delete(feedbackScope.identity)
     }
   }
 
@@ -179,12 +177,12 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
 
   async function forgetSelectedWork() {
     const work = selected.value
-    if (!isTauri || options.transitionBusy() || !work || !['stopped', 'host_lost', 'runtime_error'].includes(work.lifecycle) || workMutating.value) return
+    if (!isTauri || !work || !['stopped', 'host_lost', 'runtime_error'].includes(work.lifecycle) || workMutating.value) return
     const capturedHost = requireConnectionContext(app)
     const feedbackScope = captureFeedback(false)
     if (!await page.askConfirm('从列表移除这条历史记录？')) return
     if (!feedbackMatches(feedbackScope)) return
-    workMutating.value = true
+    pendingWorkActions.value.add(feedbackScope.identity)
     reportAction(feedbackScope, null)
     try {
       await forgetWork(work.id, app.captureOperationTarget(capturedHost, work.id))
@@ -194,7 +192,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
 
       reportAction(feedbackScope, errorMessage(cause))
     } finally {
-      workMutating.value = false
+      pendingWorkActions.value.delete(feedbackScope.identity)
     }
   }
 
@@ -344,5 +342,5 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     return false
   }
 
-  return { aborting, workMutating, actionError, nativeMutationPending, mutationOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId, abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome }
+  return { aborting, workMutating, actionError, mutationOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId, abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome }
 }

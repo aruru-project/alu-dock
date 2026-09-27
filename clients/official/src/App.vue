@@ -43,13 +43,12 @@ const page = usePageSurfaces({
 const { directoryOpen, commandOpen, deliveryOpen, workspaceBrowserOpen } = page
 const workActions = useWorkActions(page, {
   observation: () => observation,
-  transitionBusy: () => contextTransitionBusy.value,
   restoreQueue: () => restoreQueue(),
   panel: () => controlPanel.handle.value,
 })
 const { setCompactionError } = workActions
 const hostConnection = useHostConnection(page, {
-  busy: () => contextTransitionBusy.value,
+  busy: () => pairingInProgress.value,
   hasRestoredImages: () => hasRestoredImageDrafts.value,
 })
 const { pairingInProgress } = hostConnection
@@ -65,10 +64,10 @@ const { outputAwayFromBottom, showAgentActivity } = conversationRegion
 const deliveries = useDeliveries(page)
 const { deliveryTrayRef, deliveryLoading, deliveryError, currentDeliverableRows, olderDownloadHistory, openingDeliveryKey, refreshDeliverables, saveDeliverable, openDownloadedDeliverable, clearLocalDownloadHistory } = deliveries
 const workDirectory = useWorkDirectory(page, {
-  actions: () => workActions, attachments: () => attachments, input: () => input,
+  actions: () => workActions,
   pairing: () => pairingInProgress.value, acceptWork: (work) => observation.acceptWork(work),
 })
-const { newWorkMutationBusy, contextTransitionBusy } = workDirectory
+const { newWorkMutationBusy } = workDirectory
 const platform = usePlatformLifecycle(page, { observation: () => observation })
 const { windowFocused } = platform
 const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) => app.setDetailMode(value) })
@@ -112,7 +111,7 @@ onMounted(async () => {
     <WorkTopbar :page="page" :deliveries="deliveries" :failure-count="listResults.length" />
 
     <ConversationRegion :conversation-owner="conversationRegion" :observation="observation" :uploads="attachments" :page="page">
-      <ConnectionLanding :host="hostConnection" :platform="platform" :actions="workActions" :busy="contextTransitionBusy" />
+      <ConnectionLanding :host="hostConnection" :platform="platform" :actions="workActions" :busy="pairingInProgress" />
     </ConversationRegion>
 
     <div v-if="workResults.length && !commandOpen && !directoryOpen && !composerExpanded" class="alu-work-operation-results" aria-label="当前 Work 操作结果">

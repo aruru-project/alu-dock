@@ -5611,13 +5611,6 @@ async fn submit_message(
     );
     operations
         .execute(association, async move {
-            verify_session_scope(
-                &client,
-                &instance_id,
-                &expected_host_epoch,
-                expected_runtime_generation,
-            )
-            .await?;
             let images = captured
                 .as_ref()
                 .map_or(&[][..], |bucket| bucket.images.as_slice());

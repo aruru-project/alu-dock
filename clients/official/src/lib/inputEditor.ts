@@ -20,9 +20,9 @@ import { useCommandCatalogStore } from '../stores/command-catalog'
 /** One editor owner for compact and expanded input; no display state access. */
 export function useInputEditor(options: {
   page(): ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'appSettingsOpen' | 'closeControl' | 'commandOpen' | 'confirmDialog' | 'deliveryOpen' | 'directoryOpen' | 'hostSettingsOpen' | 'imagePreview' | 'messageTextView' | 'modalOpen' | 'openControlCenter' | 'returnFocusTo' | 'workspaceBrowserOpen'>>
-  observation(): ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'queue' | 'connected' | 'loading'>>
-  actions(): ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'actionError' | 'currentCompactionError' | 'nativeMutationPending' | 'workMutating' | 'mutationOutcomeUnknown' | 'stopSelectedWork'>>
-  attachments(): ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'draftAttachments' | 'maxMessageAttachments' | 'restoredImageCount' | 'clearingRestoredImages' | 'attachmentPicking' | 'uploadDrafts' | 'verifyForSubmit'>>
+  observation(): ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'queue'>>
+  actions(): ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'actionError' | 'currentCompactionError' | 'stopSelectedWork'>>
+  attachments(): ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'draftAttachments' | 'maxMessageAttachments' | 'restoredImageCount' | 'clearingRestoredImages' | 'attachmentPicking' | 'uploadDrafts'>>
   focused(): boolean
   pairing(): boolean
   activity(workId: string): void
@@ -44,7 +44,8 @@ export function useInputEditor(options: {
   let composerExpansionRevision = 0
   watch(composerExpanded, () => { composerExpansionRevision += 1 }, { flush: 'sync' })
 
-  const submitRequestPending = ref(false)
+  const pendingSubmits = ref(new Set<string>())
+  const submitWorkKey = computed(() => JSON.stringify([app.activeConnectionId, selected.value?.id]))
   const acknowledgedSubmits = ref<Set<string>>(new Set())
   let submitAttemptSequence = 0
   let submitViewRevision = 0
@@ -59,7 +60,7 @@ export function useInputEditor(options: {
       && operation.sessionId === selected.value.executor.piSessionId)
     return candidates.find(operation => operation.state === 'pending') ?? candidates.find(operation => operation.state === 'unknown')
   })
-  const submitting = computed(() => submitRequestPending.value || selectedSubmitAttempt.value?.state === 'pending')
+  const submitting = computed(() => pendingSubmits.value.has(submitWorkKey.value) || selectedSubmitAttempt.value?.state === 'pending')
   const submitOutcomeUnknown = computed(() => selectedSubmitAttempt.value?.state === 'unknown')
   const submitAcknowledged = computed(() => !!selectedSubmitAttempt.value && acknowledgedSubmits.value.has(selectedSubmitAttempt.value.operationId))
   const submitBlocked = computed(() => submitting.value || (submitOutcomeUnknown.value && !submitAcknowledged.value))
@@ -93,7 +94,8 @@ export function useInputEditor(options: {
     }
   }
 
-  const queueRestoring = ref(false)
+  const pendingQueueRestores = ref(new Set<string>())
+  const queueRestoring = computed(() => pendingQueueRestores.value.has(submitWorkKey.value))
   const queueNotice = ref('')
   let queueNoticeTimer = 0
 
@@ -123,8 +125,7 @@ export function useInputEditor(options: {
 
   const queueItems = computed(() => isTauri ? options.observation().queue.value : previewQueue)
 
-  const visibleComposerError = computed(() => submitAttemptError.value || submissionError.value || options.actions().actionError.value || options.actions().currentCompactionError.value
-    || (options.actions().nativeMutationPending.value ? '正在等待操作结果，本地编辑仍可继续。' : null))
+  const visibleComposerError = computed(() => submitAttemptError.value || submissionError.value || options.actions().actionError.value || options.actions().currentCompactionError.value)
 
   /* ── 输入框斜杠命令建议 ────────────────────────────────
    * pi 只展开位于消息最开头的 /command，因此建议仅在整段草稿
@@ -282,7 +283,8 @@ export function useInputEditor(options: {
     if (!work || options.pairing() || options.attachments().attachmentPicking.value || options.attachments().clearingRestoredImages.value || queueRestoring.value || submitting.value) return false
     const context = requireConnectionContext(app)
     const viewRevision = submitViewRevision
-    queueRestoring.value = true
+    const pendingKey = submitWorkKey.value
+    pendingQueueRestores.value.add(pendingKey)
     submissionError.value = null
     clearQueueNotice()
     try {
@@ -297,17 +299,16 @@ export function useInputEditor(options: {
       if (app.contextMatches(context) && submitViewRevision === viewRevision) submissionError.value = errorMessage(cause)
       return false
     } finally {
-      queueRestoring.value = false
+      pendingQueueRestores.value.delete(pendingKey)
     }
   }
 
   const canSubmit = computed(() => {
     if (submittedLocalControl(draft.value)) return !!selected.value && selected.value.lifecycle === 'active'
     return app.operationResultsReady && ![...app.nativeOperations.values()].some(operation => operation.kind === 'submit_message' && operation.state === 'succeeded' && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id)
-      && !!selected.value && !options.observation().loading.value && options.observation().connected.value
-      && !options.actions().workMutating.value && (!!draft.value.trim() || !!options.attachments().draftAttachments.value.length || !!options.attachments().restoredImageCount.value)
-      && isTauri && !options.pairing() && !options.attachments().clearingRestoredImages.value && !submitBlocked.value
-      && !options.actions().mutationOutcomeUnknown.value && !options.actions().nativeMutationPending.value && !queueRestoring.value && !options.attachments().attachmentPicking.value && !options.attachments().uploadDrafts.value.length
+      && !!selected.value && (!!draft.value.trim() || !!options.attachments().draftAttachments.value.length || !!options.attachments().restoredImageCount.value)
+      && isTauri && !options.attachments().clearingRestoredImages.value && !submitBlocked.value
+      && !queueRestoring.value && !options.attachments().attachmentPicking.value && !options.attachments().uploadDrafts.value.length
   })
 
   async function submit(): Promise<boolean> {
@@ -327,15 +328,11 @@ export function useInputEditor(options: {
     const capturedHost = { ...requireConnectionContext(app) }
     const viewRevision = submitViewRevision
     submitAttemptSequence++
-    submitRequestPending.value = true
+    const pendingKey = submitWorkKey.value
+    pendingSubmits.value.add(pendingKey)
     submissionError.value = null
     try {
       const operation = app.captureOperation(capturedHost, work.id, capturedAttachments.map(item => item.fileId))
-      if (!await options.attachments().verifyForSubmit(capturedAttachments)) {
-        submissionError.value = '附件在当前连接中不可用，请移除后重新选择。'
-        return false
-      }
-      if (!app.contextMatches(capturedHost) || selected.value?.id !== work.id || submitViewRevision !== viewRevision) return false
       const result = await submitMessage(work.id, captured, capturedAttachments.map(item => item.fileId), operation)
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
         if (!result.receipt.queued) options.activity(work.id)
@@ -344,7 +341,7 @@ export function useInputEditor(options: {
     } catch (cause) {
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) submissionError.value = errorMessage(cause)
       return false
-    } finally { submitRequestPending.value = false }
+    } finally { pendingSubmits.value.delete(pendingKey) }
   }
 
   async function submitExpanded() {

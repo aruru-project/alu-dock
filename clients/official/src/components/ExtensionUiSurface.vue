@@ -61,11 +61,11 @@ const locked = computed(() => phase.value !== 'idle')
 const visibleStatus = computed(() => genericExtensionStatus(extension.status))
 
 watch(() => request.value?.interactionId, async (id) => {
+  if (unknownInteractionId && unknownInteractionId !== id) {
+    extension.clearInteractionUnknown(unknownInteractionId)
+    unknownInteractionId = ''
+  }
   if (!id) {
-    if (unknownInteractionId) {
-      extension.clearInteractionUnknown(unknownInteractionId)
-      unknownInteractionId = ''
-    }
     resetResponse()
     return
   }
@@ -215,15 +215,17 @@ async function respond(cancelled = false) {
   const handle = extension.controller?.handle
   const response = responseForRequest()
   if (!current || !handle || !response || locked.value) return
+  const isCurrent = () => request.value === current && extension.controller?.handle === handle
   phase.value = 'submitting'
   responseError.value = ''
   try {
     const capturedHost = requireConnectionContext(app)
     await respondExtensionInteraction(handle, current.interactionId, response, cancelled, capturedHost)
-    if (!app.contextMatches(capturedHost)) return
+    if (!app.contextMatches(capturedHost) || !isCurrent()) return
     extension.resolveLocally(current.interactionId)
     resetResponse()
   } catch (cause) {
+    if (!isCurrent()) return
     if (isUnknown(cause)) {
       phase.value = 'unknown'
       unknownInteractionId = current.interactionId
@@ -240,9 +242,12 @@ async function reconcile() {
   const handle = extension.controller?.handle
   const interactionId = unknownInteractionId
   if (!interactionId || phase.value !== 'unknown') return
+  const current = request.value
+  const isCurrent = () => request.value === current && unknownInteractionId === interactionId
   phase.value = 'reconciling'
   responseError.value = '正在确认这次回答的结果…'
   const refreshed = await props.reconcileInteraction()
+  if (!isCurrent()) return
   if (!refreshed) {
     phase.value = 'unknown'
     responseError.value = '暂时无法确认这次回答的结果。请刷新确认，不要重复提交。'
@@ -255,12 +260,13 @@ async function reconcile() {
     return
   }
   responseError.value = '这项操作仍在等待，正在重新连接…'
-  if (handle && !await extension.releaseController(handle, 'detached')) {
-    phase.value = 'unknown'
-    return
+  if (handle) {
+    const released = await extension.releaseController(handle, 'detached')
+    if (!isCurrent()) return
+    if (!released) { phase.value = 'unknown'; return }
   }
   await acquire()
-  if (unknownInteractionId) {
+  if (isCurrent()) {
     phase.value = 'unknown'
     responseError.value = '还没有重新收到这项操作。请稍后再次刷新确认，不要重复提交。'
   }

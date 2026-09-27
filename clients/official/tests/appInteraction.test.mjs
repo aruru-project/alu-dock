@@ -35,7 +35,7 @@ nativeResults.set('create-failure', { ...nativeResults.get('new_session'), opera
 storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnectionId: 'host', connections: { host: {
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
-let abortNative, stopNative, modelNative, dequeueNative, submitNative, extensionBinding, allowExtension = false
+let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 const emit = (name, payload) => listeners.get(name)?.({ payload })
 const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
@@ -54,7 +54,14 @@ const invoke = async (command, args = {}) => {
     return extensionBinding
   }
   if (command === 'set_extension_widget_viewport') return
-  if (command === 'command_catalog') return { commands: [], diagnostics: [], total: 0, truncated: false }
+  if (command === 'command_catalog') return catalogNative ? catalogNative() : { commands: [], diagnostics: [], total: 0, truncated: false }
+  if (command === 'list_tools') {
+    if (toolsNative) return toolsNative()
+    throw { code: 'connection_failed', message: '工具暂时没有读到，请重试。' }
+  }
+  if (command === 'get_resources') return { resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
+  if (command === 'get_settings') return { settings: [] }
+  if (command === 'respond_extension_interaction') return respondNative(args)
   if (command === 'abort_run') return abortNative(args)
   if (command === 'stop_work') return stopNative(args)
   if (command === 'dequeue_messages') return dequeueNative(args)
@@ -186,6 +193,23 @@ try {
   mounted.mount(container)
   await settle()
   app.selectWork('work'); await settle()
+  // #306: sending targets a Work, not a ready conversation or unrelated control.
+  for (const state of ['pending', 'unknown']) {
+    emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-model', state, editor: null })
+    if (state === 'unknown') observation({ kind: 'status', state: 'disconnected' })
+    await settle()
+    const send = find(container, item => item.props.class === 'alu-send-btn')
+    assert.equal(send.props.disabled, false, 'send is available before the first conversation read and during a model change')
+    let submitted
+    submitNative = async args => { submitted = args; return { receipt: { queued: true, delivery: 'followUp' }, instance: work } }
+    await find(container, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} })
+    assert.equal(submitted.instanceId, 'work')
+    assert.equal(submitted.message, 'F5 draft preserved')
+  }
+  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-model', state: 'succeeded', editor: null, result: work })
+  await settle()
+  const initialSends = calls.filter(call => call.command === 'submit_message').length
+  const initialAcknowledgements = calls.filter(call => call.command === 'consume_operation').length
   contentSnapshot(); await settle()
   // User report: after a long absence, fresh idle facts must stop the cached
   // reply spinner without requiring a replayed run.settled or a content reload.
@@ -301,14 +325,14 @@ try {
   assert.ok(text(resultEntry()).includes('新建 Session没有完成'))
   assert.ok(text(resultEntry()).includes('Reload没有完成'))
   assert.ok(text(resultEntry()).includes('切换模型没有完成'))
-  assert.equal(calls.some(call => call.command === 'consume_operation'), false, 'delivery is not acknowledgement')
+  assert.equal(calls.filter(call => call.command === 'consume_operation').length, initialAcknowledgements, 'delivery is not acknowledgement')
   assert.equal(text(container).includes('另一项工作的分支切换未完成'), false)
   // A live initiating panel owns its error UI; the retained entry must not duplicate it.
   find(container, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
   await find(container, item => item.props.id === 'cc-opt-0').props.onClick(); await settle()
   assert.equal(resultEntry(), undefined, 'do not stack a second error surface on the open operation panel')
   assert.ok(text(container).includes('这次模型设置没有完成'))
-  assert.equal(calls.some(call => call.command === 'consume_operation'), false)
+  assert.equal(calls.filter(call => call.command === 'consume_operation').length, initialAcknowledgements)
   find(container, item => item.props['aria-label'] === '关闭').props.onClick(); await settle()
   assert.ok(resultEntry())
   app.selectWork('other'); await settle()
@@ -358,7 +382,7 @@ try {
     assert.equal(nativeResults.has(scenario), false)
     assert.equal(app.currentDraft, 'F5 draft preserved')
   }
-  assert.equal(calls.some(call => call.command === 'submit_message'), false, 'viewing failure never resends')
+  assert.equal(calls.filter(call => call.command === 'submit_message').length, initialSends, 'viewing failure never resends')
   const compact = find(container, item => item.type === 'textarea')
   assert.ok(compact)
   compact.props['onUpdate:modelValue']('continue typing')
@@ -517,6 +541,14 @@ try {
     const queueAwait = queueButton.props.onClick()
     await settle()
     assert.equal(capturedQueue.operationEditor, null, 'retrieval does not capture the editor before dispatch')
+    if (ordering === 'receipt-first') {
+      app.selectWork('other'); await settle()
+      assert.equal(find(container, item => item.props.class === 'alu-send-btn').props.disabled, false, 'A retrieving Queue does not block sending to B')
+      app.selectWork('work'); await settle()
+      observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: queueWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: `queue-${ordering}`, state: 'connected' })
+      observation({ kind: 'content', token: `queue-${ordering}`, change: { kind: 'checkpoint_end' } })
+      await settle()
+    }
     const result = { instance: { ...queueWork, pending: { steering: 0, followUp: 0, total: 0 } }, receipt: { instanceId: 'work', restored } }
     const receipt = { ...base, operationId: capturedQueue.operationId, kind: 'dequeue_messages', runtimeGeneration: 2, sessionId: '', editor: capturedQueue.operationEditor, state: 'succeeded', result }
     const deliverReceipt = () => { restoredImageCount = 1; nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt) }
@@ -573,6 +605,13 @@ try {
   assert.equal(capturedSend.expectedRuntimeGeneration, 2)
   compact.props['onUpdate:modelValue']('send changed later')
   app.selectWork('other'); await settle()
+  assert.equal(find(container, item => item.props.class === 'alu-send-btn').props.disabled, false, 'A pending send does not block sending to B')
+  submitNative = async args => {
+    assert.equal(args.instanceId, 'other')
+    assert.equal(args.message, 'other draft')
+    throw { code: 'busy', message: 'B 的消息未发送，请重试。' }
+  }
+  await find(container, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} })
   const sendResult = { receipt: { queued: false, delivery: 'prompt' }, instance: currentWork }
   const sentOperation = { ...base, operationId: capturedSend.operationId, kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: capturedSend.operationEditor, state: 'succeeded', result: sendResult }
   consumeFailures.add(sentOperation.operationId); nativeResults.set(sentOperation.operationId, sentOperation)
@@ -673,6 +712,47 @@ try {
   find(hostDialog, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
   assert.equal(toRaw(document.activeElement), answer)
   assert.equal(answer.value, 'unfinished extension answer')
+  // #306: static commands render before the catalog; resource/tool reads are independent.
+  let resolveCatalog, rejectTools
+  catalogNative = () => new Promise(resolve => { resolveCatalog = resolve })
+  toolsNative = () => new Promise((_resolve, reject) => { rejectTools = reject })
+  commandsButton.props.onClick(); await settle()
+  assert.ok(find(container, item => item.type === 'button' && text(item).includes('Stop Work')), 'Stop is visible while commands are being read')
+  resolveCatalog({ commands: [{ name: 'available', referenceId: 'available-command', source: { kind: 'skill' }, contentAvailable: false }], total: 1, truncated: false }); await settle()
+  assert.ok(text(container).includes('/available'), 'ready commands do not wait for other panels')
+  find(container, item => item.type === 'button' && text(item).includes('Project Status')).props.onClick(); await settle()
+  assert.ok(text(container).includes('Available skill'), 'loaded resources appear while tools are still being read')
+  assert.equal(text(container).includes('当前没有启用工具'), false, 'unread tools are not an empty list')
+  rejectTools({ code: 'connection_failed', message: '工具暂时没有读到，请重试。' }); await settle()
+  assert.ok(text(container).includes('Available skill'))
+  assert.ok(find(container, item => item.type === 'button' && text(item) === '重试读取工具'))
+  toolsNative = () => ({ instance: focusWork, tools: [], total: 0, truncated: false })
+  catalogNative = undefined
+  await find(container, item => item.type === 'button' && text(item) === '重试读取工具').props.onClick(); await settle()
+  assert.ok(text(container).includes('当前没有启用工具'))
+  toolsNative = undefined
+  find(container, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
+  // #306: an old answer receipt must leave the next question's answer usable.
+  for (const outcome of ['success', 'failure', 'unknown']) {
+    const ask = id => emit('aludock://extension-controller-event', { ...extensionBinding, event: { eventType: 'interaction.requested', data: { interactionId: id, method: 'input', issuedAt: 'now', title: id } } })
+    ask(`old-${outcome}`); await settle()
+    let resolveReply, rejectReply
+    respondNative = () => new Promise((resolve, reject) => { resolveReply = resolve; rejectReply = reject })
+    find(teleport, item => item.type === 'input').props['onUpdate:modelValue']('old answer')
+    const replying = find(teleport, item => item.type === 'button' && text(item) === '提交').props.onClick()
+    await settle(); ask(`new-${outcome}`); await settle()
+    const nextAnswer = find(teleport, item => item.type === 'input')
+    nextAnswer.props['onUpdate:modelValue']('new answer'); await settle()
+    if (outcome === 'success') resolveReply({ interactionId: `old-${outcome}`, state: 'resolved' })
+    else rejectReply({ code: 'connection_failed', outcomeUnknown: outcome === 'unknown' })
+    await replying; await settle()
+    assert.equal(nextAnswer.value, 'new answer')
+    const nextSubmit = find(teleport, item => item.type === 'button' && text(item) === '提交')
+    assert.equal(nextSubmit.props.disabled, false, `${outcome}: the next question remains usable`)
+    respondNative = async args => { assert.equal(args.interactionId, `new-${outcome}`); assert.equal(args.response.value, 'new answer'); return { interactionId: args.interactionId, state: 'resolved' } }
+    await nextSubmit.props.onClick(); await settle()
+  }
+  console.log('PASS: ready command/resource sections and independent Extension answers; late success/failure/unknown stays with the original question')
   console.log('PASS: normal command modal / same Extension answer node and value / both Escape layers honor composition / Extension focus priority')
   console.log('PASS: real input Queue and send entrypoints / event-before-receipt and receipt-before-event / later Queue IDs / display events / double-claim / late edited send')
   console.log('PASS: retained failures require scoped visible acknowledgement; footer intervention details are opt-in; actual App/ConversationView/store→native boundary keeps compact and expanded editors through offline refresh; new retires old before read; late receipt/read isolation')
@@ -688,7 +768,7 @@ try {
       attachments: () => uploads, focused: () => true, pairing: () => false, activity: id => display.showAgentActivity(id) })
     const page = compiled.usePageSurfaces({ composer: () => editor.composer, extensionActive: () => false, directoryBusy: () => false,
       modelLabel: () => '—' })
-    const actions = compiled.useWorkActions(page, { observation: () => observationOwner, transitionBusy: () => false, restoreQueue: editor.restoreQueue, panel: () => null })
+    const actions = compiled.useWorkActions(page, { observation: () => observationOwner, restoreQueue: editor.restoreQueue, panel: () => null })
     const uploads = compiled.useAttachmentUploads({ page: () => page, pairing: () => false,
       sendingOrRestoring: () => editor.submitting.value || editor.queueRestoring.value, reportError: editor.reportError })
     const display = compiled.useConversationRegion(page)
@@ -830,6 +910,10 @@ try {
       if (departure === 'A/B/A') uploadApp.selectWork('work')
     }
     await settle()
+    if (departure === 'B') {
+      uploadEditor().props['onUpdate:modelValue']('B can send while A is choosing files'); await settle()
+      assert.equal(find(uploadContainer, item => item.props.class === 'alu-send-btn').props.disabled, false)
+    }
     const untouchedDraft = uploadApp.currentDraft
     releaseJobSnapshot(); await choosing; await settle()
     assert.equal(uploadApp.currentPendingAttachments.length, 0)
@@ -945,13 +1029,32 @@ try {
   const uploadsBefore = calls.filter(call => call.command === 'upload_attachment').length
   await chooseJob('first')
   uploadEditor().props['onUpdate:modelValue']('keep typing while uploading'); await settle()
-  uploadApp.selectWork('other'); await settle()
-  uploadApp.selectWork('work'); await settle()
+  const selectUploadingWork = async index => {
+    find(uploadContainer, item => item.type === 'button' && String(item.props['aria-label']).startsWith('打开工作列表')).props.onClick(); await settle()
+    const link = all(uploadContainer, item => item.type === 'button' && item.props.class === 'alu-instance-link')[index]
+    assert.ok(!link.props.disabled, 'an upload does not disable Work navigation')
+    link.props.onClick(); await settle()
+  }
+  await selectUploadingWork(1)
+  assert.equal(uploadApp.selectedWorkId, 'other')
+  assert.equal(text(uploadContainer).includes('first.txt'), false)
+  await selectUploadingWork(0)
   assert.equal(uploadApp.currentPendingAttachments[0].jobId, 'first')
   assert.ok(text(uploadContainer).includes('first.txt'))
   await rebuildUploadView()
   assert.equal(calls.filter(call => call.command === 'upload_attachment').length, uploadsBefore + 1, 'Work A/B/A and rebuilt App read retained progress; neither replays upload')
   assert.equal(uploadApp.currentDraft, 'keep typing while uploading')
+  // #306: Stop is a separate intent, not an attachment lifecycle transition.
+  find(uploadContainer, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+  find(uploadContainer, item => item.type === 'button' && text(item).includes('Stop Work')).props.onClick(); await settle()
+  const uploadingStop = find(uploadContainer, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？')
+  assert.ok(uploadingStop, 'Stop confirmation is available during upload')
+  find(uploadingStop, item => item.type === 'button' && text(item) === '确认').props.onClick(); await settle()
+  assert.equal(countCalls('stop_work'), stopsBefore + 3)
+  assert.equal(calls.findLast(call => call.command === 'stop_work').args.instanceId, 'work')
+  assert.equal(nativeJobs.get('first').state, 'uploading')
+  assert.equal(nativeJobs.get('first').workId, 'work')
+  await rebuildUploadView()
   failStorage = true
   await publishJob('first', { state: 'succeeded', revision: 3, result: uploaded('first') })
   assert.equal(uploadApp.currentPendingAttachments.length, 1)
@@ -981,6 +1084,7 @@ try {
   await rebuildUploadView()
   assert.equal(uploadApp.currentAttachments[0].localUpload.selectionGeneration, 1, 'the original receipt is preserved across a new IPC binding')
   assert.equal(uploadApp.connectionContext.selectionGeneration, 2)
+  nativeJobs.delete('second') // A permanent Host receipt needs no process-local upload job to send.
   const sendsBefore = calls.filter(call => call.command === 'submit_message').length
   // A full local capture must succeed before native receives any send.
   failStorage = true
@@ -1004,6 +1108,7 @@ try {
   await uploadButton('重试关闭').props.onClick(); await settle()
   assert.equal(nativeResults.size, 0)
   assert.equal(uploadApp.currentAttachments.length, 0)
+  nativeJobs.set('second', { ...job('second'), state: 'succeeded', revision: 3, result: uploaded('second') })
   await publishJob('second', { revision: 3 })
   assert.equal(uploadApp.currentAttachments.length, 0, 'sent attachments do not return from repeated upload snapshots')
   assert.equal(calls.filter(call => call.command === 'submit_message').length, sendsBefore + 1, 'F5 and acknowledgement retry do not resend')

@@ -21,8 +21,8 @@ const props = defineProps<{
   page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'appSettingsOpen' | 'bindSurface' | 'closeModal' | 'commandOpen' | 'confirmDialog' | 'controlBodyOverride' | 'controlDialogBody' | 'controlDialogClasses' | 'controlDialogTitle' | 'controlTitleOverride' | 'directoryOpen' | 'dockToolsPopoverStyle' | 'handleModalKeydown' | 'handleModalWheel' | 'hostSettingsOpen' | 'messageTextView' | 'pulseCommandPalette' | 'setControlDialogTitle' | 'settleConfirm'>> & Pick<ReturnType<typeof usePageSurfaces>, 'controlSection' | 'controlSizeOverride'>
   editor: ReadonlyRefs<Pick<ReturnType<typeof useInputEditor>, 'draft' | 'prefillSlashCommand' | 'restoreQueue'>>
   actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'handleNewWorkUnknown' | 'markControlUnknown' | 'mutationOutcomeUnknown' | 'reconcileMutationOutcome' | 'selectedCompactionPending' | 'startCompaction' | 'stopSelectedWork' | 'unresolvedControlDomain'>>
-  directory: ReadonlyRefs<Pick<ReturnType<typeof useWorkDirectory>, 'acceptCreatedWork' | 'contextTransitionBusy' | 'hostMachines' | 'machineListError' | 'newWorkMachinesLoading'>> & Pick<ReturnType<typeof useWorkDirectory>, 'newWorkCompact' | 'newWorkMutationBusy'>
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'addHostEndpoint' | 'beginPairing' | 'chooseConnectionPolicy' | 'connectLocal' | 'discardRecoveredPairing' | 'endpointCanSaveDraft' | 'endpointError' | 'endpointFormOpen' | 'endpointKindLabel' | 'endpointMutatingId' | 'endpointSaving' | 'endpointStateLabel' | 'hostNameError' | 'hostNameSaved' | 'hostNameSaving' | 'moveEndpoint' | 'pairingError' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'pairingTransactionId' | 'recoverablePairings' | 'rememberPairDeviceName' | 'removeEndpoint' | 'removeSavedHost' | 'resumeRecoveredPairing' | 'saveEndpointDraft' | 'saveHostDisplayName' | 'showHostPairingForm' | 'stopPairing' | 'switchSavedHost' | 'testEndpoint' | 'testStatusLabel' | 'toggleEndpoint' | 'toggleEndpointForm' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'addingHost' | 'endpointHost' | 'endpointKind' | 'endpointLabel' | 'endpointPort' | 'hostDisplayName' | 'pairDeviceName' | 'pairHost' | 'pairPort'>
+  directory: ReadonlyRefs<Pick<ReturnType<typeof useWorkDirectory>, 'acceptCreatedWork' | 'hostMachines' | 'machineListError' | 'newWorkMachinesLoading'>> & Pick<ReturnType<typeof useWorkDirectory>, 'newWorkCompact' | 'newWorkMutationBusy'>
+  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'addHostEndpoint' | 'beginPairing' | 'chooseConnectionPolicy' | 'connectLocal' | 'discardRecoveredPairing' | 'endpointCanSaveDraft' | 'endpointError' | 'endpointFormOpen' | 'endpointKindLabel' | 'endpointMutatingId' | 'endpointSaving' | 'endpointStateLabel' | 'hostNameError' | 'hostNameSaved' | 'hostNameSaving' | 'moveEndpoint' | 'pairingError' | 'pairingInProgress' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'pairingTransactionId' | 'recoverablePairings' | 'rememberPairDeviceName' | 'removeEndpoint' | 'removeSavedHost' | 'resumeRecoveredPairing' | 'saveEndpointDraft' | 'saveHostDisplayName' | 'showHostPairingForm' | 'stopPairing' | 'switchSavedHost' | 'testEndpoint' | 'testStatusLabel' | 'toggleEndpoint' | 'toggleEndpointForm' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'addingHost' | 'endpointHost' | 'endpointKind' | 'endpointLabel' | 'endpointPort' | 'hostDisplayName' | 'pairDeviceName' | 'pairHost' | 'pairPort'>
   platform: ReadonlyRefs<Pick<ReturnType<typeof usePlatformLifecycle>, 'appSettings' | 'appSettingsError' | 'appSettingsSaving' | 'chooseWindowsAwayDelay'>>
   observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'acceptWork'>>
   controlPanel: Pick<ReturnType<typeof useControlPanel>, 'handle'>
@@ -32,7 +32,7 @@ const selected = computed(() => app.selectedWork)
 const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, messageTextView, dockToolsPopoverStyle, settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette } = props.page
 const { draft, restoreQueue, prefillSlashCommand } = props.editor
 const { mutationOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, stopSelectedWork, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome } = props.actions
-const { hostMachines, machineListError, newWorkMachinesLoading, newWorkMutationBusy, newWorkCompact, contextTransitionBusy, acceptCreatedWork } = props.directory
+const { hostMachines, machineListError, newWorkMachinesLoading, newWorkMutationBusy, newWorkCompact, acceptCreatedWork } = props.directory
 
 const { appSettings, appSettingsSaving, appSettingsError, chooseWindowsAwayDelay } = props.platform
 
@@ -110,7 +110,7 @@ const applyControlSnapshot = props.observation.acceptWork
           @busy="newWorkMutationBusy = $event"
           @view="newWorkCompact = $event === 'launcher'"
         />
-        <HostSettingsPanel v-if="hostSettingsOpen" :host="props.host" :page="page" :busy="contextTransitionBusy" />
+        <HostSettingsPanel v-if="hostSettingsOpen" :host="props.host" :page="page" :busy="props.host.pairingInProgress.value" />
 
       </section>
     </div>

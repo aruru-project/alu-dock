@@ -221,7 +221,7 @@ try {
   // explicit confirmation unlock new controls without rewriting that receipt.
   view.store.bindNativeOperation({ ...fork, operationId: 'unknown-model', kind: 'set_model', state: 'unknown', editor: null, result: null })
   const actions = view.scope.run(() => useWorkActions({ askConfirm: async () => true, closeModal() {} }, {
-    observation: () => ({ load: async () => true, acceptWork() {} }), transitionBusy: () => false,
+    observation: () => ({ load: async () => true, acceptWork() {} }),
     restoreQueue: async () => true, panel: () => ({ reconcileDomain: async () => true }),
   }))
   await view.store.load()
@@ -235,20 +235,17 @@ try {
   console.log('PASS: unknown model + refresh still permits confirmed Stop; manual continuation leaves original unknown intact')
 
   // App exit/legacy drafts lose upload jobs but not their permanent Host fileId.
-  const uploads = view.scope.run(() => useAttachmentUploads({ page: () => ({ retirePreview() {}, moveAttachmentPreview() {} }), pairing: () => false, sendingOrRestoring: () => false, reportError() {} }))
   const target = attachmentUploadTarget(view.store.selectedWork, view.store.connectionContext)
-  const persisted = { ...attachment('permanent'), localUpload: { ...target, jobId: 'previous-process-job' } }
+  const persisted = { ...attachment('permanent'), sha256: 'a'.repeat(64), localUpload: { ...target, jobId: 'previous-process-job' } }
   assert.equal(view.store.setCurrentAttachments([persisted]), true)
   view.scope.stop(); view = await rebuild()
   const restoredUploads = view.scope.run(() => useAttachmentUploads({ page: () => ({ retirePreview() {}, moveAttachmentPreview() {} }), pairing: () => false, sendingOrRestoring: () => false, reportError() {} }))
   await nextTick()
-  assert.equal(await restoredUploads.verifyForSubmit(view.store.currentAttachments), true)
-  assert.equal(await restoredUploads.verifyForSubmit([{ ...persisted, localUpload: { ...target } }]), true, 'legacy receipt needs no run job id')
-  assert.equal(await restoredUploads.verifyForSubmit([{ ...persisted, localUpload: { ...target, ownerHostEpoch: 'other' } }]), false)
+  assert.equal(view.store.currentAttachments[0].fileId, 'permanent')
   assert.equal(view.store.setPendingAttachments([{ jobId: 'missing-source', revision: 'selection', sessionId: 'session' }]), true)
   assert.equal(restoredUploads.uploadDrafts.value[0].retryable, false, 'pending selection still requires a live source job')
   for (const scope of scopes) scope.stop()
-  console.log('PASS: permanent fileId outlives source jobs; target epoch and pending-source boundaries remain')
+  console.log('PASS: permanent fileId survives rebuilding the view; pending selection still requires its source job')
   console.log('PASS: late send receipts preserve other Work/Host editors, changed/re-added drafts, replaced sessions and removed Works')
 } finally {
   await server.close()

@@ -20,7 +20,6 @@ import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { dockToolsState } from '../lib/dockTools'
 import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
-import { generationSectionState as resolveGenerationSectionState, pendingGenerationCaches, type GenerationCache, type GenerationCacheState } from '../lib/generationCaches'
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
@@ -113,14 +112,12 @@ const tools = ref<ToolsResult | null>(null)
 const resources = ref<ResourcesResult | null>(null)
 const selectedResource = ref<ResourceInfo | null>(null)
 const settings = ref<SettingsResult | null>(null)
-const loading = ref<ControlSection | null>(null)
-const generationCaches = ref(pendingGenerationCaches())
-const generationSectionState = computed<GenerationCacheState>(() => resolveGenerationSectionState(props.section, generationCaches.value))
+const loading = ref(new Set<ControlSection>())
+const loadErrors = ref<Partial<Record<ControlSection, string>>>({})
 const pending = ref('')
 const error = ref('')
 const dockToolsOperationId = ref('')
 let loadEpoch = 0
-let generationRefreshEpoch = 0
 
 const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
 const dockToolsCommand = computed(() => catalog.commands.find((item) => item.name === 'dock-tools') ?? null)
@@ -212,24 +209,24 @@ watch([
   resources.value = null
   selectedResource.value = null
   settings.value = null
-  generationCaches.value = pendingGenerationCaches()
+  loading.value.clear()
+  loadErrors.value = {}
   selectedCommandReferenceId.value = ''
   commandDetailMode.value = ''
   argumentCompletions.value = []
   commandContentText.value = ''
   dockToolsOperationId.value = ''
   error.value = ''
-  void refreshGenerationCaches()
-  if (props.section === 'models' || props.section === 'thinking') void loadSection(props.section)
+  void loadSection(props.section)
 }, { immediate: true })
 watch(() => props.section, (section) => {
   selectedResource.value = null
   selectedSettingKey.value = ''
   optionCursor.value = 0
-  const managed = ['commands', 'dock-tools', 'resources', 'tools', 'settings'].includes(section)
-  if (!managed || generationCaches.value[section as GenerationCache] !== 'loading') void loadSection(section)
+  error.value = ''
+  void loadSection(section)
   if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
-}, { immediate: true })
+})
 
 async function closeResource() {
   const contentRef = selectedResource.value?.contentRef
@@ -434,57 +431,12 @@ function applyLiveEvent(event: ProjectedEvent) {
 
 defineExpose({ reconcileDomain, applyLiveEvent })
 
-function currentGenerationKey() {
-  const context = app.connectionContext
-  if (!context) return ''
-  return JSON.stringify([
-    context.connectionId,
-    context.selectionGeneration,
-    props.work.id,
-    props.work.hostId ?? '',
-    props.work.ownerHostEpoch ?? '',
-    props.work.runtimeGeneration,
-  ])
-}
-
-async function refreshGenerationCaches() {
-  const context = app.connectionContext
-  const key = currentGenerationKey()
-  if (!context || !key) {
-    generationCaches.value = { commands: 'error', resources: 'error', tools: 'error', settings: 'error' }
-    return
-  }
-  const epoch = ++generationRefreshEpoch
-  const work = props.work
-  const settled = await Promise.allSettled([
-    catalog.ensure(work, context, true),
-    getResources(work.id, context),
-    listTools(work.id, context),
-    getSettings(work.id, context),
-  ] as const)
-  if (epoch !== generationRefreshEpoch || currentGenerationKey() !== key) return
-
-  const [commandsResult, resourcesResult, toolsResult, settingsResult] = settled
-  generationCaches.value = {
-    commands: commandsResult.status === 'fulfilled' && commandsResult.value ? 'ready' : 'error',
-    resources: resourcesResult.status === 'fulfilled' ? 'ready' : 'error',
-    tools: toolsResult.status === 'fulfilled' ? 'ready' : 'error',
-    settings: settingsResult.status === 'fulfilled' ? 'ready' : 'error',
-  }
-  if (resourcesResult.status === 'fulfilled') resources.value = resourcesResult.value
-  if (toolsResult.status === 'fulfilled') {
-    tools.value = toolsResult.value
-    emit('snapshot', toolsResult.value.instance)
-  }
-  if (settingsResult.status === 'fulfilled') settings.value = settingsResult.value
-  const failed = settled.find((result) => result.status === 'rejected')
-  if (failed?.status === 'rejected') error.value = errorMessage(failed.reason)
-}
-
 async function loadSection(section: ControlSection, force = false): Promise<boolean> {
   if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return true
+  if (section === 'resources') void loadSection('tools', force)
+  if (loading.value.has(section)) return false
   const dataExists = section === 'commands' || section === 'dock-tools'
-    ? catalog.result
+    ? null
     : section === 'models' || section === 'thinking'
       ? models.value
       : section === 'tools'
@@ -493,21 +445,13 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
           ? resources.value
           : settings.value
   if (dataExists && !force) return true
-  const epoch = ++loadEpoch
+  const epoch = loadEpoch
   const workId = props.work.id
-  if (section === 'commands' || section === 'dock-tools' || section === 'tools' || section === 'settings') {
-    const cache = section === 'dock-tools' ? 'commands' : section
-    generationCaches.value = { ...generationCaches.value, [cache]: 'loading' }
-  } else if (section === 'resources') {
-    generationCaches.value = { ...generationCaches.value, resources: 'loading', tools: 'loading' }
-  }
-  loading.value = section === 'commands' || section === 'dock-tools' ? null : section
-  error.value = ''
+  loading.value.add(section)
+  delete loadErrors.value[section]
   try {
     if (section === 'commands' || section === 'dock-tools') {
-      const loaded = await catalog.ensure(props.work, requireConnectionContext(app), force)
-      if (epoch !== loadEpoch || props.work.id !== workId) return false
-      generationCaches.value = { ...generationCaches.value, commands: loaded ? 'ready' : 'error' }
+      return await catalog.ensure(props.work, requireConnectionContext(app), force)
     } else if (section === 'models' || section === 'thinking') {
       const result = await currentConnectionCall(app, (context) => listModels(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
@@ -522,39 +466,24 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
       const result = await currentConnectionCall(app, (context) => listTools(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       tools.value = result
-      generationCaches.value = { ...generationCaches.value, tools: 'ready' }
       emit('snapshot', result.instance)
     } else if (section === 'resources') {
-      const [resourceResult, toolResult] = await Promise.all([
-        currentConnectionCall(app, (context) => getResources(workId, context)),
-        currentConnectionCall(app, (context) => listTools(workId, context)),
-      ])
+      const result = await currentConnectionCall(app, (context) => getResources(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
-      resources.value = resourceResult
-      tools.value = toolResult
-      generationCaches.value = { ...generationCaches.value, resources: 'ready', tools: 'ready' }
-      emit('snapshot', toolResult.instance)
+      resources.value = result
     } else {
       const result = await currentConnectionCall(app, (context) => getSettings(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       settings.value = result
-      generationCaches.value = { ...generationCaches.value, settings: 'ready' }
     }
     return true
   } catch (cause) {
     if (epoch === loadEpoch && props.work.id === workId) {
-      if (section === 'commands' || section === 'dock-tools') {
-        catalog.invalidate()
-        generationCaches.value = { ...generationCaches.value, commands: 'error' }
-      } else {
-        error.value = errorMessage(cause)
-        if (section === 'resources') generationCaches.value = { ...generationCaches.value, resources: 'error', tools: 'error' }
-        else if (section === 'tools' || section === 'settings') generationCaches.value = { ...generationCaches.value, [section]: 'error' }
-      }
+      loadErrors.value[section] = errorMessage(cause)
     }
     return false
   } finally {
-    if (epoch === loadEpoch) loading.value = null
+    if (epoch === loadEpoch) loading.value.delete(section)
   }
 }
 
@@ -743,8 +672,8 @@ function isCurrentModel(model: ModelInfo) {
   <div class="control-center-port">
     <div v-if="outcomeUnknown" class="alu-dialog-error"><span>上一次修改的结果还没有确认，请先刷新当前状态。</span><button @click="reconcileControl">刷新确认</button></div>
     <div v-if="error" class="alu-dialog-error">{{ error }}</div>
-    <div v-if="loading === section || generationSectionState === 'loading'" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
-    <div v-else-if="generationSectionState === 'error'" class="alu-dialog-loading">当前工作状态没有读取完整。<button type="button" @click="loadSection(section, true)">重试</button></div>
+    <div v-if="section !== 'resources' && loadErrors[section]" class="alu-dialog-error">{{ loadErrors[section] }}<button type="button" @click="loadSection(section, true)">重试</button></div>
+    <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
 
     <template v-else-if="section === 'commands'">
       <template v-if="!commandDetailMode">
@@ -772,7 +701,7 @@ function isCurrentModel(model: ModelInfo) {
           </template>
           <div v-if="!filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ catalog.state === 'idle' || catalog.state === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
         </div>
-        <div class="cmd-palette-footer">{{ commandFooter }}</div>
+        <div class="cmd-palette-footer">{{ commandFooter }}<button v-if="catalog.state === 'failed'" type="button" @click="loadSection('commands', true)">重试读取命令</button></div>
       </template>
 
       <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
@@ -811,6 +740,7 @@ function isCurrentModel(model: ModelInfo) {
       </div>
       <div v-if="dockTools === 'unavailable'" class="alu-dialog-error">当前 Work 没有提供 Dock Tools。</div>
       <div v-else-if="!dockToolsCommand && (catalog.state === 'idle' || catalog.state === 'loading')" class="dock-tools-loading"><span class="alu-agent-activity-spinner" />正在读取当前 Work 的可用命令…</div>
+      <div v-else-if="catalog.state === 'failed'" class="alu-dialog-error">命令暂时没有读到。<button type="button" @click="loadSection('dock-tools', true)">重试读取</button></div>
       <div v-else-if="!dockToolsCommand" class="alu-dialog-error">当前 Work 没有提供 Dock Tools 开关。</div>
       <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on', pending: dockToolsBusy }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :aria-pressed="dockTools === 'on'" :disabled="preview || dockToolsBusy || outcomeUnknown" data-modal-initial @click="toggleDockTools">
         <span class="dock-tools-toggle-copy"><strong>{{ dockToolsBusy ? '正在更新…' : '允许当前 Work 使用 Dock Tools' }}</strong><small>{{ dockToolsBusy ? '等待当前 Work 确认' : dockTools === 'on' ? '已开启' : '已关闭' }}</small></span>
@@ -868,15 +798,21 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="work.lastError" class="alu-project-status-error">{{ work.lastError }}</div>
       </section>
       <section class="alu-project-status-section">
-        <h3>Active Tools <span class="alu-project-status-count">{{ tools?.tools.filter(item => item.active).length || 0 }}/{{ tools?.total ?? tools?.tools.length ?? 0 }}</span></h3>
-        <div class="alu-project-status-chips"><span v-for="tool in tools?.tools.filter(item => item.active) ?? []" :key="tool.name" class="alu-project-status-chip">{{ tool.name }}</span><span v-if="!tools?.tools.some(item => item.active)" class="alu-project-status-empty">当前没有启用工具</span></div>
+        <h3>Active Tools <span v-if="tools" class="alu-project-status-count">{{ tools?.tools.filter(item => item.active).length || 0 }}/{{ tools?.total ?? tools?.tools.length ?? 0 }}</span></h3>
+        <div v-if="loadErrors.tools" class="alu-dialog-error">{{ loadErrors.tools }}<button type="button" @click="loadSection('tools', true)">重试读取工具</button></div>
+        <div v-else-if="!tools" class="alu-dialog-loading">正在读取工具…</div>
+        <div v-if="tools" class="alu-project-status-chips"><span v-for="tool in tools.tools.filter(item => item.active)" :key="tool.name" class="alu-project-status-chip">{{ tool.name }}</span><span v-if="!tools?.tools.some(item => item.active)" class="alu-project-status-empty">当前没有启用工具</span></div>
         <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回</div>
       </section>
       <section class="alu-project-status-section">
         <h3>Loaded Resources</h3>
+        <div v-if="loadErrors.resources" class="alu-dialog-error">{{ loadErrors.resources }}<button type="button" @click="loadSection('resources', true)">重试读取资源</button></div>
+        <div v-else-if="!resources" class="alu-dialog-loading">正在读取资源…</div>
+        <template v-if="resources">
         <div v-for="group in resourceGroups" :key="group.kind" class="alu-project-status-resource-group"><h4>{{ group.label }} <span class="alu-project-status-count">{{ group.items.length }}</span></h4><div class="alu-project-status-chips"><template v-for="(resource, index) in group.items" :key="resource.contentRef || `${resource.kind}:${resource.name}:${index}`"><button v-if="resource.contentRef" type="button" class="alu-project-status-chip resource-read-button" :disabled="preview" :id="`resource-${resource.contentRef}`" :aria-label="`阅读 ${resource.name}`" @click="selectedResource = resource">{{ resource.name }} <ChevronRight :size="11" /></button><span v-else class="alu-project-status-chip">{{ resource.name }}</span></template><span v-if="!group.items.length" class="alu-project-status-empty">—</span></div></div>
         <div v-if="filteredDiagnostics.length" class="alu-project-status-resource-group"><h4>Diagnostics <span class="alu-project-status-count">{{ resources?.diagnosticTotal ?? filteredDiagnostics.length }}</span></h4><div v-for="(diagnostic, index) in filteredDiagnostics" :key="index" class="alu-project-status-diagnostic" :class="`is-${diagnostic.severity}`">{{ diagnostic.message }}</div></div>
-        <div v-if="resources?.resourcesTruncated || resources?.diagnosticsTruncated" class="alu-project-status-note">资源或诊断列表未完整返回</div>
+        <div v-if="resources.resourcesTruncated || resources.diagnosticsTruncated" class="alu-project-status-note">资源或诊断列表未完整返回</div>
+        </template>
       </section>
     </section>
 

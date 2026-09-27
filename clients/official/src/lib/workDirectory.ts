@@ -7,13 +7,9 @@ import { userErrorMessage as errorMessage } from './userError'
 import type { MachineDto, Work } from './types'
 import type { usePageSurfaces } from './pageSurfaces'
 import type { useWorkActions } from './workActions'
-import type { useAttachmentUploads } from './attachmentUploads'
-import type { useInputEditor } from './inputEditor'
 import { useAppStore } from '../stores/app'
 export function useWorkDirectory(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'closeDirectory' | 'closeWorkPanels' | 'directoryOpen' | 'openDirectory'>>, options: {
-  actions(): ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'workMutating' | 'aborting' | 'reopenSelectedWork' | 'forgetSelectedWork'>>
-  attachments(): ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'attachmentPicking' | 'clearingRestoredImages' | 'uploadDrafts'>>
-  input(): ReadonlyRefs<Pick<ReturnType<typeof useInputEditor>, 'queueRestoring'>>
+  actions(): ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'reopenSelectedWork' | 'forgetSelectedWork'>>
   pairing(): boolean
   acceptWork(work: Work): void
 }) {
@@ -25,14 +21,6 @@ export function useWorkDirectory(page: ReadonlyRefs<Pick<ReturnType<typeof usePa
   const newWorkMutationBusy = ref(false)
   const newWorkCompact = ref(true)
   let machineLoadEpoch = 0
-
-  const contextTransitionBusy = computed(() => options.pairing()
-    || options.actions().workMutating.value
-    || options.attachments().attachmentPicking.value
-    || options.attachments().clearingRestoredImages.value
-    || options.input().queueRestoring.value
-    || options.actions().aborting.value
-    || options.attachments().uploadDrafts.value.some((item) => item.state !== 'error'))
 
   watch(() => Boolean(app.payload && !app.needsPairing && !selected.value), (showList) => {
     if (showList) app.workDrawerOpen = true
@@ -78,17 +66,15 @@ export function useWorkDirectory(page: ReadonlyRefs<Pick<ReturnType<typeof usePa
       app.workDrawerOpen = false
       return
     }
-    if (!contextTransitionBusy.value) app.selectWork(workId)
+    app.selectWork(workId)
   }
 
   async function reopenFromList(work: Work) {
-    if (contextTransitionBusy.value) return
     app.selectWork(work.id)
     await options.actions().reopenSelectedWork()
   }
 
   async function forgetFromList(work: Work) {
-    if (contextTransitionBusy.value) return
     app.selectWork(work.id)
     await options.actions().forgetSelectedWork()
   }
@@ -118,7 +104,7 @@ export function useWorkDirectory(page: ReadonlyRefs<Pick<ReturnType<typeof usePa
   }
 
   async function openDirectory() {
-    if (contextTransitionBusy.value) return
+    if (options.pairing()) return
     page.openDirectory()
     newWorkMachinesLoading.value = true
     newWorkMutationBusy.value = false
@@ -143,5 +129,5 @@ export function useWorkDirectory(page: ReadonlyRefs<Pick<ReturnType<typeof usePa
     page.closeDirectory()
   }
 
-  return { hostMachines, machineListError, newWorkMachinesLoading, newWorkMutationBusy, newWorkCompact, contextTransitionBusy, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, acceptCreatedWork }
+  return { hostMachines, machineListError, newWorkMachinesLoading, newWorkMutationBusy, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, acceptCreatedWork }
 }
