@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Minimal capability set for the AluDock application shell.","local":true,"windows":["main"],"permissions":["core:default"]}}

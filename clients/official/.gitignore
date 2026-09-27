@@ -1,5 +1,7 @@
 /target/
 /src-tauri/target/
+# Tauri regenerates these schemas for the current target platform.
+/src-tauri/gen/schemas/
 /node_modules/
 /dist/
 /.pi-subagents/
