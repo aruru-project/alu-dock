@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
-import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
+import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, formatCacheHitRate, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
@@ -247,6 +247,13 @@ await nextTick()
 assert.equal(conversationReloads, 1, 'selecting another Work loads its conversation')
 stopWatchingBoundary()
 
+// The Work TUI's session cache rate excludes output tokens and includes cache writes.
+assert.equal(formatCacheHitRate({ input: 100, cacheRead: 800, cacheWrite: 100, output: 50, total: 1050 }), '80%')
+assert.equal(formatCacheHitRate({ input: 1, cacheRead: 2, cacheWrite: 0 }), '67%')
+assert.equal(formatCacheHitRate({ input: 100, cacheRead: 0, cacheWrite: 100 }), '0%')
+assert.equal(formatCacheHitRate({ input: 0, cacheRead: 0, cacheWrite: 0 }), '—')
+assert.equal(formatCacheHitRate({ input: 100 }), '—')
+assert.equal(formatCacheHitRate(), '—')
 assert.equal(formatTokenCount(6_200_000), '6.2M')
 assert.equal(formatTokenCount(561_999), '561k')
 assert.equal(formatTokenCount(999), '999')

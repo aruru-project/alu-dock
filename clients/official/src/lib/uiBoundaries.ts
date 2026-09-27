@@ -26,6 +26,13 @@ export function formatTokenCount(value?: number | null): string {
   return String(value)
 }
 
+/** Same session-total cache ratio as the Work TUI; output tokens are not input cache usage. */
+export function formatCacheHitRate(tokens?: NonNullable<Work['metrics']>['tokens']): string {
+  if (tokens?.input == null || tokens.cacheRead == null || tokens.cacheWrite == null) return '—'
+  const inputTotal = tokens.input + tokens.cacheRead + tokens.cacheWrite
+  return inputTotal > 0 ? `${Math.round(tokens.cacheRead / inputTotal * 100)}%` : '—'
+}
+
 export function formatContextUsage(context?: { tokens?: number | null; contextWindow?: number; percent?: number | null }): string {
   return context
     ? `${formatTokenCount(context.tokens)}/${formatTokenCount(context.contextWindow)} (${context.percent == null ? '—' : `${context.percent.toFixed(1)}%`})`

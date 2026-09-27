@@ -18,7 +18,8 @@ const nativeJobs = new Map()
 let pickedJobs = [], failStorage = false, jobsRevision = 0, deferJobSnapshot = false, releaseJobSnapshot, uploadNative
 const context = { connectionId: 'host', selectionGeneration: 1 }
 const work = { id: 'work', displayName: 'Work', name: 'Old Session', cwd: '/work', lifecycle: 'active', extensionStatus: {}, execution: 'idle', compacting: false,
-  ownerHostEpoch: 'epoch', runtimeGeneration: 1, executor: { kind: 'pi', piSessionId: 'old' }, pending: { steering: 0, followUp: 0, total: 0 }, updatedAt: '2026-09-19' }
+  ownerHostEpoch: 'epoch', runtimeGeneration: 1, executor: { kind: 'pi', piSessionId: 'old' }, pending: { steering: 0, followUp: 0, total: 0 }, updatedAt: '2026-09-19',
+  metrics: { messages: { user: 1, assistant: 1, toolCalls: 0, toolResults: 0, total: 2 }, tokens: { input: 100, output: 50, cacheRead: 800, cacheWrite: 100, total: 1050 }, cost: 0.1234, context: { tokens: 76000, contextWindow: 200000, percent: 38 } } }
 const cursor = { hostEpoch: 'epoch', instanceId: 'work', runtimeGeneration: 1, sequence: 10 }
 const bootstrap = { instance: work, cursor, records: [{ recordId: 'old-message', entryId: 'old-message', kind: 'message', source: 'user', visibility: 'conversation', content: [{ type: 'text', text: 'OLD SESSION MESSAGE' }] }],
   activeEvents: [], queue: [], historyRevision: 1, historyTruncated: true, extensionUi: { status: {}, toolsExpanded: false, events: [] } }
@@ -194,6 +195,9 @@ try {
   mounted.mount(container)
   await settle()
   app.selectWork('work'); await settle()
+  const cacheStat = find(container, item => String(item.props.class ?? '').split(' ').includes('alu-nav-stat-cache'))
+  assert.ok(cacheStat, 'the current Work exposes its existing cache metrics in the top bar')
+  assert.equal(text(cacheStat).replace(/\s/g, ''), 'c80%', 'the compact cache label uses the same session ratio as the Work TUI')
   // #306: sending targets a Work, not a ready conversation or unrelated control.
   for (const state of ['pending', 'unknown']) {
     emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-model', state, editor: null })

@@ -194,6 +194,9 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-navbar-breadcrumb:disabled { cursor: default; }
 .alu-navbar-breadcrumb:disabled:hover { background: transparent; border-color: transparent; }
 .alu-nav-workspace {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--alu-text-dim);
   font-size: 15px;
   font-weight: 500;
@@ -232,6 +235,13 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.alu-nav-model-controls {
+  display: flex;
+  align-items: center;
+  gap: inherit;
+  min-width: 0;
 }
 
 .alu-nav-stats {
@@ -1881,19 +1891,8 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
    响应式 — 通用窄窗口
    ═══════════════════════════════════════════════════════ */
 
-@media screen and (max-width: 1000px) {
-  :root {
-    --alu-nav-height: 56px;
-    --alu-bar-height: 48px;
-  }
-
-  body.alu-terminal-body {
-    position: fixed;
-    inset: 0;
-    overflow: hidden;
-    overscroll-behavior: none;
-  }
-
+/* Keep the complete metrics strip reachable in narrower desktop windows too. */
+@media screen and (max-width: 1399px) {
   .alu-navbar {
     height: var(--alu-nav-height);
     min-height: var(--alu-nav-height);
@@ -1957,10 +1956,20 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   .alu-nav-selector-arrow { font-size: 9px; }
   .alu-nav-stats { display: inline-flex; gap: 4px; margin-left: 0; }
   .alu-nav-stat-pill { padding: 4px 6px; font-size: 10px; }
+}
 
+@media screen and (max-width: 1000px) {
+  :root {
+    --alu-nav-height: 56px;
+    --alu-bar-height: 48px;
+  }
 
-
-
+  body.alu-terminal-body {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
 
   .alu-input-section { padding: 0 clamp(10px, 3vw, 24px); }
   .alu-input-section .extension-ui-surface,
@@ -2057,35 +2066,45 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 
 @media screen and (max-width: 640px) {
-  .alu-nav-dock-tools { min-width: 40px; justify-content: center; padding-inline: 7px; }
-  .alu-nav-dock-tools-label,
-  .alu-nav-dock-tools-chevron { display: none; }
   .dock-tools-popover-layer { background: rgba(4, 6, 13, .68); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
   .dock-tools-popover-surface { top: auto; right: 0; bottom: 0; left: 0; width: 100%; max-height: min(76dvh, 560px); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; transform-origin: 50% 100%; animation-name: dockToolsSheetIn; }
   .dock-tools-panel { padding: 18px max(16px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
   @keyframes dockToolsSheetIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
-  .alu-nav-selector-model .alu-nav-selector-value { font-size: 0; }
-  .alu-nav-selector-model .alu-nav-selector-value::before { content: attr(data-provider); font-size: 11px; }
-  .alu-nav-stat-pill:nth-child(1),
-  .alu-nav-stat-pill:nth-child(2) { display: none; }
-  .alu-nav-files,
-  .alu-nav-hamburger { width: 34px; height: 34px; border-radius: 9px; }
 }
 
-/* 极窄屏（≤ 470px）：navbar 折两行——第一行面包屑 + Dock Tools + 文件 +
-   汉堡，第二行只有 Model / Thinking / 上下文 / 费用。三个操作入口固定在
-   第一行，避免挤占状态信息。 */
-@media screen and (max-width: 470px) {
+@media screen and (max-width: 839px) {
+  .alu-nav-dock-tools { min-width: 40px; justify-content: center; padding-inline: 7px; }
+  .alu-nav-dock-tools-label,
+  .alu-nav-dock-tools-chevron { display: none; }
+  /* 手机三行：工作与入口 / 模型与思考等级 / 用量。统计行保持紧凑。 */
   :root { --alu-nav-height: auto; }
-  .alu-navbar { position: relative; height: auto; min-height: 0; flex-wrap: wrap; padding: 6px 10px 4px; row-gap: 2px; }
-  .alu-navbar-left { flex: 0 0 100%; width: 100%; padding-right: 167px; }
+  .alu-navbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-areas: "work tools files menu" "models models models models" "stats stats stats stats";
+    height: auto;
+    min-height: 0;
+    padding: 4px 10px 6px;
+    gap: 4px 6px;
+  }
+  .alu-navbar-left { grid-area: work; width: auto; padding: 0; }
+  .alu-navbar-right { display: contents; }
   .alu-nav-session { max-width: none; }
-  .alu-navbar-right { flex: 0 0 100%; width: 100%; justify-content: flex-start; padding-bottom: 4px; }
-  .alu-nav-selector-model { flex: 1 1 auto; min-width: 0; }
+  .alu-nav-model-controls { grid-area: models; gap: 6px; }
+  .alu-nav-model-controls .alu-nav-selector { min-height: 40px; }
+  .alu-nav-selector-model { flex: 1 1 0; min-width: 0; }
   .alu-nav-selector-model .alu-nav-selector-value { max-width: none; }
-  .alu-navbar .alu-nav-dock-tools { position: absolute; top: 6px; right: 102px; width: 53px; }
-  .alu-navbar .alu-nav-files { position: absolute; top: 6px; right: 56px; }
-  .alu-navbar .alu-nav-hamburger { position: absolute; top: 6px; right: 10px; }
+  .alu-nav-model-provider { display: none; }
+  .alu-nav-selector-thinking { flex: 0 0 auto; }
+  .alu-nav-selector-thinking .alu-nav-selector-value { max-width: none; }
+  .alu-nav-stats { grid-area: stats; min-width: 0; gap: 6px; }
+  .alu-nav-stat-tokens { display: none; }
+  .alu-nav-stat-cost { margin-left: auto; }
+  .alu-navbar .alu-nav-dock-tools { grid-area: tools; width: 53px; min-height: 40px; }
+  .alu-navbar .alu-nav-files { grid-area: files; }
+  .alu-navbar .alu-nav-hamburger { grid-area: menu; }
+  .alu-navbar .alu-nav-files,
+  .alu-nav-hamburger { width: 40px; height: 40px; border-radius: 9px; }
 }
 
 @media screen and (max-width: 600px) {
@@ -2414,10 +2433,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 /* Large monitors enlarge navigation and command controls without changing the
    established 14px conversation/composer density. Mobile remains unchanged. */
 @media (min-width: 1200px) {
-  .alu-nav-workspace,
-  .alu-nav-sep,
-  .alu-nav-session,
-  .alu-nav-selector,
   .alu-send-btn,
   .ui-dialog-title,
   .ui-dialog-option-label,
@@ -2425,11 +2440,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     font-size: var(--alu-control-size);
   }
 
-  .alu-nav-selector-model { min-width: 260px; }
-  .alu-nav-selector-value { min-width: 0; }
-
-  .alu-nav-selector-label,
-  .alu-nav-stat-pill,
   .alu-tail-preview,
   .alu-bar-btn,
   .ui-dialog-body,
@@ -2438,6 +2448,17 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     font-size: var(--alu-meta-size);
   }
 
+}
+
+@media (min-width: 1400px) {
+  .alu-nav-workspace,
+  .alu-nav-sep,
+  .alu-nav-session,
+  .alu-nav-selector { font-size: var(--alu-control-size); }
+  .alu-nav-selector-model { min-width: 260px; }
+  .alu-nav-selector-value { min-width: 0; }
+  .alu-nav-selector-label,
+  .alu-nav-stat-pill { font-size: var(--alu-meta-size); }
 }
 
 /* Existing Work operation results, not a connection/recovery banner. */

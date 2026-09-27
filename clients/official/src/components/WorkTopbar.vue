@@ -3,7 +3,7 @@ import type { ReadonlyRefs } from '../lib/ownerView'
 import { computed } from 'vue'
 import { FileDown, Wrench } from '@lucide/vue'
 import { dockToolsState } from '../lib/dockTools'
-import { formatContextUsage, formatTokenCount } from '../lib/uiBoundaries'
+import { formatCacheHitRate, formatContextUsage, formatTokenCount } from '../lib/uiBoundaries'
 import type { useDeliveries } from '../lib/deliveries'
 import type { usePageSurfaces } from '../lib/pageSurfaces'
 import dockIconUrl from '../../../../assets/icon.svg'
@@ -25,6 +25,7 @@ const modelLabel = computed(() => {
   return model ? `${model.provider}/${model.id}` : '—'
 })
 const contextPercent = computed(() => selected.value?.metrics?.context?.percent)
+const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.tokens))
 </script>
 
 <template>
@@ -41,18 +42,20 @@ const contextPercent = computed(() => selected.value?.metrics?.context?.percent)
     </div>
 
     <div v-if="!app.needsPairing" class="alu-navbar-right">
-      <button class="alu-nav-selector alu-nav-selector-model" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('models')">
-        <span class="alu-nav-selector-icon">◉</span>
-        <span class="alu-nav-selector-label">model:</span>
-        <span class="alu-nav-selector-value" :data-provider="selected?.executor.model?.provider || '—'" :title="modelLabel">{{ modelLabel }}</span>
-        <span class="alu-nav-selector-arrow">▾</span>
-      </button>
-      <button class="alu-nav-selector" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('thinking')">
-        <span class="alu-nav-selector-icon">⌁</span>
-        <span class="alu-nav-selector-label">thinking:</span>
-        <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
-        <span class="alu-nav-selector-arrow">▾</span>
-      </button>
+      <div class="alu-nav-model-controls">
+        <button class="alu-nav-selector alu-nav-selector-model" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('models')">
+          <span class="alu-nav-selector-icon">◉</span>
+          <span class="alu-nav-selector-label">model:</span>
+          <span class="alu-nav-selector-value" :title="modelLabel"><span v-if="selected?.executor.model" class="alu-nav-model-provider">{{ selected.executor.model.provider }}/</span>{{ selected?.executor.model?.id || '—' }}</span>
+          <span class="alu-nav-selector-arrow">▾</span>
+        </button>
+        <button class="alu-nav-selector alu-nav-selector-thinking" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('thinking')">
+          <span class="alu-nav-selector-icon">⌁</span>
+          <span class="alu-nav-selector-label">thinking:</span>
+          <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
+          <span class="alu-nav-selector-arrow">▾</span>
+        </button>
+      </div>
       <button ref="dockToolsTrigger" class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on', open: dockToolsOpen }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : selectedDockTools === 'unavailable' ? '当前不可用' : '已关闭'}`" aria-haspopup="dialog" :aria-expanded="dockToolsOpen" @click="openDockTools">
         <Wrench :size="13" />
         <span class="alu-nav-dock-tools-label">Dock Tools</span>
@@ -60,10 +63,11 @@ const contextPercent = computed(() => selected.value?.metrics?.context?.percent)
         <span class="alu-nav-dock-tools-chevron" aria-hidden="true">▾</span>
       </button>
       <div class="alu-nav-stats">
-        <span class="alu-nav-stat-pill">↑<span>{{ formatTokenCount(selected?.metrics?.tokens?.input || 0) }}</span></span>
-        <span class="alu-nav-stat-pill">↓<span>{{ formatTokenCount(selected?.metrics?.tokens?.output || 0) }}</span></span>
+        <span class="alu-nav-stat-pill alu-nav-stat-tokens">↑<span>{{ formatTokenCount(selected?.metrics?.tokens?.input || 0) }}</span></span>
+        <span class="alu-nav-stat-pill alu-nav-stat-tokens">↓<span>{{ formatTokenCount(selected?.metrics?.tokens?.output || 0) }}</span></span>
         <span class="alu-nav-stat-pill" :class="{ 'text-token-warn': contextPercent != null && contextPercent > 70 && contextPercent <= 90, 'text-token-danger': contextPercent != null && contextPercent > 90 }"><span>{{ formatContextUsage(selected?.metrics?.context) }}</span></span>
-        <span class="alu-nav-stat-pill"><span>${{ Number(selected?.metrics?.cost || 0).toFixed(2) }}</span></span>
+        <span class="alu-nav-stat-pill alu-nav-stat-cache" title="当前 Session 缓存命中率" :aria-label="`缓存命中率 ${cacheHitRate}`">c<span>{{ cacheHitRate }}</span></span>
+        <span class="alu-nav-stat-pill alu-nav-stat-cost"><span>${{ Number(selected?.metrics?.cost || 0).toFixed(2) }}</span></span>
       </div>
       <button type="button" class="alu-nav-files" aria-label="打开文件列表" :aria-expanded="deliveryOpen" @click="openDeliveryTray">
         <FileDown :size="17" />

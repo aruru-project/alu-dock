@@ -25,9 +25,9 @@ export default defineConfig({
     'import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY': JSON.stringify(buildIdentity),
   },
   build: {
-    // Keep production CSS within the oldest WebView syntax in the Android support matrix.
-    // Newer minifiers otherwise rewrite max-width queries to unsupported range syntax.
-    cssTarget: 'chrome99',
+    // The owner's Huawei WebView uses Chromium 98. Keep min/max-width media queries
+    // instead of letting the minifier rewrite them to unsupported range syntax.
+    cssTarget: 'chrome98',
   },
   server: {
     host: host || '127.0.0.1',

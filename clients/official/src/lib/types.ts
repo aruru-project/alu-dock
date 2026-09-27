@@ -53,7 +53,7 @@ export interface Work {
   }
   metrics?: {
     messages?: { user?: number; assistant?: number; toolCalls?: number; total?: number }
-    tokens?: { input?: number; output?: number; total?: number }
+    tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number }
     cost?: number
     context?: { tokens?: number | null; contextWindow?: number; percent?: number | null }
   }
