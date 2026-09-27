@@ -615,6 +615,33 @@ try {
   // if the originating view moves to another Work while native execution runs.
   for (const operationId of ['unknown', 'pending']) emit('aludock://operation', { ...base, operationId, state: 'succeeded', result: { instance: currentWork, cancelled: true } })
   await settle()
+  // User report: expanded send succeeds before the native draft-clear event, but the dialog stays open.
+  const expandedEditor = () => find(container, item => item.type === 'textarea' && item.props.class === 'ui-dialog-composer-editor')
+  for (const outcome of ['receipt-first', 'event-first', 'failed', 'edited']) {
+    if (!expandedEditor()) { find(container, item => item.props['aria-label'] === '展开编辑').props.onClick(); await settle() }
+    expandedEditor().props['onUpdate:modelValue']('expanded original')
+    await settle()
+    let submitted, resolveExpanded, rejectExpanded
+    submitNative = args => { submitted = args; return new Promise((resolve, reject) => { resolveExpanded = resolve; rejectExpanded = reject }) }
+    const footer = find(container, item => String(item.props.class ?? '').includes('ui-dialog-composer-footer'))
+    const sendingExpanded = find(footer, item => item.type === 'button' && text(item) === '发送').props.onClick()
+    await settle()
+    const result = { receipt: { queued: true, delivery: 'followUp' }, instance: currentWork }
+    const operation = { ...base, operationId: submitted.operationId, kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: submitted.operationEditor, state: 'succeeded', result }
+    if (outcome === 'edited') expandedEditor().props['onUpdate:modelValue']('next unsent message')
+    if (outcome === 'event-first') { nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation); await settle() }
+    if (outcome === 'failed') rejectExpanded({ code: 'busy', message: '消息未发送，请重试。' })
+    else resolveExpanded(result)
+    await sendingExpanded; await settle()
+    assert.equal(!!expandedEditor(), outcome === 'failed' || outcome === 'edited', 'successful expanded send closes promptly, but failure or later input keeps the editor open')
+    if (outcome === 'receipt-first') assert.equal(app.currentDraft, 'expanded original', 'closing the surface does not take over native draft cleanup')
+    if (outcome !== 'failed' && outcome !== 'event-first') { nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation); await settle() }
+    assert.equal(app.currentDraft, outcome === 'edited' ? 'next unsent message' : outcome === 'failed' ? 'expanded original' : '')
+    if (expandedEditor()) {
+      const dialog = find(container, item => String(item.props.class ?? '').includes('ui-dialog-box-composer'))
+      find(dialog, item => item.props['aria-label'] === '关闭').props.onClick(); await settle()
+    }
+  }
   compact.props['onUpdate:modelValue']('send original')
   let resolveSend, capturedSend
   submitNative = args => { capturedSend = args; return new Promise(resolve => { resolveSend = resolve }) }

@@ -348,8 +348,16 @@ export function useInputEditor(options: {
     const viewRevision = submitViewRevision
     const expansionRevision = composerExpansionRevision
     const attemptSequence = submitAttemptSequence
+    const originalDraft = draft.value
+    const originalFiles = new Set(options.attachments().draftAttachments.value.map(item => item.fileId))
+    const originalImageCount = options.attachments().restoredImageCount.value
+    // The success reply can precede native draft cleanup. Close this surface without
+    // claiming the draft ourselves, unless the user has already started another message.
     if (await submit() && submitViewRevision === viewRevision && composerExpansionRevision === expansionRevision
-      && submitAttemptSequence <= attemptSequence + 1 && !draft.value && !options.attachments().draftAttachments.value.length && !options.attachments().restoredImageCount.value) composerExpanded.value = false
+      && submitAttemptSequence <= attemptSequence + 1 && (!draft.value || draft.value === originalDraft)
+      && options.attachments().draftAttachments.value.every(item => originalFiles.has(item.fileId))
+      && options.attachments().restoredImageCount.value <= originalImageCount
+      && !options.attachments().uploadDrafts.value.length) composerExpanded.value = false
   }
 
   async function executeLocalControl(command: LocalControlCommand, captured: string): Promise<boolean> {
