@@ -61,4 +61,5 @@ A `--no-bundle` Windows build produces an executable that may still need sidecar
 - Run checks that exercise the changed behavior, using the test scope and assertion criteria in [`qa.md`](../../docs/qa.md).
 - 同一事实保留一份证据；全量构建/测试只在汇报完成前做。
 - 界面改动注明验证层次：静态检查 / 模拟器 / 真机。
+- 浏览器验证使用 `corepack pnpm verify:preview`（用法见 README），需要 native fixture 时以 `--fixture` 叠加插件；不另写 `createServer({ configFile: false })` 临时预览。该入口复用项目配置并强制关闭文件监听，源码变化后重启预览。一次性模块测试若独立使用 Vite `createServer`，必须设置 `server.watch: null`。普通开发热更新仍用 `corepack pnpm dev`。
 

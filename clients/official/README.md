@@ -46,6 +46,22 @@ rm -rf "$icon_output"
 
 `corepack pnpm dev` 用于浏览器设计预览；本机 socket、文件系统等原生能力需要在具备 Tauri native bridge 的 Desktop 中验证。根 `client:test` / `client:build` 覆盖前端，Rust core 与 Tauri host 的完整 gates 见下文「验证入口」。
 
+### 浏览器验证预览
+
+临时验收、截图和 native IPC fixture 使用仓库统一入口，不另写独立 Vite 服务器：
+
+```bash
+cd clients/official
+corepack pnpm verify:preview                    # http://127.0.0.1:1422
+corepack pnpm verify:preview --port 0           # 自动分配端口并打印地址
+corepack pnpm verify:preview --fixture /absolute/path/to/fixture.mjs
+corepack pnpm test:preview
+```
+
+fixture 文件默认导出一个 Vite 插件，可模拟 native IPC 或注入测试数据；它是附加插件，不能替换项目配置或开启文件监听。入口保留 `vite.config.ts` 的 Vue、资源和构建标识配置，使用独立临时缓存，仅监听本机，关闭文件监听和热更新。**源码变化后重启预览，再刷新页面**；Ctrl-C 关闭服务器并清理临时缓存。需要日常热更新时使用上面的 `pnpm dev`。
+
+2026-09 的重复故障来自独立验证服务器跳过项目配置后扫描 Rust `target`。不要用 `configFile: false` 另起浏览器预览，也不要提高系统 watcher 上限来补救。一次性模块测试若不加载项目配置，必须显式关闭监听；`build()` 不开启文件监听，不受此限制。
+
 ## Linux Desktop
 
 安装 Rust/Tauri 编译与打包依赖：
