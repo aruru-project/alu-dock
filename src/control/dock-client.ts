@@ -1,3 +1,9 @@
+import { isDeepStrictEqual } from "node:util";
+import { MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES } from "../core/published-file.js";
+import { receiveClientFile, receiveLegacyClientFile, FileCapabilityMissingError, FileResponseError } from "./client-file-transfer.js";
+import { FileChannel } from "./file-channel.js";
+import { sendFile, FileReceiver, FileTransferSourceError } from "./file-transfer.js";
+import { FILE_TRANSFER_CAPABILITY, parseFileTransferFrame, parseFileDownloadResult, parsePublishedFileDto, parseDeliverableDto, parseWorkspaceEntryDto, type PublishedFileTransferResult, type DeliverableDownloadResult, ProtocolHelloRejectedError, type FileTransferRequest } from "./protocol.js";
 import { SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -185,12 +191,7 @@ export interface ConversationImageReadResult {
   sizeBytes: number;
   sha256: string;
 }
-export interface DeliverableDownloadResult {
-  deliverable: DeliverableDto;
-  chunks: number;
-  sizeBytes: number;
-  sha256: string;
-}
+export type { DeliverableDownloadResult } from "./protocol.js";
 export interface AttachmentUploadSource {
   name: string;
   sizeBytes: number;
@@ -235,10 +236,15 @@ export class DockClient {
     },operationId,instanceId);
   }
 
-  uploadAttachment(source:AttachmentUploadSource,operationId=this.createRequestId(),instanceId?:string):Promise<AttachmentUploadResult>{
+  async uploadAttachment(source:AttachmentUploadSource,operationId=this.createRequestId(),instanceId?:string):Promise<AttachmentUploadResult>{
+    try { return await this.sendAttachment(source, operationId, instanceId, true); }
+    catch (error) { if (!(error instanceof FileCapabilityMissingError)) throw error; return this.sendAttachment(source, operationId, instanceId, false); }
+  }
+
+  private sendAttachment(source:AttachmentUploadSource,operationId:string,instanceId:string|undefined,fileMode:boolean):Promise<AttachmentUploadResult>{
     const helloId=this.createRequestId();
     const requestId=this.createRequestId();
-    const capabilities=requiredCapabilities(ATTACHMENTS_CAPABILITY);
+    const capabilities=[...requiredCapabilities(ATTACHMENTS_CAPABILITY),...(fileMode?[FILE_TRANSFER_CAPABILITY]:[])];
     const request:Extract<ControlRequest,{type:"attachment.upload"}>={
       kind:"request",version:2,requestId,type:"attachment.upload",
       params:{operationId,...(instanceId===undefined?{}:{instanceId}),name:source.name,sizeBytes:source.sizeBytes,...(source.mediaType===undefined?{}:{mediaType:source.mediaType}),sha256:source.sha256},
@@ -252,6 +258,8 @@ export class DockClient {
       let requestSent=false;
       let completionSent=false;
       let bodyStarted=false;
+      let channel:FileChannel|undefined;
+      const legacyAbort=fileMode?undefined:new AbortController();
       let timeout:NodeJS.Timeout;
       const armTimeout=():void=>{
         clearTimeout(timeout);
@@ -266,9 +274,11 @@ export class DockClient {
         if(settled)return;
         settled=true;
         clearTimeout(timeout);
+        legacyAbort?.abort(error??new Error("Upload ended"));
+        channel?.cancel(error??new Error("Upload ended"));
         socket.destroy();
         if(error===undefined)resolveUpload(result as AttachmentUploadResult);
-        else rejectUpload(normalizeClientError(error));
+        else rejectUpload(error instanceof FileCapabilityMissingError?error:error instanceof FileTransferSourceError?new ControlClientError("attachment_source_changed", "Attachment source changed after its size or SHA-256 was declared",operationId):normalizeClientError(error));
       };
       const writeLine=async(value:unknown):Promise<void>=>{
         if(settled)throw new ControlClientError("connection_closed","Attachment upload connection is closed",operationId);
@@ -276,30 +286,21 @@ export class DockClient {
         armTimeout();
       };
       const sendBody=async(maxChunkBytes:number):Promise<void>=>{
-        const chunkLimit=Math.min(maxChunkBytes,MAX_ATTACHMENT_CHUNK_BYTES);
-        const hash=createHash("sha256");
-        let size=0,index=0;
-        for await(const raw of source.open()){
-          if(settled)return;
-          const buffer=Buffer.from(raw);
-          for(let offset=0;offset<buffer.byteLength;offset+=chunkLimit){
-            const chunk=buffer.subarray(offset,Math.min(buffer.byteLength,offset+chunkLimit));
-            size+=chunk.byteLength;
-            if(size>source.sizeBytes)throw new ControlClientError("attachment_source_changed","Attachment source exceeds its declared size",operationId);
-            hash.update(chunk);
-            await writeLine({kind:"attachment_chunk",version:2,requestId,index,data:chunk.toString("base64")});
-            index+=1;
-          }
-        }
-        const digest=hash.digest("hex");
-        if(size!==source.sizeBytes||digest!==source.sha256)throw new ControlClientError("attachment_source_changed","Attachment source changed after its size or SHA-256 was declared",operationId);
+        const options={source:source.open(),maximumBytes:source.sizeBytes,expected:{sizeBytes:source.sizeBytes,sha256:source.sha256}};
+        const summary=channel ? await channel.send(options) : await sendFile({...options,signal:legacyAbort?.signal,chunkBytes:Math.min(maxChunkBytes,MAX_ATTACHMENT_CHUNK_BYTES),onChunk:async(chunk,index)=>{
+          await writeLine({kind:"attachment_chunk",version:2,requestId,index,data:chunk.toString("base64")});
+        }});
         completionSent=true;
-        await writeLine({kind:"attachment_complete",version:2,requestId,chunks:index});
+        if(channel){await channel.write({kind:"file_complete",...summary});channel.dispose();}
+        else await writeLine({kind:"attachment_complete",version:2,requestId,chunks:summary.chunks});
         armTimeout();
       };
       const consumeResponse=(raw:unknown):void=>{
         const response=parseControlResponse(raw,requestId,hostEpoch);
-        if(!response.ok){finish(new ControlClientError(response.error.code,response.error.message,operationId,response.error.details));return;}
+        if(!response.ok){
+          if(fileMode&&!bodyStarted&&response.error.code==="capability_missing"&&Array.isArray(response.error.details?.missing)&&response.error.details.missing.includes(FILE_TRANSFER_CAPABILITY)){finish(new FileCapabilityMissingError());return;}
+          finish(new ControlClientError(response.error.code,response.error.message,operationId,response.error.details));return;
+        }
         const result=parseAttachmentUploadResult(response.result);
         if(result.attachment.sha256!==source.sha256||result.attachment.sizeBytes!==source.sizeBytes)throw new ProtocolValidationError("invalid_response","Attachment upload receipt does not match the declared content");
         finish(undefined,result);
@@ -324,16 +325,22 @@ export class DockClient {
               consumeResponse(raw);
               return;
             }
-            const ready=parseAttachmentUploadReady(raw,requestId,hostEpoch);
+            const ready=fileMode?parseFileTransferFrame(raw,requestId,hostEpoch):parseAttachmentUploadReady(raw,requestId,hostEpoch);
+            if(ready.kind!=="attachment_upload_ready"&&(ready.kind!=="file_ready"||ready.direction!=="upload"))throw new ProtocolValidationError("invalid_response","Upload did not begin with readiness");
+            if(fileMode&&ready.kind==="file_ready"){channel=new FileChannel(socket,requestId,hostEpoch);channel.configure(ready);}
             if(bodyStarted)throw new ProtocolValidationError("invalid_response","Host repeated attachment upload readiness");
             bodyStarted=true;
             phase="response";
-            armTimeout();
-            void sendBody(ready.maxChunkBytes).catch((error)=>finish(error));
+            if(channel)clearTimeout(timeout);else armTimeout();
+            void sendBody(ready.maxChunkBytes).catch((error)=>finish(completionSent?new ControlClientError("effect_unknown",`Attachment operation ${operationId} ended after completion began; retry the same operation to recover its receipt`,operationId):error));
             return;
           }
+          if(channel&&["file_progress","file_activity"].includes((raw as {kind:string}).kind)) { void channel.consume(raw).catch(finish); return; }
           consumeResponse(raw);
-        }catch(error){finish(error);}
+        }catch(error){
+          if(fileMode&&!requestSent&&error instanceof ProtocolHelloRejectedError&&error.rejection.code==="capability_missing"&&error.rejection.missing?.includes(FILE_TRANSFER_CAPABILITY))finish(new FileCapabilityMissingError());
+          else finish(error);
+        }
       };
       armTimeout();
       socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
@@ -465,125 +472,95 @@ export class DockClient {
     });
   }
 
-  async readFile(instanceId:string,fileRef:string,offset?:number):Promise<FileReadResult>{const requestedOffset=offset??0;const result=await this.request("file.read",{instanceId,fileRef,offset},PUBLISHED_FILES_CAPABILITY,(input)=>parseFileReadResult(input,requestedOffset));if(result.instanceId!==instanceId||result.file.fileRef!==fileRef||result.offset!==requestedOffset)throw new ControlClientError("invalid_response","Published file result belongs to another request");return result;}
+  private async readWholeFile(type:Exclude<FileTransferRequest["type"],"attachment.upload">,params:FileTransferRequest["params"],capability:Capability,maximumBytes:number,onChunk:(bytes:Uint8Array)=>void|Promise<void>,signal?:AbortSignal,onReady?:(metadata:unknown)=>void){
+    const request={kind:"request",version:2,requestId:this.createRequestId(),type,params} as FileTransferRequest;
+    try{const received=await receiveClientFile({openSocket:()=>this.openSocket(),hello:this.hello(this.createRequestId(),[...requiredCapabilities(capability),FILE_TRANSFER_CAPABILITY]),request,maximumBytes,sink:onChunk,signal,onReady,timeoutMs:this.timeoutMs});
+      const result=parseFileDownloadResult(type,received.result);
+      if(result.chunks!==received.summary.chunks||result.sizeBytes!==received.summary.sizeBytes||result.sha256!==received.summary.sha256)throw new ProtocolValidationError("invalid_response","File result differs from the verified transfer");
+      return {...received,result};}
+    catch(error){if(signal?.aborted)throw new ControlClientError("aborted","File read cancelled");if(error instanceof FileResponseError)throw new ControlClientError(error.code,error.message,undefined,error.details);if(error instanceof FileCapabilityMissingError)throw error;throw normalizeClientError(error);}
+  }
+
+  async downloadPublishedFile(instanceId:string,fileRef:string,onChunk:(bytes:Uint8Array)=>void|Promise<void>,signal?:AbortSignal):Promise<PublishedFileTransferResult>{
+    let acceptedFile:PublishedFileTransferResult["file"]|undefined;
+    try{
+      const result=(await this.readWholeFile("file.read",{instanceId,fileRef},PUBLISHED_FILES_CAPABILITY,MAX_PUBLISHED_FILE_BYTES,onChunk,signal,(metadata)=>{
+        acceptedFile=parsePublishedFileDto((metadata as {file?:unknown})?.file);
+        if(acceptedFile.fileRef!==fileRef)throw new ProtocolValidationError("invalid_response","Published readiness belongs to another file");
+      })).result as PublishedFileTransferResult;
+      if(result.instanceId!==instanceId||result.file.fileRef!==fileRef||!isDeepStrictEqual(result.file,acceptedFile)||result.sizeBytes!==result.file.sizeBytes)throw new ControlClientError("invalid_response","Published completion differs from the requested file");
+      return result;
+    }
+    catch(error){if(!(error instanceof FileCapabilityMissingError))throw error;}
+    let offset:number|undefined=0,chunks=0,generation:number|undefined,hostEpoch:string|undefined;let page:FileReadResult;
+    const receiver=new FileReceiver({maximumBytes:MAX_PUBLISHED_FILE_BYTES,chunkBytes:MAX_PUBLISHED_FILE_CHUNK_BYTES,sink:onChunk});
+    do{
+      signal?.throwIfAborted();page=await this.readFilePage(instanceId,fileRef,offset,(ack)=>{
+        if(hostEpoch!==undefined&&hostEpoch!==ack.host.hostEpoch)throw new ControlClientError("file_unavailable","The Host changed while the file was being read. Open the file again.");hostEpoch=ack.host.hostEpoch;
+      });
+      if(generation!==undefined&&generation!==page.runtimeGeneration)throw new ControlClientError("file_unavailable","The file changed while it was being read. Open the file again.");
+      generation=page.runtimeGeneration;await receiver.chunk(chunks++,page.data);offset=page.nextOffset;
+    }while(offset!==undefined);
+    return {instanceId,file:page.file,runtimeGeneration:page.runtimeGeneration,...receiver.end(chunks)};
+  }
+
+  private async wholeText(type:"resource.content"|"system.content",params:FileTransferRequest["params"],legacy:()=>Promise<ResourceContentResult>,signal?:AbortSignal):Promise<ResourceContentResult>{
+    const decoder=new TextDecoder("utf-8",{fatal:true,ignoreBOM:true});let text="";
+    const decode=(bytes?:Uint8Array,stream=false):string=>{try{return decoder.decode(bytes,{stream});}catch{throw new ControlClientError("resource_unavailable","这份资源不是 UTF-8 文本。请检查文件编码后重新打开。");}};
+    try{const received=await this.readWholeFile(type,params,type==="resource.content"?RESOURCE_CONTENT_CAPABILITY:SYSTEM_TEMPLATES_CAPABILITY,Number.MAX_SAFE_INTEGER,(bytes)=>{text+=decode(bytes,true);},signal);text+=decode();return {text,revision:(received.result as {revision:string}).revision};}
+    catch(error){if(!(error instanceof FileCapabilityMissingError))throw error;return legacy();}
+  }
+  resourceContentAll(instanceId:string,contentRef:string,signal?:AbortSignal):Promise<ResourceContentResult>{return this.wholeText("resource.content",{instanceId,contentRef},async()=>{let text="",offset:number|undefined,revision:string|undefined;do{signal?.throwIfAborted();const page=await this.resourceContent(instanceId,contentRef,offset,revision);signal?.throwIfAborted();text+=page.text;offset=page.nextOffset;revision=page.revision;}while(offset!==undefined);return {text,revision:revision!};},signal);}
+  systemContentAll(cwd:string,id:string,hostId?:string,signal?:AbortSignal):Promise<ResourceContentResult>{return this.wholeText("system.content",{cwd,id,hostId},async()=>{let text="",offset:number|undefined,revision:string|undefined;do{signal?.throwIfAborted();const page=await this.systemContent(cwd,id,hostId,offset,revision);signal?.throwIfAborted();text+=page.text;offset=page.nextOffset;revision=page.revision;}while(offset!==undefined);return {text,revision:revision!};},signal);}
+
+  readFile(instanceId:string,fileRef:string,offset?:number):Promise<FileReadResult>{return this.readFilePage(instanceId,fileRef,offset);}
+  private async readFilePage(instanceId:string,fileRef:string,offset?:number,onHello?:(ack:HelloAck)=>void):Promise<FileReadResult>{const requestedOffset=offset??0;const result=await this.request("file.read",{instanceId,fileRef,offset},PUBLISHED_FILES_CAPABILITY,(input)=>parseFileReadResult(input,requestedOffset),onHello);if(result.instanceId!==instanceId||result.file.fileRef!==fileRef||result.offset!==requestedOffset)throw new ControlClientError("invalid_response","Published file result belongs to another request");return result;}
   async listDeliverables(instanceId:string):Promise<DeliverableDto[]>{const result=await this.request("deliverable.list",{instanceId},INSTANCE_DELIVERABLES_CAPABILITY,parseDeliverableListResult);if(result.instanceId!==instanceId)throw new ControlClientError("invalid_response","Temporary file list belongs to another work");return result.deliverables;}
 
-  downloadDeliverable(instanceId:string,deliveryRef:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>):Promise<DeliverableDownloadResult>{
-    const helloId=this.createRequestId(),requestId=this.createRequestId();
-    const capabilities=requiredCapabilities(INSTANCE_DELIVERABLES_CAPABILITY);
-    const request:Extract<ControlRequest,{type:"deliverable.download"}>={kind:"request",version:2,requestId,type:"deliverable.download",params:{instanceId,deliveryRef}};
-    return new Promise<DeliverableDownloadResult>((resolveDownload,rejectDownload)=>{
-      const socket=this.openSocket(),decoder=new JsonLineDecoder();
-      let phase:"hello"|"ready"|"stream"|"complete"="hello",hostEpoch="",settled=false,requestSent=false;
-      let deliverable:DeliverableDto|undefined,index=0,sizeBytes=0,completion:DeliverableDownloadResult|undefined;
-      const hash=createHash("sha256");
-      let timeout:NodeJS.Timeout;
-      const finish=(error?:unknown,result?:DeliverableDownloadResult):void=>{if(settled)return;settled=true;clearTimeout(timeout);socket.destroy();error===undefined?resolveDownload(result as DeliverableDownloadResult):rejectDownload(normalizeClientError(error));};
-      const resetTimeout=():void=>{clearTimeout(timeout);timeout=setTimeout(()=>finish(new ControlClientError("timeout",`Temporary file download timed out after ${this.longMutationTimeoutMs}ms`)),this.longMutationTimeoutMs);};
-      const identity=()=>({requestId,hostEpoch,instanceId,deliveryRef});
-      const consume=async(line:string):Promise<void>=>{
-        if(!line||settled)return;
-        let raw:unknown;try{raw=JSON.parse(line);}catch{throw new ControlClientError("invalid_response","Host returned invalid JSON during temporary file download");}
-        if(phase==="hello"){
-          const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;
-          for(const required of capabilities)if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
-          phase="ready";requestSent=true;socket.write(encodeJsonLine(request));resetTimeout();return;
-        }
-        if(phase==="complete")throw new ProtocolValidationError("invalid_response","Temporary file download sent data after completion");
-        if(phase==="ready"&&raw!==null&&typeof raw==="object"&&(raw as {kind?:unknown}).kind==="response"){
-          const response=parseControlResponse(raw,requestId,hostEpoch);
-          if(!response.ok)throw new ControlClientError(response.error.code,response.error.message,undefined,response.error.details);
-          throw new ProtocolValidationError("invalid_response","Temporary file download returned an ordinary success response");
-        }
-        const frame=parseDeliverableDownloadFrame(raw,identity());resetTimeout();
-        if(phase==="ready"){
-          if(frame.kind!=="deliverable_download_ready")throw new ProtocolValidationError("invalid_response","Temporary file download did not begin with readiness");
-          deliverable=frame.deliverable;phase="stream";return;
-        }
-        if(frame.kind==="deliverable_download_error")throw new ControlClientError(frame.error.code,frame.error.message);
-        if(frame.kind==="deliverable_download_ready")throw new ProtocolValidationError("invalid_response","Host repeated temporary file download readiness");
-        if(frame.kind==="deliverable_download_chunk"){
-          if(frame.index!==index)throw new ProtocolValidationError("invalid_response","Temporary file chunks arrived out of order");
-          const bytes=Buffer.from(frame.data,"base64");
-          if(!deliverable||sizeBytes+bytes.byteLength>deliverable.sizeBytes)throw new ProtocolValidationError("invalid_response","Temporary file bytes exceed the declared size");
-          hash.update(bytes);await onChunk(bytes);sizeBytes+=bytes.byteLength;index+=1;return;
-        }
-        if(!deliverable||frame.chunks!==index||frame.sizeBytes!==sizeBytes||sizeBytes!==deliverable.sizeBytes)throw new ProtocolValidationError("invalid_response","Temporary file completion counts do not match received bytes");
-        const digest=hash.digest("hex");
-        if(frame.sha256!==digest)throw new ProtocolValidationError("invalid_response","Temporary file SHA-256 verification failed");
-        completion={deliverable,chunks:index,sizeBytes,sha256:digest};phase="complete";
-      };
-      let processing=Promise.resolve();resetTimeout();
-      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
-      socket.on("data",(chunk:Buffer)=>{socket.pause();processing=processing.then(async()=>{for(const line of decoder.push(chunk))await consume(line);}).catch(finish).finally(()=>{if(!settled&&!socket.destroyed)socket.resume();});});
-      socket.once("end",()=>{processing=processing.then(()=>{
-        decoder.finish();
-        if(!completion)throw new ControlClientError("connection_closed","Host ended before the temporary file download completed");
-        finish(undefined,completion);
-      }).catch(finish);});
-      socket.once("error",error=>finish(transportError(error)));
-      socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the temporary file download completed":"Host closed before responding"));});});
+  async downloadDeliverable(instanceId:string,deliveryRef:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>):Promise<DeliverableDownloadResult>{
+    let acceptedDelivery:DeliverableDto|undefined;
+    try {
+      const result=(await this.readWholeFile("deliverable.download",{instanceId,deliveryRef},INSTANCE_DELIVERABLES_CAPABILITY,MAX_SOURCE_FILE_TRANSFER_BYTES,onChunk,undefined,(metadata)=>{
+        acceptedDelivery=parseDeliverableDto((metadata as {deliverable?:unknown})?.deliverable,"deliverable",{allowUnknownFields:true});
+        if(acceptedDelivery.deliveryRef!==deliveryRef)throw new ProtocolValidationError("invalid_response","Readiness belongs to another delivery");
+      })).result as DeliverableDownloadResult;
+      if(!isDeepStrictEqual(result.deliverable,acceptedDelivery)||result.deliverable.deliveryRef!==deliveryRef||result.sizeBytes!==result.deliverable.sizeBytes)throw new ControlClientError("invalid_response","File completion differs from the accepted delivery");
+      return result;
+    }
+    catch(error){ if(!(error instanceof FileCapabilityMissingError))throw error; return this.legacyDownloadDeliverable(instanceId,deliveryRef,onChunk).catch(error=>{if(error instanceof FileResponseError)throw new ControlClientError(error.code,error.message,undefined,error.details);throw normalizeClientError(error);}); }
+  }
+
+  private async legacyDownloadDeliverable(instanceId:string,deliveryRef:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>):Promise<DeliverableDownloadResult>{
+    const requestId=this.createRequestId();
+    const {metadata,summary}=await receiveLegacyClientFile<DeliverableDto>({openSocket:()=>this.openSocket(),hello:this.hello(this.createRequestId(),requiredCapabilities(INSTANCE_DELIVERABLES_CAPABILITY)),request:{kind:"request",version:2,requestId,type:"deliverable.download",params:{instanceId,deliveryRef}},maximumBytes:MAX_SOURCE_FILE_TRANSFER_BYTES,sink:onChunk,timeoutMs:this.longMutationTimeoutMs,
+      frame:(raw,hostEpoch)=>{const f=parseDeliverableDownloadFrame(raw,{requestId,hostEpoch,instanceId,deliveryRef});switch(f.kind){case "deliverable_download_ready":return {kind:"ready",metadata:f.deliverable};case "deliverable_download_chunk":return {...f,kind:"chunk"};case "deliverable_download_complete":return {...f,kind:"complete"};case "deliverable_download_error":return {kind:"error",...f.error};}}
     });
+    if(metadata.sizeBytes!==summary.sizeBytes)throw new ProtocolValidationError("invalid_response","File size differs from readiness");
+    return {deliverable:metadata,...summary};
   }
   async listWorkspaceEntries(instanceId:string,path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceEntryListResult>{const normalizedPath=workspaceRequestPath(path);const result=await this.request("workspace.entry.list",{instanceId,path:normalizedPath,cursor,limit},WORKSPACE_FILES_CAPABILITY,parseWorkspaceEntryListResult);if(result.instanceId!==instanceId||result.path!==normalizedPath)throw new ControlClientError("invalid_response","Workspace entries belong to another request");return result;}
   async getWorkspaceEntry(instanceId:string,path:string):Promise<WorkspaceEntryDto>{const normalizedPath=workspaceRequestPath(path);const result=await this.request("workspace.entry.get",{instanceId,path:normalizedPath},WORKSPACE_FILES_CAPABILITY,parseWorkspaceEntryGetResult);if(result.instanceId!==instanceId||result.entry.path!==normalizedPath)throw new ControlClientError("invalid_response","Workspace entry belongs to another request");return result.entry;}
 
-  readWorkspaceFile(instanceId:string,path:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>,signal?:AbortSignal):Promise<WorkspaceFileReadResult>{
-    const helloId=this.createRequestId(),requestId=this.createRequestId();
-    const capabilities=requiredCapabilities(WORKSPACE_FILES_CAPABILITY);
-    return new Promise<WorkspaceFileReadResult>((resolveRead,rejectRead)=>{
-      let normalizedPath:string;
-      try{normalizedPath=normalizeWorkspaceRelativePath(path);}catch(error){rejectRead(normalizeClientError(error));return;}
-      const request:Extract<ControlRequest,{type:"workspace.file.read"}>={kind:"request",version:2,requestId,type:"workspace.file.read",params:{instanceId,path:normalizedPath}};
-      if(signal?.aborted){rejectRead(new ControlClientError("aborted","Workspace file read was cancelled"));return;}
-      const socket=this.openSocket(),decoder=new JsonLineDecoder();
-      let phase:"hello"|"ready"|"stream"|"complete"="hello",hostEpoch="",settled=false,requestSent=false;
-      let entry:WorkspaceEntryDto|undefined,index=0,sizeBytes=0,completion:WorkspaceFileReadResult|undefined;
-      const hash=createHash("sha256");
-      let timeout:NodeJS.Timeout;
-      const onAbort=():void=>finish(new ControlClientError("aborted","Workspace file read was cancelled"));
-      const finish=(error?:unknown,result?:WorkspaceFileReadResult):void=>{if(settled)return;settled=true;clearTimeout(timeout);signal?.removeEventListener("abort",onAbort);socket.destroy();error===undefined?resolveRead(result as WorkspaceFileReadResult):rejectRead(normalizeClientError(error));};
-      const resetTimeout=():void=>{clearTimeout(timeout);timeout=setTimeout(()=>finish(new ControlClientError("timeout",`Workspace file read timed out after ${this.longMutationTimeoutMs}ms`)),this.longMutationTimeoutMs);};
-      const identity=()=>({requestId,hostEpoch,instanceId,path:normalizedPath});
-      const consume=async(line:string):Promise<void>=>{
-        if(!line||settled)return;
-        let raw:unknown;try{raw=JSON.parse(line);}catch{throw new ControlClientError("invalid_response","Host returned invalid JSON during workspace file read");}
-        if(phase==="hello"){
-          const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;
-          for(const required of capabilities)if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
-          phase="ready";requestSent=true;socket.write(encodeJsonLine(request));resetTimeout();return;
-        }
-        if(phase==="complete")throw new ProtocolValidationError("invalid_response","Workspace file read sent data after completion");
-        if(phase==="ready"&&raw!==null&&typeof raw==="object"&&(raw as {kind?:unknown}).kind==="response"){
-          const response=parseControlResponse(raw,requestId,hostEpoch);
-          if(!response.ok)throw new ControlClientError(response.error.code,response.error.message,undefined,response.error.details);
-          throw new ProtocolValidationError("invalid_response","Workspace file read returned an ordinary success response");
-        }
-        const frame=parseWorkspaceFileReadFrame(raw,identity());resetTimeout();
-        if(phase==="ready"){
-          if(frame.kind!=="workspace_file_read_ready")throw new ProtocolValidationError("invalid_response","Workspace file read did not begin with metadata");
-          entry=frame.entry;phase="stream";return;
-        }
-        if(frame.kind==="workspace_file_read_error")throw new ControlClientError(frame.error.code,frame.error.message);
-        if(frame.kind==="workspace_file_read_ready")throw new ProtocolValidationError("invalid_response","Host repeated workspace file metadata");
-        if(frame.kind==="workspace_file_read_chunk"){
-          if(frame.index!==index)throw new ProtocolValidationError("invalid_response","Workspace file chunks arrived out of order");
-          const bytes=Buffer.from(frame.data,"base64");
-          if(sizeBytes+bytes.byteLength>MAX_SOURCE_FILE_TRANSFER_BYTES)throw new ProtocolValidationError("invalid_response","Workspace file bytes exceed the supported size");
-          hash.update(bytes);await onChunk(bytes);sizeBytes+=bytes.byteLength;index+=1;return;
-        }
-        if(!entry||frame.chunks!==index||frame.sizeBytes!==sizeBytes)throw new ProtocolValidationError("invalid_response","Workspace file completion counts do not match received bytes");
-        const digest=hash.digest("hex");
-        if(frame.sha256!==digest)throw new ProtocolValidationError("invalid_response","Workspace file SHA-256 verification failed");
-        completion={entry,chunks:index,sizeBytes,sha256:digest};phase="complete";
-      };
-      let processing=Promise.resolve();resetTimeout();signal?.addEventListener("abort",onAbort,{once:true});
-      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
-      socket.on("data",(chunk:Buffer)=>{socket.pause();processing=processing.then(async()=>{for(const line of decoder.push(chunk))await consume(line);}).catch(finish).finally(()=>{if(!settled&&!socket.destroyed)socket.resume();});});
-      socket.once("end",()=>{processing=processing.then(()=>{decoder.finish();if(!completion)throw new ControlClientError("connection_closed","Host ended before the workspace file read completed");finish(undefined,completion);}).catch(finish);});
-      socket.once("error",error=>finish(transportError(error)));
-      socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the workspace file read completed":"Host closed before responding"));});});
-    });
+  async readWorkspaceFile(instanceId:string,path:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>,signal?:AbortSignal):Promise<WorkspaceFileReadResult>{
+    const normalizedPath=workspaceRequestPath(path);
+    let acceptedEntry:WorkspaceEntryDto|undefined;
+    try {
+      const result=(await this.readWholeFile("workspace.file.read",{instanceId,path:normalizedPath},WORKSPACE_FILES_CAPABILITY,MAX_SOURCE_FILE_TRANSFER_BYTES,onChunk,signal,(metadata)=>{
+        acceptedEntry=parseWorkspaceEntryDto((metadata as {entry?:unknown})?.entry,"entry");
+        if(acceptedEntry.path!==normalizedPath||(acceptedEntry.kind!=="file"&&acceptedEntry.targetKind!=="file"))throw new ProtocolValidationError("invalid_response","Readiness does not describe the requested workspace file");
+      })).result as WorkspaceFileReadResult;
+      if(result.entry.path!==normalizedPath||!isDeepStrictEqual(result.entry,acceptedEntry))throw new ControlClientError("invalid_response","File completion differs from the accepted workspace entry");
+      // The observed size is not a promise that a workspace file cannot grow.
+      return result;
+    }
+    catch(error){ if(!(error instanceof FileCapabilityMissingError))throw error; return this.legacyReadWorkspaceFile(instanceId,path,onChunk,signal).catch(error=>{if(error instanceof FileResponseError)throw new ControlClientError(error.code,error.message,undefined,error.details);throw normalizeClientError(error);}); }
+  }
+
+  private async legacyReadWorkspaceFile(instanceId:string,path:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>,signal?:AbortSignal):Promise<WorkspaceFileReadResult>{
+    path=workspaceRequestPath(path);const requestId=this.createRequestId();
+    const {metadata,summary}=await receiveLegacyClientFile<WorkspaceEntryDto>({openSocket:()=>this.openSocket(),hello:this.hello(this.createRequestId(),requiredCapabilities(WORKSPACE_FILES_CAPABILITY)),request:{kind:"request",version:2,requestId,type:"workspace.file.read",params:{instanceId,path}},maximumBytes:MAX_SOURCE_FILE_TRANSFER_BYTES,sink:onChunk,signal,timeoutMs:this.longMutationTimeoutMs,
+      frame:(raw,hostEpoch)=>{const f=parseWorkspaceFileReadFrame(raw,{requestId,hostEpoch,instanceId,path});switch(f.kind){case "workspace_file_read_ready":return {kind:"ready",metadata:f.entry};case "workspace_file_read_chunk":return {...f,kind:"chunk"};case "workspace_file_read_complete":return {...f,kind:"complete"};case "workspace_file_read_error":return {kind:"error",...f.error};}}
+    });return {entry:metadata,...summary};
   }
 
   systemCatalog(cwd:string,hostId?:string,cursor?:SystemCatalogCursor,limit=MAX_SYSTEM_CATALOG_ITEMS):Promise<SystemCatalogResult>{return this.request("system.catalog",{cwd,hostId,cursor,limit},SYSTEM_TEMPLATES_CAPABILITY,parseSystemCatalogResult);}

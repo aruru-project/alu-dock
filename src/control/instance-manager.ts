@@ -28,7 +28,7 @@ export type InstanceLocationDecision =
   | RemoteEndpointDecision;
 
 export interface RemoteProtocolEndpoint {
-  dispatch(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RemoteEndpointDecision>;
+  dispatch(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void, fileMode?: boolean): Promise<RemoteEndpointDecision>;
 }
 
 /** Persistent remote-location backend used only by the global InstanceManager profile. */
@@ -111,6 +111,7 @@ export class InstanceManager {
     request: ControlRequest,
     emit: (record: unknown) => void | Promise<void>,
     ended: () => void,
+    fileMode = false,
   ): Promise<InstanceLocationDecision> {
     const classification = classifyControlRequest(request);
     if (classification.target === "dock") return { kind: "local" };
@@ -152,14 +153,14 @@ export class InstanceManager {
       const instanceId = "instanceId" in request.params ? request.params.instanceId : undefined;
       if (typeof instanceId !== "string") throw new Error(`Instance request ${request.type} has no instance identity`);
       const endpoint = await this.remote.resolveInstance(instanceId);
-      return endpoint ? endpoint.dispatch(request, emit, ended) : { kind: "local" };
+      return endpoint ? endpoint.dispatch(request, emit, ended, fileMode) : { kind: "local" };
     }
 
     const hostId = "hostId" in request.params ? request.params.hostId : undefined;
     if (typeof hostId !== "string" || hostId === this.remote.mainHostId()) return { kind: "local" };
     const endpoint = await this.remote.resolveHost(hostId);
     if (!endpoint) throw new ProtocolValidationError("host_not_found", "That machine is not connected to this Dock");
-    return endpoint.dispatch(request, emit, ended);
+    return endpoint.dispatch(request, emit, ended, fileMode);
   }
 
   machines(): Promise<MachineDto[]> {

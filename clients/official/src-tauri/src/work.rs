@@ -394,16 +394,23 @@ pub(crate) async fn system_content(
     revision: Option<String>,
 ) -> Result<ResourceContentResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .system_content(
-            &cwd,
-            &id,
-            target_host_id.as_deref(),
-            offset,
-            revision.as_deref(),
-        )
-        .await
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    if offset.is_none() && revision.is_none() {
+        client
+            .system_content_all(&cwd, &id, target_host_id.as_deref())
+            .await
+    } else {
+        client
+            .system_content(
+                &cwd,
+                &id,
+                target_host_id.as_deref(),
+                offset,
+                revision.as_deref(),
+            )
+            .await
+    }
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]

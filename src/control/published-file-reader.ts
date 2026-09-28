@@ -4,7 +4,7 @@ import {
   type PublishedFileDto,
   type PublishedFileReadPage,
 } from "../core/published-file.js";
-import { assertUnchangedSource, openUnchangedSource, SourceFileError, type SourceFileIdentity } from "../core/source-file.js";
+import { fileBytes, assertUnchangedSource, openUnchangedSource, SourceFileError, type SourceFileIdentity } from "../core/source-file.js";
 
 /** Host reader for the existing public page API. Registration stays with the source owner. */
 export async function readPublishedFilePage(file: PublishedFileDto, source: SourceFileIdentity, offset = 0): Promise<PublishedFileReadPage> {
@@ -17,10 +17,8 @@ export async function readPublishedFilePage(file: PublishedFileDto, source: Sour
     const count = Math.min(MAX_PUBLISHED_FILE_CHUNK_BYTES, source.size - offset);
     const bytes = Buffer.allocUnsafe(count);
     let read = 0;
-    while (read < count) {
-      const result = await handle.read(bytes, read, count - read, offset + read);
-      if (result.bytesRead === 0) throw new PublishedFileUnavailableError();
-      read += result.bytesRead;
+    for await (const chunk of fileBytes(handle, { sizeBytes: count, offset, chunkBytes: count })) {
+      chunk.copy(bytes, read); read += chunk.byteLength;
     }
     assertUnchangedSource(source, await handle.stat());
     const nextOffset = offset + read;

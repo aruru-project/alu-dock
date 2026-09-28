@@ -13,6 +13,9 @@ export class JsonLineError extends Error {
 export class JsonLineDecoder {
   private readonly decoder = new StringDecoder("utf8");
   private buffer = "";
+  private sequence = 0;
+  get partialRecord(): string { return this.buffer; }
+  get recordSequence(): number { return this.sequence; }
 
   constructor(private readonly maxLineBytes = MAX_CONTROL_LINE_BYTES) {}
 
@@ -28,6 +31,7 @@ export class JsonLineDecoder {
       if (line.endsWith("\r")) line = line.slice(0, -1);
       this.assertLineSize(line);
       lines.push(line);
+      this.sequence += 1;
     }
 
     if (Buffer.byteLength(this.buffer, "utf8") > this.maxLineBytes) {

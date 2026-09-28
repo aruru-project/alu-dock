@@ -102,6 +102,45 @@ impl DockClient {
         .await
     }
 
+    pub async fn system_content_all(
+        &self,
+        cwd: &str,
+        id: &str,
+        host_id: Option<&str>,
+    ) -> Result<ResourceContentResult> {
+        let params = ContentParams {
+            cwd,
+            id,
+            host_id,
+            offset: None,
+            revision: None,
+        };
+        if let Some(result) = self
+            .read_file_text("system.content", &params, SYSTEM_TEMPLATES)
+            .await?
+        {
+            return Ok(result);
+        }
+        let mut text = String::new();
+        let mut offset = None;
+        let mut revision: Option<String> = None;
+        loop {
+            let page = self
+                .system_content(cwd, id, host_id, offset, revision.as_deref())
+                .await?;
+            text.push_str(&page.text);
+            offset = page.next_offset;
+            revision = Some(page.revision);
+            if offset.is_none() {
+                return Ok(ResourceContentResult {
+                    text,
+                    revision: revision.unwrap(),
+                    next_offset: None,
+                });
+            }
+        }
+    }
+
     pub async fn system_content(
         &self,
         cwd: &str,

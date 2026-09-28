@@ -7,6 +7,7 @@ export class DocumentReader implements Component, Focusable {
   focused = false;
   onClose?: () => void;
   private active = true;
+  private readonly cancellation = new AbortController();
   private text = "";
   private loading = true;
   private error = false;
@@ -14,19 +15,15 @@ export class DocumentReader implements Component, Focusable {
   private pageSize = 1;
   private cached?: { width: number; raw: boolean; lines: string[] };
   constructor(private readonly title: string, private raw: boolean, private readonly rows: () => number, private readonly redraw: () => void) {}
-  async load(fetch: (offset?: number, revision?: string) => Promise<ResourceContentResult>): Promise<void> {
-    let offset: number | undefined, revision: string | undefined;
+  async load(fetch: (signal: AbortSignal) => Promise<ResourceContentResult>): Promise<void> {
+    if (!this.active) return;
     try {
-      do {
-        const page = await fetch(offset, revision);
-        if (!this.active) return;
-        this.text += page.text;
-        offset = page.nextOffset; revision = page.revision;
-      } while (offset !== undefined);
+      const content = await fetch(this.cancellation.signal);
+      if (this.active) this.text = content.text;
     } catch { if (this.active) this.error = true; }
     finally { if (this.active) { this.loading = false; this.redraw(); } }
   }
-  dispose(): void { this.active = false; }
+  dispose(): void { this.active = false; this.cancellation.abort(); }
   handleInput(data: string): void {
     if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || matchesKey(data, Key.ctrl("d")) || data === "q") { this.dispose(); this.onClose?.(); }
     else if (matchesKey(data, Key.down)) this.top++;

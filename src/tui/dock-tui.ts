@@ -1602,7 +1602,7 @@ export async function runDockTui(
         const frame = new WorkModalFrame(reader);
         const overlay = tui.showOverlay(frame, { width: "96%", maxHeight: "94%", anchor: "center", margin: 0 });
         tui.setFocus(frame);
-        void reader.load((offset, revision) => client.resourceContent(instance.id, ref, offset, revision));
+        void reader.load((signal) => client.resourceContentAll(instance.id, ref, signal));
         try { await closed; }
         finally { reader.dispose(); overlay.hide(); }
       }

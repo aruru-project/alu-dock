@@ -331,10 +331,17 @@ pub(crate) async fn resource_content(
     revision: Option<String>,
 ) -> Result<ResourceContentResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .resource_content(&instance_id, &content_ref, offset, revision.as_deref())
-        .await
-        .map_err(CommandError::from)
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    if offset.is_none() && revision.is_none() {
+        client
+            .resource_content_all(&instance_id, &content_ref)
+            .await
+    } else {
+        client
+            .resource_content(&instance_id, &content_ref, offset, revision.as_deref())
+            .await
+    }
+    .map_err(CommandError::from)
 }
 
 #[tauri::command]

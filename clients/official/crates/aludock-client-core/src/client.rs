@@ -285,6 +285,19 @@ impl DockClient {
         ))
     }
 
+    pub(crate) fn check_file_host_epoch(&self, epoch: &str) -> Result<()> {
+        if self
+            .expected_host_epoch
+            .as_deref()
+            .is_some_and(|expected| expected != epoch)
+        {
+            return Err(ClientError::Protocol(
+                "Host changed before the file request began".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn negotiate(
         &self,
         required_capabilities: &[&str],

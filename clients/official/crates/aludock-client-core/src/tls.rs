@@ -152,6 +152,29 @@ where
     T: DeserializeOwned,
     R: AsyncBufRead + Unpin,
 {
+    Ok(read_json_line_counted(stream, maximum_bytes).await?.0)
+}
+
+pub(crate) async fn read_json_line_counted<T, R>(
+    stream: &mut R,
+    maximum_bytes: usize,
+) -> Result<(T, usize)>
+where
+    T: DeserializeOwned,
+    R: AsyncBufRead + Unpin,
+{
+    read_json_line_observed(stream, maximum_bytes, |_, _| {}).await
+}
+
+pub(crate) async fn read_json_line_observed<T, R>(
+    stream: &mut R,
+    maximum_bytes: usize,
+    mut received: impl FnMut(usize, &[u8]),
+) -> Result<(T, usize)>
+where
+    T: DeserializeOwned,
+    R: AsyncBufRead + Unpin,
+{
     let mut bytes = Vec::new();
     loop {
         // The limit includes the newline. In particular, reject zero before
@@ -176,6 +199,7 @@ where
             }
             bytes.extend_from_slice(&available[..newline]);
             stream.consume(newline + 1);
+            received(newline + 1, &bytes);
             break;
         }
         if bytes.len().saturating_add(available.len()) >= maximum_bytes {
@@ -186,8 +210,12 @@ where
         let consumed = available.len();
         bytes.extend_from_slice(available);
         stream.consume(consumed);
+        received(consumed, &bytes);
     }
-    serde_json::from_slice(&bytes).map_err(ClientError::from)
+    Ok((
+        serde_json::from_slice(&bytes).map_err(ClientError::from)?,
+        bytes.len() + 1,
+    ))
 }
 
 #[derive(Clone)]

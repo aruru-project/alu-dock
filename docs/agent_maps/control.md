@@ -67,7 +67,7 @@ Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
 1. 客户端先发送 hello，并协商版本与 capabilities；
 2. hello 成功后发送业务 request；
-3. 普通 request 返回一个 response；`session.tree.v2` 成功时改用透明的有界 response-transfer records 重组同一个逻辑 response；`attachment.upload` 是唯一的有界多记录 request body，完成后仍只返回一个 terminal response；
+3. 普通 request 返回一个 response；`session.tree.v2` 成功时改用透明的有界 response-transfer records 重组同一个逻辑 response；未协商整文件模式时 `attachment.upload` 是唯一的多记录 request body；协商 `file-transfer.v1` 的文件请求见下文，仍各自只有一个 terminal response；
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
 5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
 
@@ -100,6 +100,26 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 `workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
 
 `workspace.files.v1` 是 active instance 的 Host workspace 只读能力。每次请求以受理时 snapshot 的 `cwd` 为根，path 使用 workspace-relative 形状且根为 `.`；`workspace.entry.list/get` 返回隐藏条目和不含 Host 绝对路径的 workspace metadata，`workspace.file.read` 在独立连接中按 ready/chunk/complete-or-error 顺序读取正文。Host 拒绝 absolute、`..` 与逃出根目录的符号链接，并在 open 后再次核对实际文件对象仍位于根内。安全的 contained symlink 可按目标类型读取或遍历；外部、断链或 loop symlink 仍可列出为 `targetKind: unavailable`，但不能打开。stop 后的新请求拒绝，reopen 后按普通 active instance 使用。
+
+## 整文件传输
+
+客户端在既有 hello 的 `requiredCapabilities` 加入 `file-transfer.v1`，随后仍发送原业务请求：`attachment.upload`、`workspace.file.read`、`deliverable.download`、`file.read`、`resource.content` 或 `system.content`。它不开放任意路径，也不需要先查能力。未要求此能力的旧调用保留原帧/分页行为；整文件读取只接受起点 offset 0。`conversation.image`、会话正文与 history 不属于这个能力。
+
+协议在 `protocol.ts` 定义一次，各帧带 `version: 2 + requestId + hostEpoch`：
+
+- `file_ready`：`direction: upload | download`、`maxChunkBytes`、`windowBytes`，下载可含原业务的 `metadata`（entry、deliverable、file 或 revision）。既有 workspace 接收策略在写 sink 前检查 metadata。
+- `file_chunk`：从零连续的 `index` 与 canonical-base64 `data`。内容仅是字节，传输不解释图片或文本。
+- `file_progress`：累计 `receivedWireBytes`（实际收到的 JSONL 字节，仅作进度，不是跨转发的精确记录匹配）和 `consumedBytes`（sink 成功消费的字节）。两者不能倒退，至少一项前进才算进度；消费量不能超过发送量。
+- `file_activity`：`inTransitBytes` 只累计中转处实际收到的半帧数据字节，用于存活判断，不放出任何消费窗口。转发出口分别记住两侧已接纳的累计量，只合并新增量，不回送放大；重复值不能续命。
+- `file_complete`：`chunks + sizeBytes + sha256`。收发双方独立核对计数和 SHA-256，之后仍须收到普通 terminal `ControlResponse`，才能取得业务结果。上传完整不等于附件已提交；操作去重、fsync、发布与 receipt 仍由 AttachmentService/operation ledger 管理。
+
+当前正常 chunk 为 64 KiB，消费窗口为 256 KiB；单块安全上限复用 control base64 上限。窗口在两个方向都只由最终接收端的消费确认释放，最后一块消费后才发 complete。Main/SubHost 只转发帧，不拼装或重新编码文件。本项目文件编码器先写可识别的共同头；JSON parser 仍接受其它字段顺序。半帧观察只认有界的标准头和已协商流，不从正文猜类型；activity/progress 自身不产生 activity。Main 等目标 hello 成功后才发原业务请求，并只反向映射帧根部 hostEpoch。现有 MachineWriter 在跨流容量不足时按序等待，每流生产者仍有界，heartbeat/control 保持优先，不增加私有机器协议。
+
+文件字节阶段以真实数据传输（包含未收齐一整行时实际到达的字节）或前进的接收/消费进度计算 60 秒空闲；重复进度不能续命，不沿用旧五秒 drain 截止。Rust 字节写入按实际 partial write 和并行接收的前进进度续期，不再套普通 RPC 的固定整帧写入截止；慢 sink 按实际成功写入部分报告消费。TS 上传在 ready 后只用文件空闲规则，complete 后回到业务回执计时。客户端慢于五秒仍能继续，窗口不足时发送者等待，不占用 Worker query reservation。关闭连接、取消、实例结束或来源 generation 改变会释放 source/sink/等待者。整文件 source 只打开一次；published/resource/system 的文件身份在传输后再次核对，workspace 保留读到 EOF 的语义。
+
+TS `downloadPublishedFile/resourceContentAll/systemContentAll` 与既有 workspace/download/upload 方法、Rust public 文件方法使用共用收发器。仅在执行/数据开始前明确收到缺 `file-transfer.v1`，才用旧帧或显式旧页 API 重试；普通错误、取消或部分数据不得降级。TUI/官方资源正文阅读调用整文件方法，Vue 不再自行分页。原来的 `readFile/resourceContent/systemContent` 页方法仍可显式使用。
+
+实现入口：`file-transfer.ts` 管字节收发/校验/消费窗口，`file-channel.ts` 管专用 socket 与空闲，`client-file-transfer.ts` 管客户端文件握手与新旧 wire codec，`host-file-transfer.ts` 选择已授权来源并收尾；磁盘 byte producer 在 `core/source-file.ts`，旧分页和连续读取共用它。官方 Rust 的同一职责在 `file_transfer.rs`，各业务模块只保留请求、metadata、旧帧 codec 与提交语义。
 
 ## 附件存储与上传
 
@@ -140,7 +160,7 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 
 `published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 校验 instance/lifecycle，经私有 `resolve_file_source` 向当前 Worker 取得已登记的文件路径和发布时的文件身份，再由 Host 直接读取。Unix socket 与 mTLS 共用这条读取路径；Worker 不传文件字节，Host 不另建 registry 或 media store，来源路径不进入公开响应。
 
-`file.read` 使用明确的 `fileRef + offset`，每页 decoded bytes 最多 256 KiB。response 的 `offset` 必须等于请求 offset，`nextOffset` 必须精确等于本页末尾；complete page 必须恰好到达 `sizeBytes`。registry 只在 Worker 当前 session/generation 内存活，session replacement、dispose、handle 淘汰、源文件删除或改写都返回 `file_unavailable`，客户端应让用户要求 Agent 重新发布，而不是重试任意 path。
+未协商整文件模式的 `file.read` 使用明确的 `fileRef + offset`，每页 decoded bytes 最多 256 KiB。response 的 `offset` 必须等于请求 offset，`nextOffset` 必须精确等于本页末尾；complete page 必须恰好到达 `sizeBytes`。registry 只在 Worker 当前 session/generation 内存活，session replacement、dispose、handle 淘汰、源文件删除或改写都返回 `file_unavailable`，客户端应让用户要求 Agent 重新发布，而不是重试任意 path。
 
 ## Instance 临时交付文件
 
@@ -209,7 +229,7 @@ watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 tur
 
 `resource.get` 的可读资源附带可选 `contentRef`。`resource.content.v1` 提供 `resource.content {instanceId,contentRef,offset?,revision?}`，返回 `{text,revision,nextOffset?}`；没有 `nextOffset` 表示完整读取。首请求读取磁盘当前文件，续读携带返回的字节位置和 revision，文件变化或不可读取时返回 `resource_unavailable`。不接收客户端文件路径，不改写 `command.content` 的已加载模板正文语义。
 
-Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source` 返回路径；拥有该实例的 Host 使用 `readResourceContent` 读取当前磁盘文件，产出既有结果并复用 `protocol.ts` 的唯一 parser。来源解析和读取都处于同一次 instance 查询的生命周期检查内，来源不跨请求缓存。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
+Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source` 返回路径；拥有该实例的 Host 使用 `readResourceContent` 读取当前磁盘文件，产出既有结果并复用 `protocol.ts` 的唯一 parser。旧页读取在同一次 instance 查询内完成；连续读取只让来源解析占用短查询，随后由 Host 订阅生命周期取消长传输，来源不跨请求缓存。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
 
 ## 创建前 system 选择
 
@@ -266,3 +286,5 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/source-file-transfer.ts`：workspace 与临时交付共用的 Host source-file streaming pump。
 
 新增功能时先确定归属：Host control 留在 Host，Agent session 由 Worker adapter 实现；catalog/Managed state 只保存 Dock 自身的状态。Worker、Host 和客户端复用同一个 Protocol V2 shape 定义。
+
+资源/system 的完整字符串是原有阅读结果，不是传输队列上限承诺。官方正文返回/切页只沿 context/readEpoch 防止过期结果显示，不新增自动停止下载策略；TUI 明示的 Esc cancel、显式 signal 与断连清理保留。

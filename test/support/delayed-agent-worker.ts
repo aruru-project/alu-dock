@@ -77,6 +77,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   readonly conversationContent = new Map<string, AgentConversationContentChunk[]>();
   readonly conversationImages = new Map<string, ConversationImageBody>();
   publishedFileSource?: (fileRef: string) => unknown;
+  resourceFileSource?: (ref: string) => unknown;
   treeNodes: TreeNodeDto[] = [];
   treeLeafId: string | undefined;
   treeReadCalls = 0;
@@ -248,6 +249,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
 
   control(request: AgentWorkerControl): Promise<unknown> {
     if (request.type === "resolve_file_source") {
+      if (request.kind === "resource" && this.resourceFileSource) return Promise.resolve(this.resourceFileSource(request.ref));
       if (request.kind !== "published" || this.publishedFileSource === undefined) return Promise.reject(new Error("File sources are unavailable in this fixture"));
       return Promise.resolve().then(() => this.publishedFileSource!(request.ref));
     }

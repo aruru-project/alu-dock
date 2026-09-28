@@ -45,19 +45,7 @@ test("project resources open their full current files, including global resource
   const socketPath = join(root, "dock.sock");
   const host = new DockHost({ socketPath, registry });
   const client = new DockClient({ socketPath, timeoutMs: 5_000 });
-  const readAll = async (instanceId: string, contentRef: string) => {
-    let offset: number | undefined;
-    let revision: string | undefined;
-    let text = "";
-    do {
-      const page = await client.resourceContent(instanceId, contentRef, offset, revision);
-      if (revision !== undefined) assert.equal(page.revision, revision);
-      text += page.text;
-      offset = page.nextOffset;
-      revision = page.revision;
-    } while (offset !== undefined);
-    return text;
-  };
+  const readAll = async (instanceId: string, contentRef: string) => (await client.resourceContentAll(instanceId, contentRef)).text;
   try {
     await host.start();
     const work = await client.create(cwd);

@@ -91,11 +91,29 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
         let mut send_received = Some(send_received);
         let mut finish_wait = Some(finish_wait);
         for (method, result) in replies {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut socket = BufReader::new(socket);
+            let (mut socket, hello) = loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut line = String::new();
+                socket.read_line(&mut line).await.unwrap();
+                let hello: Value = serde_json::from_str(&line).unwrap();
+                if hello["requiredCapabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item == "file-transfer.v1")
+                {
+                    let refusal = json!({"kind":"hello_error","requestId":hello["requestId"],"error":{"code":"capability_missing","message":"older Host","missing":["file-transfer.v1"]}});
+                    socket
+                        .get_mut()
+                        .write_all(format!("{refusal}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                break (socket, hello);
+            };
             let mut line = String::new();
-            socket.read_line(&mut line).await.unwrap();
-            let hello: Value = serde_json::from_str(&line).unwrap();
             let ack = json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,
                 "host":{"hostEpoch":"epoch"},"limits":{"maxLineBytes":65536},
                 "capabilities":["core.v2","extension_ui.tools-expanded.v1","git.branch-footer.v1","instance.keys.v1","instance.display-name.v1","attachments.v1","settings.v1","session.core","command.images.path.v1","queue.control.v1","run.abort.v1"]});

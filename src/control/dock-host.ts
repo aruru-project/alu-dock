@@ -1,3 +1,8 @@
+import { FileTransitRelay, fileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
+import { FileChannel, FileRelayActivity } from "./file-channel.js";
+import { FileReceiver } from "./file-transfer.js";
+import { sendHostFile } from "./host-file-transfer.js";
+import { FILE_TRANSFER_CAPABILITY, isFileTransferRequest } from "./protocol.js";
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
@@ -455,6 +460,11 @@ export class DockHost {
     this.connections.add(socket);
     const decoder = new JsonLineDecoder();
     let helloSeen = false;
+    let fileMode = false;
+    let fileChannel: FileChannel | undefined;
+    let fileRelay: FileRelayActivity | undefined;
+    let fileTransit: FileTransitRelay | undefined;
+    let receivedWireBytes = 0;
     let requestSeen = false;
     let attachmentRequest = false;
     let currentRequestId = "unknown";
@@ -464,7 +474,7 @@ export class DockHost {
       request: Extract<ControlRequest, { type: "attachment.upload" }>;
       sink: AttachmentUploadSink;
       operation: Extract<DeferredOperation<AttachmentUploadResult>, { admitted: true }>;
-      nextIndex: number;
+      receiver?: FileReceiver;
     } | undefined;
     let uploadCompleting = false;
     let remoteProxy: RoutedProtocolProxy | undefined;
@@ -501,6 +511,9 @@ export class DockHost {
       this.connections.delete(socket);
       remoteProxy?.close();
       remoteProxy = undefined;
+      fileChannel?.cancel(new Error("File connection closed"));
+      fileRelay?.dispose();
+      fileTransit?.close();
       void abortUpload();
     };
     socket.once("close", cleanup);
@@ -524,7 +537,8 @@ export class DockHost {
     };
 
     const consumeLine = async (line: string): Promise<void> => {
-      if (terminal || line.length === 0) return;
+      if (terminal) return;
+      if (line.length === 0) { if (fileChannel) throw new ProtocolValidationError("invalid_request", "Empty file record"); return; }
       let raw: unknown;
       try { raw = JSON.parse(line) as unknown; }
       catch { await fail(new ProtocolValidationError("invalid_envelope", helloSeen ? "Request is not valid JSON" : "Hello is not valid JSON"), helloSeen ? upload?.request.requestId ?? "unknown" : "unknown"); return; }
@@ -555,26 +569,33 @@ export class DockHost {
           this.sendHelloError(socket, hello.requestId, "capability_missing", "Required capabilities are unavailable", { missing: [...missing].sort() });
           return;
         }
+        fileMode = hello.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);
         const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt), [...this.capabilities]));
         if (outcome !== "written") socket.destroy();
         return;
       }
 
       if (remoteProxy) {
-        await remoteProxy.send(raw);
+        fileRelay?.record(raw);
+        if(fileTransit) await fileTransit.outputs[1].write(fileTransit.map(0,raw));
+        else await remoteProxy.send(raw);
         return;
       }
 
+      if (fileChannel && !upload) {
+        await fileChannel.consume(raw);
+        return;
+      }
       if (upload) {
-        const frame = parseAttachmentUploadFrame(raw, upload.request.requestId);
+        const completion = fileChannel ? await fileChannel.consume(raw) : undefined;
+        if (fileChannel && !completion) return;
+        const frame = completion ? { kind: "attachment_complete" as const, chunks: completion.chunks } : parseAttachmentUploadFrame(raw, upload.request.requestId);
         if (frame.kind === "attachment_chunk") {
-          if (frame.index !== upload.nextIndex) throw new ProtocolValidationError("invalid_request", `Attachment chunk index ${frame.index} is out of order`);
-          await upload.sink.write(Buffer.from(frame.data, "base64"));
-          upload.nextIndex += 1;
+          await upload.receiver!.chunk(frame.index, frame.data);
           armUploadIdleTimer();
           return;
         }
-        if (frame.chunks !== upload.nextIndex) throw new ProtocolValidationError("invalid_request", "Attachment completion chunk count is inconsistent");
+        if (!fileChannel) upload.receiver!.end(frame.chunks);
         const active = upload;
         upload = undefined;
         uploadCompleting = true;
@@ -609,19 +630,21 @@ export class DockHost {
         throw new ProtocolValidationError("capability_missing", `Capability ${WORKER_CONFIG_CAPABILITY} is unavailable`);
       }
 
-      const location = await this.instanceManager.locate(
-        request,
-        async (record) => {
-          const outcome = writeEnvelope(socket, record);
-          if (outcome === "backpressured") {
-            if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); throw new Error("Client stream stopped draining"); }
-          } else if (outcome !== "written") {
-            socket.destroy();
-            throw new Error("Client stream closed during routed response");
-          }
-        },
-        () => { if (!socket.destroyed && !socket.writableEnded) socket.end(); },
-      );
+      const emitRouted = async (record: unknown): Promise<void> => {
+        fileRelay?.record(record);
+        const outcome=writeEnvelope(socket,record);
+        if(outcome==="backpressured") {
+          if(!await waitForSocketDrain(socket,fileRelay?undefined:SOCKET_DRAIN_TIMEOUT_MS)){socket.destroy();throw new Error("Client stream stopped draining");}
+        } else if(outcome!=="written"){socket.destroy();throw new Error("Client stream closed during routed response");}
+      };
+      if(fileMode&&isFileTransferRequest(request)) {
+        fileRelay=new FileRelayActivity(socket,request.requestId,this.hostEpoch);
+        const identity={version:2 as const,requestId:request.requestId,hostEpoch:this.hostEpoch};
+        fileTransit=new FileTransitRelay([identity,identity],[emitRouted,async record=>{if(!remoteProxy)throw new Error("File route is not open");await remoteProxy.send(record);}],()=>socket.destroy());
+      }
+      const location = await this.instanceManager.locate(request,
+        async record=>{if(fileTransit)await fileTransit.outputs[0].write(fileTransit.map(1,record));else await emitRouted(record);},
+        () => { if (fileRelay) fileRelay.end(); else if (!socket.destroyed && !socket.writableEnded) socket.end(); }, fileMode);
       if (location.kind === "result") {
         terminal = true;
         this.sendSuccessAndEnd(socket, request.requestId, location.result);
@@ -632,11 +655,17 @@ export class DockHost {
         return;
       }
 
+      fileRelay?.dispose();
+      fileRelay = undefined;
+      fileTransit?.close(); fileTransit=undefined;
+      if (fileMode && isFileTransferRequest(request)) { fileChannel = new FileChannel(socket, request.requestId, this.hostEpoch, "invalid_request"); fileChannel.observeWire(receivedWireBytes); }
+
       if (request.type === "attachment.upload") {
         attachmentRequest = true;
         if (!this.attachmentService) throw new ProtocolValidationError("capability_missing", "Attachment upload is unavailable");
         const operation = this.operationLedger.defer<AttachmentUploadResult>(request.params.operationId, request.type, request.params);
         if (!operation.admitted) {
+          fileChannel?.dispose();
           const result = await operation.promise;
           terminal = true;
           this.sendSuccessAndEnd(socket, request.requestId, result);
@@ -650,7 +679,12 @@ export class DockHost {
           await operation.promise.catch(() => {});
           throw error;
         }
-        upload = { request, sink, operation, nextIndex: 0 };
+        if (socket.destroyed || socket.writableEnded) {
+          const error = new Error("Upload connection closed before storage was ready");
+          await sink.abort(); operation.abandon(error); await operation.promise.catch(() => {}); throw error;
+        }
+        upload = { request, sink, operation, receiver: fileChannel ? undefined : new FileReceiver({ maximumBytes: Number.MAX_SAFE_INTEGER, chunkBytes: MAX_ATTACHMENT_CHUNK_BYTES, errorCode: "invalid_request", sink: (bytes) => sink.write(bytes) }) };
+        fileChannel?.receive(request.params.sizeBytes, (bytes) => sink.write(bytes));
         let resolveUpload!: () => void;
         const tracked = new Promise<void>((resolve) => { resolveUpload = resolve; });
         finishUploadTracking = () => {
@@ -658,20 +692,23 @@ export class DockHost {
           resolveUpload();
         };
         this.inFlightDispatches.add(tracked);
-        const outcome = writeEnvelope(socket, {
-          kind: "attachment_upload_ready",
-          version: 2,
-          requestId: request.requestId,
-          hostEpoch: this.hostEpoch,
-          maxChunkBytes: MAX_ATTACHMENT_CHUNK_BYTES,
-        });
-        if (outcome !== "written") throw new Error("Attachment upload readiness could not be delivered");
-        armUploadIdleTimer();
+        if (fileChannel) await fileChannel.ready("upload");
+        else {
+          const outcome = writeEnvelope(socket, {
+            kind: "attachment_upload_ready", version: 2, requestId: request.requestId,
+            hostEpoch: this.hostEpoch, maxChunkBytes: MAX_ATTACHMENT_CHUNK_BYTES,
+          });
+          if (outcome !== "written") throw new Error("Attachment upload readiness could not be delivered");
+        }
+        if (!fileChannel) armUploadIdleTimer();
         return;
       }
 
       let task!: Promise<void>;
-      task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; })
+      const negotiatedDownload = fileChannel && isFileTransferRequest(request);
+      task = (negotiatedDownload
+        ? sendHostFile(request, this.registry, this.systemService, fileChannel!).then((result) => { this.sendSuccessAndEnd(socket, request.requestId, result); })
+        : this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; }))
         .catch((error: unknown) => {
           const operationId = mutationOperationId(request);
           const normalized = operationId !== undefined
@@ -685,13 +722,21 @@ export class DockHost {
         })
         .finally(() => this.inFlightDispatches.delete(task));
       this.inFlightDispatches.add(task);
-      await task;
+      if (!negotiatedDownload) await task;
     };
 
     socket.on("data", (chunk: Buffer) => {
+      receivedWireBytes += chunk.byteLength;
       socket.pause();
       processing = processing.then(async () => {
-        for (const line of decoder.push(chunk)) {
+        const lines=decoder.push(chunk);
+        fileChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
+        const partial=fileChunkHeader(decoder.partialRecord);
+        if(fileTransit&&partial?.requestId===currentRequestId&&partial.hostEpoch===this.hostEpoch){
+          fileRelay?.incomingBytes();
+          fileTransit.observe(decoder.recordSequence,Buffer.byteLength(decoder.partialRecord));
+        }
+        for (const line of lines) {
           await consumeLine(line);
           if (terminal) break;
         }
@@ -1368,7 +1413,7 @@ function writeEnvelope(socket: Socket, envelope: unknown): WriteOutcome {
   if (socket.destroyed || socket.writableEnded) return "failed";
   let encoded: string;
   try {
-    encoded = encodeJsonLine(envelope);
+    encoded = `${encodeRoutedRecord(envelope)}\n`;
   } catch {
     socket.destroy();
     return "failed";
@@ -1411,7 +1456,7 @@ function endEnvelope(socket: Socket, envelope: ControlResponse): WriteOutcome {
   }
 }
 
-function waitForSocketDrain(socket: Socket, timeoutMs: number): Promise<boolean> {
+function waitForSocketDrain(socket: Socket, timeoutMs: number | undefined): Promise<boolean> {
   if (socket.destroyed || socket.writableEnded) return Promise.resolve(false);
   if (!socket.writableNeedDrain) return Promise.resolve(true);
   return new Promise((resolve) => {
@@ -1427,8 +1472,8 @@ function waitForSocketDrain(socket: Socket, timeoutMs: number): Promise<boolean>
     };
     const onDrain = (): void => finish(true);
     const onClose = (): void => finish(false);
-    const timeout = setTimeout(() => finish(false), timeoutMs);
-    timeout.unref();
+    const timeout = timeoutMs === undefined ? undefined : setTimeout(() => finish(false), timeoutMs);
+    timeout?.unref();
     socket.once("drain", onDrain);
     socket.once("close", onClose);
     socket.once("error", onClose);

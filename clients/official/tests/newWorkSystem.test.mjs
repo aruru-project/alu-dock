@@ -98,7 +98,7 @@ try {
       }
       if (command === 'system_content' && scenario === 'read-failure') throw { code: 'resource_unavailable', message: '文件已删除，请重新选择。' }
       if (command === 'system_content' && scenario.startsWith('body-')) return new Promise(resolve => { lateResolve = resolve })
-      if (command === 'system_content') return args.offset == null ? { text: original.slice(0, 10), revision: 'body', nextOffset: 12 } : { text: original.slice(10), revision: 'body' }
+      if (command === 'system_content') return { text: original, revision: 'body' }
       if (command === 'set_system_default') {
         assert.equal(args.id, 'chosen', 'The explicit save targets the user-selected A, not the other Client default B')
         if (scenario === 'save-failure') throw { code: 'system_default_unavailable', message: '无法保存，请检查目录权限。' }
@@ -195,7 +195,7 @@ try {
       app.unmount(); continue
     }
     const source = find(container, item => item.type === 'textarea')
-    assert.equal(source.props.value, original, 'JSON preview opens raw original, fully paged including BOM')
+    assert.equal(source.props.value, original, 'JSON preview opens raw original, fully read including BOM')
     await click('复制全文'); assert.equal(copied, original)
     assert.equal(calls.filter(c => c.command === 'create_work').length, 0, 'Reading cannot create Work')
     await click('返回 system 选择')
@@ -271,7 +271,7 @@ try {
     assert.equal(calls.filter(c => c.command === 'set_system_default').length, saves, 'Trust continuation saves once; a new explicit confirmation saves its requested default again')
     app.unmount()
   }
-  console.log('PASS: directory/recent → ordered selection → raw paged preview/copy → retained choice → once/save/failures/trust; stale discovery fenced; actual TS IPC payloads')
+  console.log('PASS: directory/recent → ordered selection → raw whole-file preview/copy → retained choice → once/save/failures/trust; stale discovery fenced; actual TS IPC payloads')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

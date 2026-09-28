@@ -2564,6 +2564,18 @@ test("a Protocol V2 client reads the published file without exposing its path an
   assert.equal(wireMetadata.includes("base64"), false);
   assert.deepEqual((read.recentHistory[0]!.content[0] as { publishedFile?: unknown }).publishedFile, published);
 
+  const continuous: Buffer[] = [];
+  const full = await client.downloadPublishedFile(created.id, published.fileRef, (chunk) => { continuous.push(Buffer.from(chunk)); });
+  assert.deepEqual(Buffer.concat(continuous), bytes);
+  assert.equal(full.sizeBytes, 300_000);
+  // Same registered source changing mid-read must fail, never publish a partial image.
+  let changed = false;
+  await assert.rejects(client.downloadPublishedFile(created.id, published.fileRef, async () => {
+    if (!changed) { changed = true; await writeFile(sourcePath, bytes); }
+  }), { code: "file_unavailable" });
+  const republished = await registry.publish(sourcePath);
+  Object.assign(published, republished);
+
   const first = await client.readFile(created.id, published.fileRef);
   assert.equal(first.complete, false);
   assert.equal(Buffer.from(first.data, "base64").length, 262_144);
@@ -2580,6 +2592,14 @@ test("a Protocol V2 client reads the published file without exposing its path an
   assert.equal(Buffer.from((await client.readFile(created.id, replacement.fileRef)).data, "base64").toString(), "replacement image");
   await unlink(sourcePath);
   await assert.rejects(client.readFile(created.id, replacement.fileRef), { code: "file_unavailable" });
+  await writeFile(sourcePath, bytes);
+  const last = await registry.publish(sourcePath);
+  let stopped = false;
+  // Stop must not wait behind a long Worker query reservation held by the file reader.
+  await assert.rejects(client.downloadPublishedFile(created.id, last.fileRef, async () => {
+    if (!stopped) { stopped = true; await client.stop(created.id, "stop-during-file-read"); }
+  }));
+  assert.equal(stopped, true);
 });
 
 test("Hub session inventory is runtime-free and adoption publishes one managed instance", async (context) => {

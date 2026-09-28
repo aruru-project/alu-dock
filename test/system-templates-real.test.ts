@@ -103,7 +103,7 @@ export default function(pi) {
     let offset: number | undefined, revision: string | undefined, full = "", pages = 0;
     do { const page = await client.systemContent(cwd, all[0]!.id, hostId, offset, revision); full += page.text; offset = page.nextOffset; revision = page.revision; pages++; } while (offset !== undefined);
     assert.equal(full, longText); assert.ok(pages > 1);
-    assert.equal((await client.systemContent(cwd, chosen.id, hostId)).text, selectedText);
+    assert.equal((await client.systemContentAll(cwd, chosen.id, hostId)).text, selectedText);
     // Candidate IDs, not arbitrary paths or another cwd, are the source-file read authority.
     await assert.rejects(client.systemContent(cwd, join(agentDir, "auth.json"), hostId), { code: "resource_unavailable" });
     await assert.rejects(client.systemContent(home, chosen.id, hostId), { code: "resource_unavailable" });

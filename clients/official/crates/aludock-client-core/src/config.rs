@@ -641,6 +641,43 @@ impl DockClient {
         Ok(result)
     }
 
+    pub async fn resource_content_all(
+        &self,
+        instance_id: &str,
+        content_ref: &str,
+    ) -> Result<ResourceContentResult> {
+        let params = ResourceContentParams {
+            instance_id,
+            content_ref,
+            offset: None,
+            revision: None,
+        };
+        if let Some(result) = self
+            .read_file_text("resource.content", &params, RESOURCE_CONTENT_CAPABILITIES)
+            .await?
+        {
+            return Ok(result);
+        }
+        let mut text = String::new();
+        let mut offset = None;
+        let mut revision: Option<String> = None;
+        loop {
+            let page = self
+                .resource_content(instance_id, content_ref, offset, revision.as_deref())
+                .await?;
+            text.push_str(&page.text);
+            offset = page.next_offset;
+            revision = Some(page.revision);
+            if offset.is_none() {
+                return Ok(ResourceContentResult {
+                    text,
+                    revision: revision.unwrap(),
+                    next_offset: None,
+                });
+            }
+        }
+    }
+
     pub async fn resource_content(
         &self,
         instance_id: &str,

@@ -74,7 +74,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 ## 文件从哪里来、活多久
 
 - 本地选取的文件与 clipboard/Android URI 导入同一个 `RunCache`，sync 后发布私有不可变源。上传、preview 和可信 receipt 关联的正式图片共享这个源。普通非图片文件仍可上传。
-- `conversation_images.rs` 持有 `conversation.image` 传输；它与交付、工作区读取复用 `file_transfer.rs` 的计数和远端摘要检查，`wire.rs` 提供超时读取与文件流结束检查，各入口保留不同的 readiness/完成条件。`file.read` 沿既有分页/parser 写 sink，并核实例、offset、DTO、epoch/runtime 和完整长度。后者没有远端 SHA 字段，`PublishedFileTransfer.sha256` **只描述实际收到的本地字节**，不得称为远端摘要认证。
+- `file_transfer.rs` 持有 `file-transfer.v1` 的共用双向收发、有限消费窗口、计数和摘要核验。交付、工作区、published 图片及 resource/system 正文默认走连续读取；只有明确缺能力且未开始数据时使用原帧/页 API。Published 文件在新模式有远端 SHA 验证，旧 Host 的分页 fallback 才只有本地摘要。`conversation_images.rs` 保持原生 `conversation.image` 行为，不改成磁盘来源。资源阅读由 Rust core 完整读取，Vue 只显示/复制结果，不自行续页。
 - 原生根据真实稳定连接 authority、Machine、fileId、MIME 和源描述关联 receipt；opaque ref 不拆解，文件名不当身份，Vue 不用附件预览覆盖正式图片。请求域与文件寿命分开。
 - 所有对话/发布/附件图片都返回 `MediaHandle`。URL 只通过受限 `aludock-media` 解析注册的 handle，WebView 没有任意路径读权限。显示 prune、F5、Work 切换只释放显示资源，不删可信文件。
 - 图片保存传 `{handle, name}`，不 fetch URL 到 JS，不把 Uint8Array 再传回 Rust。core 流式复制并复核本地长度/SHA；Tauri 复用原 dialog、staging、atomic commit/Android URI copy。保存任务持有自己的临时文件直到完成；取消/错误只清自己的临时文件，不能删原件。Dialog/URI 的平台差异仍在 Tauri。

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
-use sha2::{Digest, Sha256};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWrite;
 
 use crate::{
     ClientError, DockClient, Result, capabilities::PUBLISHED_FILES as PUBLISHED_FILE_CAPABILITIES,
@@ -75,7 +74,7 @@ impl PublishedFileDto {
 pub struct PublishedFileTransfer {
     pub file: PublishedFileDto,
     pub size_bytes: u64,
-    /// Local digest of the received bytes; file.read does not provide a remote digest.
+    /// Verified remote digest in file-transfer.v1; local digest only with an older Host.
     pub sha256: String,
     pub host_epoch: String,
     pub runtime_generation: u64,
@@ -109,8 +108,59 @@ impl DockClient {
         sink: &mut W,
     ) -> Result<PublishedFileTransfer> {
         expected_file.validate()?;
-        let mut digest = Sha256::new();
-        let mut size_bytes = 0_u64;
+        let mut ready_generation = None;
+        if let Some(file) = self
+            .read_file_stream(
+                "file.read",
+                &FileReadParams {
+                    instance_id,
+                    file_ref: &expected_file.file_ref,
+                    offset: 0,
+                },
+                PUBLISHED_FILE_CAPABILITIES,
+                MAX_PUBLISHED_FILE_BYTES as u64,
+                sink,
+                |metadata| {
+                    let file: PublishedFileDto = serde_json::from_value(metadata["file"].clone())?;
+                    let generation = metadata["runtimeGeneration"]
+                        .as_u64()
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| protocol("Missing file generation"))?;
+                    if file != *expected_file {
+                        return Err(protocol("Published readiness belongs to another file"));
+                    }
+                    ready_generation = Some(generation);
+                    Ok(())
+                },
+                |_| {},
+            )
+            .await?
+        {
+            let metadata: PublishedFileDto = serde_json::from_value(file.result["file"].clone())?;
+            let generation = file.result["runtimeGeneration"].as_u64();
+            if file.result["instanceId"].as_str() != Some(instance_id)
+                || metadata != *expected_file
+                || file.summary.size_bytes != expected_file.size_bytes
+                || generation != ready_generation
+            {
+                return Err(protocol(
+                    "Published file result belongs to another request or file size",
+                ));
+            }
+            return Ok(PublishedFileTransfer {
+                file: metadata,
+                size_bytes: file.summary.size_bytes,
+                sha256: file.summary.sha256,
+                host_epoch: file.host_epoch,
+                runtime_generation: generation
+                    .ok_or_else(|| protocol("Missing file generation"))?,
+            });
+        }
+        let mut transfer = crate::file_transfer::FileTransfer::new(
+            MAX_PUBLISHED_FILE_BYTES as u64,
+            "published file",
+        );
+        let mut chunks = 0;
         let mut offset = 0_u64;
         let mut expected_epoch: Option<String> = None;
         let mut expected_generation: Option<u64> = None;
@@ -128,7 +178,7 @@ impl DockClient {
                     None,
                 )
                 .await?;
-            let chunk = validate_file_page(&page, instance_id, expected_file, offset)?;
+            validate_file_page(&page, instance_id, expected_file, offset)?;
             if expected_epoch
                 .as_ref()
                 .is_some_and(|value| value != &host_epoch)
@@ -140,22 +190,29 @@ impl DockClient {
             }
             expected_epoch.get_or_insert(host_epoch);
             expected_generation.get_or_insert(page.runtime_generation);
-            sink.write_all(&chunk).await.map_err(|e| {
-                crate::private_fs::storage_error(std::path::Path::new("published image sink"), e)
-            })?;
-            digest.update(&chunk);
-            size_bytes += chunk.len() as u64;
+            transfer
+                .write_chunk(chunks, &page.data, MAX_PUBLISHED_FILE_CHUNK_BYTES, sink)
+                .await
+                .map_err(|error| match error {
+                    ClientError::Io(error) => crate::private_fs::storage_error(
+                        std::path::Path::new("published image sink"),
+                        error,
+                    ),
+                    other => other,
+                })?;
+            chunks += 1;
 
             if page.complete {
-                if size_bytes != expected_file.size_bytes {
+                if transfer.size_bytes() != expected_file.size_bytes {
                     return Err(protocol(
                         "published file completed with an inconsistent size",
                     ));
                 }
+                let summary = transfer.received_summary();
                 return Ok(PublishedFileTransfer {
                     file: page.file,
-                    size_bytes,
-                    sha256: hex::encode(digest.finalize()),
+                    size_bytes: summary.size_bytes,
+                    sha256: summary.sha256,
                     host_epoch: expected_epoch.unwrap_or_default(),
                     runtime_generation: expected_generation.unwrap_or_default(),
                 });
@@ -283,6 +340,12 @@ mod native_file_test {
         };
         let expected = file.clone();
         let peer = tokio::spawn(async move {
+            // The old Host explicitly refuses the new framing before any request.
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio::io::BufReader::new(socket);
+            let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+            write_json_line(&mut socket, &json!({"kind":"hello_error","requestId":hello["requestId"],"error":{"code":"capability_missing","message":"older Host","missing":["file-transfer.v1"]}})).await.unwrap();
+            drop(socket);
             for (offset, bytes, complete) in [
                 (0, &b"\x89PNG\r"[..], false),
                 (5, &b"\n\x1a\nbody"[..], true),

@@ -48,21 +48,13 @@ async function load() {
   loading.value = true
   try {
     if (!props.system && (!contentRef || !instanceId)) throw new Error('这份资源没有可读取的正文。请返回项目状态重新选择。')
-    const chunks: string[] = []
-    let offset: number | undefined
-    let currentRevision: string | undefined
-    do {
-      const system = props.system
-      const page = await currentConnectionCall(app, (context) => system
-        ? systemContent(system.cwd, system.candidate.id, context, system.hostId, offset, currentRevision)
-        : getResourceContent(instanceId!, contentRef!, context, offset, currentRevision))
-      if (epoch !== readEpoch) return
-      chunks.push(page.text)
-      currentRevision = page.revision
-      offset = page.nextOffset
-    } while (offset !== undefined)
-    text.value = chunks.join('')
-    revision.value = currentRevision ?? ''
+    const system = props.system
+    const content = await currentConnectionCall(app, (context) => system
+      ? systemContent(system.cwd, system.candidate.id, context, system.hostId)
+      : getResourceContent(instanceId!, contentRef!, context))
+    if (epoch !== readEpoch) return
+    text.value = content.text
+    revision.value = content.revision
   } catch (cause) {
     if (epoch === readEpoch) {
       if (props.system) emit('failed', cause)

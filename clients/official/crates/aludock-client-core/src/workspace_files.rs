@@ -1,16 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncWrite};
 use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
     capabilities::WORKSPACE_FILES as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
-    file_transfer::FileTransfer,
-    timing::FILE_READ_IDLE_TIMEOUT,
     tls::write_json_line,
-    wire::{read_timed_json_line, require_clean_end},
 };
 
 pub use crate::file_transfer::{
@@ -291,6 +288,53 @@ impl DockClient {
     {
         validate_instance_id(instance_id)?;
         let path = normalize_workspace_path(path)?;
+        let total = std::sync::atomic::AtomicU64::new(0);
+        let mut accepted_entry = None;
+        if let Some(file) = self
+            .read_file_stream(
+                "workspace.file.read",
+                &WorkspaceEntryParams {
+                    instance_id,
+                    path: &path,
+                },
+                REQUIRED_CAPABILITIES,
+                MAX_WORKSPACE_FILE_BYTES,
+                sink,
+                |metadata| {
+                    let entry: WorkspaceFileEntry =
+                        serde_json::from_value(metadata["entry"].clone())?;
+                    validate_read_entry(&entry, &path)?;
+                    total.store(
+                        entry.size_bytes.unwrap_or(0),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    validate_ready(&entry)?;
+                    accepted_entry = Some(entry);
+                    Ok(())
+                },
+                |bytes_received| {
+                    on_progress(WorkspaceFileReadProgress {
+                        bytes_received,
+                        observed_size_bytes: total.load(std::sync::atomic::Ordering::Relaxed),
+                    })
+                },
+            )
+            .await?
+        {
+            let entry: WorkspaceFileEntry = serde_json::from_value(file.result["entry"].clone())?;
+            if accepted_entry.as_ref() != Some(&entry) {
+                return Err(protocol(
+                    "File completion differs from the accepted workspace entry",
+                ));
+            }
+            return Ok(WorkspaceFileReadResult {
+                host_epoch: file.host_epoch,
+                entry,
+                chunks: file.summary.chunks,
+                size_bytes: file.summary.size_bytes,
+                sha256: file.summary.sha256,
+            });
+        }
         let routed = self.negotiate(REQUIRED_CAPABILITIES).await?;
         let endpoint_id = routed.endpoint_id;
         let route_generation = routed.route_generation;
@@ -380,6 +424,23 @@ fn validate_cursor(cursor: Option<&WorkspaceFileCursor>) -> Result<()> {
     Ok(())
 }
 
+// Shared by both wire codecs. The caller's readiness callback adds policy;
+// it does not replace the requested-file and existing transfer-bound checks.
+fn validate_read_entry(entry: &WorkspaceFileEntry, path: &str) -> Result<()> {
+    entry.validate()?;
+    if entry.path != path || !entry.is_file() || entry.size_bytes.is_none() {
+        return Err(protocol(
+            "Workspace readiness does not describe the requested file",
+        ));
+    }
+    if entry.size_bytes.unwrap_or_default() > MAX_WORKSPACE_FILE_BYTES {
+        return Err(protocol(
+            "Workspace file readiness exceeded its transfer bound",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn read_after_request<S, W, R, F>(
     stream: &mut S,
@@ -398,93 +459,57 @@ where
     R: FnMut(&WorkspaceFileEntry) -> Result<()>,
     F: FnMut(WorkspaceFileReadProgress),
 {
-    let first: Value = read_timed_json_line(
+    use crate::file_transfer::{LegacyFileFrame, receive_legacy_file};
+    let (entry, summary) = receive_legacy_file(
         stream,
+        sink,
         maximum_line_bytes,
-        FILE_READ_IDLE_TIMEOUT,
-        "workspace file read",
+        MAX_WORKSPACE_FILE_BYTES,
+        MAX_WORKSPACE_FILE_CHUNK_BYTES,
+        |raw| {
+            if raw.get("kind").and_then(Value::as_str) == Some("response") {
+                let response: ResponseEnvelope = serde_json::from_value(raw)?;
+                validate_response_envelope(&response, request_id, host_epoch)?;
+                let _: Value = response_result(response, "workspace.file.read", None)?;
+                return Err(protocol("File returned ordinary success"));
+            }
+            Ok(
+                match parse_frame(raw, request_id, host_epoch, instance_id, path)? {
+                    WorkspaceFileReadFrame::Ready { entry, .. } => LegacyFileFrame::Ready(entry),
+                    WorkspaceFileReadFrame::Chunk { index, data, .. } => {
+                        LegacyFileFrame::Chunk(index, data)
+                    }
+                    WorkspaceFileReadFrame::Complete {
+                        chunks,
+                        size_bytes,
+                        sha256,
+                        ..
+                    } => LegacyFileFrame::Complete(chunks, size_bytes, sha256),
+                    WorkspaceFileReadFrame::Error { error, .. } => {
+                        LegacyFileFrame::Error(read_error(error))
+                    }
+                },
+            )
+        },
+        |entry: &WorkspaceFileEntry| {
+            validate_read_entry(entry, path)?;
+            validate_ready(entry)
+        },
+        |bytes_received, entry| {
+            on_progress(WorkspaceFileReadProgress {
+                bytes_received,
+                observed_size_bytes: entry.size_bytes.unwrap_or(0),
+            })
+        },
     )
     .await?;
-    if first.get("kind").and_then(Value::as_str) == Some("response") {
-        let response: ResponseEnvelope = serde_json::from_value(first)?;
-        validate_response_envelope(&response, request_id, host_epoch)?;
-        let _: Value = response_result(response, "workspace.file.read", None)?;
-        return Err(protocol(
-            "workspace file read returned an ordinary success response",
-        ));
-    }
-    let entry = match parse_frame(first, request_id, host_epoch, instance_id, path)? {
-        WorkspaceFileReadFrame::Ready { entry, .. }
-            if entry.path == path && entry.is_file() && entry.size_bytes.is_some() =>
-        {
-            entry
-        }
-        _ => {
-            return Err(protocol(
-                "workspace file read did not begin with file metadata",
-            ));
-        }
-    };
-    entry.validate()?;
-    let observed_size_bytes = entry.size_bytes.unwrap_or_default();
-    if observed_size_bytes > MAX_WORKSPACE_FILE_BYTES {
-        return Err(protocol(
-            "workspace file readiness exceeded its transfer bound",
-        ));
-    }
-    validate_ready(&entry)?;
-    // Readiness is an observation, not a promise that the file cannot grow.
-    let mut transfer = FileTransfer::new(MAX_WORKSPACE_FILE_BYTES, "workspace file");
-    on_progress(WorkspaceFileReadProgress {
-        bytes_received: 0,
-        observed_size_bytes,
-    });
-
-    loop {
-        let raw: Value = read_timed_json_line(
-            stream,
-            maximum_line_bytes,
-            FILE_READ_IDLE_TIMEOUT,
-            "workspace file read",
-        )
-        .await?;
-        if raw.get("kind").and_then(Value::as_str) == Some("response") {
-            return Err(protocol(
-                "workspace file read returned an ordinary response after readiness",
-            ));
-        }
-        match parse_frame(raw, request_id, host_epoch, instance_id, path)? {
-            WorkspaceFileReadFrame::Ready { .. } => {
-                return Err(protocol("Host repeated workspace file readiness"));
-            }
-            WorkspaceFileReadFrame::Error { error, .. } => return Err(read_error(error)),
-            WorkspaceFileReadFrame::Chunk { index, data, .. } => {
-                let bytes = transfer.decode_chunk(index, &data, MAX_WORKSPACE_FILE_CHUNK_BYTES)?;
-                sink.write_all(&bytes).await?;
-                on_progress(WorkspaceFileReadProgress {
-                    bytes_received: transfer.size_bytes(),
-                    observed_size_bytes,
-                });
-            }
-            WorkspaceFileReadFrame::Complete {
-                chunks: terminal_chunks,
-                size_bytes: terminal_size,
-                sha256,
-                ..
-            } => {
-                let summary = transfer.finish(terminal_chunks, terminal_size, &sha256)?;
-                sink.flush().await?;
-                require_clean_end(stream, FILE_READ_IDLE_TIMEOUT, "workspace file read").await?;
-                return Ok(WorkspaceFileReadResult {
-                    entry,
-                    chunks: summary.chunks,
-                    size_bytes: summary.size_bytes,
-                    sha256: summary.sha256,
-                    host_epoch: host_epoch.into(),
-                });
-            }
-        }
-    }
+    Ok(WorkspaceFileReadResult {
+        host_epoch: host_epoch.to_owned(),
+        entry,
+        chunks: summary.chunks,
+        size_bytes: summary.size_bytes,
+        sha256: summary.sha256,
+    })
 }
 
 fn parse_frame(

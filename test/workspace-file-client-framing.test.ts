@@ -23,7 +23,11 @@ test("workspace file reading accepts a changed observed size and returns the rec
         const value = JSON.parse(line) as { requestId: string; params?: { path?: string } };
         if (!helloSeen) {
           helloSeen = true;
-          socket.write(encodeJsonLine(createHelloAck(value.requestId, defaultHostIdentity(HOST_EPOCH, "2026-08-18T00:00:00.000Z"), implementedCapabilities())));
+          if ((value as { requiredCapabilities?: string[] }).requiredCapabilities?.includes("file-transfer.v1")) {
+            socket.end(encodeJsonLine({ kind: "hello_error", requestId: value.requestId, error: { code: "capability_missing", message: "Older Host", missing: ["file-transfer.v1"] } }));
+            continue;
+          }
+          socket.write(encodeJsonLine(createHelloAck(value.requestId, defaultHostIdentity(HOST_EPOCH, "2026-08-18T00:00:00.000Z"), implementedCapabilities().filter((capability) => capability !== "file-transfer.v1"))));
           continue;
         }
         const common = { version: 2, requestId: value.requestId, hostEpoch: HOST_EPOCH, instanceId: INSTANCE_ID, path: "changing.txt" };

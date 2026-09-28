@@ -927,6 +927,18 @@ export class ManagedInstance {
     });
   }
 
+  /** Resolve under the short Worker query reservation; byte transfer is Host-owned. */
+  async resolveRegisteredFile(kind: "published" | "resource", ref: string): Promise<{ source: AgentFileSource; runtimeGeneration: number }> {
+    return this.withProjectionRead(async () => {
+      this.assertActive();
+      const runtimeGeneration = this.runtimeGenerationValue;
+      const source = await this.session.control({ type: "resolve_file_source", kind, ref }) as AgentFileSource;
+      if (runtimeGeneration !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(runtimeGeneration, this.runtimeGenerationValue);
+      if (source.kind !== kind) throw kind === "published" ? new PublishedFileUnavailableError() : new ResourceContentError();
+      return { source, runtimeGeneration };
+    });
+  }
+
   async readPublishedFile(fileRef: string, offset?: number): Promise<PublishedFileReadPage & { instanceId: string; runtimeGeneration: number }> {
     return this.withProjectionRead(async () => {
       this.assertActive();

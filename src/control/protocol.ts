@@ -1,3 +1,4 @@
+import { MAX_CONTROL_BASE64_CHUNK_BYTES } from "../core/transport-bounds.js";
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash } from "node:crypto";
 import { MAX_RESOURCE_CONTENT_PAGE_BYTES, MAX_RESOURCE_CONTENT_REF_CHARS } from "../core/resource-content.js";
@@ -158,6 +159,7 @@ export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as cons
 export const CONVERSATION_IMAGES_CAPABILITY = "conversation.images.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 export const WORKSPACE_FILES_CAPABILITY = "workspace.files.v1" as const;
+export const FILE_TRANSFER_CAPABILITY = "file-transfer.v1" as const;
 export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
@@ -170,6 +172,7 @@ export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
+  FILE_TRANSFER_CAPABILITY,
   SYSTEM_TEMPLATES_CAPABILITY,
   MACHINES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
@@ -430,6 +433,79 @@ export interface ResponseTransferFrame {
   data: string;
 }
 export interface ControlEventEnvelope { kind: "event"; version: 2; requestId: string; hostEpoch: string; event: DockEvent }
+
+/** Opt-in file framing on an existing, authorized business request. */
+export const FILE_TRANSFER_CHUNK_BYTES = 64 * 1024;
+export const FILE_TRANSFER_WINDOW_BYTES = 256 * 1024;
+export const FILE_TRANSFER_IDLE_MS = 60_000;
+export const FILE_TRANSFER_REQUESTS = ["attachment.upload", "workspace.file.read", "deliverable.download", "file.read", "resource.content", "system.content"] as const;
+export type FileTransferRequest = Extract<ControlRequest, { type: typeof FILE_TRANSFER_REQUESTS[number] }>;
+export function isFileTransferRequest(request: ControlRequest): request is FileTransferRequest {
+  return (FILE_TRANSFER_REQUESTS as readonly string[]).includes(request.type);
+}
+export interface FileTransferIdentity { version: 2; requestId: string; hostEpoch: string }
+export interface FileTransferSummary { chunks: number; sizeBytes: number; sha256: string }
+export type FileTransferFrame = FileTransferIdentity & (
+  | { kind: "file_ready"; direction: "upload" | "download"; maxChunkBytes: number; windowBytes: number; metadata?: unknown }
+  | { kind: "file_chunk"; index: number; data: string }
+  | ({ kind: "file_complete" } & FileTransferSummary)
+  | { kind: "file_activity"; inTransitBytes: number }
+  | { kind: "file_progress"; receivedWireBytes: number; consumedBytes: number }
+);
+
+/** Shared at both ends and at the routing boundary; payload is opaque bytes. */
+export function parseFileTransferFrame(input: unknown, requestId: string, hostEpoch: string, code: "invalid_request" | "invalid_response" = "invalid_response"): FileTransferFrame {
+  const value = object(input, "file transfer frame", code);
+  if (value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch) throw validation("invalid_response", "File transfer identity does not match its request");
+  const base: FileTransferIdentity = { version: 2, requestId, hostEpoch };
+  const fields = ["kind", "version", "requestId", "hostEpoch"];
+  switch (value.kind) {
+    case "file_ready": {
+      exact(value, [...fields, "direction", "maxChunkBytes", "windowBytes", "metadata"], code);
+      const maxChunkBytes = positive(value.maxChunkBytes, "file chunk bound");
+      const windowBytes = positive(value.windowBytes, "file window");
+      if (maxChunkBytes > MAX_CONTROL_BASE64_CHUNK_BYTES || windowBytes < maxChunkBytes || windowBytes > FILE_TRANSFER_WINDOW_BYTES) throw validation("invalid_response", "Unsupported file transfer bounds");
+      return { ...base, kind: value.kind, direction: enumeration(value.direction, "file direction", ["upload", "download"]), maxChunkBytes, windowBytes, ...(value.metadata === undefined ? {} : { metadata: value.metadata }) };
+    }
+    case "file_chunk":
+      exact(value, [...fields, "index", "data"], code);
+      return { ...base, kind: value.kind, index: unsigned(value.index, "file chunk index"), data: canonicalBase64(value.data, "file chunk", MAX_CONTROL_BASE64_CHUNK_BYTES) };
+    case "file_complete": {
+      exact(value, [...fields, "chunks", "sizeBytes", "sha256"], code);
+      const sha256 = string(value.sha256, "file SHA-256", 64);
+      if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", "Invalid file SHA-256");
+      return { ...base, kind: value.kind, chunks: unsigned(value.chunks, "file chunks"), sizeBytes: unsigned(value.sizeBytes, "file bytes"), sha256 };
+    }
+    case "file_activity":
+      exact(value, [...fields, "inTransitBytes"], code);
+      return { ...base, kind: value.kind, inTransitBytes: unsigned(value.inTransitBytes, "file in-transit bytes") };
+    case "file_progress":
+      exact(value, [...fields, "receivedWireBytes", "consumedBytes"], code);
+      return { ...base, kind: value.kind, receivedWireBytes: unsigned(value.receivedWireBytes, "received wire bytes"), consumedBytes: unsigned(value.consumedBytes, "consumed bytes") };
+    default: throw validation("invalid_response", "Unknown file transfer frame");
+  }
+}
+
+export { parseDeliverableDto };
+
+export interface DeliverableDownloadResult extends FileTransferSummary { deliverable: DeliverableDto }
+export interface PublishedFileTransferResult extends FileTransferSummary { instanceId: string; runtimeGeneration: number; file: PublishedFileDto }
+export interface ResourceFileTransferResult extends FileTransferSummary { revision: string }
+export type FileDownloadResult = WorkspaceFileReadResult | DeliverableDownloadResult | PublishedFileTransferResult | ResourceFileTransferResult;
+
+/** Terminal file metadata belongs to the original business request; bytes were verified separately. */
+export function parseFileDownloadResult(type: Exclude<FileTransferRequest["type"], "attachment.upload">, input: unknown): FileDownloadResult {
+  const value = object(input, "file result");
+  const sha256 = string(value.sha256, "file SHA-256", 64);
+  if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", "Invalid file SHA-256");
+  const summary = { chunks: unsigned(value.chunks, "file chunks"), sizeBytes: unsigned(value.sizeBytes, "file bytes"), sha256 };
+  switch (type) {
+    case "workspace.file.read": return { ...summary, entry: parseWorkspaceEntryDto(value.entry, "entry") };
+    case "deliverable.download": return { ...summary, deliverable: parseDeliverableDto(value.deliverable, "deliverable", { allowUnknownFields: true }) };
+    case "file.read": return { ...summary, instanceId: id(value.instanceId, "instanceId"), runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration"), file: parsePublishedFileDto(value.file, "file") };
+    case "resource.content": case "system.content": return { ...summary, revision: string(value.revision, "revision", 128) };
+  }
+}
 
 interface DeliverableDownloadIdentity { version: 2; requestId: string; hostEpoch: string; instanceId: string; deliveryRef: string }
 export interface DeliverableDownloadReady extends DeliverableDownloadIdentity { kind: "deliverable_download_ready"; deliverable: DeliverableDto }
@@ -2513,7 +2589,7 @@ export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDt
   };
 }
 
-function parseWorkspaceEntryDto(input: unknown, field: string): WorkspaceEntryDto {
+export function parseWorkspaceEntryDto(input: unknown, field: string): WorkspaceEntryDto {
   const value = object(input, field);
   exact(value, ["path", "name", "kind", "hidden", "targetKind", "sizeBytes"]);
   const kind = enumeration(value.kind, `${field}.kind`, ["file", "directory", "symlink"]);

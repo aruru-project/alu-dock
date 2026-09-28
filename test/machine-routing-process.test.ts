@@ -79,7 +79,7 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   await chmod(root, 0o700);
   const workspace = join(root, "workspace");
   await mkdir(workspace, { mode: 0o700 });
-  const workspaceBytes = Buffer.from("routed workspace file\n");
+  const workspaceBytes = Buffer.alloc(900_000, 0x61);
   await writeFile(join(workspace, "note.txt"), workspaceBytes);
   const mainCatalog = join(root, "main", "catalog.json");
   const subCatalog = join(root, "sub", "catalog.json");
@@ -167,7 +167,15 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   const read = await client.read(remote.id);
   assert.equal(read.instance.id, remote.id);
   const workspaceChunks: Buffer[] = [];
-  const workspaceRead = await client.readWorkspaceFile(remote.id, "note.txt", (chunk) => { workspaceChunks.push(Buffer.from(chunk)); });
+  const workspaceRead = await client.readWorkspaceFile(remote.id, "note.txt", async (chunk) => {
+    if (!workspaceChunks.length) {
+      // card325: an actual consuming client slower than the old 5s drain deadline
+      // must not freeze other machine requests or lose this file.
+      await new Promise((resolve) => setTimeout(resolve, 5_500));
+      assert.equal((await client.status(remote.id)).id, remote.id);
+    }
+    workspaceChunks.push(Buffer.from(chunk));
+  });
   assert.equal(workspaceRead.sizeBytes, workspaceBytes.byteLength);
   assert.deepEqual(Buffer.concat(workspaceChunks), workspaceBytes);
 
@@ -188,7 +196,7 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   for (let attempt = 0; attempt < 100 && events.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.ok(events.length > 0);
 
-  const bytes = Buffer.from("specialized-stream");
+  const bytes = Buffer.alloc(900_000, 0x62);
   const uploaded = await client.uploadAttachment(source(bytes), "routed-upload", remote.id);
   assert.equal(uploaded.attachment.sha256, createHash("sha256").update(bytes).digest("hex"));
 

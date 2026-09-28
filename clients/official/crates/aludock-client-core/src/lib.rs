@@ -13,6 +13,7 @@ mod endpoint;
 mod error;
 mod extension_ui;
 mod file_transfer;
+mod file_io;
 mod fs_publish;
 mod host_registry;
 mod identity;
@@ -155,3 +156,6 @@ pub use conversation::{
 pub use extension_ui::safe_controller_event;
 pub use operations::operation_association;
 pub use sessions::{SafeSessionReload, project_session_reload};
+
+#[cfg(all(test, unix, not(target_os = "android")))]
+mod file_read_contract_tests;

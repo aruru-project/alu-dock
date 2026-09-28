@@ -45,4 +45,5 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true

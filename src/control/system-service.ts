@@ -166,9 +166,12 @@ export class SystemService {
     return candidate;
   }
 
+  async contentPath(cwd: string, id: string): Promise<string> {
+    return (await this.selected(await this.directory(cwd), id, false)).path;
+  }
+
   async content(cwd: string, id: string, offset?: number, revision?: string) {
-    const candidate = await this.selected(await this.directory(cwd), id, false);
-    return readResourceContent(candidate.path, offset, revision);
+    return readResourceContent(await this.contentPath(cwd, id), offset, revision);
   }
 
   async setDefault(cwd: string, id: string): Promise<SystemDefaultSetResult> {

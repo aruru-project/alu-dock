@@ -2,17 +2,14 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncWrite};
 use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
     capabilities::INSTANCE_DELIVERABLES as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
-    file_transfer::FileTransfer,
-    timing::FILE_READ_IDLE_TIMEOUT,
     tls::write_json_line,
-    wire::{read_timed_json_line, require_clean_end},
 };
 
 pub use crate::file_transfer::{
@@ -230,6 +227,53 @@ impl DockClient {
         {
             return Err(protocol("temporary file request identity was invalid"));
         }
+        let total = std::sync::atomic::AtomicU64::new(0);
+        let mut accepted_delivery = None;
+        if let Some(file) = self
+            .read_file_stream(
+                "deliverable.download",
+                &DeliverableDownloadParams {
+                    instance_id,
+                    delivery_ref,
+                },
+                REQUIRED_CAPABILITIES,
+                MAX_TEMPORARY_DELIVERABLE_BYTES,
+                sink,
+                |metadata| {
+                    let delivery: DeliverableDto =
+                        serde_json::from_value(metadata["deliverable"].clone())?;
+                    if delivery.delivery_ref != delivery_ref {
+                        return Err(protocol("File belongs to another delivery"));
+                    }
+                    total.store(delivery.size_bytes, std::sync::atomic::Ordering::Relaxed);
+                    accepted_delivery = Some(delivery);
+                    Ok(())
+                },
+                |bytes_received| {
+                    on_progress(DeliverableDownloadProgress {
+                        bytes_received,
+                        total_bytes: total.load(std::sync::atomic::Ordering::Relaxed),
+                    })
+                },
+            )
+            .await?
+        {
+            let deliverable: DeliverableDto =
+                serde_json::from_value(file.result["deliverable"].clone())?;
+            if accepted_delivery.as_ref() != Some(&deliverable)
+                || file.summary.size_bytes != deliverable.size_bytes
+            {
+                return Err(protocol(
+                    "File completion differs from the accepted delivery",
+                ));
+            }
+            return Ok(DeliverableDownloadResult {
+                deliverable,
+                chunks: file.summary.chunks,
+                size_bytes: file.summary.size_bytes,
+                sha256: file.summary.sha256,
+            });
+        }
         let routed = self.negotiate(REQUIRED_CAPABILITIES).await?;
         let endpoint_id = routed.endpoint_id;
         let route_generation = routed.route_generation;
@@ -292,92 +336,63 @@ where
     W: AsyncWrite + Unpin,
     F: FnMut(DeliverableDownloadProgress),
 {
-    let first: Value = read_timed_json_line(
+    use crate::file_transfer::{LegacyFileFrame, receive_legacy_file};
+    let (deliverable, summary) = receive_legacy_file(
         stream,
+        sink,
         maximum_line_bytes,
-        FILE_READ_IDLE_TIMEOUT,
-        "temporary file download",
+        MAX_TEMPORARY_DELIVERABLE_BYTES,
+        MAX_DELIVERABLE_CHUNK_BYTES,
+        |raw| {
+            if raw.get("kind").and_then(Value::as_str) == Some("response") {
+                let response: ResponseEnvelope = serde_json::from_value(raw)?;
+                validate_response_envelope(&response, request_id, host_epoch)?;
+                let _: Value = response_result(response, "deliverable.download", None)?;
+                return Err(protocol("File returned ordinary success"));
+            }
+            Ok(
+                match parse_frame(raw, request_id, host_epoch, instance_id, delivery_ref)? {
+                    DeliverableDownloadFrame::Ready { deliverable, .. } => {
+                        LegacyFileFrame::Ready(deliverable)
+                    }
+                    DeliverableDownloadFrame::Chunk { index, data, .. } => {
+                        LegacyFileFrame::Chunk(index, data)
+                    }
+                    DeliverableDownloadFrame::Complete {
+                        chunks,
+                        size_bytes,
+                        sha256,
+                        ..
+                    } => LegacyFileFrame::Complete(chunks, size_bytes, sha256),
+                    DeliverableDownloadFrame::Error { error, .. } => {
+                        LegacyFileFrame::Error(download_error(error))
+                    }
+                },
+            )
+        },
+        |metadata: &DeliverableDto| {
+            if metadata.delivery_ref != delivery_ref {
+                return Err(protocol("File belongs to another delivery"));
+            }
+            Ok(())
+        },
+        |bytes_received, metadata| {
+            on_progress(DeliverableDownloadProgress {
+                bytes_received,
+                total_bytes: metadata.size_bytes,
+            })
+        },
     )
     .await?;
-    if first.get("kind").and_then(Value::as_str) == Some("response") {
-        let response: ResponseEnvelope = serde_json::from_value(first)?;
-        validate_response_envelope(&response, request_id, host_epoch)?;
-        let _: Value = response_result(response, "deliverable.download", None)?;
-        return Err(protocol(
-            "temporary file download returned an ordinary success response",
-        ));
+    if summary.size_bytes != deliverable.size_bytes {
+        return Err(protocol("File size changed"));
     }
-
-    let first = parse_frame(first, request_id, host_epoch, instance_id, delivery_ref)?;
-    let deliverable = match first {
-        DeliverableDownloadFrame::Ready { deliverable, .. }
-            if deliverable.delivery_ref == delivery_ref =>
-        {
-            deliverable
-        }
-        _ => {
-            return Err(protocol(
-                "temporary file download did not begin with readiness",
-            ));
-        }
-    };
-
-    let mut transfer = FileTransfer::new(deliverable.size_bytes, "temporary file");
-    on_progress(DeliverableDownloadProgress {
-        bytes_received: 0,
-        total_bytes: deliverable.size_bytes,
-    });
-
-    loop {
-        let raw: Value = read_timed_json_line(
-            stream,
-            maximum_line_bytes,
-            FILE_READ_IDLE_TIMEOUT,
-            "temporary file download",
-        )
-        .await?;
-        if raw.get("kind").and_then(Value::as_str) == Some("response") {
-            return Err(protocol(
-                "temporary file download returned an ordinary response after readiness",
-            ));
-        }
-        match parse_frame(raw, request_id, host_epoch, instance_id, delivery_ref)? {
-            DeliverableDownloadFrame::Ready { .. } => {
-                return Err(protocol("Host repeated temporary file download readiness"));
-            }
-            DeliverableDownloadFrame::Error { error, .. } => return Err(download_error(error)),
-            DeliverableDownloadFrame::Chunk { index, data, .. } => {
-                let bytes = transfer.decode_chunk(index, &data, MAX_DELIVERABLE_CHUNK_BYTES)?;
-                sink.write_all(&bytes).await?;
-                on_progress(DeliverableDownloadProgress {
-                    bytes_received: transfer.size_bytes(),
-                    total_bytes: deliverable.size_bytes,
-                });
-            }
-            DeliverableDownloadFrame::Complete {
-                chunks: terminal_chunks,
-                size_bytes: terminal_size,
-                sha256,
-                ..
-            } => {
-                if terminal_size != deliverable.size_bytes {
-                    return Err(protocol(
-                        "temporary file completion did not match the declared size",
-                    ));
-                }
-                let summary = transfer.finish(terminal_chunks, terminal_size, &sha256)?;
-                sink.flush().await?;
-                require_clean_end(stream, FILE_READ_IDLE_TIMEOUT, "temporary file download")
-                    .await?;
-                return Ok(DeliverableDownloadResult {
-                    deliverable,
-                    chunks: summary.chunks,
-                    size_bytes: summary.size_bytes,
-                    sha256: summary.sha256,
-                });
-            }
-        }
-    }
+    Ok(DeliverableDownloadResult {
+        deliverable,
+        chunks: summary.chunks,
+        size_bytes: summary.size_bytes,
+        sha256: summary.sha256,
+    })
 }
 
 fn parse_frame(

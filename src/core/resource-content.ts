@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ResourceContentResult } from "../control/protocol.js";
-import { assertUnchangedSource, inspectSourceFile, MAX_SOURCE_FILE_PATH_CHARS, openUnchangedSource, SourceFileError } from "./source-file.js";
+import { fileBytes, assertUnchangedSource, inspectSourceFile, MAX_SOURCE_FILE_PATH_CHARS, openUnchangedSource, SourceFileError } from "./source-file.js";
 
 export const MAX_RESOURCE_CONTENT_REF_CHARS = 128;
 
@@ -29,10 +29,8 @@ export async function readResourceContent(path: string, offset = 0, revision?: s
     const count = Math.min(MAX_RESOURCE_CONTENT_PAGE_BYTES + 1, source.size - offset);
     const bytes = Buffer.allocUnsafe(count);
     let read = 0;
-    while (read < count) {
-      const result = await handle.read(bytes, read, count - read, offset + read);
-      if (result.bytesRead === 0) throw new ResourceContentError("资源文件已变化。请重新打开查看最新正文。");
-      read += result.bytesRead;
+    for await (const chunk of fileBytes(handle, { sizeBytes: count, offset, chunkBytes: count })) {
+      chunk.copy(bytes, read); read += chunk.byteLength;
     }
     let end = Math.min(read, MAX_RESOURCE_CONTENT_PAGE_BYTES);
     if (end < read) while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;

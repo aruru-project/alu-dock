@@ -7,7 +7,6 @@ use std::{
     },
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -181,25 +180,6 @@ struct UploadReady {
     max_chunk_bytes: u64,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadChunk<'a> {
-    kind: &'static str,
-    version: u8,
-    request_id: &'a str,
-    index: u64,
-    data: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadComplete<'a> {
-    kind: &'static str,
-    version: u8,
-    request_id: &'a str,
-    chunks: u64,
-}
-
 impl DockClient {
     /// Pre-hashes and uploads one regular file over a fresh exact-pinned mTLS
     /// connection. The operation ID is caller-owned. This is an upload, not a read-only
@@ -221,58 +201,85 @@ impl DockClient {
         let path = path.as_ref();
         let prepared = prehash_file(path, cancellation, &mut on_progress).await?;
 
-        let routed =
-            wait_before_completion(cancellation, self.negotiate(REQUIRED_CAPABILITIES)).await?;
-        let endpoint_id = routed.endpoint_id;
-        let route_generation = routed.route_generation;
-        let mut connection = routed.connection;
-        let hello = routed.hello;
-        let request_id = Uuid::new_v4().to_string();
-        if let Err(error) = wait_before_completion(
-            cancellation,
-            write_json_line(
-                &mut connection.stream,
-                &UploadRequest {
-                    kind: "request",
-                    version: 2,
-                    request_id: &request_id,
-                    request_type: "attachment.upload",
-                    params: UploadParams {
-                        operation_id,
-                        instance_id,
-                        name,
-                        size_bytes: prepared.size_bytes,
-                        media_type,
-                        sha256: &prepared.sha256,
+        for file_mode in [true, false] {
+            let mut capabilities = REQUIRED_CAPABILITIES.to_vec();
+            if file_mode {
+                capabilities.push(crate::file_transfer::FILE_TRANSFER_CAPABILITY);
+            }
+            let routed =
+                match wait_before_completion(cancellation, self.negotiate(&capabilities)).await {
+                    Ok(routed) => routed,
+                    Err(error)
+                        if file_mode && crate::file_transfer::missing_file_capability(&error) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+            let endpoint_id = routed.endpoint_id;
+            let route_generation = routed.route_generation;
+            let mut connection = routed.connection;
+            let hello = routed.hello;
+            let request_id = Uuid::new_v4().to_string();
+            if let Err(error) = wait_before_completion(
+                cancellation,
+                write_json_line(
+                    &mut connection.stream,
+                    &UploadRequest {
+                        kind: "request",
+                        version: 2,
+                        request_id: &request_id,
+                        request_type: "attachment.upload",
+                        params: UploadParams {
+                            operation_id,
+                            instance_id,
+                            name,
+                            size_bytes: prepared.size_bytes,
+                            media_type,
+                            sha256: &prepared.sha256,
+                        },
                     },
-                },
-            ),
-        )
-        .await
-        {
-            self.router()
-                .report_connection_failure(&endpoint_id, route_generation);
-            return Err(error);
-        }
+                ),
+            )
+            .await
+            {
+                self.router()
+                    .report_connection_failure(&endpoint_id, route_generation);
+                return Err(error);
+            }
 
-        let result = upload_after_header(
-            &mut connection.stream,
-            path,
-            &request_id,
-            &hello.host.host_epoch,
-            maximum_line_bytes(&hello),
-            operation_id,
-            &prepared,
-            cancellation,
-            &mut on_progress,
-        )
-        .await;
-        if result.is_err() {
-            self.router()
-                .report_connection_failure(&endpoint_id, route_generation);
+            let mut body_started = false;
+            let result = upload_after_header(
+                &mut connection.stream,
+                path,
+                &request_id,
+                &hello.host.host_epoch,
+                maximum_line_bytes(&hello),
+                operation_id,
+                &prepared,
+                cancellation,
+                &mut on_progress,
+                &mut body_started,
+                file_mode,
+            )
+            .await;
+            if result.is_err() {
+                self.router()
+                    .report_connection_failure(&endpoint_id, route_generation);
+            }
+            // Only an explicit refusal before readiness may retry using old records.
+            if file_mode
+                && !body_started
+                && result
+                    .as_ref()
+                    .err()
+                    .is_some_and(crate::file_transfer::missing_file_capability)
+            {
+                continue;
+            }
+            return result;
         }
-        // A verified receipt remains a fact even if the view closed its router.
-        result
+        unreachable!("legacy attempt returns")
     }
 }
 
@@ -356,6 +363,8 @@ async fn upload_after_header<S, F>(
     prepared: &PreparedFile,
     cancellation: &AttachmentUploadCancellation,
     on_progress: &mut F,
+    body_started: &mut bool,
+    file_mode: bool,
 ) -> Result<AttachmentUploadResult>
 where
     S: AsyncBufRead + AsyncWrite + Unpin,
@@ -364,12 +373,38 @@ where
     let first: Value =
         wait_for_host_before_completion(cancellation, read_json_line(stream, maximum_line_bytes))
             .await?;
-    if first.get("kind").and_then(Value::as_str) != Some("attachment_upload_ready") {
+    let kind = first.get("kind").and_then(Value::as_str);
+    if kind == Some("response") {
         return terminal_result(first, request_id, host_epoch, operation_id, prepared, true);
     }
+    if kind
+        != Some(if file_mode {
+            "file_ready"
+        } else {
+            "attachment_upload_ready"
+        })
+    {
+        return Err(ClientError::Protocol(
+            "Upload readiness differs from negotiated framing".into(),
+        ));
+    }
+    if file_mode && first.get("direction").and_then(Value::as_str) != Some("upload") {
+        return Err(ClientError::Protocol(
+            "File readiness has wrong direction".into(),
+        ));
+    }
+    let window = if file_mode {
+        first.get("windowBytes").and_then(Value::as_u64)
+    } else {
+        None
+    };
 
     let ready: UploadReady = serde_json::from_value(first)?;
-    if ready.kind != "attachment_upload_ready"
+    if (ready.kind != "attachment_upload_ready" && ready.kind != "file_ready")
+        || (file_mode
+            && window.is_none_or(|value| {
+                value < ready.max_chunk_bytes || value > crate::file_transfer::FILE_WINDOW_BYTES
+            }))
         || ready.version != 2
         || ready.request_id != request_id
         || ready.host_epoch != host_epoch
@@ -380,6 +415,7 @@ where
             "attachment readiness correlation or limits were invalid".into(),
         ));
     }
+    *body_started = true;
     check_cancelled(cancellation)?;
 
     let metadata = wait_before_completion(cancellation, async {
@@ -401,69 +437,53 @@ where
 
     let mut file =
         wait_before_completion(cancellation, async { Ok(File::open(path).await?) }).await?;
-    let mut buffer = vec![0_u8; chunk_bytes];
-    let mut digest = Sha256::new();
-    let mut count = 0_u64;
-    let mut chunks = 0_u64;
     on_progress(AttachmentUploadProgress {
         phase: AttachmentUploadPhase::Uploading,
         bytes_processed: 0,
         total_bytes: prepared.size_bytes,
     });
-    loop {
-        let read =
-            wait_before_completion(cancellation, async { Ok(file.read(&mut buffer).await?) })
-                .await?;
-        if read == 0 {
-            break;
-        }
-        count = count
-            .checked_add(read as u64)
-            .ok_or(ClientError::AttachmentSourceChanged)?;
-        if count > prepared.size_bytes {
-            return Err(ClientError::AttachmentSourceChanged);
-        }
-        digest.update(&buffer[..read]);
-        wait_before_completion(
-            cancellation,
-            write_json_line(
-                stream,
-                &UploadChunk {
-                    kind: "attachment_chunk",
-                    version: 2,
-                    request_id,
-                    index: chunks,
-                    data: BASE64_STANDARD.encode(&buffer[..read]),
-                },
-            ),
-        )
-        .await?;
-        chunks += 1;
-        on_progress(AttachmentUploadProgress {
-            phase: AttachmentUploadPhase::Uploading,
-            bytes_processed: count,
-            total_bytes: prepared.size_bytes,
-        });
-    }
-    let streamed_sha256 = hex::encode(digest.finalize());
-    if count != prepared.size_bytes || streamed_sha256 != prepared.sha256 {
-        return Err(ClientError::AttachmentSourceChanged);
-    }
-    check_cancelled(cancellation)?;
-
-    wait_after_completion_started(
+    let summary = wait_before_completion(
         cancellation,
-        operation_id,
-        write_json_line(
+        crate::file_transfer::send_file(
             stream,
-            &UploadComplete {
-                kind: "attachment_complete",
-                version: 2,
-                request_id,
-                chunks,
+            &mut file,
+            request_id,
+            host_epoch,
+            maximum_line_bytes,
+            chunk_bytes,
+            window,
+            prepared.size_bytes,
+            &prepared.sha256,
+            &mut |bytes_processed| {
+                on_progress(AttachmentUploadProgress {
+                    phase: AttachmentUploadPhase::Uploading,
+                    bytes_processed,
+                    total_bytes: prepared.size_bytes,
+                })
             },
         ),
     )
+    .await?;
+    let count = summary.size_bytes;
+    check_cancelled(cancellation)?;
+
+    let complete = if file_mode {
+        serde_json::json!({"kind":"file_complete","version":2,"requestId":request_id,"hostEpoch":host_epoch,"chunks":summary.chunks,"sizeBytes":summary.size_bytes,"sha256":summary.sha256})
+    } else {
+        serde_json::json!({"kind":"attachment_complete","version":2,"requestId":request_id,"chunks":summary.chunks})
+    };
+    wait_after_completion_started(cancellation, operation_id, async {
+        if file_mode {
+            crate::file_io::write_file_record(
+                stream,
+                &complete,
+                &crate::file_io::FileActivity::new(),
+            )
+            .await
+        } else {
+            write_json_line(stream, &complete).await
+        }
+    })
     .await?;
     on_progress(AttachmentUploadProgress {
         phase: AttachmentUploadPhase::Finalizing,
@@ -471,12 +491,22 @@ where
         total_bytes: prepared.size_bytes,
     });
 
-    let terminal: Value = wait_for_host_after_completion_started(
-        cancellation,
-        operation_id,
-        read_json_line(stream, maximum_line_bytes),
-    )
-    .await?;
+    let terminal: Value =
+        wait_for_host_after_completion_started(cancellation, operation_id, async {
+            if file_mode {
+                crate::file_transfer::read_file_receipt(
+                    stream,
+                    maximum_line_bytes,
+                    request_id,
+                    host_epoch,
+                    prepared.size_bytes,
+                )
+                .await
+            } else {
+                read_json_line(stream, maximum_line_bytes).await
+            }
+        })
+        .await?;
     terminal_result(
         terminal,
         request_id,
@@ -692,6 +722,7 @@ fn effect_unknown(operation_id: &str, error: ClientError) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use serde_json::json;
     use tokio::io::duplex;
 
@@ -802,6 +833,8 @@ mod tests {
             &prepared,
             &cancellation,
             &mut ignored,
+            &mut false,
+            false,
         )
         .await
         .unwrap();
@@ -839,6 +872,8 @@ mod tests {
             &prepared,
             &cancellation,
             &mut ignored,
+            &mut false,
+            false,
         )
         .await
         .unwrap();
@@ -879,6 +914,8 @@ mod tests {
             &prepared,
             &cancellation,
             &mut ignored,
+            &mut false,
+            false,
         )
         .await
         .unwrap_err();
@@ -947,6 +984,8 @@ mod tests {
                 &prepared,
                 &cancellation,
                 &mut ignored,
+                &mut false,
+                false,
             ),
         )
         .await
@@ -999,6 +1038,8 @@ mod tests {
                 &prepared,
                 &cancellation,
                 &mut ignored,
+                &mut false,
+                false,
             ),
         )
         .await
@@ -1052,6 +1093,8 @@ mod tests {
                 &prepared,
                 &cancellation,
                 &mut ignored,
+                &mut false,
+                false,
             ),
         )
         .await
@@ -1102,6 +1145,8 @@ mod tests {
             &prepared,
             &cancellation,
             &mut ignored,
+            &mut false,
+            false,
         )
         .await
         .unwrap_err();

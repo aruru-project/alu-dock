@@ -67,3 +67,21 @@ export function assertUnchangedSource(source: SourceFileIdentity, info: Stats): 
 function identity(path: string, info: Stats): SourceFileIdentity {
   return { path, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
 }
+
+/** Bounded disk producer, shared by continuous and legacy source readers. Does not close caller's handle. */
+export async function* fileBytes(handle: FileHandle, options: { sizeBytes?: number; offset?: number; chunkBytes?: number; signal?: AbortSignal } = {}): AsyncGenerator<Buffer> {
+  let remaining = options.sizeBytes;
+  let position = options.offset ?? 0;
+  while (remaining === undefined || remaining > 0) {
+    options.signal?.throwIfAborted();
+    const bytes = Buffer.allocUnsafe(Math.min(options.chunkBytes ?? MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES, remaining ?? Infinity));
+    const { bytesRead } = await handle.read(bytes, 0, bytes.byteLength, position);
+    if (bytesRead === 0) {
+      if (remaining !== undefined && remaining > 0) throw new SourceFileError("changed", "File ended before its declared size");
+      return;
+    }
+    position += bytesRead;
+    if (remaining !== undefined) remaining -= bytesRead;
+    yield bytes.subarray(0, bytesRead);
+  }
+}

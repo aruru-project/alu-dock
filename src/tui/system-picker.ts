@@ -7,7 +7,7 @@ import { paint } from "./theme.js";
 
 export interface SystemChoice { cwd: string; selection?: SystemCandidate; defaultSaved: boolean }
 interface SystemPickerOptions { forceSelection?: boolean; notice?: string; selectedId?: string }
-type SystemClient = Pick<DockClient, "systemCatalog" | "systemContent" | "setSystemDefault">;
+type SystemClient = Pick<DockClient, "systemCatalog" | "systemContentAll" | "setSystemDefault">;
 const systemKindLabels: Record<SystemCandidate["kind"], string> = {
   "project-system": "Project SYSTEM",
   "global-system": "User SYSTEM",
@@ -66,7 +66,7 @@ export class SystemPicker implements Component, Focusable {
         const reader = new DocumentReader(item.name, item.kind === "dock-template", this.rows, this.redraw);
         this.reader = reader;
         reader.onClose = () => { this.reader = undefined; this.redraw(); };
-        void reader.load((offset, revision) => this.client.systemContent(this.catalog!.cwd, item.id, undefined, offset, revision));
+        void reader.load((signal) => this.client.systemContentAll(this.catalog!.cwd, item.id, undefined, signal));
       } else if (item && (matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl("s")))) {
         if (item.warning) this.status = item.warning;
         else if (matchesKey(data, Key.ctrl("s"))) void this.save(item);

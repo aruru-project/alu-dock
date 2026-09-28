@@ -25,7 +25,11 @@ test("temporary file download rejects out-of-order chunks, wrong hashes, and dat
         const value = JSON.parse(line) as { requestId: string };
         if (!helloSeen) {
           helloSeen = true;
-          socket.write(encodeJsonLine(createHelloAck(value.requestId, defaultHostIdentity(HOST_EPOCH, "2026-08-18T00:00:00.000Z"), implementedCapabilities())));
+          if ((value as { requiredCapabilities?: string[] }).requiredCapabilities?.includes("file-transfer.v1")) {
+            socket.end(encodeJsonLine({ kind: "hello_error", requestId: value.requestId, error: { code: "capability_missing", message: "Older Host", missing: ["file-transfer.v1"] } }));
+            continue;
+          }
+          socket.write(encodeJsonLine(createHelloAck(value.requestId, defaultHostIdentity(HOST_EPOCH, "2026-08-18T00:00:00.000Z"), implementedCapabilities().filter((capability) => capability !== "file-transfer.v1"))));
           continue;
         }
         connection += 1;

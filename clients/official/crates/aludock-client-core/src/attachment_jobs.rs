@@ -428,11 +428,12 @@ mod tests {
                     released.await.unwrap();
                     return;
                 }
-                write_json_line(&mut stream, &json!({"kind":"attachment_upload_ready","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","maxChunkBytes":524288})).await.unwrap();
+                write_json_line(&mut stream, &json!({"kind":"file_ready","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","direction":"upload","maxChunkBytes":65536,"windowBytes":262144})).await.unwrap();
                 let chunk: Value = read_json_line(&mut stream, 1048576).await.unwrap();
                 assert_eq!(chunk["data"], "YWJj");
+                write_json_line(&mut stream, &json!({"kind":"file_progress","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","receivedWireBytes":chunk.to_string().len()+1,"consumedBytes":3})).await.unwrap();
                 let complete: Value = read_json_line(&mut stream, 1048576).await.unwrap();
-                assert_eq!(complete["kind"], "attachment_complete");
+                assert_eq!(complete["kind"], "file_complete");
                 reached_tx.send(()).unwrap();
                 released.await.unwrap();
                 if scenario == "receipt" {
