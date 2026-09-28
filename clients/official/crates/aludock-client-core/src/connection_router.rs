@@ -617,6 +617,7 @@ mod tests {
         HelloWithoutCapabilities,
         MissingSystemCapability,
         CloseAfterRequest,
+        Records(&'static str),
         HoldHello {
             arrived: Arc<Notify>,
             release: Arc<Notify>,
@@ -737,6 +738,34 @@ mod tests {
                     .await
                     .is_err()
                     {
+                        return;
+                    }
+                    if let ServerMode::Records(mode) = mode {
+                        let request: Value = read_json_line(&mut stream, 1024 * 1024).await.unwrap();
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        let id = &request["requestId"];
+                        if mode == "refused" || mode == "missing" {
+                            let code = if mode == "missing" { "capability_missing" } else { "instance_not_active" };
+                            write_json_line(&mut stream, &serde_json::json!({"kind":"response","version":2,"requestId":id,"hostEpoch":"test-epoch","ok":false,
+                                "error":{"code":code,"message":"fixture refusal","retryable":false,"details":{"missing":["instance.records.v1"]}}})).await.unwrap();
+                            return;
+                        }
+                        let cursor = serde_json::json!({"hostEpoch":"test-epoch","instanceId":"work","runtimeGeneration":1,"sequence":0});
+                        let metadata = serde_json::json!({"kind":"response","version":2,"requestId":id,"hostEpoch":"test-epoch","ok":true,
+                            "result":{"page":{"events":[],"earliest":cursor,"latest":cursor,"truncated":false,"epochChanged":false,"generationChanged":false}}});
+                        let ready = serde_json::json!({"kind":"instance_ready","version":2,"requestId":id,"hostEpoch":"test-epoch","historyEntries":0,"eventCount":0});
+                        let mut total = 0;
+                        for (index, value) in [metadata, ready].iter().enumerate() {
+                            use base64::Engine as _;
+                            let bytes = if mode == "malformed" { b"{".to_vec() } else { serde_json::to_vec(value).unwrap() };
+                            total += bytes.len() as u64;
+                            write_json_line(&mut stream,&serde_json::json!({"kind":"instance_record_fragment","version":2,"requestId":id,"hostEpoch":"test-epoch",
+                                "recordIndex":index,"index":0,"count":1,"data":base64::engine::general_purpose::STANDARD.encode(bytes)})).await.unwrap();
+                            if mode == "malformed" { return; }
+                        }
+                        while let Ok(progress) = read_json_line::<Value,_>(&mut stream,1024*1024).await {
+                            if progress["consumedBytes"].as_u64() == Some(total) { break; }
+                        }
                         return;
                     }
                     if matches!(mode, ServerMode::CloseAfterRequest)
@@ -1189,4 +1218,33 @@ mod tests {
         active.stop();
         fallback.stop();
     }
+    // #325 review: hello alone cannot keep a broken records endpoint preferred.
+    #[tokio::test]
+    async fn records_failures_reselect_another_address_but_business_refusals_do_not() {
+        let identity = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        for mode in [ServerMode::CloseAfterRequest, ServerMode::Records("malformed"), ServerMode::Records("refused"), ServerMode::Records("missing")] {
+            let business = matches!(mode, ServerMode::Records("refused" | "missing"));
+            let active = spawn_test_host(&host, mode).await;
+            let healthy = spawn_test_host(&host, ServerMode::Records("valid")).await;
+            let router = test_router(&identity, &host, vec![("active", active.endpoint.clone()), ("healthy", healthy.endpoint.clone())], "active");
+            let client = DockClient::new(router.clone());
+            let context = crate::InstanceDeliveryContext::default();
+            let params = serde_json::json!({"instanceId":"work"});
+            let result = client.open_instance_records::<_,Value>("instance.follow", &params, &[], &context).await;
+            assert!(result.is_err());
+            if business {
+                assert!(matches!(result,Err(ClientError::Host{..})));
+                assert_eq!(router.snapshot().active_endpoint_id.as_deref(),Some("active"));
+                assert_eq!(healthy.connections.load(Ordering::SeqCst),0);
+            } else {
+                assert_eq!(router.snapshot().active_endpoint_id,None);
+                let (result,_stream) = client.open_instance_records::<_,Value>("instance.follow", &params, &[], &context).await.unwrap();
+                assert_eq!(result["page"]["events"],serde_json::json!([]));
+                assert_eq!(router.snapshot().active_endpoint_id.as_deref(),Some("healthy"));
+            }
+            active.stop();healthy.stop();
+        }
+    }
+
 }

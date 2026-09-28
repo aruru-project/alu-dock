@@ -1,4 +1,4 @@
-import { parseFileTransferFrame, MAX_CONTROL_REQUEST_ID_CHARS, MAX_INSTANCE_ID_CHARS, type FileTransferIdentity } from "./protocol.js";
+import { parseInstanceRecordFrame, parseFileTransferFrame, MAX_CONTROL_REQUEST_ID_CHARS, MAX_INSTANCE_ID_CHARS, type FileTransferIdentity } from "./protocol.js";
 
 /** One encoder for common file frames. Consumers remain JSON field-order independent. */
 export function encodeFileRecord(record: Record<string, unknown>): string {
@@ -6,19 +6,22 @@ export function encodeFileRecord(record: Record<string, unknown>): string {
   return JSON.stringify({ kind, version, requestId, hostEpoch, ...body });
 }
 export function encodeRoutedRecord(record: unknown): string {
-  return record && typeof record === "object" && typeof (record as {kind?:unknown}).kind === "string" && String((record as {kind:string}).kind).startsWith("file_")
+  return record && typeof record === "object" && typeof (record as {kind?:unknown}).kind === "string" && /^(file_|instance_record_)/u.test(String((record as {kind:string}).kind))
     ? encodeFileRecord(record as Record<string,unknown>) : JSON.stringify(record);
 }
 const PREFIX_CHARS = 128 + 12 * (MAX_CONTROL_REQUEST_ID_CHARS + MAX_INSTANCE_ID_CHARS);
 const TOKEN = '"(?:[^"\\\\]|\\\\.)*"';
 const chunkHeader = new RegExp('^\\{"kind":"file_chunk","version":2,"requestId":(' + TOKEN + '),"hostEpoch":(' + TOKEN + '),');
 const machineHeader = new RegExp('^\\{"kind":"machine_stream_data","streamId":(' + TOKEN + '),"data":');
+export function instanceRecordHeader(prefix: string): {requestId:string;hostEpoch:string}|undefined {
+  return fileChunkHeader(prefix.replace(/^\{"kind":"instance_record_fragment"/, '{"kind":"file_chunk"'));
+}
 export function fileChunkHeader(prefix: string): {requestId:string;hostEpoch:string}|undefined {
   const match=chunkHeader.exec(prefix.slice(0,PREFIX_CHARS));
   if(!match)return;
   try {return {requestId:JSON.parse(match[1]!),hostEpoch:JSON.parse(match[2]!)};} catch {return;}
 }
-export function machineFileChunkHeader(prefix: string): {streamId:string;requestId:string;hostEpoch:string}|undefined {
+export function machineFileChunkHeader(prefix: string, records = false): {streamId:string;requestId:string;hostEpoch:string}|undefined {
   const match=machineHeader.exec(prefix.slice(0,PREFIX_CHARS));
   if(!match)return;
   // Decode only the bounded JSON string envelope prefix, never base64 file data.
@@ -34,7 +37,7 @@ export function machineFileChunkHeader(prefix: string): {streamId:string;request
     } else end++;
   }
   try {
-    const header=fileChunkHeader(JSON.parse(text.slice(0,end)+'"'));
+    const header=(records?instanceRecordHeader:fileChunkHeader)(JSON.parse(text.slice(0,end)+'"'));
     if(header)return {streamId:JSON.parse(match[1]!),...header};
   } catch { /* Incomplete or noncanonical header: do not manufacture progress. */ }
   return;
@@ -67,21 +70,23 @@ export class FileRecordWriter {
   close():void {this.closed=true;this.pending=undefined;}
 }
 
-/** Two exits of one file relay. Incoming cumulative values are merged only once, never echoed. */
-export class FileTransitRelay {
+/** Two exits of byte transit. Activities carry real progress, never consumption credit. */
+export class ByteTransitRelay {
   private own=0;
   private readonly incoming=[0,0];
   private stopped=false;
   private sequence=-1;
   private observed=0;
+  private progressWire=0;
+  private progressConsumed=0;
   readonly outputs:[FileRecordWriter,FileRecordWriter];
-  constructor(private readonly identity:[FileTransferIdentity,FileTransferIdentity],outputs:[(record:unknown)=>Promise<void>,(record:unknown)=>Promise<void>],failed:(error:unknown)=>void){
+  constructor(private readonly identity:[FileTransferIdentity,FileTransferIdentity],outputs:[(record:unknown)=>Promise<void>,(record:unknown)=>Promise<void>],failed:(error:unknown)=>void, private readonly family: "file" | "instance_record" = "file"){
     this.outputs=[new FileRecordWriter(outputs[0],failed),new FileRecordWriter(outputs[1],failed)];
   }
   private frame(exit:0|1):unknown {
     const inTransitBytes=this.own+this.incoming[1-exit]!;
     if(!Number.isSafeInteger(inTransitBytes))throw new Error("File activity count overflow");
-    return {...this.identity[exit],kind:"file_activity",inTransitBytes};
+    return {...this.identity[exit],kind:`${this.family}_activity`,inTransitBytes};
   }
   observe(sequence:number,bytes:number):void {
     if(this.stopped)return;
@@ -90,13 +95,23 @@ export class FileTransitRelay {
     this.own+=bytes-this.observed;this.observed=bytes;
     this.outputs[0].activity(this.frame(0));this.outputs[1].activity(this.frame(1));
   }
+  /** A mapping hop can be blocked on its downstream window while upstream has
+   * queued its next window. Forward genuine downstream progress upstream only. */
+  downstreamProgress(wire:number,consumed:number):void {
+    const advanced=Math.max(wire-this.progressWire,consumed-this.progressConsumed);
+    this.progressWire=wire;this.progressConsumed=consumed;
+    if(this.stopped||advanced<=0)return;
+    this.own+=advanced;
+    this.outputs[1].activity(this.frame(1));
+  }
   map(from:0|1,raw:unknown):unknown {
     if(!raw||typeof raw!=="object")return raw;
     const record=raw as {kind?:unknown;inTransitBytes?:unknown};
-    if(record.kind==="file_complete"||record.kind==="response"){this.stopped=true;this.outputs.forEach(writer=>writer.stopActivity());}
-    if(record.kind!=="file_activity")return raw;
+    if(this.family==="file" && (record.kind==="file_complete"||record.kind==="response")){this.stopped=true;this.outputs.forEach(writer=>writer.stopActivity());}
+    if(record.kind!==`${this.family}_activity`)return raw;
     const identity=this.identity[from];
-    parseFileTransferFrame(raw,identity.requestId,identity.hostEpoch,from===0?"invalid_request":"invalid_response");
+    if(this.family==="file")parseFileTransferFrame(raw,identity.requestId,identity.hostEpoch,from===0?"invalid_request":"invalid_response");
+    else parseInstanceRecordFrame(raw,identity.requestId,identity.hostEpoch);
     const value=record.inTransitBytes;
     if(typeof value!=="number"||!Number.isSafeInteger(value)||value<0)throw new Error("Invalid file activity");
     this.incoming[from]=Math.max(this.incoming[from]!,value);

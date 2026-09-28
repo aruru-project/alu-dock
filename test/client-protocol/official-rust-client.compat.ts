@@ -121,3 +121,75 @@ async function stopChild(child: ChildProcess | undefined): Promise<void> {
     child.once("exit", () => { clearTimeout(timeout); resolve(); });
   });
 }
+
+// #325 independent transport evidence: the real official observation owner reads
+// complete initial/live content through real Main/SubHost TLS, not a Rust fake peer.
+test("official ConversationObservation receives complete routed initial and consecutive large live records", { timeout: 60_000 }, async (context) => {
+  const {DockHost}=await import("../../src/control/dock-host.js");
+  const {DockClient}=await import("../../src/control/dock-client.js");
+  const {DockRegistry}=await import("../../src/control/dock-registry.js");
+  const {ManagedInstance}=await import("../../src/core/managed-instance.js");
+  const {DelayedAgentWorkerConnection}=await import("../support/delayed-agent-worker.js");
+  const {MainMachineState,SubHostMachineState}=await import("../../src/control/machine-state.js");
+  const {MachineSettingsState}=await import("../../src/control/machine-settings-state.js");
+  const {MainMachineController,SubHostMachineConnection}=await import("../../src/control/machine-transport.js");
+  const {parseConversationFrame}=await import("../../src/control/protocol.js");
+  const {createServer,createConnection}=await import("node:net");
+  const {JsonLineDecoder}=await import("../../src/control/json-lines.js");
+  const root=await mkdtemp(join(tmpdir(),"alu-routed-records-"));
+  const runtime=new DelayedAgentWorkerConnection("record-gate-session");
+  const registry=new DockRegistry(async ({id,creationOperationId,hostEpoch,cwd})=>new ManagedInstance({id,creationOperationId,hostEpoch,cwd,session:runtime}));
+  const sub=new DockHost({socketPath:join(root,"sub.sock"),registry});
+  const subClient=new DockClient({socketPath:sub.socketPath});
+  let main:InstanceType<typeof DockHost>|undefined,upstream:InstanceType<typeof SubHostMachineConnection>|undefined,reader:ChildProcess|undefined;
+  context.after(async()=>{await stopChild(reader);subClient.closeActiveConnections();await upstream?.stop();await main?.stop();await sub.stop();await rm(root,{recursive:true,force:true});});
+  await sub.start();const work=await subClient.create(root);
+  const emit=(messageId:string,error:string)=>runtime.emit({type:"dock_conversation_frame",frame:parseConversationFrame({type:"message.completed",data:{messageId,role:"assistant",content:[],stopReason:"error",error}})});
+  const accepted=new Promise<void>(resolve=>{const unsubscribe=registry.get(work.id).subscribe(event=>{if(event.type==="message.delta"&&event.data.messageId==="distinct-1000"){unsubscribe();resolve();}});});
+  emit("initial-large",`${work.id}|${registry.hostEpoch}|${"雪".repeat(370000)}`);
+  for(let index=0;index<1001;index++)runtime.emit({type:"dock_conversation_frame",frame:parseConversationFrame({type:"message.delta",data:{messageId:`distinct-${index}`,block:"text",delta:"x"}})});
+  await accepted;
+  const source=await registry.get(work.id).getAttachProjection(undefined,200,"conversation_bootstrap");
+  const mainState=new MainMachineState(join(root,"main-state"),"Main");await mainState.initialize();
+  const subState=new SubHostMachineState(join(root,"sub-state"));await subState.prepare(await mainState.createJoin(),"Records target");
+  const probe=createServer();await new Promise<void>(resolve=>probe.listen(0,"127.0.0.1",resolve));const port=(probe.address() as {port:number}).port;await new Promise<void>(resolve=>probe.close(()=>resolve()));
+  const settings=new MachineSettingsState(join(root,"settings"));await settings.writeMainConnections({enabled:true,port});
+  const mainRegistry=new DockRegistry(async()=>{throw new Error("No local runtime in routed gate");});
+  const controller=new MainMachineController({state:mainState,settingsState:settings,bindAddress:"127.0.0.1",mainHostEpoch:mainRegistry.hostEpoch,localSnapshots:()=>[]});
+  main=new DockHost({socketPath:join(root,"main.sock"),registry:mainRegistry,remoteInstances:controller});
+  upstream=new SubHostMachineConnection({state:subState,address:"127.0.0.1",port,hostEpoch:registry.hostEpoch,snapshots:()=>registry.list(),acceptProtocolSocket:socket=>sub.acceptProtocolSocket(socket)});
+  await main.start();await upstream.start();
+  const client=new DockClient({socketPath:main.socketPath});context.after(()=>client.closeActiveConnections());
+  let routed:Awaited<ReturnType<typeof client.list>>[number]|undefined;
+  for(let attempt=0;attempt<200;attempt++){routed=(await client.list())[0];if(routed)break;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.ok(routed);assert.notEqual(routed.id,work.id);
+  // Hold a real initial event halfway through its first physical fragment. The
+  // Rust owner is replaced before readiness; late bytes must not publish a Read.
+  let holdFirst=true,releaseOld=()=>{};
+  const proxySockets=new Set<import("node:net").Socket>();
+  const proxy=createServer(incoming=>{
+    const outgoing=createConnection(main!.socketPath);proxySockets.add(incoming);proxySockets.add(outgoing);
+    const requests=new JsonLineDecoder(),responses=new JsonLineDecoder();let candidate=false,holding=false;
+    const held:string[]=[];
+    incoming.on("error",()=>{});outgoing.on("error",()=>{});
+    incoming.on("data",bytes=>{for(const line of requests.push(bytes)){const raw=JSON.parse(line);if(raw.type==="instance.read"&&holdFirst){candidate=true;holdFirst=false;}}outgoing.write(bytes);});
+    outgoing.on("data",bytes=>{for(const line of responses.push(bytes)){
+      const raw=JSON.parse(line);
+      if(candidate&&!holding&&raw.kind==="instance_record_fragment"&&raw.recordIndex===1){
+        holding=true;const cut=Math.floor(line.length/2);incoming.write(line.slice(0,cut));held.push(line.slice(cut)+"\n");
+        releaseOld=()=>{for(const part of held.splice(0))if(!incoming.destroyed)incoming.write(part);};
+        reader!.stdin!.write("replace\n");
+      }else if(holding)held.push(line+"\n");else incoming.write(line+"\n");
+    }});
+    outgoing.on("end",()=>{if(!holding)incoming.end();});incoming.on("close",()=>{held.length=0;outgoing.destroy();});
+  });
+  const proxyPath=join(root,"observation.sock");await new Promise<void>(resolve=>proxy.listen(proxyPath,resolve));
+  context.after(async()=>{for(const socket of proxySockets)socket.destroy();await new Promise<void>(resolve=>proxy.close(()=>resolve()));});
+  const executable=join(resolve(process.env.CARGO_TARGET_DIR||"clients/official/target"),"debug","examples","protocol_records");
+  reader=spawn(executable,[proxyPath,join(root,"identity"),join(root,"content"),routed.id,mainRegistry.hostEpoch,routed.hostId!,work.id,registry.hostEpoch,String(source.page.truncated),String(source.page.latest.sequence)],{env:process.env,stdio:["pipe","pipe","pipe"],signal:context.signal});
+  let stderr="",stdout="";reader.stderr!.on("data",chunk=>{stderr+=String(chunk);});
+  const lines=createInterface({input:reader.stdout!});
+  lines.on("line",line=>{stdout+=line+"\n";const value=JSON.parse(line) as {kind:string};if(value.kind==="records.owner-replaced")releaseOld();if(value.kind==="records.initial")emit("live-0","a".repeat(5*1024*1024));if(value.kind==="records.first-live"){emit("live-1","b".repeat(5*1024*1024));emit("live-2","small tail");}});
+  const code=await new Promise<number|null>((resolve,reject)=>{reader!.once("error",reject);reader!.once("exit",resolve);});
+  assert.equal(code,0,stderr);assert.match(stdout,/records.pass/u);
+});

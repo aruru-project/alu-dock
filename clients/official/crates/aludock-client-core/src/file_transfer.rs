@@ -118,7 +118,7 @@ pub(crate) fn lowercase_sha256(value: &str) -> bool {
 use crate::{
     DockClient,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
-    tls::{read_json_line_counted, read_json_line_observed, write_json_line},
+    tls::{read_json_line_counted, write_json_line},
     wire::require_clean_end,
 };
 use serde::Serialize;
@@ -436,28 +436,10 @@ async fn read_file_record<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     report_progress: bool,
     deadline: &mut tokio::time::Instant,
 ) -> Result<(Value, usize)> {
-    let (received, mut changes) = tokio::sync::watch::channel(wire_bytes);
-    let mut total = wire_bytes;
-    let line = read_json_line_observed(reader, maximum_line, |count, prefix| {
-        total += count as u64;
-        if crate::file_io::chunk_header(prefix, request_id, host_epoch) {
-            received.send_replace(total);
-        }
-    });
-    tokio::pin!(line);
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut line => return result,
-            changed = changes.changed() => {
-                changed.map_err(|_| invalid("File reception ended"))?;
-                let wire = *changes.borrow_and_update();
-                *deadline = tokio::time::Instant::now() + FILE_IDLE;
-                if report_progress { write_file_record(writer, &json!({"kind":"file_progress","version":2,"requestId":request_id,"hostEpoch":host_epoch,"receivedWireBytes":wire,"consumedBytes":consumed}), &FileActivity::new()).await?; }
-            },
-            _ = tokio::time::sleep_until(*deadline) => return Err(invalid("File transfer was idle for too long")),
-        }
-    }
+    let mut active = Some(*deadline);
+    let result = crate::file_io::read_byte_record(reader, writer, maximum_line, request_id, host_epoch, wire_bytes, consumed, report_progress, &mut active, "file", || {}).await;
+    *deadline = active.unwrap_or(*deadline);
+    result
 }
 
 /// Common sender for legacy and negotiated uploads. Caller owns the completion/commit boundary.

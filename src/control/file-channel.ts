@@ -8,7 +8,7 @@ import {
 } from "./protocol.js";
 
 /** The byte phase is idle only when neither real traffic nor peer progress advances. */
-class FileIdleTimer {
+export class FileIdleTimer {
   private timer?: NodeJS.Timeout;
   constructor(private readonly expired: () => void) {}
   activity(): void {
@@ -131,12 +131,7 @@ export class FileChannel {
   async write(frame: Omit<FileTransferFrame, "version" | "requestId" | "hostEpoch"> | Record<string, unknown>): Promise<void> {
     this.abort.signal.throwIfAborted();
     const line = encodeFileRecord({ ...frame, version: 2, requestId: this.requestId, hostEpoch: this.hostEpoch })+"\n";
-    await new Promise<void>((resolve, reject) => {
-      const abort = () => { cleanup(); reject(this.abort.signal.reason); };
-      const cleanup = () => this.abort.signal.removeEventListener("abort", abort);
-      this.abort.signal.addEventListener("abort", abort, { once: true });
-      this.socket.write(line, (error) => { cleanup(); error ? reject(error) : resolve(); });
-    });
+    await writeTransferBytes(this.socket, line, this.abort.signal);
     // Progress records may repeat; only data writes count as outgoing activity.
     if (frame.kind !== "file_progress" && frame.kind !== "file_activity") this.activity();
   }
@@ -185,4 +180,15 @@ export class FileChannel {
     await this.window.drained();
     return result;
   }
+}
+
+/** Cancellation-aware socket write shared by finite files and logical records. */
+export function writeTransferBytes(socket: Socket, bytes: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve,reject)=>{
+    const cleanup=()=>signal.removeEventListener("abort",abort);
+    const abort=()=>{cleanup();reject(signal.reason);};
+    signal.addEventListener("abort",abort,{once:true});
+    socket.write(bytes,error=>{cleanup();error?reject(error):resolve();});
+  });
 }

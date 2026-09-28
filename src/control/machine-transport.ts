@@ -1,4 +1,6 @@
-import { FileTransitRelay, machineFileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
+import { InstanceRecordChannel } from "./instance-record-delivery.js";
+import { usesInstanceRecords, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
+import { ByteTransitRelay, machineFileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
 import { FILE_TRANSFER_CAPABILITY } from "./protocol.js";
 import { randomUUID, X509Certificate } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -90,7 +92,11 @@ interface MainStream {
   ended: () => void;
   helloSeen: boolean;
   nativeRequest: ControlRequest;
-  fileTransit?: FileTransitRelay;
+  fileTransit?: ByteTransitRelay;
+  recordTransit?: ByteTransitRelay;
+  recordInput?: InstanceRecordChannel;
+  recordOutput?: InstanceRecordChannel;
+  recordsReady?: boolean;
   requiredCapabilities: readonly string[];
   acceptingInput: boolean;
   inputTail: Promise<void>;
@@ -146,8 +152,9 @@ interface MainConnection {
 
 interface SubHostStream {
   fileMode?: boolean;
+  recordsMode?: boolean;
   requestId?: string;
-  fileTransit?: FileTransitRelay;
+  fileTransit?: ByteTransitRelay;
   streamId: string;
   socket: MachineVirtualSocket;
   acceptingInput: boolean;
@@ -640,10 +647,19 @@ export class MainMachineController implements RemoteInstanceDirectory {
       inputTail: Promise.resolve(),
       queuedInputBytes: 0,
     };
-    if(fileMode)stream.fileTransit=new FileTransitRelay([
+    if(fileMode)stream.fileTransit=new ByteTransitRelay([
       {version:2,requestId:request.requestId,hostEpoch:this.options.mainHostEpoch},
       {version:2,requestId:request.requestId,hostEpoch:connection.hostEpoch},
     ],[async record=>{this.assertStreamEmissionCurrent(stream);await emit(record);},async record=>{await writeMachine(connection.socket,{kind:"machine_stream_data",streamId,data:encodeRoutedRecord(record)});}],error=>this.resetMainStream(connection,stream,diagnosticReason(error,"File activity failed")));
+    if(usesInstanceRecords(request)) {
+      const failed=(error:unknown)=>this.resetMainStream(connection,stream,diagnosticReason(error,"Instance record delivery failed"));
+      stream.recordTransit=new ByteTransitRelay([
+        {version:2,requestId:request.requestId,hostEpoch:this.options.mainHostEpoch},
+        {version:2,requestId:request.requestId,hostEpoch:connection.hostEpoch},
+      ],[async record=>{this.assertStreamEmissionCurrent(stream);await emit(record);},async record=>{await writeMachine(connection.socket,{kind:"machine_stream_data",streamId,data:encodeRoutedRecord(record)});}],failed,"instance_record");
+      stream.recordInput=new InstanceRecordChannel(request.requestId,connection.hostEpoch,"receive",frame=>stream.recordTransit!.outputs[1].write(frame),failed);
+      stream.recordOutput=new InstanceRecordChannel(request.requestId,this.options.mainHostEpoch,"send",frame=>stream.recordTransit!.outputs[0].write(frame),failed,(wire,consumed)=>{stream.recordInput!.activity();stream.recordTransit!.downstreamProgress(wire,consumed);});
+    }
     connection.streams.set(streamId, stream);
     try {
       await writeMachine(connection.socket, { kind: "machine_stream_open", streamId });
@@ -667,6 +683,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       proxy: {
         send: async (record) => {
           try {
+            if(stream.recordOutput){await stream.recordOutput.consume(record);return;}
             if (fileMode) {
               // Endpoints own file parsing; routers only translate envelope identity,
               // never decode/re-encode the opaque base64 payload.
@@ -736,6 +753,12 @@ export class MainMachineController implements RemoteInstanceDirectory {
           connection!.lastSeenAt=Date.now();
           fileStream.fileTransit.observe(decoder.recordSequence,Buffer.byteLength(decoder.partialRecord));
         }
+        const recordPartial=machineFileChunkHeader(decoder.partialRecord,true);
+        const recordStream=recordPartial&&connection?.streams.get(recordPartial.streamId);
+        if(recordPartial&&recordStream?.helloSeen&&recordStream.recordTransit&&recordPartial.requestId===recordStream.requestId&&recordPartial.hostEpoch===recordStream.route.nativeHostEpoch){
+          connection!.lastSeenAt=Date.now();recordStream.recordInput!.waiting();recordStream.recordOutput!.activity();
+          recordStream.recordTransit.observe(decoder.recordSequence,Buffer.byteLength(decoder.partialRecord));
+        }
         for (const line of lines) {
           const record = parseMachineRecord(line);
           if (connection?.closed) throw new Error("SubHost machine connection closed during record processing");
@@ -788,7 +811,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     if (connection.closed) return;
     connection.closed = true;
     if (this.connections.get(connection.machine.id) === connection) this.connections.delete(connection.machine.id);
-    for (const stream of connection.streams.values()) { stream.fileTransit?.close(); stream.ended(); }
+    for (const stream of connection.streams.values()) { stream.fileTransit?.close(); stream.recordTransit?.close();stream.recordInput?.cancel();stream.recordOutput?.cancel(); stream.ended(); }
     connection.streams.clear();
     if (markRoutesOffline) void this.markOfflineUnlessConnected(connection.machine.id);
   }
@@ -893,15 +916,36 @@ export class MainMachineController implements RemoteInstanceDirectory {
       const stream = connection.streams.get(record.streamId);
       if (stream) {
         stream.acceptingInput = false;
-        this.enqueueMainStream(connection, stream, 0, async () => { this.closeMainStream(connection, stream.streamId, false); });
+        this.enqueueMainStream(connection, stream, 0, async () => {
+          // Normal EOF is a delivery boundary; resets still cancel immediately.
+          await stream.recordOutput?.drained();
+          this.closeMainStream(connection, stream.streamId, false);
+        });
       }
       return;
     }
     if (record.kind !== "machine_stream_data") throw new Error("Unexpected SubHost machine record");
     const stream = connection.streams.get(record.streamId);
     if (!stream || !stream.acceptingInput) return;
+    let raw: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(record.data);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid stream record");
+      raw = parsed as Record<string, unknown>;
+    } catch(error) {
+      this.resetMainStream(connection, stream, diagnosticReason(error, "Invalid stream record"));
+      return;
+    }
+    if(stream.recordInput && raw.kind==="instance_record_activity") {
+      try {
+        await stream.recordInput.consume(raw);
+        await stream.recordOutput!.consume({...raw,hostEpoch:this.options.mainHostEpoch});
+        // Never block the machine input loop behind a slow public writer.
+        stream.recordTransit!.outputs[0].activity(stream.recordTransit!.map(1,raw));
+      } catch(error) {this.resetMainStream(connection,stream,diagnosticReason(error,"Invalid instance record activity"));}
+      return;
+    }
     this.enqueueMainStream(connection, stream, Buffer.byteLength(record.data, "utf8"), async () => {
-      const raw = JSON.parse(record.data) as unknown;
       if (!stream.helloSeen) {
         try {
           const hello = parseHelloReply(raw, `machine-${stream.streamId}`);
@@ -923,6 +967,25 @@ export class MainMachineController implements RemoteInstanceDirectory {
         stream.helloSeen = true;
         if(stream.fileTransit)await stream.fileTransit.outputs[1].write(stream.nativeRequest);
         else await writeMachine(connection.socket, { kind: "machine_stream_data", streamId: stream.streamId, data: JSON.stringify(stream.nativeRequest) });
+        return;
+      }
+      if(stream.recordInput && stream.recordOutput) {
+        if((raw as {kind?:unknown})?.kind==="response" && !stream.recordInput.started){
+          const response=parseControlResponse(raw,stream.requestId,stream.route.nativeHostEpoch);
+          if(response.ok)throw new Error("Expected instance record delivery");
+          await this.emitMappedStreamRecords(stream,await this.mapRemoteStreamRecord(stream,raw));return;
+        }
+        const logical=await stream.recordInput.consume(raw);
+        if(logical===undefined)return;
+        stream.recordInput.quiescent();
+        const mapped=recordForMainHost(logical,stream.route);
+        await stream.recordOutput.send(mapped);
+        if((logical as {kind?:unknown})?.kind==="instance_ready") {
+          await stream.recordOutput.drained();
+          stream.recordsReady=true;
+        }
+        if(stream.recordsReady){stream.recordInput.quiescent();stream.recordOutput.quiescent();}
+        else stream.recordInput.waiting();
         return;
       }
       const mapped = await this.mapRemoteStreamRecord(stream, stream.fileTransit?.map(1,raw)??raw);
@@ -964,6 +1027,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     if (connection.streams.get(stream.streamId) !== stream) return;
     stream.acceptingInput = false;
     stream.fileTransit?.close();
+    stream.recordTransit?.close();stream.recordInput?.cancel();stream.recordOutput?.cancel();
     connection.streams.delete(stream.streamId);
     if (!connection.socket.destroyed) void writeMachine(connection.socket, {
       kind: "machine_stream_reset",
@@ -1091,6 +1155,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     if (!stream) return;
     stream.acceptingInput = false;
     stream.fileTransit?.close();
+    stream.recordTransit?.close();stream.recordInput?.cancel();stream.recordOutput?.cancel();
     connection.streams.delete(streamId);
     if (notify && !connection.socket.destroyed) void writeMachine(connection.socket, stream.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY)
       ? { kind: "machine_stream_reset", streamId, reason: "File client disconnected" }
@@ -1418,7 +1483,7 @@ export class SubHostMachineConnection {
       socket.pause();
       processing = processing.then(async () => {
         const lines=decoder.push(chunk);
-        const partial=machineFileChunkHeader(decoder.partialRecord);
+        const partial=machineFileChunkHeader(decoder.partialRecord)??machineFileChunkHeader(decoder.partialRecord,true);
         const fileStream=partial&&this.streams.get(partial.streamId);
         if(ready&&partial&&fileStream?.fileTransit&&partial.requestId===fileStream.requestId&&partial.hostEpoch===this.options.hostEpoch){
           this.lastMainRecordAt=Date.now();
@@ -1533,11 +1598,11 @@ export class SubHostMachineConnection {
       const stream = this.streams.get(record.streamId);
       if (stream?.acceptingInput) this.enqueueSubHostStream(socket, stream, Buffer.byteLength(record.data, "utf8"), async () => {
         const raw=JSON.parse(record.data) as Record<string,unknown>;
-        if(raw.kind==="hello")stream.fileMode=Array.isArray(raw.requiredCapabilities)&&raw.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);
-        if(stream.fileMode&&raw.kind==="request"&&typeof raw.requestId==="string"){
+        if(raw.kind==="hello"){stream.fileMode=Array.isArray(raw.requiredCapabilities)&&raw.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);stream.recordsMode=Array.isArray(raw.requiredCapabilities)&&raw.requiredCapabilities.includes(INSTANCE_RECORDS_CAPABILITY);}
+        if((stream.fileMode||stream.recordsMode)&&raw.kind==="request"&&typeof raw.requestId==="string"){
           stream.requestId=raw.requestId;
           const identity={version:2 as const,requestId:raw.requestId,hostEpoch:this.options.hostEpoch};
-          stream.fileTransit=new FileTransitRelay([identity,identity],[async frame=>{await writeMachine(socket,{kind:"machine_stream_data",streamId:stream.streamId,data:encodeRoutedRecord(frame)});},frame=>stream.socket.receive(Buffer.from(encodeRoutedRecord(frame)+"\n"))],error=>this.resetSubHostStream(socket,stream,diagnosticReason(error,"File activity failed")));
+          stream.fileTransit=new ByteTransitRelay([identity,identity],[async frame=>{await writeMachine(socket,{kind:"machine_stream_data",streamId:stream.streamId,data:encodeRoutedRecord(frame)});},frame=>stream.socket.receive(Buffer.from(encodeRoutedRecord(frame)+"\n"))],error=>this.resetSubHostStream(socket,stream,diagnosticReason(error,"Byte activity failed")),stream.recordsMode?"instance_record":"file");
         }
         if(stream.fileTransit)await stream.fileTransit.outputs[1].write(stream.fileTransit.map(0,raw));
         else await stream.socket.receive(Buffer.from(`${record.data}\n`,"utf8"));

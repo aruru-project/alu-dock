@@ -9,6 +9,7 @@ import { WorkerExtensionUiEndpoint, WorkerUiLifecycleCancelledError } from "./wo
 import {
   ORDINARY_REVERSE_WORKER_CAPABILITIES,
   OrderedWorkerSender,
+  forwardWorkerEvent,
   WorkerFrameReceiver,
   decodeWorkerError,
   encodeWorkerError,
@@ -155,7 +156,7 @@ async function runWorker(): Promise<void> {
   if (init.initialName !== undefined && !reopened) runtime.currentSession().setSessionName(init.initialName);
   runtime.subscribe((event) => {
     const envelope: WorkerEnvelope = { kind: "event", event, state: captureState(runtime!) };
-    void sender.sendEnvelope(envelope).catch(() => process.exit(1));
+    forwardWorkerEvent(sender, envelope, () => process.exit(1));
     if (event.type === "dock_session_replaced") {
       generation += 1;
       sender.updateRuntimeGeneration(generation);

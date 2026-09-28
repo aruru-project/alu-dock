@@ -50,10 +50,10 @@ impl FileActivity {
 }
 
 /// Recognize only the canonical common header, never a kind string inside body data.
-pub(crate) fn chunk_header(bytes: &[u8], request: &str, epoch: &str) -> bool {
+pub(crate) fn byte_record_header(bytes: &[u8], request: &str, epoch: &str, kind: &str) -> bool {
     let mut rest = &bytes[..bytes.len().min(4096)];
     for (prefix, expected) in [
-        (b"{\"kind\":".as_slice(), Value::String("file_chunk".into())),
+        (b"{\"kind\":".as_slice(), Value::String(kind.into())),
         (b",\"version\":".as_slice(), Value::from(2)),
         (b",\"requestId\":".as_slice(), Value::String(request.into())),
         (b",\"hostEpoch\":".as_slice(), Value::String(epoch.into())),
@@ -142,5 +142,52 @@ mod tests {
         sent.unwrap();
         let (mut blocked, _peer) = duplex(1);
         assert!(write_file_record(&mut blocked,&serde_json::json!({"kind":"file_progress","version":2,"requestId":"r","hostEpoch":"h","consumedBytes":0,"receivedWireBytes":1}),&FileActivity::new()).await.is_err());
+    }
+}
+
+/// Shared partial-line reception/credit reporting. None means a quiescent live stream.
+pub(crate) async fn read_byte_record<R: tokio::io::AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    maximum_line: usize,
+    request_id: &str,
+    host_epoch: &str,
+    wire_bytes: u64,
+    consumed: u64,
+    report_progress: bool,
+    deadline: &mut Option<Instant>,
+    family: &str,
+    mut on_data: impl FnMut(),
+) -> Result<(Value, usize)> {
+    let (received, mut changes) = watch::channel((wire_bytes, false));
+    let mut total = wire_bytes;
+    let fragment = if family == "file" {
+        "file_chunk"
+    } else {
+        "instance_record_fragment"
+    };
+    let line = crate::tls::read_json_line_observed(reader, maximum_line, |count, prefix| {
+        total += count as u64;
+        let data = byte_record_header(prefix, request_id, host_epoch, fragment);
+        if data {
+            on_data();
+        }
+        received.send_replace((total, data));
+    });
+    tokio::pin!(line);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut line => return result,
+            changed = changes.changed() => {
+                changed.map_err(|_| ClientError::Protocol("Byte reception ended".into()))?;
+                let (wire, data) = *changes.borrow_and_update();
+                if deadline.is_none() || data { *deadline = Some(Instant::now() + FILE_IDLE); }
+                if data && report_progress {
+                    write_file_record(writer, &serde_json::json!({"kind":format!("{family}_progress"),"version":2,"requestId":request_id,"hostEpoch":host_epoch,"receivedWireBytes":wire,"consumedBytes":consumed}), &FileActivity::new()).await?;
+                }
+            },
+            _ = async { match deadline { Some(at) => tokio::time::sleep_until(*at).await, None => std::future::pending().await } } => return Err(ClientError::Protocol("Byte delivery was idle for too long".into())),
+        }
     }
 }

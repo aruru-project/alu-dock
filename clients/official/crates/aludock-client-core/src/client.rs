@@ -26,7 +26,7 @@ const CLIENT_VERSION: &str = match option_env!("ALUDOCK_RELEASE_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
     MAX_DOCK_TRANSFER_BYTES.div_ceil(MAX_RESPONSE_TRANSFER_CHUNK_BYTES);
 pub(crate) const CATALOG_SCHEMA_VERSION: u64 = 1;
@@ -208,6 +208,44 @@ impl DockClient {
         Ok((result, hello.host.host_epoch))
     }
 
+    pub(crate) async fn open_instance_records<P: Serialize, R: DeserializeOwned>(
+        &self, request_type: &'static str, params: &P, capabilities: &[&str], context: &crate::InstanceDeliveryContext,
+    ) -> Result<(R, ProtocolEventStream)> {
+        let mut params = serde_json::to_value(params)?;
+        params["delivery"] = Value::String("records".into());
+        let mut required = capabilities.to_vec();
+        required.push(crate::instance_records::CAPABILITY);
+        let routed = self.negotiate(&required).await?;
+        let request_id = Uuid::new_v4().to_string();
+        let maximum_bytes = maximum_line_bytes(&routed.hello);
+        let host_epoch = routed.hello.host.host_epoch;
+        let mut connection = routed.connection;
+        let received: Result<(R, crate::instance_records::InstanceRecords)> = async {
+            write_json_line(&mut connection.stream, &RequestEnvelope {
+                kind: "request", version: 2, request_id: &request_id, request_type, params: &params,
+            }).await?;
+            let mut records = crate::instance_records::InstanceRecords::new(
+                connection, request_id.clone(), host_epoch.clone(), maximum_bytes, context.clone(),
+            );
+            let value = records.initial(request_type == "instance.read").await?;
+            Ok((serde_json::from_value(value)?, records))
+        }.await;
+        let (result, records) = received.map_err(|error| {
+            // A business refusal (including optional capability negotiation) is
+            // not evidence that this address failed. Transport/protocol errors are.
+            if !matches!(&error, ClientError::Host { .. }) {
+                self.router.report_connection_failure(&routed.endpoint_id, routed.route_generation);
+            }
+            error
+        })?;
+        self.router.ensure_open()?;
+        Ok((result, ProtocolEventStream {
+            connection: None, records: Some(records), request_id, host_epoch, maximum_bytes,
+            router: self.router.clone(), endpoint_id: routed.endpoint_id,
+            route_generation: routed.route_generation,
+        }))
+    }
+
     pub(crate) async fn open_event_stream<P, R>(
         &self,
         request_type: &'static str,
@@ -274,7 +312,8 @@ impl DockClient {
         Ok((
             result,
             ProtocolEventStream {
-                connection,
+                connection: Some(connection),
+                records: None,
                 request_id,
                 host_epoch: hello.host.host_epoch,
                 maximum_bytes,
@@ -469,7 +508,8 @@ fn protocol(message: impl Into<String>) -> ClientError {
 }
 
 pub(crate) struct ProtocolEventStream {
-    connection: ConnectedTransport,
+    connection: Option<ConnectedTransport>,
+    records: Option<crate::instance_records::InstanceRecords>,
     request_id: String,
     host_epoch: String,
     maximum_bytes: usize,
@@ -486,7 +526,10 @@ impl ProtocolEventStream {
     pub(crate) async fn next<T: DeserializeOwned>(&mut self) -> Result<T> {
         self.router.ensure_open()?;
         let envelope: EventEnvelope =
-            match read_json_line(&mut self.connection.stream, self.maximum_bytes).await {
+            match async {
+                if let Some(records)=self.records.as_mut(){ Ok(serde_json::from_value(records.next(true).await?)?) }
+                else {read_json_line(&mut self.connection.as_mut().unwrap().stream, self.maximum_bytes).await}
+            }.await {
                 Ok(envelope) => envelope,
                 Err(error) => {
                     self.router

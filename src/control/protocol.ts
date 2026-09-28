@@ -147,6 +147,7 @@ export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as con
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
 export const CONTROLLER_DIRECTIVES_CAPABILITY = "extension_ui.controller-directives.v1" as const;
 export const PERSISTENT_INTERACTIONS_CAPABILITY = "extension_ui.persistent-interactions.v1" as const;
+export const INSTANCE_RECORDS_CAPABILITY = "instance.records.v1" as const;
 export const INSTANCE_READ_CAPABILITY = "instance.read.v1" as const;
 export const EVENTS_FOLLOW_CAPABILITY = "events.follow.v2" as const;
 export const EXTENSION_UI_CONTROL_CAPABILITY = "extension_ui.control.v1" as const;
@@ -174,6 +175,7 @@ export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
+  INSTANCE_RECORDS_CAPABILITY,
   FILE_TRANSFER_CAPABILITY,
   SYSTEM_TEMPLATES_CAPABILITY,
   MACHINES_CAPABILITY,
@@ -279,8 +281,8 @@ export type ControlRequest =
   | Request<"workspace.entry.list", { instanceId: string; path: string; cursor?: WorkspaceListCursor; limit: number }>
   | Request<"workspace.entry.get", { instanceId: string; path: string }>
   | Request<"workspace.file.read", { instanceId: string; path: string }>
-  | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap" }>
-  | Request<"instance.follow", { instanceId: string; since: EventCursor }>
+  | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap"; delivery?: "records" }>
+  | Request<"instance.follow", { instanceId: string; since: EventCursor; delivery?: "records" }>
   | Request<"interaction.control", { instanceId: string }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
   | Request<"instance.forget", { operationId: string; instanceId: string }>
@@ -723,8 +725,9 @@ export type { AttachmentDto, AttachmentUploadResult, DeliverableDto };
 export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
-/** The explicit view, not hello advertisement, selects the new contract. */
+/** Explicit request options, not hello advertisement, select additional delivery contracts. */
 export function conversationViewCapability(request: ControlRequest): string[] {
+  if (usesInstanceRecords(request)) return [INSTANCE_RECORDS_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
@@ -998,15 +1001,17 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, ["instanceId", "path"], "invalid_request");
       return { ...base, type, params: { instanceId: instanceId(), path: normalizeWorkspaceRelativePath(string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request")) } };
     case "instance.read": {
-      exact(params, ["instanceId", "since", "replay"], "invalid_request");
+      exact(params, ["instanceId", "since", "replay", "delivery"], "invalid_request");
+      const delivery = params.delivery === undefined ? {} : { delivery: enumeration(params.delivery, "params.delivery", ["records"], "invalid_request") };
       const replay = enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
       const since = params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request");
       if (replay === "conversation_bootstrap" && since !== undefined) throw validation("invalid_request", "conversation bootstrap requires a fresh read");
-      return { ...base, type, params: { instanceId: instanceId(), since, replay } };
+      return { ...base, type, params: { instanceId: instanceId(), since, replay, ...delivery } };
     }
     case "instance.follow": {
-      exact(params, ["instanceId", "since"], "invalid_request");
-      return { ...base, type, params: { instanceId: instanceId(), since: parseCursor(params.since, "params.since", "invalid_request") } };
+      exact(params, ["instanceId", "since", "delivery"], "invalid_request");
+      const delivery = params.delivery === undefined ? {} : { delivery: enumeration(params.delivery, "params.delivery", ["records"], "invalid_request") };
+      return { ...base, type, params: { instanceId: instanceId(), since: parseCursor(params.since, "params.since", "invalid_request"), ...delivery } };
     }
     case "interaction.control": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
@@ -1643,7 +1648,7 @@ function parseEventPage(input: unknown, instanceId: string, runtimeGeneration: n
   const events = array(page.events, "page.events", MAX_REPLAY_EVENTS).map((item, index) => parseDockEvent(item, `page.events[${index}]`));
   let previous = -1;
   for (const event of events) {
-    if (event.instanceId !== instanceId || event.runtimeGeneration !== runtimeGeneration || event.sequence <= previous || event.sequence > latest.sequence) throw validation("invalid_response", "Saved updates are out of order or belong to another work state");
+    validatePageEvent(event, latest, previous);
     previous = event.sequence;
   }
   return { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") };
@@ -2829,3 +2834,43 @@ function timestamp(input: unknown, field: string): string { const value = string
 function parseJsonObject(input: unknown, field: string): JsonObject { const value = parseJsonValue(input, field, 0); if (value === null || typeof value !== "object" || Array.isArray(value)) throw validation("invalid_response", `${field} must be a JSON object`); return value; }
 function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_VALUE_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_JSON_STRING_CHARS); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY_ITEMS).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_OBJECT_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [string(key, `${field} key`, 256), parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
 function valueOr(input: unknown): unknown { return input; }
+
+/** Shared page ordering/domain check; record delivery has no legacy page-count ceiling. */
+export function validatePageEvent(event: DockEvent, latest: EventCursor, previous: number): void {
+  if (event.instanceId !== latest.instanceId || event.runtimeGeneration !== latest.runtimeGeneration || event.sequence <= previous || event.sequence > latest.sequence) throw validation("invalid_response", "Saved updates are out of order or belong to another work state");
+}
+export function usesInstanceRecords(request: ControlRequest): request is Extract<ControlRequest, {type: "instance.read" | "instance.follow"}> {
+  return (request.type === "instance.read" || request.type === "instance.follow") && request.params.delivery === "records";
+}
+export type InstanceRecordFrame =
+  | {kind: "instance_record_fragment"; version: 2; requestId: string; hostEpoch: string; recordIndex: number; index: number; count: number; data: string}
+  | {kind: "instance_record_progress"; version: 2; requestId: string; hostEpoch: string; receivedWireBytes: number; consumedBytes: number}
+  | {kind: "instance_record_activity"; version: 2; requestId: string; hostEpoch: string; inTransitBytes: number};
+export function parseInstanceRecordFrame(raw: unknown, requestId: string, hostEpoch: string): InstanceRecordFrame {
+  const value = object(raw, "instance record frame");
+  if(value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch) throw validation("invalid_response", "Instance record identity changed");
+  const base = {version: 2 as const, requestId, hostEpoch};
+  if(value.kind === "instance_record_progress") {
+    exact(value, ["kind","version","requestId","hostEpoch","receivedWireBytes","consumedBytes"]);
+    return {...base, kind: value.kind, receivedWireBytes: unsigned(value.receivedWireBytes,"receivedWireBytes"), consumedBytes: unsigned(value.consumedBytes,"consumedBytes")};
+  }
+  if(value.kind === "instance_record_activity") {
+    exact(value, ["kind","version","requestId","hostEpoch","inTransitBytes"]);
+    return {...base, kind: value.kind, inTransitBytes: unsigned(value.inTransitBytes,"inTransitBytes")};
+  }
+  if(value.kind !== "instance_record_fragment") throw validation("invalid_response", "Expected an instance record fragment");
+  exact(value,["kind","version","requestId","hostEpoch","recordIndex","index","count","data"]);
+  const count=positive(value.count,"count"), index=unsigned(value.index,"index");
+  if(index >= count || count > Math.ceil(MAX_DOCK_TRANSFER_BYTES / FILE_TRANSFER_CHUNK_BYTES)) throw validation("invalid_response", "Instance record chunk count exceeds bounds");
+  return {...base,kind:value.kind,recordIndex:unsigned(value.recordIndex,"recordIndex"),index,count,data:canonicalBase64(value.data,"data",FILE_TRANSFER_CHUNK_BYTES)};
+}
+export function parseInstanceHistory(raw: unknown, requestId: string, hostEpoch: string): HistoryEntryDto {
+  const value=object(raw,"instance history"); exact(value,["kind","version","requestId","hostEpoch","entry"]);
+  if(value.kind !== "instance_history" || value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch) throw validation("invalid_response","Instance history identity changed");
+  return parseHistoryEntry(value.entry,"entry");
+}
+export function parseInstanceReady(raw: unknown, requestId: string, hostEpoch: string): {historyEntries:number;eventCount:number} {
+  const value=object(raw,"instance ready"); exact(value,["kind","version","requestId","hostEpoch","historyEntries","eventCount"]);
+  if(value.kind !== "instance_ready" || value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch) throw validation("invalid_response","Instance ready identity changed");
+  return {historyEntries:unsigned(value.historyEntries,"historyEntries"),eventCount:unsigned(value.eventCount,"eventCount")};
+}

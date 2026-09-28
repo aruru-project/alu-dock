@@ -87,7 +87,7 @@ Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字�
 
 `conversation.content.stream.v1` 提供显式 `conversation.content.stream {instanceId,contentRef}`：一次连接完整读取一个引用视图正文。它同时要求 `conversation.content.v1`、`conversation.references.v1` 与 `file-transfer.v1`，不改变旧 history/content 请求。Host 按需读取现有 Worker 引用页，把每个 canonical content chunk 编为一条 UTF-8 JSONL，经共用字节窗口交付；不读取会话磁盘文件、不聚合整篇正文，也不在网络等待期间持有 Worker 查询。`file_ready.metadata` 仅含 `contentRef/revision/runtimeGeneration`；terminal response 的 result 在这些字段外含根 `instanceId` 及 `chunks/sizeBytes/sha256`。Main 只映射根身份，metadata 和正文仍不透明。每条记录沿用协议 record 上限，没有额外正文总长限制。整个读取核对来源与运行代次，正常追加不作全局 revision 失效。
 
-官方 Rust 在固定 References 上下文中优先使用连续读取；仅 ready/bytes 前明确缺新 stream 或 file-transfer 能力时，回到相同引用视图的旧分页，不改成 Legacy，不对普通错误或部分结果重试。已选择 Legacy 的读取直接沿用旧页。JSONL 接收器逐记录调用既有正文 assembler，全部完整性、终端身份和块连续性检查完成后才提交。TS 的 `conversationContentStream` 是显式新入口，逐块 callback 在 promise 成功前均为临时结果；旧 `conversationContent` 不变。首次读取与 follow/event 的 framing 尚未改变。
+官方 Rust 在固定 References 上下文中优先使用连续读取；仅 ready/bytes 前明确缺新 stream 或 file-transfer 能力时，回到相同引用视图的旧分页，不改成 Legacy，不对普通错误或部分结果重试。已选择 Legacy 的读取直接沿用旧页。JSONL 接收器逐记录调用既有正文 assembler，全部完整性、终端身份和块连续性检查完成后才提交。TS 的 `conversationContentStream` 是显式新入口，逐块 callback 在 promise 成功前均为临时结果；旧 `conversationContent` 不变。未选择下述 instance records 的首次读取与 follow/event 保留旧 framing。
 
 `conversation.images.v1` 在独立 Protocol V2 连接上以 `conversation.image {instanceId,contentRef}` 读取原生 conversation image。Host 先发送包含 MIME、decoded size 和 lowercase SHA-256 的 ready，再发送从零连续、decoded bytes 最大 512 KiB 的 chunk，最后发送带总 chunk 数、size 和 SHA-256 的 complete；ready 后失败发送专用 error，客户端丢弃已收 bytes。DockClient 逐块调用 callback、独立 hash 且不缓存完整图片。Worker adapter 在一次 Agent request 中产出 immutable image body，Worker 边界与 Host 复用同一 parser 校验 bytes/size/SHA；Host 只按 socket drain 背压切成公开 stream frame，既有 `conversation.content` 保留。Main/SubHost 仍通过通用 machine stream route，identity mapper 只改 frame root 的 Host/instance identity。
 
@@ -207,6 +207,16 @@ Worker 接受副作用前失联和接受后失联是不同结果。Host 必须�
 消息提交中，Host 的 admission result 使用 Worker 报告的实际 delivery。`operationId` 是直接 prompt 与 Queue message 共用的提交身份；`queueItemId` 只属于确实等待过的 Queue item。一个 Host-deferred Queue item 可以在 Agent 恢复空闲后以 `prompt` delivery 被消费，此时 `message.submitted` 仍保留它真实的历史 Queue identity；普通 direct prompt 没有该 identity。若辅助关联异常，Host 省略这个可选 identity，canonical message 仍正常发布。Host 不根据 catalog 中稍早的 running 状态替 Agent 决定最终 delivery。用户必须始终能确认消息处于以下哪种状态：未接受、在 Queue 中等待，或已被 Agent 消费并出现在 conversation。
 
 ## Read、follow 与 Extension UI 操作
+
+`instance.records.v1` 为完整初始内容和持续事件提供显式逐条交付。客户端必须在 hello 要求该能力，并在 `instance.read / instance.follow` 发送 `delivery: "records"`；仅广告能力不改变旧 V2 响应、字段、错误、游标或传输预算。Main 同样向目标 SubHost 要求该能力，不按 Main 的版本猜测目标支持。
+
+每条逻辑记录分别编码为 UTF-8 JSON，经 `instance_record_fragment {version:2,requestId,hostEpoch,recordIndex,index,count,data}` 交付；`data` 是 canonical base64，recordIndex 从零递增，每条记录的 index 从零重置、count 固定。复用文件字节传输的 64 KiB fragment、256 KiB 窗口和共享的 256 MiB **单记录**安全界限，没有初始总量界限。初始顺序为原成功 response（events/recentHistory 空数组的 metadata）、read 的逐项 `instance_history {entry}`、原 event envelope、`instance_ready {historyEntries,eventCount}`；这两种逻辑标记同样带 version/requestId/hostEpoch。只有 ready 计数与已收内容一致，客户端才提交同一个原结果。read 随后结束；follow 在同一连接继续独立事件记录。原历史范围、隐藏的 controller 事件、真实 truncated/epochChanged/generationChanged 不变，不再为单行或 1,000 条限制丢内容。
+
+`instance_record_progress {receivedWireBytes,consumedBytes}` 逐块确认有界当前记录的接收，不表示 UI 或会话游标已提交。Main 每次只拼装、按既有 identity mapper 映射一条，再在下游窗口发送；两段各自计字节，不能把身份改写前后的 ACK 直接互转。`instance_record_activity {inTransitBytes}` 只转达实际半帧字节或映射后下游的真实进展，不释放消费额度；重复通知、普通 heartbeat 不能续命。小记录共享尚未耗尽的窗口，不逐条等待 ACK 往返；只在初始交接、正常结束或退役收尾等交付边界等待全部消费确认。应用队列已空但仍有未确认字节时，空闲期限继续生效。文件传输的原端到端 credit 语义不变。新模式有待交付内容时使用真实进度空闲期限，稳定 follow 无事件时无限安静；慢链路不套旧五秒 drain 或三十秒整次请求期限。
+
+Host 初始仍只取同一次权威投影，follow 仍先订阅再取投影、按原边界交接去重。发送中记录与普通 backlog 分开计账，普通 backlog 外允许一个超出旧队列字节预算、但合法的大项；初始化期间同样适用。持续过载可以断流，不能据此声称无限积压或整个 App 常量内存。接收端初始内容仍按请求范围暂存，ready 前的取消不提交半份结果。
+
+TS 默认 read/follow 不变；传入并复用 `InstanceDeliveryContext`（或 streamEvents/follow 的显式 records 选项）选择新模式。Work TUI 的观察调用显式复用该上下文。官方 Rust `ConversationObservation` 在 owner 内自动选择 records，仍由既有 `SessionContent` 接纳初始和 live。仅首次任何 fragment 之前明确 `capability_missing` 且 missing 含此能力时，才允许用原请求回到旧模式；同一观察一旦选定 records，重连也不得换回旧模式。没有能力预查询、全局缓存或额外 UI/storage owner。
 
 `instance.read` 返回当前 snapshot、conversation bootstrap、Queue 与读取边界。conversation bootstrap 由同一边界下的两部分组成：
 

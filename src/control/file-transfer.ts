@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   FILE_TRANSFER_CHUNK_BYTES, FILE_TRANSFER_WINDOW_BYTES,
-  ProtocolValidationError, type FileTransferFrame, type FileTransferSummary,
+  ProtocolValidationError, type FileTransferSummary,
 } from "./protocol.js";
 
 function invalid(message: string): never { throw new ProtocolValidationError("invalid_response", message); }
@@ -108,7 +108,7 @@ export class FileSendWindow {
   private wake?: () => void;
   constructor(private readonly signal: AbortSignal, private readonly windowBytes = FILE_TRANSFER_WINDOW_BYTES) {}
 
-  progress(frame: Extract<FileTransferFrame, { kind: "file_progress" }>): boolean {
+  progress(frame: {consumedBytes: number; receivedWireBytes: number}): boolean {
     if (frame.consumedBytes < this.consumed || frame.consumedBytes > this.sent || frame.receivedWireBytes < this.receivedWire) invalid("File progress is inconsistent");
     const advanced = frame.consumedBytes > this.consumed || frame.receivedWireBytes > this.receivedWire;
     this.consumed = frame.consumedBytes;
@@ -116,6 +116,8 @@ export class FileSendWindow {
     this.wake?.();
     return advanced;
   }
+
+  get pending(): boolean { return this.sent !== this.consumed; }
 
   async drained(): Promise<void> {
     // Reserving zero with a zero allowance waits for the last consumption ACK.

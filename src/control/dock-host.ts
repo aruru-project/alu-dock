@@ -1,5 +1,8 @@
+import { InstanceRecordChannel, recordEvent } from "./instance-record-delivery.js";
+import { usesInstanceRecords, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
+import { writeTransferBytes } from "./file-channel.js";
 import { sendConversationContent } from "./host-conversation-stream.js";
-import { FileTransitRelay, fileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
+import { ByteTransitRelay, fileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
 import { FileChannel, FileRelayActivity } from "./file-channel.js";
 import { FileReceiver } from "./file-transfer.js";
 import { sendHostFile } from "./host-file-transfer.js";
@@ -172,7 +175,7 @@ export class DockHost {
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private readonly connections = new Set<Socket>();
-  private readonly attachConnections = new Map<string, Set<Socket>>();
+  private readonly attachConnections = new Map<string, Map<Socket, () => void>>();
   private readonly interactionConnections = new Map<string, Socket>();
   private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
   private readonly inFlightDispatches = new Set<Promise<void>>();
@@ -345,7 +348,7 @@ export class DockHost {
       this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
       this.unsubscribeRuntimeReopened = this.registry.onRuntimeReopened((instanceId) => this.closeStaleAttachStreams(instanceId));
       this.unsubscribeCatalogRemoval = this.registry.onCatalogRecordsRemoved((instanceIds) => {
-        for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId);
+        for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId, true);
       });
       this.state = "running";
     } catch (error) {
@@ -463,9 +466,12 @@ export class DockHost {
     const decoder = new JsonLineDecoder();
     let helloSeen = false;
     let fileMode = false;
+    let recordsNegotiated = false;
+    let routedRecordsStarted = false;
+    let recordChannel: InstanceRecordChannel | undefined;
     let fileChannel: FileChannel | undefined;
     let fileRelay: FileRelayActivity | undefined;
-    let fileTransit: FileTransitRelay | undefined;
+    let fileTransit: ByteTransitRelay | undefined;
     let receivedWireBytes = 0;
     let requestSeen = false;
     let attachmentRequest = false;
@@ -514,6 +520,7 @@ export class DockHost {
       remoteProxy?.close();
       remoteProxy = undefined;
       fileChannel?.cancel(new Error("File connection closed"));
+      recordChannel?.cancel();
       fileRelay?.dispose();
       fileTransit?.close();
       void abortUpload();
@@ -530,6 +537,11 @@ export class DockHost {
       if (terminal) return;
       terminal = true;
       await abortUpload(error);
+      if (recordChannel?.started || routedRecordsStarted) {
+        recordChannel?.cancel(error);
+        socket.destroy();
+        return;
+      }
       const mapped = mapControlError(error);
       const safe: { code: string; message: string; retryable?: boolean; details?: JsonObject } = attachmentRequest && mapped.code === "request_failed"
         ? { code: "attachment_upload_failed", message: "Attachment storage could not complete the upload", retryable: false }
@@ -572,6 +584,7 @@ export class DockHost {
           return;
         }
         fileMode = hello.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);
+        recordsNegotiated = hello.requiredCapabilities.includes(INSTANCE_RECORDS_CAPABILITY);
         const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt), [...this.capabilities]));
         if (outcome !== "written") socket.destroy();
         return;
@@ -583,6 +596,8 @@ export class DockHost {
         else await remoteProxy.send(raw);
         return;
       }
+
+      if (recordChannel) { await recordChannel.consume(raw); return; }
 
       if (fileChannel && !upload) {
         await fileChannel.consume(raw);
@@ -625,6 +640,7 @@ export class DockHost {
       const request = parseControlRequest(raw);
       currentRequestId = request.requestId;
       if (this.state !== "running" && this.state !== "mutation_faulted") throw new ProtocolValidationError("host_draining", "Alu Dock host is not accepting requests");
+      if (usesInstanceRecords(request) && !recordsNegotiated) throw new ProtocolValidationError("invalid_request", "Instance record delivery requires negotiation");
       const descriptor = controlRequestDescriptor(request.type);
       if (this.state === "mutation_faulted" && descriptor.effect === "command" && !descriptor.availableDuringMutationFault) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
@@ -638,20 +654,21 @@ export class DockHost {
       if (request.type === "conversation.content.stream" && !fileMode) throw new ProtocolValidationError("invalid_request", "Conversation streaming requires negotiated byte framing");
 
       const emitRouted = async (record: unknown): Promise<void> => {
+        if (usesInstanceRecords(request) && (record as { kind?: unknown })?.kind === "instance_record_fragment") routedRecordsStarted = true;
         fileRelay?.record(record);
         const outcome=writeEnvelope(socket,record);
         if(outcome==="backpressured") {
-          if(!await waitForSocketDrain(socket,fileRelay?undefined:SOCKET_DRAIN_TIMEOUT_MS)){socket.destroy();throw new Error("Client stream stopped draining");}
+          if(!await waitForSocketDrain(socket,fileRelay||usesInstanceRecords(request)?undefined:SOCKET_DRAIN_TIMEOUT_MS)){socket.destroy();throw new Error("Client stream stopped draining");}
         } else if(outcome!=="written"){socket.destroy();throw new Error("Client stream closed during routed response");}
       };
       if(fileMode&&isByteStreamRequest(request)) {
         fileRelay=new FileRelayActivity(socket,request.requestId,this.hostEpoch);
         const identity={version:2 as const,requestId:request.requestId,hostEpoch:this.hostEpoch};
-        fileTransit=new FileTransitRelay([identity,identity],[emitRouted,async record=>{if(!remoteProxy)throw new Error("File route is not open");await remoteProxy.send(record);}],()=>socket.destroy());
+        fileTransit=new ByteTransitRelay([identity,identity],[emitRouted,async record=>{if(!remoteProxy)throw new Error("File route is not open");await remoteProxy.send(record);}],()=>socket.destroy());
       }
       const location = await this.instanceManager.locate(request,
         async record=>{if(fileTransit)await fileTransit.outputs[0].write(fileTransit.map(1,record));else await emitRouted(record);},
-        () => { if (fileRelay) fileRelay.end(); else if (!socket.destroyed && !socket.writableEnded) socket.end(); }, fileMode);
+        () => { if (fileRelay) fileRelay.end(); else if (usesInstanceRecords(request) && socket.writableNeedDrain) socket.destroy(); else if (!socket.destroyed && !socket.writableEnded) socket.end(); }, fileMode);
       if (location.kind === "result") {
         terminal = true;
         this.sendSuccessAndEnd(socket, request.requestId, location.result);
@@ -711,9 +728,12 @@ export class DockHost {
         return;
       }
 
+      if (usesInstanceRecords(request)) recordChannel = new InstanceRecordChannel(request.requestId,this.hostEpoch,"send",frame=>writeTransferBytes(socket,encodeJsonLine(frame),recordChannel!.abort.signal),()=>socket.destroy());
       let task!: Promise<void>;
       const negotiatedDownload = fileChannel && isByteStreamRequest(request);
-      task = (negotiatedDownload
+      task = (recordChannel && usesInstanceRecords(request)
+        ? this.deliverInstanceRecords(request,socket,recordChannel,(unsubscribe)=>{eventUnsubscribe=unsubscribe;})
+        : negotiatedDownload
         ? (request.type === "conversation.content.stream"
           ? sendConversationContent(request, this.registry, fileChannel!)
           : sendHostFile(request, this.registry, this.systemService, fileChannel!)).then((result) => { this.sendSuccessAndEnd(socket, request.requestId, result); })
@@ -726,12 +746,13 @@ export class DockHost {
             && !(error instanceof CatalogEffectUnknownError)
             ? new CatalogEffectUnknownError({ kind: request.type, effect: "post_effect", operationId }, error)
             : error;
+          if(recordChannel?.started){socket.destroy();return;}
           const mapped = mapControlError(normalized);
           this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId, mapped.details, mapped.retryable);
         })
         .finally(() => this.inFlightDispatches.delete(task));
       this.inFlightDispatches.add(task);
-      if (!negotiatedDownload) await task;
+      if (!negotiatedDownload && !recordChannel) await task;
     };
 
     socket.on("data", (chunk: Buffer) => {
@@ -740,6 +761,7 @@ export class DockHost {
       processing = processing.then(async () => {
         const lines=decoder.push(chunk);
         fileChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
+        recordChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
         const partial=fileChunkHeader(decoder.partialRecord);
         if(fileTransit&&partial?.requestId===currentRequestId&&partial.hostEpoch===this.hostEpoch){
           fileRelay?.incomingBytes();
@@ -947,6 +969,97 @@ export class DockHost {
     }
   }
 
+  private async sendInstanceInitial(request: Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>, projection: AttachProjection, channel: InstanceRecordChannel): Promise<void> {
+    const page={...projection.page,events:[],epochChanged:projection.epochChanged,generationChanged:projection.generationChanged};
+    const result=request.type==="instance.read"
+      ? {instance:projection.instance,page,recentHistory:[],historyRevision:projection.historyRevision,historyTruncated:projection.historyTruncated,pendingMessages:projection.pendingMessages}
+      : {page};
+    await channel.send(successResponse(request.requestId,this.hostEpoch,this.projectResult(result)));
+    let historyEntries=0,eventCount=0;
+    if(request.type==="instance.read")for(const entry of projection.recentHistory){
+      await channel.send({kind:"instance_history",version:2,requestId:request.requestId,hostEpoch:this.hostEpoch,entry});historyEntries++;
+    }
+    for(const event of projection.page.events)if(!eventHiddenFromStream(event,undefined)){
+      await channel.send(recordEvent(request.requestId,this.hostEpoch,event));eventCount++;
+    }
+    await channel.send({kind:"instance_ready",version:2,requestId:request.requestId,hostEpoch:this.hostEpoch,historyEntries,eventCount});
+    await channel.drained();
+  }
+
+  private async deliverInstanceRecords(request: Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,socket:Socket,channel:InstanceRecordChannel,setUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
+    const instance=this.registry.get(request.params.instanceId);
+    const cursor=request.params.since;
+    if(cursor && cursor.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
+    if(request.type==="instance.read") {
+      const projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay);
+      await this.sendInstanceInitial(request,projection,channel);
+      channel.quiescent();socket.end();return;
+    }
+    type Item={event:DockEvent;bytes:number};
+    let queue:Item[]=[],ordinaryBytes=0,largeItems=0,initializing=true,sending=false,closed=false,terminalQueued=false,retired=false;
+    let generation=instance.runtimeGeneration,sequence=0,unsubscribe=()=>{};
+    const close=()=>{if(closed)return;closed=true;unsubscribe();queue=[];ordinaryBytes=0;largeItems=0;channel.cancel();};
+    const overflow=()=>{
+      this.attachBackpressureStats.overflow++;
+      const beforeContent=initializing&&!channel.started;
+      close();
+      if(beforeContent){
+        void instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE).catch(()=>{});
+        this.sendErrorAndEnd(socket,"follow_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
+      }else socket.destroy();
+    };
+    const take=():Item=>{
+      const item=queue.shift()!;
+      if(item.bytes>MAX_ATTACH_EVENT_QUEUE_BYTES)largeItems--;else ordinaryBytes-=item.bytes;
+      return item;
+    };
+    const flush=async()=>{
+      if(sending||initializing||closed)return;
+      sending=true;
+      try {
+        while(queue.length && !closed){
+          const {event}=take();
+          if(event.runtimeGeneration<generation)continue;
+          if(event.runtimeGeneration>generation){
+            if(event.runtimeGeneration!==generation+1||event.type!=="session.replaced"||event.sequence!==1)throw new Error("Live instance generation changed unexpectedly");
+            generation=event.runtimeGeneration;sequence=0;
+          }
+          if(event.sequence<=sequence)continue;
+          await channel.send(recordEvent(request.requestId,this.hostEpoch,event));
+          sequence=event.sequence;
+        }
+        if(!closed){
+          channel.quiescent();
+          if(retired){await channel.drained();close();socket.end();}
+        }
+      }catch{close();socket.destroy();}finally{sending=false;}
+    };
+    unsubscribe=instance.subscribe(event=>{
+      if(closed||eventHiddenFromStream(event,undefined))return;
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,undefined);
+      const large=bytes>MAX_ATTACH_EVENT_QUEUE_BYTES;
+      if(!Number.isFinite(bytes)||bytes>MAX_DOCK_TRANSFER_BYTES||queue.length>=MAX_ATTACH_EVENT_QUEUE||(large?largeItems>0:ordinaryBytes+bytes>MAX_ATTACH_EVENT_QUEUE_BYTES)){overflow();return;}
+      if(event.type==="instance.stopped")terminalQueued=true;
+      queue.push({event,bytes});if(large)largeItems++;else ordinaryBytes+=bytes;
+      void flush();
+    });
+    this.trackAttachStream(instance.id,socket,()=>{
+      // Stop retires the Work immediately, without awaiting a reader. The
+      // already queued terminal records finish under this connection's window.
+      if(!terminalQueued){close();socket.destroy();return;}
+      retired=true;void flush();
+    });
+    if(closed)unsubscribe();setUnsubscribe(close);
+    try {
+      const projection=await instance.getAttachProjection(cursor,1,"event_log");
+      if(closed)return;
+      await this.sendInstanceInitial(request,projection,channel);
+      generation=projection.page.latest.runtimeGeneration;sequence=Math.max(projection.replaySince,projection.page.latest.sequence);
+      queue.sort((a,b)=>a.event.runtimeGeneration-b.event.runtimeGeneration||a.event.sequence-b.event.sequence);
+      initializing=false;await flush();
+    }catch(error){close();throw error;}
+  }
+
   private async followEventStream(request: Extract<ControlRequest,{type:"instance.follow"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
     this.trackAttachStream(instance.id, socket);
@@ -1072,9 +1185,9 @@ export class DockHost {
     }
   }
 
-  private trackAttachStream(instanceId: string, socket: Socket): void {
-    const streams = this.attachConnections.get(instanceId) ?? new Set<Socket>();
-    streams.add(socket);
+  private trackAttachStream(instanceId: string, socket: Socket, retired: () => void = () => { socket.destroy(); }): void {
+    const streams = this.attachConnections.get(instanceId) ?? new Map<Socket, () => void>();
+    streams.set(socket, retired);
     this.attachConnections.set(instanceId, streams);
     socket.once("close", () => {
       streams.delete(socket);
@@ -1082,11 +1195,11 @@ export class DockHost {
     });
   }
 
-  private closeStaleAttachStreams(instanceId: string): void {
+  private closeStaleAttachStreams(instanceId: string, retired = false): void {
     const streams = this.attachConnections.get(instanceId);
     if (!streams) return;
     this.attachConnections.delete(instanceId);
-    for (const socket of streams) socket.destroy();
+    for (const [socket, finishRetirement] of streams) { if(retired)finishRetirement();else socket.destroy(); }
   }
 
   private activeWorkspace(instanceId: string): InstanceWorkspace {

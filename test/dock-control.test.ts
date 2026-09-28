@@ -3045,7 +3045,7 @@ test("permanently stalled followers are bounded without affecting Extension UI o
   assert.doesNotMatch(frames[1]!, /controller|leaseToken/u);
   socket.pause();
 
-  const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Set<{ destroyed: boolean }>> }).attachConnections.get(created.id) ?? [])][0];
+  const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Map<{ destroyed: boolean }, () => void>> }).attachConnections.get(created.id)?.keys() ?? [])][0];
   assert.ok(serverSocket);
   const runtime = harness.sessions.get(created.id)!;
   for (let index = 0; index < 800; index += 1) {

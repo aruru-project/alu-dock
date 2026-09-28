@@ -18,6 +18,8 @@ mod fs_publish;
 mod host_registry;
 mod identity;
 mod instances;
+mod instance_records;
+pub use instance_records::InstanceDeliveryContext;
 mod local_transport;
 mod observation;
 mod operations;

@@ -101,3 +101,45 @@ test("Main opens and pages near-limit conversation history without losing record
     });
   }
 });
+
+// #325 archived Host reproduction: a legal diagnostic disappeared while latest advanced;
+// 1001 active records became 1000, and the same diagnostic disconnected live follow.
+test("opted instance observation keeps all active records and consecutive large live diagnostics", async (context) => {
+  const directory=await mkdtemp(join(tmpdir(),"alu-instance-records-"));
+  const runtime=new DelayedAgentWorkerConnection("records-session");
+  const registry=new DockRegistry(async ({id,creationOperationId,hostEpoch,cwd})=>new ManagedInstance({id,creationOperationId,hostEpoch,cwd,session:runtime}));
+  const host=new DockHost({socketPath:join(directory,"dock.sock"),registry});
+  const client=new DockClient({socketPath:host.socketPath});
+  context.after(async()=>{client.closeActiveConnections();await host.stop();await rm(directory,{recursive:true,force:true});});
+  await host.start();const work=await client.create(directory);
+  const {parseConversationFrame}=await import("../src/control/protocol.js");
+  const diagnostic=(messageId:string,error:string)=>parseConversationFrame({type:"message.completed",data:{messageId,role:"assistant",content:[],stopReason:"error",error}});
+  const emit=(frame:ReturnType<typeof parseConversationFrame>)=>runtime.emit({type:"dock_conversation_frame",frame});
+  const text="雪\\\"\n".repeat(280_000);
+  const accepted=new Promise<void>(resolve=>{const unsubscribe=registry.get(work.id).subscribe(event=>{if(event.type==="message.delta"&&event.data.messageId==="distinct-1000"){unsubscribe();resolve();}});});
+  emit(diagnostic("initial-large",text));
+  for(let index=0;index<1001;index++)emit(parseConversationFrame({type:"message.delta",data:{messageId:`distinct-${index}`,block:"text",delta:"x"}}));
+  await accepted;
+  const source=await registry.get(work.id).getAttachProjection(undefined,200,"conversation_bootstrap");
+  assert.equal(source.page.events.length,1002);
+  const delivery={};
+  const initial=await client.read(work.id,undefined,"conversation_bootstrap",delivery);
+  context.diagnostic("complete bootstrap accepted");
+  assert.deepEqual(initial.page.events,source.page.events);
+  assert.equal(initial.page.truncated,source.page.truncated);
+  assert.deepEqual(initial.page.latest,source.page.latest);
+  const live:unknown[]=[];
+  let first!:()=>void;const firstDelivered=new Promise<void>(resolve=>{first=resolve;});
+  let complete!:()=>void;const finished=new Promise<void>(resolve=>{complete=resolve;});
+  const follow=await client.follow(work.id,initial.page.latest,{deliveryContext:delivery,onEvent:event=>{live.push(event);if(live.length===1)first();if(live.length===3)complete();}});
+  context.diagnostic("follow ready accepted");
+  context.after(()=>follow.close());
+  const errors=["a".repeat(5*1024*1024),"b".repeat(5*1024*1024),"small tail"];
+  emit(diagnostic("live-0",errors[0]!));
+  await Promise.race([firstDelivered,follow.done]);
+  // Follow keeps framing/credit state correct across consecutive large records.
+  emit(diagnostic("live-1",errors[1]!));emit(diagnostic("live-2",errors[2]!));
+  await Promise.race([finished,follow.done.then(()=>{throw new Error("Follow ended before all events");})]);
+  assert.deepEqual(live.map(item=>(item as {data:{error:string}}).data.error),errors);
+  follow.close();await follow.done;
+});

@@ -1,3 +1,4 @@
+import type { InstanceDeliveryContext } from "../control/dock-client.js";
 import { DocumentReader } from "./document-reader.js";
 import { randomUUID } from "node:crypto";
 
@@ -274,7 +275,8 @@ export async function runDockTui(
     }
   };
 
-  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, conversationBootstrap: true });
+  const instanceDelivery: InstanceDeliveryContext = {};
+  subscription = await client.streamEvents(instance.id, { deliveryContext: instanceDelivery, onEvent, requireTuiProjection: true, conversationBootstrap: true });
   const initialProjection = subscription.initial.instance;
   instance = initialProjection;
   status.setController("read-only");
@@ -1668,6 +1670,7 @@ export async function runDockTui(
     const [projectionLoad, settingsLoad, commandsLoad] = await Promise.allSettled([
       (async () => {
         const projection = await client.streamEvents(instance.id, {
+          deliveryContext: instanceDelivery,
           onEvent: () => {},
           requireTuiProjection: true,
           conversationBootstrap: true,
@@ -1750,6 +1753,7 @@ export async function runDockTui(
   async function refreshNavigationProjection(token: string, generation: number): Promise<void> {
     const loaded = await (async () => {
       const projection = await client.streamEvents(instance.id, {
+        deliveryContext: instanceDelivery,
         onEvent: () => {},
         requireTuiProjection: true,
         conversationBootstrap: true,
@@ -2096,6 +2100,7 @@ export async function runDockTui(
       try {
         if (!forceFreshBootstrap) {
           next = await client.streamEvents(instance.id, {
+            deliveryContext: instanceDelivery,
             since: cursor,
             onEvent: onCandidateEvent,
             requireTuiProjection: true,
@@ -2113,6 +2118,7 @@ export async function runDockTui(
           }
           candidateBufferedEvents.length = 0;
           next = await client.streamEvents(instance.id, {
+            deliveryContext: instanceDelivery,
             onEvent: onCandidateEvent,
             requireTuiProjection: true,
             conversationBootstrap: true,

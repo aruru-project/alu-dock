@@ -78,6 +78,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 - 原生根据真实稳定连接 authority、Machine、fileId、MIME 和源描述关联 receipt；opaque ref 不拆解，文件名不当身份，Vue 不用附件预览覆盖正式图片。请求域与文件寿命分开。
 - 所有对话/发布/附件图片都返回 `MediaHandle`。URL 只通过受限 `aludock-media` 解析注册的 handle，WebView 没有任意路径读权限。显示 prune、F5、Work 切换只释放显示资源，不删可信文件。
 - 图片保存传 `{handle, name}`，不 fetch URL 到 JS，不把 Uint8Array 再传回 Rust。core 流式复制并复核本地长度/SHA；Tauri 复用原 dialog、staging、atomic commit/Android URI copy。保存任务持有自己的临时文件直到完成；取消/错误只清自己的临时文件，不能删原件。Dialog/URI 的平台差异仍在 Tauri。
+- `ConversationObservation` 的 owner 显式选择 [instance records](control.md#readfollow-与-extension-ui-操作)，完整接收初始内容与独立 live 事件；初始 ready 之前不提交，换 owner 丢弃未完成记录。每个 owner 固定协商结果，仅首次数据前明确缺能力才使用原 V2，旧 public read/follow 默认不变。
 - 正文与会话增量保留在原生内存，仍由 `SessionContent` 唯一持有。当前成员、checkpoint、Segment 和实际 binding 共享不可变正文引用，旧版本最后一个引用释放后回收；不再创建逐条正文文件或磁盘 journal。Host 返回历史后即可按原有分批接口显示，不以前置写盘/权限/摘要回读作为首屏条件。
 - 正文在本次原生生命周期内保留，支持 F5 和切 Work，不承诺重启持久化。媒体可信文件仍保留；正常退出释放 RunCache，下次启动仅清无活动 lease 的私有残留，不动用户原文件、主动保存的文件或 Host 附件。不承诺异常退出后的永久内容恢复。
 

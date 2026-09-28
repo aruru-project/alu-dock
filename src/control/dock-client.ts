@@ -1,3 +1,6 @@
+import { InstanceRecordChannel, InstanceRecordInitial } from "./instance-record-delivery.js";
+import { INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
+import { writeTransferBytes } from "./file-channel.js";
 import { CONVERSATION_CONTENT_STREAM_CAPABILITY, parseConversationContentChunk, parseConversationContentStreamMetadata, parseConversationContentStreamResult, type ConversationContentStreamMetadata, type ConversationContentStreamResult } from "./protocol.js";
 import { isDeepStrictEqual } from "node:util";
 import { MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES } from "../core/published-file.js";
@@ -209,6 +212,9 @@ export class ControlClientError extends Error {
  * The selected view belongs to that read chain, not the client or Host globally. */
 export interface ConversationReadContext { view?: "references" | "legacy" }
 
+/** Explicit opt-in scoped to one observation; reuse across read, follow and reconnect. */
+export interface InstanceDeliveryContext { delivery?: "records" | "legacy" }
+
 export class DockClient {
   readonly socketPath:string;
   private readonly timeoutMs:number;
@@ -403,7 +409,9 @@ export class DockClient {
   forget(instanceId:string,operationId=this.createRequestId()):Promise<ForgetResult>{return this.request("instance.forget",{operationId,instanceId},"catalog.maintenance.v1",parseForgetResult);}
   pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
-  read(instanceId:string,since?:EventCursor,replay:"event_log"|"conversation_bootstrap"="event_log"):Promise<InstanceReadResult>{return this.request("instance.read",{instanceId,since,replay},[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
+  read(instanceId:string,since?:EventCursor,replay:"event_log"|"conversation_bootstrap"="event_log",context?:InstanceDeliveryContext):Promise<InstanceReadResult>{
+    if(context && context.delivery!=="legacy")return this.withInstanceDelivery(context,()=>this.openInstanceRecords({kind:"request",version:2,requestId:this.createRequestId(),type:"instance.read",params:{instanceId,since,replay,delivery:"records"}},context).then(stream=>stream.initial as InstanceReadResult),()=>this.read(instanceId,since,replay));
+    return this.request("instance.read",{instanceId,since,replay},[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId(),images?:ImagePathDto[],attachments?:string[]):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,...(images===undefined?{}:{images}),...(attachments===undefined?{}:{attachments}),delivery},["session.core",...(images===undefined?[]:[IMAGE_INPUT_CAPABILITY]),...(attachments===undefined?[]:[ATTACHMENTS_CAPABILITY])],parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
@@ -620,9 +628,10 @@ export class DockClient {
   cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v2",parseSessionCloneResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult,undefined,this.longMutationTimeoutMs);}
 
-  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;conversationBootstrap?:boolean;delivery?:"records";deliveryContext?:InstanceDeliveryContext}):Promise<EventSubscription>{
     const replay=options.conversationBootstrap?"conversation_bootstrap":"event_log";
-    const initial=await this.read(instanceId,options.since,replay);
+    const context=options.deliveryContext??(options.delivery==="records"?{}:undefined);
+    const initial=await this.read(instanceId,options.since,replay,context);
     const requested=options.since;
     const followSince=requested
       && !initial.page.epochChanged
@@ -633,14 +642,16 @@ export class DockClient {
       && requested.sequence>initial.page.latest.sequence
       ? requested
       : initial.page.latest;
-    const follow=await this.follow(instanceId,followSince,{onEvent:options.onEvent,requireTuiProjection:options.requireTuiProjection});
+    const follow=await this.follow(instanceId,followSince,{onEvent:options.onEvent,requireTuiProjection:options.requireTuiProjection,deliveryContext:context});
     return {initial,close:follow.close,done:follow.done};
   }
 
-  follow(instanceId:string,since:EventCursor,options:{onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<FollowSubscription>{
+  follow(instanceId:string,since:EventCursor,options:{onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;delivery?:"records";deliveryContext?:InstanceDeliveryContext}):Promise<FollowSubscription>{
+    const context=options.deliveryContext??(options.delivery==="records"?{}:undefined);
     const capabilities:Capability[]=options.requireTuiProjection
       ? [EVENTS_FOLLOW_CAPABILITY,TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,"queue.control.v1","run.abort.v1","tui.projection.v1"]
       : [EVENTS_FOLLOW_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY];
+    if(context && context.delivery!=="legacy")return this.withInstanceDelivery(context,()=>this.openInstanceRecords({kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since,delivery:"records"}},context,options.onEvent,capabilities),()=>this.follow(instanceId,since,{...options,delivery:undefined,deliveryContext:undefined}));
     return this.openEventStream({
       request:{kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since}},
       capabilities,
@@ -706,6 +717,77 @@ export class DockClient {
     }catch(e){fail(e);}};
     socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,streamCapabilities))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){if(closeRequested||options.cleanEnd&&!hadError)settleDone();else settleDone(new ControlClientError("connection_closed",hadError?"Stream closed after a transport error":"Host closed the stream unexpectedly"));}});
     return initial;
+  }
+
+  private async withInstanceDelivery<T>(context:InstanceDeliveryContext,records:()=>Promise<T>,legacy:()=>Promise<T>):Promise<T>{
+    try{return await records();}catch(error){
+      if(context.delivery!==undefined || !(error instanceof ControlClientError) || error.code!=="capability_missing" || !Array.isArray(error.details?.missing) || !error.details.missing.includes(INSTANCE_RECORDS_CAPABILITY))throw error;
+      context.delivery="legacy";return legacy();
+    }
+  }
+
+  private openInstanceRecords(request:Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,context:InstanceDeliveryContext,onEvent?:(event:DockEvent)=>void,additionalCapabilities:readonly Capability[]=[]):Promise<FollowSubscription>{
+    const socket=this.openSocket(),decoder=new JsonLineDecoder(),helloId=this.createRequestId();
+    const capabilities=[...new Set([...requiredCapabilities(request.type==="instance.read"?INSTANCE_READ_CAPABILITY:EVENTS_FOLLOW_CAPABILITY),IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,INSTANCE_RECORDS_CAPABILITY,...additionalCapabilities.flatMap(item=>requiredCapabilities(item))])];
+    let channel:InstanceRecordChannel|undefined,initial:InstanceRecordInitial|undefined,epoch="",settled=false,closed=false,ended=false;
+    let generation=0,sequence=0,processing=Promise.resolve();
+    let resolveInitial!:(result:FollowSubscription)=>void,rejectInitial!:(error:unknown)=>void,resolveDone!:()=>void,rejectDone!:(error:unknown)=>void;
+    const done=new Promise<void>((resolve,reject)=>{resolveDone=resolve;rejectDone=reject;});void done.catch(()=>{});
+    const result=new Promise<FollowSubscription>((resolve,reject)=>{resolveInitial=resolve;rejectInitial=reject;});
+    const fail=(error:unknown)=>{const normalized=normalizeClientError(error);if(!settled){settled=true;rejectInitial(normalized);}rejectDone(normalized);channel?.cancel(error);socket.destroy();};
+    const timeout=setTimeout(()=>fail(new ControlClientError("timeout","Host did not complete negotiation")),this.timeoutMs);
+    const close=()=>{closed=true;channel?.cancel();socket.destroy();resolveDone();};
+    const consume=async(raw:unknown)=>{
+      if(!channel){
+        const ack=parseHelloReply(raw,helloId);epoch=ack.host.hostEpoch;
+        for(const capability of capabilities)if(!ack.capabilities.includes(capability))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${capability}`);
+        channel=new InstanceRecordChannel(request.requestId,epoch,"receive",frame=>writeTransferBytes(socket,encodeJsonLine(frame),channel!.abort.signal),fail);
+        initial=new InstanceRecordInitial(request.type==="instance.read",request.requestId,epoch);
+        clearTimeout(timeout);socket.write(encodeJsonLine(request));return;
+      }
+      if((raw as {kind?:unknown})?.kind==="response" && !channel.started){
+        const response=parseControlResponse(raw,request.requestId,epoch);
+        if(!response.ok)throw new ControlClientError(response.error.code,response.error.message,undefined,response.error.details);
+        throw new ProtocolValidationError("invalid_response","Expected instance records");
+      }
+      if((raw as {kind?:unknown})?.kind==="instance_record_fragment")context.delivery="records";
+      const record=await channel.consume(raw);if(record===undefined)return;
+      if(!initial!.ready){
+        const value=initial!.consume(record);if(!value)return;
+        validateRequestResult(request.type,request.params,value,epoch);
+        if(value.page.latest.instanceId!==request.params.instanceId)throw new ProtocolValidationError("invalid_response","Live updates do not match this work");
+        generation=value.page.latest.runtimeGeneration;sequence=value.page.latest.sequence;
+        settled=true;resolveInitial({initial:value,close,done});
+        // Let the caller install its owner before delivering the staged initial events.
+        await new Promise<void>(resolve=>setImmediate(resolve));
+        if(closed)return;
+        if(onEvent)for(const event of value.page.events)onEvent(event);
+        channel.quiescent();
+        return;
+      }
+      if(request.type!=="instance.follow")throw new ProtocolValidationError("invalid_response","Unexpected record after read readiness");
+      const event=parseControlEventEnvelope(record,request.requestId,epoch).event;
+      if(event.instanceId!==request.params.instanceId)throw new ProtocolValidationError("invalid_response","Live event belongs to another work");
+      if(event.runtimeGeneration!==generation){
+        if(event.runtimeGeneration!==generation+1||event.type!=="session.replaced"||event.sequence!==1||event.data.runtimeGeneration!==event.runtimeGeneration)throw new ProtocolValidationError("invalid_response","Live work changed unexpectedly");
+        generation=event.runtimeGeneration;sequence=0;
+      }
+      if(event.sequence<=sequence)throw new ProtocolValidationError("invalid_response","Live events arrived out of order");
+      onEvent?.(event);sequence=event.sequence;channel.quiescent();
+    };
+    socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
+    socket.on("data",(chunk:Buffer)=>{
+      socket.pause();
+      processing=processing.then(async()=>{
+        const lines=decoder.push(chunk);channel?.observeWire(chunk.byteLength,decoder.partialRecord);if(channel?.started)context.delivery="records";
+        for(const line of lines){if(closed)return;if(!line)throw new ProtocolValidationError("invalid_response","Empty instance record");await consume(JSON.parse(line));}
+        channel?.observeWire(0,decoder.partialRecord);if(channel?.started)context.delivery="records";
+      }).catch(fail).finally(()=>{if(!socket.destroyed)socket.resume();});
+    });
+    socket.once("end",()=>{ended=true;processing=processing.then(()=>{decoder.finish();channel?.finish();initial?.finish();if(request.type==="instance.read"&&settled){channel?.cancel();resolveDone();}else if(!closed)throw new ControlClientError("connection_closed","Host closed the stream unexpectedly");}).catch(fail);});
+    socket.once("error",error=>fail(transportError(error)));
+    socket.once("close",()=>{clearTimeout(timeout);if(!closed&&!ended)fail(new ControlClientError("connection_closed","Host closed instance record delivery"));channel?.cancel();});
+    return result;
   }
 
   private async conversationViewRequest<T>(context:ConversationReadContext|undefined, read:(view:"references"|undefined)=>Promise<T>):Promise<T>{

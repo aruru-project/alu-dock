@@ -133,7 +133,8 @@ export class OrderedWorkerSender {
 
   close(): void { this.closed = true; }
 
-  sendEnvelope(envelope: WorkerEnvelope, method?: "conversation.image"): Promise<void> {
+  async sendEnvelope(envelope: WorkerEnvelope, method?: "conversation.image"): Promise<void> {
+    const identity = { ...this.identity };
     const json = JSON.stringify(envelope);
     if (json === undefined) return Promise.reject(new Error("Worker envelope is not JSON serializable"));
     const parsed: unknown = JSON.parse(json);
@@ -144,7 +145,6 @@ export class OrderedWorkerSender {
     for (let index = 0; index < json.length; index += MAX_WORKER_CHUNK_CHARS) chunks.push(json.slice(index, index + MAX_WORKER_CHUNK_CHARS));
     if (chunks.length < 1) chunks.push("");
     if (chunks.length > MAX_WORKER_TRANSFER_CHUNKS) return Promise.reject(new Error("Worker envelope exceeds chunk count bound"));
-    const identity = { ...this.identity };
     const transferId = `${process.pid}-${++this.transferSequence}`;
     const task = this.tail.then(async () => {
       if (this.closed) throw new Error("Worker IPC sender is closed");
@@ -169,6 +169,11 @@ export class OrderedWorkerSender {
     this.tail = task.catch(() => {});
     return task;
   }
+}
+
+/** Production subscription seam: transport rejection must not be swallowed by an Agent's synchronous subscriber isolation. */
+export function forwardWorkerEvent(sender: OrderedWorkerSender, envelope: Extract<WorkerEnvelope, {kind: "event"}>, failed: (error: unknown) => void): void {
+  void sender.sendEnvelope(envelope).catch(failed);
 }
 
 export class WorkerFrameReceiver {
@@ -765,18 +770,17 @@ function validateEnvelopeJson(root: unknown, context?: WorkerResponseContext): v
   const envelope = record(root, "Worker envelope");
   const image = envelope.kind === "response" && envelope.ok === true
     && context !== "cancelled" && context?.method === "conversation.image";
-  // Traverse all structure before the method parser. Only its data scalar has
-  // a different bound; the single V2 parser owns bytes/base64/length/SHA checks.
+  // Traverse structure before the shared method parser, which owns scalar bounds.
   const result = envelope.kind === "response" ? envelope.result : undefined;
-  validateJsonValue(root, image ? result : undefined, context === "cancelled" ? result : undefined);
+  validateJsonValue(root);
   if (image) validateAgentWorkerResult("conversation.image", result);
 }
 
-function validateJsonValue(root: unknown, imageResult?: unknown, cancelledResult?: unknown): void {
+function validateJsonValue(root: unknown): void {
   let nodes = 0;
-  const stack: Array<{ value: unknown; depth: number; discarded?: boolean; imageData?: boolean }> = [{ value: root, depth: 0 }];
+  const stack: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
   while (stack.length > 0) {
-    const { value, depth, discarded, imageData } = stack.pop()!;
+    const { value, depth } = stack.pop()!;
     nodes += 1;
     if (nodes > 2_000_000 || depth > 32) throw new Error("Worker IPC JSON structure exceeds bounds");
     if (value === null || typeof value === "boolean" || typeof value === "number") {
@@ -784,11 +788,10 @@ function validateJsonValue(root: unknown, imageResult?: unknown, cancelledResult
       continue;
     }
     if (typeof value === "string") {
-      if (!discarded && !imageData && value.length > 2_000_000) throw new Error("Worker IPC JSON string exceeds bounds");
       continue;
     }
     if (Array.isArray(value)) {
-      for (const item of value) stack.push({ value: item, depth: depth + 1, discarded });
+      for (const item of value) stack.push({ value: item, depth: depth + 1 });
       continue;
     }
     if (typeof value !== "object" || value === undefined) throw new Error("Worker IPC contains a non-JSON value");
@@ -796,7 +799,7 @@ function validateJsonValue(root: unknown, imageResult?: unknown, cancelledResult
     if (entries.length > 10_000) throw new Error("Worker IPC JSON object exceeds bounds");
     for (const [key, child] of entries) {
       if (key.length > 256 || child === undefined) throw new Error("Worker IPC JSON member is invalid");
-      stack.push({ value: child, depth: depth + 1, discarded: discarded || (value === root && key === "result" && cancelledResult !== undefined), imageData: value === imageResult && key === "data" });
+      stack.push({ value: child, depth: depth + 1 });
     }
   }
 }

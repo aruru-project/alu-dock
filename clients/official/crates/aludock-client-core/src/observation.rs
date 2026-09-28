@@ -186,6 +186,7 @@ impl ConversationObservation {
         host_epoch: String,
         mut read_required: bool,
     ) {
+        let delivery = crate::InstanceDeliveryContext::default();
         let checkpoint_pending = Arc::new(AtomicBool::new(false));
         loop {
             if !self.content.owns(&key, owner)
@@ -203,7 +204,7 @@ impl ConversationObservation {
             );
             if read_required || self.content.needs_read(&key, owner) {
                 match client
-                    .read_instance(&instance, None, ReadReplay::ConversationBootstrap)
+                    .read_instance_records(&instance, None, ReadReplay::ConversationBootstrap, &delivery)
                     .await
                 {
                     Ok(read) if read.page.latest.host_epoch != host_epoch => {
@@ -252,7 +253,7 @@ impl ConversationObservation {
             let Some(cursor) = self.content.cursor(&key, owner) else {
                 return;
             };
-            match client.follow_instance(&instance, &cursor).await {
+            match client.follow_instance_records(&instance, &cursor, &delivery).await {
                 Ok((initial, mut stream)) => {
                     if initial.truncated || initial.epoch_changed || initial.generation_changed {
                         read_required = true;
@@ -313,12 +314,14 @@ impl ConversationObservation {
                                         checkpoint_pending.clone(),
                                         host_epoch.clone(),
                                     );
+                                    let delivery=delivery.clone();
                                     tokio::spawn(async move {
                                         match client
-                                            .read_instance(
+                                            .read_instance_records(
                                                 &instance,
                                                 None,
                                                 ReadReplay::ConversationBootstrap,
+                                                &delivery,
                                             )
                                             .await
                                         {
@@ -468,6 +471,14 @@ mod tests {
 
     // Windows cold Work opens previously wrote and reread every body before
     // display. Exercise the real Host read -> content admission -> binding path.
+    // These existing peers implement legacy V2, not the new record transport.
+    async fn legacy_peer(socket: &mut (impl tokio::io::AsyncWrite + Unpin), hello: &Value) -> bool {
+        if hello["requiredCapabilities"].as_array().unwrap().iter().any(|value| value == "instance.records.v1") {
+            write_json_line(socket,&json!({"kind":"hello_error","requestId":hello["requestId"],"error":{"code":"capability_missing","message":"legacy peer","missing":["instance.records.v1"]}})).await.unwrap();
+            false
+        }else{true}
+    }
+
     #[tokio::test]
     async fn cold_host_history_and_native_rebind_display_complete_utf8_without_body_files() {
         let directory = std::env::temp_dir().join(format!(
@@ -726,6 +737,7 @@ mod tests {
                 let (r, s, f, gate) = (r.clone(), s.clone(), f.clone(), gate.clone());
                 tokio::spawn(async move {
                     let hello: Value = read_json_line(&mut socket, 1024 * 1024).await.unwrap();
+                    if !legacy_peer(&mut socket,&hello).await { return; }
                     write_json_line(&mut socket, &json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,
                         "host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
                     let request: Value = read_json_line(&mut socket, 1024 * 1024).await.unwrap();
@@ -1318,8 +1330,9 @@ mod tests {
                 loop {
                     let (socket, _) = listener.accept().await.unwrap();
                     let mut socket = tokio::io::BufReader::new(socket);
-                    received.fetch_add(1, Ordering::SeqCst);
                     let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    if !legacy_peer(&mut socket,&hello).await { continue; }
+                    received.fetch_add(1, Ordering::SeqCst);
                     write_json_line(&mut socket,&json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
                     let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
                     if mode == "refusal" {
@@ -1425,6 +1438,7 @@ mod tests {
                     tokio::spawn(async move {
                         let mut socket = tokio::io::BufReader::new(socket);
                         let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    if !legacy_peer(&mut socket,&hello).await { return; }
                         write_json_line(&mut socket, &json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
                         let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
                         let result = match request["type"].as_str().unwrap() {
@@ -1692,6 +1706,7 @@ mod tests {
                     );
                     tokio::spawn(async move {
                         let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    if !legacy_peer(&mut socket,&hello).await { return; }
                         write_json_line(&mut socket,&json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
                         let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
                         if request["type"] == "instance.read" {

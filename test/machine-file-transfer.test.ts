@@ -52,12 +52,13 @@ class Peer {
   async next(kind:string){await until(()=>this.frames.some(frame=>frame.kind===kind)||this.socket.destroyed);const index=this.frames.findIndex(frame=>frame.kind===kind);assert.ok(index>=0,`connection ended before ${kind}`);return this.frames.splice(index,1)[0]!;}
 }
 
-test("routed uploads and downloads stay alive on real half-frame traffic, not repeated activity, and cancellation closes the file", {timeout:20_000}, async context=>{
+test("routed files and instance records survive real half-frame progress while idle files close and quiet follow stays open", {timeout:20_000}, async context=>{
   const root=await mkdtemp(join(tmpdir(),"alu-file-route-"));
   const source=Buffer.alloc(300_000,0x61);await writeFile(join(root,"source.bin"),source);
   const storage=()=>new AttachmentService(new AttachmentStorageState(join(root,Math.random().toString(36)),join(root,Math.random().toString(36))));
   const subAttachments=storage(),mainAttachments=storage();
-  const registry=new DockRegistry(async input=>new ManagedInstance({...input,session:new DelayedAgentWorkerConnection("file-route")}),undefined,{attachmentHostPort:subAttachments});
+  const runtime=new DelayedAgentWorkerConnection("file-route");
+  const registry=new DockRegistry(async input=>new ManagedInstance({...input,session:runtime}),undefined,{attachmentHostPort:subAttachments});
   await registry.create({operationId:"create",cwd:root});
   const sub=new DockHost({socketPath:join(root,"unused"),registry,attachmentService:subAttachments,listen:false});
   const mainState=new MainMachineState(join(root,"main"),"Main");await mainState.initialize();
@@ -67,8 +68,8 @@ test("routed uploads and downloads stay alive on real half-frame traffic, not re
   const controller=new MainMachineController({state:mainState,settingsState:settings,bindAddress:"127.0.0.1",mainHostEpoch:mainRegistry.hostEpoch,localSnapshots:()=>[]});
   const main=new DockHost({socketPath:join(root,"main.sock"),registry:mainRegistry,remoteInstances:controller,attachmentService:mainAttachments});
   const gate=tlsGate(machinePort);gate.server.listen(0,"127.0.0.1");await once(gate.server,"listening");
-  let nativeTransit=0;
-  const upstream=new SubHostMachineConnection({state:subState,address:"127.0.0.1",port:(gate.server.address() as {port:number}).port,hostEpoch:registry.hostEpoch,snapshots:()=>registry.list(),acceptProtocolSocket:socket=>{sub.acceptProtocolSocket(socket);const observed=new JsonLineDecoder();socket.on("data",bytes=>{for(const line of observed.push(bytes)){const frame=JSON.parse(line);if(frame.kind==="file_activity")nativeTransit=Math.max(nativeTransit,frame.inTransitBytes);}});}});
+  let nativeTransit=0,recordTransit=0,recordNotices=0;
+  const upstream=new SubHostMachineConnection({state:subState,address:"127.0.0.1",port:(gate.server.address() as {port:number}).port,hostEpoch:registry.hostEpoch,snapshots:()=>registry.list(),acceptProtocolSocket:socket=>{sub.acceptProtocolSocket(socket);const observed=new JsonLineDecoder();socket.on("data",bytes=>{for(const line of observed.push(bytes)){const frame=JSON.parse(line);if(frame.kind==="file_activity")nativeTransit=Math.max(nativeTransit,frame.inTransitBytes);if(frame.kind==="instance_record_activity"){recordTransit=Math.max(recordTransit,frame.inTransitBytes);recordNotices++;}}});}});
   const client=new DockClient({socketPath:main.socketPath});const peers:Peer[]=[];
   const open=async(type:string,params:Record<string,unknown>,cap:string)=>{
     const socket=createConnection(main.socketPath);await once(socket,"connect");const peer=new Peer(socket);peers.push(peer);
@@ -115,6 +116,64 @@ test("routed uploads and downloads stay alive on real half-frame traffic, not re
     gate.release();
     while(count<source.length){const chunk=await download.next("file_chunk");count+=Buffer.from(chunk.data,"base64").length;download.send({kind:"file_progress",version:2,requestId:"file",hostEpoch:mainRegistry.hostEpoch,receivedWireBytes:download.wire,consumedBytes:count});}
     assert.equal((await download.next("file_complete")).sizeBytes,300_000);assert.equal((await download.next("response")).ok,true);download.socket.destroy();
+    // #325 must retain the file path's solved half-machine-frame liveness while
+    // assembling/mapping logical items with independent upstream/downstream credit.
+    const accepted=new Promise<void>(resolve=>{const unsubscribe=registry.get(registry.list()[0]!.id).subscribe(event=>{if(event.type==="message.completed"){unsubscribe();resolve();}});});
+    runtime.emit({type:"dock_conversation_frame",frame:{type:"message.completed",data:{messageId:"slow-record",role:"assistant",content:[],stopReason:"error",error:"x".repeat(1_100_000)}}});
+    await accepted;gate.hold();
+    const delivery={};const reading=client.read(work.id,undefined,"conversation_bootstrap",delivery);
+    let failed:unknown;void reading.catch(error=>{failed=error;});
+    // Advance the fake clock only once the same actual partial-frame notice has
+    // reached both endpoints, not on metadata ACKs or scheduler timing.
+    let deliveredActivity=0;
+    const readSocket=[...(client as unknown as {activeSockets:Set<Socket>}).activeSockets].at(-1)!;
+    const observedRecords=new JsonLineDecoder();
+    readSocket.on("data",bytes=>{for(const line of observedRecords.push(bytes)){const frame=JSON.parse(line);if(frame.kind==="instance_record_activity")deliveredActivity=Math.max(deliveredActivity,frame.inTransitBytes);}});
+    let advanced=0,previous=0;
+    for(let attempt=0;attempt<2000&&advanced<3&&!failed;attempt++){
+      gate.one();await turn();await turn();
+      if(deliveredActivity>previous){previous=deliveredActivity;await until(()=>recordTransit>=previous);await turn();context.mock.timers.tick(40_000);advanced++;}
+    }
+    assert.equal(failed,undefined);assert.equal(advanced,3);
+    gate.release();const read=await reading;
+    assert.equal((read.page.events.find(event=>event.type==="message.completed")!.data as {error:string}).error.length,1_100_000);
+    // Reverse pressure at the public leg must also keep the paused upstream
+    // leg alive: Main holds one mapped record, not a whole initial result.
+    const slowSockets=new Set<Socket>();let holding=false,held="",released=false;
+    const byteProxy=createServer(incoming=>{
+      const outgoing=createConnection(main.socketPath);slowSockets.add(incoming);slowSockets.add(outgoing);
+      incoming.on("error",()=>{});outgoing.on("error",()=>{});incoming.pipe(outgoing);
+      const decoder=new JsonLineDecoder();
+      outgoing.on("data",bytes=>{for(const line of decoder.push(bytes)){
+        const frame=JSON.parse(line);
+        if(!released&&frame.kind==="instance_record_fragment"&&frame.recordIndex===1)holding=true;
+        if(holding)held+=line+"\n";else incoming.write(line+"\n");
+      }});
+      outgoing.on("end",()=>incoming.end());incoming.on("close",()=>outgoing.destroy());
+    });
+    byteProxy.listen(join(root,"slow.sock"));await once(byteProxy,"listening");
+    const slowClient=new DockClient({socketPath:join(root,"slow.sock")});
+    try {
+      const slowRead=slowClient.read(work.id,undefined,"conversation_bootstrap",{});
+      let slowError:unknown;void slowRead.catch(error=>{slowError=error;});
+      await until(()=>held.length>=30_000);
+      const incoming=[...slowSockets][0]!;
+      for(let step=0;step<3;step++){
+        const before=recordNotices;incoming.write(held.slice(0,10_000));held=held.slice(10_000);
+        await until(()=>recordNotices>before);await turn();context.mock.timers.tick(40_000);
+      }
+      assert.equal(slowError,undefined);
+      released=true;holding=false;incoming.write(held);held="";
+      assert.equal((await slowRead).page.events.length,read.page.events.length);
+    } finally {
+      slowClient.closeActiveConnections();for(const socket of slowSockets)socket.destroy();await new Promise<void>(resolve=>byteProxy.close(()=>resolve()));
+    }
+    const follow=await client.follow(work.id,read.page.latest,{deliveryContext:delivery,onEvent:()=>{}});
+    // Round-trip a separate real request after the ready ACK so all three hops
+    // have completed initialization before advancing the artificial clock.
+    await client.status(work.id);await turn();await turn();let ended=false;void follow.done.then(()=>{ended=true;},()=>{ended=true;});
+    context.mock.timers.tick(120_000);await turn();assert.equal(ended,false,"quiescent live observation has no idle deadline");
+    follow.close();await follow.done;
     const cancel=await open("workspace.file.read",{instanceId:work.id,path:"source.bin"},"workspace.files.v1");await cancel.next("file_ready");cancel.socket.destroy();
     assert.equal((await client.status(work.id)).id,work.id);
   }finally{context.mock.timers.reset();for(const peer of peers)peer.socket.destroy();client.closeActiveConnections();gate.release();await upstream.stop();await main.stop();await sub.stop();await gate.close();await rm(root,{recursive:true,force:true});}

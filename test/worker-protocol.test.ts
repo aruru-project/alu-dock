@@ -5,6 +5,7 @@ import type { AgentWorkerState } from "../src/core/agent-worker.js";
 import {
   ORDINARY_REVERSE_WORKER_CAPABILITIES,
   OrderedWorkerSender,
+  forwardWorkerEvent,
   WorkerFrameReceiver,
   parseWorkerEnvelope,
   validateAgentWorkerResult,
@@ -263,7 +264,7 @@ test("private Worker Dock tools keep source identity and accept supported result
 
 // Phase 4A incident: an otherwise valid image above 2M base64 characters was
 // rejected on both IPC sides before the existing 20 MiB image contract ran.
-test("large conversation images cross Worker IPC only for the locally requested image method", async () => {
+test("large conversation images cross Worker IPC with canonical method validation", async () => {
   const { createHash } = await import("node:crypto");
   const bytes = Buffer.alloc(1_600_000, 9);
   const image = { contentRef: "opaque", mimeType: "image/png", sizeBytes: bytes.length,
@@ -271,17 +272,11 @@ test("large conversation images cross Worker IPC only for the locally requested 
   const response = { kind: "response", callId: "image-call", ok: true, result: image, state: STATE } as const;
   const frames: WorkerFrame[] = [];
   const sender = new OrderedWorkerSender(IDENTITY, (frame, callback) => { frames.push(frame); callback(null); return true; });
-  assert.throws(() => sender.sendEnvelope(response));
   await sender.sendEnvelope(response, "conversation.image");
   const receiver = new WorkerFrameReceiver(() => true, id => id === "image-call" ? { method: "conversation.image" } : undefined);
   let actual;
   for (const frame of frames) actual = receiver.accept(frame);
   assert.deepEqual(actual, response);
-  // Unknown/non-image pending methods cannot borrow the data exception.
-  for (const method of [undefined, "conversation.content", "unknown"]) {
-    const rejected = new WorkerFrameReceiver(() => true, () => method ? { method } : undefined);
-    assert.throws(() => { for (const frame of frames) rejected.accept(frame); });
-  }
   for (const result of [
     { ...image, sizeBytes: 20 * 1024 * 1024 + 1 },
     { ...image, data: "!!!!" }, { ...image, sizeBytes: 1 },
@@ -289,7 +284,7 @@ test("large conversation images cross Worker IPC only for the locally requested 
     // Computed keys create own JSON members, including __proto__.
     ...["constructor", "toString", "__proto__"].map(key => ({ ...image, [key]: true })),
   ]) {
-    assert.throws(() => sender.sendEnvelope({ ...response, result }, "conversation.image"));
+    await assert.rejects(sender.sendEnvelope({ ...response, result }, "conversation.image"));
     // Reuse production frames to transport a malformed external result without
     // having the sender's own parser mask receiver validation.
     const json = JSON.stringify({ ...response, result });
@@ -299,7 +294,7 @@ test("large conversation images cross Worker IPC only for the locally requested 
       for (let i = 0; i < count; i++) malformed.accept({ ...frames[0], sequence: i + 1, index: i, count, payload: json.slice(i * 96_000, (i + 1) * 96_000) });
     });
   }
-  assert.throws(() => sender.sendEnvelope({ ...response, state: { ...STATE, metrics: { ...STATE.metrics, cost: image.data as unknown as number } } }, "conversation.image"));
+  await assert.rejects(sender.sendEnvelope({ ...response, state: { ...STATE, metrics: { ...STATE.metrics, ["k".repeat(257)]: 0 } } }, "conversation.image"));
 });
 
 test("discarded replies still enforce Worker structure, envelope and state boundaries", async () => {
@@ -315,7 +310,7 @@ test("discarded replies still enforce Worker structure, envelope and state bound
     return result;
   }
   assert.equal(receive(response, true), undefined);
-  assert.throws(() => receive(response, false));
+  assert.deepEqual(receive(response, false), response);
   let deep: unknown = large;
   for (let i = 0; i < 33; i++) deep = { deep };
   for (const value of [
@@ -323,7 +318,7 @@ test("discarded replies still enforce Worker structure, envelope and state bound
     { ...response, result: Object.fromEntries(Array.from({ length: 10_001 }, (_, i) => [String(i), 0])) },
     { ...response, result: { ["k".repeat(257)]: 0 } },
     { ...response, result: Array(2_000_001).fill(0) },
-    { ...response, state: { ...STATE, metrics: { payload: large } } },
+    { ...response, state: { ...STATE, sessionId: "x".repeat(129) } },
     { ...response, extra: "not an envelope field" },
   ]) assert.throws(() => receive(value, true));
 });
@@ -386,7 +381,7 @@ test("a cancelled image reply cannot kill the replacement Worker or overwrite it
       const lost = new Promise<void>(resolve => session.subscribe(event => { if (event.type === "dock_runtime_lost") resolve(); }));
       try {
         await assert.rejects(session.invoke({ kind: "request", version: 2, requestId: "image", type: mode === "pending-nonimage" ? "conversation.content" : "conversation.image", params: { instanceId: "instance-test", contentRef: "opaque" } }));
-        if (mode === "late") {
+        if (mode !== "pending-nonimage") {
           assert.equal(await session.control({ type: "wait_for_idle" }), null);
           assert.equal(session.state().sessionId, "new-session");
         } else {
@@ -400,7 +395,7 @@ test("a cancelled image reply cannot kill the replacement Worker or overwrite it
 
 test("image reassembly retains aggregate, ordered frames and identity fences", () => {
   // IPC is an untrusted process boundary even when a pending image authorizes
-  // its data scalar. Aggregate checks run before parsing/hashing the result.
+  // the content. Aggregate checks run before parsing/hashing the result.
   const frame = { protocol: "alu-dock-pi-worker", version: 1, identity: IDENTITY, sequence: 1, transferId: "bounded", index: 0, count: 2, payload: "{}" };
   assert.throws(() => new WorkerFrameReceiver(() => false).accept(frame));
   for (const override of [{ sequence: 2 }, { index: 1 }, { count: 4097 }]) {
@@ -414,4 +409,33 @@ test("image reassembly retains aggregate, ordered frames and identity fences", (
   assert.throws(() => {
     for (let i = 0; i < 3000; i++) aggregate.accept({ ...frame, count: 3000, sequence: i + 1, index: i, payload });
   });
+});
+
+// #325: public diagnostic content was legal, but the private sender synchronously
+// threw at 2M characters before the production subscriber's .catch could run.
+test("Worker delivers legal large diagnostics and reports serialization failure through its Promise", async () => {
+  const receiver=new WorkerFrameReceiver(()=>true);
+  const received:unknown[]=[];
+  const sender=new OrderedWorkerSender(IDENTITY,(frame,callback)=>{const envelope=receiver.accept(frame);if(envelope)received.push(envelope);queueMicrotask(()=>callback(null));return true;});
+  const error="x".repeat(2_000_001);
+  const event={type:"dock_conversation_frame",frame:{type:"message.completed",data:{messageId:"diagnostic",role:"assistant",content:[],stopReason:"error",error}}};
+  await sender.sendEnvelope({kind:"event",event,state:STATE});
+  assert.equal((received[0] as {event:typeof event}).event.frame.data.error,error);
+  const cyclic:Record<string,unknown>={};cyclic.self=cyclic;
+  let pending!:Promise<void>;
+  assert.doesNotThrow(()=>{pending=sender.sendEnvelope({kind:"response",callId:"bad",ok:true,result:cyclic});});
+  await assert.rejects(pending);
+  let swallowed=0;
+  const rejected=new Promise<unknown>(resolve=>{
+    // Pi isolates synchronous subscriber exceptions; use the production forwarding
+    // function so this tests its fatal/error path, not an imitation .catch.
+    try { forwardWorkerEvent(sender,{kind:"event",event:cyclic,state:STATE},resolve); }
+    catch { swallowed++; }
+  });
+  assert.ok(await rejected instanceof Error);
+  assert.equal(swallowed,0);
+  // A rejected envelope does not consume the next valid identity/sequence.
+  sender.updateRuntimeGeneration(2);
+  await sender.sendEnvelope({kind:"event",event,state:STATE});
+  assert.equal(received.length,2);
 });
