@@ -1,6 +1,6 @@
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash } from "node:crypto";
-import { MAX_RESOURCE_CONTENT_PAGE_BYTES } from "../core/resource-content.js";
+import { MAX_RESOURCE_CONTENT_PAGE_BYTES, MAX_RESOURCE_CONTENT_REF_CHARS } from "../core/resource-content.js";
 
 import { MAX_EXTENSION_WIDGET_LINES, type InteractionResponse } from "../core/extension-ui-broker.js";
 import {
@@ -983,7 +983,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
       const revision = optionalString(params.revision, "params.revision", 128, "invalid_request");
       if (offset !== undefined && offset > 0 && revision === undefined) throw validation("invalid_request", "Resource continuation requires revision");
-      return { ...base, type, params: { instanceId: instanceId(), contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"), offset, revision } };
+      return { ...base, type, params: { instanceId: instanceId(), contentRef: string(params.contentRef, "params.contentRef", MAX_RESOURCE_CONTENT_REF_CHARS, "invalid_request"), offset, revision } };
     }
     case "command.catalog": exact(params, ["instanceId", "prefix"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), prefix: optionalString(params.prefix, "params.prefix", 256, "invalid_request") } };
     case "command.content": {
@@ -2640,7 +2640,7 @@ function parseSettingValue(key: SettingKey, input: unknown, code = "invalid_resp
 }
 
 function parseTool(input: unknown, field: string): ToolDto { const value = object(input, field); exact(value, ["name", "description", "active", "source", "parameterSchema"]); return { name: string(value.name, `${field}.name`, 256), description: boundedString(value.description, `${field}.description`, MAX_MESSAGE), active: boolean(value.active, `${field}.active`), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.parameterSchema === undefined ? {} : { parameterSchema: parseJsonObject(value.parameterSchema, `${field}.parameterSchema`) }) }; }
-function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source", "contentRef"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.contentRef === undefined ? {} : { contentRef: string(value.contentRef, `${field}.contentRef`, 128) }) }; }
+function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source", "contentRef"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.contentRef === undefined ? {} : { contentRef: string(value.contentRef, `${field}.contentRef`, MAX_RESOURCE_CONTENT_REF_CHARS) }) }; }
 function parseSource(input: unknown, field: string, code = "invalid_response"): import("../core/config-projection.js").SourceDto { const value = object(input, field, code); exact(value, ["kind", "path", "package"], code); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"], code); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation(code,`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS, code) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256, code) }) }; }
 function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const value = object(input, field); exact(value, ["severity", "message", "source"]); return { severity: enumeration(value.severity, `${field}.severity`, ["info", "warning", "error"]), message: string(value.message, `${field}.message`, MAX_MESSAGE), ...(value.source === undefined ? {} : { source: string(value.source, `${field}.source`, 256) }) }; }
 function parseCommandReference(input: unknown, field: string, code = "invalid_response"): CommandReferenceDto { const value = object(input, field, code); exact(value, ["name", "source"], code); return { name: string(value.name, `${field}.name`, 256, code), source: parseSource(value.source, `${field}.source`, code) }; }

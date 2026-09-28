@@ -26,7 +26,7 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
-import { readResourceContent, ResourceContentError } from "../core/resource-content.js";
+import { ResourceContentError } from "../core/resource-content.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
 import {
@@ -440,11 +440,6 @@ export class PiAgentAdapter {
       case "settings.get": return this.getSettings();
       case "settings.update": return this.updateSetting(request.params.update);
       case "resource.get": return this.getResources();
-      case "resource.content": {
-        const resource = this.getDocumentResources().find((item) => item.contentRef === request.params.contentRef);
-        if (!resource?.path) throw new ResourceContentError("这份资源已不在当前列表中。请返回项目状态重新选择。");
-        return readResourceContent(resource.path, request.params.offset, request.params.revision);
-      }
       case "command.catalog": return this.getCommands(request.params.prefix);
       case "command.content": return this.getCommandContent(request.params.command, request.params.cursor);
       case "command.complete": return this.getCommandCompletions(request.params.command, request.params.argumentPrefix);
@@ -452,7 +447,6 @@ export class PiAgentAdapter {
       case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
       case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
       case "conversation.image": return this.getConversationImage(request.params.contentRef);
-      case "file.read": return this.options.publishedFiles.read(request.params.fileRef, request.params.offset);
       case "session.list": return this.listSessions(request.params.scope);
       case "session.switch": {
         if (context?.type !== "session_switch") throw new Error("Session switch requires resolved Host trust context");
@@ -479,6 +473,15 @@ export class PiAgentAdapter {
     switch (request.type) {
       case "activate": this.activateInitial(); return null;
       case "resolve_session_target": return this.resolveSessionTarget(request.sessionFile);
+      case "resolve_file_source": {
+        if (request.kind === "published") {
+          const { dto: file, source } = this.options.publishedFiles.resolve(request.ref);
+          return { kind: "published", file, source };
+        }
+        const resource = this.getDocumentResources().find((item) => item.contentRef === request.ref);
+        if (!resource?.path) throw new ResourceContentError("这份资源已不在当前列表中。请返回项目状态重新选择。");
+        return { kind: "resource", path: resource.path };
+      }
       case "wait_for_idle": await this.waitForIdle(); return null;
       case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
       case "dispose": return this.dispose();

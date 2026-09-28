@@ -138,7 +138,7 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 
 ## Published files 与读取
 
-`published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 只校验 instance/lifecycle 并把同一 Protocol V2 request 路由到当前 generation 的 Worker，Unix socket 与 mTLS 共用这条 route；这条 `show_image` 路径不在 Host 维护 registry 或 media store。
+`published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 校验 instance/lifecycle，经私有 `resolve_file_source` 向当前 Worker 取得已登记的文件路径和发布时的文件身份，再由 Host 直接读取。Unix socket 与 mTLS 共用这条读取路径；Worker 不传文件字节，Host 不另建 registry 或 media store，来源路径不进入公开响应。
 
 `file.read` 使用明确的 `fileRef + offset`，每页 decoded bytes 最多 256 KiB。response 的 `offset` 必须等于请求 offset，`nextOffset` 必须精确等于本页末尾；complete page 必须恰好到达 `sizeBytes`。registry 只在 Worker 当前 session/generation 内存活，session replacement、dispose、handle 淘汰、源文件删除或改写都返回 `file_unavailable`，客户端应让用户要求 Agent 重新发布，而不是重试任意 path。
 
@@ -209,7 +209,7 @@ watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 tur
 
 `resource.get` 的可读资源附带可选 `contentRef`。`resource.content.v1` 提供 `resource.content {instanceId,contentRef,offset?,revision?}`，返回 `{text,revision,nextOffset?}`；没有 `nextOffset` 表示完整读取。首请求读取磁盘当前文件，续读携带返回的字节位置和 revision，文件变化或不可读取时返回 `resource_unavailable`。不接收客户端文件路径，不改写 `command.content` 的已加载模板正文语义。
 
-Worker 产出结果并与 TypeScript 客户端复用本文件所指 `protocol.ts` 的唯一 parser；Host 仅沿当前 instance 的查询与位置路由转发。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
+Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source` 返回路径；拥有该实例的 Host 使用 `readResourceContent` 读取当前磁盘文件，产出既有结果并复用 `protocol.ts` 的唯一 parser。来源解析和读取都处于同一次 instance 查询的生命周期检查内，来源不跨请求缓存。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
 
 ## 创建前 system 选择
 
@@ -260,7 +260,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/attachment-storage-state.ts`：本机 storage directory 设置。
 - `src/control/attachment-service.ts`：stream sink、hash verification、manifest、dedupe 与 Agent path resolution。
 - `src/core/instance-deliverables.ts`：instance-lifetime 临时交付 registry、path-free DTO 与 producer bounds。
-- `src/core/source-file.ts`：`show_image` 与临时交付共用的 source canonicalize/stat/open/unchanged check。
+- `src/core/source-file.ts`：文件来源 canonicalize/stat/open/unchanged check；`src/control/published-file-reader.ts`：Host 对既有 `file.read` 分页接口的字节读取。
 - `src/control/workspace-browser.ts`：Host 文件系统目录浏览与可恢复错误。
 - `src/control/instance-workspace.ts`：active instance workspace 的相对路径、符号链接与 canonical containment。
 - `src/control/source-file-transfer.ts`：workspace 与临时交付共用的 Host source-file streaming pump。

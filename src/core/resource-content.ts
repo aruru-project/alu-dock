@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { ResourceContentResult } from "../control/protocol.js";
 import { assertUnchangedSource, inspectSourceFile, MAX_SOURCE_FILE_PATH_CHARS, openUnchangedSource, SourceFileError } from "./source-file.js";
 
+export const MAX_RESOURCE_CONTENT_REF_CHARS = 128;
+
 /** Leaves room for JSON escaping within a normal Protocol V2 response. */
 export const MAX_RESOURCE_CONTENT_PAGE_BYTES = 48 * 1_024;
 

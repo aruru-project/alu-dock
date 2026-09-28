@@ -76,7 +76,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   conversationRevision = "fixture-conversation-revision";
   readonly conversationContent = new Map<string, AgentConversationContentChunk[]>();
   readonly conversationImages = new Map<string, ConversationImageBody>();
-  publishedFileRead?: (fileRef: string, offset?: number) => Promise<unknown>;
+  publishedFileSource?: (fileRef: string) => unknown;
   treeNodes: TreeNodeDto[] = [];
   treeLeafId: string | undefined;
   treeReadCalls = 0;
@@ -233,10 +233,6 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       case "conversation.history": return this.getConversationHistory(p.cursor, p.limit);
       case "conversation.content": return this.getConversationContent(p.contentRef, p.cursor);
       case "conversation.image": return this.getConversationImage(p.contentRef);
-      case "file.read": {
-        if (this.publishedFileRead === undefined) throw new Error("Published files are unavailable in this fixture");
-        return this.publishedFileRead(p.fileRef, p.offset);
-      }
       case "session.list": return this.listSessions(p.scope);
       case "session.switch": return this.switchSession(p.operationId, p.sessionFile);
       case "session.new": return this.newSession(p.operationId, p.parentSession);
@@ -251,6 +247,10 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   }
 
   control(request: AgentWorkerControl): Promise<unknown> {
+    if (request.type === "resolve_file_source") {
+      if (request.kind !== "published" || this.publishedFileSource === undefined) return Promise.reject(new Error("File sources are unavailable in this fixture"));
+      return Promise.resolve().then(() => this.publishedFileSource!(request.ref));
+    }
     if (request.type === "resolve_session_target") return this.resolveSessionTarget(request.sessionFile);
     if (request.type === "wait_for_idle") return this.waitForIdle();
     if (request.type === "observation_delivery") {

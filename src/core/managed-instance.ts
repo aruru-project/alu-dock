@@ -58,6 +58,7 @@ import type {
   AgentConversationHistoryPage,
   AgentConversationImageBody,
   AgentEvent,
+  AgentFileSource,
   AgentForkResult,
   AgentHistoryEntry,
   AgentInputKind,
@@ -82,7 +83,9 @@ import type {
   ThinkingLevel,
 } from "./agent-worker.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
-import type { PublishedFileReadPage } from "./published-file.js";
+import { PublishedFileUnavailableError, type PublishedFileReadPage } from "./published-file.js";
+import { readPublishedFilePage } from "../control/published-file-reader.js";
+import { readResourceContent, ResourceContentError } from "./resource-content.js";
 import { InstanceDeliverables, type DeliverableDto } from "./instance-deliverables.js";
 import {
   MAX_ATTACHMENT_BYTES,
@@ -180,7 +183,7 @@ export {
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "./instance-dto.js";
 import { projectAgentNavigateResult } from "./session-tree.js";
-import { classifyControlRequest, type SessionTreeResult } from "../control/protocol.js";
+import { classifyControlRequest, type ResourceContentResult, type SessionTreeResult } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
 
 interface AgentEventTransition {
@@ -928,9 +931,19 @@ export class ManagedInstance {
     return this.withProjectionRead(async () => {
       this.assertActive();
       const generation = this.runtimeGenerationValue;
-      const page = await this.invokeAgent<PublishedFileReadPage>("file.read", { fileRef, ...(offset === undefined ? {} : { offset }) });
+      const source = await this.session.control({ type: "resolve_file_source", kind: "published", ref: fileRef }) as AgentFileSource;
+      if (source.kind !== "published" || source.file.fileRef !== fileRef) throw new PublishedFileUnavailableError();
+      const page = await readPublishedFilePage(source.file, source.source, offset);
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       return { instanceId: this.id, runtimeGeneration: generation, ...cloneJson(page) };
+    });
+  }
+
+  async readResourceContent(contentRef: string, offset?: number, revision?: string): Promise<ResourceContentResult> {
+    return this.withProjectionRead(async () => {
+      const source = await this.session.control({ type: "resolve_file_source", kind: "resource", ref: contentRef }) as AgentFileSource;
+      if (source.kind !== "resource") throw new ResourceContentError();
+      return readResourceContent(source.path, offset, revision);
     });
   }
 

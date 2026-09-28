@@ -170,6 +170,22 @@ test("private Worker attachment calls keep source identity and private paths on 
   })));
 });
 
+test("private file resolution accepts registered references and keeps file paths out of public read requests", () => {
+  const control = { type: "resolve_file_source", kind: "published", ref: "file-one" };
+  assert.deepEqual(parseWorkerEnvelope({ kind: "agent_control", callId: "source-1", control }), {
+    kind: "agent_control", callId: "source-1", control,
+  });
+  const source = { path: "/private/image.png", dev: 1, ino: 2, size: 42, mtimeMs: 100, ctimeMs: 100 };
+  const published = { kind: "published", file: { presentation: "image", fileRef: "file-one", name: "image.png", sizeBytes: 42 }, source };
+  validateAgentWorkerResult("agent.resolve_file_source", published);
+  validateAgentWorkerResult("agent.resolve_file_source", { kind: "resource", path: "/private/SKILL.md" });
+  // Security boundary: callers resolve an existing registration, never supply a
+  // path for the Host to read. The private result must identify that exact file.
+  assert.throws(() => parseWorkerEnvelope({ kind: "agent_control", callId: "source-1", control: { ...control, path: "/private/other" } }));
+  assert.throws(() => validateAgentWorkerResult("agent.resolve_file_source", { kind: "resource", path: "relative.md" }));
+  assert.throws(() => validateAgentWorkerResult("agent.resolve_file_source", { ...published, source: { ...source, size: 43 } }));
+});
+
 test("private Worker Dock tools keep source identity and accept supported result shapes", () => {
   validateUiCapabilityArgs("dock.tools.configure", { enabled: true, operationId: "grant-one" });
   assert.throws(() => validateUiCapabilityArgs("dock.tools.configure", {

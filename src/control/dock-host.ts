@@ -855,8 +855,8 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "session.compaction.prompts":
-      case "resource.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.readAgent(request)); return; }
+      case "session.compaction.prompts": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.readAgent(request)); return; }
+      case "resource.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.readResourceContent(request.params.contentRef, request.params.offset, request.params.revision)); return; }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,result); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommands(request.params.prefix)); return; }
       case "command.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandContent(request.params.command,request.params.cursor)); return; }

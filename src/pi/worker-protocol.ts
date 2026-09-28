@@ -11,8 +11,9 @@ import {
   AgentSettingsWriteError,
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
-import { PublishedFileUnavailableError } from "../core/published-file.js";
-import { ResourceContentError } from "../core/resource-content.js";
+import { MAX_PUBLISHED_FILE_REF_CHARS, PublishedFileUnavailableError } from "../core/published-file.js";
+import { MAX_RESOURCE_CONTENT_REF_CHARS, ResourceContentError } from "../core/resource-content.js";
+import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import {
@@ -26,14 +27,13 @@ import {
   parseConversationContentBody,
   parseConversationHistoryBody,
   parseConversationImageBody,
-  parseFileReadBody,
+  parsePublishedFileDto,
   parseHistoryEntry,
   parseCompactionBody,
   parseCompactionPromptTemplatesResult,
   parseConversationFrame,
   parseModelListBody,
   parseResourcesResult,
-  parseResourceContentResult,
   parseSessionsResult,
   parseSettingDto,
   parseSettingDtos,
@@ -452,7 +452,28 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
       return;
     }
     case "conversation.image": assertNoUnknownFields(raw, parseConversationImageBody(raw), "Worker conversation image"); return;
-    case "file.read": parseFileReadBody(raw); return;
+    case "agent.resolve_file_source": {
+      const result = record(raw, "Worker file source");
+      const kind = oneOf(result.kind, ["published", "resource"], "Worker file source kind");
+      if (kind === "resource") {
+        exactKeys(result, ["kind", "path"], "Worker resource source");
+        privateSourcePath(result.path);
+      } else {
+        exactKeys(result, ["kind", "file", "source"], "Worker published source");
+        const file = parsePublishedFileDto(result.file);
+        const source = record(result.source, "Worker source identity");
+        exactKeys(source, ["path", "dev", "ino", "size", "mtimeMs", "ctimeMs"], "Worker source identity");
+        privateSourcePath(source.path);
+        for (const key of ["dev", "ino"] as const) {
+          if (typeof source[key] !== "number" || !Number.isInteger(source[key]) || source[key] < 0) throw new Error(`Worker source ${key} is invalid`);
+        }
+        if (nonNegativeInteger(source.size, "Worker source size") !== file.sizeBytes) throw new Error("Worker source size does not match the published file");
+        for (const key of ["mtimeMs", "ctimeMs"] as const) {
+          if (typeof source[key] !== "number" || !Number.isFinite(source[key])) throw new Error(`Worker source ${key} is invalid`);
+        }
+      }
+      return;
+    }
     case "model.list": parseModelListBody(raw); return;
     case "session.compact": parseCompactionBody(raw); return;
     case "session.compaction.prompts": parseCompactionPromptTemplatesResult(raw); return;
@@ -460,7 +481,6 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
     case "settings.get": parseSettingDtos(raw); return;
     case "settings.update": parseSettingDto(raw, "Worker setting"); return;
     case "resource.get": parseResourcesResult(raw); return;
-    case "resource.content": parseResourceContentResult(raw); return;
     case "command.catalog": parseCommandsResult(raw); return;
     case "command.content": parseCommandContentResult(raw); return;
     case "command.complete": parseCommandCompletionsResult(raw); return;
@@ -648,10 +668,21 @@ function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
 
 function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
   const value = record(raw, "Worker Agent control");
-  const type = oneOf(value.type, ["activate", "resolve_session_target", "wait_for_idle", "observation_delivery", "dispose"], "Worker Agent control type");
+  const type = oneOf(value.type, ["activate", "resolve_session_target", "resolve_file_source", "wait_for_idle", "observation_delivery", "dispose"], "Worker Agent control type");
+  if (type === "resolve_file_source") {
+    exactKeys(value, ["type", "kind", "ref"], "Worker source resolution");
+    const kind = oneOf(value.kind, ["published", "resource"], "Worker file source kind");
+    return { type, kind, ref: boundedString(value.ref, kind === "published" ? MAX_PUBLISHED_FILE_REF_CHARS : MAX_RESOURCE_CONTENT_REF_CHARS, "Worker source reference") };
+  }
   if (type === "resolve_session_target") { exactKeys(value, ["type", "sessionFile"], "Worker Agent control"); return { type, sessionFile: boundedString(value.sessionFile, 16_384, "Session file") }; }
   if (type === "observation_delivery") { exactKeys(value, ["type", "notification"], "Worker Agent control"); return { type, notification: parseObservationNotification(value.notification) }; }
   exactKeys(value, ["type"], "Worker Agent control"); return { type };
+}
+
+function privateSourcePath(raw: unknown): string {
+  const path = boundedString(raw, MAX_SOURCE_FILE_PATH_CHARS, "Worker source path");
+  if (!isPortableAbsoluteLocalPath(path)) throw new Error("Worker source path must be absolute");
+  return path;
 }
 
 function isAgentRequest(type: string): type is AgentRequest["type"] {

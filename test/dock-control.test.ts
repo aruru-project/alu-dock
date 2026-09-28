@@ -2537,7 +2537,7 @@ test("conversation content survives fresh clients through revision-bound Protoco
   );
 });
 
-test("a Protocol V2 client displays path-free published metadata and reads the file until it disappears", async (context) => {
+test("a Protocol V2 client reads the published file without exposing its path and detects source changes or removal", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -2549,7 +2549,10 @@ test("a Protocol V2 client displays path-free published metadata and reads the f
   await writeFile(sourcePath, bytes);
   const registry = new TransientFileRegistry();
   const published = await registry.publish(sourcePath);
-  runtime.publishedFileRead = (fileRef, offset) => registry.read(fileRef, offset);
+  runtime.publishedFileSource = (fileRef) => {
+    const { dto: file, source } = registry.resolve(fileRef);
+    return { kind: "published", file, source };
+  };
   runtime.history = [agentRecord("published-result", "tool", [{
     type: "tool_result", toolCallId: "show-1", toolName: "show_image", text: "Published display.png for display.", isError: false, publishedFile: published,
   }], { toolCallId: "show-1", toolName: "show_image", isError: false })];
@@ -2568,9 +2571,15 @@ test("a Protocol V2 client displays path-free published metadata and reads the f
   assert.equal(second.complete, true);
   assert.deepEqual(Buffer.concat([Buffer.from(first.data, "base64"), Buffer.from(second.data, "base64")]), bytes);
 
+  assert.equal(JSON.stringify(first).includes(harness.directory), false);
+  // Published references retain the original file identity; changing the source
+  // must not silently return different bytes under the same reference.
+  await writeFile(sourcePath, Buffer.from("replacement image"));
+  await assert.rejects(client.readFile(created.id, published.fileRef), { code: "file_unavailable" });
+  const replacement = await registry.publish(sourcePath);
+  assert.equal(Buffer.from((await client.readFile(created.id, replacement.fileRef)).data, "base64").toString(), "replacement image");
   await unlink(sourcePath);
-  await assert.rejects(client.readFile(created.id, published.fileRef), (error: unknown) =>
-    error instanceof ControlClientError && error.code === "file_unavailable" && /publish it again/iu.test(error.message));
+  await assert.rejects(client.readFile(created.id, replacement.fileRef), { code: "file_unavailable" });
 });
 
 test("Hub session inventory is runtime-free and adoption publishes one managed instance", async (context) => {
