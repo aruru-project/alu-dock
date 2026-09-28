@@ -1,7 +1,9 @@
 // Actual Rust public API → isolated Host/Worker. Saved data and a no-turn extension; no model.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import { crc32 } from 'node:zlib'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { createServer, createConnection } from 'node:net'
 import { join } from 'node:path'
@@ -10,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
 const hostRoot = process.env.ALUDOCK_TEST_HOST_ROOT || repo
+const legacy = process.argv.includes('--legacy')
 const root = await mkdtemp(join(tmpdir(), 'alu-content-protocol-'))
 const home = join(root, 'home'), cwd = join(root, 'workspace'), agent = join(root, 'agent'), socket = join(root, 'host.sock')
 const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: '1',
@@ -19,6 +22,7 @@ const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, PI_CODING_A
 let host, reader, proxy
 let blockContent = false, offlineSeen = false, onlineSeen = false, offlineRequests
 const sockets = new Set(), counts = {}, errors = {}
+let shortReference, referenceChunks = 0, shortBodyReads = 0
 let heldContent, heldFast, heldEarlier, earlierWaiterDropped = false, appended = false, slowReference, fastReference, fastBodySeen = false, fastWhileHeld = false, slowHeld = false
 const appendWhenFast = () => { if (slowHeld && fastBodySeen && !appended) host.stdin.write('append\n') }
 async function stop(child) {
@@ -37,7 +41,17 @@ try {
     pi.on("input", () => ({action:"handled"}));
   }`)
 
+  // #325: real Pi JSONL keeps a valid 2 MiB PNG, while mixed body reads use references.
+  const base = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')
+  const payload = Buffer.alloc(2 * 1024 * 1024 - base.length - 12, 120); payload.write('Diagnostic\0')
+  const chunk = Buffer.concat([Buffer.from('tEXt'), payload]), length = Buffer.alloc(4), crc = Buffer.alloc(4)
+  length.writeUInt32BE(payload.length); crc.writeUInt32BE(crc32(chunk))
+  const png = Buffer.concat([base.subarray(0, 33), length, chunk, crc, base.subarray(33)])
+  const imagePath = join(root, 'source.png'); await writeFile(imagePath, png)
+  const imageSha = createHash('sha256').update(png).digest('hex')
   const script = `
+    import { readFile } from 'node:fs/promises';
+    const image = {type:'image',mimeType:'image/png',data:(await readFile(${JSON.stringify(imagePath)})).toString('base64')};
     import { SessionManager } from '@earendil-works/pi-coding-agent';
     import { DockHost } from './dist/src/control/dock-host.js';
     import { DockClient } from './dist/src/control/dock-client.js';
@@ -47,7 +61,7 @@ try {
     manager.appendMessage({role:'user',content:[{type:'text',text:'Use the saved tool group'}],timestamp:0});
     manager.appendMessage({role:'assistant',content:Array.from({length:55},(_,i)=>({type:'toolCall',id:'tool-'+i,name:'read',arguments:{path:'saved-'+i}})),api:'openai-completions',provider:'openai',model:'gpt-4o-mini',stopReason:'toolUse',timestamp:1,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
     for(let i=0;i<55;i++) manager.appendMessage({role:'toolResult',toolCallId:'tool-'+i,toolName:'read',content:[{type:'text',text:'saved output '+i}],isError:false,timestamp:2});
-    for(let i=1;i<=260;i++) manager.appendMessage(i % 2 ? { role:'user', content:[{type:'text',text:i===250 ? 'history-250 '+ 'x'.repeat(150000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}],timestamp:i } : {role:'assistant',content:[{type:'text',text:i===250 ? 'history-250 '+ 'x'.repeat(150000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}],api:'openai-completions',provider:'openai',model:'gpt-4o-mini',stopReason:'stop',timestamp:i,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
+    for(let i=1;i<=260;i++) manager.appendMessage(i % 2 ? { role:'user', content:[{type:'text',text:i===250 ? 'history-250 '+ 'x'.repeat(150000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}, ...(i===239 ? [image,{type:'text',text:'short-after-image'}] : [])],timestamp:i } : {role:'assistant',content:[{type:'text',text:i===250 ? 'history-250 '+ 'x'.repeat(150000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}, ...(i===250 ? [image,{type:'text',text:'long-after-image'}] : [])],api:'openai-completions',provider:'openai',model:'gpt-4o-mini',stopReason:'stop',timestamp:i,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
     const workerEnvironment = {...process.env, HOME:${JSON.stringify(join(root, 'worker-home'))}, USERPROFILE:${JSON.stringify(join(root, 'worker-home'))}};
     const registry = new DockRegistry(input => createPiInstance({...input, agentDir:${JSON.stringify(agent)}, workerEnvironment}), undefined, {reopenTargetResolver:{resolve:resolvePiReopenTarget}});
     const host = new DockHost({socketPath:${JSON.stringify(socket)}, registry}); await host.start();
@@ -60,7 +74,7 @@ try {
 
     process.stdin.setEncoding('utf8'); process.stdin.on('data', async command => { if(command.trim()==='append') { const commands = await client.commands(result.instance.id); if(!commands.commands.some(command => command.name==='content-append')) throw new Error('isolated append extension unavailable'); await client.prompt(result.instance.id, '/content-append'); console.log(JSON.stringify({kind:'appended'})); } });
     process.on('SIGTERM', async () => {client.closeActiveConnections(); await host.stop(); process.exit(0)});
-    console.log(JSON.stringify({kind:'ready',id:result.instance.id,otherId:otherResult.instance.id}));
+    console.log(JSON.stringify({kind:'ready',id:result.instance.id,otherId:otherResult.instance.id,sessionFile:manager.getSessionFile()}));
   `
   host = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: hostRoot, env, stdio: ['pipe', 'pipe', 'pipe'] })
   let hostErrors = ''; host.stderr.on('data', b => { hostErrors += b })
@@ -70,6 +84,7 @@ try {
     lines.on('line', line => { try { const data = JSON.parse(line); if (data.kind === 'ready') { clearTimeout(timer); resolve(data) } } catch {} })
     host.once('exit', code => { clearTimeout(timer); reject(new Error(`Host exit ${code}: ${hostErrors}`)) }); host.once('error', reject)
   })
+  const originalSession = await readFile(target.sessionFile)
   lines.on('line', line => { try { if (JSON.parse(line).kind === 'appended') { appended = true; heldContent?.(); heldContent = null } } catch {} })
   const proxySocket = join(root, 'reader.sock')
   let appendStarted = false
@@ -82,7 +97,7 @@ try {
         const end = buffer.indexOf('\n'); if (end < 0) break
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)
         const frame = JSON.parse(line)
-        if (frame.kind === 'request') { method = frame.type; counts[method] = (counts[method] || 0) + 1 }
+        if (frame.kind === 'request') { method = frame.type; counts[method] = (counts[method] || 0) + 1; if (method === 'conversation.content' && frame.params.contentRef === shortReference) shortBodyReads++ }
         if (frame.kind === 'request' && blockContent) { incoming.destroy(); outgoing.destroy(); continue }
         if (frame.kind === 'request' && method === 'session.history' && !earlierWaiterDropped) {
           heldEarlier = () => outgoing.write(line + '\n')
@@ -104,17 +119,23 @@ try {
         const line = response.slice(0, end); response = response.slice(end + 1)
         const frame = JSON.parse(line)
         if (frame.error?.code) errors[frame.error.code] = (errors[frame.error.code] || 0) + 1
+        if (method === 'conversation.content') for (const chunk of frame.result?.chunks ?? []) {
+          if (!legacy) assert.equal('data' in chunk, false, '#325 mixed reference body must not transfer image bytes')
+          if (chunk.type === 'image_ref') referenceChunks++
+        }
         if (method === 'conversation.history') for (const item of frame.result?.entries ?? []) {
           if (item.entry.content.some(block => block.type === 'text' && block.text.startsWith('history-250 '))) slowReference = item.contentRef
           if (item.entry.content.some(block => block.type === 'text' && block.text.startsWith('fast-body '))) fastReference = item.contentRef
+          if (item.entry.content.some(block => block.type === 'text' && block.text === 'history-239')) { shortReference = item.contentRef; assert.equal(item.contentComplete, !legacy) }
         }
       }
     })
     incoming.on('error', () => outgoing.destroy()); outgoing.on('error', () => incoming.destroy())
-    incoming.on('close', () => { sockets.delete(incoming); outgoing.destroy() }); outgoing.on('close', () => { sockets.delete(outgoing); incoming.destroy() })
+    incoming.on('end', () => outgoing.end()); outgoing.on('end', () => incoming.end())
+    incoming.on('close', () => { sockets.delete(incoming); outgoing.destroy() }); outgoing.on('close', () => { sockets.delete(outgoing) })
   })
   await new Promise((resolve, reject) => { proxy.once('error', reject); proxy.listen(proxySocket, resolve) })
-  reader = spawn(join(repo, 'clients/official/target/debug/examples/protocol_content'), [proxySocket, join(root, 'identity'), target.id, join(root, 'content'), target.otherId], { cwd: repo, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  reader = spawn(join(repo, 'clients/official/target/debug/examples/protocol_content'), [proxySocket, join(root, 'identity'), target.id, join(root, 'content'), target.otherId, imageSha], { cwd: repo, env, stdio: ['pipe', 'pipe', 'pipe'] })
   let stdout = '', stderr = ''; reader.stdout.on('data', b => { stdout += b; if (!offlineSeen && stdout.includes('cache-offline')) { offlineSeen = true; offlineRequests = { ...counts }; blockContent = true; reader.stdin.write('continue\n') } if (!onlineSeen && stdout.includes('cache-online')) { onlineSeen = true; assert.deepEqual(counts, offlineRequests, 'offline rebinding reads native content, not Host'); blockContent = false; reader.stdin.write('continue\n') } if (!earlierWaiterDropped && stdout.includes('earlier-waiter-dropped')) { earlierWaiterDropped = true; heldEarlier?.(); heldEarlier = null } if (!fastBodySeen && stdout.includes('fast-body.pass')) { fastBodySeen = true; fastWhileHeld = slowHeld && !appended; appendWhenFast() } }); reader.stderr.on('data', b => { stderr += b })
   const code = await new Promise((resolve, reject) => { const timer = setTimeout(() => { void stop(reader); reject(new Error('Rust content timeout')) }, 60000); reader.once('exit', c => { clearTimeout(timer); resolve(c) }); reader.once('error', reject) })
   assert.equal(code, 0, `${stderr}\nHost: ${hostErrors}\n${JSON.stringify({ counts, errors, appended })}`)
@@ -123,8 +144,11 @@ try {
   assert.equal(earlierWaiterDropped, true, 'the view waiter was dropped while the native history request remained owned')
   assert.equal(fastWhileHeld, true, 'another full body completed while the slow continuation was actually held')
   assert.equal(appended, true, 'a real Worker append occurred while an old descriptor body was queued')
-  if (hostRoot !== repo) assert.ok(errors.invalid_cursor >= 1, JSON.stringify({ counts, errors, evidence }))
-  console.log(JSON.stringify({ hostRoot, ...evidence, earlierWaiterDropped, fastWhileHeld, appended, counts, errors }))
+  assert.ok((await readFile(target.sessionFile)).subarray(0, originalSession.length).equals(originalSession), 'reference reads do not rewrite the original Pi JSONL, including image data')
+  assert.ok(shortReference)
+  if (legacy) { assert.ok(shortBodyReads > 0); assert.equal(referenceChunks, 0); assert.equal(errors.capability_missing, 2, 'one probe for the body descriptor scan and one for the later independent history scan; none per content page') }
+  else { assert.equal(shortBodyReads, 0); assert.ok(referenceChunks > 0); assert.equal(counts['conversation.image'], 1, 'the original PNG uses the independent media owner') }
+  console.log(JSON.stringify({ hostRoot, ...evidence, earlierWaiterDropped, fastWhileHeld, appended, counts, errors, referenceChunks, shortBodyReads }))
 } finally {
   await stop(reader); for (const socket of sockets) socket.destroy(); if (proxy) await new Promise(resolve => proxy.close(resolve)); await stop(host); await rm(root, { recursive: true, force: true })
 }

@@ -88,6 +88,7 @@ import {
   MACHINES_CAPABILITY,
   WORKER_CONFIG_CAPABILITY,
   capabilityForRequest,
+  conversationViewCapability,
   controlRequestDescriptor,
   CONTROL_PROTOCOL_VERSION,
   createHelloAck,
@@ -626,6 +627,9 @@ export class DockHost {
       const descriptor = controlRequestDescriptor(request.type);
       if (this.state === "mutation_faulted" && descriptor.effect === "command" && !descriptor.availableDuringMutationFault) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
+      for (const capability of conversationViewCapability(request)) {
+        if (!this.capabilities.has(capability)) throw new ProtocolValidationError("capability_missing", `Capability ${capability} is unavailable`);
+      }
       if (request.type === "instance.create" && request.params.workerConfig !== undefined && !this.capabilities.has(WORKER_CONFIG_CAPABILITY)) {
         throw new ProtocolValidationError("capability_missing", `Capability ${WORKER_CONFIG_CAPABILITY} is unavailable`);
       }
@@ -907,8 +911,8 @@ export class DockHost {
       case "command.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandContent(request.params.command,request.params.cursor)); return; }
       case "command.complete": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandCompletions(request.params.command,request.params.argumentPrefix)); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page,(projected)=>createBoundedHistoryResult(projected,request.requestId,this.hostEpoch)); return; }
-      case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
-      case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit,request.params.view); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor,request.params.view); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.image": await this.streamConversationImage(request, socket); return;
       case "file.read": { const instance=this.registry.get(request.params.instanceId); const page=await instance.readPublishedFile(request.params.fileRef,request.params.offset); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.inventory": {

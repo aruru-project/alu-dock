@@ -42,6 +42,7 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
+  CONVERSATION_REFERENCES_CAPABILITY,
   CONVERSATION_IMAGES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
   COMPACTION_PROMPTS_CAPABILITY,
@@ -202,6 +203,10 @@ export interface AttachmentUploadSource {
 export class ControlClientError extends Error {
   constructor(readonly code:string,message:string,readonly operationId?:string,readonly details?:import("../core/json-value.js").JsonObject){super(message);this.name="ControlClientError";}
 }
+
+/** Pass one context through a history scan and its body continuations to opt in.
+ * The selected view belongs to that read chain, not the client or Host globally. */
+export interface ConversationReadContext { view?: "references" | "legacy" }
 
 export class DockClient {
   readonly socketPath:string;
@@ -417,8 +422,8 @@ export class DockClient {
   commandContent(instanceId:string,command:CommandReferenceDto,cursor?:string):Promise<CommandContentResult>{return this.request("command.content",{instanceId,command,cursor},COMMAND_DISCOVERY_CAPABILITY,parseCommandContentResult);}
   commandCompletions(instanceId:string,command:CommandReferenceDto,argumentPrefix:string):Promise<CommandCompletionsResult>{return this.request("command.complete",{instanceId,command,argumentPrefix},COMMAND_DISCOVERY_CAPABILITY,parseCommandCompletionsResult);}
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
-  async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
-  async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
+  async conversationHistory(instanceId:string,cursor?:string,limit=50,context?:ConversationReadContext):Promise<ConversationHistoryResult>{const result=await this.conversationViewRequest(context,(selected)=>this.request("conversation.history",{instanceId,cursor,limit,...(selected?{view:selected}:{})},selected?[CONVERSATION_CONTENT_CAPABILITY,CONVERSATION_REFERENCES_CAPABILITY]:CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult));if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
+  async conversationContent(instanceId:string,contentRef:string,cursor?:string,context?:ConversationReadContext):Promise<ConversationContentResult>{const result=await this.conversationViewRequest(context,(selected)=>this.request("conversation.content",{instanceId,contentRef,cursor,...(selected?{view:selected}:{})},selected?[CONVERSATION_CONTENT_CAPABILITY,CONVERSATION_REFERENCES_CAPABILITY]:CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult));if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
 
   readConversationImage(instanceId:string,contentRef:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>):Promise<ConversationImageReadResult>{
     const helloId=this.createRequestId(),requestId=this.createRequestId();
@@ -669,6 +674,20 @@ export class DockClient {
     return initial;
   }
 
+  private async conversationViewRequest<T>(context:ConversationReadContext|undefined, read:(view:"references"|undefined)=>Promise<T>):Promise<T>{
+    if(context===undefined||context.view==="legacy")return read(undefined);
+    try{
+      const result=await read("references");
+      context.view="references";
+      return result;
+    }catch(error){
+      if(context.view!==undefined||!(error instanceof ControlClientError)||error.code!=="capability_missing"
+        ||!Array.isArray(error.details?.missing)||!error.details.missing.includes(CONVERSATION_REFERENCES_CAPABILITY))throw error;
+      context.view="legacy";
+      return read(undefined);
+    }
+  }
+
   private openSocket():Socket{const socket=createConnection(this.socketPath);this.activeSockets.add(socket);socket.once("close",()=>this.activeSockets.delete(socket));return socket;}
   private timeoutFor(type:ControlRequest["type"]):number{return LONG_MUTATION_TYPES.has(type)?this.longMutationTimeoutMs:this.timeoutMs;}
   private hello(requestId:string,capabilities:string[]):ClientHello{return {kind:"hello",requestId,versions:[2],client:{name:"alu-dock-client",version:DOCK_VERSION,clientId:this.clientId},requiredCapabilities:capabilities};}
@@ -840,6 +859,6 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
 }
 function isOperationEvent(event:DockEvent):event is Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>{return event.type==="interaction.requested"||event.type==="extension.title_set"||event.type==="extension.editor_text_set";}
 function waitForUploadDrain(socket:Socket,operationId:string):Promise<void>{if(socket.destroyed||socket.writableEnded)return Promise.reject(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));return new Promise((resolveDrain,rejectDrain)=>{const cleanup=():void=>{socket.off("drain",onDrain);socket.off("close",onClose);socket.off("error",onError);};const onDrain=():void=>{cleanup();resolveDrain();};const onClose=():void=>{cleanup();rejectDrain(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));};const onError=(error:Error):void=>{cleanup();rejectDrain(transportError(error));};socket.once("drain",onDrain);socket.once("close",onClose);socket.once("error",onError);});}
-function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
+function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolHelloRejectedError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message,undefined,e.rejection.missing?{missing:e.rejection.missing}:undefined);if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
 function workspaceRequestPath(path:string):string{try{return normalizeWorkspaceRelativePath(path);}catch(error){throw normalizeClientError(error);}}
 function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}

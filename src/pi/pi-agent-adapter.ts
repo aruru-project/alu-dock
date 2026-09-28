@@ -266,8 +266,8 @@ export class PiAgentAdapter {
   private sessionNameOperationId: string | undefined;
   private manualCompactionOperationId: string | undefined;
   private extensionCommandOperationId: string | undefined;
-  private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number }>();
-  private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number }>();
+  private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number; view?: "references" }>();
+  private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number; view?: "references" }>();
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
@@ -444,8 +444,8 @@ export class PiAgentAdapter {
       case "command.content": return this.getCommandContent(request.params.command, request.params.cursor);
       case "command.complete": return this.getCommandCompletions(request.params.command, request.params.argumentPrefix);
       case "session.history": return this.getHistory();
-      case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
-      case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
+      case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit, request.params.view);
+      case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor, request.params.view);
       case "conversation.image": return this.getConversationImage(request.params.contentRef);
       case "session.list": return this.listSessions(request.params.scope);
       case "session.switch": {
@@ -756,13 +756,13 @@ export class PiAgentAdapter {
     return this.conversationEntries();
   }
 
-  async getConversationHistory(cursor?: string, limit = 50): Promise<AgentConversationHistoryPage> {
+  async getConversationHistory(cursor?: string, limit = 50, view?: "references"): Promise<AgentConversationHistoryPage> {
     const state = this.conversationState();
     const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
     let end = state.entries.length;
     if (cursor !== undefined) {
       const continuation = this.conversationHistoryCursors.get(cursor);
-      if (!continuation || continuation.revision !== state.revision) throw new AgentConversationCursorError("Conversation history cursor is stale");
+      if (!continuation || continuation.revision !== state.revision || continuation.view !== view) throw new AgentConversationCursorError("Conversation history cursor is stale");
       end = continuation.end;
     }
     // A continuation reads its accepted prefix, not tool results appended after
@@ -772,10 +772,10 @@ export class PiAgentAdapter {
     let entries = selected.map((item) => {
       const projected = this.conversationProjection(state, item.source);
       const entry = previewConversationEntry(projected);
-      const blocks = conversationContentBlocks(item.source, projected, this.options.attachmentContextKey);
+      const blocks = conversationContentBlocks(item.source, projected, this.options.attachmentContextKey, this.options.publishedFiles);
       return {
         entry, contentRef: item.contentRef,
-        contentComplete: conversationPreviewIsComplete(blocks, entry),
+        contentComplete: conversationPreviewIsComplete(blocks, entry, view),
         totalBlocks: blocks.length,
       };
     });
@@ -790,7 +790,7 @@ export class PiAgentAdapter {
       entries = entries.map((item, index) => {
         const entry = slimSemanticHistoryEntry(item.entry);
         return { ...item, entry, contentComplete: item.contentComplete && conversationPreviewIsComplete(
-          conversationContentBlocks(selected[index]!.source, this.conversationProjection(state, selected[index]!.source), this.options.attachmentContextKey), entry,
+          conversationContentBlocks(selected[index]!.source, this.conversationProjection(state, selected[index]!.source), this.options.attachmentContextKey, this.options.publishedFiles), entry, view,
         ) };
       });
     }
@@ -799,7 +799,7 @@ export class PiAgentAdapter {
       throw new Error("A complete conversation section is too large to return in one history page");
     }
     if (nextCursor !== undefined) {
-      this.conversationHistoryCursors.set(nextCursor, { revision: state.revision, end: page.start });
+      this.conversationHistoryCursors.set(nextCursor, { revision: state.revision, end: page.start, view });
       trimTokenMap(this.conversationHistoryCursors);
     }
     return bounded;
@@ -812,11 +812,18 @@ export class PiAgentAdapter {
     return image;
   }
 
-  async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
-    const nativeImage = this.options.publishedFiles.readImageContent(contentRef, cursor);
+  async getConversationContent(contentRef: string, cursor?: string, view?: "references"): Promise<AgentConversationContentPage> {
+    const nativeImage = view === undefined ? this.options.publishedFiles.readImageContent(contentRef, cursor) : undefined;
     if (nativeImage !== undefined) return nativeImage;
     const state = this.conversationState();
-    if (this.options.publishedFiles.image(contentRef, state.imageSources.get(contentRef)) !== undefined) {
+    const image = this.options.publishedFiles.image(contentRef, state.imageSources.get(contentRef));
+    if (image !== undefined) {
+      if (view === "references") {
+        if (cursor !== undefined) throw new AgentConversationCursorError("Conversation image reference view has no continuation");
+        return { revision: contentRef, contentRef, complete: true, chunks: [
+          { type: "image_ref", blockIndex: 0, mimeType: image.mimeType, contentRef: image.contentRef },
+        ] };
+      }
       const restored = this.options.publishedFiles.readImageContent(contentRef, cursor);
       if (restored !== undefined) return restored;
     }
@@ -824,7 +831,7 @@ export class PiAgentAdapter {
     let offset = 0;
     if (cursor !== undefined) {
       const continuation = this.conversationContentCursors.get(cursor);
-      if (!continuation || continuation.revision !== state.revision || continuation.contentRef !== contentRef) {
+      if (!continuation || continuation.revision !== state.revision || continuation.contentRef !== contentRef || continuation.view !== view) {
         throw new AgentConversationCursorError("Conversation content cursor is stale");
       }
       blockIndex = continuation.blockIndex;
@@ -836,7 +843,7 @@ export class PiAgentAdapter {
     // previews are cached, but full joined text/argument JSON is not duplicated
     // for the whole session or for every continuation token.
     if (state.reading?.item !== selected) state.reading = {
-      item: selected, blocks: conversationContentBlocks(selected.source, this.conversationProjection(state, selected.source), this.options.attachmentContextKey),
+      item: selected, blocks: conversationContentBlocks(selected.source, this.conversationProjection(state, selected.source), this.options.attachmentContextKey, this.options.publishedFiles),
     };
     const blocks = state.reading.blocks;
     const chunks: AgentConversationContentChunk[] = [];
@@ -852,11 +859,18 @@ export class PiAgentAdapter {
         chars += text.length;
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else if (block.type === "image") {
+        if (view === "references") {
+          const { data: _data, type: _type, ...reference } = block;
+          chunks.push({ ...reference, type: "image_ref", blockIndex });
+          blockIndex += 1;
+          offset = 0;
+          continue;
+        }
         const remaining = Math.max(1, 64_000 - chars);
         const end = unicodeSafeEnd(block.data, Math.min(block.data.length, offset + Math.min(MAX_CONVERSATION_CHUNK_CHARS, remaining)));
         const data = block.data.slice(offset, end);
         const blockComplete = end >= block.data.length;
-        chunks.push({ ...block, blockIndex, data, offset, blockComplete });
+        chunks.push({ type: "image", mimeType: block.mimeType, blockIndex, data, offset, blockComplete });
         chars += data.length;
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else if (block.type === "tool_call") {
@@ -883,7 +897,7 @@ export class PiAgentAdapter {
     }
     if (blockIndex >= blocks.length) return { revision: state.revision, contentRef, chunks, complete: true };
     const nextCursor = randomUUID();
-    this.conversationContentCursors.set(nextCursor, { revision: state.revision, contentRef, blockIndex, offset });
+    this.conversationContentCursors.set(nextCursor, { revision: state.revision, contentRef, blockIndex, offset, view });
     trimTokenMap(this.conversationContentCursors);
     return { revision: state.revision, contentRef, chunks, complete: false, nextCursor };
   }
@@ -945,7 +959,8 @@ export class PiAgentAdapter {
         : source.type === "custom_message" ? source.content : undefined;
       if (Array.isArray(content)) for (const block of content) {
         if (!isRecord(block) || block.type !== "image") continue;
-        const imageRef = this.options.publishedFiles.imageReference(block);
+        const imageRef = this.options.publishedFiles.imageReference(block)
+          ?? registerConversationImage(this.options.publishedFiles, typeof block.data === "string" ? block.data : undefined, safeImageMimeType(block.mimeType), block)?.contentRef;
         if (imageRef !== undefined) state.imageSources.set(imageRef, block);
       }
       const item: ConversationReadEntry = {
@@ -2413,12 +2428,22 @@ type ConversationTextSourceBlock = { type: "text" | "thinking"; text: string };
 type ConversationOmittedSourceBlock = { type: "omitted"; kind: "image" | "binary"; description: string };
 type ConversationSourceBlock =
   | ConversationTextSourceBlock
-  | { type: "image"; mimeType: string; data: string }
+  | { type: "image"; mimeType: string; data: string; contentRef?: string; fileId?: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
 
-function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array): ConversationSourceBlock[] {
+function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array, publishedFiles: TransientFileRegistry): ConversationSourceBlock[] {
+  // Reuse canonical image identities in source order, independently of text clipping.
+  const images = projected.content.filter((block) => block.type === "image")[Symbol.iterator]();
+  const imageSource = (item: Record<string, unknown>): Extract<ConversationSourceBlock, { type: "image" }> => {
+    const contentRef = publishedFiles.imageReference(item);
+    return {
+      ...conversationImageSource(item),
+      ...(contentRef === undefined ? {} : { contentRef }),
+      ...images.next().value,
+    };
+  };
   const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
   const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock | undefined => (
     typeof value === "string" && value.length > 0 ? { type, text: value } : undefined
@@ -2452,7 +2477,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
       const projectedToolResult = projected.content.find((block) => block.type === "tool_result");
       let firstText = true;
       return toolResultParts(message.content).map((part): ConversationSourceBlock => {
-        if (part.type === "image") return conversationImageSource(part);
+        if (part.type === "image") return imageSource(part);
         const attachMetadata = firstText;
         firstText = false;
         return {
@@ -2470,7 +2495,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
     if (!isRecord(item)) return [];
     if (item.type === "text") return textBlocks("text", item.text);
     if (item.type === "thinking") return textBlocks("thinking", item.thinking);
-    if (item.type === "image") return [conversationImageSource(item)];
+    if (item.type === "image") return [imageSource(item)];
     if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
       try {
         const argumentsJson = JSON.stringify(item.arguments ?? {});
@@ -2525,7 +2550,7 @@ function stripDockAttachmentContext(content: unknown, attachmentContextKey: Uint
 }
 
 /** Exact content comparison after every preview transform; metadata is separate. */
-function conversationPreviewIsComplete(blocks: readonly ConversationSourceBlock[], entry: AgentHistoryEntry): boolean {
+function conversationPreviewIsComplete(blocks: readonly ConversationSourceBlock[], entry: AgentHistoryEntry, view?: "references"): boolean {
   if (blocks.length !== entry.content.length) return false;
   return blocks.every((source, index) => {
     const preview = entry.content[index]!;
@@ -2537,7 +2562,8 @@ function conversationPreviewIsComplete(blocks: readonly ConversationSourceBlock[
         // Legacy readers only fetch original image bytes when this is false.
         // A descriptor enables the separate image path, but is not an inline
         // complete preview for consumers of conversation.content.
-        return false;
+        return view === "references" && preview.type === "image"
+          && source.mimeType === preview.mimeType && source.contentRef === preview.contentRef && source.fileId === preview.fileId;
       case "tool_call":
         return preview.type === "tool_call" && !preview.omittedFields?.length
           && source.argumentsJson === JSON.stringify(preview.args);

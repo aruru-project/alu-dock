@@ -897,21 +897,21 @@ export class ManagedInstance {
     return this.withCommittedProjectionRead(() => ({ ...this.journal.historyPage(beforeEntryId, limit), instance: this.snapshot() }));
   }
 
-  async getConversationHistory(cursor?: string, limit = 50): Promise<ConversationHistoryPageDto> {
+  async getConversationHistory(cursor?: string, limit = 50, view?: "references"): Promise<ConversationHistoryPageDto> {
     return this.withProjectionRead(async () => {
       this.assertActive();
       const generation = this.runtimeGenerationValue;
-      const page = await this.invokeAgent<AgentConversationHistoryPage>("conversation.history", { ...(cursor === undefined ? {} : { cursor }), limit });
+      const page = await this.invokeAgent<AgentConversationHistoryPage>("conversation.history", { ...(cursor === undefined ? {} : { cursor }), limit, ...(view === undefined ? {} : { view }) });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       return { instance: this.snapshot(), ...cloneJson(page) };
     });
   }
 
-  async getConversationContent(contentRef: string, cursor?: string): Promise<ConversationContentPageDto> {
+  async getConversationContent(contentRef: string, cursor?: string, view?: "references"): Promise<ConversationContentPageDto> {
     return this.withProjectionRead(async () => {
       this.assertActive();
       const generation = this.runtimeGenerationValue;
-      const page = await this.invokeAgent<AgentConversationContentPage>("conversation.content", { contentRef, ...(cursor === undefined ? {} : { cursor }) });
+      const page = await this.invokeAgent<AgentConversationContentPage>("conversation.content", { contentRef, ...(cursor === undefined ? {} : { cursor }), ...(view === undefined ? {} : { view }) });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       return { instanceId: this.id, runtimeGeneration: generation, ...cloneJson(page) };
     });

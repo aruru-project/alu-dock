@@ -93,7 +93,7 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 
 ## 资源边界与失败
 
-- 正文读取以实际可见 interest/显式重试为需求边界，不自动扫全部 incomplete；纯图（含空工具结果身份块）走媒体 owner，必要长文字继续自动补全。混合图文的整记录补全仍经过既有 V2 图片段，不能以局部 image API 的缓存命中推断整页正文无传图。
+- 正文读取以实际可见 interest/显式重试为需求边界，不自动扫全部 incomplete；纯图（含空工具结果身份块）走媒体 owner，必要长文字继续自动补全。官方 Rust reader 显式选择 `conversation.references.v1` 的引用视图；短混排可由完整 descriptor 接纳，长混排补全只取得文字、工具信息和原位置的图片引用，图片字节仍归媒体 owner。只有 Host（含目标 SubHost）明确缺此能力时回到原 V2 图片段；旧 Host 下不能以局部 image API 的缓存命中推断整页正文无传图。
 - 永久上传 fileId 不依赖当前运行的 source/job，仍核原目标域并交 Host 接纳；未完成选择继续要求有效 job。成功发送或进入 Queue 后，只清理本次发送前捕获的已完成上传任务，不删除 Host 附件或可信媒体缓存；失败/未知不清理。未接纳的导入撤销，不另设“保留附件”或上传历史界面。
 - 正文为共享 `Arc<str>` JSON，增量为 Segment 内存提交列表；binding 按 `session_journal.rs` 原有 256 KiB / 64 条预算回放，正文按 32 KiB UTF-8 边界切块，Vue 只组装当前一条记录。大单个源事件不截断。旧版本按实际引用释放，当前可信成员不为“达标”被丢弃。
 - 图片/发布文件共用现有三个传输许可；接收只保协议 chunk，不预分配整文件 Vec。文件长度、chunk 和协议限制由各产出端常量定义，入口复用，不再另设未经测量的 128 MiB Blob 预算。

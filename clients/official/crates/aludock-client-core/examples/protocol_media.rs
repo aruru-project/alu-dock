@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let owner = content.claim("work");
     content.commit("work", owner, SessionUpdate::Read(read))?;
     let (page, host_epoch) = client
-        .conversation_history(&args[2], None, 50)
+        .conversation_history(&args[2], None, 50, &mut Default::default())
         .await
         .map_err(|e| format!("conversation.history: {e}"))?;
     let descriptor_ms = started.elapsed().as_secs_f64() * 1000.0;

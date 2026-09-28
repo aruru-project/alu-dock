@@ -1,7 +1,7 @@
 //! Local content reads. No display state and no second record collection: only
 //! temporary request results and shared versions awaiting SessionContent admission.
 use crate::{
-    ClientError, DockClient, InstanceSnapshot, Result, SessionContent,
+    ClientError, ConversationReadContext, DockClient, InstanceSnapshot, Result, SessionContent,
     session_records::RecordVersion,
 };
 
@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 const HISTORY_PAGE_TARGET: u16 = 50;
 #[derive(Clone)]
 struct Descriptor {
+    context: ConversationReadContext,
     reference: String,
     revision: String,
     blocks: usize,
@@ -23,6 +24,7 @@ pub(crate) struct BodyReads {
     pub(crate) paused: bool,
     scanning: bool,
     cursor: Option<String>,
+    context: ConversationReadContext,
     scan_done: bool,
     locator_generation: u64,
     seen_cursors: HashSet<String>,
@@ -55,6 +57,7 @@ impl BodyReads {
     }
     fn reset_locator(&mut self) {
         self.cursor = None;
+        self.context = ConversationReadContext::default();
         self.scan_done = false;
         self.locator_generation += 1;
         self.seen_cursors.clear();
@@ -80,20 +83,20 @@ impl BodyReads {
     }
 }
 enum BodyWork {
-    Scan(Option<String>, u64),
+    Scan(Option<String>, u64, ConversationReadContext),
     Body(RecordVersion, Descriptor),
 }
 enum BodyResult {
-    Page(u64, Result<(crate::ConversationHistoryPage, String)>),
+    Page(u64, ConversationReadContext, Result<(crate::ConversationHistoryPage, String)>),
     Body(String, Result<RecordVersion>),
 }
 
-// contentComplete is whole-record completeness, not text completeness. A
-// visible mixed record still needs the existing full reader. An image-only
-// tool's empty result block is identity, not a demand for image base64.
+// Reference-view completeness includes image identities, not image downloads.
+// The legacy fallback still uses this image-only check to leave bytes to media.
+// A tool's empty result block is identity, not a demand for image base64.
 fn descriptor_needs_body(item: &crate::ConversationHistoryEntry) -> bool {
     use crate::ContentBlock;
-    item.total_blocks > item.entry.content.len()
+    !item.content_complete && (item.total_blocks > item.entry.content.len()
         || item.entry.content.iter().any(|block| match block {
             ContentBlock::Image { .. } => false,
             ContentBlock::ToolResult {
@@ -102,7 +105,7 @@ fn descriptor_needs_body(item: &crate::ConversationHistoryEntry) -> bool {
                 ..
             } => !text.is_empty() || !omitted_fields.is_empty(),
             _ => true,
-        })
+        }))
 }
 
 async fn cache_records(
@@ -247,6 +250,7 @@ impl SessionContent {
                             return Some(BodyWork::Scan(
                                 reads.cursor.clone(),
                                 reads.locator_generation,
+                                reads.context,
                             ));
                         }
                         None
@@ -256,18 +260,14 @@ impl SessionContent {
                 let client = client.clone();
                 let target = target.clone();
                 match work {
-                    BodyWork::Scan(cursor, generation) => {
+                    BodyWork::Scan(cursor, generation, mut context) => {
                         jobs.spawn(async move {
-                            BodyResult::Page(
-                                generation,
-                                client
-                                    .conversation_history(
-                                        &target.id,
-                                        cursor.as_deref(),
-                                        HISTORY_PAGE_TARGET,
-                                    )
-                                    .await,
-                            )
+                            let result = client
+                                .conversation_history(
+                                    &target.id, cursor.as_deref(), HISTORY_PAGE_TARGET, &mut context,
+                                )
+                                .await;
+                            BodyResult::Page(generation, context, result)
                         });
                     }
                     BodyWork::Body(version, descriptor) => {
@@ -294,6 +294,7 @@ impl SessionContent {
                                         &descriptor.revision,
                                         &descriptor.reference,
                                         descriptor.blocks,
+                                        descriptor.context,
                                     )
                                     .await?;
                                 restore_body_metadata(&preview, &mut record.content);
@@ -359,7 +360,7 @@ impl SessionContent {
                 }
             };
             match result {
-                BodyResult::Page(generation, result) => {
+                BodyResult::Page(generation, context, result) => {
                     let current = self
                         .body_access(&key, &token, |reads, _| {
                             reads.scanning = false;
@@ -397,6 +398,7 @@ impl SessionContent {
                                         return false;
                                     }
                                     reads.cursor = page.next_cursor.clone();
+                                    reads.context = context;
                                     reads.scan_done = !page.has_earlier;
                                     true
                                 })
@@ -450,6 +452,7 @@ impl SessionContent {
                                                     reads.descriptors.insert(
                                                         id.clone(),
                                                         Descriptor {
+                                                            context,
                                                             reference: item.content_ref,
                                                             revision: page.revision.clone(),
                                                             blocks: item.total_blocks,

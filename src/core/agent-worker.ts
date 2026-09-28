@@ -81,12 +81,7 @@ export class AgentInvalidTreeTargetError extends Error {
   }
 }
 
-export type AgentConversationContentChunk =
-  | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
-  | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
+export type AgentConversationContentChunk = import("./instance-dto.js").ConversationContentChunkDto;
 
 export interface AgentConversationHistoryEntry {
   entry: AgentHistoryEntry;

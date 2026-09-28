@@ -156,6 +156,7 @@ export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
+export const CONVERSATION_REFERENCES_CAPABILITY = "conversation.references.v1" as const;
 export const CONVERSATION_IMAGES_CAPABILITY = "conversation.images.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 export const WORKSPACE_FILES_CAPABILITY = "workspace.files.v1" as const;
@@ -182,6 +183,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
   "catalog.v1",
   CONVERSATION_CONTENT_CAPABILITY,
+  CONVERSATION_REFERENCES_CAPABILITY,
   CONVERSATION_IMAGES_CAPABILITY,
   "core.v2",
   IMAGE_INPUT_CAPABILITY,
@@ -304,8 +306,8 @@ export type ControlRequest =
   | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
   | Request<"command.complete", { instanceId: string; command: CommandReferenceDto; argumentPrefix: string }>
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
-  | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number }>
-  | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string }>
+  | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number; view?: "references" }>
+  | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string; view?: "references" }>
   | Request<"conversation.image", { instanceId: string; contentRef: string }>
   | Request<"file.read", { instanceId: string; fileRef: string; offset?: number }>
   | Request<"session.inventory", { cwd: string; scope: "cwd" | "all"; hostId?: string }>
@@ -696,6 +698,15 @@ export type { AttachmentDto, AttachmentUploadResult, DeliverableDto };
 export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
+/** The explicit view, not hello advertisement, selects the new contract. */
+export function conversationViewCapability(request: ControlRequest): string[] {
+  return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
+    ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
+}
+function conversationView(params: Record<string, unknown>): { view?: "references" } {
+  return params.view === undefined ? {} : { view: enumeration(params.view, "params.view", ["references"] as const, "invalid_request") };
+}
+
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type === "machine.list" || type === "machine.remove") return MACHINES_CAPABILITY;
@@ -1084,14 +1095,15 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { instanceId: instanceId(), beforeEntryId: optionalString(params.beforeEntryId, "params.beforeEntryId", 128, "invalid_request"), limit: params.limit as number } };
     }
     case "conversation.history": {
-      exact(params, ["instanceId", "cursor", "limit"], "invalid_request");
+      exact(params, ["instanceId", "cursor", "limit", "view"], "invalid_request");
       if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_CONVERSATION_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_CONVERSATION_HISTORY_ITEMS}`);
-      return { ...base, type, params: { instanceId: instanceId(), cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"), limit: params.limit as number } };
+      return { ...base, type, params: { instanceId: instanceId(), cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"), limit: params.limit as number, ...conversationView(params) } };
     }
     case "conversation.content": {
-      exact(params, ["instanceId", "contentRef", "cursor"], "invalid_request");
+      exact(params, ["instanceId", "contentRef", "cursor", "view"], "invalid_request");
       return { ...base, type, params: {
         instanceId: instanceId(),
+        ...conversationView(params),
         contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"),
         cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"),
       } };
@@ -1900,7 +1912,7 @@ function conversationContentFields(value: Record<string, unknown>): Omit<Convers
 
 function parseConversationContentChunk(input: unknown, field: string): ConversationContentChunkDto {
   const chunk = object(input, field);
-  const type = enumeration(chunk.type, `${field}.type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"] as const);
+  const type = enumeration(chunk.type, `${field}.type`, ["text", "thinking", "image", "image_ref", "tool_call", "tool_result", "omitted"] as const);
   const blockIndex = unsigned(chunk.blockIndex, `${field}.blockIndex`);
   if (type === "text" || type === "thinking") {
     exact(chunk, ["blockIndex", "type", "text", "offset", "blockComplete"]);
@@ -1910,6 +1922,14 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       text: payloadFreeBoundedString(chunk.text, `${field}.text`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
+    };
+  }
+  if (type === "image_ref") {
+    exact(chunk, ["blockIndex", "type", "mimeType", "contentRef", "fileId"]);
+    return {
+      blockIndex, type, mimeType: imageMimeType(chunk.mimeType, `${field}.mimeType`),
+      ...(chunk.contentRef === undefined ? {} : { contentRef: string(chunk.contentRef, `${field}.contentRef`, 128) }),
+      ...(chunk.fileId === undefined ? {} : { fileId: id(chunk.fileId, `${field}.fileId`) }),
     };
   }
   if (type === "image") {

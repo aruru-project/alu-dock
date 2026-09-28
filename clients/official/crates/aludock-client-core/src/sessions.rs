@@ -10,7 +10,8 @@ use crate::{
     ClientError, DiagnosticInfo, DockClient, HistoryRecord, InstanceSnapshot, ProjectTrustDecision,
     PublishedFileDto, ResourceInfo, Result,
     capabilities::{
-        CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES,
+        CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES, CONVERSATION_REFERENCES,
+        CONVERSATION_REFERENCES_V1,
         SESSION_COMMANDS as SESSION_COMMAND_CAPABILITIES,
         SESSION_CORE_REQUIRED as SESSION_CORE_CAPABILITIES,
         SESSION_HISTORY as SESSION_HISTORY_CAPABILITIES, SESSION_TREE as SESSION_TREE_CAPABILITIES,
@@ -102,6 +103,19 @@ pub struct SessionInventoryResult {
     pub host_epoch: String,
 }
 
+/// One history scan and its bodies share the view selected by their first request.
+/// This is caller-owned read state, never a Host-wide capability cache.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConversationReadContext {
+    view: Option<ConversationReadView>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConversationReadView {
+    References,
+    Legacy,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationHistoryEntry {
@@ -149,6 +163,12 @@ pub enum ConversationContentChunk {
         text: String,
         offset: usize,
         block_complete: bool,
+    },
+    ImageRef {
+        block_index: usize,
+        mime_type: String,
+        content_ref: Option<String>,
+        file_id: Option<String>,
     },
     Image {
         block_index: usize,
@@ -200,6 +220,8 @@ pub struct ConversationContentPage {
 struct ConversationHistoryParams<'a> {
     instance_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cursor: Option<&'a str>,
     limit: u16,
 }
@@ -217,6 +239,8 @@ struct SessionHistoryParams<'a> {
 #[serde(rename_all = "camelCase")]
 struct ConversationContentParams<'a> {
     instance_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<&'a str>,
     content_ref: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     cursor: Option<&'a str>,
@@ -463,52 +487,90 @@ impl DockClient {
         Ok((page, epoch))
     }
 
+    /// Read text/tool content and image references; only explicitly missing support uses the legacy view.
     pub async fn conversation_history(
         &self,
         instance_id: &str,
         cursor: Option<&str>,
         limit: u16,
+        context: &mut ConversationReadContext,
     ) -> Result<(ConversationHistoryPage, String)> {
         if limit == 0 || limit > 50 {
             return Err(protocol(
                 "conversation history limit must be between 1 and 50",
             ));
         }
-        let (page, epoch): (ConversationHistoryPage, String) = self
+        let mut params = ConversationHistoryParams {
+            instance_id,
+            cursor,
+            limit,
+            view: (context.view != Some(ConversationReadView::Legacy)).then_some("references"),
+        };
+        let result = self
             .request_with_host_epoch(
                 "conversation.history",
-                &ConversationHistoryParams {
-                    instance_id,
-                    cursor,
-                    limit,
-                },
-                CONVERSATION_CAPABILITIES,
+                &params,
+                if params.view.is_some() { CONVERSATION_REFERENCES } else { CONVERSATION_CAPABILITIES },
                 None,
             )
-            .await?;
+            .await;
+        let (page, epoch): (ConversationHistoryPage, String) = match result {
+            Err(error) if context.view.is_none() && missing_reference_view(&error) => {
+                context.view = Some(ConversationReadView::Legacy);
+                params.view = None;
+                self.request_with_host_epoch(
+                    "conversation.history",
+                    &params,
+                    CONVERSATION_CAPABILITIES,
+                    None,
+                )
+                .await?
+            }
+            result => result?,
+        };
         validate_history_page(&page, instance_id)?;
+        context.view.get_or_insert(ConversationReadView::References);
         Ok((page, epoch))
     }
 
+    /// Complete a record without downloading its images on reference-capable Hosts.
     pub async fn conversation_content(
         &self,
         instance_id: &str,
         content_ref: &str,
         cursor: Option<&str>,
+        context: &mut ConversationReadContext,
     ) -> Result<(ConversationContentPage, String)> {
-        let (page, epoch): (ConversationContentPage, String) = self
+        let mut params = ConversationContentParams {
+            instance_id,
+            content_ref,
+            cursor,
+            view: (context.view != Some(ConversationReadView::Legacy)).then_some("references"),
+        };
+        let result = self
             .request_with_host_epoch(
                 "conversation.content",
-                &ConversationContentParams {
-                    instance_id,
-                    content_ref,
-                    cursor,
-                },
-                CONVERSATION_CAPABILITIES,
+                &params,
+                if params.view.is_some() { CONVERSATION_REFERENCES } else { CONVERSATION_CAPABILITIES },
                 None,
             )
-            .await?;
+            .await;
+        let (page, epoch): (ConversationContentPage, String) = match result {
+            Err(error) if context.view.is_none() && missing_reference_view(&error) => {
+                context.view = Some(ConversationReadView::Legacy);
+                params.view = None;
+                self.request_with_host_epoch(
+                    "conversation.content",
+                    &params,
+                    CONVERSATION_CAPABILITIES,
+                    None,
+                )
+                .await?
+            }
+            result => result?,
+        };
         validate_content_page(&page, instance_id, content_ref)?;
+        context.view.get_or_insert(ConversationReadView::References);
         Ok((page, epoch))
     }
 
@@ -520,13 +582,14 @@ impl DockClient {
         revision: &str,
         content_ref: &str,
         total_blocks: usize,
+        mut context: ConversationReadContext,
     ) -> Result<Vec<crate::ContentBlock>> {
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
         let mut assembler = ContentAssembler::default();
         loop {
             let (page, epoch) = self
-                .conversation_content(instance_id, content_ref, cursor.as_deref())
+                .conversation_content(instance_id, content_ref, cursor.as_deref(), &mut context)
                 .await?;
             if epoch != host_epoch
                 || page.runtime_generation != generation
@@ -976,6 +1039,12 @@ fn validate_tree(tree: &SessionTree) -> Result<()> {
     Ok(())
 }
 
+fn missing_reference_view(error: &ClientError) -> bool {
+    matches!(error, ClientError::Host { code, details: Some(details), .. }
+        if code == "capability_missing" && details.get("missing").and_then(serde_json::Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(CONVERSATION_REFERENCES_V1))))
+}
+
 #[derive(Default)]
 struct ContentAssembler {
     blocks: HashMap<usize, PartialBlock>,
@@ -984,6 +1053,11 @@ struct ContentAssembler {
 
 #[derive(Clone)]
 enum PartialBlock {
+    ImageRef {
+        mime: String,
+        content_ref: Option<String>,
+        file_id: Option<String>,
+    },
     Text {
         kind: bool,
         data: String,
@@ -1021,6 +1095,7 @@ impl ContentAssembler {
             ConversationContentChunk::Text { block_index, .. }
             | ConversationContentChunk::Thinking { block_index, .. }
             | ConversationContentChunk::Image { block_index, .. }
+            | ConversationContentChunk::ImageRef { block_index, .. }
             | ConversationContentChunk::ToolCall { block_index, .. }
             | ConversationContentChunk::ToolResult { block_index, .. }
             | ConversationContentChunk::Omitted { block_index, .. } => *block_index,
@@ -1029,6 +1104,10 @@ impl ContentAssembler {
             return Err(protocol("conversation content blocks were not contiguous"));
         }
         match chunk {
+            ConversationContentChunk::ImageRef { mime_type, content_ref, file_id, .. } => {
+                self.blocks.insert(index, PartialBlock::ImageRef { mime: mime_type, content_ref, file_id });
+                self.next_block += 1;
+            }
             ConversationContentChunk::Text {
                 text,
                 offset,
@@ -1272,6 +1351,9 @@ impl ContentAssembler {
                 .remove(&index)
                 .ok_or_else(|| protocol("conversation content omitted a block"))?;
             output.push(match block {
+                PartialBlock::ImageRef { mime, content_ref, file_id } => crate::ContentBlock::Image {
+                    mime_type: mime, content_ref, file_id, data: None,
+                },
                 PartialBlock::Text {
                     kind: false,
                     data,
@@ -1504,7 +1586,13 @@ mod tests {
                 block_complete: true,
             })
             .unwrap();
-        let blocks = assembler.finish(2).unwrap();
+        assembler.push(serde_json::from_value(serde_json::json!({
+            "type": "image_ref", "blockIndex": 2, "mimeType": "image/png",
+            "contentRef": "original-image", "fileId": "permanent-attachment"
+        })).unwrap()).unwrap();
+        let blocks = assembler.finish(3).unwrap();
+        assert!(matches!(&blocks[2], crate::ContentBlock::Image { mime_type, content_ref: Some(reference), file_id: Some(file), data: None }
+            if mime_type == "image/png" && reference == "original-image" && file == "permanent-attachment"));
         assert!(matches!(&blocks[0], crate::ContentBlock::Text { text } if text == "hello"));
         assert!(
             matches!(&blocks[1], crate::ContentBlock::ToolCall { tool_name, .. } if tool_name == "read")

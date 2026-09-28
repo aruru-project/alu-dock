@@ -209,6 +209,10 @@ test("#301 SDK user events retain trusted image identity through live and histor
     for (const image of images) assert.equal("sha256" in image || "data" in image || "path" in image, false);
     assert.equal(adapter.getConversationImage(images[0]!.contentRef!).data, PNG);
     assert.doesNotMatch(JSON.stringify(completed), /alu_dock_attachments_v1/u);
+    const descriptor = (await adapter.getConversationHistory(undefined, 50, "references")).entries.at(-1)!;
+    const referenced = await adapter.getConversationContent(descriptor.contentRef, undefined, "references");
+    assert.deepEqual(referenced.chunks.filter((block) => block.type === "image_ref").map(({ blockIndex: _index, type: _type, ...image }) => ({ type: "image", ...image })), images);
+
   }
 });
 
@@ -233,14 +237,19 @@ test("#301 read image descriptors survive preview trimming and completeness desc
   const add = (message: Parameters<SessionManager["appendMessage"]>[0]) => manager.appendMessage(message);
   const short = add({ role: "toolResult", toolCallId: "read-short", toolName: "read", isError: false, timestamp: 1,
     content: [{ type: "text", text: "first" }, { type: "image", mimeType: "image/png", data: largeImage }, { type: "text", text: "second" }] });
+  const base64Text = add({ role: "user", content: [{ type: "text", text: "```base64\n" + largeImage + "\n```" }], timestamp: 1 });
   const textOnly = add({ role: "toolResult", toolCallId: "read-text", toolName: "read", isError: false, timestamp: 1,
     content: [{ type: "text", text: "first" }, { type: "text", text: "second" }] });
   const imageOnly = add({ role: "toolResult", toolCallId: "read-only", toolName: "read", isError: false, timestamp: 1,
     content: [{ type: "image", mimeType: "image/png", data: PNG }] });
   const long = add({ role: "toolResult", toolCallId: "read-long", toolName: "read", isError: false, timestamp: 2,
-    content: [{ type: "text", text: "x".repeat(40_001) }, { type: "image", mimeType: "image/png", data: PNG }] });
+    content: [{ type: "text", text: "x".repeat(40_001) }, { type: "image", mimeType: "image/png", data: largeImage }, { type: "text", text: "after-long-image" }] });
   const many = add({ role: "user", timestamp: 3, content: [
     ...Array.from({ length: 100 }, () => ({ type: "text" as const, text: "t".repeat(8_000) })), { type: "image", mimeType: "image/png", data: PNG },
+  ] });
+  const beyondPreview = add({ role: "user", timestamp: 3, content: [
+    ...Array.from({ length: 200 }, () => ({ type: "text" as const, text: "part" })),
+    { type: "image", mimeType: "image/png", data: PNG },
   ] });
   const summary = manager.appendCompaction("summary", short, 42);
   const metadata = manager.appendSessionInfo("named");
@@ -262,6 +271,15 @@ test("#301 read image descriptors survive preview trimming and completeness desc
   assert.equal(descriptor.totalBlocks, 3, "text on opposite sides of an image must stay on those sides");
   assert.equal(item(textOnly).contentComplete, true);
   assert.equal(item(textOnly).totalBlocks, 1);
+  let textCursor: string | undefined;
+  let recoveredText = "";
+  do {
+    const page = await adapter.getConversationContent(item(base64Text).contentRef, textCursor, "references");
+    recoveredText += page.chunks.map((chunk) => chunk.type === "text" ? chunk.text : "").join("");
+    textCursor = page.nextCursor;
+  } while (textCursor);
+  assert.equal(recoveredText, "```base64\n" + largeImage + "\n```");
+
   // Existing Web complete_content behavior: true returns entry.content as-is;
   // only false enters conversation.content. Its image renderer needs data,
   // not just a contentRef. Keep that legacy decision path working unchanged.
@@ -289,6 +307,54 @@ test("#301 read image descriptors survive preview trimming and completeness desc
   assert.deepEqual(ordered.map((value) => value.type === "tool_result" ? value.text : value.type), ["first", "image", "second"]);
   assert.deepEqual(ordered.map((value) => value.blockIndex), [0, 1, 2]);
   context.diagnostic("2 MiB PNG: descriptor history=1, image body=1 (2097152 verified bytes); legacy record content=88 requests, exact base64 and revision match");
+  // #325: explicit reference reads cannot drag image bytes through mixed-body
+  // completion; alternating readers keep the external V2 consumer unchanged.
+  const references = parseConversationHistoryBody(await adapter.getConversationHistory(undefined, 50, "references"));
+  const referenceItem = (id: string) => references.entries.find(({ entry }) => entry.entryId === id)!;
+  assert.equal(referenceItem(short).contentComplete, true);
+  assert.equal(referenceItem(imageOnly).contentComplete, true);
+  assert.equal(referenceItem(long).contentComplete, false);
+  let beyondCursor: string | undefined;
+  let beyondImageRef: string | undefined;
+  do {
+    const page = await adapter.getConversationContent(referenceItem(beyondPreview).contentRef, beyondCursor, "references");
+    for (const chunk of page.chunks) if (chunk.type === "image_ref") beyondImageRef = chunk.contentRef;
+    beyondCursor = page.nextCursor;
+  } while (beyondCursor);
+  assert.ok(beyondImageRef, "full content retains an image beyond the canonical preview's block limit");
+  assert.equal(adapter.getConversationImage(beyondImageRef).data, PNG);
+
+  assert.deepEqual(referenceItem(short).entry, descriptor.entry);
+  const referenceBody = parseConversationContentBody(await adapter.getConversationContent(descriptor.contentRef, undefined, "references"));
+  assert.equal(referenceBody.complete, true);
+  assert.deepEqual(referenceBody.chunks.map((chunk) => chunk.type), ["tool_result", "image_ref", "tool_result"]);
+  assert.deepEqual(referenceBody.chunks[1], { type: "image_ref", blockIndex: 1, mimeType: "image/png", contentRef: image.contentRef });
+  const longPages = [parseConversationContentBody(await adapter.getConversationContent(referenceItem(long).contentRef, undefined, "references"))];
+  while (!longPages.at(-1)!.complete) longPages.push(parseConversationContentBody(await adapter.getConversationContent(referenceItem(long).contentRef, longPages.at(-1)!.nextCursor, "references")));
+  assert.equal(longPages.length, 2);
+  const longChunks = longPages.flatMap((page) => page.chunks);
+  assert.equal(longChunks.filter((chunk) => chunk.type === "tool_result").map((chunk) => chunk.text).join(""), "x".repeat(40_001) + "after-long-image");
+  assert.deepEqual(longChunks.filter((chunk) => chunk.type === "image_ref" || ("offset" in chunk && chunk.offset === 0)).map((chunk) => [chunk.blockIndex, chunk.type]), [[0, "tool_result"], [1, "image_ref"], [2, "tool_result"]]);
+  assert.ok(longChunks.every((chunk) => !("data" in chunk)));
+  assert.equal(adapter.getConversationImage(image.contentRef!).data, largeImage);
+  // Existing contentRef may address the image itself, not only a whole record.
+  // Explicit references must cover this legal target without falling into inline bytes.
+  const directImage = parseConversationContentBody(await adapter.getConversationContent(image.contentRef!, undefined, "references"));
+  assert.deepEqual(directImage, { revision: image.contentRef, contentRef: image.contentRef, complete: true,
+    chunks: [{ type: "image_ref", blockIndex: 0, mimeType: "image/png", contentRef: image.contentRef }] });
+  const directLegacyImage = await adapter.getConversationContent(image.contentRef!);
+  assert.equal(directLegacyImage.chunks[0]?.type, "image");
+  await assert.rejects(adapter.getConversationContent(image.contentRef!, directLegacyImage.nextCursor, "references"), AgentConversationCursorError);
+  assert.deepEqual(parseConversationContentBody(await adapter.getConversationContent(descriptor.contentRef)).chunks, body.chunks);
+  const oldAgain = parseConversationHistoryBody(await adapter.getConversationHistory());
+  assert.equal(oldAgain.entries.find(({ entry }) => entry.entryId === short)!.contentComplete, false);
+  // Continuations must remain bound to the selected wire contract.
+  await assert.rejects(adapter.getConversationContent(referenceItem(long).contentRef, longPages[0]!.nextCursor), AgentConversationCursorError);
+  await assert.rejects(adapter.getConversationContent(descriptor.contentRef, body.nextCursor, "references"), AgentConversationCursorError);
+  const firstReferencePage = await adapter.getConversationHistory(undefined, 1, "references");
+  await assert.rejects(adapter.getConversationHistory(firstReferencePage.nextCursor, 1), AgentConversationCursorError);
+  context.diagnostic("#325 2 MiB image: short mixed reference content is complete in descriptor; 40001 text chars + image + suffix complete in 2 pages, image data absent; legacy remains 88 pages");
+
   assert.equal(item(imageOnly).contentComplete, false);
   assert.equal(item(imageOnly).totalBlocks, 2);
   assert.equal(item(publishedId).contentComplete, true);

@@ -119,8 +119,8 @@ pub use session_content::{
 pub use session_media::{MAX_ATTACHMENT_PREVIEW_BYTES, MediaHandle, MediaScope};
 pub use sessions::{
     CompactionPromptTemplatesResult, ConversationContentChunk, ConversationContentPage,
-    ConversationHistoryEntry, ConversationHistoryPage, NavigateOptions, SessionChange,
-    SessionCompaction, SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
+    ConversationHistoryEntry, ConversationHistoryPage, ConversationReadContext, NavigateOptions,
+    SessionChange, SessionCompaction, SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
     SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
     SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
     SessionTokenScope, SessionTokenState, SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind,
