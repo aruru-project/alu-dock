@@ -51,8 +51,9 @@ fn report_fast(record: &HistoryRecord) {
     }
 }
 fn complete_body(record: &HistoryRecord) -> bool {
-    let complete = record.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("history-250 ") && text.len() == 150012));
+    let complete = record.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("history-250 ") && text.len() == 500012));
     if complete {
+        assert!(matches!(&record.content[0], ContentBlock::Text { text } if text == &format!("history-250 {}", "x😀".repeat(100000))));
         assert!(matches!(record.content.as_slice(), [ContentBlock::Text { .. }, ContentBlock::Image { content_ref: Some(_), data: None, .. }, ContentBlock::Text { text }] if text == "long-after-image"));
     }
     complete
@@ -243,7 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(image.size_bytes, 2_097_152);
     println!(
         "{}",
-        serde_json::json!({"kind":"content.pass","initial":200,"firstEarlier":50,"rebound":250,"completeBodyBytes":150012,"semanticGroupEntries":semantic_group_entries,"workSwitchRetained":true,"offlineRebindComplete":true,"noBodyOrJournalFiles":true,"beforeEntryId":anchor})
+        serde_json::json!({"kind":"content.pass","initial":200,"firstEarlier":50,"rebound":250,"completeBodyBytes":500012,"semanticGroupEntries":semantic_group_entries,"workSwitchRetained":true,"offlineRebindComplete":true,"noBodyOrJournalFiles":true,"beforeEntryId":anchor})
     );
     Ok(())
 }

@@ -4,6 +4,8 @@ import test from "node:test";
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
 import { MAX_JSON_STRING_CHARS } from "../src/core/json-value.js";
 import {
+  CONVERSATION_CONTENT_STREAM_CAPABILITY,
+  conversationViewCapability,
   capabilityForRequest,
   classifyControlRequest,
   parseAttachmentDto,
@@ -337,6 +339,10 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.get_by_key"), INSTANCE_KEYS_CAPABILITY);
   assert.equal(capabilityForRequest("conversation.history"), CONVERSATION_CONTENT_CAPABILITY);
   assert.equal(capabilityForRequest("conversation.content"), CONVERSATION_CONTENT_CAPABILITY);
+  const stream = parseControlRequest({ kind: "request", version: 2, requestId: "body", type: "conversation.content.stream", params: { instanceId: "work", contentRef: "body" } });
+  assert.equal(capabilityForRequest(stream.type), CONVERSATION_CONTENT_STREAM_CAPABILITY);
+  assert.deepEqual(conversationViewCapability(stream), ["conversation.content.v1", "conversation.references.v1", "file-transfer.v1"]);
+  assert.deepEqual(classifyControlRequest(stream), { target: "instance", effect: "query", transport: "response_stream" });
   assert.equal(capabilityForRequest("workspace.list"), WORKSPACE_LIST_CAPABILITY);
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");

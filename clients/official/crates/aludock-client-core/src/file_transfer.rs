@@ -130,8 +130,12 @@ pub(crate) const FILE_TRANSFER_CAPABILITY: &str = "file-transfer.v1";
 pub(crate) const FILE_WINDOW_BYTES: u64 = 256 * 1024;
 
 pub(crate) fn missing_file_capability(error: &ClientError) -> bool {
+    missing_stream_capability(error, &[FILE_TRANSFER_CAPABILITY])
+}
+
+fn missing_stream_capability(error: &ClientError, optional: &[&str]) -> bool {
     matches!(error, ClientError::Host { code, details: Some(details), .. }
-        if code == "capability_missing" && details.get("missing").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item.as_str() == Some(FILE_TRANSFER_CAPABILITY))))
+        if code == "capability_missing" && details.get("missing").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item.as_str().is_some_and(|capability| optional.contains(&capability)))))
 }
 
 pub(crate) struct RemoteFile {
@@ -189,6 +193,27 @@ impl DockClient {
         capabilities: &[&str],
         maximum_bytes: u64,
         sink: &mut W,
+        ready: R,
+        progress: F,
+    ) -> Result<Option<RemoteFile>>
+    where
+        P: Serialize,
+        W: AsyncWrite + Unpin,
+        R: FnMut(&Value) -> Result<()>,
+        F: FnMut(u64),
+    {
+        self.read_byte_stream(request_type, params, capabilities, &[FILE_TRANSFER_CAPABILITY], maximum_bytes, sink, ready, progress).await
+    }
+
+    /// None means explicit missing capability before any file was delivered. Never retry partial data.
+    pub(crate) async fn read_byte_stream<P, W, R, F>(
+        &self,
+        request_type: &str,
+        params: &P,
+        capabilities: &[&str],
+        fallback_capabilities: &[&str],
+        maximum_bytes: u64,
+        sink: &mut W,
         mut ready: R,
         mut progress: F,
     ) -> Result<Option<RemoteFile>>
@@ -202,7 +227,7 @@ impl DockClient {
         required.push(FILE_TRANSFER_CAPABILITY);
         let routed = match self.negotiate(&required).await {
             Ok(value) => value,
-            Err(error) if missing_file_capability(&error) => return Ok(None),
+            Err(error) if missing_stream_capability(&error, fallback_capabilities) => return Ok(None),
             Err(error) => return Err(error),
         };
         self.check_file_host_epoch(&routed.hello.host.host_epoch)?;
@@ -233,7 +258,7 @@ impl DockClient {
                     host_epoch,
                 }))
             }
-            Err(error) if !began && missing_file_capability(&error) => Ok(None),
+            Err(error) if !began && missing_stream_capability(&error, fallback_capabilities) => Ok(None),
             Err(error) => {
                 self.router()
                     .report_connection_failure(&routed.endpoint_id, routed.route_generation);

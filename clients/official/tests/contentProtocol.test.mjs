@@ -8,11 +8,14 @@ import { tmpdir } from 'node:os'
 import { createServer, createConnection } from 'node:net'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
+import { StringDecoder } from 'node:string_decoder'
 import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url))
 const hostRoot = process.env.ALUDOCK_TEST_HOST_ROOT || repo
 const legacy = process.argv.includes('--legacy')
+const pages = legacy || process.argv.includes('--pages')
+const routed = process.argv.includes('--routed')
 const root = await mkdtemp(join(tmpdir(), 'alu-content-protocol-'))
 const home = join(root, 'home'), cwd = join(root, 'workspace'), agent = join(root, 'agent'), socket = join(root, 'host.sock')
 const env = { PATH: process.env.PATH, HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: agent, PI_OFFLINE: '1',
@@ -61,7 +64,7 @@ try {
     manager.appendMessage({role:'user',content:[{type:'text',text:'Use the saved tool group'}],timestamp:0});
     manager.appendMessage({role:'assistant',content:Array.from({length:55},(_,i)=>({type:'toolCall',id:'tool-'+i,name:'read',arguments:{path:'saved-'+i}})),api:'openai-completions',provider:'openai',model:'gpt-4o-mini',stopReason:'toolUse',timestamp:1,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
     for(let i=0;i<55;i++) manager.appendMessage({role:'toolResult',toolCallId:'tool-'+i,toolName:'read',content:[{type:'text',text:'saved output '+i}],isError:false,timestamp:2});
-    for(let i=1;i<=260;i++) manager.appendMessage(i % 2 ? { role:'user', content:[{type:'text',text:i===250 ? 'history-250 '+ 'x'.repeat(150000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}, ...(i===239 ? [image,{type:'text',text:'short-after-image'}] : [])],timestamp:i } : {role:'assistant',content:[{type:'text',text:i===250 ? 'history-250 '+ 'x'.repeat(150000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}, ...(i===250 ? [image,{type:'text',text:'long-after-image'}] : [])],api:'openai-completions',provider:'openai',model:'gpt-4o-mini',stopReason:'stop',timestamp:i,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
+    for(let i=1;i<=260;i++) manager.appendMessage(i % 2 ? { role:'user', content:[{type:'text',text:i===250 ? 'history-250 '+ 'x😀'.repeat(100000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}, ...(i===239 ? [image,{type:'text',text:'short-after-image'}] : [])],timestamp:i } : {role:'assistant',content:[{type:'text',text:i===250 ? 'history-250 '+ 'x😀'.repeat(100000) : i===240 ? 'fast-body '+ 'y'.repeat(40000) : 'history-'+i}, ...(i===250 ? [image,{type:'text',text:'long-after-image'}] : [])],api:'openai-completions',provider:'openai',model:'gpt-4o-mini',stopReason:'stop',timestamp:i,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}});
     const workerEnvironment = {...process.env, HOME:${JSON.stringify(join(root, 'worker-home'))}, USERPROFILE:${JSON.stringify(join(root, 'worker-home'))}};
     const registry = new DockRegistry(input => createPiInstance({...input, agentDir:${JSON.stringify(agent)}, workerEnvironment}), undefined, {reopenTargetResolver:{resolve:resolvePiReopenTarget}});
     const host = new DockHost({socketPath:${JSON.stringify(socket)}, registry}); await host.start();
@@ -73,8 +76,32 @@ try {
     const otherResult = await client.adopt(other.getSessionFile());
 
     process.stdin.setEncoding('utf8'); process.stdin.on('data', async command => { if(command.trim()==='append') { const commands = await client.commands(result.instance.id); if(!commands.commands.some(command => command.name==='content-append')) throw new Error('isolated append extension unavailable'); await client.prompt(result.instance.id, '/content-append'); console.log(JSON.stringify({kind:'appended'})); } });
-    process.on('SIGTERM', async () => {client.closeActiveConnections(); await host.stop(); process.exit(0)});
-    console.log(JSON.stringify({kind:'ready',id:result.instance.id,otherId:otherResult.instance.id,sessionFile:manager.getSessionFile()}));
+    let main, upstream, routedId = result.instance.id, otherId = otherResult.instance.id;
+    if (${routed}) {
+      const { createServer } = await import('node:net');
+      const { DockHost: MainHost } = await import(${JSON.stringify(join(repo, 'dist/src/control/dock-host.js'))});
+      const { DockRegistry: MainRegistry } = await import(${JSON.stringify(join(repo, 'dist/src/control/dock-registry.js'))});
+      const { MainMachineState, SubHostMachineState } = await import(${JSON.stringify(join(repo, 'dist/src/control/machine-state.js'))});
+      const { MachineSettingsState } = await import(${JSON.stringify(join(repo, 'dist/src/control/machine-settings-state.js'))});
+      const { MainMachineController } = await import(${JSON.stringify(join(repo, 'dist/src/control/machine-transport.js'))});
+      const { SubHostMachineConnection } = await import('./dist/src/control/machine-transport.js');
+      const mainState = new MainMachineState(${JSON.stringify(join(root, 'main-state'))}, 'Main'); await mainState.initialize();
+      const subState = new SubHostMachineState(${JSON.stringify(join(root, 'sub-state'))}); await subState.prepare(await mainState.createJoin(), 'Body target');
+      const probe = createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port; await new Promise(resolve => probe.close(resolve));
+      const settings = new MachineSettingsState(${JSON.stringify(join(root, 'machine-settings'))}); await settings.writeMainConnections({enabled:true,port});
+      const mainRegistry = new MainRegistry(async () => {throw new Error('No local Worker')});
+      const controller = new MainMachineController({state:mainState,settingsState:settings,bindAddress:'127.0.0.1',mainHostEpoch:mainRegistry.hostEpoch,localSnapshots:()=>[]});
+      main = new MainHost({socketPath:${JSON.stringify(join(root, 'main.sock'))}, registry:mainRegistry,remoteInstances:controller});
+      upstream = new SubHostMachineConnection({state:subState,address:'127.0.0.1',port,hostEpoch:registry.hostEpoch,snapshots:()=>registry.list(),acceptProtocolSocket:socket=>host.acceptProtocolSocket(socket)});
+      await main.start(); await upstream.start();
+      const mainClient = new DockClient({socketPath:main.socketPath});
+      let works = [];
+      for(let attempt=0;attempt<200;attempt++) { works=await mainClient.list(); if(works.length===2)break; await new Promise(resolve=>setTimeout(resolve,10)); }
+      routedId = works.find(work=>work.creationOperationId===result.instance.creationOperationId).id;
+      otherId = works.find(work=>work.creationOperationId===otherResult.instance.creationOperationId).id;
+    }
+    process.on('SIGTERM', async () => {client.closeActiveConnections(); await upstream?.stop(); await main?.stop(); await host.stop(); process.exit(0)});
+    console.log(JSON.stringify({kind:'ready',id:routedId,otherId,sessionFile:manager.getSessionFile()}));
   `
   host = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd: hostRoot, env, stdio: ['pipe', 'pipe', 'pipe'] })
   let hostErrors = ''; host.stderr.on('data', b => { hostErrors += b })
@@ -89,19 +116,20 @@ try {
   const proxySocket = join(root, 'reader.sock')
   let appendStarted = false
   proxy = createServer(incoming => {
-    const outgoing = createConnection(socket); sockets.add(incoming); sockets.add(outgoing)
-    let buffer = '', response = '', method = ''
+    const outgoing = createConnection(routed ? join(root, 'main.sock') : socket); sockets.add(incoming); sockets.add(outgoing)
+    let buffer = '', response = '', method = '', contentRef, contentRecords = ''; const held = []; let holding = false; const bodyDecoder = new StringDecoder('utf8')
+    const requestDecoder = new StringDecoder('utf8'), responseDecoder = new StringDecoder('utf8')
     incoming.on('data', bytes => {
-      buffer += bytes
+      buffer += requestDecoder.write(bytes)
       for (;;) {
         const end = buffer.indexOf('\n'); if (end < 0) break
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1)
         const frame = JSON.parse(line)
-        if (frame.kind === 'request') { method = frame.type; counts[method] = (counts[method] || 0) + 1; if (method === 'conversation.content' && frame.params.contentRef === shortReference) shortBodyReads++ }
+        if (frame.kind === 'request') { method = frame.type; contentRef = frame.params.contentRef; counts[method] = (counts[method] || 0) + 1; if (method.startsWith('conversation.content') && frame.params.contentRef === shortReference) shortBodyReads++ }
         if (frame.kind === 'request' && blockContent) { incoming.destroy(); outgoing.destroy(); continue }
         if (frame.kind === 'request' && method === 'session.history' && !earlierWaiterDropped) {
           heldEarlier = () => outgoing.write(line + '\n')
-        } else if (frame.kind === 'request' && method === 'conversation.content' && frame.params.contentRef === fastReference && !slowHeld) {
+        } else if (frame.kind === 'request' && method.startsWith('conversation.content') && frame.params.contentRef === fastReference && !slowHeld) {
           heldFast = () => outgoing.write(line + '\n')
         } else if (frame.kind === 'request' && method === 'conversation.content' && frame.params.contentRef === slowReference && frame.params.cursor && !appendStarted) {
           appendStarted = true
@@ -113,11 +141,27 @@ try {
       }
     })
     outgoing.on('data', bytes => {
-      incoming.write(bytes); response += bytes
+      response += responseDecoder.write(bytes)
       for (;;) {
         const end = response.indexOf('\n'); if (end < 0) break
         const line = response.slice(0, end); response = response.slice(end + 1)
         const frame = JSON.parse(line)
+        if (method === 'conversation.content.stream' && contentRef === slowReference && frame.kind === 'file_chunk' && !appendStarted) {
+          appendStarted = true; holding = true
+          heldContent = () => { holding = false; for (const record of held.splice(0)) incoming.write(record) }
+          slowHeld = true; heldFast?.(); heldFast = null; appendWhenFast()
+        }
+        if (holding) held.push(line + '\n'); else incoming.write(line + '\n')
+        if (method === 'conversation.content.stream' && frame.kind === 'file_chunk') {
+          // Decode only for gate evidence; the real Rust receiver sees original byte frames.
+          contentRecords += bodyDecoder.write(Buffer.from(frame.data, 'base64'))
+          for (;;) {
+            const end = contentRecords.indexOf('\n'); if (end < 0) break
+            const chunk = JSON.parse(contentRecords.slice(0, end)); contentRecords = contentRecords.slice(end + 1)
+            assert.equal('data' in chunk, false, '#325 reference body does not carry image bytes')
+            if (chunk.type === 'image_ref') referenceChunks++
+          }
+        }
         if (frame.error?.code) errors[frame.error.code] = (errors[frame.error.code] || 0) + 1
         if (method === 'conversation.content') for (const chunk of frame.result?.chunks ?? []) {
           if (!legacy) assert.equal('data' in chunk, false, '#325 mixed reference body must not transfer image bytes')
@@ -147,8 +191,8 @@ try {
   assert.ok((await readFile(target.sessionFile)).subarray(0, originalSession.length).equals(originalSession), 'reference reads do not rewrite the original Pi JSONL, including image data')
   assert.ok(shortReference)
   if (legacy) { assert.ok(shortBodyReads > 0); assert.equal(referenceChunks, 0); assert.equal(errors.capability_missing, 2, 'one probe for the body descriptor scan and one for the later independent history scan; none per content page') }
-  else { assert.equal(shortBodyReads, 0); assert.ok(referenceChunks > 0); assert.equal(counts['conversation.image'], 1, 'the original PNG uses the independent media owner') }
-  console.log(JSON.stringify({ hostRoot, ...evidence, earlierWaiterDropped, fastWhileHeld, appended, counts, errors, referenceChunks, shortBodyReads }))
+  else { if (!pages) { assert.equal(counts['conversation.content.stream'], 2, 'one request for each complete long body'); assert.equal(counts['conversation.content'] || 0, 0, 'no external body page loop'); } else { assert.ok(counts['conversation.content'] > 2); assert.equal(counts['conversation.content.stream'] || 0, routed ? 2 : 0, 'one failed selection per long body at Main, before any stream data'); assert.equal(errors.capability_missing, 2); } assert.equal(shortBodyReads, 0); assert.ok(referenceChunks > 0); assert.equal(counts['conversation.image'], 1, 'the original PNG uses the independent media owner') }
+  console.log(JSON.stringify({ hostRoot, routed, pages, ...evidence, earlierWaiterDropped, fastWhileHeld, appended, counts, errors, referenceChunks, shortBodyReads }))
 } finally {
   await stop(reader); for (const socket of sockets) socket.destroy(); if (proxy) await new Promise(resolve => proxy.close(resolve)); await stop(host); await rm(root, { recursive: true, force: true })
 }

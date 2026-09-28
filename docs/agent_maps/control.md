@@ -85,6 +85,10 @@ Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字�
 
 `conversation.references.v1` 允许显式发送 `conversation.history / conversation.content` 的 `view: "references"`。此视图的 `contentComplete` 表示文字、工具信息与图片位置/引用已齐全，不表示图片已下载；正文分页的图片块为 `image_ref {blockIndex,mimeType,contentRef?,fileId?}`，没有 `data`，原图仍由 `conversation.image` 读取。普通文字即使像 Base64 也原样保留。省略 view 的旧请求保留原 `contentComplete` 与 image/data chunks，hello 广告能力不改变请求语义；新旧视图共享生产器与稳定 contentRef，但 continuation 绑定请求视图。Main 在转发业务前向 SubHost 要求同一能力；TS 显式引用调用和官方 Rust reader 仅在明确 `capability_missing` 且 missing 指向此能力时回到旧接口，不按未知参数或其他读取错误降级。同一次历史 scan 与正文续读沿用首次确定的视图：官方 Rust 把它放在既有读取上下文与 descriptor；TS 通过调用者传入并沿链复用的 `ConversationReadContext` 明确选择引用读取。没有全局能力缓存、预查询，也不解析 opaque cursor。
 
+`conversation.content.stream.v1` 提供显式 `conversation.content.stream {instanceId,contentRef}`：一次连接完整读取一个引用视图正文。它同时要求 `conversation.content.v1`、`conversation.references.v1` 与 `file-transfer.v1`，不改变旧 history/content 请求。Host 按需读取现有 Worker 引用页，把每个 canonical content chunk 编为一条 UTF-8 JSONL，经共用字节窗口交付；不读取会话磁盘文件、不聚合整篇正文，也不在网络等待期间持有 Worker 查询。`file_ready.metadata` 仅含 `contentRef/revision/runtimeGeneration`；terminal response 的 result 在这些字段外含根 `instanceId` 及 `chunks/sizeBytes/sha256`。Main 只映射根身份，metadata 和正文仍不透明。每条记录沿用协议 record 上限，没有额外正文总长限制。整个读取核对来源与运行代次，正常追加不作全局 revision 失效。
+
+官方 Rust 在固定 References 上下文中优先使用连续读取；仅 ready/bytes 前明确缺新 stream 或 file-transfer 能力时，回到相同引用视图的旧分页，不改成 Legacy，不对普通错误或部分结果重试。已选择 Legacy 的读取直接沿用旧页。JSONL 接收器逐记录调用既有正文 assembler，全部完整性、终端身份和块连续性检查完成后才提交。TS 的 `conversationContentStream` 是显式新入口，逐块 callback 在 promise 成功前均为临时结果；旧 `conversationContent` 不变。首次读取与 follow/event 的 framing 尚未改变。
+
 `conversation.images.v1` 在独立 Protocol V2 连接上以 `conversation.image {instanceId,contentRef}` 读取原生 conversation image。Host 先发送包含 MIME、decoded size 和 lowercase SHA-256 的 ready，再发送从零连续、decoded bytes 最大 512 KiB 的 chunk，最后发送带总 chunk 数、size 和 SHA-256 的 complete；ready 后失败发送专用 error，客户端丢弃已收 bytes。DockClient 逐块调用 callback、独立 hash 且不缓存完整图片。Worker adapter 在一次 Agent request 中产出 immutable image body，Worker 边界与 Host 复用同一 parser 校验 bytes/size/SHA；Host 只按 socket drain 背压切成公开 stream frame，既有 `conversation.content` 保留。Main/SubHost 仍通过通用 machine stream route，identity mapper 只改 frame root 的 Host/instance identity。
 
 `session.tree.v2` 专指当前 Pi Session Tree。请求只有 `{instanceId}`，一次逻辑调用返回一个完整 compact snapshot `{nodes, leafId?}`；node 只含 ID、拓扑、kind/role、展示标签、时间、摘要和 children fact，不含 Pi JSONL entry、完整 message 或 tool content。Host 不缓存、分页、revision 或解释树拓扑，只做 lifecycle、admission、generation fencing 和路由。
@@ -105,7 +109,7 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 
 ## 整文件传输
 
-客户端在既有 hello 的 `requiredCapabilities` 加入 `file-transfer.v1`，随后仍发送原业务请求：`attachment.upload`、`workspace.file.read`、`deliverable.download`、`file.read`、`resource.content` 或 `system.content`。它不开放任意路径，也不需要先查能力。未要求此能力的旧调用保留原帧/分页行为；整文件读取只接受起点 offset 0。`conversation.image`、会话正文与 history 不属于这个能力。
+客户端在既有 hello 的 `requiredCapabilities` 加入 `file-transfer.v1`，随后仍发送原业务请求：`attachment.upload`、`workspace.file.read`、`deliverable.download`、`file.read`、`resource.content` 或 `system.content`。它不开放任意路径，也不需要先查能力。未要求此能力的旧调用保留原帧/分页行为；整文件读取只接受起点 offset 0。`conversation.image` 与 history 不属于这个能力；会话正文仅上文显式的新 stream 请求复用这些字节帧，不属于六种文件业务，也不因 hello 广告而改写旧正文请求。
 
 协议在 `protocol.ts` 定义一次，各帧带 `version: 2 + requestId + hostEpoch`：
 

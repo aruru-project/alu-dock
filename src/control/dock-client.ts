@@ -1,3 +1,4 @@
+import { CONVERSATION_CONTENT_STREAM_CAPABILITY, parseConversationContentChunk, parseConversationContentStreamMetadata, parseConversationContentStreamResult, type ConversationContentStreamMetadata, type ConversationContentStreamResult } from "./protocol.js";
 import { isDeepStrictEqual } from "node:util";
 import { MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES } from "../core/published-file.js";
 import { receiveClientFile, receiveLegacyClientFile, FileCapabilityMissingError, FileResponseError } from "./client-file-transfer.js";
@@ -475,6 +476,39 @@ export class DockClient {
       socket.once("error",error=>finish(transportError(error)));
       socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the conversation image completed":"Host closed before responding"));});});
     });
+  }
+
+  /** Explicit reference-view whole read. Chunks are provisional until this promise succeeds. */
+  async conversationContentStream(instanceId: string, contentRef: string, onChunk: (chunk: ReturnType<typeof parseConversationContentChunk>) => void | Promise<void>, signal?: AbortSignal): Promise<ConversationContentStreamResult> {
+    const decoder = new JsonLineDecoder();
+    let metadata: ConversationContentStreamMetadata | undefined;
+    try {
+      const received = await receiveClientFile({
+        openSocket: () => this.openSocket(),
+        hello: this.hello(this.createRequestId(), [...requiredCapabilities(CONVERSATION_CONTENT_CAPABILITY), CONVERSATION_REFERENCES_CAPABILITY, CONVERSATION_CONTENT_STREAM_CAPABILITY, FILE_TRANSFER_CAPABILITY]),
+        request: { kind: "request", version: 2, requestId: this.createRequestId(), type: "conversation.content.stream", params: { instanceId, contentRef } },
+        maximumBytes: Number.MAX_SAFE_INTEGER, signal, timeoutMs: this.timeoutMs,
+        // This explicit API never falls back. Preserve the Host's error code and
+        // missing-capability details instead of leaking the file retry sentinel.
+        fallbackCapabilities: [],
+        onReady: raw => {
+          metadata = parseConversationContentStreamMetadata(raw);
+          if (metadata.contentRef !== contentRef) throw new ProtocolValidationError("invalid_response", "Conversation readiness belongs to another content reference");
+        },
+        sink: async bytes => {
+          for (const line of decoder.push(Buffer.from(bytes))) await onChunk(parseConversationContentChunk(JSON.parse(line)));
+        },
+      });
+      decoder.finish();
+      const result = parseConversationContentStreamResult(received.result);
+      if (result.instanceId !== instanceId || !isDeepStrictEqual(metadata, { contentRef: result.contentRef, revision: result.revision, runtimeGeneration: result.runtimeGeneration })
+        || result.chunks !== received.summary.chunks || result.sizeBytes !== received.summary.sizeBytes || result.sha256 !== received.summary.sha256) throw new ProtocolValidationError("invalid_response", "Conversation completion differs from the verified body");
+      return result;
+    } catch (error) {
+      if (signal?.aborted) throw new ControlClientError("aborted", "Conversation content read cancelled");
+      if (error instanceof FileResponseError) throw new ControlClientError(error.code, error.message, undefined, error.details);
+      throw normalizeClientError(error);
+    }
   }
 
   private async readWholeFile(type:Exclude<FileTransferRequest["type"],"attachment.upload">,params:FileTransferRequest["params"],capability:Capability,maximumBytes:number,onChunk:(bytes:Uint8Array)=>void|Promise<void>,signal?:AbortSignal,onReady?:(metadata:unknown)=>void){

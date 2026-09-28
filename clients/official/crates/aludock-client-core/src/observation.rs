@@ -1442,7 +1442,7 @@ mod tests {
                                 histories.fetch_add(1, Ordering::SeqCst);
                                 json!({"instance":instance(1),"revision":"revision","entries":[{"entry":image,"contentRef":"image-body","contentComplete":false,"totalBlocks":2},{"entry":text,"contentRef":"text-body","contentComplete":false,"totalBlocks":1}],"hasEarlier":false,"nextCursor":null})
                             }
-                            "conversation.content" => {
+                            "conversation.content.stream" => {
                                 let reference =
                                     request["params"]["contentRef"].as_str().unwrap().to_owned();
                                 bodies.lock().unwrap().push(reference.clone());
@@ -1452,7 +1452,20 @@ mod tests {
                                     write_json_line(&mut socket, &json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":false,"error":{"code":"not_found","message":"fixture body unavailable","retryable":false}})).await.unwrap();
                                     return;
                                 }
-                                json!({"instanceId":"work","runtimeGeneration":1,"revision":"revision","contentRef":reference,"chunks":[{"type":"text","blockIndex":0,"text":"complete necessary text".repeat(300),"offset":0,"blockComplete":true}],"complete":true,"nextCursor":null})
+                                use sha2::Digest;
+                                use crate::file_io::{FileActivity, write_file_record};
+                                let activity = FileActivity::new();
+                                let metadata = json!({"runtimeGeneration":1,"revision":"revision","contentRef":reference});
+                                let bytes = format!("{}\n", json!({"type":"text","blockIndex":0,"text":"complete necessary text".repeat(300),"offset":0,"blockComplete":true})).into_bytes();
+                                let sha = hex::encode(sha2::Sha256::digest(&bytes));
+                                write_file_record(&mut socket, &json!({"kind":"file_ready","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","direction":"download","maxChunkBytes":65536,"windowBytes":262144,"metadata":metadata}), &activity).await.unwrap();
+                                write_file_record(&mut socket, &json!({"kind":"file_chunk","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","index":0,"data":base64::Engine::encode(&base64::engine::general_purpose::STANDARD,&bytes)}), &activity).await.unwrap();
+                                loop {
+                                    let progress: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                                    if progress["consumedBytes"] == bytes.len() { break; }
+                                }
+                                write_file_record(&mut socket, &json!({"kind":"file_complete","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","chunks":1,"sizeBytes":bytes.len(),"sha256":sha}), &activity).await.unwrap();
+                                json!({"instanceId":"work","runtimeGeneration":1,"revision":"revision","contentRef":reference,"chunks":1,"sizeBytes":bytes.len(),"sha256":sha})
                             }
                             other => panic!("unexpected request {other}"),
                         };

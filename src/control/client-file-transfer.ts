@@ -6,7 +6,7 @@ import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import {
   FILE_TRANSFER_CAPABILITY, parseControlResponse, parseFileTransferFrame, parseHelloReply,
   ProtocolHelloRejectedError, ProtocolValidationError,
-  type ClientHello, type FileTransferRequest, type FileTransferSummary,
+  type ClientHello, type ByteStreamRequest, type FileTransferRequest, type FileTransferSummary,
 } from "./protocol.js";
 
 export class FileCapabilityMissingError extends Error {}
@@ -16,7 +16,7 @@ export class FileResponseError extends Error {
 interface ClientFileOptions {
   openSocket: () => Socket;
   hello: ClientHello;
-  request: FileTransferRequest;
+  request: ByteStreamRequest;
   maximumBytes: number;
   signal?: AbortSignal;
   timeoutMs: number;
@@ -26,6 +26,7 @@ interface ClientFileOptions {
 export function receiveClientFile(options: ClientFileOptions & {
   sink: (bytes: Uint8Array) => void | Promise<void>;
   onReady?: (metadata: unknown) => void;
+  fallbackCapabilities?: readonly string[];
 }): Promise<{ result: unknown; summary: FileTransferSummary; hostEpoch: string }> {
   return new Promise((resolve, reject) => {
     const socket = options.openSocket(), decoder = new JsonLineDecoder();
@@ -53,7 +54,7 @@ export function receiveClientFile(options: ClientFileOptions & {
         let ack;
         try { ack = parseHelloReply(raw, options.hello.requestId); }
         catch (error) {
-          if (error instanceof ProtocolHelloRejectedError && error.rejection.code === "capability_missing" && error.rejection.missing?.includes(FILE_TRANSFER_CAPABILITY)) throw new FileCapabilityMissingError();
+          if (error instanceof ProtocolHelloRejectedError && error.rejection.code === "capability_missing" && error.rejection.missing?.some(capability => (options.fallbackCapabilities ?? [FILE_TRANSFER_CAPABILITY]).includes(capability))) throw new FileCapabilityMissingError();
           throw error;
         }
         for (const required of options.hello.requiredCapabilities) if (!ack.capabilities.includes(required)) throw new ProtocolValidationError("protocol_incompatible", "Host did not negotiate required capabilities");
@@ -68,7 +69,7 @@ export function receiveClientFile(options: ClientFileOptions & {
       if ((raw as { kind?: string }).kind === "response") {
         const response = parseControlResponse(raw, options.request.requestId, epoch);
         if (!response.ok) {
-          if (phase === "ready" && response.error.code === "capability_missing" && Array.isArray(response.error.details?.missing) && response.error.details.missing.includes(FILE_TRANSFER_CAPABILITY)) throw new FileCapabilityMissingError();
+          if (phase === "ready" && response.error.code === "capability_missing" && Array.isArray(response.error.details?.missing) && response.error.details.missing.some(capability => typeof capability === "string" && (options.fallbackCapabilities ?? [FILE_TRANSFER_CAPABILITY]).includes(capability))) throw new FileCapabilityMissingError();
           throw new FileResponseError(response.error.code, response.error.message, response.error.details);
         }
         if (phase !== "response" || !summary) throw new ProtocolValidationError("invalid_response", "File response preceded transfer completion");

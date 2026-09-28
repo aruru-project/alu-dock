@@ -635,7 +635,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       ended,
       helloSeen: false,
       nativeRequest: requestForNativeHost(request, identity),
-      requiredCapabilities: [...requiredCapabilities(capabilityForRequest(request.type)), ...conversationViewCapability(request), ...(fileMode ? [FILE_TRANSFER_CAPABILITY] : [])],
+      requiredCapabilities: [...new Set([...requiredCapabilities(capabilityForRequest(request.type)), ...conversationViewCapability(request), ...(fileMode ? [FILE_TRANSFER_CAPABILITY] : [])])],
       acceptingInput: true,
       inputTail: Promise.resolve(),
       queuedInputBytes: 0,

@@ -1,4 +1,5 @@
 mod presentation;
+mod content_stream;
 pub use presentation::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -584,6 +585,13 @@ impl DockClient {
         total_blocks: usize,
         mut context: ConversationReadContext,
     ) -> Result<Vec<crate::ContentBlock>> {
+        if context.view == Some(ConversationReadView::References) {
+            if let Some(blocks) = self.read_content_stream(instance_id, host_epoch, generation, revision, content_ref, total_blocks).await? {
+                return Ok(blocks);
+            }
+            // Only an explicit missing optional capability before readiness reaches
+            // this old page path. The descriptor's selected view remains fixed.
+        }
         let mut cursor: Option<String> = None;
         let mut seen = HashSet::new();
         let mut assembler = ContentAssembler::default();

@@ -1,8 +1,9 @@
+import { sendConversationContent } from "./host-conversation-stream.js";
 import { FileTransitRelay, fileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
 import { FileChannel, FileRelayActivity } from "./file-channel.js";
 import { FileReceiver } from "./file-transfer.js";
 import { sendHostFile } from "./host-file-transfer.js";
-import { FILE_TRANSFER_CAPABILITY, isFileTransferRequest } from "./protocol.js";
+import { FILE_TRANSFER_CAPABILITY, isByteStreamRequest } from "./protocol.js";
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
@@ -634,6 +635,8 @@ export class DockHost {
         throw new ProtocolValidationError("capability_missing", `Capability ${WORKER_CONFIG_CAPABILITY} is unavailable`);
       }
 
+      if (request.type === "conversation.content.stream" && !fileMode) throw new ProtocolValidationError("invalid_request", "Conversation streaming requires negotiated byte framing");
+
       const emitRouted = async (record: unknown): Promise<void> => {
         fileRelay?.record(record);
         const outcome=writeEnvelope(socket,record);
@@ -641,7 +644,7 @@ export class DockHost {
           if(!await waitForSocketDrain(socket,fileRelay?undefined:SOCKET_DRAIN_TIMEOUT_MS)){socket.destroy();throw new Error("Client stream stopped draining");}
         } else if(outcome!=="written"){socket.destroy();throw new Error("Client stream closed during routed response");}
       };
-      if(fileMode&&isFileTransferRequest(request)) {
+      if(fileMode&&isByteStreamRequest(request)) {
         fileRelay=new FileRelayActivity(socket,request.requestId,this.hostEpoch);
         const identity={version:2 as const,requestId:request.requestId,hostEpoch:this.hostEpoch};
         fileTransit=new FileTransitRelay([identity,identity],[emitRouted,async record=>{if(!remoteProxy)throw new Error("File route is not open");await remoteProxy.send(record);}],()=>socket.destroy());
@@ -662,7 +665,7 @@ export class DockHost {
       fileRelay?.dispose();
       fileRelay = undefined;
       fileTransit?.close(); fileTransit=undefined;
-      if (fileMode && isFileTransferRequest(request)) { fileChannel = new FileChannel(socket, request.requestId, this.hostEpoch, "invalid_request"); fileChannel.observeWire(receivedWireBytes); }
+      if (fileMode && isByteStreamRequest(request)) { fileChannel = new FileChannel(socket, request.requestId, this.hostEpoch, "invalid_request"); fileChannel.observeWire(receivedWireBytes); }
 
       if (request.type === "attachment.upload") {
         attachmentRequest = true;
@@ -709,9 +712,11 @@ export class DockHost {
       }
 
       let task!: Promise<void>;
-      const negotiatedDownload = fileChannel && isFileTransferRequest(request);
+      const negotiatedDownload = fileChannel && isByteStreamRequest(request);
       task = (negotiatedDownload
-        ? sendHostFile(request, this.registry, this.systemService, fileChannel!).then((result) => { this.sendSuccessAndEnd(socket, request.requestId, result); })
+        ? (request.type === "conversation.content.stream"
+          ? sendConversationContent(request, this.registry, fileChannel!)
+          : sendHostFile(request, this.registry, this.systemService, fileChannel!)).then((result) => { this.sendSuccessAndEnd(socket, request.requestId, result); })
         : this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; }))
         .catch((error: unknown) => {
           const operationId = mutationOperationId(request);

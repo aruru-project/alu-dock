@@ -156,6 +156,7 @@ export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
+export const CONVERSATION_CONTENT_STREAM_CAPABILITY = "conversation.content.stream.v1" as const;
 export const CONVERSATION_REFERENCES_CAPABILITY = "conversation.references.v1" as const;
 export const CONVERSATION_IMAGES_CAPABILITY = "conversation.images.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
@@ -184,6 +185,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "catalog.v1",
   CONVERSATION_CONTENT_CAPABILITY,
   CONVERSATION_REFERENCES_CAPABILITY,
+  CONVERSATION_CONTENT_STREAM_CAPABILITY,
   CONVERSATION_IMAGES_CAPABILITY,
   "core.v2",
   IMAGE_INPUT_CAPABILITY,
@@ -307,6 +309,7 @@ export type ControlRequest =
   | Request<"command.complete", { instanceId: string; command: CommandReferenceDto; argumentPrefix: string }>
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
   | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number; view?: "references" }>
+  | Request<"conversation.content.stream", { instanceId: string; contentRef: string }>
   | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string; view?: "references" }>
   | Request<"conversation.image", { instanceId: string; contentRef: string }>
   | Request<"file.read", { instanceId: string; fileRef: string; offset?: number }>
@@ -384,6 +387,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "command.complete": { target: "instance", effect: "query", transport: "unary" },
   "session.history": { target: "instance", effect: "query", transport: "unary" },
   "conversation.history": { target: "instance", effect: "query", transport: "unary" },
+  "conversation.content.stream": { target: "instance", effect: "query", transport: "response_stream" },
   "conversation.content": { target: "instance", effect: "query", transport: "unary" },
   "conversation.image": { target: "instance", effect: "query", transport: "response_stream" },
   "file.read": { target: "instance", effect: "query", transport: "unary" },
@@ -445,6 +449,23 @@ export type FileTransferRequest = Extract<ControlRequest, { type: typeof FILE_TR
 export function isFileTransferRequest(request: ControlRequest): request is FileTransferRequest {
   return (FILE_TRANSFER_REQUESTS as readonly string[]).includes(request.type);
 }
+/** Byte framing is shared; conversation bodies are not file business requests. */
+export type ByteStreamRequest = FileTransferRequest | Extract<ControlRequest, { type: "conversation.content.stream" }>;
+export function isByteStreamRequest(request: ControlRequest): request is ByteStreamRequest {
+  return isFileTransferRequest(request) || request.type === "conversation.content.stream";
+}
+export interface ConversationContentStreamMetadata { contentRef: string; revision: string; runtimeGeneration: number }
+export type ConversationContentStreamResult = ConversationContentStreamMetadata & FileTransferSummary & { instanceId: string };
+export function parseConversationContentStreamMetadata(input: unknown): ConversationContentStreamMetadata {
+  const value = object(input, "conversation stream metadata");
+  exact(value, ["contentRef", "revision", "runtimeGeneration"]);
+  return { contentRef: string(value.contentRef, "contentRef", 128), revision: string(value.revision, "revision", 128), runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration") };
+}
+export function parseConversationContentStreamResult(input: unknown): ConversationContentStreamResult {
+  const value = object(input, "conversation stream result");
+  exact(value, ["instanceId", "contentRef", "revision", "runtimeGeneration", "chunks", "sizeBytes", "sha256"]);
+  return { instanceId: id(value.instanceId, "instanceId"), ...parseConversationContentStreamMetadata({contentRef: value.contentRef, revision: value.revision, runtimeGeneration: value.runtimeGeneration}), ...parseFileTransferSummary(value) };
+}
 export interface FileTransferIdentity { version: 2; requestId: string; hostEpoch: string }
 export interface FileTransferSummary { chunks: number; sizeBytes: number; sha256: string }
 export type FileTransferFrame = FileTransferIdentity & (
@@ -495,12 +516,16 @@ export interface PublishedFileTransferResult extends FileTransferSummary { insta
 export interface ResourceFileTransferResult extends FileTransferSummary { revision: string }
 export type FileDownloadResult = WorkspaceFileReadResult | DeliverableDownloadResult | PublishedFileTransferResult | ResourceFileTransferResult;
 
+function parseFileTransferSummary(value: Record<string, unknown>): FileTransferSummary {
+  const sha256 = string(value.sha256, "file SHA-256", 64);
+  if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", "Invalid file SHA-256");
+  return { chunks: unsigned(value.chunks, "file chunks"), sizeBytes: unsigned(value.sizeBytes, "file bytes"), sha256 };
+}
+
 /** Terminal file metadata belongs to the original business request; bytes were verified separately. */
 export function parseFileDownloadResult(type: Exclude<FileTransferRequest["type"], "attachment.upload">, input: unknown): FileDownloadResult {
   const value = object(input, "file result");
-  const sha256 = string(value.sha256, "file SHA-256", 64);
-  if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", "Invalid file SHA-256");
-  const summary = { chunks: unsigned(value.chunks, "file chunks"), sizeBytes: unsigned(value.sizeBytes, "file bytes"), sha256 };
+  const summary = parseFileTransferSummary(value);
   switch (type) {
     case "workspace.file.read": return { ...summary, entry: parseWorkspaceEntryDto(value.entry, "entry") };
     case "deliverable.download": return { ...summary, deliverable: parseDeliverableDto(value.deliverable, "deliverable", { allowUnknownFields: true }) };
@@ -700,6 +725,7 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 /** The explicit view, not hello advertisement, selects the new contract. */
 export function conversationViewCapability(request: ControlRequest): string[] {
+  if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
 }
@@ -727,6 +753,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
+  if (type === "conversation.content.stream") return CONVERSATION_CONTENT_STREAM_CAPABILITY;
   if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
   if (type === "conversation.image") return CONVERSATION_IMAGES_CAPABILITY;
   if (type === "file.read") return PUBLISHED_FILES_CAPABILITY;
@@ -1107,6 +1134,10 @@ export function parseControlRequest(input: unknown): ControlRequest {
         contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"),
         cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"),
       } };
+    }
+    case "conversation.content.stream": {
+      exact(params, ["instanceId", "contentRef"], "invalid_request");
+      return { ...base, type, params: { instanceId: instanceId(), contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request") } };
     }
     case "conversation.image": {
       exact(params, ["instanceId", "contentRef"], "invalid_request");
@@ -1910,7 +1941,7 @@ function conversationContentFields(value: Record<string, unknown>): Omit<Convers
   };
 }
 
-function parseConversationContentChunk(input: unknown, field: string): ConversationContentChunkDto {
+export function parseConversationContentChunk(input: unknown, field = "chunk"): ConversationContentChunkDto {
   const chunk = object(input, field);
   const type = enumeration(chunk.type, `${field}.type`, ["text", "thinking", "image", "image_ref", "tool_call", "tool_result", "omitted"] as const);
   const blockIndex = unsigned(chunk.blockIndex, `${field}.blockIndex`);
