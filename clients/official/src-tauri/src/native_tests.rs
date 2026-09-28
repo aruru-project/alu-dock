@@ -352,22 +352,51 @@ fn endpoint_runtime(name: &str) -> (PathBuf, ConnectionRuntimeState, String) {
         "aludock-tauri-endpoint-{name}-{}",
         uuid::Uuid::new_v4()
     ));
-    let legacy_store = IdentityStore::new(&path);
-    let identity = legacy_store.load_or_create_identity().unwrap();
     let host = aludock_client_core::ClientIdentity::generate().unwrap();
-    let endpoint: Endpoint = "192.168.1.8:33781".parse().unwrap();
-    let client_id = legacy_store.client_id().unwrap();
-    legacy_store
-        .save_pairing(
-            &identity,
-            host.certificate_der(),
-            &endpoint,
-            "Test device",
-            &client_id,
-        )
-        .unwrap();
     let host_id = aludock_client_core::host_id(host.certificate_der());
     let registry = HostRegistry::open(&path).unwrap();
+    let identity = aludock_client_core::ClientIdentity::generate().unwrap();
+    let home = path.join("hosts").join(&host_id);
+    let ig = "identity-11111111-1111-4111-8111-111111111111";
+    let pg = "pairing-22222222-2222-4222-8222-222222222222";
+    let write = |path: PathBuf, bytes: &[u8]| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    };
+    // Hand-written current successful layout; no test-only production save API.
+    write(
+        home.join("state").join(ig).join("client-certificate.der"),
+        identity.certificate_der(),
+    );
+    write(
+        home.join("state").join(ig).join("client-private-key.der"),
+        identity.private_key_der(),
+    );
+    write(
+        home.join("state").join(pg).join("host-certificate.der"),
+        host.certificate_der(),
+    );
+    write(home.join("client-identity-manifest.json"), serde_json::json!({"schemaVersion":1,"generation":ig,"clientFingerprint":identity.fingerprint()}).to_string().as_bytes());
+    write(
+        home.join("pairing-manifest.json"),
+        serde_json::json!({"schemaVersion":1,"generation":pg})
+            .to_string()
+            .as_bytes(),
+    );
+    write(
+        home.join("client-id"),
+        b"33333333-3333-4333-8333-333333333333\n",
+    );
+    write(home.join("state").join(pg).join("pairing-metadata.json"), serde_json::json!({"schemaVersion":1,"endpoint":{"host":"192.168.1.8","port":33781},"deviceName":"Test device","clientId":"33333333-3333-4333-8333-333333333333","clientFingerprint":identity.fingerprint()}).to_string().as_bytes());
+    write(path.join("host-registry/registry-00000000000000000001.json"),
+        serde_json::json!({"schemaVersion": 2, "revision": 1, "activeHostId": host_id, "localSelected": false,
+            "hosts": [{"hostId": host_id, "addedAt": "2026-09-01T00:00:00Z"}]}).to_string().as_bytes());
     let preferences =
         ClientPreferencesStore::open(registry.root().join("client-preferences")).unwrap();
     let runtime = ConnectionRuntimeState {
@@ -852,4 +881,79 @@ fn queue_item_projection_keeps_attachments_and_removes_image_paths() {
     assert!(json.get("images").is_none());
     assert!(!json.to_string().contains("/home/private"));
     assert!(!json.to_string().contains("operation-1"));
+}
+
+#[tokio::test]
+async fn leaving_the_main_page_stops_pairing_before_it_can_save() {
+    use std::sync::atomic::AtomicBool;
+    let state = PairingTaskState::default();
+    let directory =
+        std::env::temp_dir().join(format!("aludock-page-pairing-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&directory).unwrap();
+    let saved = directory.join("saved-host");
+    let destination = saved.clone();
+    let (arrived, waiting) = tokio::sync::oneshot::channel();
+    let (release, response) = tokio::sync::oneshot::channel();
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    let handle = tauri::async_runtime::spawn(async move {
+        let _ = arrived.send(());
+        let _ = response.await; // Held authentication response at the external boundary.
+        fs::write(destination, b"successful pairing").unwrap();
+        let _ = completed.send(());
+    });
+    state.tasks.lock().unwrap().insert(
+        "old-page-request".into(),
+        PairingTask {
+            handle,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        },
+    );
+    waiting.await.unwrap();
+    // The real main-webview load-start and window-destroy hooks call this owner.
+    // Unlike Vue unmount, these boundaries also run for a native page reload.
+    state.cancel_all();
+    let _ = release.send(());
+    assert!(completion.await.is_err());
+    assert!(
+        !saved.exists(),
+        "the old page's waiting authorization cannot publish a later save"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn start_dispatch_registers_pairing_before_the_next_page_exit() {
+    use tauri::Manager;
+    let (path, runtime, _) = endpoint_runtime("pairing-dispatch");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let state = PairingTaskState::default();
+    let app = tauri::test::mock_builder()
+        .manage(runtime)
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![crate::connection::start_pairing])
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+    let webview: &tauri::Webview<_> = window.as_ref();
+    let (responded, response) = std::sync::mpsc::channel();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    // Invoke the actual generated command wrapper, not get_ipc_response (which
+    // waits and would hide an async command scheduled after a page-exit cut).
+    webview.clone().on_message(tauri::webview::InvokeRequest {
+        cmd: "start_pairing".into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+        url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
+        body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+            "requestId": request_id, "host": "127.0.0.1", "port": listener.local_addr().unwrap().port(), "deviceName": "This page"
+        })), headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
+    }, Box::new(move |_, _, result, _, _| { let _ = responded.send(result); }));
+    // This is the next platform event after dispatch returns. No async work is
+    // awaited before the cut; all accepted attempts must already be cancellable.
+    app.state::<PairingTaskState>().cancel_all();
+    assert!(
+        matches!(response.try_recv(), Ok(tauri::ipc::InvokeResponse::Ok(_))),
+        "start acceptance must not remain queued beyond the page exit"
+    );
+    fs::remove_dir_all(path).unwrap();
 }

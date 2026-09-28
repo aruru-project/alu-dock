@@ -15,8 +15,6 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     /// Override the platform-default private client data root.
-    ///
-    /// An existing one-Host identity directory is migrated in place.
     #[arg(long, global = true)]
     identity_dir: Option<PathBuf>,
 
@@ -114,11 +112,8 @@ async fn main() -> Result<()> {
             if cli.host_id.is_some() {
                 bail!("--host-id does not apply to pair; pairing creates and activates a Host");
             }
-            let promoted = registry
-                .pair_host(endpoint, &device_name, |event| match event {
-                    PairingProgress::RecoveringPairing => {
-                        println!("Recovering a pairing already accepted by the Host...");
-                    }
+            let verified = registry
+                .verify_pairing(endpoint, &device_name, |event| match event {
                     PairingProgress::PinGenerated { pin } => {
                         println!("Pairing PIN: {pin}");
                         println!(
@@ -146,17 +141,22 @@ async fn main() -> Result<()> {
                 })
                 .await
                 .context("pairing failed")?;
-            println!("Paired with {}.", promoted.outcome.endpoint);
-            println!("Host ID: {}", promoted.host_id);
+            let host_id = verified.host_id();
+            let revision = registry
+                .save_pairing(verified)
+                .context("could not save paired Host")?;
+            let store = registry
+                .resolve_store(Some(&host_id))
+                .context("could not resolve saved Host")?;
+            let pairing = store.load_pairing()?;
+            println!("Paired with {}.", pairing.metadata.endpoint);
+            println!("Host ID: {host_id}");
             println!(
                 "Client certificate fingerprint: {}",
-                promoted.outcome.client_fingerprint
+                pairing.identity.fingerprint()
             );
-            println!("Registry revision: {}", promoted.registry_revision);
+            println!("Registry revision: {revision}");
 
-            let store = registry
-                .resolve_store(Some(&promoted.host_id))
-                .context("could not resolve the promoted Host")?;
             let info = host_info(&store, None)
                 .await
                 .context("pairing completed, but the Protocol V2 host.info check failed")?;

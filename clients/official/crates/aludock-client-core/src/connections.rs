@@ -7,9 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, Endpoint, IdentityStore, Result, host_info,
-    private_fs::{
-        set_private_directory_permissions, storage_error, sync_directory, write_new_private_file,
-    },
+    private_fs::{ensure_private_directory, storage_error},
 };
 
 const PROFILE_DIRECTORY: &str = "connection-profile-history";
@@ -237,12 +235,11 @@ impl IdentityStore {
         let mut profile = self.load_connection_profile()?.ok_or_else(|| {
             ClientError::InvalidPairing("pair with an AluDock before editing its addresses".into())
         })?;
-        if profile.revision != expected_revision {
-            return Err(ClientError::ProfileConflict {
-                expected: expected_revision,
-                actual: profile.revision,
-            });
-        }
+        crate::storage::snapshots::check_revision(
+            expected_revision,
+            profile.revision,
+            |expected, actual| ClientError::ProfileConflict { expected, actual },
+        )?;
         update(&mut profile)?;
         profile.revision = profile.revision.checked_add(1).ok_or_else(|| {
             ClientError::InvalidPairing("Host connection profile revision overflowed".into())
@@ -606,19 +603,7 @@ fn load_latest_profile(
         if name.starts_with('.') || !name.ends_with(".json") {
             continue;
         }
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| storage_error(&path, source))?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(ClientError::InvalidPairing(
-                "Host connection profile is not a regular file".into(),
-            ));
-        }
-        #[cfg(windows)]
-        {
-            crate::windows_security::secure_file(&path)
-                .map_err(|source| storage_error(&path, source))?;
-        }
-        let bytes = fs::read(&path).map_err(|source| storage_error(&path, source))?;
+        let bytes = crate::private_fs::read_regular_file(&path)?;
         let profile: HostConnectionProfile = serde_json::from_slice(&bytes)?;
         profile.validate(expected_host_id)?;
         match &latest {
@@ -636,38 +621,18 @@ fn load_latest_profile(
 
 fn write_profile(directory: &Path, profile: &HostConnectionProfile) -> Result<bool> {
     ensure_private_directory(directory)?;
-    // The deterministic name is a cross-process compare-and-swap: exactly one
-    // writer can publish a given revision with hard-link no-clobber semantics.
-    let file_name = format!("profile-{:020}.json", profile.revision);
-    let final_path = directory.join(file_name);
-    let temporary = directory.join(format!(".{}.tmp", Uuid::new_v4()));
-    let bytes = serde_json::to_vec_pretty(profile)?;
-    write_new_private_file(&temporary, &bytes)?;
-    match crate::fs_publish::publish_new_file(&temporary, &final_path) {
-        Ok(true) => {
-            sync_directory(directory)?;
-            Ok(true)
-        }
-        Ok(false) => Ok(false),
-        Err(source) => Err(storage_error(&final_path, source)),
-    }
+    crate::private_fs::publish_private_file(
+        &directory.join(format!("profile-{:020}.json", profile.revision)),
+        &serde_json::to_vec_pretty(profile)?,
+    )
 }
-
 fn cleanup_old_profiles(directory: &Path, latest_revision: u64) -> Result<()> {
-    let retain_from = latest_revision.saturating_sub(1);
-    for entry in fs::read_dir(directory).map_err(|source| storage_error(directory, source))? {
-        let entry = entry.map_err(|source| storage_error(directory, source))?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let revision = name
-            .strip_prefix("profile-")
-            .and_then(|rest| rest.get(..20))
-            .and_then(|value| value.parse::<u64>().ok());
-        if revision.is_some_and(|revision| revision < retain_from) {
-            fs::remove_file(&path).map_err(|source| storage_error(&path, source))?;
-        }
-    }
-    sync_directory(directory)
+    crate::storage::snapshots::cleanup_snapshots(
+        directory,
+        latest_revision,
+        |name| name.strip_prefix("profile-")?.get(..20)?.parse().ok(),
+        storage_error,
+    )
 }
 
 fn safe_label(value: &str, maximum: usize) -> bool {
@@ -680,31 +645,6 @@ fn safe_label(value: &str, maximum: usize) -> bool {
                     '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
                 )
         })
-}
-
-fn ensure_private_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(ClientError::InvalidPairing(
-                    "Host profile path is not a real directory".into(),
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|source| storage_error(path, source))?;
-            let metadata =
-                fs::symlink_metadata(path).map_err(|source| storage_error(path, source))?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(ClientError::InvalidPairing(
-                    "Host profile path is not a real directory".into(),
-                ));
-            }
-        }
-        Err(source) => return Err(storage_error(path, source)),
-    }
-    set_private_directory_permissions(path)?;
-    assert_private_directory(path)
 }
 
 #[cfg(unix)]
@@ -732,9 +672,7 @@ fn assert_private_directory(path: &Path) -> Result<()> {
             path.display()
         )));
     }
-    crate::windows_security::secure_directory(path)
-        .and_then(|()| crate::windows_security::assert_private_directory(path))
-        .map_err(|source| storage_error(path, source))
+    crate::private_fs::set_private_directory_permissions(path)
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -783,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_single_endpoint_and_orders_local_before_remote() {
+    fn initial_profile_orders_local_before_remote() {
         let (path, store) = paired_store("migration");
         let initial = store
             .load_connection_profile()

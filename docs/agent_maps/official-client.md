@@ -50,7 +50,18 @@ App / 区域组件 → Vue 专属交互 owner → typed bridge
 - `operations::OperationAssociations` 保存操作结果，`OperationState` 和 `OperationFailure` 提供类型化状态/错误分类；core 不解析界面错误 JSON 决定是否未知。任务异常结束会收尾为未知，关闭界面不取消任务。`ConversationObservation::accept_session_result` 根据 core 的 `SessionChange` 应用成功回执；显示失败不改判远端操作失败。
 - `extension_ui::ExtensionControlState` 持有控制连接、当前问题、回答和 viewport 状态；Tauri 只转交界面事件。迟到的回答回执不清除新问题，断线不代答。
 
-各业务模块的 `presentation` 子模块只做原有 IPC 的路径/凭据隔离和显示形状转换，复用 core 枚举；不是第二套 Host 协议。Vue IPC 名称、参数与结果形状不变。文件传输和本机存储的内部实现没有随这次拆分重写。
+各业务模块的 `presentation` 子模块只做原有 IPC 的路径/凭据隔离和显示形状转换，复用 core 枚举；不是第二套 Host 协议。普通工作入口继续沿原有 Vue IPC；配对只保留开始、进度和取消本次请求，不再提供恢复或丢弃入口。
+
+### 本机连接资料与设置
+
+- `host_registry.rs` 只管已保存 Host 的新增、移除和打开；`host_registry/catalog.rs` 拥有目录、选择与版本检查。重复配对已保存 Host 会被拒绝，不覆盖原凭据或连接设置，也没有隐藏的同 Host 身份替换功能。
+- core `pairing.rs` 的一次授权只活在当前 future 中：新证书、PIN 和临时材料保存在内存，完成 SRP、server identity 的密码学验证和最终 exact-pin / mTLS / Protocol V2 确认后，才返回可保存的结果。Tauri 同步接纳开始命令并登记任务，再异步执行认证，避免旧页面的登记被排到页面退出之后；取消与最终保存互斥；主 WebView 开始重新加载或窗口销毁时，原生也会终止这些任务，不依赖 Vue 卸载。普通失焦或转入后台不取消配对，用户仍可去 Host 输入 PIN。Vue 用本次请求 ID 隔离迟到进度和回执，退出配对界面会取消当前请求。
+- 最终保存和移除共用资料根目录的 OS 文件锁，取得锁后再读目录快照，独立打开的客户端/CLI 不能把另一份已保存资料当作残留删除。文件锁复用 `private_fs.rs` 中供 `run_cache.rs` 使用的步骤，不增加事务日志。成功结果在自有私有临时目录完整写好，再发布为 `hosts/<host-id>` 并提交目录快照。保存失败清理自己的临时目录；重开不会认领未登记目录，也不会续办未完成授权。若进程在发布目录与提交快照之间退出，下一次显式完成的新授权可清理对应 Host 的未登记旧目录后保存，不要求它还包含完整凭据，也不自动恢复旧授权。删除正式目录时先同父目录改名到唯一隐藏清理位置并同步，再递归清理；清理中断只留下垃圾，不占据新保存的正式路径。
+- `storage.rs` 继续读取现有 0.2.12 的 identity/pairing manifest、凭据和 metadata，未扩展成功记录格式。只保留当前 registry schema 2 和当前 identity/pairing schema 1；不执行旧单 Host、flat 文件或旧 registry schema 的迁移。旧 pending/transaction 文件不再读取或提升，不为升级增加磁盘清理引擎。
+- `preferences.rs` 与 `connections.rs` 各自负责数据含义和格式检查，`storage/snapshots.rs` 只复用版本检查、查找与旧快照清理。连接资料继续接受当前客户端已经保存的历史后缀文件名，不套用 Host 目录的文件名规则。
+- `private_fs.rs` 复用私有路径校验、按需权限修复和原子新文件发布，`fs_publish.rs` 保留跨平台不覆盖提交。正常读取仍检查路径和凭据权限，但正确权限不重写，也不执行无变化的清理同步。目录/profile/preferences 仍有版本冲突保护。
+- 配对失败、取消或退出后只能显式重新开始。最终回包丢失可能在 Host 留下闲置设备授权，由用户在现有 Devices 页面移除；客户端不以 provisional pin 恢复授权，不自动撤销或补偿。
+- `cargo test --locked -p aludock-client-core` 覆盖当前格式重开、重复配对保留原资料和保存失败后的再次保存；`node tests/appInteraction.test.mjs` 走真实 Vue 配对控件和 IPC fixture。根目录 `npm run build` 后，在 `clients/official/` 运行 `pnpm test:pairing`，通过 loopback TLS 和真实 Rust public API 验证完整认证、丢失/篡改回包、取消及新授权，不启动 Host/Worker 或模型。
 
 ## 会话与编辑的长期规则
 

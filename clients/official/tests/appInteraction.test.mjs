@@ -36,6 +36,7 @@ nativeResults.set('create-failure', { ...nativeResults.get('new_session'), opera
 storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnectionId: 'host', connections: { host: {
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
+let startPairingNative, cancelPairingNative
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 const emit = (name, payload) => listeners.get(name)?.({ payload })
@@ -67,6 +68,8 @@ const invoke = async (command, args = {}) => {
   if (command === 'stop_work') return stopNative(args)
   if (command === 'dequeue_messages') return dequeueNative(args)
   if (command === 'submit_message') return submitNative(args)
+  if (command === 'start_pairing') return startPairingNative(args)
+  if (command === 'cancel_pairing') return cancelPairingNative(args)
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
   if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([work, otherWork]), total: 2 }
@@ -756,6 +759,55 @@ try {
   find(confirmation, item => item.type === 'button' && text(item) === '取消').props.onClick(); await removal; await settle()
   assert.equal(toRaw(document.activeElement), removeHost, 'cancelling the covering confirmation restores the underlying surface trigger')
   assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title'))
+  // #321: the actual connection form starts one live authorization. Native
+  // start/cancel acknowledgements may lag, but old events never own a new form.
+  find(hostDialog, item => item.type === 'button' && text(item) === '连接 Host').props.onClick(); await settle()
+  const pairingForm = find(hostDialog, item => item.type === 'form' && String(item.props.class).includes('host-pairing-card'))
+  const pairingInputs = all(pairingForm, item => item.type === 'input')
+  pairingInputs[0].props['onUpdate:modelValue']('127.0.0.1')
+  pairingInputs[1].props['onUpdate:modelValue'](4444)
+  pairingInputs[2].props['onUpdate:modelValue']('This device')
+  let releaseStart, releaseCancel, attemptA, attemptB
+  startPairingNative = args => {
+    attemptA = args.requestId
+    emit('aludock://pairing-status', { requestId: attemptA, stage: 'waiting_for_host', pin: '1111', message: '请在电脑上输入配对码' })
+    return new Promise(resolve => { releaseStart = resolve })
+  }
+  cancelPairingNative = args => {
+    emit('aludock://pairing-status', { requestId: args.requestId, stage: 'cancelled', message: '配对已取消；需要连接时请重新开始。' })
+    return new Promise(resolve => { releaseCancel = resolve })
+  }
+  const starting = pairingForm.props.onSubmit({ preventDefault() {} }); await settle()
+  assert.ok(text(pairingForm).includes('1111'), 'progress can precede the start acknowledgement')
+  const cancelling = find(pairingForm, item => item.type === 'button' && text(item) === '停止等待').props.onClick(); await settle()
+  assert.ok(text(pairingForm).includes('正在取消配对'))
+  releaseStart(); await starting; await settle()
+  assert.ok(text(pairingForm).includes('配对已取消'))
+  assert.equal(text(hostDialog).includes('可恢复配对'), false)
+  assert.equal(all(hostDialog, item => item.type === 'button' && ['恢复', '丢弃'].includes(text(item))).length, 0)
+  startPairingNative = args => {
+    attemptB = args.requestId
+    emit('aludock://pairing-status', { requestId: attemptB, stage: 'waiting_for_host', pin: '2222', message: '新的配对码' })
+  }
+  await pairingForm.props.onSubmit({ preventDefault() {} }); await settle()
+  assert.notEqual(attemptB, attemptA)
+  emit('aludock://pairing-status', { requestId: attemptA, stage: 'failed', error: { message: 'OLD FAILURE' } })
+  releaseCancel(true); await cancelling; await settle()
+  assert.ok(text(pairingForm).includes('2222'))
+  assert.equal(text(pairingForm).includes('OLD FAILURE'), false)
+  emit('aludock://pairing-status', { requestId: attemptB, stage: 'failed', error: { message: '配对未完成，请重新开始。' } }); await settle()
+  assert.ok(text(pairingForm).includes('配对未完成'))
+  const previous = attemptB
+  await pairingForm.props.onSubmit({ preventDefault() {} }); await settle()
+  assert.notEqual(attemptB, previous, 'retry is a fresh explicit attempt')
+  cancelPairingNative = args => {
+    emit('aludock://pairing-status', { requestId: args.requestId, stage: 'cancelled', message: '配对已取消。' })
+    return true
+  }
+  await find(pairingForm, item => item.props['aria-label'] === '收起配对表单').props.onClick(); await settle()
+  assert.equal(find(hostDialog, item => item.type === 'form' && String(item.props.class).includes('host-pairing-card')), undefined)
+  assert.equal(app.activeConnectionId, 'host', 'cancel/retry does not replace the saved selection')
+  console.log('PASS: actual Host form start/cancel/fresh retry/exit; no recovery UI; late progress and cancel cannot alter the next attempt')
   find(hostDialog, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
   assert.equal(toRaw(document.activeElement), answer)
   assert.equal(answer.value, 'unfinished extension answer')

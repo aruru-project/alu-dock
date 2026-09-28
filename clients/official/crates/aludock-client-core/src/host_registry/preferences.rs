@@ -1,9 +1,8 @@
-use std::{fs, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use super::{ensure_root_directory, read_private_json, sync_directory, write_new_private_file};
+use crate::private_fs::{ensure_private_directory, read_private_json};
 use crate::{ClientError, Result};
 
 const PREFERENCES_SCHEMA_VERSION: u32 = 1;
@@ -77,7 +76,7 @@ pub struct ClientPreferencesStore {
 impl ClientPreferencesStore {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let store = Self { root: root.into() };
-        ensure_root_directory(&store.root)?;
+        ensure_private_directory(&store.root)?;
         if store.load_snapshot()?.is_none() {
             store.write_snapshot(&ClientPreferences::initial())?;
         }
@@ -117,12 +116,11 @@ impl ClientPreferencesStore {
         change: impl FnOnce(&mut ClientPreferences),
     ) -> Result<ClientPreferences> {
         let mut snapshot = self.snapshot()?;
-        if snapshot.revision != expected_revision {
-            return Err(ClientError::PreferencesConflict {
-                expected: expected_revision,
-                actual: snapshot.revision,
-            });
-        }
+        crate::storage::snapshots::check_revision(
+            expected_revision,
+            snapshot.revision,
+            |expected, actual| ClientError::PreferencesConflict { expected, actual },
+        )?;
         snapshot.revision = snapshot.revision.checked_add(1).ok_or_else(|| {
             ClientError::InvalidPairing("client preferences revision overflowed".into())
         })?;
@@ -139,28 +137,19 @@ impl ClientPreferencesStore {
         Ok(snapshot)
     }
 
-    fn load_snapshot(&self) -> Result<Option<ClientPreferences>> {
-        let mut files = Vec::new();
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            let revision = parse_snapshot_filename(&name).ok_or_else(|| {
-                ClientError::InvalidPairing(
-                    "client preferences contain an unexpected committed entry".into(),
-                )
-            })?;
-            files.push((revision, entry.path()));
-        }
-        files.sort_by_key(|item| item.0);
-        let Some((filename_revision, path)) = files.last() else {
+    pub(super) fn load_snapshot(&self) -> Result<Option<ClientPreferences>> {
+        let Some((filename_revision, path)) = crate::storage::snapshots::latest_snapshot(
+            &self.root,
+            parse_snapshot_filename,
+            "client preferences contains an unexpected committed entry",
+            |_, source| ClientError::Io(source),
+        )?
+        else {
             return Ok(None);
         };
-        let snapshot: ClientPreferences = read_private_json(path)?;
+        let snapshot: ClientPreferences = read_private_json(&path)?;
         snapshot.validate()?;
-        if snapshot.revision != *filename_revision {
+        if snapshot.revision != filename_revision {
             return Err(ClientError::InvalidPairing(
                 "client preferences filename and revision do not match".into(),
             ));
@@ -169,32 +158,19 @@ impl ClientPreferencesStore {
     }
 
     fn write_snapshot(&self, snapshot: &ClientPreferences) -> Result<bool> {
-        let final_path = self.root.join(snapshot_filename(snapshot.revision));
-        let temporary = self.root.join(format!(".{}.tmp", Uuid::new_v4()));
-        write_new_private_file(&temporary, &serde_json::to_vec_pretty(snapshot)?)?;
-        match crate::fs_publish::publish_new_file(&temporary, &final_path) {
-            Ok(true) => {
-                sync_directory(&self.root)?;
-                Ok(true)
-            }
-            Ok(false) => Ok(false),
-            Err(source) => Err(ClientError::Storage {
-                path: final_path.display().to_string(),
-                source,
-            }),
-        }
+        crate::private_fs::publish_private_file(
+            &self.root.join(snapshot_filename(snapshot.revision)),
+            &serde_json::to_vec_pretty(snapshot)?,
+        )
     }
 
     fn cleanup_snapshots(&self, latest_revision: u64) -> Result<()> {
-        let retain_from = latest_revision.saturating_sub(1);
-        for entry in fs::read_dir(&self.root)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if parse_snapshot_filename(&name).is_some_and(|revision| revision < retain_from) {
-                fs::remove_file(entry.path())?;
-            }
-        }
-        sync_directory(&self.root)
+        crate::storage::snapshots::cleanup_snapshots(
+            &self.root,
+            latest_revision,
+            parse_snapshot_filename,
+            |_, source| ClientError::Io(source),
+        )
     }
 }
 
@@ -212,6 +188,8 @@ fn parse_snapshot_filename(name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use uuid::Uuid;
 
     #[test]
     fn client_choices_are_kept_after_reopening() {
@@ -228,6 +206,11 @@ mod tests {
         store
             .update_windows_away_delay(pure_client.revision, WindowsAwayDelay::ThirtyMinutes)
             .unwrap();
+        // A stale settings screen must not overwrite choices saved by another screen.
+        assert!(matches!(
+            store.update_windows_start_local_host(initial.revision, true),
+            Err(ClientError::PreferencesConflict { .. })
+        ));
         drop(store);
 
         let reopened = ClientPreferencesStore::open(&root).unwrap();
@@ -236,6 +219,34 @@ mod tests {
             reopened.snapshot().unwrap().windows_away_delay,
             WindowsAwayDelay::ThirtyMinutes
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn settings_save_failure_keeps_the_previous_choices_after_reopening() {
+        use std::os::unix::fs::PermissionsExt;
+        // This fixture exercises an OS-denied write; root bypasses Unix mode bits.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("OS write-denial fixture requires an unprivileged user");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aludock-preferences-write-failure-{}",
+            Uuid::new_v4()
+        ));
+        let store = ClientPreferencesStore::open(&root).unwrap();
+        let original = store.snapshot().unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = store.update_windows_start_local_host(original.revision, false);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(result, Err(ClientError::Storage { .. })));
+        drop(store);
+        let reopened = ClientPreferencesStore::open(&root).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), original);
+        let saved = reopened
+            .update_windows_start_local_host(original.revision, false)
+            .unwrap();
+        assert!(!saved.windows_start_local_host);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -70,6 +70,18 @@ pub fn run() {
         });
 
     builder
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                webview.state::<PairingTaskState>().cancel_all();
+            }
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<PairingTaskState>().cancel_all();
+            }
+        })
         .register_asynchronous_uri_scheme_protocol(
             "aludock-media",
             |context, request, responder| {
@@ -150,9 +162,7 @@ pub fn run() {
             connection::set_active_host,
             connection::remove_saved_host,
             connection::start_pairing,
-            connection::resume_pairing,
             connection::cancel_pairing,
-            connection::discard_pairing,
             connection::reselect_host_route,
             connection::bootstrap,
             connection::work_catalog,

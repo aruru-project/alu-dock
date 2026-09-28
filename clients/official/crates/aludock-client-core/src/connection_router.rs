@@ -822,9 +822,12 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("aludock-pairing-read-{}", uuid::Uuid::new_v4()));
         let store = IdentityStore::new(&directory);
-        let error = crate::pair(endpoint.endpoint.clone(), "reader-test", &store, |_| {})
+        let error = crate::HostRegistry::open(store.root())
+            .unwrap()
+            .verify_pairing(endpoint.endpoint.clone(), "reader-test", |_| {})
             .await
-            .unwrap_err();
+            .err()
+            .unwrap();
         assert!(
             matches!(error, ClientError::PairingRejected { code, .. } if code == "pairing_closed")
         );

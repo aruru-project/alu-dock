@@ -12,7 +12,7 @@ import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
 
 const props = defineProps<{
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'beginPairing' | 'connectLocal' | 'discardRecoveredPairing' | 'openHostSettings' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'pairingTransactionId' | 'recoverablePairings' | 'rememberPairDeviceName' | 'resumeRecoveredPairing' | 'showHostPairingForm' | 'stopPairing' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'pairDeviceName' | 'pairHost' | 'pairPort' | 'pairingError'>
+  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'beginPairing' | 'connectLocal' | 'openHostSettings' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'rememberPairDeviceName' | 'showHostPairingForm' | 'stopPairing' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'pairDeviceName' | 'pairHost' | 'pairPort' | 'pairingError'>
   platform: ReadonlyRefs<Pick<ReturnType<typeof usePlatformLifecycle>, 'desktopShell' | 'desktopShellBusy' | 'retryDesktopHost' | 'runDesktopShellAction'>>
   actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'mutationOutcomeUnknown' | 'reopenSelectedWork' | 'workMutating'>>
   busy: boolean

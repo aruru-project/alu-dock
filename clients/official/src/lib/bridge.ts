@@ -142,22 +142,14 @@ export async function removeSavedHost(hostId: string, expectedRevision: number):
   throw new Error('浏览器设计预览不会删除本地 Host')
 }
 
-export async function resumePairing(transactionId: string): Promise<void> {
-  if (isTauri) await invoke('resume_pairing', { transactionId })
+export async function startPairing(requestId: string, host: string, port: number, deviceName: string): Promise<void> {
+  if (!isTauri) throw new Error('请在原生客户端中配对。')
+  await invoke('start_pairing', { requestId, host, port, deviceName })
 }
 
-export async function startPairing(host: string, port: number, deviceName: string, replacementHostId?: string): Promise<string> {
-  if (isTauri) return invoke<string>('start_pairing', { host, port, deviceName, replacementHostId: replacementHostId ?? null })
-  throw new Error('浏览器设计预览不会发起配对')
-}
-
-export async function cancelPairing(transactionId: string): Promise<boolean> {
-  if (isTauri) return invoke<boolean>('cancel_pairing', { transactionId })
+export async function cancelPairing(requestId: string): Promise<boolean> {
+  if (isTauri) return invoke<boolean>('cancel_pairing', { requestId })
   return false
-}
-
-export async function discardPairing(transactionId: string): Promise<void> {
-  if (isTauri) await invoke('discard_pairing', { transactionId })
 }
 
 export async function verifyHostEndpoint(
@@ -270,7 +262,6 @@ export async function respondExtensionInteraction(handle: string, interactionId:
 export async function reportExtensionViewport(handle: string, width: number, height: number, context: ConnectionContext): Promise<void> {
   if (isTauri) await invoke('set_extension_widget_viewport', { ...context, handle, width, height })
 }
-
 
 export async function pickAttachments(workId: string, context: ConnectionContext): Promise<SelectedAttachment[]> {
   if (isTauri) return invoke('pick_attachments', { ...context, workId })
@@ -854,8 +845,6 @@ const previewCatalog: HostCatalog = {
   localEndpointEffective: '/run/user/1000/alu-dock/dock.sock',
   selectionGeneration: 1,
   localConnectionSupported: true,
-  pairingTransactionIds: [],
-  pairingTransactions: [],
   hosts: [{
     hostId: previewBootstrap.connectionId,
     displayName: previewBootstrap.host.profile!.displayName,

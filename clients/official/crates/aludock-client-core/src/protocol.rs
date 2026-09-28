@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{
     ClientError, ClientIdentity, ConnectionRouter, DockClient, Endpoint, HostConnectionProfile,
-    IdentityStore, PendingPairing, Result, StoredPairing, capabilities,
+    IdentityStore, Result, StoredPairing, capabilities,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -30,21 +30,6 @@ pub async fn host_info(
     store: &IdentityStore,
     endpoint_override: Option<Endpoint>,
 ) -> Result<HostInfo> {
-    if !store.is_paired()
-        && let Some(pending) = store.load_pending_pairing()?
-    {
-        let endpoint = endpoint_override.unwrap_or_else(|| pending.metadata.endpoint.clone());
-        let info = request_host_info(
-            &endpoint,
-            &pending.identity,
-            &pending.host_certificate,
-            &pending.metadata.client_id,
-        )
-        .await?;
-        store.commit_pending_pairing()?;
-        return Ok(info);
-    }
-
     let paired = store.load_pairing()?;
     let endpoint = endpoint_override.unwrap_or_else(|| paired.metadata.endpoint.clone());
     request_host_info(
@@ -82,17 +67,6 @@ impl DockClient {
         }
         Ok(result)
     }
-}
-
-pub(crate) async fn probe_pending_pairing(pending: &PendingPairing) -> Result<()> {
-    request_host_info(
-        &pending.metadata.endpoint,
-        &pending.identity,
-        &pending.host_certificate,
-        &pending.metadata.client_id,
-    )
-    .await?;
-    Ok(())
 }
 
 pub(crate) async fn probe_stored_pairing(pairing: &StoredPairing) -> Result<()> {

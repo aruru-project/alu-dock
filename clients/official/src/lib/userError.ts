@@ -1,5 +1,5 @@
 const SAFE_ERROR_CODES = new Set([
-  'invalid_endpoint', 'pairing_timeout', 'finalization_pending', 'pairing_invalid',
+  'invalid_endpoint', 'pairing_timeout', 'pairing_invalid',
   'pairing_closed', 'busy', 'wrong_pin', 'expired', 'not_found', 'invalid_request',
   'host_certificate_mismatch', 'attachment_too_large', 'attachment_source_changed',
   'attachment_upload_cancelled', 'attachment_picker_failed', 'attachment_limit_exceeded',

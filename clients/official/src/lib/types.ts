@@ -121,14 +121,6 @@ export interface HostCatalogEntry {
   profile: HostConnectionProfile
 }
 
-export interface RecoverablePairing {
-  transactionId: string
-  host?: string
-  port?: number
-  deviceName?: string
-  recoverable: boolean
-}
-
 export interface HostCatalog {
   schemaVersion: number
   revision: number
@@ -138,8 +130,6 @@ export interface HostCatalog {
   selectionGeneration: number
   localConnectionSupported: boolean
   hosts: HostCatalogEntry[]
-  pairingTransactionIds: string[]
-  pairingTransactions: RecoverablePairing[]
 }
 
 export interface HostSummary {

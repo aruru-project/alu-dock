@@ -44,13 +44,6 @@ impl From<ClientError> for CommandError {
                         "pairing_timeout",
                         "等待电脑确认超时。请重新打开配对窗口后再试。",
                     )
-                } else if message.contains("pending state was kept")
-                    || message.contains("pairing finalization is pending")
-                {
-                    (
-                        "finalization_pending",
-                        "电脑可能已经接受配对，但最终连接尚未确认。请保持地址不变并再次尝试，客户端会安全恢复。",
-                    )
                 } else {
                     (
                         "pairing_invalid",

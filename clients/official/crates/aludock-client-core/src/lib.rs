@@ -92,7 +92,7 @@ pub use extension_ui::{
 };
 pub use host_registry::{
     ClientPreferences, ClientPreferencesStore, HostRecord, HostRegistry, HostRegistrySnapshot,
-    PairingTransaction, PromotedPairing, VerifiedPairing, WindowsAwayDelay, validate_host_id,
+    WindowsAwayDelay, validate_host_id,
 };
 pub use identity::ClientIdentity;
 pub use instances::{
@@ -106,7 +106,7 @@ pub use observation::ConversationObservation;
 pub use operations::{
     OperationAssociation, OperationAssociations, OperationFailure, OperationState,
 };
-pub use pairing::{PairingOutcome, PairingProgress, pair, validate_device_name};
+pub use pairing::{PairingProgress, VerifiedPairing, validate_device_name};
 pub use protocol::{HostIdentity, HostInfo, host_info, host_info_for_profile};
 pub use published_files::{
     MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES, PublishedFileDto,
@@ -126,7 +126,7 @@ pub use sessions::{
     TreeNodeRole, TreeNodeState, begin_session_token_request, publish_session_tokens,
     resolve_machine_session_token, resolve_work_session_token,
 };
-pub use storage::{IdentityStore, PairingMetadata, PendingPairing, StoredPairing};
+pub use storage::{IdentityStore, PairingMetadata, StoredPairing};
 pub use workspace_files::{
     MAX_WORKSPACE_ENTRY_LIST_ITEMS, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_FILE_CHUNK_BYTES,
     WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFileKind, WorkspaceFilePage,

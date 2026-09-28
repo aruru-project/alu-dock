@@ -2,8 +2,8 @@ import type { ReadonlyRefs } from './ownerView'
 import { computed, onScopeDispose, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
-  cancelPairing, discardPairing, getSystemDeviceName, isTauri, renameHostProfile, reorderHostEndpoints,
-  reselectHostRoute, resumePairing, startPairing, deleteHostEndpoint, saveUnverifiedHostEndpoint, setConnectionPolicy,
+  cancelPairing, getSystemDeviceName, isTauri, renameHostProfile, reorderHostEndpoints,
+  reselectHostRoute, startPairing, deleteHostEndpoint, saveUnverifiedHostEndpoint, setConnectionPolicy,
   setHostEndpointEnabled, testHostEndpoint, verifyHostEndpoint
 } from './bridge'
 import {
@@ -25,8 +25,9 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   const deviceNameStorage = browserDeviceNameStorage()
   const pairDeviceName = ref(readDeviceNamePreference(deviceNameStorage) ?? DEVICE_NAME_FALLBACK)
   const pairDeviceNameTouched = ref(false)
-  const pairingTransactionId = ref('')
+  const pairingRequestId = ref('')
   const pairingStage = ref('idle')
+  let startingPairing: Promise<void> | undefined
   const pairingPin = ref('')
   const pairingMessage = ref('')
   const pairingError = ref('')
@@ -65,70 +66,57 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
     persistDeviceNamePreference(deviceNameStorage, pairDeviceName.value)
   }
 
-  async function beginPairing(replacementHostId?: string) {
-    if (!isTauri || options.busy() || !pairHost.value.trim() || !pairPort.value || pairPort.value < 1 || pairingStage.value === 'connecting') return
+  async function beginPairing() {
+    if (!isTauri || options.busy() || !pairHost.value.trim() || !pairPort.value || pairPort.value < 1 || pairingInProgress.value) return
     const deviceName = normalizeDeviceName(pairDeviceName.value)
     if (!deviceName) {
       pairingError.value = '请填写这台设备在 AluDock 中显示的名称。'
       return
     }
     pairDeviceName.value = deviceName
-    if (!replacementHostId && !await confirmRestoredImagesBeforeHostTransition()) return
-    pairingTransactionId.value = ''
+    if (!await confirmRestoredImagesBeforeHostTransition()) return
+    const requestId = crypto.randomUUID()
+    pairingRequestId.value = requestId
     pairingStage.value = 'connecting'
     pairingPin.value = ''
     pairingMessage.value = '正在连接这台电脑…'
     pairingError.value = ''
     try {
-      pairingTransactionId.value = await startPairing(
+      startingPairing = startPairing(
+        requestId,
         pairHost.value.trim(),
         pairPort.value,
         deviceName,
-        replacementHostId,
       )
+      await startingPairing
     } catch (cause) {
+      if (pairingRequestId.value !== requestId) return
+      pairingRequestId.value = ''
       pairingStage.value = 'failed'
       pairingMessage.value = ''
-      pairingError.value = errorMessage(cause)
-    }
-  }
-
-  async function resumeRecoveredPairing(transactionId: string) {
-    if (!isTauri || options.busy() || !await confirmRestoredImagesBeforeHostTransition()) return
-    pairingTransactionId.value = transactionId
-    pairingStage.value = 'connecting'
-    pairingPin.value = ''
-    pairingError.value = ''
-    pairingMessage.value = '正在恢复已保存的配对…'
-    try {
-      await resumePairing(transactionId)
-    } catch (cause) {
-      pairingStage.value = 'failed'
-      pairingMessage.value = ''
-      pairingError.value = errorMessage(cause)
-    }
-  }
-
-  async function discardRecoveredPairing(transactionId: string) {
-    if (!isTauri || options.busy()) return
-    try {
-      await discardPairing(transactionId)
-      if (pairingTransactionId.value === transactionId) pairingTransactionId.value = ''
-      await app.load()
-    } catch (cause) {
       pairingError.value = errorMessage(cause)
     }
   }
 
   async function stopPairing() {
-    if (!pairingTransactionId.value) return
-    const cancelled = await cancelPairing(pairingTransactionId.value)
-    if (cancelled) {
-      pairingStage.value = 'cancelled'
-      pairingPin.value = ''
-      pairingMessage.value = '已取消等待；可以从恢复列表继续或丢弃。'
+    const requestId = pairingRequestId.value
+    if (!requestId) return
+    pairingMessage.value = '正在取消配对…'
+    try {
+      // The cancel uses this attempt's native handle even if its start reply is delayed.
+      await startingPairing?.catch(() => {})
+      if (pairingRequestId.value !== requestId) return
+      const cancelled = await cancelPairing(requestId)
+      if (pairingRequestId.value !== requestId) return
+      if (cancelled) {
+        pairingRequestId.value = ''
+        pairingStage.value = 'cancelled'
+        pairingPin.value = ''
+        pairingMessage.value = '配对已取消；需要连接时请重新开始。电脑上已授予的权限可在设备管理中移除。'
+      }
+    } catch (cause) {
+      if (pairingRequestId.value === requestId) pairingError.value = errorMessage(cause)
     }
-    await app.load()
   }
 
   function openHostSettings() {
@@ -143,6 +131,10 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   }
 
   function showHostPairingForm() {
+    if (!pairingInProgress.value) {
+      pairingStage.value = 'idle'
+      pairingMessage.value = ''; pairingError.value = ''; pairingPin.value = ''
+    }
     pairDeviceName.value = resolveDeviceName(
       readDeviceNamePreference(deviceNameStorage),
       app.activeHost?.deviceName,
@@ -372,15 +364,14 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   const addingHost = ref(false)
 
   const pairingInProgress = computed(() => !['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage.value))
-  const recoverablePairings = computed(() => app.catalog?.pairingTransactions ?? [])
   let unlisten: UnlistenFn | undefined
   let disposed = false
   async function listenNative() {
-    const release = await listen<{ transactionId: string; stage: string; pin?: string; message?: string; error?: { message: string }; hostId?: string; registryRevision?: number; selectionGeneration?: number }>('aludock://pairing-status', ({ payload }) => {
-      if (pairingTransactionId.value && payload.transactionId !== pairingTransactionId.value) return
-      if (!pairingTransactionId.value) pairingTransactionId.value = payload.transactionId
+    const release = await listen<{ requestId: string; stage: string; pin?: string; message?: string; error?: { message: string }; hostId?: string; registryRevision?: number; selectionGeneration?: number }>('aludock://pairing-status', ({ payload }) => {
+      if (!pairingRequestId.value || payload.requestId !== pairingRequestId.value) return
       pairingStage.value = payload.stage
       if (payload.pin) pairingPin.value = payload.pin
+      if (['failed', 'cancelled', 'completed'].includes(payload.stage)) { pairingRequestId.value = ''; pairingPin.value = '' }
       pairingMessage.value = payload.message ?? ''
       pairingError.value = payload.error?.message ?? ''
       if (payload.stage === 'completed' && payload.hostId && payload.registryRevision && payload.selectionGeneration) {
@@ -391,6 +382,6 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
     })
     if (disposed) release(); else unlisten = release
   }
-  onScopeDispose(() => { disposed = true; unlisten?.() })
-  return { pairHost, pairPort, pairDeviceName, pairingTransactionId, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost, pairingInProgress, recoverablePairings, initializePairDeviceName, rememberPairDeviceName, beginPairing, resumeRecoveredPairing, discardRecoveredPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, listenNative }
+  onScopeDispose(() => { disposed = true; unlisten?.(); const id = pairingRequestId.value; pairingRequestId.value = ''; if (id) void (startingPairing ?? Promise.resolve()).catch(() => {}).then(() => cancelPairing(id)).catch(() => {}) })
+  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, listenNative }
 }

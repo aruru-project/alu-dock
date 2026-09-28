@@ -65,18 +65,6 @@ pub(crate) struct HostCatalog {
     pub(crate) selection_generation: u64,
     pub(crate) local_connection_supported: bool,
     pub(crate) hosts: Vec<HostCatalogEntry>,
-    pub(crate) pairing_transaction_ids: Vec<String>,
-    pub(crate) pairing_transactions: Vec<RecoverablePairing>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RecoverablePairing {
-    pub(crate) transaction_id: String,
-    pub(crate) host: Option<String>,
-    pub(crate) port: Option<u16>,
-    pub(crate) device_name: Option<String>,
-    pub(crate) recoverable: bool,
 }
 
 #[derive(Serialize)]
@@ -96,6 +84,21 @@ pub(crate) struct PairingTaskState {
     pub(crate) tasks: Arc<Mutex<HashMap<String, PairingTask>>>,
 }
 
+impl PairingTaskState {
+    /// Page reload/destruction ends the visible authorization. The same task
+    /// lock guards final saving, so an ended attempt cannot save afterwards.
+    pub(crate) fn cancel_all(&self) {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (_, task) in tasks.drain() {
+            task.cancelled.store(true, Ordering::Release);
+            task.handle.abort();
+        }
+    }
+}
+
 pub(crate) struct PairingTask {
     pub(crate) handle: tauri::async_runtime::JoinHandle<()>,
     pub(crate) cancelled: Arc<AtomicBool>,
@@ -108,7 +111,7 @@ pub(crate) fn pairing_task_matches(entry: &PairingTask, token: &Arc<AtomicBool>)
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PairingEmission {
-    pub(crate) transaction_id: String,
+    pub(crate) request_id: String,
     pub(crate) stage: String,
     pub(crate) pin: Option<String>,
     pub(crate) message: Option<String>,
@@ -164,26 +167,6 @@ pub(crate) fn catalog_from_snapshot(
             profile,
         });
     }
-    let pairing_transactions = runtime
-        .registry
-        .pairing_transactions()
-        .map_err(CommandError::from)?
-        .into_iter()
-        .map(|transaction| RecoverablePairing {
-            transaction_id: transaction.transaction_id,
-            host: transaction
-                .endpoint
-                .as_ref()
-                .map(|endpoint| endpoint.host().to_owned()),
-            port: transaction.endpoint.as_ref().map(Endpoint::port),
-            device_name: transaction.device_name,
-            recoverable: transaction.endpoint.is_some(),
-        })
-        .collect::<Vec<_>>();
-    let pairing_transaction_ids = pairing_transactions
-        .iter()
-        .map(|transaction| transaction.transaction_id.clone())
-        .collect();
     let local_connection_supported = cfg!(any(
         target_os = "windows",
         target_os = "linux",
@@ -212,14 +195,12 @@ pub(crate) fn catalog_from_snapshot(
         selection_generation,
         local_connection_supported,
         hosts,
-        pairing_transaction_ids,
-        pairing_transactions,
     })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn invalidate_connection_lifecycle(
-    app: &tauri::AppHandle,
+pub(crate) fn invalidate_connection_lifecycle<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     runtime: &ConnectionRuntimeState,
     follow: &FollowState,
     extension: &ExtensionControlState,
@@ -499,42 +480,26 @@ pub(crate) fn remove_saved_host(
     catalog_from_snapshot(&runtime, snapshot, generation)
 }
 
+// Registration must complete in synchronous IPC dispatch before a later page
+// load-start can cancel it. Only authentication runs in the spawned future.
 #[tauri::command]
-pub(crate) async fn start_pairing(
-    app: tauri::AppHandle,
+pub(crate) fn start_pairing<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, PairingTaskState>,
+    request_id: String,
     host: String,
     port: u16,
     device_name: String,
-    replacement_host_id: Option<String>,
-) -> Result<String, CommandError> {
+) -> Result<(), CommandError> {
     let endpoint = Endpoint::new(host, port).map_err(CommandError::from)?;
-    let transaction = {
-        // Host removal holds this same lifecycle lock through its registry
-        // mutation. A re-pair transaction is therefore either visible to
-        // deletion and discarded, or starts only after deletion and fails.
-        let _lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-        match replacement_host_id.as_deref() {
-            Some(expected_host_id) => runtime.registry.start_repairing_transaction(
-                endpoint.clone(),
-                &device_name,
-                expected_host_id,
-            ),
-            None => runtime
-                .registry
-                .start_pairing_transaction(endpoint.clone(), &device_name),
-        }
-        .map_err(CommandError::from)?
-    };
-    let transaction_id = transaction.transaction_id;
+    validate_device_name(&device_name).map_err(CommandError::from)?;
+    uuid::Uuid::parse_str(&request_id).map_err(|_| lifecycle_error())?;
     let mut tasks = state.tasks.lock().map_err(|_| lifecycle_error())?;
-    if tasks.contains_key(&transaction_id) {
-        return Ok(transaction_id);
+    if tasks.contains_key(&request_id) {
+        return Err(lifecycle_error());
     }
-
-    let task_transaction = transaction_id.clone();
-    let task_replacement_host_id = transaction.replacement_host_id;
+    let task_request = request_id.clone();
     let registry = runtime.registry.clone();
     let runtime_state = runtime.inner().clone();
     let task_app = app.clone();
@@ -552,7 +517,7 @@ pub(crate) async fn start_pairing(
             let _ = task_app.emit(
                 "aludock://pairing-status",
                 PairingEmission {
-                    transaction_id: task_transaction.clone(),
+                    request_id: task_request.clone(),
                     stage: stage.to_owned(),
                     pin,
                     message,
@@ -573,15 +538,6 @@ pub(crate) async fn start_pairing(
             None,
         );
         let report_progress = |progress| match progress {
-            PairingProgress::RecoveringPairing => emit(
-                "confirming",
-                None,
-                Some("正在确认上次已经获准的配对…".into()),
-                None,
-                None,
-                None,
-                None,
-            ),
             PairingProgress::PinGenerated { pin } => emit(
                 "waiting_for_host",
                 Some(pin),
@@ -629,23 +585,14 @@ pub(crate) async fn start_pairing(
                 None,
             ),
         };
-        let outcome = match task_replacement_host_id.as_deref() {
-            Some(expected_host_id) => {
-                registry
-                    .verify_repairing(endpoint, &device_name, expected_host_id, report_progress)
-                    .await
-            }
-            None => {
-                registry
-                    .verify_pairing(endpoint, &device_name, report_progress)
-                    .await
-            }
-        };
+        let outcome = registry
+            .verify_pairing(endpoint, &device_name, report_progress)
+            .await;
 
         match outcome {
             Ok(verified) => {
-                // The task slot serializes cancellation with promotion. Whichever acquires it
-                // first wins, so cancellation can never be followed by a promotion.
+                // The task slot serializes cancellation with saving. Whichever acquires it
+                // first wins, so cancellation can never be followed by a save.
                 let mut task_guard = match task_state.tasks.lock() {
                     Ok(guard) => guard,
                     Err(_) => {
@@ -662,7 +609,7 @@ pub(crate) async fn start_pairing(
                     }
                 };
                 let still_current = task_guard
-                    .get(&task_transaction)
+                    .get(&task_request)
                     .is_some_and(|entry| pairing_task_matches(entry, &task_cancelled));
                 if !still_current {
                     return;
@@ -670,7 +617,7 @@ pub(crate) async fn start_pairing(
                 let mut lifecycle = match runtime_state.lifecycle.lock() {
                     Ok(lifecycle) => lifecycle,
                     Err(_) => {
-                        task_guard.remove(&task_transaction);
+                        task_guard.remove(&task_request);
                         emit(
                             "failed",
                             None,
@@ -685,25 +632,20 @@ pub(crate) async fn start_pairing(
                 };
                 let old_connection_id = lifecycle.connection_id().map(str::to_owned);
                 let old_generation = lifecycle.selection_generation;
-                let promoted = match task_replacement_host_id.as_deref() {
-                    Some(expected_host_id) => {
-                        registry.promote_repairing(&verified.transaction_id, expected_host_id)
-                    }
-                    None => registry.promote_pairing(&verified.transaction_id, &verified.host_id),
-                };
+                let host_id = verified.host_id();
+                let promoted = registry.save_pairing(verified);
                 let registry_revision = match promoted.map_err(CommandError::from) {
                     Ok(revision) => revision,
                     Err(error) => {
-                        task_guard.remove(&task_transaction);
+                        task_guard.remove(&task_request);
                         emit("failed", None, None, Some(error), None, None, None);
                         return;
                     }
                 };
-                let generation = match lifecycle.transition_to_host(Some(verified.host_id.clone()))
-                {
+                let generation = match lifecycle.transition_to_host(Some(host_id.clone())) {
                     Ok(generation) => generation,
                     Err(error) => {
-                        task_guard.remove(&task_transaction);
+                        task_guard.remove(&task_request);
                         emit("failed", None, None, Some(error), None, None, None);
                         return;
                     }
@@ -722,103 +664,56 @@ pub(crate) async fn start_pairing(
                     &attachments,
                     &restored_images,
                     old_connection_id,
-                    Some(verified.host_id.clone()),
+                    Some(host_id.clone()),
                     old_generation,
                     generation,
                 );
                 emit(
                     "completed",
                     None,
-                    Some(if task_replacement_host_id.is_some() {
-                        "重新配对完成".into()
-                    } else {
-                        "配对完成".into()
-                    }),
+                    Some("配对完成".into()),
                     None,
-                    Some(verified.host_id),
+                    Some(host_id),
                     Some(registry_revision),
                     Some(generation),
                 );
-                task_guard.remove(&task_transaction);
+                task_guard.remove(&task_request);
             }
             Err(error) => {
+                // Authentication has no local pending state. A dropped network
+                // reply ends this attempt; it is not a local-storage recovery.
+                let connection_failed = matches!(
+                    &error,
+                    ClientError::Io(_) | ClientError::Tls(_) | ClientError::Protocol(_)
+                );
+                let mut error = CommandError::from(error);
+                if connection_failed {
+                    error.code = "pairing_invalid".into();
+                    error.message =
+                        "配对没有完成。请确认电脑端配对窗口和网络，然后重新开始。".into();
+                }
                 let should_emit = task_state.tasks.lock().ok().is_some_and(|mut tasks| {
                     let current = tasks
-                        .get(&task_transaction)
+                        .get(&task_request)
                         .is_some_and(|entry| pairing_task_matches(entry, &task_cancelled));
                     if current {
-                        tasks.remove(&task_transaction);
+                        tasks.remove(&task_request);
                     }
                     current
                 });
                 if should_emit {
-                    emit(
-                        "failed",
-                        None,
-                        None,
-                        Some(CommandError::from(error)),
-                        None,
-                        None,
-                        None,
-                    );
+                    emit("failed", None, None, Some(error), None, None, None);
                 }
             }
         }
     });
     tasks.insert(
-        transaction_id.clone(),
+        request_id.clone(),
         PairingTask {
             handle: task,
             cancelled,
         },
     );
-    Ok(transaction_id)
-}
-
-#[tauri::command]
-pub(crate) async fn resume_pairing(
-    app: tauri::AppHandle,
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    state: tauri::State<'_, PairingTaskState>,
-    transaction_id: String,
-) -> Result<(), CommandError> {
-    let transaction = runtime
-        .registry
-        .pairing_transactions()
-        .map_err(CommandError::from)?
-        .into_iter()
-        .find(|transaction| transaction.transaction_id == transaction_id)
-        .ok_or_else(|| {
-            CommandError::from(ClientError::InvalidPairing(
-                "pairing transaction was not found".into(),
-            ))
-        })?;
-    let endpoint = transaction.endpoint.ok_or_else(|| {
-        CommandError::from(ClientError::InvalidPairing(
-            "pairing transaction does not have a recoverable address".into(),
-        ))
-    })?;
-    let device_name = transaction.device_name.ok_or_else(|| {
-        CommandError::from(ClientError::InvalidPairing(
-            "pairing transaction does not have a device name".into(),
-        ))
-    })?;
-    let replacement_host_id = transaction.replacement_host_id;
-    let resumed = start_pairing(
-        app,
-        runtime,
-        state,
-        endpoint.host().to_owned(),
-        endpoint.port(),
-        device_name,
-        replacement_host_id,
-    )
-    .await?;
-    if resumed != transaction_id {
-        return Err(CommandError::from(ClientError::InvalidPairing(
-            "pairing resume selected a different transaction".into(),
-        )));
-    }
     Ok(())
 }
 
@@ -826,24 +721,25 @@ pub(crate) async fn resume_pairing(
 pub(crate) fn cancel_pairing(
     app: tauri::AppHandle,
     state: tauri::State<'_, PairingTaskState>,
-    transaction_id: String,
+    request_id: String,
 ) -> Result<bool, CommandError> {
     if let Some(task) = state
         .tasks
         .lock()
         .map_err(|_| lifecycle_error())?
-        .remove(&transaction_id)
+        .remove(&request_id)
     {
         task.cancelled.store(true, Ordering::Release);
         task.handle.abort();
         let _ = app.emit(
             "aludock://pairing-status",
             PairingEmission {
-                transaction_id,
+                request_id,
                 stage: "cancelled".into(),
                 pin: None,
                 message: Some(
-                    "已停止等待。若已在电脑上确认，请重新打开这台 Host 查看配对结果。".into(),
+                    "配对已取消；需要连接时请重新开始。电脑上已授予的权限可在设备管理中移除。"
+                        .into(),
                 ),
                 error: None,
                 host_id: None,
@@ -854,24 +750,6 @@ pub(crate) fn cancel_pairing(
         return Ok(true);
     }
     Ok(false)
-}
-
-#[tauri::command]
-pub(crate) fn discard_pairing(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    state: tauri::State<'_, PairingTaskState>,
-    transaction_id: String,
-) -> Result<(), CommandError> {
-    let tasks = state.tasks.lock().map_err(|_| lifecycle_error())?;
-    if tasks.contains_key(&transaction_id) {
-        return Err(CommandError::from(ClientError::InvalidPairing(
-            "cancel the running pairing before discarding it".into(),
-        )));
-    }
-    runtime
-        .registry
-        .discard_pairing_transaction(&transaction_id)
-        .map_err(CommandError::from)
 }
 
 // Route changes restart native observation tasks; dispatch inside Tauri's async
