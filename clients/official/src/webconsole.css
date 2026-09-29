@@ -2188,6 +2188,8 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   .ui-dialog-btn { min-height: 44px; }
   .ui-dialog-input,
   .ui-dialog-editor { margin: 14px 12px; }
+  /* Search boxes already sit in a padded wrapper; a margin here pushes them past the right edge. */
+  .ui-dialog-search { margin: 0; }
   .ui-dialog-composer-editor { margin: 12px 10px 0; padding: 13px; font-size: 14px; }
   .ui-dialog-composer-footer { padding: 10px; }
   .alu-project-status { padding: 10px; }
