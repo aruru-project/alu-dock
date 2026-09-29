@@ -15,7 +15,6 @@
   animation: dialogFadeIn 0.14s ease-out;
 }
 .ui-dialog-box {
-  position: relative;
   display: flex;
   flex-direction: column;
   width: min(520px, 100%);
@@ -217,7 +216,6 @@
   .ui-dialog-size-wide,
   .ui-dialog-size-tree,
   .cmd-palette-box {
-    max-height: 92vh;
     max-height: 92vh;
     max-height: 92dvh;
     border-radius: 17px 17px 0 0;

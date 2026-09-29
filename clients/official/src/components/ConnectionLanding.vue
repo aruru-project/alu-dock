@@ -298,9 +298,5 @@ function inactiveState(work: Work) {
     width: min(100%, 760px);
     margin-inline: auto;
   }
-  .alu-work-state {
-    width: min(100%, 760px);
-    margin-inline: auto;
-  }
 }
 </style>

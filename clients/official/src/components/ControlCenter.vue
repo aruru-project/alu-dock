@@ -1121,7 +1121,6 @@ function isCurrentModel(model: ModelInfo) {
   overflow-wrap: anywhere;
 }
 .cmd-center-output {
-  min-height: 160px;
   flex: 1 1 auto;
   overflow-y: auto;
   margin: 0 14px 12px;

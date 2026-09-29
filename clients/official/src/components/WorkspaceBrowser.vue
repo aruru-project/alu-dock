@@ -546,7 +546,6 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 0 13px;
   border-bottom: 1px solid var(--alu-border);
   background: rgba(13, 21, 35, .94);
 }
