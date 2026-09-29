@@ -1213,15 +1213,13 @@ export class PiAgentAdapter {
       binding.bufferEvents = true;
       await this.options.extensionUiBroker?.beginGenerationChange("reload");
       try {
-        // Match Pi's /reload path. ModelRuntime.reloadConfig() also refreshes
-        // remote catalogs, which made resource reload depend on pi.dev (card #222).
         let seamCalls = 0;
         await binding.session.reload({
-          beforeSessionStart: () => {
+          beforeSessionStart: async () => {
             seamCalls += 1;
             // Extension providers have been re-registered by this point, so
-            // refresh model objects only now rather than against the old runner.
-            refreshSessionModelReferences(binding.session, binding.services);
+            // refresh models only now rather than against the old runner.
+            await refreshSessionModels(binding.session, binding.services);
             syncAgentRuntimeSettings(binding.session, binding.services.settingsManager);
             this.options.configureNetwork?.(binding.services.settingsManager);
           },
@@ -1427,8 +1425,8 @@ export class PiAgentAdapter {
         await this.options.extensionUiBroker?.beginGenerationChange("reload");
         try {
           await session.reload({
-            beforeSessionStart: () => {
-              refreshSessionModelReferences(session, services);
+            beforeSessionStart: async () => {
+              await refreshSessionModels(session, services);
               syncAgentRuntimeSettings(session, services.settingsManager);
               this.options.configureNetwork?.(services.settingsManager);
             },
@@ -3035,7 +3033,10 @@ function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
   };
 }
 
-function refreshSessionModelReferences(session: AgentSession, services: AgentSessionServices): void {
+async function refreshSessionModels(session: AgentSession, services: AgentSessionServices): Promise<void> {
+  // Reload adopts local models.json and saved catalogs without waiting on pi.dev
+  // (cards #222/#330). Pi owns loading, merging and provider availability.
+  await services.modelRuntime.refresh({ allowNetwork: false });
   const current = session.model;
   if (current) {
     const refreshed = services.modelRuntime.getModel(current.provider, current.id);

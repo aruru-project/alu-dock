@@ -11,12 +11,6 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
 
-const PROXY_ENVIRONMENT_KEYS = [
-  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-  "http_proxy", "https_proxy", "all_proxy",
-  "NO_PROXY", "no_proxy", "PI_OFFLINE",
-] as const;
-
 test("package-managed Pi extensions remain loaded across new and reload", { timeout: 15_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-package-lifecycle-"));
   const cwd = join(root, "cwd");
@@ -141,22 +135,43 @@ export default function (pi) {
   for (const name of DOCK_TOOL_NAMES) assert.equal(freshTools.tools.find((tool) => tool.name === name)?.active, true);
 });
 
-test("real Protocol reload completes when remote model catalogs are unavailable (card #222)", { timeout: 15_000 }, async () => {
+test("existing Work reads local model changes on new and both reload paths while upstream is unavailable (cards #222/#330)", { timeout: 20_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-reload-real-"));
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
   const sessionDir = join(root, "sessions");
   const socketPath = join(root, "dock.sock");
-  await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(sessionDir)]);
+  await Promise.all([mkdir(cwd), mkdir(join(agentDir, "extensions"), { recursive: true }), mkdir(sessionDir)]);
+  const saveLocalModels = (id: string, name: string) => writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: {
+    "local-llm": { baseUrl: "http://127.0.0.1:9/v1", api: "openai-completions", apiKey: "local-fixture",
+      models: [{ id: "original", name }, { id }] },
+  } }));
+  // A saved upstream catalog is the output consumed after `aludock update model`.
+  // Use a fixed date newer than Pi's bundled model data, not a network download.
+  const saveCatalog = (id: string) => writeFile(join(agentDir, "models-store.json"), JSON.stringify({ openai: {
+    checkedAt: 0, lastModified: 4_102_444_800_000,
+    models: [{ id, name: id, provider: "openai", api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1",
+      reasoning: false, input: ["text"], contextWindow: 32_000, maxTokens: 2_000,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+  } }));
   await Promise.all([
     chmod(root, 0o700),
     writeFile(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "fixture-no-model-call" } })),
-    writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "openai", defaultModel: "gpt-4o-mini" })),
+    writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "local-llm", defaultModel: "original" })),
+    saveLocalModels("initial", "Original at startup"),
+    writeFile(join(agentDir, "extensions", "reload-fixture.ts"), `
+export default function (pi) {
+  pi.registerCommand("fixture-reload", { handler: async (_args, ctx) => { await ctx.reload(); } });
+  pi.on("session_start", (_event, ctx) => { ctx.ui.setStatus("model-at-start", ctx.model?.name); });
+}
+`),
   ]);
 
   const blackhole = createServer();
   const blackholeSockets = new Set<Socket>();
+  let upstreamConnections = 0;
   blackhole.on("connection", (socket) => {
+    upstreamConnections += 1;
     blackholeSockets.add(socket);
     socket.on("close", () => blackholeSockets.delete(socket));
   });
@@ -164,13 +179,19 @@ test("real Protocol reload completes when remote model catalogs are unavailable 
   const address = blackhole.address();
   assert.ok(address && typeof address !== "string");
   const proxyUrl = `http://127.0.0.1:${address.port}`;
-  const originalEnvironment = new Map(PROXY_ENVIRONMENT_KEYS.map((key) => [key, process.env[key]]));
-  for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] as const) {
-    process.env[key] = proxyUrl;
-  }
-  process.env.NO_PROXY = "";
-  process.env.no_proxy = "";
-  delete process.env.PI_OFFLINE;
+  const workerEnvironment = {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR,
+    ComSpec: process.env.ComSpec, PATHEXT: process.env.PATHEXT,
+    HOME: root, USERPROFILE: root, PI_CODING_AGENT_DIR: agentDir,
+    XDG_CONFIG_HOME: join(root, "config"), XDG_CACHE_HOME: join(root, "cache"),
+    XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state"), XDG_RUNTIME_DIR: join(root, "run"),
+    APPDATA: join(root, "appdata"), LOCALAPPDATA: join(root, "localappdata"),
+    TMPDIR: root, TEMP: root, TMP: root,
+    // Deliberately omit PI_OFFLINE: an accidental network refresh must reach the stalled proxy.
+    PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
+    HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, ALL_PROXY: proxyUrl,
+    http_proxy: proxyUrl, https_proxy: proxyUrl, all_proxy: proxyUrl, NO_PROXY: "", no_proxy: "",
+  };
 
   const registry = new DockRegistry(
     (input) => createPiInstance({
@@ -178,7 +199,7 @@ test("real Protocol reload completes when remote model catalogs are unavailable 
       agentDir,
       sessionDir,
       tools: [],
-      workerEnvironment: { ...process.env },
+      workerEnvironment,
       workerTimeouts: { mutationMs: 1_500, termMs: 300 },
     }),
     () => "reload-real-instance",
@@ -189,14 +210,36 @@ test("real Protocol reload completes when remote model catalogs are unavailable 
   try {
     await host.start();
     const created = await client.create(cwd, "reload real", "reload-real-create");
-    restoreEnvironment(originalEnvironment);
-
-    const result = await client.reloadSession(created.id, "reload-real-operation");
-
-    assert.equal(result.instance.lifecycle, "active");
-    assert.equal(result.instance.runtimeGeneration, 2);
+    for (const action of ["new", "reload", "extension-reload"] as const) {
+      const localId = `local-${action}`;
+      const catalogId = `cached-${action}`;
+      const name = `Original after ${action}`;
+      await Promise.all([saveLocalModels(localId, name), saveCatalog(catalogId)]);
+      const before = (await client.read(created.id)).instance;
+      if (action === "new") await client.newSession(created.id, undefined, "models-new");
+      else if (action === "reload") await client.reloadSession(created.id, "models-reload");
+      else {
+        await client.prompt(created.id, "/fixture-reload", "auto", "models-extension-reload");
+        await waitForRead(client, created.id, (read) => read.instance.execution === "idle"
+          && read.instance.extensionStatus?.["model-at-start"] === name);
+      }
+      const after = (await client.read(created.id)).instance;
+      assert.equal(after.id, created.id);
+      assert.equal(after.lifecycle, "active");
+      assert.equal(after.executor.model?.id, "original", `${action} keeps the selected model`);
+      assert.equal(after.extensionStatus?.["model-at-start"], name, `${action} starts extensions with the refreshed model`);
+      if (action !== "new") assert.equal(after.executor.piSessionId, before.executor.piSessionId, "reload retains the session");
+      const models = await client.models(created.id);
+      assert.ok(models.models.some((model) => model.provider === "local-llm" && model.id === localId), `${action} loads models.json`);
+      assert.ok(models.models.some((model) => model.provider === "openai" && model.id === catalogId), `${action} loads the saved catalog`);
+      for (const [provider, id] of [["local-llm", localId], ["openai", catalogId]] as const) {
+        const selected = await client.setModel(created.id, provider, id, `select-${id}`);
+        assert.equal(selected.instance.executor.model?.id, id);
+      }
+      await client.setModel(created.id, "local-llm", "original", `restore-${action}`);
+    }
+    assert.equal(upstreamConnections, 0, "the card #222 stalled-upstream incident must not return");
   } finally {
-    restoreEnvironment(originalEnvironment);
     client.closeActiveConnections();
     await host.stop().catch(() => {});
     for (const socket of blackholeSockets) socket.destroy();
@@ -216,13 +259,6 @@ async function waitForRead(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Timed out waiting for the Work projection");
-}
-
-function restoreEnvironment(original: ReadonlyMap<string, string | undefined>): void {
-  for (const [key, value] of original) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
 }
 
 function listen(server: Server): Promise<void> {
