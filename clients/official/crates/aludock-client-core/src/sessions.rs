@@ -1,5 +1,5 @@
-mod presentation;
 mod content_stream;
+mod presentation;
 pub use presentation::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,7 @@ use crate::{
     PublishedFileDto, ResourceInfo, Result,
     capabilities::{
         CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES, CONVERSATION_REFERENCES,
-        CONVERSATION_REFERENCES_V1,
-        SESSION_COMMANDS as SESSION_COMMAND_CAPABILITIES,
+        CONVERSATION_REFERENCES_V1, SESSION_COMMANDS as SESSION_COMMAND_CAPABILITIES,
         SESSION_CORE_REQUIRED as SESSION_CORE_CAPABILITIES,
         SESSION_HISTORY as SESSION_HISTORY_CAPABILITIES, SESSION_TREE as SESSION_TREE_CAPABILITIES,
     },
@@ -511,7 +510,11 @@ impl DockClient {
             .request_with_host_epoch(
                 "conversation.history",
                 &params,
-                if params.view.is_some() { CONVERSATION_REFERENCES } else { CONVERSATION_CAPABILITIES },
+                if params.view.is_some() {
+                    CONVERSATION_REFERENCES
+                } else {
+                    CONVERSATION_CAPABILITIES
+                },
                 None,
             )
             .await;
@@ -552,7 +555,11 @@ impl DockClient {
             .request_with_host_epoch(
                 "conversation.content",
                 &params,
-                if params.view.is_some() { CONVERSATION_REFERENCES } else { CONVERSATION_CAPABILITIES },
+                if params.view.is_some() {
+                    CONVERSATION_REFERENCES
+                } else {
+                    CONVERSATION_CAPABILITIES
+                },
                 None,
             )
             .await;
@@ -586,7 +593,17 @@ impl DockClient {
         mut context: ConversationReadContext,
     ) -> Result<Vec<crate::ContentBlock>> {
         if context.view == Some(ConversationReadView::References) {
-            if let Some(blocks) = self.read_content_stream(instance_id, host_epoch, generation, revision, content_ref, total_blocks).await? {
+            if let Some(blocks) = self
+                .read_content_stream(
+                    instance_id,
+                    host_epoch,
+                    generation,
+                    revision,
+                    content_ref,
+                    total_blocks,
+                )
+                .await?
+            {
                 return Ok(blocks);
             }
             // Only an explicit missing optional capability before readiness reaches
@@ -1112,8 +1129,20 @@ impl ContentAssembler {
             return Err(protocol("conversation content blocks were not contiguous"));
         }
         match chunk {
-            ConversationContentChunk::ImageRef { mime_type, content_ref, file_id, .. } => {
-                self.blocks.insert(index, PartialBlock::ImageRef { mime: mime_type, content_ref, file_id });
+            ConversationContentChunk::ImageRef {
+                mime_type,
+                content_ref,
+                file_id,
+                ..
+            } => {
+                self.blocks.insert(
+                    index,
+                    PartialBlock::ImageRef {
+                        mime: mime_type,
+                        content_ref,
+                        file_id,
+                    },
+                );
                 self.next_block += 1;
             }
             ConversationContentChunk::Text {
@@ -1359,8 +1388,15 @@ impl ContentAssembler {
                 .remove(&index)
                 .ok_or_else(|| protocol("conversation content omitted a block"))?;
             output.push(match block {
-                PartialBlock::ImageRef { mime, content_ref, file_id } => crate::ContentBlock::Image {
-                    mime_type: mime, content_ref, file_id, data: None,
+                PartialBlock::ImageRef {
+                    mime,
+                    content_ref,
+                    file_id,
+                } => crate::ContentBlock::Image {
+                    mime_type: mime,
+                    content_ref,
+                    file_id,
+                    data: None,
                 },
                 PartialBlock::Text {
                     kind: false,
@@ -1594,13 +1630,20 @@ mod tests {
                 block_complete: true,
             })
             .unwrap();
-        assembler.push(serde_json::from_value(serde_json::json!({
-            "type": "image_ref", "blockIndex": 2, "mimeType": "image/png",
-            "contentRef": "original-image", "fileId": "permanent-attachment"
-        })).unwrap()).unwrap();
+        assembler
+            .push(
+                serde_json::from_value(serde_json::json!({
+                    "type": "image_ref", "blockIndex": 2, "mimeType": "image/png",
+                    "contentRef": "original-image", "fileId": "permanent-attachment"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         let blocks = assembler.finish(3).unwrap();
-        assert!(matches!(&blocks[2], crate::ContentBlock::Image { mime_type, content_ref: Some(reference), file_id: Some(file), data: None }
-            if mime_type == "image/png" && reference == "original-image" && file == "permanent-attachment"));
+        assert!(
+            matches!(&blocks[2], crate::ContentBlock::Image { mime_type, content_ref: Some(reference), file_id: Some(file), data: None }
+            if mime_type == "image/png" && reference == "original-image" && file == "permanent-attachment")
+        );
         assert!(matches!(&blocks[0], crate::ContentBlock::Text { text } if text == "hello"));
         assert!(
             matches!(&blocks[1], crate::ContentBlock::ToolCall { tool_name, .. } if tool_name == "read")

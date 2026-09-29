@@ -741,11 +741,16 @@ mod tests {
                         return;
                     }
                     if let ServerMode::Records(mode) = mode {
-                        let request: Value = read_json_line(&mut stream, 1024 * 1024).await.unwrap();
+                        let request: Value =
+                            read_json_line(&mut stream, 1024 * 1024).await.unwrap();
                         requests.fetch_add(1, Ordering::SeqCst);
                         let id = &request["requestId"];
                         if mode == "refused" || mode == "missing" {
-                            let code = if mode == "missing" { "capability_missing" } else { "instance_not_active" };
+                            let code = if mode == "missing" {
+                                "capability_missing"
+                            } else {
+                                "instance_not_active"
+                            };
                             write_json_line(&mut stream, &serde_json::json!({"kind":"response","version":2,"requestId":id,"hostEpoch":"test-epoch","ok":false,
                                 "error":{"code":code,"message":"fixture refusal","retryable":false,"details":{"missing":["instance.records.v1"]}}})).await.unwrap();
                             return;
@@ -757,14 +762,24 @@ mod tests {
                         let mut total = 0;
                         for (index, value) in [metadata, ready].iter().enumerate() {
                             use base64::Engine as _;
-                            let bytes = if mode == "malformed" { b"{".to_vec() } else { serde_json::to_vec(value).unwrap() };
+                            let bytes = if mode == "malformed" {
+                                b"{".to_vec()
+                            } else {
+                                serde_json::to_vec(value).unwrap()
+                            };
                             total += bytes.len() as u64;
                             write_json_line(&mut stream,&serde_json::json!({"kind":"instance_record_fragment","version":2,"requestId":id,"hostEpoch":"test-epoch",
                                 "recordIndex":index,"index":0,"count":1,"data":base64::engine::general_purpose::STANDARD.encode(bytes)})).await.unwrap();
-                            if mode == "malformed" { return; }
+                            if mode == "malformed" {
+                                return;
+                            }
                         }
-                        while let Ok(progress) = read_json_line::<Value,_>(&mut stream,1024*1024).await {
-                            if progress["consumedBytes"].as_u64() == Some(total) { break; }
+                        while let Ok(progress) =
+                            read_json_line::<Value, _>(&mut stream, 1024 * 1024).await
+                        {
+                            if progress["consumedBytes"].as_u64() == Some(total) {
+                                break;
+                            }
                         }
                         return;
                     }
@@ -1223,28 +1238,52 @@ mod tests {
     async fn records_failures_reselect_another_address_but_business_refusals_do_not() {
         let identity = ClientIdentity::generate().unwrap();
         let host = ClientIdentity::generate().unwrap();
-        for mode in [ServerMode::CloseAfterRequest, ServerMode::Records("malformed"), ServerMode::Records("refused"), ServerMode::Records("missing")] {
+        for mode in [
+            ServerMode::CloseAfterRequest,
+            ServerMode::Records("malformed"),
+            ServerMode::Records("refused"),
+            ServerMode::Records("missing"),
+        ] {
             let business = matches!(mode, ServerMode::Records("refused" | "missing"));
             let active = spawn_test_host(&host, mode).await;
             let healthy = spawn_test_host(&host, ServerMode::Records("valid")).await;
-            let router = test_router(&identity, &host, vec![("active", active.endpoint.clone()), ("healthy", healthy.endpoint.clone())], "active");
+            let router = test_router(
+                &identity,
+                &host,
+                vec![
+                    ("active", active.endpoint.clone()),
+                    ("healthy", healthy.endpoint.clone()),
+                ],
+                "active",
+            );
             let client = DockClient::new(router.clone());
             let context = crate::InstanceDeliveryContext::default();
             let params = serde_json::json!({"instanceId":"work"});
-            let result = client.open_instance_records::<_,Value>("instance.follow", &params, &[], &context).await;
+            let result = client
+                .open_instance_records::<_, Value>("instance.follow", &params, &[], &context)
+                .await;
             assert!(result.is_err());
             if business {
-                assert!(matches!(result,Err(ClientError::Host{..})));
-                assert_eq!(router.snapshot().active_endpoint_id.as_deref(),Some("active"));
-                assert_eq!(healthy.connections.load(Ordering::SeqCst),0);
+                assert!(matches!(result, Err(ClientError::Host { .. })));
+                assert_eq!(
+                    router.snapshot().active_endpoint_id.as_deref(),
+                    Some("active")
+                );
+                assert_eq!(healthy.connections.load(Ordering::SeqCst), 0);
             } else {
-                assert_eq!(router.snapshot().active_endpoint_id,None);
-                let (result,_stream) = client.open_instance_records::<_,Value>("instance.follow", &params, &[], &context).await.unwrap();
-                assert_eq!(result["page"]["events"],serde_json::json!([]));
-                assert_eq!(router.snapshot().active_endpoint_id.as_deref(),Some("healthy"));
+                assert_eq!(router.snapshot().active_endpoint_id, None);
+                let (result, _stream) = client
+                    .open_instance_records::<_, Value>("instance.follow", &params, &[], &context)
+                    .await
+                    .unwrap();
+                assert_eq!(result["page"]["events"], serde_json::json!([]));
+                assert_eq!(
+                    router.snapshot().active_endpoint_id.as_deref(),
+                    Some("healthy")
+                );
             }
-            active.stop();healthy.stop();
+            active.stop();
+            healthy.stop();
         }
     }
-
 }

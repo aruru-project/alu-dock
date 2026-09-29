@@ -209,7 +209,11 @@ impl DockClient {
     }
 
     pub(crate) async fn open_instance_records<P: Serialize, R: DeserializeOwned>(
-        &self, request_type: &'static str, params: &P, capabilities: &[&str], context: &crate::InstanceDeliveryContext,
+        &self,
+        request_type: &'static str,
+        params: &P,
+        capabilities: &[&str],
+        context: &crate::InstanceDeliveryContext,
     ) -> Result<(R, ProtocolEventStream)> {
         let mut params = serde_json::to_value(params)?;
         params["delivery"] = Value::String("records".into());
@@ -221,29 +225,51 @@ impl DockClient {
         let host_epoch = routed.hello.host.host_epoch;
         let mut connection = routed.connection;
         let received: Result<(R, crate::instance_records::InstanceRecords)> = async {
-            write_json_line(&mut connection.stream, &RequestEnvelope {
-                kind: "request", version: 2, request_id: &request_id, request_type, params: &params,
-            }).await?;
+            write_json_line(
+                &mut connection.stream,
+                &RequestEnvelope {
+                    kind: "request",
+                    version: 2,
+                    request_id: &request_id,
+                    request_type,
+                    params: &params,
+                },
+            )
+            .await?;
             let mut records = crate::instance_records::InstanceRecords::new(
-                connection, request_id.clone(), host_epoch.clone(), maximum_bytes, context.clone(),
+                connection,
+                request_id.clone(),
+                host_epoch.clone(),
+                maximum_bytes,
+                context.clone(),
             );
             let value = records.initial(request_type == "instance.read").await?;
             Ok((serde_json::from_value(value)?, records))
-        }.await;
+        }
+        .await;
         let (result, records) = received.map_err(|error| {
             // A business refusal (including optional capability negotiation) is
             // not evidence that this address failed. Transport/protocol errors are.
             if !matches!(&error, ClientError::Host { .. }) {
-                self.router.report_connection_failure(&routed.endpoint_id, routed.route_generation);
+                self.router
+                    .report_connection_failure(&routed.endpoint_id, routed.route_generation);
             }
             error
         })?;
         self.router.ensure_open()?;
-        Ok((result, ProtocolEventStream {
-            connection: None, records: Some(records), request_id, host_epoch, maximum_bytes,
-            router: self.router.clone(), endpoint_id: routed.endpoint_id,
-            route_generation: routed.route_generation,
-        }))
+        Ok((
+            result,
+            ProtocolEventStream {
+                connection: None,
+                records: Some(records),
+                request_id,
+                host_epoch,
+                maximum_bytes,
+                router: self.router.clone(),
+                endpoint_id: routed.endpoint_id,
+                route_generation: routed.route_generation,
+            },
+        ))
     }
 
     pub(crate) async fn open_event_stream<P, R>(
@@ -525,18 +551,26 @@ impl ProtocolEventStream {
 
     pub(crate) async fn next<T: DeserializeOwned>(&mut self) -> Result<T> {
         self.router.ensure_open()?;
-        let envelope: EventEnvelope =
-            match async {
-                if let Some(records)=self.records.as_mut(){ Ok(serde_json::from_value(records.next(true).await?)?) }
-                else {read_json_line(&mut self.connection.as_mut().unwrap().stream, self.maximum_bytes).await}
-            }.await {
-                Ok(envelope) => envelope,
-                Err(error) => {
-                    self.router
-                        .report_connection_failure(&self.endpoint_id, self.route_generation);
-                    return Err(error);
-                }
-            };
+        let envelope: EventEnvelope = match async {
+            if let Some(records) = self.records.as_mut() {
+                Ok(serde_json::from_value(records.next(true).await?)?)
+            } else {
+                read_json_line(
+                    &mut self.connection.as_mut().unwrap().stream,
+                    self.maximum_bytes,
+                )
+                .await
+            }
+        }
+        .await
+        {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                self.router
+                    .report_connection_failure(&self.endpoint_id, self.route_generation);
+                return Err(error);
+            }
+        };
         if envelope.kind != "event"
             || envelope.version != 2
             || envelope.request_id != self.request_id

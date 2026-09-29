@@ -202,7 +202,17 @@ impl DockClient {
         R: FnMut(&Value) -> Result<()>,
         F: FnMut(u64),
     {
-        self.read_byte_stream(request_type, params, capabilities, &[FILE_TRANSFER_CAPABILITY], maximum_bytes, sink, ready, progress).await
+        self.read_byte_stream(
+            request_type,
+            params,
+            capabilities,
+            &[FILE_TRANSFER_CAPABILITY],
+            maximum_bytes,
+            sink,
+            ready,
+            progress,
+        )
+        .await
     }
 
     /// None means explicit missing capability before any file was delivered. Never retry partial data.
@@ -227,7 +237,9 @@ impl DockClient {
         required.push(FILE_TRANSFER_CAPABILITY);
         let routed = match self.negotiate(&required).await {
             Ok(value) => value,
-            Err(error) if missing_stream_capability(&error, fallback_capabilities) => return Ok(None),
+            Err(error) if missing_stream_capability(&error, fallback_capabilities) => {
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         self.check_file_host_epoch(&routed.hello.host.host_epoch)?;
@@ -258,7 +270,9 @@ impl DockClient {
                     host_epoch,
                 }))
             }
-            Err(error) if !began && missing_stream_capability(&error, fallback_capabilities) => Ok(None),
+            Err(error) if !began && missing_stream_capability(&error, fallback_capabilities) => {
+                Ok(None)
+            }
             Err(error) => {
                 self.router()
                     .report_connection_failure(&routed.endpoint_id, routed.route_generation);
@@ -437,7 +451,20 @@ async fn read_file_record<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     deadline: &mut tokio::time::Instant,
 ) -> Result<(Value, usize)> {
     let mut active = Some(*deadline);
-    let result = crate::file_io::read_byte_record(reader, writer, maximum_line, request_id, host_epoch, wire_bytes, consumed, report_progress, &mut active, "file", || {}).await;
+    let result = crate::file_io::read_byte_record(
+        reader,
+        writer,
+        maximum_line,
+        request_id,
+        host_epoch,
+        wire_bytes,
+        consumed,
+        report_progress,
+        &mut active,
+        "file",
+        || {},
+    )
+    .await;
     *deadline = active.unwrap_or(*deadline);
     result
 }

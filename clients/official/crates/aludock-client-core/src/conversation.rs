@@ -297,28 +297,50 @@ impl DockClient {
         instance_id: &str,
         since: &EventCursor,
     ) -> Result<(EventPage, FollowStream)> {
-        self.follow_instance_delivery(instance_id, since, None).await
+        self.follow_instance_delivery(instance_id, since, None)
+            .await
     }
 
-    pub async fn follow_instance_records(&self, instance_id: &str, since: &EventCursor, context: &crate::InstanceDeliveryContext) -> Result<(EventPage, FollowStream)> {
-        self.follow_instance_delivery(instance_id,since,Some(context)).await
+    pub async fn follow_instance_records(
+        &self,
+        instance_id: &str,
+        since: &EventCursor,
+        context: &crate::InstanceDeliveryContext,
+    ) -> Result<(EventPage, FollowStream)> {
+        self.follow_instance_delivery(instance_id, since, Some(context))
+            .await
     }
 
-    async fn follow_instance_delivery(&self, instance_id: &str, since: &EventCursor, context: Option<&crate::InstanceDeliveryContext>) -> Result<(EventPage, FollowStream)> {
+    async fn follow_instance_delivery(
+        &self,
+        instance_id: &str,
+        since: &EventCursor,
+        context: Option<&crate::InstanceDeliveryContext>,
+    ) -> Result<(EventPage, FollowStream)> {
         if since.instance_id != instance_id {
             return Err(ClientError::Protocol(
                 "follow cursor belongs to a different Work".into(),
             ));
         }
-        let params=FollowParams {instance_id,since};
-        let records=if let Some(context)=context.filter(|context| !context.legacy()) {
-            match self.open_instance_records("instance.follow",&params,FOLLOW_CAPABILITIES,context).await {
-                Ok(result)=>Some(result),Err(error) if context.fallback(&error)=>None,Err(error)=>return Err(error),
+        let params = FollowParams { instance_id, since };
+        let records = if let Some(context) = context.filter(|context| !context.legacy()) {
+            match self
+                .open_instance_records("instance.follow", &params, FOLLOW_CAPABILITIES, context)
+                .await
+            {
+                Ok(result) => Some(result),
+                Err(error) if context.fallback(&error) => None,
+                Err(error) => return Err(error),
             }
-        }else{None};
+        } else {
+            None
+        };
         let (initial, stream): (FollowInitial, ProtocolEventStream) = match records {
-            Some(result)=>result,
-            None=>self.open_event_stream("instance.follow",&params,FOLLOW_CAPABILITIES).await?,
+            Some(result) => result,
+            None => {
+                self.open_event_stream("instance.follow", &params, FOLLOW_CAPABILITIES)
+                    .await?
+            }
         };
         let synthetic_instance = InstanceSnapshot {
             id: instance_id.to_owned(),
@@ -384,14 +406,28 @@ impl DockClient {
         since: Option<&EventCursor>,
         replay: ReadReplay,
     ) -> Result<InstanceReadResult> {
-        self.read_instance_delivery(instance_id,since,replay,None).await
+        self.read_instance_delivery(instance_id, since, replay, None)
+            .await
     }
 
-    pub async fn read_instance_records(&self, instance_id: &str, since: Option<&EventCursor>, replay: ReadReplay, context: &crate::InstanceDeliveryContext) -> Result<InstanceReadResult> {
-        self.read_instance_delivery(instance_id,since,replay,Some(context)).await
+    pub async fn read_instance_records(
+        &self,
+        instance_id: &str,
+        since: Option<&EventCursor>,
+        replay: ReadReplay,
+        context: &crate::InstanceDeliveryContext,
+    ) -> Result<InstanceReadResult> {
+        self.read_instance_delivery(instance_id, since, replay, Some(context))
+            .await
     }
 
-    async fn read_instance_delivery(&self, instance_id: &str, since: Option<&EventCursor>, replay: ReadReplay, context: Option<&crate::InstanceDeliveryContext>) -> Result<InstanceReadResult> {
+    async fn read_instance_delivery(
+        &self,
+        instance_id: &str,
+        since: Option<&EventCursor>,
+        replay: ReadReplay,
+        context: Option<&crate::InstanceDeliveryContext>,
+    ) -> Result<InstanceReadResult> {
         if matches!(replay, ReadReplay::ConversationBootstrap) && since.is_some() {
             return Err(ClientError::Protocol(
                 "fresh conversation bootstrap must not include a cursor".into(),
@@ -402,15 +438,34 @@ impl DockClient {
                 "event-log replay requires a complete cursor".into(),
             ));
         }
-        let params=InstanceReadParams{instance_id,since,replay};
-        let records=if let Some(context)=context.filter(|context| !context.legacy()) {
-            match self.open_instance_records::<_,InstanceReadResult>("instance.read",&params,READ_CAPABILITIES,context).await {
-                Ok((result,_stream))=>Some(result),Err(error) if context.fallback(&error)=>None,Err(error)=>return Err(error),
+        let params = InstanceReadParams {
+            instance_id,
+            since,
+            replay,
+        };
+        let records = if let Some(context) = context.filter(|context| !context.legacy()) {
+            match self
+                .open_instance_records::<_, InstanceReadResult>(
+                    "instance.read",
+                    &params,
+                    READ_CAPABILITIES,
+                    context,
+                )
+                .await
+            {
+                Ok((result, _stream)) => Some(result),
+                Err(error) if context.fallback(&error) => None,
+                Err(error) => return Err(error),
             }
-        }else{None};
+        } else {
+            None
+        };
         let result: InstanceReadResult = match records {
-            Some(result)=>result,
-            None=>self.request("instance.read",&params,READ_CAPABILITIES,None).await?,
+            Some(result) => result,
+            None => {
+                self.request("instance.read", &params, READ_CAPABILITIES, None)
+                    .await?
+            }
         };
         if result.instance.id != instance_id {
             return Err(ClientError::Protocol(

@@ -185,7 +185,9 @@ async fn check_history(
     prompt: &str,
     expected: &[AttachmentDto],
 ) -> Result<Value> {
-    let (page, epoch) = client.conversation_history(work, None, 50, &mut Default::default()).await?;
+    let (page, epoch) = client
+        .conversation_history(work, None, 50, &mut Default::default())
+        .await?;
     // Preserve the actual DTO before assertions, including on a producer failure.
     save(root, &format!("{label}.json"), &page)?;
     let users: Vec<_> = page

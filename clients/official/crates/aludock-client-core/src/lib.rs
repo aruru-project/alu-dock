@@ -12,13 +12,13 @@ mod deliverables;
 mod endpoint;
 mod error;
 mod extension_ui;
-mod file_transfer;
 mod file_io;
+mod file_transfer;
 mod fs_publish;
 mod host_registry;
 mod identity;
-mod instances;
 mod instance_records;
+mod instances;
 pub use instance_records::InstanceDeliveryContext;
 mod local_transport;
 mod observation;
@@ -122,12 +122,13 @@ pub use session_media::{MAX_ATTACHMENT_PREVIEW_BYTES, MediaHandle, MediaScope};
 pub use sessions::{
     CompactionPromptTemplatesResult, ConversationContentChunk, ConversationContentPage,
     ConversationHistoryEntry, ConversationHistoryPage, ConversationReadContext, NavigateOptions,
-    SessionChange, SessionCompaction, SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
-    SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
-    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
-    SessionTokenScope, SessionTokenState, SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind,
-    TreeNodeRole, TreeNodeState, begin_session_token_request, publish_session_tokens,
-    resolve_machine_session_token, resolve_work_session_token,
+    SessionChange, SessionCompaction, SessionCompactionResult, SessionForkResult,
+    SessionHistoryPage, SessionInfo, SessionInventoryDiagnostic, SessionInventoryResult,
+    SessionListResult, SessionNameResult, SessionNavigateResult, SessionReloadResult,
+    SessionReplacementResult, SessionScope, SessionTokenScope, SessionTokenState, SessionTree,
+    TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,
+    begin_session_token_request, publish_session_tokens, resolve_machine_session_token,
+    resolve_work_session_token,
 };
 pub use storage::{IdentityStore, PairingMetadata, StoredPairing};
 pub use workspace_files::{

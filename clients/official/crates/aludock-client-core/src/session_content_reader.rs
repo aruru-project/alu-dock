@@ -87,7 +87,11 @@ enum BodyWork {
     Body(RecordVersion, Descriptor),
 }
 enum BodyResult {
-    Page(u64, ConversationReadContext, Result<(crate::ConversationHistoryPage, String)>),
+    Page(
+        u64,
+        ConversationReadContext,
+        Result<(crate::ConversationHistoryPage, String)>,
+    ),
     Body(String, Result<RecordVersion>),
 }
 
@@ -96,16 +100,17 @@ enum BodyResult {
 // A tool's empty result block is identity, not a demand for image base64.
 fn descriptor_needs_body(item: &crate::ConversationHistoryEntry) -> bool {
     use crate::ContentBlock;
-    !item.content_complete && (item.total_blocks > item.entry.content.len()
-        || item.entry.content.iter().any(|block| match block {
-            ContentBlock::Image { .. } => false,
-            ContentBlock::ToolResult {
-                text,
-                omitted_fields,
-                ..
-            } => !text.is_empty() || !omitted_fields.is_empty(),
-            _ => true,
-        }))
+    !item.content_complete
+        && (item.total_blocks > item.entry.content.len()
+            || item.entry.content.iter().any(|block| match block {
+                ContentBlock::Image { .. } => false,
+                ContentBlock::ToolResult {
+                    text,
+                    omitted_fields,
+                    ..
+                } => !text.is_empty() || !omitted_fields.is_empty(),
+                _ => true,
+            }))
 }
 
 async fn cache_records(
@@ -264,7 +269,10 @@ impl SessionContent {
                         jobs.spawn(async move {
                             let result = client
                                 .conversation_history(
-                                    &target.id, cursor.as_deref(), HISTORY_PAGE_TARGET, &mut context,
+                                    &target.id,
+                                    cursor.as_deref(),
+                                    HISTORY_PAGE_TARGET,
+                                    &mut context,
                                 )
                                 .await;
                             BodyResult::Page(generation, context, result)

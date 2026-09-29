@@ -1,7 +1,7 @@
 //! Real public-core history/rebinding gate; no model calls.
 use aludock_client_core::{
-    ConnectionRouter, ContentBlock, ContentUpdate, DockClient, HistoryRecord, IdentityStore, LocalDockEndpoint, MediaScope,
-    ReadReplay, SessionContent, SessionUpdate,
+    ConnectionRouter, ContentBlock, ContentUpdate, DockClient, HistoryRecord, IdentityStore,
+    LocalDockEndpoint, MediaScope, ReadReplay, SessionContent, SessionUpdate,
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -53,8 +53,12 @@ fn report_fast(record: &HistoryRecord) {
 fn complete_body(record: &HistoryRecord) -> bool {
     let complete = record.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.starts_with("history-250 ") && text.len() == 500012));
     if complete {
-        assert!(matches!(&record.content[0], ContentBlock::Text { text } if text == &format!("history-250 {}", "x😀".repeat(100000))));
-        assert!(matches!(record.content.as_slice(), [ContentBlock::Text { .. }, ContentBlock::Image { content_ref: Some(_), data: None, .. }, ContentBlock::Text { text }] if text == "long-after-image"));
+        assert!(
+            matches!(&record.content[0], ContentBlock::Text { text } if text == &format!("history-250 {}", "x😀".repeat(100000)))
+        );
+        assert!(
+            matches!(record.content.as_slice(), [ContentBlock::Text { .. }, ContentBlock::Image { content_ref: Some(_), data: None, .. }, ContentBlock::Text { text }] if text == "long-after-image")
+        );
     }
     complete
 }
@@ -63,7 +67,9 @@ fn cache_files(root: &std::path::Path) -> std::io::Result<std::collections::BTre
     for entry in std::fs::read_dir(root)? {
         let path = entry?.path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "media") { continue; }
+            if path.file_name().is_some_and(|name| name == "media") {
+                continue;
+            }
             files.extend(cache_files(&path)?);
         } else {
             files.insert(path);
@@ -233,13 +239,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     // The same descriptor survives full-body assembly and is read by the existing media owner.
-    let mixed = restored.iter().find(|record| complete_body(record)).unwrap();
-    let ContentBlock::Image { content_ref: Some(reference), mime_type, .. } = &mixed.content[1] else { unreachable!() };
+    let mixed = restored
+        .iter()
+        .find(|record| complete_body(record))
+        .unwrap();
+    let ContentBlock::Image {
+        content_ref: Some(reference),
+        mime_type,
+        ..
+    } = &mixed.content[1]
+    else {
+        unreachable!()
+    };
     let target = content.bind("work")?.snapshot.target.unwrap();
-    let image = content.conversation_image(&client, MediaScope {
-        authority: args[0].clone(), instance_id: args[2].clone(),
-        host_epoch: target.owner_host_epoch.unwrap(), runtime_generation: target.runtime_generation,
-    }, reference, mime_type, "", None).await?;
+    let image = content
+        .conversation_image(
+            &client,
+            MediaScope {
+                authority: args[0].clone(),
+                instance_id: args[2].clone(),
+                host_epoch: target.owner_host_epoch.unwrap(),
+                runtime_generation: target.runtime_generation,
+            },
+            reference,
+            mime_type,
+            "",
+            None,
+        )
+        .await?;
     assert_eq!(image.sha256, args[5]);
     assert_eq!(image.size_bytes, 2_097_152);
     println!(
