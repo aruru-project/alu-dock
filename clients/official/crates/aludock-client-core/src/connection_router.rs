@@ -329,32 +329,37 @@ impl ConnectionRouter {
         }
     }
 
-    /// Commit a negotiated connection as this route's link and open the request's stream on it.
+    /// Commit a negotiated connection as this route's link. A link that another
+    /// caller committed meanwhile is kept; the newer connection is dropped.
     fn adopt_link(
         state: &mut RouterState,
         inner: &Arc<RouterInner>,
         negotiated: Negotiated,
         endpoint_id: &str,
-        route_generation: u64,
     ) -> Result<Link> {
+        if let Some(existing) = state.live_link() {
+            drop(negotiated);
+            return Ok(existing);
+        }
         let weak = Arc::downgrade(inner);
         let failed_endpoint = endpoint_id.to_owned();
         let link = Link::establish(
             negotiated.connection,
             negotiated.hello,
-            Box::new(move || {
+            Box::new(move |link_id| {
                 let Some(inner) = weak.upgrade() else { return };
-                ConnectionRouter { inner }.report_link_loss(&failed_endpoint, route_generation);
+                ConnectionRouter { inner }.report_link_loss(link_id, &failed_endpoint);
             }),
         );
         state.link = Some(link.clone());
         Ok(link)
     }
 
-    fn report_link_loss(&self, endpoint_id: &str, route_generation: u64) {
+    /// The route's current link ended on its own: the address is retried last next time.
+    fn report_link_loss(&self, link_id: uuid::Uuid, endpoint_id: &str) {
         if let Ok(mut state) = self.inner.state.lock()
             && !state.closed
-            && state.route_generation == route_generation
+            && state.link.as_ref().is_some_and(|link| link.id() == link_id)
             && state.active_endpoint_id.as_deref() == Some(endpoint_id)
         {
             state.link = None;
@@ -494,7 +499,6 @@ impl ConnectionRouter {
                                     &self.inner,
                                     negotiated,
                                     &candidate.id,
-                                    generation,
                                 )?;
                                 drop(state);
                                 return self.stream_on(
@@ -635,7 +639,6 @@ impl ConnectionRouter {
                                 &self.inner,
                                 negotiated,
                                 &candidate.id,
-                                route_generation,
                             )?;
                             drop(state);
                             return self.stream_on(

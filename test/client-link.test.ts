@@ -92,9 +92,13 @@ test("one client link serves concurrent requests, a live follow, and a failed st
   assert.equal((await link.streamLine("c", "response")).ok, true);
 
   // A stream whose request is malformed is reset alone; ping still answers and the follow is still live.
+  // Review of #329: the reset reason (here Node's JSON.parse message, which contains a newline)
+  // must still be a record the peer's parser accepts, or one bad stream would end the link.
   link.open("bad", hello("bad-hello", []));
   link.send({ kind: "stream_data", streamId: "bad", data: "{" });
-  await link.record(record => record.kind === "stream_reset" && record.streamId === "bad");
+  const reset = await link.record(record => record.kind === "stream_reset" && record.streamId === "bad");
+  assert.doesNotMatch(reset.reason, /[\u0000-\u001f\u007f-\u009f]/u);
+  assert.ok(reset.reason.length > 0 && reset.reason.length <= 256);
   link.send({ kind: "ping" });
   await link.record(record => record.kind === "pong");
   assert.equal(link.records.some(record => record.kind === "stream_close" && record.streamId === "follow"), false);
@@ -105,10 +109,17 @@ test("one client link serves concurrent requests, a live follow, and a failed st
   link.open("d", hello("d-hello", ["host.info"]), { kind: "request", version: 2, requestId: "d-req", type: "host.info", params: {} });
   assert.equal((await link.streamLine("d", "response")).ok, true);
 
-  // A hello error on a stream is answered on that stream.
+  // A hello error on a stream is answered on that stream; a link cannot be nested on a stream.
   link.open("missing", hello("m-hello", ["no.such.capability"]));
   const helloError = await link.streamLine("missing", "hello_error");
   assert.equal(helloError.error.code, "capability_missing");
+  link.open("nested", hello("n-hello", ["transport.multiplex.v1"]));
+  assert.equal((await link.streamLine("nested", "hello_error")).error.code, "invalid_hello");
+
+  // Review of #329: streams the Host finished must not stay behind as connections on a long-running Host.
+  await link.record(record => record.kind === "stream_close" && record.streamId === "c");
+  await link.record(record => record.kind === "stream_close" && record.streamId === "d");
+  await until(() => (host as unknown as { connections: Set<unknown> }).connections.size === 1);
 
   // Anything but a link record after negotiation ends the link.
   link.send({ kind: "request", version: 2, requestId: "raw", type: "host.info", params: {} });

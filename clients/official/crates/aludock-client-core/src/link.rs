@@ -37,6 +37,9 @@ use crate::{
 pub(crate) const MULTIPLEX_CAPABILITY: &str = "transport.multiplex.v1";
 /// A link record wraps one Protocol V2 line (the Host bound, mirrored here).
 const MAX_LINK_LINE_BYTES: usize = 2 * MAX_CONTROL_LINE_BYTES;
+/// Streams one link may hold at once (the Host bound, mirrored here so a
+/// request is refused before anything is sent rather than reset after).
+const MAX_LINK_STREAMS: usize = 256;
 /// Outbound records waiting for the socket; producers wait beyond this.
 const MAX_LINK_OUTPUT_BYTES: usize = 8 * MAX_LINK_LINE_BYTES;
 /// Inbound records a stream's consumer has not read yet; the stream is reset beyond this.
@@ -58,6 +61,9 @@ impl std::fmt::Display for HostRejection {
 }
 impl std::error::Error for HostRejection {}
 
+/// Told the link's own id when the link ends on its own (not when the route closes it).
+pub(crate) type LinkClosedCallback = Box<dyn FnOnce(Uuid) + Send>;
+
 enum Inbound {
     Data(Vec<u8>),
     Close,
@@ -77,6 +83,7 @@ struct StreamSlot {
 }
 
 struct LinkInner {
+    id: Uuid,
     hello: HelloAck,
     outbound: mpsc::UnboundedSender<Vec<u8>>,
     outbound_bytes: AtomicUsize,
@@ -86,7 +93,7 @@ struct LinkInner {
     closed_notify: Notify,
     last_inbound: Mutex<Instant>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    on_closed: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    on_closed: Mutex<Option<LinkClosedCallback>>,
 }
 
 #[derive(Clone)]
@@ -99,10 +106,11 @@ impl Link {
     pub(crate) fn establish(
         connection: ConnectedTransport,
         hello: HelloAck,
-        on_closed: Box<dyn FnOnce() + Send>,
+        on_closed: LinkClosedCallback,
     ) -> Self {
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(LinkInner {
+            id: Uuid::new_v4(),
             hello,
             outbound,
             outbound_bytes: AtomicUsize::new(0),
@@ -127,6 +135,10 @@ impl Link {
 
     pub(crate) fn hello(&self) -> &HelloAck {
         &self.inner.hello
+    }
+
+    pub(crate) fn id(&self) -> Uuid {
+        self.inner.id
     }
 
     pub(crate) fn is_closed(&self) -> bool {
@@ -171,6 +183,11 @@ impl Link {
         let queued = Arc::new(AtomicUsize::new(0));
         {
             let mut streams = self.inner.streams.lock().map_err(|_| link_state_error())?;
+            if streams.len() >= MAX_LINK_STREAMS {
+                return Err(ClientError::Protocol(
+                    "too many requests are open on the Host link".into(),
+                ));
+            }
             streams.insert(
                 stream_id.clone(),
                 StreamSlot {
@@ -241,7 +258,7 @@ impl Link {
             .ok()
             .and_then(|mut slot| slot.take());
         if let Some(callback) = callback {
-            callback();
+            callback(self.inner.id);
         }
     }
 

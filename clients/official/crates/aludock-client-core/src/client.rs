@@ -715,6 +715,10 @@ fn response_timeout_for(request_type: &str) -> Duration {
 }
 
 fn ambiguous_if_mutation(error: ClientError, operation_id: Option<&str>) -> ClientError {
+    // A stream's pipelined hello was refused before the Host read the request: nothing ran.
+    if matches!(error, ClientError::Host { .. }) {
+        return error;
+    }
     match operation_id {
         Some(operation_id) => ClientError::EffectUnknown {
             operation_id: operation_id.to_owned(),

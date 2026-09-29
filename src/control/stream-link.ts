@@ -81,10 +81,12 @@ function exact(value: Record<string, unknown>, keys: readonly string[]): void {
   if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("Link record has unexpected fields");
 }
 
+/** A reset reason the peer's parser accepts: no control characters, bounded, never empty. */
 export function diagnosticReason(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  const text = message.trim().length > 0 ? message.trim() : fallback;
-  return text.length > MAX_LINK_RESET_REASON_CHARS ? `${text.slice(0, MAX_LINK_RESET_REASON_CHARS - 1)}…` : text;
+  const text = message.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").trim();
+  const chosen = text.length > 0 ? text : fallback;
+  return chosen.length > MAX_LINK_RESET_REASON_CHARS ? `${chosen.slice(0, MAX_LINK_RESET_REASON_CHARS - 1)}…` : chosen;
 }
 
 /** The accepting side's view of one stream: a socket for the protocol handler. */
@@ -107,7 +109,9 @@ export class VirtualProtocolSocket extends Duplex {
       callback(error as Error);
     });
   }
-  _final(callback: (error?: Error | null) => void): void { this.notifyClose(); callback(); }
+  /** Ending the writable side is a full close for the peer, so it is one here too: the
+   * handler's `close` cleanup must run even though the peer will not answer with its own close. */
+  _final(callback: (error?: Error | null) => void): void { this.notifyClose(); callback(); this.localReset(); }
   _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
     if (error) this.failureReason = diagnosticReason(error, "Protocol stream failed");
     this.resolveReadableDrain();
@@ -566,8 +570,10 @@ export class ClientLink {
     await this.streams.handle(record);
   }
 
-  observePartial(partialRecord: string, recordSequence: number): void {
-    if (this.streams.observePartial(CLIENT_LINK_DIALECT, partialRecord, recordSequence)) this.armIdleTimer();
+  /** Any bytes from the client keep the link alive; a file chunk in transit also keeps its stream live. */
+  observeInput(partialRecord: string, recordSequence: number): void {
+    this.armIdleTimer();
+    this.streams.observePartial(CLIENT_LINK_DIALECT, partialRecord, recordSequence);
   }
 
   dispose(): void {

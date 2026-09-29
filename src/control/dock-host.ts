@@ -7,7 +7,7 @@ import { FileChannel, FileRelayActivity } from "./file-channel.js";
 import { FileReceiver } from "./file-transfer.js";
 import { sendHostFile } from "./host-file-transfer.js";
 import { FILE_TRANSFER_CAPABILITY, MULTIPLEX_CAPABILITY, isByteStreamRequest } from "./protocol.js";
-import { ClientLink, MAX_LINK_LINE_BYTES } from "./stream-link.js";
+import { ClientLink, MAX_LINK_LINE_BYTES, VirtualProtocolSocket } from "./stream-link.js";
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
@@ -589,6 +589,12 @@ export class DockHost {
           this.sendHelloError(socket, hello.requestId, "capability_missing", "Required capabilities are unavailable", { missing: [...missing].sort() });
           return;
         }
+        if (hello.requiredCapabilities.includes(MULTIPLEX_CAPABILITY) && socket instanceof VirtualProtocolSocket) {
+          // A stream is already on a link; a link inside it would multiply the per-link stream bound.
+          terminal = true;
+          this.sendHelloError(socket, hello.requestId, "invalid_hello", "A link cannot be opened on a stream");
+          return;
+        }
         fileMode = hello.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);
         recordsNegotiated = hello.requiredCapabilities.includes(INSTANCE_RECORDS_CAPABILITY);
         const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt), [...this.capabilities]));
@@ -772,7 +778,7 @@ export class DockHost {
       socket.pause();
       processing = processing.then(async () => {
         const lines=decoder.push(chunk);
-        link?.observePartial(decoder.partialRecord,decoder.recordSequence);
+        link?.observeInput(decoder.partialRecord,decoder.recordSequence);
         fileChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
         recordChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
         const partial=fileChunkHeader(decoder.partialRecord);
