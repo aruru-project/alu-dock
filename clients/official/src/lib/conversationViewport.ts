@@ -1,4 +1,4 @@
-import { nextTick, onUnmounted, ref, watch, type Ref } from 'vue'
+import { nextTick, onScopeDispose, ref, watch, type Ref } from 'vue'
 import type { ConversationReadingPosition } from './localState'
 
 interface ConversationTextAnchor {
@@ -407,7 +407,7 @@ export function useConversationViewport(surfaceRef: Ref<HTMLElement | null>, per
     document.addEventListener('visibilitychange', hiding)
     document.addEventListener('selectionchange', selecting)
   }
-  onUnmounted(() => {
+  onScopeDispose(() => {
     disposed = true
     savePosition()
     if (typeof window !== 'undefined') window.removeEventListener('pagehide', leaving)

@@ -1,25 +1,27 @@
-import type { ReadonlyRefs } from './ownerView'
+import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   cancelPairing, getSystemDeviceName, isTauri, renameHostProfile, reorderHostEndpoints,
   reselectHostRoute, startPairing, deleteHostEndpoint, saveUnverifiedHostEndpoint, setConnectionPolicy,
   setHostEndpointEnabled, testHostEndpoint, verifyHostEndpoint
-} from './bridge'
+} from '../lib/bridge'
 import {
   DEVICE_NAME_FALLBACK, browserDeviceNameStorage, normalizeDeviceName, persistDeviceNamePreference,
   readDeviceNamePreference, resolveDeviceName
-} from './deviceName'
-import { currentConnectionCall, requireConnectionContext } from './hostResult'
-import { userErrorMessage as errorMessage } from './userError'
-import type { ConnectionKind, HostConnectionProfile, HostEndpoint } from './types'
-import type { usePageSurfaces } from './pageSurfaces'
-import { useAppStore } from '../stores/app'
-import { useExtensionUiStore } from '../stores/extension-ui'
+} from '../lib/deviceName'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
+import { userErrorMessage as errorMessage } from '../lib/userError'
+import type { ConnectionKind, HostConnectionProfile, HostEndpoint } from '../lib/types'
+import { useAppStore } from './app'
+import { useExtensionUiStore } from './extension-ui'
+import { useSurfacesStore } from './surfaces'
 /** Host settings and pairing UI only; native security and service policies are unchanged. */
-export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'askConfirm' | 'closeModal' | 'openHostSettings'>>, options: { busy(): boolean; hasRestoredImages(): boolean }) {
+export const useHostStore = defineStore('host', () => {
   const app = useAppStore()
   const extensionUi = useExtensionUiStore()
+  const page = useSurfacesStore()
+  const busy = () => pairingInProgress.value
   const pairHost = ref('')
   const pairPort = ref<number | null>(null)
   const deviceNameStorage = browserDeviceNameStorage()
@@ -46,7 +48,7 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   const hostNameSaved = ref(false)
 
   async function confirmRestoredImagesBeforeHostTransition() {
-    return !options.hasRestoredImages() || await page.askConfirm('切换 Host？', '切换会移除尚未发送的已取回附件。')
+    return !app.hasRestoredImages || await page.askConfirm('切换 Host？', '切换会移除尚未发送的已取回附件。')
   }
 
   async function initializePairDeviceName() {
@@ -67,7 +69,7 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   }
 
   async function beginPairing() {
-    if (!isTauri || options.busy() || !pairHost.value.trim() || !pairPort.value || pairPort.value < 1 || pairingInProgress.value) return
+    if (!isTauri || busy() || !pairHost.value.trim() || !pairPort.value || pairPort.value < 1 || pairingInProgress.value) return
     const deviceName = normalizeDeviceName(pairDeviceName.value)
     if (!deviceName) {
       pairingError.value = '请填写这台设备在 AluDock 中显示的名称。'
@@ -150,14 +152,14 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   }
 
   async function switchSavedHost(hostId: string) {
-    if (!isTauri || hostId === app.activeConnectionId || options.busy() || !await confirmRestoredImagesBeforeHostTransition()) return
+    if (!isTauri || hostId === app.activeConnectionId || busy() || !await confirmRestoredImagesBeforeHostTransition()) return
     await extensionUi.clear()
     page.closeModal()
     await app.switchHost(hostId)
   }
 
   async function connectLocal() {
-    if (!isTauri || app.loading || options.busy() || !await confirmRestoredImagesBeforeHostTransition()) return
+    if (!isTauri || app.loading || busy() || !await confirmRestoredImagesBeforeHostTransition()) return
     await extensionUi.clear()
     await app.connectLocal()
     if (!app.error) {
@@ -168,13 +170,13 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   }
 
   async function updateLocalEndpoint(endpoint?: string) {
-    if (!isTauri || options.busy()) return
+    if (!isTauri || busy()) return
     await app.saveLocalEndpoint(endpoint)
   }
 
   async function removeSavedHost(hostId: string, displayName: string) {
-    if (!isTauri || options.busy()) return
-    const imageWarning = options.hasRestoredImages() && hostId === app.activeConnectionId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
+    if (!isTauri || busy()) return
+    const imageWarning = app.hasRestoredImages && hostId === app.activeConnectionId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
     const body = `这台 Host 会从此设备的列表中移除。电脑端仍会保留此设备的访问权限；如需一并撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
     if (!await page.askConfirm(`从此设备删除“${displayName}”？`, body)) return
     await extensionUi.clear()
@@ -367,6 +369,7 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   let unlisten: UnlistenFn | undefined
   let disposed = false
   async function listenNative() {
+    if (unlisten) return
     const release = await listen<{ requestId: string; stage: string; pin?: string; message?: string; error?: { message: string }; hostId?: string; registryRevision?: number; selectionGeneration?: number }>('aludock://pairing-status', ({ payload }) => {
       if (!pairingRequestId.value || payload.requestId !== pairingRequestId.value) return
       pairingStage.value = payload.stage
@@ -384,4 +387,4 @@ export function useHostConnection(page: ReadonlyRefs<Pick<ReturnType<typeof useP
   }
   onScopeDispose(() => { disposed = true; unlisten?.(); const id = pairingRequestId.value; pairingRequestId.value = ''; if (id) void (startingPairing ?? Promise.resolve()).catch(() => {}).then(() => cancelPairing(id)).catch(() => {}) })
   return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, listenNative }
-}
+})

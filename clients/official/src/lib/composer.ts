@@ -1,12 +1,16 @@
-import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onScopeDispose, ref, watch, type Ref } from 'vue'
 
-/** Owns both editing surfaces. Output recovery is deliberately not an input. */
-export function useComposer(options: { read: () => string; write: (text: string) => void; identity: () => string; flush: () => void; canFocus: () => boolean }) {
+/** Owns both editing surfaces. Output recovery is deliberately not an input.
+ * The expanded/composition state may be shared with page surfaces. */
+export function useComposer(options: {
+  read: () => string; write: (text: string) => void; identity: () => string; flush: () => void; canFocus: () => boolean
+  expanded?: Ref<boolean>; composing?: Ref<boolean>
+}) {
   const draft = computed({ get: options.read, set: options.write })
   const compact = ref<HTMLTextAreaElement | null>(null)
   const expandedTextarea = ref<HTMLTextAreaElement | null>(null)
-  const expanded = ref(false)
-  const composing = ref(false)
+  const expanded = options.expanded ?? ref(false)
+  const composing = options.composing ?? ref(false)
   const selection = ref({ start: 0, end: 0, direction: 'none' as 'forward' | 'backward' | 'none' })
   let frame = 0
   let transfer = 0
@@ -45,6 +49,6 @@ export function useComposer(options: { read: () => string; write: (text: string)
     resize()
   }, { flush: 'pre' })
   watch(options.identity, () => { transfer++; composing.value = false; selection.value = { start: 0, end: 0, direction: 'none' }; options.flush(); void nextTick(resize) })
-  onUnmounted(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); options.flush() })
+  onScopeDispose(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); options.flush() })
   return { draft, compact, expandedTextarea, expanded, composing, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
 }

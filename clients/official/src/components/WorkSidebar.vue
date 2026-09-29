@@ -1,39 +1,35 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { Settings, X } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
 import { workPresence } from '../lib/uiBoundaries'
 import OperationResults from './OperationResults.vue'
-import type { usePlatformLifecycle } from '../lib/platformLifecycle'
-import type { useWorkDirectory } from '../lib/workDirectory'
-import type { useWorkActions } from '../lib/workActions'
-import type { useHostConnection } from '../lib/hostConnection'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
-import type { useWorkObservation } from '../lib/workObservation'
-import type { useOperationResults } from '../lib/operationResults'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useHostStore } from '../stores/host'
+import { useObservationStore } from '../stores/observation'
+import { useOperationsStore } from '../stores/operations'
+import { usePlatformStore } from '../stores/platform'
+import { useSurfacesStore } from '../stores/surfaces'
+import { useWorkActionsStore } from '../stores/work-actions'
 
-const props = defineProps<{
-  directory: ReadonlyRefs<Pick<ReturnType<typeof useWorkDirectory>, 'forgetFromList' | 'groupedWorks' | 'machineListError' | 'openDirectory' | 'refreshWorkDrawer' | 'reopenFromList' | 'selectWork' | 'workMachineTag'>>
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'directoryOpen'>>
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'openHostSettings' | 'pairingInProgress'>>
-  platform: ReadonlyRefs<Pick<ReturnType<typeof usePlatformLifecycle>, 'appSettings' | 'openAppSettings' | 'windowsAwayLabel'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'workMutating'>>
-  operations: ReadonlyRefs<Pick<ReturnType<typeof useOperationResults>, 'consumeNativeOperation' | 'listResults'>>
-  observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'label'>>
-}>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
-const { machineListError, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory } = props.directory
-const { directoryOpen } = props.page
-const { openHostSettings, pairingInProgress } = props.host
-const { appSettings, windowsAwayLabel, openAppSettings } = props.platform
-const { workMutating } = props.actions
-const { listResults, consumeNativeOperation } = props.operations
-
-const connectionLabel = props.observation.label
+const workActions = useWorkActionsStore()
+const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions)
+const { workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory } = workActions
+const { directoryOpen } = storeToRefs(useSurfacesStore())
+const host = useHostStore()
+const { pairingInProgress } = storeToRefs(host)
+const { openHostSettings } = host
+const platform = usePlatformStore()
+const { appSettings, windowsAwayLabel } = storeToRefs(platform)
+const { openAppSettings } = platform
+const operations = useOperationsStore()
+const { listResults } = storeToRefs(operations)
+const { consumeNativeOperation } = operations
+const { label: connectionLabel } = storeToRefs(useObservationStore())
 </script>
 
 <template>

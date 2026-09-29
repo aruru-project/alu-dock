@@ -1,27 +1,27 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { isTauri } from '../lib/bridge'
 import ConversationView from './ConversationView.vue'
-import type { useConversationRegion } from '../lib/conversationRegion'
-import type { useAttachmentUploads } from '../lib/attachmentUploads'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
-import type { useWorkObservation } from '../lib/workObservation'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useAttachmentsStore } from '../stores/attachments'
+import { useConversationStore } from '../stores/conversation'
+import { useObservationStore } from '../stores/observation'
+import { useSurfacesStore } from '../stores/surfaces'
 
-const props = defineProps<{
-  conversationOwner: ReadonlyRefs<Pick<ReturnType<typeof useConversationRegion>, 'readingError' | 'contentSeeding' | 'conversation' | 'conversationState' | 'conversationSwitching' | 'handleOutputMediaLoad' | 'handleOutputScroll' | 'historyError' | 'historyHydrating' | 'historyLoading' | 'historyTruncated' | 'imageResource' | 'loadEarlierHistory' | 'markConversationImageFailed' | 'openImagePreview' | 'rememberToolDetail' | 'requestConversationImage' | 'retryConversationHydration' | 'streamingPartIds' | 'toolDetailOpen'>> & Pick<ReturnType<typeof useConversationRegion>, 'output'> & { conversationSession: Pick<ReturnType<typeof useConversationRegion>['conversationSession'], 'setInterest' | 'retry'> }
-  observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'error' | 'load' | 'loading'>>
-  uploads: ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'attachmentPreviews' | 'openAttachmentPreview'>>
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'openMessageText'>>
-}>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
-const { readingError, output, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, conversationSession, handleOutputScroll, handleOutputMediaLoad, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration } = props.conversationOwner
-const { loading: conversationLoading, error: conversationError, load: loadSelectedConversation } = props.observation
-const { attachmentPreviews, openAttachmentPreview } = props.uploads
-const { openMessageText } = props.page
+const conversationStore = useConversationStore()
+const { readingError, output, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError } = storeToRefs(conversationStore)
+const { setReadInterest, handleOutputScroll, handleOutputMediaLoad, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration } = conversationStore
+const observation = useObservationStore()
+const { loading: conversationLoading, error: conversationError } = storeToRefs(observation)
+const { load: loadSelectedConversation } = observation
+const attachments = useAttachmentsStore()
+const { attachmentPreviews } = storeToRefs(attachments)
+const { openAttachmentPreview } = attachments
+const { openMessageText } = useSurfacesStore()
 </script>
 
 <template>
@@ -57,7 +57,7 @@ const { openMessageText } = props.page
       :attachment-previews="attachmentPreviews"
       :tool-open="toolDetailOpen"
       :image-resource="imageResource"
-      @read-interest="conversationSession.setInterest"
+      @read-interest="setReadInterest"
       @load-earlier="loadEarlierHistory"
       @retry-history="retryConversationHydration"
       @tool-toggle="rememberToolDetail"

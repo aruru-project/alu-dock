@@ -20,9 +20,10 @@ import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 import SavedSessionList from './SavedSessionList.vue'
 import type { CompactionPromptTemplatesResult, SessionReloadResult, SavedSession, SessionTree, Work } from '../lib/types'
 import { useAppStore } from '../stores/app'
+import { useControlPanelStore } from '../stores/control-panel'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
-const props = defineProps<{ work: Work; mode: SessionMode; preview: boolean; compactionPending: boolean }>()
+const props = defineProps<{ work: Work; mode: SessionMode; compactionPending: boolean }>()
 const app = useAppStore()
 const emit = defineEmits<{
   unknown: [cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext]
@@ -355,7 +356,6 @@ function handleTreeNodeKeydown(event: KeyboardEvent) {
 function operationId() { return crypto.randomUUID() }
 
 async function createNew() {
-  if (props.preview) { status.value = '浏览器预览仅作演示。'; return }
   if (pending.value) return
   pending.value = 'new'; error.value = ''; status.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消新建 Session。' }
@@ -363,7 +363,7 @@ async function createNew() {
 }
 
 async function resumeSelected(selected: Pick<SavedSession, 'token' | 'current'>, continuation?: SessionTrustContinuation) {
-  if (selected.current || props.preview || pending.value) return
+  if (selected.current || pending.value) return
   const attempt = continuation ?? { operationId: operationId() }
   let captured: OperationContext | undefined
   pending.value = 'switch'; error.value = ''; status.value = ''
@@ -387,17 +387,17 @@ async function resumeSelected(selected: Pick<SavedSession, 'token' | 'current'>,
 }
 
 async function rename() {
-  if (props.preview || pending.value) return
+  if (pending.value) return
   pending.value = 'rename'; error.value = ''
   try { const scope = { ...context.value }; await currentSessionCall(scope, () => nameSession(app.captureOperationTarget(scope, scope.instanceId), renameDraft.value, operationId())); emit('finished'); status.value = 'Session 名称已更新。'; await loadSessionList() }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 function compact() {
-  if (props.preview || pending.value || props.compactionPending || props.work.compacting) return
+  if (pending.value || props.compactionPending || props.work.compacting) return
   emit('compact', compactDraft.value.trim() || undefined)
 }
 async function reload() {
-  if (props.preview || pending.value) return
+  if (pending.value) return
   pending.value = 'reload'; error.value = ''; status.value = ''; reloadSummary.value = null; reloadScope.value = null
   try {
     const scope = { ...context.value }
@@ -413,21 +413,21 @@ async function reload() {
 
 async function navigate(summarize: boolean) {
   const node = selectedNode.value
-  if (!node || props.preview || pending.value) return
+  if (!node || pending.value) return
   pending.value = summarize ? 'navigate-summary' : 'navigate'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(app.captureOperation(scope, scope.instanceId), node.entryId, summarize, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function fork() {
   const node = selectedNode.value
-  if (!node || node.role !== 'user' || props.preview || pending.value) return
+  if (!node || node.role !== 'user' || pending.value) return
   pending.value = 'fork'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => forkSession(app.captureOperation(scope, scope.instanceId), node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消 Fork。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function clone() {
   const node = selectedNode.value
-  if (!node || props.preview || pending.value) return
+  if (!node || pending.value) return
   pending.value = 'clone'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => cloneSession(app.captureOperation(scope, scope.instanceId), node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消 Clone。' }
   catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
@@ -451,8 +451,11 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
   }
   error.value = errorMessage(cause)
 }
-async function reconcileDomain(domain: 'sessions' | 'tree') { return domain === 'sessions' ? loadSessionList() : loadTree() }
-defineExpose({ reconcileDomain })
+// An unconfirmed Session change was checked elsewhere; show the Host's current list or tree.
+onUnmounted(useControlPanelStore().onSessionsChanged((domain) => {
+  if (domain === 'sessions' && props.mode === 'sessions') void loadSessionList()
+  else if (domain === 'tree' && props.mode === 'tree') void loadTree()
+}))
 function time(value?: string | null) { return treeNodeTime(value) }
 </script>
 
@@ -474,7 +477,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
         :loading-more="sessionPages.loadingMore.value"
         :more-failed="sessionPages.moreFailed.value"
         :incomplete="sessionPages.incomplete.value"
-        :disabled="preview || !!pending"
+        :disabled="!!pending"
         empty-text="当前目录没有可恢复的 Session。"
         @select="resumeSelected"
         @retry="sessionPages.retryMore()"
@@ -488,7 +491,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
 
     <section v-else-if="mode === 'rename-session'" class="alu-session-form">
       <input v-model="renameDraft" class="ui-dialog-input" maxlength="256" />
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending" @click="rename">{{ pending === 'rename' ? '正在提交…' : '确认' }}</button></div>
+      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="!!pending" @click="rename">{{ pending === 'rename' ? '正在提交…' : '确认' }}</button></div>
     </section>
 
     <section v-else-if="mode === 'compact-session'" class="compaction-panel">
@@ -503,7 +506,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
           <button ref="promptLink" type="button" class="compaction-prompt-link" @click="openPromptReader"><BookOpen :size="16" /><span>查看默认压缩提示</span><span class="compaction-readonly">只读</span><ChevronRight :size="15" /></button>
           <div v-if="compactionPending || work.compacting" class="compaction-progress" role="status"><span class="alu-agent-activity-spinner" />正在压缩，进度与结果会显示在对话中。</div>
         </div>
-        <div class="ui-dialog-form-footer compaction-footer"><button type="button" class="ui-dialog-btn" @click="$emit('close')">取消</button><button type="button" class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="preview || !!pending || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
+        <div class="ui-dialog-form-footer compaction-footer"><button type="button" class="ui-dialog-btn" @click="$emit('close')">取消</button><button type="button" class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
       </template>
       <section v-else class="compaction-reader" aria-label="默认压缩提示">
         <div class="compaction-reader-header"><button ref="promptBack" type="button" class="compaction-reader-back" @click="closePromptReader"><ArrowLeft :size="15" />返回压缩</button><span class="compaction-readonly">默认提示 · 只读</span></div>
@@ -517,7 +520,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
     </section>
 
     <section v-else-if="mode === 'reload-session'" class="alu-session-action-state alu-confirm-state">
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="preview || !!pending" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : '确认' }}</button></div>
+      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : '确认' }}</button></div>
       <div v-if="reloadSummary" class="reload-summary"><strong>{{ reloadSummary.resourceTotal }} 个资源 · {{ reloadSummary.diagnosticTotal }} 条诊断</strong><span v-for="diagnostic in reloadSummary.diagnostics" :key="diagnostic.message" :data-severity="diagnostic.severity">{{ diagnostic.message }}</span></div>
     </section>
 
@@ -599,10 +602,10 @@ function time(value?: string | null) { return treeNodeTime(value) }
       </div>
       <div v-if="selectedNode" class="ui-dialog-actions alu-tree-actions">
         <div class="ui-dialog-selection-summary"><span>已选择</span><strong>{{ selectedNode.summary || selectedNode.label || selectedNode.kind }}</strong></div>
-        <button type="button" class="ui-dialog-btn ui-dialog-btn-primary ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || preview || !!pending" title="不生成分支摘要，直接切换到这里" @click="navigate(false)">直接切换</button>
-        <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || preview || !!pending" title="先总结放弃的分支，再切换到这里" @click="navigate(true)">摘要后切换</button>
-        <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.kind !== 'message' || selectedNode.role !== 'user' || preview || !!pending" title="回到这条用户消息之前，并将消息放回输入框" @click="fork">Fork</button>
-        <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="preview || !!pending" title="从这个节点克隆为新的 Session" @click="clone">Clone</button>
+        <button type="button" class="ui-dialog-btn ui-dialog-btn-primary ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || !!pending" title="不生成分支摘要，直接切换到这里" @click="navigate(false)">直接切换</button>
+        <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || !!pending" title="先总结放弃的分支，再切换到这里" @click="navigate(true)">摘要后切换</button>
+        <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.kind !== 'message' || selectedNode.role !== 'user' || !!pending" title="回到这条用户消息之前，并将消息放回输入框" @click="fork">Fork</button>
+        <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="!!pending" title="从这个节点克隆为新的 Session" @click="clone">Clone</button>
       </div>
     </section>
   </div>

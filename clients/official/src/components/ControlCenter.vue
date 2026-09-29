@@ -4,56 +4,50 @@ import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, Pencil, P
 import {
   getCommandCompletions,
   getCommandContent,
-  getResources,
-  getSettings,
-  listModels,
-  listTools,
   runCatalogCommand,
   setActiveTools,
   setModel,
   setThinking,
   updateSetting,
+  sessionContext,
   type SessionContext,
 } from '../lib/bridge'
-import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
+import { currentConnectionCall } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { dockToolsState } from '../lib/dockTools'
 import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
-import { workPresence } from '../lib/uiBoundaries'
+import { formatContextUsage, workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import ResourceDocument from './ResourceDocument.vue'
+import { storeToRefs } from 'pinia'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
+import { useControlPanelStore, type ControlMutationDomain } from '../stores/control-panel'
 import type {
   CommandArgumentCompletion,
   CommandInfo,
   ModelInfo,
-  ModelsResult,
-  ProjectedEvent,
-  ResourcesResult,
   ResourceInfo,
   SettingInfo,
   SettingKey,
   SettingValue,
-  SettingsResult,
   ThinkingLevel,
   ToolInfo,
-  ToolsResult,
   Work,
 } from '../lib/types'
 
-export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'models' | 'tools' | 'settings'
-
-const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; compactionPending: boolean }>()
+const props = defineProps<{ work: Work; section: ControlSection; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; compactionPending: boolean }>()
 const app = useAppStore()
+const panel = useControlPanelStore()
+const { models, tools, resources, settings, loading, loadErrors } = storeToRefs(panel)
+const { loadSection } = panel
 const catalog = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
-  snapshot: [work: Work]
   unknown: [cause: unknown, domain: ControlMutationDomain, scope: SessionContext]
   reconcile: [domain: ControlMutationDomain]
   section: [section: ControlSection]
@@ -65,8 +59,6 @@ const emit = defineEmits<{
   title: [title: string, body?: string]
   size: [size: 'default' | 'wide' | 'tree']
 }>()
-
-const sessionManager = ref<InstanceType<typeof SessionManager> | null>(null)
 
 const localControlIcons = {
   session_new: Plus,
@@ -107,17 +99,14 @@ const MAX_VISIBLE_COMMAND_CONTENT_CHARS = 4_000_000
 const commandSelectedIndex = ref(0)
 const commandSearchInput = ref<HTMLInputElement | null>(null)
 const commandArgsInput = ref<HTMLInputElement | null>(null)
-const models = ref<ModelsResult | null>(null)
-const tools = ref<ToolsResult | null>(null)
-const resources = ref<ResourcesResult | null>(null)
 const selectedResource = ref<ResourceInfo | null>(null)
-const settings = ref<SettingsResult | null>(null)
-const loading = ref(new Set<ControlSection>())
-const loadErrors = ref<Partial<Record<ControlSection, string>>>({})
 const pending = ref('')
 const error = ref('')
 const dockToolsOperationId = ref('')
-let loadEpoch = 0
+// A settings write that fails after the reply is reported by the live event.
+onUnmounted(panel.onWriteFailed((message) => { error.value = message }))
+// Resources reloaded by the Agent close the open resource document.
+watch(resources, (value) => { if (!value) selectedResource.value = null })
 
 const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
 const dockToolsCommand = computed(() => catalog.commands.find((item) => item.name === 'dock-tools') ?? null)
@@ -201,15 +190,8 @@ watch([
   () => props.work.ownerHostEpoch,
   () => props.work.runtimeGeneration,
 ], () => {
-  if (app.connectionContext) commandConsole.bindContext(app.connectionContext.connectionId, app.connectionContext.selectionGeneration, props.work)
-  loadEpoch += 1
-  models.value = null
-  tools.value = null
-  resources.value = null
+  panel.reset()
   selectedResource.value = null
-  settings.value = null
-  loading.value.clear()
-  loadErrors.value = {}
   selectedCommandReferenceId.value = ''
   commandDetailMode.value = ''
   argumentCompletions.value = []
@@ -323,7 +305,7 @@ function backToCatalog() {
 function scheduleArgumentCompletions() {
   window.clearTimeout(commandCompletionTimer)
   const command = selectedCommand.value
-  if (props.preview || commandDetailMode.value !== 'runner' || !command?.argumentCompletions) {
+  if (commandDetailMode.value !== 'runner' || !command?.argumentCompletions) {
     commandCompletionEpoch += 1
     argumentCompletions.value = []
     argumentCompletionsLoading.value = false
@@ -401,100 +383,14 @@ async function openCommandContent(command: CommandInfo) {
   }
 }
 
-async function reconcileDomain(domain: ControlMutationDomain): Promise<boolean> {
-  if (domain === 'conversation') return false
-  if (domain === 'sessions' || domain === 'tree') return sessionManager.value?.reconcileDomain(domain) ?? false
-  return loadSection(domain === 'models' ? 'models' : domain, true)
-}
-
-function applyLiveEvent(event: ProjectedEvent) {
-  const data = event.data
-  if (event.eventType === 'settings.changed' && settings.value && typeof data.key === 'string') {
-    const setting = settings.value.settings.find((item) => item.key === data.key)
-    if (setting && 'value' in data) {
-      setting.value = data.value as SettingValue
-      if (typeof data.reloadRequired === 'boolean') setting.reloadRequired = data.reloadRequired
-      if (typeof data.hostRestartRequired === 'boolean') setting.hostRestartRequired = data.hostRestartRequired
-    }
-  } else if (event.eventType === 'settings.write_failed' && typeof data.error === 'string') {
-    error.value = data.error
-  } else if (event.eventType === 'resources.reloaded') {
-    selectedResource.value = null
-    resources.value = null
-    tools.value = null
-    if (props.section === 'resources' || props.section === 'tools') void loadSection(props.section, true)
-  } else if ((event.eventType === 'model.changed' || event.eventType === 'thinking.changed') && models.value) {
-    models.value.instance = props.work
-  }
-}
-
-defineExpose({ reconcileDomain, applyLiveEvent })
-
-async function loadSection(section: ControlSection, force = false): Promise<boolean> {
-  if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return true
-  if (section === 'resources') void loadSection('tools', force)
-  if (loading.value.has(section)) return false
-  const dataExists = section === 'commands' || section === 'dock-tools'
-    ? null
-    : section === 'models' || section === 'thinking'
-      ? models.value
-      : section === 'tools'
-        ? tools.value
-        : section === 'resources'
-          ? resources.value
-          : settings.value
-  if (dataExists && !force) return true
-  const epoch = loadEpoch
-  const workId = props.work.id
-  loading.value.add(section)
-  delete loadErrors.value[section]
-  try {
-    if (section === 'commands' || section === 'dock-tools') {
-      return await catalog.ensure(props.work, requireConnectionContext(app), force)
-    } else if (section === 'models' || section === 'thinking') {
-      const result = await currentConnectionCall(app, (context) => listModels(workId, context))
-      if (epoch !== loadEpoch || props.work.id !== workId) return false
-      models.value = result
-      emit('snapshot', result.instance)
-      if (section === 'models') {
-        const current = result.instance.executor.model
-        const currentLabel = current ? `${current.provider}/${current.id}` : '—'
-        emit('title', '选择 Model', [`当前：${currentLabel}`, result.truncated ? `显示 ${result.models.length}/${result.total} 项` : ''].filter(Boolean).join('\n'))
-      }
-    } else if (section === 'tools') {
-      const result = await currentConnectionCall(app, (context) => listTools(workId, context))
-      if (epoch !== loadEpoch || props.work.id !== workId) return false
-      tools.value = result
-      emit('snapshot', result.instance)
-    } else if (section === 'resources') {
-      const result = await currentConnectionCall(app, (context) => getResources(workId, context))
-      if (epoch !== loadEpoch || props.work.id !== workId) return false
-      resources.value = result
-    } else {
-      const result = await currentConnectionCall(app, (context) => getSettings(workId, context))
-      if (epoch !== loadEpoch || props.work.id !== workId) return false
-      settings.value = result
-    }
-    return true
-  } catch (cause) {
-    if (epoch === loadEpoch && props.work.id === workId) {
-      loadErrors.value[section] = errorMessage(cause)
-    }
-    return false
-  } finally {
-    if (epoch === loadEpoch) loading.value.delete(section)
-  }
-}
-
 async function executeCatalogCommand(command: CommandInfo, argumentsText: string): Promise<boolean> {
-  if (props.preview || pending.value) return false
+  if (pending.value) return false
   const operationId = crypto.randomUUID()
   pending.value = `command:${command.name}`
   error.value = ''
   commandConsole.beginOperation(operationId, command.name, argumentsText)
   if (command.name === 'dock-tools') dockToolsOperationId.value = operationId
-  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
-    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
+  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, app.captureOperationTarget(context, props.work.id)))
     commandConsole.receiveReceipt(operationId, result.receipt)
@@ -522,11 +418,10 @@ async function toggleDockTools() {
 }
 
 async function chooseModel(model: ModelInfo) {
-  if (props.preview || pending.value || isCurrentModel(model)) return
+  if (pending.value || isCurrentModel(model)) return
   pending.value = `model:${model.provider}/${model.id}`
   error.value = ''
-  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
-    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
+  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const snapshot = await currentConnectionCall(app, (context) => setModel(props.work.id, model.provider, model.id, app.captureOperationTarget(context, props.work.id)))
     if (models.value) models.value.instance = snapshot
@@ -539,11 +434,10 @@ async function chooseModel(model: ModelInfo) {
 }
 
 async function chooseThinking(level: ThinkingLevel) {
-  if (props.preview || pending.value || props.work.executor.thinkingLevel === level) return
+  if (pending.value || props.work.executor.thinkingLevel === level) return
   pending.value = `thinking:${level}`
   error.value = ''
-  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
-    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
+  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const snapshot = await currentConnectionCall(app, (context) => setThinking(props.work.id, level, app.captureOperationTarget(context, props.work.id)))
     if (models.value) models.value.instance = snapshot
@@ -556,12 +450,11 @@ async function chooseThinking(level: ThinkingLevel) {
 }
 
 async function toggleTool(tool: ToolInfo) {
-  if (!tools.value || tools.value.truncated || props.preview || pending.value) return
+  if (!tools.value || tools.value.truncated || pending.value) return
   const names = tools.value.tools.filter((item) => item.name === tool.name ? !tool.active : item.active).map((item) => item.name)
   pending.value = `tool:${tool.name}`
   error.value = ''
-  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
-    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
+  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const result = await currentConnectionCall(app, (context) => setActiveTools(props.work.id, names, app.captureOperationTarget(context, props.work.id)))
     tools.value = result
@@ -613,11 +506,10 @@ function saveSettingDraft(setting: SettingInfo) {
 }
 
 async function saveSetting(setting: SettingInfo, value: SettingValue) {
-  if (!settings.value || !setting.writable || props.preview || pending.value) return
+  if (!settings.value || !setting.writable || pending.value) return
   pending.value = `setting:${setting.key}`
   error.value = ''
-  const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
-    expectedHostEpoch: props.work.ownerHostEpoch ?? '', expectedRuntimeGeneration: props.work.runtimeGeneration })
+  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, app.captureOperationTarget(context, props.work.id)))
     const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
@@ -641,19 +533,6 @@ function sectionDomain(section: ControlSection): ControlMutationDomain {
   if (section === 'resources') return 'conversation'
   if (['sessions', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return 'sessions'
   return section as ControlMutationDomain
-}
-
-function formatProjectTokens(value?: number | null) {
-  if (value == null || !Number.isFinite(Number(value))) return '—'
-  const number = Number(value)
-  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`
-  if (number >= 1_000) return `${Math.floor(number / 1_000)}k`
-  return String(number)
-}
-function contextLabel(work: Work) {
-  const context = work.metrics?.context
-  if (!context?.contextWindow) return '—'
-  return `${formatProjectTokens(context.tokens)}/${formatProjectTokens(context.contextWindow)} · ${context.percent == null ? '—' : `${context.percent.toFixed(1)}%`}`
 }
 
 function runLabel(value: string) {
@@ -706,7 +585,7 @@ function isCurrentModel(model: ModelInfo) {
       <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
         <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending">{{ pending ? '运行中…' : '运行' }}</button></form>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="!!pending">{{ pending ? '运行中…' : '运行' }}</button></form>
         <div v-if="argumentCompletionsLoading || argumentCompletions.length" class="cmd-center-completions" role="listbox" aria-label="参数候选">
           <button v-for="(item, index) in argumentCompletions" :key="`${item.value}:${index}`" type="button" class="cmd-center-completion" @click="chooseArgumentCompletion(item)"><strong>{{ item.label }}</strong><span v-if="item.description">{{ item.description }}</span></button>
           <div v-if="argumentCompletionsLoading && !argumentCompletions.length" class="cmd-center-completion-loading">正在读取参数候选…</div>
@@ -741,7 +620,7 @@ function isCurrentModel(model: ModelInfo) {
       <div v-else-if="!dockToolsCommand && (catalog.state === 'idle' || catalog.state === 'loading')" class="dock-tools-loading"><span class="alu-agent-activity-spinner" />正在读取当前 Work 的可用命令…</div>
       <div v-else-if="catalog.state === 'failed'" class="alu-dialog-error">命令暂时没有读到。<button type="button" @click="loadSection('dock-tools', true)">重试读取</button></div>
       <div v-else-if="!dockToolsCommand" class="alu-dialog-error">当前 Work 没有提供 Dock Tools 开关。</div>
-      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on', pending: dockToolsBusy }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :aria-pressed="dockTools === 'on'" :disabled="preview || dockToolsBusy" data-modal-initial @click="toggleDockTools">
+      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on', pending: dockToolsBusy }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :aria-pressed="dockTools === 'on'" :disabled="dockToolsBusy" data-modal-initial @click="toggleDockTools">
         <span class="dock-tools-toggle-copy"><strong>{{ dockToolsBusy ? '正在更新…' : '允许当前 Work 使用 Dock Tools' }}</strong><small>{{ dockToolsBusy ? '等待当前 Work 确认' : dockTools === 'on' ? '已开启' : '已关闭' }}</small></span>
         <span class="dock-tools-switch" aria-hidden="true"><i /></span>
       </button>
@@ -752,10 +631,8 @@ function isCurrentModel(model: ModelInfo) {
 
     <SessionManager
       v-else-if="['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)"
-      ref="sessionManager"
       :work="work"
       :mode="sessionMode"
-      :preview="preview"
       :compaction-pending="compactionPending"
       @unknown="forwardSessionUnknown"
       @finished="sessionActionFinished"
@@ -768,17 +645,17 @@ function isCurrentModel(model: ModelInfo) {
       <p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p>
       <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredModels, chooseModel)" /></div>
       <div class="ui-dialog-options">
-        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="preview || !!pending" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
+        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="!!pending" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
         <div v-if="models && !filteredModels.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
     </section>
 
-    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
+    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="!!pending" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
       <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
       <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回，暂时不能切换工具。</div>
-      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
+      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="!!pending || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
     </section>
 
     <ResourceDocument v-else-if="section === 'resources' && selectedResource" :work="work" :resource="selectedResource" @back="closeResource" />
@@ -791,7 +668,7 @@ function isCurrentModel(model: ModelInfo) {
       </section>
       <section class="alu-project-status-section">
         <h3>Session</h3>
-        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ contextLabel(work) }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
+        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ formatContextUsage(work.metrics?.context, 'status') }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
         <div v-if="work.lastError" class="alu-project-status-error">{{ work.lastError }}</div>
       </section>
       <section class="alu-project-status-section">
@@ -806,7 +683,7 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="loadErrors.resources" class="alu-dialog-error">{{ loadErrors.resources }}<button type="button" @click="loadSection('resources', true)">重试读取资源</button></div>
         <div v-else-if="!resources" class="alu-dialog-loading">正在读取资源…</div>
         <template v-if="resources">
-        <div v-for="group in resourceGroups" :key="group.kind" class="alu-project-status-resource-group"><h4>{{ group.label }} <span class="alu-project-status-count">{{ group.items.length }}</span></h4><div class="alu-project-status-chips"><template v-for="(resource, index) in group.items" :key="resource.contentRef || `${resource.kind}:${resource.name}:${index}`"><button v-if="resource.contentRef" type="button" class="alu-project-status-chip resource-read-button" :disabled="preview" :id="`resource-${resource.contentRef}`" :aria-label="`阅读 ${resource.name}`" @click="selectedResource = resource">{{ resource.name }} <ChevronRight :size="11" /></button><span v-else class="alu-project-status-chip">{{ resource.name }}</span></template><span v-if="!group.items.length" class="alu-project-status-empty">—</span></div></div>
+        <div v-for="group in resourceGroups" :key="group.kind" class="alu-project-status-resource-group"><h4>{{ group.label }} <span class="alu-project-status-count">{{ group.items.length }}</span></h4><div class="alu-project-status-chips"><template v-for="(resource, index) in group.items" :key="resource.contentRef || `${resource.kind}:${resource.name}:${index}`"><button v-if="resource.contentRef" type="button" class="alu-project-status-chip resource-read-button" :id="`resource-${resource.contentRef}`" :aria-label="`阅读 ${resource.name}`" @click="selectedResource = resource">{{ resource.name }} <ChevronRight :size="11" /></button><span v-else class="alu-project-status-chip">{{ resource.name }}</span></template><span v-if="!group.items.length" class="alu-project-status-empty">—</span></div></div>
         <div v-if="filteredDiagnostics.length" class="alu-project-status-resource-group"><h4>Diagnostics <span class="alu-project-status-count">{{ resources?.diagnosticTotal ?? filteredDiagnostics.length }}</span></h4><div v-for="(diagnostic, index) in filteredDiagnostics" :key="index" class="alu-project-status-diagnostic" :class="`is-${diagnostic.severity}`">{{ diagnostic.message }}</div></div>
         <div v-if="resources.resourcesTruncated || resources.diagnosticsTruncated" class="alu-project-status-note">资源或诊断列表未完整返回</div>
         </template>
@@ -826,20 +703,20 @@ function isCurrentModel(model: ModelInfo) {
 
     <section v-else class="alu-session-form alu-setting-editor">
       <div v-if="selectedSetting.key === 'warnings'" class="ui-dialog-options">
-        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, { anthropicExtraUsage: true })"><span class="ui-dialog-option-marker">{{ anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启 Anthropic 额外用量提醒</span></span></button>
-        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, { anthropicExtraUsage: false })"><span class="ui-dialog-option-marker">{{ !anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭 Anthropic 额外用量提醒</span></span></button>
+        <button class="ui-dialog-option" :disabled="!!pending" @click="saveSetting(selectedSetting, { anthropicExtraUsage: true })"><span class="ui-dialog-option-marker">{{ anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启 Anthropic 额外用量提醒</span></span></button>
+        <button class="ui-dialog-option" :disabled="!!pending" @click="saveSetting(selectedSetting, { anthropicExtraUsage: false })"><span class="ui-dialog-option-marker">{{ !anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭 Anthropic 额外用量提醒</span></span></button>
       </div>
       <div v-else-if="selectedSetting.valueType === 'boolean'" class="ui-dialog-options">
-        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, true)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === true ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启</span></span></button>
-        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, false)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === false ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭</span></span></button>
+        <button class="ui-dialog-option" :disabled="!!pending" @click="saveSetting(selectedSetting, true)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === true ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启</span></span></button>
+        <button class="ui-dialog-option" :disabled="!!pending" @click="saveSetting(selectedSetting, false)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === false ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭</span></span></button>
       </div>
       <div v-else-if="selectedSetting.valueType === 'enum'" class="ui-dialog-options">
-        <button v-for="value in selectedSetting.allowedValues" :key="String(value)" class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, value)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === value ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ settingOptionLabel(selectedSetting.key, value) }}</span></span></button>
+        <button v-for="value in selectedSetting.allowedValues" :key="String(value)" class="ui-dialog-option" :disabled="!!pending" @click="saveSetting(selectedSetting, value)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === value ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ settingOptionLabel(selectedSetting.key, value) }}</span></span></button>
       </div>
       <template v-else>
         <textarea v-if="selectedSetting.valueType === 'object'" v-model="settingDraft" class="ui-dialog-editor" rows="8" />
         <input v-else v-model="settingDraft" class="ui-dialog-input" :inputmode="selectedSetting.valueType === 'integer' ? 'numeric' : 'text'" />
-        <div class="ui-dialog-form-footer"><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending" @click="saveSettingDraft(selectedSetting)">确认</button></div>
+        <div class="ui-dialog-form-footer"><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="!!pending" @click="saveSettingDraft(selectedSetting)">确认</button></div>
       </template>
     </section>
   </div>

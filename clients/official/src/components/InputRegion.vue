@@ -1,47 +1,51 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { isTauri } from '../lib/bridge'
 import AttachmentCard from './AttachmentCard.vue'
 import OperationResults from './OperationResults.vue'
-import type { useInputEditor } from '../lib/inputEditor'
-import type { useWorkActions } from '../lib/workActions'
-import type { useAttachmentUploads } from '../lib/attachmentUploads'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
-import type { useWorkObservation } from '../lib/workObservation'
-import type { useOperationResults } from '../lib/operationResults'
 import ExtensionUiSurface from './ExtensionUiSurface.vue'
 import { useAppStore } from '../stores/app'
+import { useAttachmentsStore } from '../stores/attachments'
 import { useCommandCatalogStore } from '../stores/command-catalog'
+import { useConversationStore } from '../stores/conversation'
+import { useInputStore } from '../stores/input'
+import { useObservationStore } from '../stores/observation'
+import { useOperationsStore } from '../stores/operations'
+import { useSurfacesStore } from '../stores/surfaces'
+import { useWorkActionsStore } from '../stores/work-actions'
 
-const props = defineProps<{
-  editor: ReadonlyRefs<Pick<ReturnType<typeof useInputEditor>, 'allowAnotherSubmit' | 'applyExtensionEditorText' | 'canSubmit' | 'completeSuggest' | 'composerArgumentLoading' | 'handleComposerKeydown' | 'queueItems' | 'queueNotice' | 'queueRestoring' | 'restoreQueue' | 'slashQuery' | 'submit' | 'submitAcknowledged' | 'submitExpanded' | 'submitOutcomeUnknown' | 'submitting' | 'suggestItems' | 'suggestOpen' | 'visibleComposerError'>> & Pick<ReturnType<typeof useInputEditor>, 'composerExpanded' | 'composerTextarea' | 'draft' | 'expandedTextarea' | 'suggestIndex'> & { composer: Pick<ReturnType<typeof useInputEditor>['composer'], 'remember' | 'composition'> }
-  uploads: ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'attachmentPicking' | 'attachmentPreviews' | 'cancelUpload' | 'clearQueueImages' | 'clearingRestoredImages' | 'draftAttachments' | 'handleComposerPaste' | 'launchAttachmentUpload' | 'openAttachmentPreview' | 'removeUpload' | 'removeUploaded' | 'restoredImageCount' | 'uploadDrafts'>>
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'bindSurface' | 'handleModalKeydown' | 'handleModalWheel' | 'modalOpen' | 'rememberModalTrigger'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'actionNotice' | 'mutationOutcomeUnknown' | 'reconcileMutationOutcome' | 'reconcilingReopenWorkId'>>
-  operations: ReadonlyRefs<Pick<ReturnType<typeof useOperationResults>, 'consumeNativeOperation' | 'restoreReturnedOperation' | 'returnedOperations' | 'returnedContentErrors' | 'workResults'>>
-  observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'load'>>
-  away: boolean
-}>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
-const { composer, draft, composerTextarea, expandedTextarea, composerExpanded, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown } = props.editor
-const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, clearQueueImages, handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview } = props.uploads
-const { modalOpen, rememberModalTrigger, handleModalKeydown, handleModalWheel } = props.page
-const { actionNotice, mutationOutcomeUnknown, reconcilingReopenWorkId, reconcileMutationOutcome } = props.actions
+const input = useInputStore()
+const { draft, composerTextarea, expandedTextarea, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
+const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages } = input
+const attachments = useAttachmentsStore()
+const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount } = storeToRefs(attachments)
+const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview } = attachments
+const surfaces = useSurfacesStore()
+const { modalOpen, composerExpanded } = storeToRefs(surfaces)
+const { rememberModalTrigger, handleModalKeydown, handleModalWheel, bindSurface } = surfaces
+const workActions = useWorkActionsStore()
+const { actionNotice, mutationOutcomeUnknown, reconcilingReopenWorkId } = storeToRefs(workActions)
+const { reconcileMutationOutcome } = workActions
 // An unconfirmed result stays visible with a refresh action; other actions remain usable.
 const canConfirmOutcome = computed(() => !!selected.value && mutationOutcomeUnknown.value && reconcilingReopenWorkId.value !== selected.value.id)
-const { returnedOperations, returnedContentErrors, workResults, consumeNativeOperation, restoreReturnedOperation } = props.operations
-const { load: loadSelectedConversation } = props.observation
+const operations = useOperationsStore()
+const { returnedOperations, returnedContentErrors, workResults } = storeToRefs(operations)
+const { consumeNativeOperation, restoreReturnedOperation } = operations
+const observation = useObservationStore()
+const { load: loadSelectedConversation } = observation
+const conversation = useConversationStore()
+const { outputAwayFromBottom: away } = storeToRefs(conversation)
 const commandCatalogStore = useCommandCatalogStore()
-const reconcileExtensionInteraction = () => selected.value ? props.observation.load(selected.value.id, true) : Promise.resolve(false)
+const reconcileExtensionInteraction = () => selected.value ? observation.load(selected.value.id, true) : Promise.resolve(false)
 const applyExtensionTitle = (title: string) => { document.title = title }
-const emit = defineEmits<{ latest: [] }>()
 </script>
 
 <template>
   <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
-    <button v-if="props.away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="emit('latest')"><span aria-hidden="true">↓</span>滚到底部</button>
+    <button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
     <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
       <div v-if="visibleComposerError" :class="submitOutcomeUnknown ? 'alu-composer-notice' : 'alu-composer-error'" :role="submitOutcomeUnknown ? 'status' : undefined"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!submitAcknowledged" @click="allowAnotherSubmit">允许再次发送</button></template></div>
       <div v-if="actionNotice || canConfirmOutcome" class="alu-composer-notice" role="status"><span>{{ actionNotice ?? '上一次操作的结果还没有确认。可以刷新查看，其他操作照常可用。' }}</span><button v-if="canConfirmOutcome" @click="reconcileMutationOutcome()">刷新并确认</button></div>
@@ -72,7 +76,7 @@ const emit = defineEmits<{ latest: [] }>()
           <div v-else-if="!suggestItems.length && commandCatalogStore.state === 'failed'" class="cmd-suggest-hint">当前命令目录暂时不可用，请稍后重试。</div>
           <div v-else-if="!suggestItems.length && slashQuery" class="cmd-suggest-hint">无匹配命令</div>
         </div>
-        <textarea ref="composerTextarea" v-model="draft" rows="1" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @select="composer.remember" @blur="composer.remember" @compositionstart="composer.composition" @compositionend="composer.composition" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
+        <textarea ref="composerTextarea" v-model="draft" rows="1" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @select="rememberSelection" @blur="rememberSelection" @compositionstart="trackComposition" @compositionend="trackComposition" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
         <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
         <button class="alu-send-btn" type="submit" :disabled="!canSubmit">{{ submitting ? '发送中…' : '发送' }}</button>
       </form>
@@ -83,10 +87,10 @@ const emit = defineEmits<{ latest: [] }>()
 
   <Transition name="fade">
     <div v-if="composerExpanded" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
-      <section :ref="element => props.page.bindSurface('expanded', element)" class="ui-dialog-box ui-dialog-box-composer ui-dialog-size-wide" role="dialog" aria-modal="true" aria-labelledby="expanded-composer-title" tabindex="-1" @wheel="handleModalWheel">
+      <section :ref="element => bindSurface('expanded', element)" class="ui-dialog-box ui-dialog-box-composer ui-dialog-size-wide" role="dialog" aria-modal="true" aria-labelledby="expanded-composer-title" tabindex="-1" @wheel="handleModalWheel">
         <header class="ui-dialog-header"><div id="expanded-composer-title" class="ui-dialog-title">编辑消息</div></header>
         <button class="ui-dialog-close" aria-label="关闭" @click="composerExpanded = false">×</button>
-        <textarea ref="expandedTextarea" v-model="draft" @select="composer.remember" @blur="composer.remember" @compositionstart="composer.composition" @compositionend="composer.composition" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" title="Ctrl+J 换行" aria-keyshortcuts="Control+J" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event, true)" />
+        <textarea ref="expandedTextarea" v-model="draft" @select="rememberSelection" @blur="rememberSelection" @compositionstart="trackComposition" @compositionend="trackComposition" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" title="Ctrl+J 换行" aria-keyshortcuts="Control+J" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event, true)" />
         <OperationResults v-if="workResults.length" :operations="workResults" :acknowledge="consumeNativeOperation" />
         <footer class="ui-dialog-actions ui-dialog-composer-footer">
           <span class="ui-dialog-composer-attachments">{{ draftAttachments.length + restoredImageCount ? `已附加 ${draftAttachments.length + restoredImageCount} 个文件` : '未附加文件' }}</span>

@@ -93,7 +93,7 @@ try {
       throw new Error(`Unexpected IPC ${command}`)
     }
     const created = []
-    const props = reactive({ machines, machinesLoading: false, preview: false, outcomeUnknown: false })
+    const props = reactive({ machines, machinesLoading: false, outcomeUnknown: false })
     const ui = mount(NewWorkDialog, props, { onCreated: work => created.push(work) })
     await ui.click('选择其他目录')
     return { ...ui, calls, created, store }

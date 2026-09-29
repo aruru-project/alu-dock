@@ -96,7 +96,7 @@ try {
       return { instance: { ...work, name: 'Renamed' } }
     } }
     const container = node('storage-session')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode, preview: false, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode, compactionPending: false }) })
     mounted.mount(container); await settle()
     failStorage = true
     const rename = find(container, item => item.type === 'input')
@@ -128,7 +128,7 @@ try {
       return { instance: { ...work, name: 'Renamed' } }
     } }
     const container = node(`compaction-${state}-rename`)
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'rename-session', preview: false, compactionPending: state === 'pending' }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'rename-session', compactionPending: state === 'pending' }) })
     mounted.mount(container); await settle()
     find(container, item => item.type === 'input').props['onUpdate:modelValue']('Renamed')
     const confirm = find(container, item => item.type === 'button' && text(item) === '确认')
@@ -147,7 +147,7 @@ try {
     const resync = []
     const container = node('root')
     const app = renderer.createApp({ render: () => h(SessionManager, {
-      work, mode: 'reload-session', preview: false, compactionPending: false,
+      work, mode: 'reload-session', compactionPending: false,
       onFinished: () => resync.push(true),
     }) })
     app.mount(container)
@@ -201,7 +201,7 @@ try {
     } }
     const container = node('root')
     const mounted = renderer.createApp({ render: () => h(SessionManager, {
-      work, mode: operation === 'new' ? 'new-session' : operation === 'switch' ? 'sessions' : 'tree', preview: false, compactionPending: false,
+      work, mode: operation === 'new' ? 'new-session' : operation === 'switch' ? 'sessions' : 'tree', compactionPending: false,
       onFinished: () => resync.push(true),
     }) })
     mounted.mount(container)
@@ -245,7 +245,7 @@ try {
         : { ...page, sessions: [{ token: 'older', firstUserMessage: '整理发布清单', cwd: '/project', lastActivityAt: '2026-09-28T12:00:00.000Z', current: false }] }
     } }
     const container = node('root')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', compactionPending: false }) })
     mounted.mount(container); await settle()
     assert.deepEqual(reads.map(args => [args.instanceId, args.machineHostId, args.cwd, args.cursor]), [
       ['work-a', 'machine-a', '/project', null],
@@ -271,7 +271,7 @@ try {
       ? Promise.resolve({ sessions: [{ token: 'saved', name: 'saved', cwd: '/project', current: false }], total: 1, incomplete: false })
       : new Promise((_resolve, reject) => { rejectReply = reject; operationId = args.operationId }) }
     const container = node('root')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', compactionPending: false }) })
     mounted.mount(container); await settle()
     const pending = find(container, hasClass('ui-dialog-option')).props.onClick()
     await settle(); work.id = 'work-b'; await settle()
@@ -295,7 +295,7 @@ try {
       return { cancelled: false, instance: { ...work, runtimeGeneration: 5 } }
     } }
     const container = node('root')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', compactionPending: false }) })
     mounted.mount(container); await settle()
     await find(container, hasClass('ui-dialog-option')).props.onClick(); await settle()
     store.setCurrentDraft('edited during trust')
@@ -322,7 +322,7 @@ try {
     return new Promise((resolve, reject) => { resolveTemplates = resolve; rejectTemplates = reject })
   } }
   const container = node('root')
-  const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'compact-session', preview: false, compactionPending: false, onCompact: value => submitted.push(value) }) })
+  const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'compact-session', compactionPending: false, onCompact: value => submitted.push(value) }) })
   mounted.mount(container)
   await settle()
   const button = label => find(container, item => item.type === 'button' && text(item).includes(label))

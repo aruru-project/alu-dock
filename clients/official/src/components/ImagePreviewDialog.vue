@@ -1,28 +1,26 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
+import { storeToRefs } from 'pinia'
 import { FileDown } from '@lucide/vue'
 import { isTauri, savePreviewImage } from '../lib/bridge'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { useConversationRegion } from '../lib/conversationRegion'
-import type { useAttachmentUploads } from '../lib/attachmentUploads'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
 import ImageZoomSurface from './ImageZoomSurface.vue'
+import { useAttachmentsStore } from '../stores/attachments'
+import { useConversationStore } from '../stores/conversation'
+import { useSurfacesStore } from '../stores/surfaces'
 
-const props = defineProps<{
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'bindSurface' | 'closeModal' | 'handleModalKeydown' | 'handleModalWheel'>> & Pick<ReturnType<typeof usePageSurfaces>, 'imagePreview' | 'imageSaveStatus' | 'imageSaving'>
-  conversationOwner: ReadonlyRefs<Pick<ReturnType<typeof useConversationRegion>, 'failPreview'>>
-  uploads: ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'previewFailed' | 'removeAttachmentPreview'>>
-}>()
-const { imagePreview, imageSaving, imageSaveStatus, closeModal, handleModalKeydown, handleModalWheel } = props.page
-const { removeAttachmentPreview } = props.uploads
+const surfaces = useSurfacesStore()
+const { imagePreview, imageSaving, imageSaveStatus } = storeToRefs(surfaces)
+const { bindSurface, closeModal, handleModalKeydown, handleModalWheel } = surfaces
+const conversation = useConversationStore()
+const attachments = useAttachmentsStore()
 function markPreviewImageFailed() {
   const preview = imagePreview.value
   if (!preview) return
   if (preview.kind === 'conversation') {
-    props.conversationOwner.failPreview(preview.imageKey)
+    conversation.failPreview(preview.imageKey)
   } else {
-    removeAttachmentPreview(preview.attachmentKey)
-    props.uploads.previewFailed()
+    attachments.removeAttachmentPreview(preview.attachmentKey)
+    attachments.previewFailed()
   }
   imagePreview.value = null
 }
@@ -58,7 +56,7 @@ async function saveOpenImage() {
 <template>
   <Transition name="fade">
     <div v-if="imagePreview" class="alu-image-preview-overlay" role="presentation" @click.self="closeModal" @keydown="handleModalKeydown" @wheel.prevent.stop>
-      <section :ref="element => props.page.bindSurface('image', element)" class="alu-image-preview" role="dialog" aria-modal="true" aria-label="图片预览" tabindex="-1" @wheel="handleModalWheel">
+      <section :ref="element => bindSurface('image', element)" class="alu-image-preview" role="dialog" aria-modal="true" aria-label="图片预览" tabindex="-1" @wheel="handleModalWheel">
         <button type="button" class="alu-image-preview-save" :disabled="imageSaving" @click="saveOpenImage"><FileDown :size="17" />{{ imageSaving ? '保存中…' : '保存图片' }}</button>
         <button type="button" class="alu-image-preview-close" aria-label="关闭图片预览" data-modal-initial @click="closeModal">×</button>
         <ImageZoomSurface :url="imagePreview.url" :name="imagePreview.name" @failed="markPreviewImageFailed" />

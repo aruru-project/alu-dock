@@ -48,7 +48,6 @@ const props = defineProps<{
   machines: readonly MachineDto[]
   machinesLoading: boolean
   machineError?: string
-  preview: boolean
   outcomeUnknown: boolean
 }>()
 const emit = defineEmits<{
@@ -150,7 +149,7 @@ function resetSystems() {
 }
 
 async function chooseDirectory(path: string, refresh = false) {
-  if (!isTauri || props.preview || actionBusy.value || !machine.value?.available) return
+  if (!isTauri || actionBusy.value || !machine.value?.available) return
   const selectedId = refresh ? systemSelection.value?.id : undefined
   const shouldSave = refresh && saveDefault.value
   const previouslySaved = refresh ? savedDefaultId.value : ''
@@ -353,7 +352,7 @@ async function loadInventory() {
 }
 
 async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, workerConfig?: Record<string, unknown>) {
-  if (!isTauri || props.preview || !!pending.value || (!!trust.value && !continuation)) return
+  if (!isTauri || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   const epoch = systemEpoch
@@ -376,7 +375,7 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
 }
 
 async function adoptSaved(sessionToken: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation) {
-  if (!isTauri || props.preview || !!pending.value || (!!trust.value && !continuation)) return
+  if (!isTauri || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   pending.value = 'adopt'
@@ -461,7 +460,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
       <section v-if="view === 'launcher'" class="new-work-launcher">
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
-          <button v-for="path in recentWorkspaces" :key="path" type="button" class="ui-dialog-option" :disabled="preview || actionBusy || !machine.available" @click="chooseDirectory(path)">
+          <button v-for="path in recentWorkspaces" :key="path" type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="chooseDirectory(path)">
             <span class="ui-dialog-option-marker">•</span>
             <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ path.split(/[\\/]/u).filter(Boolean).at(-1) || path }}</span><span class="ui-dialog-option-detail"><span>{{ path }}</span></span></span>
           </button>
@@ -495,7 +494,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         />
         <footer class="directory-confirm">
           <span :title="workspacePath">{{ workspacePath }}</span>
-          <button type="button" class="ui-dialog-btn session-primary" :disabled="preview || actionBusy || !machine.available" @click="chooseDirectory(workspacePath)">使用这个目录</button>
+          <button type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || !machine.available" @click="chooseDirectory(workspacePath)">使用这个目录</button>
         </footer>
       </template>
 
@@ -536,7 +535,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         :loading-more="sessionPages.loadingMore.value"
         :more-failed="sessionPages.moreFailed.value"
         :incomplete="sessionPages.incomplete.value"
-        :disabled="preview || actionBusy"
+        :disabled="actionBusy"
         :empty-text="sessionPages.incomplete.value ? '部分 Session 暂时无法读取。请稍后重试。' : '这台机器上没有保存的 Pi Session。'"
         @select="adoptSaved($event.token)"
         @retry="sessionPages.retryMore()"

@@ -14,51 +14,49 @@ import {
 import type { DeliverableDto } from '../lib/types'
 import { deliveryHistoryKey, type DownloadedDeliverable } from '../lib/downloadHistory'
 import { formatFileSize } from '../lib/fileSize'
+import { storeToRefs } from 'pinia'
+import { useAppStore } from '../stores/app'
+import { useDeliveriesStore } from '../stores/deliveries'
+import { useSurfacesStore } from '../stores/surfaces'
 
-export interface CurrentDeliverableRow {
+interface CurrentDeliverableRow {
   deliverable: DeliverableDto
   downloaded?: DownloadedDeliverable
   downloading: boolean
   progress: number
 }
 
-const props = defineProps<{
-  open: boolean
-  loading: boolean
-  error: string
-  currentWorkName: string
-  current: CurrentDeliverableRow[]
-  history: DownloadedDeliverable[]
-  openingKey: string
-}>()
-
-const emit = defineEmits<{
-  close: []
-  refresh: []
-  download: [deliverable: DeliverableDto]
-  redownload: [deliverable: DeliverableDto]
-  openSaved: [item: DownloadedDeliverable]
-  clear: []
-}>()
+const app = useAppStore()
+const deliveries = useDeliveriesStore()
+const { deliveryOpen: open } = storeToRefs(useSurfacesStore())
+const { deliveryLoading: loading, deliveryError: error, currentDeliverableRows: current, olderDownloadHistory: history, openingDeliveryKey: openingKey } = storeToRefs(deliveries)
+const currentWorkName = computed(() => app.selectedWork?.displayName || '')
+const actions = {
+  close: () => { open.value = false },
+  refresh: () => { void deliveries.refreshDeliverables() },
+  download: (deliverable: DeliverableDto) => { void deliveries.saveDeliverable(deliverable) },
+  redownload: (deliverable: DeliverableDto) => { void deliveries.saveDeliverable(deliverable, true) },
+  openSaved: (item: DownloadedDeliverable) => { void deliveries.openDownloadedDeliverable(item) },
+  clear: async () => {
+    const cleared = await deliveries.clearLocalDownloadHistory()
+    await nextTick()
+    ;(cleared ? closeButton : clearButton).value?.focus()
+  },
+}
 
 const tray = ref<HTMLElement | null>(null)
 const closeButton = ref<HTMLButtonElement | null>(null)
 const clearButton = ref<HTMLButtonElement | null>(null)
-const pendingRows = computed(() => props.current.filter((row) => !row.downloaded).slice().reverse())
-const downloadedRows = computed(() => props.current
+const pendingRows = computed(() => current.value.filter((row) => !row.downloaded).slice().reverse())
+const downloadedRows = computed(() => current.value
   .filter((row): row is CurrentDeliverableRow & { downloaded: DownloadedDeliverable } => Boolean(row.downloaded))
   .slice()
   .sort((left, right) => Date.parse(right.downloaded.downloadedAt) - Date.parse(left.downloaded.downloadedAt)))
 
-watch(() => props.open, async (open) => {
-  if (!open) return
+watch(open, async (isOpen) => {
+  if (!isOpen) return
   await nextTick()
   closeButton.value?.focus()
-})
-
-defineExpose({
-  focusClear: () => clearButton.value?.focus(),
-  focusClose: () => closeButton.value?.focus(),
 })
 
 function keepFocusInside(event: KeyboardEvent) {
@@ -80,7 +78,7 @@ function keepFocusInside(event: KeyboardEvent) {
 }
 
 function isOpening(item: DownloadedDeliverable) {
-  return props.openingKey === deliveryHistoryKey(item.connectionId, item.instanceId, item.deliveryRef)
+  return openingKey.value === deliveryHistoryKey(item.connectionId, item.instanceId, item.deliveryRef)
 }
 
 function savedFileAction(item: DownloadedDeliverable) {
@@ -106,7 +104,7 @@ function dateLabel(value: string) {
     :aria-hidden="!open"
     :tabindex="open ? 0 : -1"
     aria-label="关闭文件列表"
-    @click="emit('close')"
+    @click="actions.close()"
   />
   <aside
     ref="tray"
@@ -126,10 +124,10 @@ function dateLabel(value: string) {
         <h2 id="delivery-tray-title">文件</h2>
         <p>查看当前 Work 交付的文件</p>
       </div>
-      <button type="button" title="刷新当前 Work 的文件" aria-label="刷新当前 Work 的文件" :disabled="loading || !currentWorkName" @click="emit('refresh')">
+      <button type="button" title="刷新当前 Work 的文件" aria-label="刷新当前 Work 的文件" :disabled="loading || !currentWorkName" @click="actions.refresh()">
         <RefreshCw :size="16" :class="{ spinning: loading }" />
       </button>
-      <button ref="closeButton" type="button" aria-label="关闭文件列表" @click="emit('close')"><X :size="18" /></button>
+      <button ref="closeButton" type="button" aria-label="关闭文件列表" @click="actions.close()"><X :size="18" /></button>
     </header>
 
     <div class="delivery-tray-body">
@@ -160,7 +158,7 @@ function dateLabel(value: string) {
                   class="delivery-row-action"
                   :disabled="row.downloading"
                   :aria-label="`下载 ${row.deliverable.name}`"
-                  @click="emit('download', row.deliverable)"
+                  @click="actions.download(row.deliverable)"
                 ><Download :size="16" /><span>{{ row.downloading ? `${Math.round(row.progress * 100)}%` : '下载' }}</span></button>
               </article>
             </div>
@@ -186,7 +184,7 @@ function dateLabel(value: string) {
                     class="delivery-row-action is-open"
                     :disabled="isOpening(row.downloaded)"
                     :aria-label="`${savedFileAction(row.downloaded)}：${row.deliverable.name}`"
-                    @click="emit('openSaved', row.downloaded)"
+                    @click="actions.openSaved(row.downloaded)"
                   ><component :is="row.downloaded.savedLocation.kind === 'path' ? FolderOpen : ExternalLink" :size="16" /><span>{{ isOpening(row.downloaded) ? '正在打开' : savedFileAction(row.downloaded) }}</span></button>
                   <button
                     type="button"
@@ -194,7 +192,7 @@ function dateLabel(value: string) {
                     :disabled="row.downloading"
                     :aria-label="`重新下载：${row.deliverable.name}`"
                     title="重新下载"
-                    @click="emit('redownload', row.deliverable)"
+                    @click="actions.redownload(row.deliverable)"
                   ><RotateCcw :size="15" /><span>重新下载</span></button>
                 </div>
               </article>
@@ -215,14 +213,14 @@ function dateLabel(value: string) {
               <span>{{ formatFileSize(item.sizeBytes) }}<template v-if="item.workName"> · {{ item.workName }}</template> · {{ dateLabel(item.downloadedAt) }}</span>
               <small :title="item.savedLocation.label">{{ item.savedLocation.label }}</small>
             </div>
-            <button type="button" class="delivery-row-action is-open" :disabled="isOpening(item)" :aria-label="`${savedFileAction(item)}：${item.name}`" @click="emit('openSaved', item)"><component :is="item.savedLocation.kind === 'path' ? FolderOpen : ExternalLink" :size="16" /><span>{{ isOpening(item) ? '正在打开' : savedFileAction(item) }}</span></button>
+            <button type="button" class="delivery-row-action is-open" :disabled="isOpening(item)" :aria-label="`${savedFileAction(item)}：${item.name}`" @click="actions.openSaved(item)"><component :is="item.savedLocation.kind === 'path' ? FolderOpen : ExternalLink" :size="16" /><span>{{ isOpening(item) ? '正在打开' : savedFileAction(item) }}</span></button>
           </article>
         </div>
       </section>
     </div>
 
     <footer v-if="history.length" class="delivery-tray-footer">
-      <button ref="clearButton" type="button" @click="emit('clear')"><Trash2 :size="15" />清空过去记录</button>
+      <button ref="clearButton" type="button" @click="actions.clear()"><Trash2 :size="15" />清空过去记录</button>
     </footer>
   </aside>
 </template>

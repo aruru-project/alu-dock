@@ -1,16 +1,20 @@
-import { computed, nextTick, onScopeDispose, readonly, ref, watch } from 'vue'
+import { defineStore } from 'pinia'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { acknowledgeConversationFollow, isTauri, startConversationFollow, stopConversationFollow } from './bridge'
-import type { ConversationContentChange } from './conversationContent'
-import type { ConnectionContext, ConversationBootstrap, ProjectedEvent, Work } from './types'
-import { reduceLiveEvent } from './liveReducer'
-import { conversationBoundaryKey, conversationReadMatches } from './uiBoundaries'
-import { requireConnectionContext } from './hostResult'
-import { userErrorMessage } from './userError'
-import { useAppStore } from '../stores/app'
-import { useExtensionUiStore } from '../stores/extension-ui'
-import { useCommandConsoleStore } from '../stores/command-console'
-import { useCommandCatalogStore } from '../stores/command-catalog'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { acknowledgeConversationFollow, beginWindowsAway, cancelWindowsAway, isTauri, reselectHostRoute, startConversationFollow, stopConversationFollow } from '../lib/bridge'
+import type { ConversationContentChange } from '../lib/conversationContent'
+import type { ConnectionContext, ConversationBootstrap, ProjectedEvent, Work } from '../lib/types'
+import { reduceLiveEvent } from '../lib/liveReducer'
+import { conversationBoundaryKey, conversationReadMatches, initialWindowFocused } from '../lib/uiBoundaries'
+import { requireConnectionContext } from '../lib/hostResult'
+import { createSignal } from '../lib/signal'
+import { userErrorMessage } from '../lib/userError'
+import { useAppStore } from './app'
+import { useExtensionUiStore } from './extension-ui'
+import { useCommandConsoleStore } from './command-console'
+import { useCommandCatalogStore } from './command-catalog'
+import { usePlatformStore } from './platform'
 
 export type ObservationUpdate = {
   kind: 'snapshot' | 'replacement_snapshot' | 'read' | 'event' | 'replaced' | 'status' | 'batch' | 'binding_error' | 'content' | 'facts'
@@ -19,7 +23,7 @@ export type ObservationUpdate = {
   updates?: { revision: number; update: ObservationUpdate }[]
 }
 export type ObservationEmission = ConnectionContext & { instanceId: string; subscriptionId: string; revision: number; deliveryId?: number; update: ObservationUpdate }
-/** One fixed display destination. Neither input nor control panels subscribe to the native stream. */
+/** The conversation display attached by the conversation store. Neither input nor control panels subscribe to the native stream. */
 export interface ConversationSink {
   preparingView(): boolean
   matchesToken(token: string): boolean
@@ -33,16 +37,28 @@ export interface ConversationSink {
   replace(snapshot: Work): void
 }
 
-export function useWorkObservation(display: ConversationSink, options: {
-  focused(): boolean
-  configEvent(event: ProjectedEvent): void
-  compactionSettled(connectionId: string, instanceId: string): void
-  replacement(): void
-}) {
+// Before a display attaches, facts still update and content is not bound.
+const detachedDisplay: ConversationSink = {
+  preparingView: () => false, matchesToken: () => false, bind: () => false, content() {}, failed() {},
+  replay: () => false, event() {}, readCut() {}, read() {}, replace() {},
+}
+
+/** Follows the selected Work: control facts, Queue, status and frame ACK.
+ * Window focus and the Windows away period decide when it observes. */
+export const useObservationStore = defineStore('observation', () => {
   const app = useAppStore()
   const extensionUi = useExtensionUiStore()
   const commandConsole = useCommandConsoleStore()
   const commandCatalog = useCommandCatalogStore()
+  const platform = usePlatformStore()
+  let display = detachedDisplay
+  function attachDisplay(sink: ConversationSink) {
+    display = sink
+    return () => { if (display === sink) display = detachedDisplay }
+  }
+  const configChanged = createSignal<[event: ProjectedEvent]>()
+  const compactionSettled = createSignal<[connectionId: string, instanceId: string]>()
+  const replaced = createSignal<[]>()
   const facts = ref<Pick<ConversationBootstrap, 'instance' | 'cursor' | 'queue'> | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -50,14 +66,13 @@ export function useWorkObservation(display: ConversationSink, options: {
   const connected = ref(false)
   const active = ref<(ConnectionContext & { instanceId: string; subscriptionId: string }) | null>(null)
   let revision = -1
-  let unlisten: UnlistenFn | undefined
+  const unlisteners: UnlistenFn[] = []
   let disposed = false
   let refreshOnEntry = false
+  function keep(release: UnlistenFn) { if (disposed) release(); else unlisteners.push(release) }
   async function listenNative() {
-    const release = await listen<ObservationEmission>('aludock://observation', ({ payload }) => { void receive(payload) })
-    if (disposed) release(); else unlisten = release
+    keep(await listen<ObservationEmission>('aludock://observation', ({ payload }) => { void receive(payload) }))
   }
-  onScopeDispose(() => { disposed = true; unlisten?.() })
 
   function acceptWork(snapshot: Work, context = app.connectionContext, extensionSnapshot = true): Work {
     if (context) app.applyWorkSnapshot(snapshot, context)
@@ -77,9 +92,9 @@ export function useWorkObservation(display: ConversationSink, options: {
     current.instance = reduced.state.instance
     current.queue = reduced.state.queue
     current.cursor.sequence = reduced.state.sequence
-    if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') options.compactionSettled(payload.connectionId, payload.instanceId)
+    if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') compactionSettled.emit(payload.connectionId, payload.instanceId)
     if (payload.event.eventType === 'resources.reloaded') commandCatalog.invalidate()
-    if (reduced.configChanged) options.configEvent(payload.event)
+    if (reduced.configChanged) configChanged.emit(payload.event)
     extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)
     const commandRoute = commandConsole.handleDockEvent(payload.event)
     if (payload.event.eventType === 'extension.notification' && commandRoute.matched) return
@@ -133,7 +148,7 @@ export function useWorkObservation(display: ConversationSink, options: {
     if (payload.revision <= revision) return
     revision = payload.revision
     if (update.kind === 'facts' && update.bootstrap) { readFacts(payload, update.bootstrap); refreshOnEntry = false; return }
-    if ((update.kind === 'replaced' || update.kind === 'replacement_snapshot') && update.target) { replace(update.target, true); options.replacement() }
+    if ((update.kind === 'replaced' || update.kind === 'replacement_snapshot') && update.target) { replace(update.target, true); replaced.emit() }
     if ((update.kind === 'read' || update.kind === 'snapshot' || update.kind === 'replacement_snapshot') && update.bootstrap) {
       read({ ...payload, bootstrap: update.bootstrap }, sameContent, update.canLoadEarlier)
       if (update.kind === 'read') refreshOnEntry = false
@@ -191,7 +206,7 @@ export function useWorkObservation(display: ConversationSink, options: {
     current.queue = current.queue.filter(item => !ids.includes(item.queueItemId))
   }
   async function load(instanceId: string, refresh = false): Promise<boolean> {
-    if ((isTauri && !options.focused()) || app.selectedWork?.id !== instanceId || app.selectedWork.lifecycle !== 'active') return false
+    if ((isTauri && !windowFocused.value) || app.selectedWork?.id !== instanceId || app.selectedWork.lifecycle !== 'active') return false
     const context = { ...requireConnectionContext(app) }
     const subscriptionId = crypto.randomUUID()
     status.value = 'connecting'; revision = -1
@@ -232,7 +247,7 @@ export function useWorkObservation(display: ConversationSink, options: {
     }
     selection = identity
     const id = app.selectedWork?.id
-    if (isTauri && options.focused() && id) void load(id)
+    if (isTauri && windowFocused.value && id) void load(id)
     else if (!id) void extensionUi.clear()
   })
   function reportRouteError(cause: unknown) { error.value = userErrorMessage(cause) }
@@ -252,8 +267,142 @@ export function useWorkObservation(display: ConversationSink, options: {
     }
   }
 
-  return {
-    label: connectionLabel, refreshCurrent, loading: readonly(loading), error: readonly(error), status: readonly(status), connected: readonly(connected), active: readonly(active),
-    queue: computed(() => readonly(facts.value?.queue ?? [])), listenNative, load, detach, canContinue, reportRouteError, acceptWork, queueRetrieved
+  // ── Window focus and the Windows away period ─────────────────────────
+  // Leaving the window pauses observation (after the configured away delay on
+  // Windows); coming back resumes it. The native policy is unchanged.
+  const isAndroidWebView = /Android/i.test(navigator.userAgent)
+  const windowFocused = ref(!isTauri)
+  let windowFocusEpoch = 0
+  let windowsAwayId: string | null = null
+  const elapsedWindowsAwayIds = new Set<string>()
+  const windowsAwaySupported = () => !!platform.appSettings?.windowsAwaySupported
+
+  function runningWorkIdsForAway() {
+    return app.works.filter((work) => work.execution === 'running').map((work) => work.id)
   }
-}
+
+  function handleWebViewFocus() {
+    void handleWindowFocusChanged(true)
+  }
+
+  function handleAndroidNetworkChanged() {
+    const context = app.connectionContext
+    if (context && !app.localSelected) void reselectHostRoute({ ...context }).catch(cause => {
+      if (app.contextMatches(context)) reportRouteError(cause)
+    })
+  }
+
+  async function handleWindowFocusChanged(focused: boolean) {
+    if (focused === windowFocused.value) {
+      const work = app.selectedWork
+      if (focused && work?.lifecycle === 'active' && !loading.value && !canContinue(work.id)) {
+        await load(work.id)
+      }
+      return
+    }
+    const epoch = ++windowFocusEpoch
+    windowFocused.value = focused
+    if (!focused) {
+      app.flushLocalState()
+      if (!windowsAwaySupported()) {
+        await detach()
+        return
+      }
+      try {
+        const awayId = await beginWindowsAway(runningWorkIdsForAway())
+        if (epoch !== windowFocusEpoch || windowFocused.value) {
+          if (awayId) await cancelWindowsAway(awayId)
+          return
+        }
+        windowsAwayId = awayId
+        if (awayId && elapsedWindowsAwayIds.delete(awayId)) await detach()
+      } catch (cause) {
+        console.error('Failed to begin Windows away period.', cause)
+        if (epoch === windowFocusEpoch && !windowFocused.value) await detach()
+      }
+      return
+    }
+
+    const awayId = windowsAwayId
+    windowsAwayId = null
+    elapsedWindowsAwayIds.clear()
+    if (windowsAwaySupported()) {
+      try {
+        await cancelWindowsAway(awayId)
+      } catch (cause) {
+        console.error('Failed to finish Windows away period.', cause)
+      }
+    }
+    void app.refreshWorksQuietly()
+    if (epoch !== windowFocusEpoch || !windowFocused.value) return
+    const work = app.selectedWork
+    if (work?.lifecycle === 'active' && !canContinue(work.id)) {
+      await load(work.id)
+    }
+  }
+
+  let focusListening = false
+  /** Runs after the platform store has read App settings (away support). */
+  async function listenFocus() {
+    if (focusListening) return
+    focusListening = true
+    window.addEventListener('focus', handleWebViewFocus)
+    if (isAndroidWebView) {
+      window.addEventListener('aludock:network-changed', handleAndroidNetworkChanged)
+      document.documentElement.dataset.aludockNetworkReady = 'true'
+    }
+    if (!isTauri) return
+    const appWindow = getCurrentWindow()
+    keep(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
+    windowFocused.value = initialWindowFocused(
+      await appWindow.isFocused(),
+      document.hasFocus(),
+      isAndroidWebView && document.visibilityState === 'visible',
+    )
+    keep(await listen<{ awayId: string }>('aludock://windows-away-elapsed', ({ payload }) => {
+      if (windowFocused.value) return
+      if (payload.awayId === windowsAwayId) void detach()
+      else elapsedWindowsAwayIds.add(payload.awayId)
+    }))
+    if (!windowFocused.value && windowsAwaySupported()) {
+      try {
+        windowsAwayId = await beginWindowsAway(runningWorkIdsForAway())
+        if (windowsAwayId && elapsedWindowsAwayIds.delete(windowsAwayId)) await detach()
+      } catch (cause) {
+        console.error('Failed to begin initial Windows away period.', cause)
+      }
+    }
+  }
+
+  /** The first Host read has finished; start observing if the window has focus. */
+  async function afterLoad() {
+    await nextTick()
+    if (!isTauri) return
+    const focusedAfterLoad = initialWindowFocused(
+      await getCurrentWindow().isFocused(),
+      document.hasFocus(),
+      isAndroidWebView && document.visibilityState === 'visible',
+    )
+    if (focusedAfterLoad) await handleWindowFocusChanged(true)
+  }
+
+  onScopeDispose(() => {
+    disposed = true
+    unlisteners.forEach(unlisten => unlisten())
+    if (focusListening) {
+      window.removeEventListener('focus', handleWebViewFocus)
+      if (isAndroidWebView) {
+        window.removeEventListener('aludock:network-changed', handleAndroidNetworkChanged)
+        delete document.documentElement.dataset.aludockNetworkReady
+      }
+    }
+    elapsedWindowsAwayIds.clear()
+    if (windowsAwaySupported()) void cancelWindowsAway(windowsAwayId)
+  })
+
+  return {
+    label: connectionLabel, refreshCurrent, loading, error, status, connected, active, windowFocused,
+    queue: computed(() => facts.value?.queue ?? []), listenNative, listenFocus, afterLoad, load, detach, canContinue, reportRouteError, acceptWork, queueRetrieved,
+    attachDisplay, onConfigChanged: configChanged.on, onCompactionSettled: compactionSettled.on, onReplaced: replaced.on,
+  }
+})

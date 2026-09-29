@@ -1,35 +1,33 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { FolderTree } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
 import ConnectionStatus from './ConnectionStatus.vue'
-import type { useWorkActions } from '../lib/workActions'
-import type { useHostConnection } from '../lib/hostConnection'
-import type { useAttachmentUploads } from '../lib/attachmentUploads'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
-import type { useWorkObservation } from '../lib/workObservation'
 import { useAppStore } from '../stores/app'
+import { useAttachmentsStore } from '../stores/attachments'
+import { useHostStore } from '../stores/host'
+import { useObservationStore } from '../stores/observation'
+import { useSurfacesStore } from '../stores/surfaces'
+import { useWorkActionsStore } from '../stores/work-actions'
 
-const props = defineProps<{
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'openControlCenter' | 'openWorkspaceBrowser' | 'workspaceBrowserOpen'>>
-  uploads: ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'attachmentPicking' | 'chooseAttachments' | 'draftAttachments' | 'maxMessageAttachments' | 'uploadDrafts'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'abortCurrentRun' | 'aborting'>>
-  observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'label' | 'refreshCurrent' | 'status'>>
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'openHostSettings'>>
-}>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
-const { workspaceBrowserOpen, openControlCenter } = props.page
-const { draftAttachments, uploadDrafts, attachmentPicking, maxMessageAttachments, chooseAttachments } = props.uploads
-const { aborting, abortCurrentRun } = props.actions
-const { status: observationStatus } = props.observation
-const { openHostSettings } = props.host
+const surfaces = useSurfacesStore()
+const { workspaceBrowserOpen } = storeToRefs(surfaces)
+const { openControlCenter, openWorkspaceBrowser } = surfaces
+const attachments = useAttachmentsStore()
+const { draftAttachments, uploadDrafts, attachmentPicking, maxMessageAttachments } = storeToRefs(attachments)
+const { chooseAttachments } = attachments
+const workActions = useWorkActionsStore()
+const { aborting } = storeToRefs(workActions)
+const { abortCurrentRun } = workActions
+const observation = useObservationStore()
+const { status: observationStatus, label: connectionLabel } = storeToRefs(observation)
+const { refreshCurrent } = observation
+const { openHostSettings } = useHostStore()
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
 const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) => app.setDetailMode(value) })
-const connectionLabel = props.observation.label
-const refreshCurrent = props.observation.refreshCurrent
-const openWorkspaceBrowser = props.page.openWorkspaceBrowser
 </script>
 
 <template>

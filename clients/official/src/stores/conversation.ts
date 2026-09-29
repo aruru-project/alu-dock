@@ -1,20 +1,23 @@
-import type { ReadonlyRefs } from './ownerView'
+import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref, watch } from 'vue'
-import { isTauri, loadConversationImage, loadPublishedImage, nativeMediaUrl, registerInlineConversationImage } from './bridge'
-import { useConversationContent } from './conversationContent'
-import { useConversationSession } from './conversationSession'
-import { useConversationViewport, type ConversationReadingAnchor } from './conversationViewport'
-import { readConversationPosition, saveConversationPosition } from './localState'
-import { requireConnectionContext } from './hostResult'
-import { userErrorMessage as errorMessage } from './userError'
-import type { ConnectionContext, ConversationImageResource, ConversationItem, ConversationProcessItem, Work } from './types'
-import type { ConversationSink } from './workObservation'
-import type { usePageSurfaces } from './pageSurfaces'
-import { useAppStore } from '../stores/app'
-import { useExtensionUiStore } from '../stores/extension-ui'
-/** Disposable display, media resources and tool expansion. No editor or Queue control. */
-export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'imagePreview' | 'retirePreview' | 'showImagePreview'>>) {
+import { loadConversationImage, loadPublishedImage, nativeMediaUrl, registerInlineConversationImage } from '../lib/bridge'
+import { useConversationContent } from '../lib/conversationContent'
+import { useConversationSession } from '../lib/conversationSession'
+import { useConversationViewport, type ConversationReadingAnchor } from '../lib/conversationViewport'
+import { readConversationPosition, saveConversationPosition } from '../lib/localState'
+import { requireConnectionContext } from '../lib/hostResult'
+import { userErrorMessage as errorMessage } from '../lib/userError'
+import type { ConnectionContext, ConversationImageResource, ConversationItem, ConversationProcessItem, Work } from '../lib/types'
+import { useObservationStore, type ConversationSink } from './observation'
+import { useAppStore } from './app'
+import { useExtensionUiStore } from './extension-ui'
+import { useSurfacesStore } from './surfaces'
+/** Disposable display, media resources and tool expansion. No editor or Queue control.
+ * It attaches itself as the observation store's display when created. */
+export const useConversationStore = defineStore('conversation', () => {
   const app = useAppStore()
+  const page = useSurfacesStore()
+  const observation = useObservationStore()
   const selected = computed(() => app.selectedWork)
   const detailMode = computed(() => app.detailMode)
   const extensionUi = useExtensionUiStore()
@@ -35,26 +38,6 @@ export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof 
   const imageResources = ref<Record<string, ConversationImageResource>>({})
   let imageDomainKey = ''
   let imageLoadEpoch = 0
-
-  const previewConversation: ConversationItem[] = [
-    { id: 'u1', kind: 'user', text: '请结合这份发布检查清单确认 Linux 客户端。', time: '19:38', attachments: [{ fileId: '45c6f7e8-9462-4fde-8ab9-1829dff71234', name: 'Linux 发布检查清单.pdf', sizeBytes: 248320, mediaType: 'application/pdf', sha256: 'a'.repeat(64), storedAt: '2026-08-17T08:00:00.000Z' }] },
-    {
-      id: 'a1',
-      kind: 'assistant',
-      groupId: 'preview-assistant-1',
-      text: '已完成连接检查，Work 列表和当前对话已准备好。',
-      time: '19:41',
-    },
-    { id: 't1', kind: 'thinking', groupId: 'preview-assistant-tools', title: '检查顺序', text: '先确认连接状态和 Work 列表，再检查窄屏布局。', open: true, groupTime: '19:41' },
-    { id: 'tool1', kind: 'tool', groupId: 'preview-assistant-tools', name: '检查工作列表', summary: '已读取 Work 列表', status: 'done', detail: '已找到 5 个 Work' },
-    {
-      id: 'a2',
-      kind: 'assistant',
-      groupId: 'preview-assistant-2',
-      text: '连接中断后，当前消息和草稿仍会保留；恢复连接后会继续显示最新内容。',
-      time: '19:42',
-    },
-  ]
 
   const conversationContent = useConversationContent({
     compact: computed(() => !detailMode.value),
@@ -81,7 +64,7 @@ export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof 
   const historyHydrationErrors = conversationContent.hydrationErrors
   const historyHydrating = conversationContent.historyHydrating
   const historyError = conversationContent.historyError
-  const conversation = computed(() => (isTauri ? realConversation.value : previewConversation))
+  const conversation = realConversation
 
   const conversationSwitching = computed(() => Boolean(
     selected.value && conversationState.value && selected.value.id !== conversationState.value.instance.id,
@@ -290,10 +273,11 @@ export function useConversationRegion(page: ReadonlyRefs<Pick<ReturnType<typeof 
     conversationViewport.bindScope(null)
     conversationContent.clear(); resetConversationImages(); toolExpansionOverrides.value = {}
   }, { flush: 'sync' })
-  onScopeDispose(() => { conversationViewport.savePosition(); conversationContent.dispose(); resetConversationImages() })
+  const detachDisplay = observation.attachDisplay(sink)
+  onScopeDispose(() => { detachDisplay(); conversationViewport.savePosition(); conversationContent.dispose(); resetConversationImages() })
   function failPreview(imageKey: string) {
     const resource = imageResources.value[imageKey]
     if (resource?.state === 'ready') setImageResource(imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
   }
-  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, conversationSession, sink, showAgentActivity, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
-}
+  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, setReadInterest: conversationSession.setInterest, showAgentActivity, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
+})

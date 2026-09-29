@@ -1,31 +1,33 @@
-import type { ReadonlyRefs } from './ownerView'
+import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   attachmentSnapshot, cancelAttachmentUpload, clearRestoredImages, isTauri, loadAttachmentPreview, nativeMediaUrl, pickAttachments, removeAttachment,
   restoredImageCount as nativeRestoredImageCount, stageClipboardImage, uploadAttachment,
-} from './bridge'
-import { attachmentUploadMatches, attachmentUploadTarget, bindLocalAttachment, moveAttachmentPreviewResource } from './attachmentDraft'
-import { isRasterImageMimeType, rasterImageMimeType } from './rasterImage'
-import { requireConnectionContext } from './hostResult'
-import { userErrorMessage as errorMessage } from './userError'
-import type { AttachmentJobSnapshot, ConnectionContext, SelectedAttachment } from './types'
-import type { usePageSurfaces } from './pageSurfaces'
-import { useAppStore } from '../stores/app'
+} from '../lib/bridge'
+import { attachmentUploadMatches, attachmentUploadTarget, bindLocalAttachment, moveAttachmentPreviewResource } from '../lib/attachmentDraft'
+import { isRasterImageMimeType, rasterImageMimeType } from '../lib/rasterImage'
+import { requireConnectionContext } from '../lib/hostResult'
+import { userErrorMessage as errorMessage } from '../lib/userError'
+import type { AttachmentJobSnapshot, SelectedAttachment } from '../lib/types'
+import { createSignal } from '../lib/signal'
+import { useAppStore } from './app'
+import { useHostStore } from './host'
+import { useObservationStore } from './observation'
+import { useSurfacesStore } from './surfaces'
 type AttachmentPreviewResource = { handle: string; url: string; mediaType: string }
-export function useAttachmentUploads(options: {
-  page(): ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'moveAttachmentPreview' | 'retirePreview' | 'showImagePreview'>>
-  pairing(): boolean
-  sendingOrRestoring(): boolean
-  reportError(message: string | null): void
-}) {
+/** The editor's attachment selection, uploads and previews. Failures go to the editor's message line. */
+export const useAttachmentsStore = defineStore('attachments', () => {
   const app = useAppStore()
+  const surfaces = useSurfacesStore()
+  const host = useHostStore()
+  const observation = useObservationStore()
+  const errorReported = createSignal<[message: string | null]>()
   const selected = computed(() => app.selectedWork)
   const draftAttachments = computed(() => app.currentAttachments)
   const maxMessageAttachments = computed(() => app.payload?.maxAttachmentsPerMessage ?? 0)
   const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
-  const reportError = options.reportError
-  const restoredImageCounts = ref<Record<string, number>>({})
+  const reportError = (message: string | null) => errorReported.emit(message)
   const attachmentWorkKey = computed(() => JSON.stringify([app.activeConnectionId, selected.value?.id]))
   const clearingImageWorks = ref(new Set<string>())
   const pickingWorks = ref(new Set<string>())
@@ -48,17 +50,7 @@ export function useAttachmentUploads(options: {
       retryable: !!job && !mismatch && job.state !== 'unknown',
     }
   }))
-  const restoredImageKey = (context: ConnectionContext, workId: string) => JSON.stringify([context.connectionId, workId])
-  const restoredImageCount = computed({
-    get: () => app.connectionContext && selected.value ? restoredImageCounts.value[restoredImageKey(app.connectionContext, selected.value.id)] ?? 0 : 0,
-    set: (value: number) => {
-      if (!app.connectionContext || !selected.value) return
-      const key = restoredImageKey(app.connectionContext, selected.value.id)
-      const next = { ...restoredImageCounts.value }
-      if (value > 0) next[key] = value; else delete next[key]
-      restoredImageCounts.value = next
-    },
-  })
+  const restoredImageCount = computed(() => app.currentRestoredImageCount)
   let viewEpoch = 0
   let jobsRevision = -1
   // Scalars, not a retained reactive Work: an A→B→A visit is a new handoff.
@@ -130,25 +122,25 @@ export function useAttachmentUploads(options: {
     const next = { ...attachmentPreviews.value }
     delete next[key]
     attachmentPreviews.value = next
-    options.page().retirePreview('attachment', key)
+    surfaces.retirePreview('attachment', key)
   }
 
   function moveAttachmentPreview(from: string, to: string) {
     const moved = moveAttachmentPreviewResource(attachmentPreviews.value, from, to)
     if (!moved.moved) return
     attachmentPreviews.value = moved.resources
-    options.page().moveAttachmentPreview(from, to)
+    surfaces.moveAttachmentPreview(from, to)
   }
 
   function resetAttachmentPreviews() {
     attachmentPreviews.value = {}
-    options.page().retirePreview('attachment')
+    surfaces.retirePreview('attachment')
   }
 
   function openAttachmentPreview(key: string, name: string) {
     const resource = attachmentPreviews.value[key]
     if (!resource) return
-    options.page().showImagePreview({
+    surfaces.showImagePreview({
       kind: 'attachment',
       attachmentKey: key,
       url: resource.url,
@@ -200,7 +192,7 @@ export function useAttachmentUploads(options: {
   }
   async function chooseAttachments() {
     const work = selected.value
-    if (!work || !isTauri || work.lifecycle !== 'active' || options.pairing() || attachmentPicking.value) return
+    if (!work || !isTauri || work.lifecycle !== 'active' || host.pairingInProgress || attachmentPicking.value) return
     const view = captureView()
     if (!viewMatches(view)) return
     const pendingKey = attachmentWorkKey.value
@@ -224,7 +216,7 @@ export function useAttachmentUploads(options: {
     if (!images.length) return
     event.preventDefault()
     const work = selected.value
-    if (!work || work.lifecycle !== 'active' || options.pairing() || attachmentPicking.value) { reportError('当前暂时不能添加剪贴板图片，请稍后重试。'); return }
+    if (!work || work.lifecycle !== 'active' || host.pairingInProgress || attachmentPicking.value) { reportError('当前暂时不能添加剪贴板图片，请稍后重试。'); return }
     if (images.length + draftAttachments.value.length + app.currentPendingAttachments.length > maxMessageAttachments.value) {
       reportError(`一条消息最多可附加 ${maxMessageAttachments.value} 个文件，请减少选择后重试。`); return
     }
@@ -279,20 +271,21 @@ export function useAttachmentUploads(options: {
       const work = selected.value
       if (!work) return
       const count = await nativeRestoredImageCount(work, context)
-      if (app.contextMatches(context) && selected.value?.id === workId) restoredImageCount.value = count
+      if (app.contextMatches(context) && selected.value?.id === workId) app.setRestoredImageCount(context.connectionId, workId, count)
     } catch (cause) { console.error('Cannot read restored image count.', cause) }
   }
 
+  /** The input store checks that no send or Queue retrieval is running first. */
   async function clearQueueImages() {
     const work = selected.value
-    if (!work || options.pairing() || clearingRestoredImages.value || options.sendingOrRestoring()) return
+    if (!work || host.pairingInProgress || clearingRestoredImages.value) return
     const context = requireConnectionContext(app)
     const pendingKey = attachmentWorkKey.value
     clearingImageWorks.value.add(pendingKey)
     try {
       await clearRestoredImages(work, context)
       if (!app.contextMatches(context) || selected.value?.id !== work.id) return
-      restoredImageCount.value = 0
+      app.setRestoredImageCount(context.connectionId, work.id, 0)
     } catch (cause) {
       if (app.contextMatches(context) && selected.value?.id === work.id) reportError(errorMessage(cause))
     } finally {
@@ -317,6 +310,7 @@ export function useAttachmentUploads(options: {
   let unlisten: UnlistenFn | undefined
   let disposed = false
   async function listenNative() {
+    if (unlisten) return
     const release = await listen<AttachmentJobSnapshot>('aludock://attachment-progress', ({ payload }) => {
       if (payload.connectionId === app.activeConnectionId && payload.workId === selected.value?.id) {
         // Resolve authority through the scoped query, not an event from an old local endpoint.
@@ -325,12 +319,13 @@ export function useAttachmentUploads(options: {
     })
     if (disposed) release(); else { unlisten = release; await refreshCurrentJobs() }
   }
-  onScopeDispose(() => { disposed = true; viewEpoch++; unlisten?.(); resetAttachmentPreviews() })
+  // A replaced Session may have dropped the images returned from its Queue.
+  const offReplaced = observation.onReplaced(() => { void refreshRestoredImageCount() })
+  onScopeDispose(() => { disposed = true; viewEpoch++; unlisten?.(); offReplaced(); resetAttachmentPreviews() })
   return {
     draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount,
-    hasRestoredImageDrafts: computed(() => Object.values(restoredImageCounts.value).some(count => count > 0)),
-    maxMessageAttachments, refreshRestoredImageCount, clearQueueImages, chooseAttachments, handleComposerPaste,
+    maxMessageAttachments, onError: errorReported.on, refreshRestoredImageCount, clearQueueImages, chooseAttachments, handleComposerPaste,
     launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, removeAttachmentPreview, listenNative,
     previewFailed: () => reportError('这个图片附件无法预览，原附件仍保持不变。'),
   }
-}
+})

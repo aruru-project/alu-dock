@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
-import { createRenderer, h, nextTick, effectScope } from 'vue'
-import { createPinia, setActivePinia } from 'pinia'
+import { createRenderer, h, nextTick } from 'vue'
+import { createPinia, disposePinia, setActivePinia } from 'pinia'
 
 // 2026-09-07: a pending native send locked Work navigation. Opening navigation
 // must not let its eventual receipt consume another Work's or a newer editor.
@@ -13,13 +13,17 @@ const works = ['A', 'B'].map(id => ({ id, lifecycle: 'active', runtimeGeneration
 const storage = new Map()
 let storageWrites = 0, storageFails = false, consumeFails = false, stops = 0
 const retainedOperations = new Map()
+globalThis.document = { activeElement: null, title: '' }
+globalThis.HTMLElement = class {}
 globalThis.window = {
+  history: { pushState() {}, back() {} },
   localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (storageFails) throw Error("fixture storage failure"); storageWrites++; storage.set(key, value) }, removeItem: key => storage.delete(key) },
   __TAURI_INTERNALS__: { invoke: async (command, args) => {
     if (command === 'pending_operations') return [...retainedOperations.values()]
     if (command === 'consume_operation') { if (consumeFails) throw Error('fixture ACK failure'); retainedOperations.delete(args.operationId); return }
     if (command === 'attachment_snapshot') return { revision: 1, jobs: [] }
     if (command === 'restored_image_count') return 0
+    if (command === 'list_models') return { instance: works.find(w => w.id === args.instanceId), models: [], availableThinkingLevels: [], total: 0, truncated: false }
     if (command === 'stop_work') { stops++; return { instance: { ...works.find(w => w.id === args.instanceId), lifecycle: 'stopped', execution: 'unavailable' }, receipt: { operationId: args.operationId } } }
     if (command === 'get_host_catalog') return structuredClone(catalog)
     if (command === 'set_active_host') {
@@ -151,17 +155,16 @@ try {
   assert.equal(rebuilt.applyReturnedDraft(acrossView, 'late returned text'), false)
   // Master-side review: failed returned-content storage used to consume the
   // only native receipt; successful append + failed ACK duplicated after F5.
-  const { useOperationResults } = await server.ssrLoadModule('/src/lib/operationResults.ts')
-  const { useWorkActions } = await server.ssrLoadModule('/src/lib/workActions.ts')
-  const { useAttachmentUploads } = await server.ssrLoadModule('/src/lib/attachmentUploads.ts')
+  const { useOperationsStore } = await server.ssrLoadModule('/src/stores/operations.ts')
+  const { useWorkActionsStore } = await server.ssrLoadModule('/src/stores/work-actions.ts')
+  const { useAttachmentsStore } = await server.ssrLoadModule('/src/stores/attachments.ts')
+  const { useSurfacesStore } = await server.ssrLoadModule('/src/stores/surfaces.ts')
   const { attachmentUploadTarget } = await server.ssrLoadModule('/src/lib/attachmentDraft.ts')
-  const scopes = []
+  // Rebuilding the view: a new Pinia with the real stores; only native IPC is a fixture.
   async function rebuild() {
-    setActivePinia(createPinia())
+    const pinia = createPinia(); setActivePinia(pinia)
     const store = useAppStore(); await store.load(); store.selectWork('B')
-    const scope = effectScope(); scopes.push(scope)
-    const results = scope.run(() => useOperationResults({ presentFailure: async () => {}, acceptWork: w => store.applyWorkSnapshot(w), queueRetrieved() {}, refreshRestoredImages: async () => {} }))
-    return { store, results, scope }
+    return { store, results: useOperationsStore(), scope: { stop: () => disposePinia(pinia) } }
   }
   storage.clear()
   let view = await rebuild()
@@ -177,18 +180,18 @@ try {
   assert.equal(storage.get('aludock.uiState'), saved)
   assert.equal(view.store.captureOperationTarget(view.store.connectionContext, 'B').instanceId, 'B')
   assert.equal(retainedOperations.has('queue'), true)
-  assert.deepEqual(view.results.workResults.value.map(item => item.operationId), ['queue'], 'save failure is available through the operation result retry')
-  assert.equal(view.results.returnedOperations.value.length, 0, 'Queue does not offer a second append action')
+  assert.deepEqual(view.results.workResults.map(item => item.operationId), ['queue'], 'save failure is available through the operation result retry')
+  assert.equal(view.results.returnedOperations.length, 0, 'Queue does not offer a second append action')
   storageFails = false; consumeFails = true
   // Applying the retained result inserts before the current editor, without a capture.
   view.scope.stop(); view = await rebuild(); await view.results.initialize()
   assert.equal(view.store.currentDraft, 'returned Queue\n\noriginal')
   assert.deepEqual(view.store.currentAttachments.map(a => a.fileId), ['returned'])
   assert.equal(view.store.operationWasApplied('queue'), true)
-  assert.equal(view.results.returnedOperations.value.length, 0)
+  assert.equal(view.results.returnedOperations.length, 0)
   view.scope.stop(); view = await rebuild(); await view.results.initialize()
   assert.equal(view.store.currentDraft, 'returned Queue\n\noriginal')
-  assert.equal(view.results.returnedOperations.value.length, 0, 'F5 offers ACK only, not insertion again')
+  assert.equal(view.results.returnedOperations.length, 0, 'F5 offers ACK only, not insertion again')
   consumeFails = false
   await view.results.consumeNativeOperation(queue)
   assert.equal(retainedOperations.size, 0)
@@ -211,7 +214,7 @@ try {
   await view.results.restoreReturnedOperation(fork)
   assert.equal(view.store.currentDraft, 'later draft\n\nreturned Fork')
   view.scope.stop(); view = await rebuild(); await view.results.initialize()
-  assert.equal(view.results.returnedOperations.value.length, 0)
+  assert.equal(view.results.returnedOperations.length, 0)
   assert.equal(view.store.currentDraft, 'later draft\n\nreturned Fork')
   consumeFails = false; await view.results.consumeNativeOperation(fork)
   assert.deepEqual(JSON.parse(storage.get('aludock.uiState')).appliedOperationIds, [])
@@ -220,17 +223,16 @@ try {
   // A new Stop is independent from the old unknown model intent. Refresh and
   // explicit confirmation unlock new controls without rewriting that receipt.
   view.store.bindNativeOperation({ ...fork, operationId: 'unknown-model', kind: 'set_model', state: 'unknown', editor: null, result: null })
-  const actions = view.scope.run(() => useWorkActions({ askConfirm: async () => true, closeModal() {} }, {
-    observation: () => ({ load: async () => true, acceptWork() {} }),
-    restoreQueue: async () => true, panel: () => ({ reconcileDomain: async () => true }),
-  }))
+  const actions = useWorkActionsStore()
   await view.store.load()
-  assert.equal(actions.mutationOutcomeUnknown.value, true)
-  assert.equal(await actions.stopSelectedWork(), true)
+  assert.equal(actions.mutationOutcomeUnknown, true)
+  const stopping = actions.stopSelectedWork()
+  await nextTick(); useSurfacesStore().settleConfirm(true)
+  assert.equal(await stopping, true)
   assert.equal(stops, 1)
   assert.equal(view.store.nativeOperations.get('unknown-model').state, 'unknown')
   await actions.reconcileMutationOutcome()
-  assert.equal(actions.mutationOutcomeUnknown.value, false)
+  assert.equal(actions.mutationOutcomeUnknown, false)
   assert.equal(view.store.nativeOperations.get('unknown-model').state, 'unknown')
   console.log('PASS: unknown model + refresh still permits confirmed Stop; manual continuation leaves original unknown intact')
 
@@ -239,12 +241,12 @@ try {
   const persisted = { ...attachment('permanent'), sha256: 'a'.repeat(64), localUpload: { ...target, jobId: 'previous-process-job' } }
   assert.equal(view.store.setCurrentAttachments([persisted]), true)
   view.scope.stop(); view = await rebuild()
-  const restoredUploads = view.scope.run(() => useAttachmentUploads({ page: () => ({ retirePreview() {}, moveAttachmentPreview() {} }), pairing: () => false, sendingOrRestoring: () => false, reportError() {} }))
+  const restoredUploads = useAttachmentsStore()
   await nextTick()
   assert.equal(view.store.currentAttachments[0].fileId, 'permanent')
   assert.equal(view.store.setPendingAttachments([{ jobId: 'missing-source', revision: 'selection', sessionId: 'session' }]), true)
-  assert.equal(restoredUploads.uploadDrafts.value[0].retryable, false, 'pending selection still requires a live source job')
-  for (const scope of scopes) scope.stop()
+  assert.equal(restoredUploads.uploadDrafts[0].retryable, false, 'pending selection still requires a live source job')
+  view.scope.stop()
   console.log('PASS: permanent fileId survives rebuilding the view; pending selection still requires its source job')
   console.log('PASS: late send receipts preserve other Work/Host editors, changed/re-added drafts, replaced sessions and removed Works')
 } finally {

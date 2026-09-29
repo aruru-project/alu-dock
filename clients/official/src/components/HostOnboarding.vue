@@ -1,18 +1,17 @@
 <script setup lang="ts">
 import { onBeforeUnmount } from 'vue'
-import type { ReadonlyRefs } from '../lib/ownerView'
+import { storeToRefs } from 'pinia'
 import { Link } from '@lucide/vue'
-import type { useHostConnection } from '../lib/hostConnection'
 import LocalConnectionCard from './LocalConnectionCard.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useHostStore } from '../stores/host'
 
-const props = defineProps<{
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'beginPairing' | 'connectLocal' | 'pairingError' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'rememberPairDeviceName' | 'stopPairing' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'pairDeviceName' | 'pairHost' | 'pairPort'>
-  busy: boolean
-}>()
 const app = useAppStore()
-const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, rememberPairDeviceName, beginPairing, stopPairing, connectLocal, updateLocalEndpoint } = props.host
+const hostStore = useHostStore()
+const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError } = storeToRefs(hostStore)
+const { rememberPairDeviceName, beginPairing, stopPairing, connectLocal, updateLocalEndpoint } = hostStore
+const { pairingInProgress: busy } = storeToRefs(hostStore)
 onBeforeUnmount(() => { void stopPairing() })
 </script>
 
@@ -29,7 +28,7 @@ onBeforeUnmount(() => { void stopPairing() })
             :connected="!!app.localSelected"
             :effective-endpoint="app.catalog.localEndpointEffective"
             :endpoint-override="app.catalog.localEndpointOverride"
-            :busy="app.loading || props.busy"
+            :busy="app.loading || busy"
             :error="app.error"
             @connect="connectLocal"
             @save="updateLocalEndpoint"

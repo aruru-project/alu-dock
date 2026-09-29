@@ -1,27 +1,27 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
 import HostOnboarding from './HostOnboarding.vue'
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { FileText, Monitor, Plus, RefreshCw, Settings, Waypoints, WifiOff } from '@lucide/vue'
 import { openDesktopHostLog, openDesktopTui } from '../lib/bridge'
 import type { Work } from '../lib/types'
-import type { usePlatformLifecycle } from '../lib/platformLifecycle'
-import type { useWorkActions } from '../lib/workActions'
-import type { useHostConnection } from '../lib/hostConnection'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useHostStore } from '../stores/host'
+import { usePlatformStore } from '../stores/platform'
+import { useWorkActionsStore } from '../stores/work-actions'
 
-const props = defineProps<{
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'beginPairing' | 'connectLocal' | 'openHostSettings' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'rememberPairDeviceName' | 'showHostPairingForm' | 'stopPairing' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'pairDeviceName' | 'pairHost' | 'pairPort' | 'pairingError'>
-  platform: ReadonlyRefs<Pick<ReturnType<typeof usePlatformLifecycle>, 'desktopShell' | 'desktopShellBusy' | 'retryDesktopHost' | 'runDesktopShellAction'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'reopenSelectedWork' | 'workMutating'>>
-  busy: boolean
-}>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
-const { pairingError, openHostSettings, showHostPairingForm } = props.host
-const { desktopShell, desktopShellBusy, retryDesktopHost, runDesktopShellAction } = props.platform
-const { workMutating, reopenSelectedWork } = props.actions
+const hostStore = useHostStore()
+const { pairingError } = storeToRefs(hostStore)
+const { openHostSettings, showHostPairingForm } = hostStore
+const platform = usePlatformStore()
+const { desktopShell, desktopShellBusy } = storeToRefs(platform)
+const { retryDesktopHost, runDesktopShellAction } = platform
+const workActions = useWorkActionsStore()
+const { workMutating } = storeToRefs(workActions)
+const { reopenSelectedWork } = workActions
 function inactiveState(work: Work) {
   if (work.lifecycle === 'host_lost') return { label: '连接已中断', message: '这个 Work 的运行进程已经离线。继续后会恢复同一个 Work。', action: '继续这个 Work' }
   if (work.lifecycle === 'runtime_error') return { label: '工作出现故障', message: '这个 Work 已停止运行，可以重新启动后继续。', action: '重新启动这个 Work' }
@@ -59,7 +59,7 @@ function inactiveState(work: Work) {
       </div>
     </div>
 
-    <HostOnboarding v-else-if="app.needsPairing" :host="props.host" :busy="props.busy" />
+    <HostOnboarding v-else-if="app.needsPairing" />
 
     <div v-else-if="app.error && !app.payload" class="center-state error-state offline-host-state">
       <WifiOff :size="28" />

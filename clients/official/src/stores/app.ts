@@ -68,6 +68,20 @@ export const useAppStore = defineStore('app', () => {
     const workId = selectedWork.value?.id
     return id && workId ? localUiState.value.connections[id]?.pendingAttachments[workId] ?? [] : []
   })
+  // Native core holds images returned from the Queue; this is each Work's count for the editor.
+  const restoredImageCounts = ref<Record<string, number>>({})
+  const currentRestoredImageCount = computed(() => {
+    const id = activeConnectionId.value
+    const workId = selectedWork.value?.id
+    return id && workId ? restoredImageCounts.value[editorKey(id, workId)] ?? 0 : 0
+  })
+  const hasRestoredImages = computed(() => Object.values(restoredImageCounts.value).some(count => count > 0))
+  function setRestoredImageCount(connectionId: string, workId: string, count: number) {
+    const next = { ...restoredImageCounts.value }
+    if (count > 0) next[editorKey(connectionId, workId)] = count
+    else delete next[editorKey(connectionId, workId)]
+    restoredImageCounts.value = next
+  }
   const operationResultsReady = ref(false)
   function commitEditor(change: (state: ReturnType<typeof emptyLocalUiState>) => void): boolean {
     const candidate = cloneLocalUiState(localUiState.value)
@@ -559,7 +573,7 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
-    currentDraft, currentAttachments, currentPendingAttachments, setPendingAttachments, completeAttachmentSelection, operationResultsReady, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
+    currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
     operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, unresolvedMutations, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }

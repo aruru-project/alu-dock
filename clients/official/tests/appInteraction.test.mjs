@@ -178,7 +178,7 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
 let mounted
 try {
-  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; ${['inputEditor', 'pageSurfaces', 'workActions', 'attachmentUploads', 'conversationRegion', 'workObservation', 'operationResults'].map(name => `export * from '${root}src/lib/${name}';`).join(' ')}`)
+  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
   await build({ root, configFile: false, logLevel: 'silent', build: { outDir: directory, emptyOutDir: false, minify: false,
     lib: { entry: join(directory, 'entry.ts'), formats: ['es'], fileName: () => 'app.mjs' }, rolldownOptions: { external: ['vue', 'pinia'] } },
     plugins: [{ name: 'native-boundary', enforce: 'pre', resolveId(id) {
@@ -947,32 +947,18 @@ try {
   console.log('PASS: normal command modal / same Extension answer node and value / both Escape layers honor composition / Extension focus priority')
   console.log('PASS: real input Queue and send entrypoints / event-before-receipt and receipt-before-event / later Queue IDs / display events / double-claim / late edited send')
   console.log('PASS: retained failures require scoped visible acknowledgement; footer intervention details are opt-in; actual App/ConversationView/store→native boundary keeps compact and expanded editors through offline refresh; new retires old before read; late receipt/read isolation')
-  // Mount the input region without App/Layout or a conversation view. Its real
-  // owners and typed native interface are sufficient to edit and submit.
+  // Mount the input region without App/Layout or a conversation view. It reads
+  // the real stores and typed native interface, which are enough to edit and submit.
   mounted.unmount(); await settle(); allowExtension = false
   const standalonePinia = createPinia()
   const standaloneStore = useAppStore(standalonePinia)
   const standaloneContainer = element('standalone-input')
-  let owners
-  mounted = renderer.createApp({ setup() {
-    const editor = compiled.useInputEditor({ page: () => page, observation: () => observationOwner, actions: () => actions,
-      attachments: () => uploads, focused: () => true, pairing: () => false, activity: id => display.showAgentActivity(id) })
-    const page = compiled.usePageSurfaces({ composer: () => editor.composer, extensionActive: () => false, directoryBusy: () => false,
-      modelLabel: () => '—' })
-    const actions = compiled.useWorkActions(page, { observation: () => observationOwner, restoreQueue: editor.restoreQueue, panel: () => null })
-    const uploads = compiled.useAttachmentUploads({ page: () => page, pairing: () => false,
-      sendingOrRestoring: () => editor.submitting.value || editor.queueRestoring.value, reportError: editor.reportError })
-    const display = compiled.useConversationRegion(page)
-    const observationOwner = compiled.useWorkObservation(display.sink, { focused: () => true, configEvent() {}, compactionSettled: actions.setCompactionError, replacement: uploads.refreshRestoredImageCount })
-    const operations = compiled.useOperationResults({ presentFailure: editor.presentSubmitFailure, acceptWork: observationOwner.acceptWork,
-      queueRetrieved: observationOwner.queueRetrieved, refreshRestoredImages: uploads.refreshRestoredImageCount })
-    owners = { observationOwner, operations }
-    return () => h(compiled.InputRegion, { editor, uploads, page, actions, observation: observationOwner, operations, away: false })
-  } }).use(standalonePinia)
+  mounted = renderer.createApp({ render: () => h(compiled.InputRegion) }).use(standalonePinia)
   mounted.mount(standaloneContainer)
-  await owners.observationOwner.listenNative(); await owners.operations.listenNative()
+  const standaloneObservation = compiled.useObservationStore(standalonePinia), standaloneOperations = compiled.useOperationsStore(standalonePinia)
+  await standaloneObservation.listenFocus(); await standaloneObservation.listenNative(); await standaloneOperations.listenNative()
   failCatalog = false
-  await standaloneStore.load(); await owners.operations.initialize(); await settle()
+  await standaloneStore.load(); await standaloneOperations.initialize(); await settle()
   contentSnapshot(); await settle()
   const standaloneEditor = find(standaloneContainer, item => item.type === 'textarea')
   assert.ok(standaloneEditor)

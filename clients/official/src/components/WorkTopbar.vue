@@ -1,23 +1,25 @@
 <script setup lang="ts">
-import type { ReadonlyRefs } from '../lib/ownerView'
 import { computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { FileDown, Wrench } from '@lucide/vue'
 import { dockToolsState } from '../lib/dockTools'
 import { formatCacheHitRate, formatContextUsage, formatTokenCount } from '../lib/uiBoundaries'
-import type { useDeliveries } from '../lib/deliveries'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useDeliveriesStore } from '../stores/deliveries'
+import { useOperationsStore } from '../stores/operations'
+import { useSurfacesStore } from '../stores/surfaces'
 
-const props = defineProps<{
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'deliveryOpen' | 'dockToolsOpen' | 'openControlCenter' | 'openDockTools'>> & Pick<ReturnType<typeof usePageSurfaces>, 'dockToolsTrigger'>
-  deliveries: ReadonlyRefs<Pick<ReturnType<typeof useDeliveries>, 'openDeliveryTray' | 'pendingDeliverableCount'>>
-  failureCount: number
-}>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
-const { deliveryOpen, dockToolsTrigger, dockToolsOpen, openControlCenter, openDockTools } = props.page
-const { pendingDeliverableCount, openDeliveryTray } = props.deliveries
+const surfaces = useSurfacesStore()
+const { deliveryOpen, dockToolsTrigger, dockToolsOpen } = storeToRefs(surfaces)
+const { openControlCenter, openDockTools } = surfaces
+const deliveries = useDeliveriesStore()
+const { pendingDeliverableCount } = storeToRefs(deliveries)
+const { openDeliveryTray } = deliveries
+const operations = useOperationsStore()
+const failureCount = computed(() => operations.listResults.length)
 const selectedDockTools = computed(() => selected.value ? dockToolsState(selected.value.extensionStatus) : 'off')
 const selectedDockToolsLabel = computed(() => selectedDockTools.value === 'on' ? 'ON' : selectedDockTools.value === 'unavailable' ? 'N/A' : 'OFF')
 const modelLabel = computed(() => {
@@ -73,7 +75,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
         <FileDown :size="17" />
         <span v-if="pendingDeliverableCount" class="alu-nav-files-badge">{{ pendingDeliverableCount > 99 ? '99+' : pendingDeliverableCount }}</span>
       </button>
-      <button class="alu-nav-hamburger" :aria-label="props.failureCount ? `打开工作列表，有 ${props.failureCount} 项操作结果` : '打开工作列表'" @click="app.workDrawerOpen = true">☰<span v-if="props.failureCount" class="alu-operation-count">{{ props.failureCount }}</span></button>
+      <button class="alu-nav-hamburger" :aria-label="failureCount ? `打开工作列表，有 ${failureCount} 项操作结果` : '打开工作列表'" @click="app.workDrawerOpen = true">☰<span v-if="failureCount" class="alu-operation-count">{{ failureCount }}</span></button>
     </div>
   </nav>
 

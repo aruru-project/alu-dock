@@ -1,17 +1,19 @@
-import type { ReadonlyRefs } from './ownerView'
-import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
+import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { downloadDeliverable, listDeliverables, openSavedDeliverable } from './bridge'
+import { downloadDeliverable, listDeliverables, openSavedDeliverable } from '../lib/bridge'
 import {
   deliveryHistoryKey, downloadedDelivery, pastDownloadedDeliveries, persistDownloadHistory, readDownloadHistory,
   recordDownloadedDelivery, removeDownloadedDeliveries, type DownloadedDeliverable
-} from './downloadHistory'
-import { userErrorMessage as errorMessage } from './userError'
-import type { DeliverableDto, DeliverableDownloadProgress } from './types'
-import type { usePageSurfaces } from './pageSurfaces'
-import { useAppStore } from '../stores/app'
-export function useDeliveries(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'askConfirm' | 'openDeliveryTray'>>) {
+} from '../lib/downloadHistory'
+import { userErrorMessage as errorMessage } from '../lib/userError'
+import type { DeliverableDto, DeliverableDownloadProgress } from '../lib/types'
+import { useAppStore } from './app'
+import { useSurfacesStore } from './surfaces'
+/** Files the Agent delivered for the selected Work and this device's download history. */
+export const useDeliveriesStore = defineStore('deliveries', () => {
   const app = useAppStore()
+  const page = useSurfacesStore()
   const selected = computed(() => app.selectedWork)
   const deliverables = ref<DeliverableDto[]>([])
   const deliveryLoading = ref(false)
@@ -25,8 +27,6 @@ export function useDeliveries(page: ReadonlyRefs<Pick<ReturnType<typeof usePageS
   })()
   const downloadHistory = ref(readDownloadHistory(downloadHistoryStorage))
   let deliveryLoadEpoch = 0
-
-  const deliveryTrayRef = ref<{ focusClear: () => void; focusClose: () => void } | null>(null)
 
   const currentDeliverableRows = computed(() => {
     const context = app.connectionContext
@@ -155,24 +155,19 @@ export function useDeliveries(page: ReadonlyRefs<Pick<ReturnType<typeof usePageS
     }
   }
 
-  async function clearLocalDownloadHistory() {
-    if (!olderDownloadHistory.value.length) return
+  /** Resolves to whether the past records were removed. */
+  async function clearLocalDownloadHistory(): Promise<boolean> {
+    if (!olderDownloadHistory.value.length) return false
     const confirmed = await page.askConfirm('清空过去的下载记录？', '这些记录将从列表移除。已保存的文件保留在原位置。')
-    await nextTick()
-    if (!confirmed) {
-      deliveryTrayRef.value?.focusClear()
-      return
-    }
+    if (!confirmed) return false
     const next = removeDownloadedDeliveries(downloadHistory.value, olderDownloadHistory.value)
     if (!persistDownloadHistory(downloadHistoryStorage, next)) {
       deliveryError.value = '下载记录未能清空，请重试。'
-      deliveryTrayRef.value?.focusClear()
-      return
+      return false
     }
     downloadHistory.value = next
     deliveryError.value = ''
-    await nextTick()
-    deliveryTrayRef.value?.focusClose()
+    return true
   }
 
   watch(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id]), () => {
@@ -182,6 +177,7 @@ export function useDeliveries(page: ReadonlyRefs<Pick<ReturnType<typeof usePageS
   let unlisten: UnlistenFn | undefined
   let disposed = false
   async function listenNative() {
+    if (unlisten) return
     const release = await listen<DeliverableDownloadProgress>('aludock://deliverable-progress', ({ payload }) => {
       const key = deliveryHistoryKey(payload.connectionId, payload.instanceId, payload.deliveryRef)
       if (!downloadingDeliveries.value.has(key)) return
@@ -193,5 +189,5 @@ export function useDeliveries(page: ReadonlyRefs<Pick<ReturnType<typeof usePageS
     if (disposed) release(); else unlisten = release
   }
   onScopeDispose(() => { disposed = true; unlisten?.() })
-  return { deliveryTrayRef, deliveryLoading, deliveryError, currentDeliverableRows, olderDownloadHistory, pendingDeliverableCount, openingDeliveryKey, openDeliveryTray, refreshDeliverables, saveDeliverable, openDownloadedDeliverable, clearLocalDownloadHistory, listenNative }
-}
+  return { deliveryLoading, deliveryError, currentDeliverableRows, olderDownloadHistory, pendingDeliverableCount, openingDeliveryKey, openDeliveryTray, refreshDeliverables, saveDeliverable, openDownloadedDeliverable, clearLocalDownloadHistory, listenNative }
+})

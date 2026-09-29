@@ -1,29 +1,28 @@
-import type { ReadonlyRefs } from './ownerView'
-import { computed, nextTick, ref, watch } from 'vue'
+import { defineStore } from 'pinia'
+import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import {
-  abortRun, compactSession, forgetWork, getSettings, isTauri, listModels, listSessions, listTools, loadSessionTree, reopenWork, stopWork,
+  abortRun, compactSession, forgetWork, isTauri, listMachines, reopenWork, sessionContext, stopWork,
   type SessionContext
-} from './bridge'
-import { currentConnectionCall, requireConnectionContext } from './hostResult'
-import { conversationBoundaryKey, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from './uiBoundaries'
-import { userErrorMessage as errorMessage } from './userError'
-import type { ConnectionContext, ProjectedEvent } from './types'
-import type { ControlMutationDomain } from '../components/ControlCenter.vue'
-import type { usePageSurfaces } from './pageSurfaces'
-import type { useWorkObservation } from './workObservation'
-import { mutationScopeKey, useAppStore } from '../stores/app'
+} from '../lib/bridge'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
+import { subhostMachineName } from '../lib/machines'
+import { conversationBoundaryKey, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
+import { userErrorMessage as errorMessage } from '../lib/userError'
+import type { ConnectionContext, MachineDto, Work } from '../lib/types'
+import { mutationScopeKey, useAppStore } from './app'
+import { useControlPanelStore, type ControlMutationDomain } from './control-panel'
+import { useHostStore } from './host'
+import { useObservationStore } from './observation'
+import { useSurfacesStore } from './surfaces'
 type MutationDomain = ControlMutationDomain | 'work'
-export type ControlCenterHandle = {
-  reconcileDomain: (domain: ControlMutationDomain) => Promise<boolean>
-  applyLiveEvent: (event: ProjectedEvent) => void
-}
 
-/** Work buttons and their local feedback. Results are claimed by operationResults. */
-export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'askConfirm' | 'closeModal'>>, options: {
-  observation(): ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'load' | 'active' | 'connected' | 'acceptWork'>>
-  panel(): Pick<ControlCenterHandle, 'reconcileDomain'> | null
-}) {
+/** Work buttons, the Work list and New Work, with their local feedback. Results are claimed by the operations store. */
+export const useWorkActionsStore = defineStore('work-actions', () => {
   const app = useAppStore()
+  const page = useSurfacesStore()
+  const observation = useObservationStore()
+  const panel = useControlPanelStore()
+  const host = useHostStore()
   const selected = computed(() => app.selectedWork)
   let conversationSelectionRevision = 0
   watch(() => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id), () => { conversationSelectionRevision++ }, { flush: 'sync' })
@@ -157,7 +156,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     try {
       await reopenWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return
-      void options.observation().load(work.id, true)
+      void observation.load(work.id, true)
     } catch (cause) {
       if (!feedbackMatches(feedbackScope)) return
       const failure = cause as { code?: string; message?: string; details?: Record<string, unknown>; operationId?: string; outcomeUnknown?: boolean }
@@ -191,8 +190,8 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     }
     reportAction(feedbackScope, '当前 Work 状态已更新，原操作结果仍待确认。请勿重复提交。', 'notice')
     reconcilingReopenWorkId.value = ''
-    options.observation().acceptWork(current, context)
-    void options.observation().load(workId, true)
+    observation.acceptWork(current, context)
+    void observation.load(workId, true)
   }
 
   async function forgetSelectedWork() {
@@ -239,12 +238,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     const work = selected.value
     if (!isTauri || !work || compactionWorkIds.value.has(work.id) || work.compacting) return
     const capturedHost = requireConnectionContext(app)
-    const scope: SessionContext = {
-      ...capturedHost,
-      instanceId: work.id,
-      expectedHostEpoch: work.ownerHostEpoch ?? '',
-      expectedRuntimeGeneration: work.runtimeGeneration,
-    }
+    const scope = sessionContext(capturedHost, work)
     const feedbackScope = captureFeedback()
     page.closeModal()
     setCompactionPending(work.id, true)
@@ -255,8 +249,8 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     } catch (cause) {
       reportFailure(feedbackScope, cause)
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
-      const followed = options.observation().active.value
-      const matchingFollow = options.observation().connected.value
+      const followed = observation.active
+      const matchingFollow = observation.connected
         && followed?.connectionId === capturedHost.connectionId
         && followed.selectionGeneration === capturedHost.selectionGeneration
         && followed.instanceId === work.id
@@ -295,7 +289,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     try {
       let reconciled = false
       if (domain === 'conversation' && workId !== 'global') {
-        reconciled = await options.observation().load(workId)
+        reconciled = await observation.load(workId)
       } else if (domain === 'models' && workId !== 'global') {
         reconciled = await reconcileControlProjection('models', workId)
       } else if (domain === 'tools' && workId !== 'global') {
@@ -311,7 +305,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
         if (!isCurrent()) return
         const projection = await reconcileControlProjection(domain, workId)
         if (!isCurrent()) return
-        const conversation = await options.observation().load(workId, true)
+        const conversation = await observation.load(workId, true)
         reconciled = projection && conversation && !app.error
       } else if (domain === 'work') {
         reconciled = await app.loadActive()
@@ -329,38 +323,130 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     }
   }
 
-  async function reconcileControlProjection(domain: ControlMutationDomain, workId: string): Promise<boolean> {
-    const panel = options.panel()
-    if (panel && domain !== 'conversation') return panel.reconcileDomain(domain)
-    if (domain === 'models') {
-      const result = await currentConnectionCall(app, (context) => listModels(workId, context))
-      options.observation().acceptWork(result.instance)
-      return true
-    }
-    if (domain === 'tools') {
-      const result = await currentConnectionCall(app, (context) => listTools(workId, context))
-      options.observation().acceptWork(result.instance)
-      return true
-    }
-    if (domain === 'settings') {
-      await currentConnectionCall(app, (context) => getSettings(workId, context))
-      return true
-    }
-    if (domain === 'sessions' || domain === 'tree') {
-      const work = app.works.find((item) => item.id === workId)
-      if (!work) return false
-      const sessionContext = (context: ConnectionContext): SessionContext => ({
-        ...context,
-        instanceId: work.id,
-        expectedHostEpoch: work.ownerHostEpoch ?? '',
-        expectedRuntimeGeneration: work.runtimeGeneration,
-      })
-      if (domain === 'sessions') await currentConnectionCall(app, (context) => listSessions(sessionContext(context), { machineHostId: work.hostId, cwd: work.cwd }))
-      else await currentConnectionCall(app, (context) => loadSessionTree(sessionContext(context)))
-      return true
-    }
-    return false
+  function reconcileControlProjection(domain: ControlMutationDomain, workId: string): Promise<boolean> {
+    return selected.value?.id === workId ? panel.reconcileDomain(domain) : Promise.resolve(false)
   }
 
-  return { aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, workOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId, abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome }
-}
+  // A compaction event reported by the conversation replaces this button's earlier failure.
+  onScopeDispose(observation.onCompactionSettled((connectionId, instanceId) => setCompactionError(connectionId, instanceId)))
+
+  // ── Work list and New Work ───────────────────────────────────────────
+  const hostMachines = ref<MachineDto[]>([])
+  const machineListError = ref('')
+  const newWorkMachinesLoading = ref(false)
+  const newWorkCompact = ref(true)
+  let machineLoadEpoch = 0
+
+  watch(() => Boolean(app.payload && !app.needsPairing && !selected.value), (showList) => {
+    if (showList) app.workDrawerOpen = true
+  })
+  watch(() => app.workDrawerOpen, (open, wasOpen) => {
+    if (open) {
+      page.closeWorkPanels()
+    }
+    if (open && !wasOpen) {
+      void app.refreshWorksQuietly()
+      void refreshHostMachinesQuietly()
+    }
+  })
+  watch(
+    () => [app.activeConnectionId, app.connectionContext?.selectionGeneration] as const,
+    () => {
+      ++machineLoadEpoch
+      hostMachines.value = []
+      page.closeDirectory()
+      machineListError.value = ''
+      if (app.workDrawerOpen) void refreshHostMachinesQuietly()
+    },
+  )
+
+  function workGroup(work: Work) {
+    if (work.lifecycle === 'active' || work.lifecycle === 'stopping') return 'current'
+    if (work.reopenable) return 'continue'
+    return 'history'
+  }
+
+  const groupedWorks = computed(() => ({
+    current: app.works.filter((work) => workGroup(work) === 'current'),
+    continue: app.works.filter((work) => workGroup(work) === 'continue'),
+    history: app.works.filter((work) => workGroup(work) === 'history'),
+  }))
+
+  function workMachineTag(work: Work) {
+    return subhostMachineName(hostMachines.value, work.hostId)
+  }
+
+  function selectWork(workId: string) {
+    if (workId === selected.value?.id) {
+      app.workDrawerOpen = false
+      return
+    }
+    app.selectWork(workId)
+  }
+
+  async function reopenFromList(work: Work) {
+    app.selectWork(work.id)
+    await reopenSelectedWork()
+  }
+
+  async function forgetFromList(work: Work) {
+    app.selectWork(work.id)
+    await forgetSelectedWork()
+  }
+
+  async function loadHostMachines() {
+    const epoch = ++machineLoadEpoch
+    const machines = await currentConnectionCall(app, (context) => listMachines(context))
+    if (epoch === machineLoadEpoch) {
+      hostMachines.value = machines
+      machineListError.value = ''
+    }
+    return machines
+  }
+
+  async function refreshHostMachinesQuietly() {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    try {
+      await loadHostMachines()
+    } catch {
+      if (context && app.contextMatches(context)) machineListError.value = '机器信息暂时没有载入。刷新后重试。'
+    }
+  }
+
+  async function refreshWorkDrawer() {
+    await app.load()
+    await refreshHostMachinesQuietly()
+  }
+
+  async function openDirectory() {
+    if (host.pairingInProgress) return
+    page.openDirectory()
+    newWorkMachinesLoading.value = true
+    page.directoryBusy = false
+    newWorkCompact.value = true
+    machineListError.value = ''
+    try {
+      await loadHostMachines()
+    } catch (cause) {
+      if (page.directoryOpen) machineListError.value = errorMessage(cause, '无法读取可用机器，请检查连接后重试。')
+    } finally {
+      newWorkMachinesLoading.value = false
+    }
+  }
+
+  function acceptCreatedWork(work: Work) {
+    page.directoryBusy = false
+    const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
+    if (machine && work.hostId) app.rememberCreatedWorkspace(work.hostId, work.cwd, machine.platform)
+    observation.acceptWork(work)
+    app.selectWork(work.id)
+    void app.refreshWorksQuietly()
+    page.closeDirectory()
+  }
+
+  return {
+    aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, workOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId,
+    abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome,
+    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, acceptCreatedWork,
+  }
+})

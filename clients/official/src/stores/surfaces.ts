@@ -1,22 +1,22 @@
-import type { ReadonlyRefs } from './ownerView'
-import { useExtensionUiStore } from '../stores/extension-ui'
-import { isTauri } from './bridge'
+import { defineStore } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, shallowReactive, watch } from 'vue'
-import type { ControlSection } from './localCommands'
-import type { useComposer } from './composer'
-import { useAppStore } from '../stores/app'
+import type { ControlSection } from '../lib/localCommands'
+import { useAppStore } from './app'
+import { useExtensionUiStore } from './extension-ui'
 export type ImagePreview =
   | { kind: 'conversation'; imageKey: string; url: string; handle?: string; name: string }
   | { kind: 'attachment'; attachmentKey: string; url: string; handle?: string; name: string }
-/** Page-only surfaces, history/back, wheel and focus. No native facts or receipts. */
-export function usePageSurfaces(options: {
-  composer(): ReadonlyRefs<Pick<ReturnType<typeof useComposer>, 'expanded' | 'composing' | 'collapse'>>
-  extensionActive(): boolean
-  directoryBusy(): boolean
-  modelLabel(): string
-}) {
+/** Page-only surfaces, history/back, wheel and focus. No native facts or receipts.
+ * It also holds the editor's expanded/composition state, because every open
+ * surface and the Escape/Back handling depend on it. */
+export const useSurfacesStore = defineStore('surfaces', () => {
   const app = useAppStore()
   const extensionUi = useExtensionUiStore()
+  const composerExpanded = ref(false)
+  const composerComposing = ref(false)
+  /** The New Work dialog is committing; Back and closing wait for it. */
+  const directoryBusy = ref(false)
+  const extensionActive = () => !!extensionUi.activeRequest
   const selected = computed(() => app.selectedWork)
   watch(() => extensionUi.controller?.handle, (handle) => {
     if (!handle) restoreDocumentTitle()
@@ -63,7 +63,7 @@ export function usePageSurfaces(options: {
   }
   let modalTrigger: HTMLElement | null = null
 
-  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || options.composer().expanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
+  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
 
   /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
      浮层/抽屉打开时压入一个占位历史条目，返回键触发 popstate 时关闭最上层；
@@ -92,7 +92,7 @@ export function usePageSurfaces(options: {
       return
     }
     if (!backLayerOpen.value) return
-    if (directoryOpen.value && options.directoryBusy()) {
+    if (directoryOpen.value && directoryBusy.value) {
       window.history.pushState({ aluLayer: true }, '')
       backLayerArmed = true
       return
@@ -126,9 +126,9 @@ export function usePageSurfaces(options: {
   let composerOwnsModalFocus = false
   watch(modalOpen, async (open, wasOpen) => {
     if (open && !wasOpen) {
-      composerOwnsModalFocus = options.composer().expanded.value
+      composerOwnsModalFocus = composerExpanded.value
       await nextTick()
-      if (!modalOpen.value || options.composer().expanded.value) return
+      if (!modalOpen.value || composerExpanded.value) return
       const surface = modalSurface.value
       const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
         ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
@@ -140,7 +140,7 @@ export function usePageSurfaces(options: {
       if (composerOwnsModalFocus) { composerOwnsModalFocus = false; return }
       await nextTick()
       window.requestAnimationFrame(() => {
-        if (!modalOpen.value && !options.extensionActive() && trigger?.isConnected) trigger.focus({ preventScroll: true })
+        if (!modalOpen.value && !extensionActive() && trigger?.isConnected) trigger.focus({ preventScroll: true })
       })
     }
   })
@@ -159,7 +159,7 @@ export function usePageSurfaces(options: {
     const trigger = confirmationTrigger
     confirmationTrigger = null
     void nextTick(() => {
-      if (!confirmDialog.value && trigger?.isConnected && (modalOpen.value || !options.extensionActive())) trigger.focus({ preventScroll: true })
+      if (!confirmDialog.value && trigger?.isConnected && (modalOpen.value || !extensionActive())) trigger.focus({ preventScroll: true })
     })
   }
 
@@ -168,14 +168,14 @@ export function usePageSurfaces(options: {
   }
 
   function closeModal() {
-    if (directoryOpen.value && options.directoryBusy()) return
+    if (directoryOpen.value && directoryBusy.value) return
     workspaceBrowserOpen.value = false
     deliveryOpen.value = false
     directoryOpen.value = false
     commandOpen.value = false
     appSettingsOpen.value = false
     hostSettingsOpen.value = false
-    options.composer().collapse()
+    composerExpanded.value = false
     imagePreview.value = null
     messageTextView.value = null
     imageSaving.value = false
@@ -183,7 +183,7 @@ export function usePageSurfaces(options: {
   }
 
   function handleGlobalModalKeydown(event: KeyboardEvent) {
-    if (!modalOpen.value || event.key !== 'Escape' || event.isComposing || options.composer().composing.value) return
+    if (!modalOpen.value || event.key !== 'Escape' || event.isComposing || composerComposing.value) return
     event.preventDefault()
     event.stopPropagation()
     if (confirmDialog.value) settleConfirm(false)
@@ -226,7 +226,7 @@ export function usePageSurfaces(options: {
   }
 
   function handleModalKeydown(event: KeyboardEvent) {
-    if (event.isComposing || options.composer().composing.value) return
+    if (event.isComposing || composerComposing.value) return
     if (event.key === 'Escape') {
       event.preventDefault()
       closeModal()
@@ -260,7 +260,10 @@ export function usePageSurfaces(options: {
   }
 
   function controlDialogBody(section: ControlSection) {
-    if (section === 'models') return `当前：${options.modelLabel()}`
+    if (section === 'models') {
+      const model = app.selectedWork?.executor.model
+      return `当前：${model ? `${model.provider}/${model.id}` : '—'}`
+    }
     if (section === 'dock-tools') return '当前 Work 可以交给 Agent 使用的 Dock 能力'
     if (section === 'resources') return '当前 Work、Session、Git 与已加载能力'
     if (section === 'tree') {
@@ -327,41 +330,21 @@ export function usePageSurfaces(options: {
     imagePreview.value = preview
   }
 
-  let shortcuts: { abort(): Promise<void>; restoreQueue(): Promise<boolean> } | undefined
-  function listenShortcuts(actions: NonNullable<typeof shortcuts>) {
-    shortcuts = actions
+  let listening = false
+  /** Page-wide Escape, Android Back (popstate) and popover placement. */
+  function listenWindow() {
+    if (listening) return
+    listening = true
     window.addEventListener('keydown', handleGlobalModalKeydown, true)
-    window.addEventListener('keydown', handleDesktopShortcut)
     window.addEventListener('popstate', handlePopstate)
     window.addEventListener('resize', positionDockToolsPopover)
   }
   onScopeDispose(() => {
+    if (!listening) return
     window.removeEventListener('keydown', handleGlobalModalKeydown, true)
-    window.removeEventListener('keydown', handleDesktopShortcut)
     window.removeEventListener('popstate', handlePopstate)
     window.removeEventListener('resize', positionDockToolsPopover)
   })
-  function handleDesktopShortcut(event: KeyboardEvent) {
-    if (!isTauri || event.defaultPrevented || event.isComposing || options.composer().composing.value || event.repeat || modalOpen.value) return
-    const key = event.key.toLowerCase()
-    if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
-      if (app.selectedWork?.execution !== 'running') return
-      event.preventDefault()
-      void shortcuts?.abort()
-      return
-    }
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === 'k') {
-      if (!app.selectedWork) return
-      event.preventDefault()
-      openControlCenter('commands')
-      return
-    }
-    if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === 'ArrowUp') {
-      if (!app.selectedWork || app.selectedWork.lifecycle !== 'active') return
-      event.preventDefault()
-      void shortcuts?.restoreQueue()
-    }
-  }
 
   function openWorkspaceBrowser() {
     if (app.selectedWork?.lifecycle !== 'active') return
@@ -393,5 +376,5 @@ export function usePageSurfaces(options: {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenShortcuts, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
-}
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+})

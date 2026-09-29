@@ -521,6 +521,13 @@ export interface SessionContext extends ConnectionContext {
   expectedHostEpoch: string
   expectedRuntimeGeneration: number
 }
+/** The Session scope of one Work on the given connection selection. */
+export function sessionContext(context: ConnectionContext, work: Pick<Work, 'id' | 'ownerHostEpoch' | 'runtimeGeneration'>): SessionContext {
+  return {
+    connectionId: context.connectionId, selectionGeneration: context.selectionGeneration,
+    instanceId: work.id, expectedHostEpoch: work.ownerHostEpoch ?? '', expectedRuntimeGeneration: work.runtimeGeneration,
+  }
+}
 export interface SessionTrustContinuation {
   operationId: string
   trustChallengeId?: string

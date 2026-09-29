@@ -20,7 +20,7 @@ export function conversationBoundaryKey(
 
 /** Matches WebConsole's compact metric density exactly. */
 export function formatTokenCount(value?: number | null): string {
-  if (value == null) return '—'
+  if (value == null || !Number.isFinite(value)) return '—'
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
   if (value >= 1_000) return `${Math.floor(value / 1_000)}k`
   return String(value)
@@ -33,10 +33,13 @@ export function formatCacheHitRate(tokens?: NonNullable<Work['metrics']>['tokens
   return inputTotal > 0 ? `${Math.round(tokens.cacheRead / inputTotal * 100)}%` : '—'
 }
 
-export function formatContextUsage(context?: { tokens?: number | null; contextWindow?: number; percent?: number | null }): string {
-  return context
-    ? `${formatTokenCount(context.tokens)}/${formatTokenCount(context.contextWindow)} (${context.percent == null ? '—' : `${context.percent.toFixed(1)}%`})`
-    : '—'
+/** Top bar: `245k/372k (65.9%)`. The project status panel lists it as `245k/372k · 65.9%`
+ * and shows `—` until the context window is known. */
+export function formatContextUsage(context?: { tokens?: number | null; contextWindow?: number; percent?: number | null }, layout: 'bar' | 'status' = 'bar'): string {
+  if (!context || (layout === 'status' && !context.contextWindow)) return '—'
+  const used = `${formatTokenCount(context.tokens)}/${formatTokenCount(context.contextWindow)}`
+  const percent = context.percent == null ? '—' : `${context.percent.toFixed(1)}%`
+  return layout === 'status' ? `${used} · ${percent}` : `${used} (${percent})`
 }
 
 /** Admission success clears only the exact draft that was submitted; failures and concurrent typing are preserved. */

@@ -1,18 +1,26 @@
+import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { pendingOperations, consumeOperation } from './bridge'
-import { operationWork, type NativeOperation } from './operationBinding'
-import type { Work } from './types'
-import { useAppStore } from '../stores/app'
+import { pendingOperations, consumeOperation } from '../lib/bridge'
+import { operationWork, type NativeOperation } from '../lib/operationBinding'
+import { useAppStore } from './app'
+import { useAttachmentsStore } from './attachments'
+import { useObservationStore } from './observation'
+
+type FailurePresenter = (operation: NativeOperation, consume: (operation: NativeOperation) => Promise<void>) => Promise<void>
 
 /** Sole native result claimant. Awaiting a button call is only surface feedback. */
-export function useOperationResults(options: {
-  presentFailure(operation: NativeOperation, consume: (operation: NativeOperation) => Promise<void>): Promise<void>
-  acceptWork(work: Work): void
-  queueRetrieved(operation: NativeOperation, ids: string[]): void
-  refreshRestoredImages(): Promise<void>
-}) {
+export const useOperationsStore = defineStore('operations', () => {
   const app = useAppStore()
+  const observation = useObservationStore()
+  const attachments = useAttachmentsStore()
+  // The editor shows a failed send inline when it is still on screen; otherwise
+  // the failure stays in its Work/list result entry.
+  let presentFailure: FailurePresenter | null = null
+  function setFailurePresenter(presenter: FailurePresenter) {
+    presentFailure = presenter
+    return () => { if (presentFailure === presenter) presentFailure = null }
+  }
   const selected = computed(() => app.selectedWork)
   // Local application and an in-flight acknowledgement are different facts.
   // Durable editor claims cover only the pending native acknowledgement window.
@@ -47,7 +55,7 @@ export function useOperationResults(options: {
     if (pending) return pending
     const attempt = (async () => {
       try {
-        if (refreshImages) await options.refreshRestoredImages()
+        if (refreshImages) await attachments.refreshRestoredImageCount()
         await consumeOperation(operation.operationId)
         appliedOperations.value.add(operation.operationId)
         app.confirmAppliedOperation(operation.operationId)
@@ -86,9 +94,10 @@ export function useOperationResults(options: {
     // A terminal failure is not a UI acknowledgement. Keep it in native state
     // until the corresponding Work/list result entry is explicitly acknowledged.
     if (operation.state === 'failed') {
-      if (operation.kind === 'submit_message' && !inlineFailureClaims.value.has(operation.operationId)) {
+      const presenter = presentFailure
+      if (operation.kind === 'submit_message' && presenter && !inlineFailureClaims.value.has(operation.operationId)) {
         inlineFailureClaims.value.add(operation.operationId)
-        try { await options.presentFailure(operation, consumeNativeOperation) }
+        try { await presenter(operation, consumeNativeOperation) }
         finally { inlineFailureClaims.value.delete(operation.operationId) }
       }
       return
@@ -106,7 +115,7 @@ export function useOperationResults(options: {
           return
         }
       } else if (returnsQueue(operation) && result && 'receipt' in result && result.receipt && 'restored' in result.receipt) {
-        options.queueRetrieved({ ...operation, sessionId: result.instance.executor.piSessionId ?? '' }, result.receipt.restored.map(item => item.queueItemId))
+        observation.queueRetrieved({ ...operation, sessionId: result.instance.executor.piSessionId ?? '' }, result.receipt.restored.map(item => item.queueItemId))
         if (result.receipt.restored.length && !app.restoreOperationQueue(operation.connectionId, operation.instanceId, result.receipt.restored, operation.operationId)) {
           acknowledgementErrors.value.add(operation.operationId)
           return
@@ -121,7 +130,7 @@ export function useOperationResults(options: {
       }
       if (app.activeConnectionId === operation.connectionId) {
         if (operation.kind === 'forget_work') app.removeWorkSnapshot(operation.instanceId)
-        else if (snapshot && !newerDomain) options.acceptWork(snapshot)
+        else if (snapshot && !newerDomain) observation.acceptWork(snapshot)
       }
     }
     appliedOperations.value.add(operation.operationId)
@@ -159,9 +168,10 @@ export function useOperationResults(options: {
   let unlisten: UnlistenFn | undefined
   let disposed = false
   async function listenNative() {
+    if (unlisten) return
     const release = await listen<NativeOperation>('aludock://operation', ({ payload }) => { void acceptNativeOperation(payload) })
     if (disposed) release(); else unlisten = release
   }
   onScopeDispose(() => { disposed = true; unlisten?.() })
-  return { returnedContentErrors, returnedOperations, workResults, listResults, initialize, listenNative, consumeNativeOperation, restoreReturnedOperation }
-}
+  return { returnedContentErrors, returnedOperations, workResults, listResults, initialize, listenNative, consumeNativeOperation, restoreReturnedOperation, setFailurePresenter }
+})

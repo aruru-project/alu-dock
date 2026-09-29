@@ -1,45 +1,49 @@
-import type { ReadonlyRefs } from './ownerView'
+import { defineStore, storeToRefs } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
-import { useComposer } from './composer'
-import { dequeueMessages, getCommandCompletions, isTauri, submitMessage } from './bridge'
-import { attachmentUploadMatches, attachmentUploadTarget } from './attachmentDraft'
-import { currentConnectionCall, requireConnectionContext } from './hostResult'
-import { conversationBoundaryKey } from './uiBoundaries'
-import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './commandSuggest'
-import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type LocalControlCommand } from './localCommands'
-import { userErrorMessage as errorMessage } from './userError'
-import type { EditorCapture, NativeOperation } from './operationBinding'
-import type { CommandArgumentCompletion, CommandInfo, QueueItem } from './types'
-import type { usePageSurfaces } from './pageSurfaces'
-import type { useWorkObservation } from './workObservation'
-import type { useWorkActions } from './workActions'
-import type { useAttachmentUploads } from './attachmentUploads'
-import { useAppStore } from '../stores/app'
-import { useExtensionUiStore } from '../stores/extension-ui'
-import { useCommandCatalogStore } from '../stores/command-catalog'
-/** One editor owner for compact and expanded input; no display state access. */
-export function useInputEditor(options: {
-  page(): ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'appSettingsOpen' | 'closeControl' | 'commandOpen' | 'confirmDialog' | 'deliveryOpen' | 'directoryOpen' | 'hostSettingsOpen' | 'imagePreview' | 'messageTextView' | 'modalOpen' | 'openControlCenter' | 'returnFocusTo' | 'workspaceBrowserOpen'>>
-  observation(): ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'queue'>>
-  actions(): ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'actionError' | 'currentCompactionError' | 'stopSelectedWork'>>
-  attachments(): ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'draftAttachments' | 'maxMessageAttachments' | 'restoredImageCount' | 'clearingRestoredImages' | 'attachmentPicking' | 'uploadDrafts'>>
-  focused(): boolean
-  pairing(): boolean
-  activity(workId: string): void
-}) {
+import { useComposer } from '../lib/composer'
+import { dequeueMessages, getCommandCompletions, isTauri, submitMessage } from '../lib/bridge'
+import { attachmentUploadMatches, attachmentUploadTarget } from '../lib/attachmentDraft'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
+import { conversationBoundaryKey } from '../lib/uiBoundaries'
+import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from '../lib/commandSuggest'
+import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type LocalControlCommand } from '../lib/localCommands'
+import { userErrorMessage as errorMessage } from '../lib/userError'
+import type { EditorCapture, NativeOperation } from '../lib/operationBinding'
+import type { CommandArgumentCompletion, CommandInfo } from '../lib/types'
+import { useAppStore } from './app'
+import { useAttachmentsStore } from './attachments'
+import { useCommandCatalogStore } from './command-catalog'
+import { useConversationStore } from './conversation'
+import { useExtensionUiStore } from './extension-ui'
+import { useHostStore } from './host'
+import { useObservationStore } from './observation'
+import { useOperationsStore } from './operations'
+import { useSurfacesStore } from './surfaces'
+import { useWorkActionsStore } from './work-actions'
+/** One editor for compact and expanded input, its send/Queue feedback and desktop shortcuts. */
+export const useInputStore = defineStore('input', () => {
   const app = useAppStore()
   const selected = computed(() => app.selectedWork)
   const extensionUi = useExtensionUiStore()
   const commandCatalogStore = useCommandCatalogStore()
+  const surfaces = useSurfacesStore()
+  const observation = useObservationStore()
+  const host = useHostStore()
+  const workActions = useWorkActionsStore()
+  const attachments = useAttachmentsStore()
+  const operations = useOperationsStore()
+  const conversation = useConversationStore()
   const submissionError = ref<string | null>(null)
 
+  const { composerExpanded, composerComposing } = storeToRefs(surfaces)
   const composer = useComposer({
     read: () => app.currentDraft, write: (value) => app.setCurrentDraft(value),
     identity: () => JSON.stringify([app.connectionContext, app.selectedWorkId]),
     flush: () => app.flushLocalState(),
-    canFocus: () => !extensionUi.activeRequest && (!options.page().modalOpen.value || composerExpanded.value),
+    canFocus: () => !extensionUi.activeRequest && (!surfaces.modalOpen || composerExpanded.value),
+    expanded: composerExpanded, composing: composerComposing,
   })
-  const { draft, compact: composerTextarea, expandedTextarea, expanded: composerExpanded } = composer
+  const { draft, compact: composerTextarea, expandedTextarea } = composer
 
   let composerExpansionRevision = 0
   watch(composerExpanded, () => { composerExpansionRevision += 1 }, { flush: 'sync' })
@@ -72,12 +76,12 @@ export function useInputEditor(options: {
 
   async function presentSubmitFailure(operation: NativeOperation, consumeNativeOperation: (operation: NativeOperation) => Promise<void>) {
     const revision = submitViewRevision
-    const canPresent = () => submitViewRevision === revision && options.focused() && document.visibilityState === 'visible'
+    const canPresent = () => submitViewRevision === revision && observation.windowFocused && document.visibilityState === 'visible'
       && operation.connectionId === app.activeConnectionId && operation.hostEpoch === app.payload?.host.hostEpoch
       && operation.instanceId === selected.value?.id && selected.value.lifecycle === 'active'
       && operation.runtimeGeneration === selected.value.runtimeGeneration && operation.sessionId === selected.value.executor.piSessionId
-      && !app.workDrawerOpen && !options.page().commandOpen.value && !options.page().directoryOpen.value && !options.page().hostSettingsOpen.value && !options.page().appSettingsOpen.value
-      && !options.page().workspaceBrowserOpen.value && !options.page().deliveryOpen.value && !options.page().imagePreview.value && !options.page().messageTextView.value && !options.page().confirmDialog.value
+      && !app.workDrawerOpen && !surfaces.commandOpen && !surfaces.directoryOpen && !surfaces.hostSettingsOpen && !surfaces.appSettingsOpen
+      && !surfaces.workspaceBrowserOpen && !surfaces.deliveryOpen && !surfaces.imagePreview && !surfaces.messageTextView && !surfaces.confirmDialog
       && !extensionUi.activeRequest
     if (!canPresent()) return
     const message = errorMessage(operation.error, '这次消息没有发送。当前编辑内容已保留，请检查原因后重试。')
@@ -114,18 +118,9 @@ export function useInputEditor(options: {
     }, 3_500)
   }
 
-  const previewQueue: QueueItem[] = [{
-    queueItemId: 'preview-queue-1',
-    delivery: 'followUp',
-    text: '请在确认桌面布局后，再检查窄屏 Queue 与附件操作。',
-    attachments: [{ fileId: 'd729a77f-69f0-4f12-ac4c-2badf5750220', name: '窄屏验收清单.txt', sizeBytes: 1864, mediaType: 'text/plain', sha256: 'b'.repeat(64), storedAt: '2026-08-17T08:02:00.000Z' }],
-    imageCount: 1,
-    acceptedAt: '2026-08-17T08:02:00.000Z',
-  }]
+  const queueItems = computed(() => observation.queue)
 
-  const queueItems = computed(() => isTauri ? options.observation().queue.value : previewQueue)
-
-  const visibleComposerError = computed(() => submitAttemptError.value || submissionError.value || options.actions().actionError.value || options.actions().currentCompactionError.value)
+  const visibleComposerError = computed(() => submitAttemptError.value || submissionError.value || workActions.actionError || workActions.currentCompactionError)
 
   /* ── 输入框斜杠命令建议 ────────────────────────────────
    * pi 只展开位于消息最开头的 /command，因此建议仅在整段草稿
@@ -265,13 +260,13 @@ export function useInputEditor(options: {
    *  焦点走 modal 关闭时的 trigger 归位通道，避免和归位逻辑抢时序。 */
   function prefillSlashCommand(name: string) {
     draft.value = prefixSlashCommand(name, draft.value)
-    options.page().returnFocusTo(composerTextarea.value)
-    options.page().closeControl()
+    surfaces.returnFocusTo(composerTextarea.value)
+    surfaces.closeControl()
     void nextTick(() => {
       const textarea = composerTextarea.value
       if (!textarea || extensionUi.activeRequest) return
       window.setTimeout(() => {
-        if (extensionUi.activeRequest || options.page().modalOpen.value) return
+        if (extensionUi.activeRequest || surfaces.modalOpen) return
         textarea.focus()
         textarea.setSelectionRange(textarea.value.length, textarea.value.length)
       }, 0)
@@ -280,7 +275,7 @@ export function useInputEditor(options: {
 
   async function restoreQueue(): Promise<boolean> {
     const work = selected.value
-    if (!work || options.pairing() || options.attachments().attachmentPicking.value || options.attachments().clearingRestoredImages.value || queueRestoring.value || submitting.value) return false
+    if (!work || host.pairingInProgress || attachments.attachmentPicking || attachments.clearingRestoredImages || queueRestoring.value || submitting.value) return false
     const context = requireConnectionContext(app)
     const viewRevision = submitViewRevision
     const pendingKey = submitWorkKey.value
@@ -306,15 +301,15 @@ export function useInputEditor(options: {
   const canSubmit = computed(() => {
     if (submittedLocalControl(draft.value)) return !!selected.value && selected.value.lifecycle === 'active'
     return app.operationResultsReady && ![...app.nativeOperations.values()].some(operation => operation.kind === 'submit_message' && operation.state === 'succeeded' && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id)
-      && !!selected.value && (!!draft.value.trim() || !!options.attachments().draftAttachments.value.length || !!options.attachments().restoredImageCount.value)
-      && isTauri && !options.attachments().clearingRestoredImages.value && !submitBlocked.value
-      && !queueRestoring.value && !options.attachments().attachmentPicking.value && !options.attachments().uploadDrafts.value.length
+      && !!selected.value && (!!draft.value.trim() || !!attachments.draftAttachments.length || !!attachments.restoredImageCount)
+      && isTauri && !attachments.clearingRestoredImages && !submitBlocked.value
+      && !queueRestoring.value && !attachments.attachmentPicking && !attachments.uploadDrafts.length
   })
 
   async function submit(): Promise<boolean> {
     const work = selected.value
     const captured = draft.value
-    const capturedAttachments = options.attachments().draftAttachments.value.slice(0, options.attachments().maxMessageAttachments.value).map((item) => ({ ...item }))
+    const capturedAttachments = attachments.draftAttachments.slice(0, attachments.maxMessageAttachments).map((item) => ({ ...item }))
     const localCommand = submittedLocalControl(captured)
     if (localCommand) return executeLocalControl(localCommand, captured)
     if (!work || !canSubmit.value) return false
@@ -335,7 +330,7 @@ export function useInputEditor(options: {
       const operation = app.captureOperation(capturedHost, work.id, capturedAttachments.map(item => item.fileId))
       const result = await submitMessage(work.id, captured, capturedAttachments.map(item => item.fileId), operation)
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
-        if (!result.receipt.queued) options.activity(work.id)
+        if (!result.receipt.queued) conversation.showAgentActivity(work.id)
       }
       return true
     } catch (cause) {
@@ -349,22 +344,22 @@ export function useInputEditor(options: {
     const expansionRevision = composerExpansionRevision
     const attemptSequence = submitAttemptSequence
     const originalDraft = draft.value
-    const originalFiles = new Set(options.attachments().draftAttachments.value.map(item => item.fileId))
-    const originalImageCount = options.attachments().restoredImageCount.value
+    const originalFiles = new Set(attachments.draftAttachments.map(item => item.fileId))
+    const originalImageCount = attachments.restoredImageCount
     // The success reply can precede native draft cleanup. Close this surface without
     // claiming the draft ourselves, unless the user has already started another message.
     if (await submit() && submitViewRevision === viewRevision && composerExpansionRevision === expansionRevision
       && submitAttemptSequence <= attemptSequence + 1 && (!draft.value || draft.value === originalDraft)
-      && options.attachments().draftAttachments.value.every(item => originalFiles.has(item.fileId))
-      && options.attachments().restoredImageCount.value <= originalImageCount
-      && !options.attachments().uploadDrafts.value.length) composerExpanded.value = false
+      && attachments.draftAttachments.every(item => originalFiles.has(item.fileId))
+      && attachments.restoredImageCount <= originalImageCount
+      && !attachments.uploadDrafts.length) composerExpanded.value = false
   }
 
   async function executeLocalControl(command: LocalControlCommand, captured: string): Promise<boolean> {
     if (!selected.value || selected.value.lifecycle !== 'active') return false
     if (command.section) {
       if (draft.value === captured) draft.value = ''
-      options.page().openControlCenter(command.section)
+      surfaces.openControlCenter(command.section)
       return true
     }
     if (command.action === 'restoreQueue') {
@@ -376,7 +371,7 @@ export function useInputEditor(options: {
       let original: EditorCapture | undefined
       try { original = app.captureSubmitDraft(context.connectionId, selected.value.id, []) }
       catch { /* Stop must remain available; without a durable capture, keep the local command text. */ }
-      const stopped = await options.actions().stopSelectedWork()
+      const stopped = await workActions.stopSelectedWork()
       if (stopped && original) app.completeSubmitDraft(original)
       return stopped
     }
@@ -438,7 +433,52 @@ export function useInputEditor(options: {
     submissionError.value = null
     commandCatalogStore.invalidate()
   })
-  onScopeDispose(() => { window.clearTimeout(composerCompletionTimer); clearQueueNotice() })
-  function reportError(message: string | null) { submissionError.value = message }
-  return { composer, draft, composerTextarea, expandedTextarea, composerExpanded, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading, submit, submitExpanded, restoreQueue, allowAnotherSubmit, presentSubmitFailure, prefillSlashCommand, applyExtensionEditorText, completeSuggest, handleComposerKeydown, reportError }
-}
+  /** Returned Queue images are removed only while no send or Queue retrieval is running. */
+  function clearQueueImages() {
+    if (submitting.value || queueRestoring.value) return
+    void attachments.clearQueueImages()
+  }
+
+  // Desktop shortcuts: Esc aborts the reply, Ctrl/Cmd+K opens commands, Alt+↑ retrieves the Queue.
+  function handleDesktopShortcut(event: KeyboardEvent) {
+    if (!isTauri || event.defaultPrevented || event.isComposing || composerComposing.value || event.repeat || surfaces.modalOpen) return
+    const key = event.key.toLowerCase()
+    if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+      if (app.selectedWork?.execution !== 'running') return
+      event.preventDefault()
+      void workActions.abortCurrentRun()
+      return
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === 'k') {
+      if (!app.selectedWork) return
+      event.preventDefault()
+      surfaces.openControlCenter('commands')
+      return
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === 'ArrowUp') {
+      if (!app.selectedWork || app.selectedWork.lifecycle !== 'active') return
+      event.preventDefault()
+      void restoreQueue()
+    }
+  }
+  let listeningShortcuts = false
+  function listenShortcuts() {
+    if (listeningShortcuts) return
+    listeningShortcuts = true
+    window.addEventListener('keydown', handleDesktopShortcut)
+  }
+
+  const offAttachmentError = attachments.onError((message) => { submissionError.value = message })
+  const offFailurePresenter = operations.setFailurePresenter(presentSubmitFailure)
+  onScopeDispose(() => {
+    window.clearTimeout(composerCompletionTimer); clearQueueNotice()
+    if (listeningShortcuts) window.removeEventListener('keydown', handleDesktopShortcut)
+    offAttachmentError(); offFailurePresenter()
+  })
+  return {
+    draft, composerTextarea, expandedTextarea, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit,
+    suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading,
+    rememberSelection: composer.remember, trackComposition: composer.composition,
+    submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
+  }
+})

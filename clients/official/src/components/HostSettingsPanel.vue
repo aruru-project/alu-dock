@@ -1,21 +1,19 @@
 <script setup lang="ts">
 import { onBeforeUnmount } from 'vue'
-import type { ReadonlyRefs } from '../lib/ownerView'
+import { storeToRefs } from 'pinia'
 import { Globe2, Link, Monitor, Plus, RotateCcw, ShieldCheck, Trash2, X } from '@lucide/vue'
-import type { useHostConnection } from '../lib/hostConnection'
-import type { usePageSurfaces } from '../lib/pageSurfaces'
 import LocalConnectionCard from './LocalConnectionCard.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useHostStore } from '../stores/host'
+import { useSurfacesStore } from '../stores/surfaces'
 
-const props = defineProps<{
-  host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'addHostEndpoint' | 'beginPairing' | 'chooseConnectionPolicy' | 'connectLocal' | 'endpointCanSaveDraft' | 'endpointError' | 'endpointFormOpen' | 'endpointKindLabel' | 'endpointMutatingId' | 'endpointSaving' | 'endpointStateLabel' | 'hostNameError' | 'hostNameSaved' | 'hostNameSaving' | 'moveEndpoint' | 'pairingError' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'rememberPairDeviceName' | 'removeEndpoint' | 'removeSavedHost' | 'saveEndpointDraft' | 'saveHostDisplayName' | 'showHostPairingForm' | 'stopPairing' | 'switchSavedHost' | 'testEndpoint' | 'testStatusLabel' | 'toggleEndpoint' | 'toggleEndpointForm' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'addingHost' | 'endpointHost' | 'endpointKind' | 'endpointLabel' | 'endpointPort' | 'hostDisplayName' | 'pairDeviceName' | 'pairHost' | 'pairPort'>
-  page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'closeModal'>>
-  busy: boolean
-}>()
 const app = useAppStore()
-const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost, rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel } = props.host
-const { closeModal } = props.page
+const hostStore = useHostStore()
+const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost } = storeToRefs(hostStore)
+const { rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel } = hostStore
+const { pairingInProgress: busy } = storeToRefs(hostStore)
+const { closeModal } = useSurfacesStore()
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 onBeforeUnmount(() => { void stopPairing() })
 </script>
@@ -32,7 +30,7 @@ onBeforeUnmount(() => { void stopPairing() })
               :connected="!!app.localSelected"
               :effective-endpoint="app.catalog.localEndpointEffective"
               :endpoint-override="app.catalog.localEndpointOverride"
-              :busy="app.loading || props.busy"
+              :busy="app.loading || busy"
               :error="app.error"
               @connect="connectLocal"
               @save="updateLocalEndpoint"
@@ -40,15 +38,15 @@ onBeforeUnmount(() => { void stopPairing() })
             <div class="host-catalog-title"><span>Host</span><b>{{ app.catalog?.hosts.length ?? 0 }}</b></div>
             <div class="host-catalog-list">
               <article v-for="host in app.catalog?.hosts" :key="host.hostId" class="host-choice" :class="{ active: host.hostId === app.activeHost?.hostId && !app.localSelected }">
-                <button class="host-choice-main" :disabled="host.hostId === app.activeHost?.hostId && !app.localSelected || props.busy" @click="switchSavedHost(host.hostId)">
+                <button class="host-choice-main" :disabled="host.hostId === app.activeHost?.hostId && !app.localSelected || busy" @click="switchSavedHost(host.hostId)">
                   <span class="host-choice-dot" aria-hidden="true" />
                   <span class="host-choice-copy"><strong>{{ host.displayName }}</strong><small>{{ host.endpointSummary }}</small></span>
                   <span v-if="host.hostId === app.activeHost?.hostId && !app.localSelected" class="host-choice-current">当前</span>
                 </button>
-                <button class="host-choice-delete" :aria-label="`从此设备删除 ${host.displayName}`" :disabled="props.busy" @click="removeSavedHost(host.hostId, host.displayName)"><Trash2 :size="14" /></button>
+                <button class="host-choice-delete" :aria-label="`从此设备删除 ${host.displayName}`" :disabled="busy" @click="removeSavedHost(host.hostId, host.displayName)"><Trash2 :size="14" /></button>
               </article>
             </div>
-            <button class="host-connect-new" :disabled="props.busy" @click="showHostPairingForm"><Plus :size="15" />连接 Host</button>
+            <button class="host-connect-new" :disabled="busy" @click="showHostPairingForm"><Plus :size="15" />连接 Host</button>
           </aside>
           <div class="host-detail-column">
             <section v-if="app.localSelected && !addingHost" class="local-connection-summary">
@@ -63,7 +61,7 @@ onBeforeUnmount(() => { void stopPairing() })
             <div v-if="pairingPin" class="pairing-pin"><small>请在电脑上的 AluDock 中输入</small><strong>{{ pairingPin }}</strong></div>
             <div v-if="pairingMessage" class="pairing-progress">{{ pairingMessage }}</div>
             <div v-if="pairingError" class="directory-error">{{ pairingError }}</div>
-            <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="props.busy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
+            <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="busy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
           </form>
           <template v-if="app.activeHost && !app.localSelected && !addingHost">
           <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost.displayName }}</h3></div><p>{{ app.activeHost.profile.endpoints.length }} 个 TLS 地址 · {{ app.activeHost.profile.policy.mode === 'automatic' ? '自动选择' : '固定首选' }}</p></div>
