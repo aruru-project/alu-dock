@@ -26,10 +26,8 @@
 
   /* Accents — from Alu's character design */
   --alu-pink:           #f472b6;
-  --alu-pink-dim:       #c054a0;
   --alu-pink-bg:        #1e0f20;
   --alu-pink-border:    #4a1e3a;
-  --alu-pink-glow:      rgba(244, 114, 182, 0.25);
 
   --alu-blue:           #7ec8e0;
   --alu-blue-dim:       #5aaac8;
@@ -457,202 +455,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   box-shadow: 0 2px 10px rgba(200, 56, 110, 0.32);
 }
 
-/* 小尾巴预览：输入框下方灰色小字，每秒更新 */
-.alu-tail-preview {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin: 6px 6px 0;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--alu-text-faint);
-  font-variant-numeric: tabular-nums;
-  user-select: none;
-}
-.alu-tail-icon {
-  opacity: 0.7;
-}
-.alu-tail-text:empty::before {
-  content: '\2014';
-  opacity: 0.5;
-}
-
-/* ════════════════════════════════════════════
-   图片选择器（功能③）
-   ════════════════════════════════════════════ */
-
-/* 已选预览行 */
-.alu-image-selected {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px 6px 0;
-}
-.alu-image-chip {
-  position: relative;
-  width: 56px;
-  height: 56px;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid var(--alu-border-light);
-  flex-shrink: 0;
-}
-.alu-image-chip img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.alu-image-chip-x {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 18px;
-  height: 18px;
-  border: none;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.62);
-  color: #fff;
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-}
-.alu-image-chip-x:hover { background: var(--alu-rose); }
-
-/* 拖拽高亮 */
-.alu-input-section.alu-drag-over .alu-input-wrap {
-  border-color: var(--alu-blue);
-  box-shadow: 0 0 0 2px var(--alu-blue-bg);
-}
-
-
-
-/* 图库弹窗 */
-.alu-library-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(4, 6, 14, 0.78);
-  padding: 24px;
-}
-.alu-library-modal.hidden { display: none; }
-.alu-library-panel {
-  width: 720px;
-  max-width: 100%;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  background: var(--alu-bg-raised);
-  border: 1px solid var(--alu-border);
-  border-radius: 14px;
-  overflow: hidden;
-}
-.alu-library-head {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding: 12px;
-  border-bottom: 1px solid var(--alu-border);
-}
-.alu-library-search {
-  flex: 1;
-  background: var(--alu-bg);
-  border: 1px solid var(--alu-border-light);
-  border-radius: 8px;
-  padding: 7px 10px;
-  color: var(--alu-text);
-  font-size: 13px;
-  font-family: inherit;
-}
-.alu-library-search:focus { outline: none; border-color: var(--alu-blue); }
-.alu-library-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
-  padding: 12px;
-  overflow-y: auto;
-}
-.alu-library-empty {
-  grid-column: 1 / -1;
-  text-align: center;
-  color: var(--alu-text-muted);
-  padding: 32px 0;
-  font-size: 13px;
-}
-.alu-library-cell {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  border: 2px solid transparent;
-  border-radius: 10px;
-  overflow: hidden;
-  cursor: pointer;
-  padding: 0;
-  background: var(--alu-bg);
-}
-.alu-library-cell img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-.alu-library-cell-video {
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-.alu-library-cell-video-badge {
-  position: absolute;
-  bottom: 4px;
-  left: 4px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.6);
-  color: #fff;
-  font-size: 10px;
-  line-height: 20px;
-  text-align: center;
-  pointer-events: none;
-}
-.alu-library-cell-selected {
-  border-color: var(--alu-blue);
-}
-.alu-library-cell-selected::after {
-  content: '\2713';
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--alu-blue);
-  color: #00121a;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.alu-library-foot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  padding: 10px;
-  border-top: 1px solid var(--alu-border);
-}
-.alu-library-status {
-  color: var(--alu-text-muted);
-  font-size: 12px;
-  min-width: 90px;
-  text-align: center;
-}
-
 /* ═══════════════════════════════════════════════════════
    底部工具栏
    ═══════════════════════════════════════════════════════ */
@@ -760,71 +562,10 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   color: var(--alu-text-muted);
   font-size: 11px;
 }
-.alu-status-time {
-  color: var(--alu-text-faint);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  min-width: 58px;
-}
-
-/* ── Badge (保留，用于命令面板等) ── */
-.alu-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 8px;
-  border-radius: 9999px;
-  border: 1px solid var(--alu-border);
-  color: var(--alu-text-muted);
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.15s;
-  background: transparent;
-}
-.alu-badge:hover {
-  border-color: var(--alu-pink-border);
-  color: var(--alu-pink);
-}
 
 /* ── 状态栏头像（用于旧版兼容）── */
 .session-dot {
   box-shadow: 0 0 8px rgba(244, 114, 182, 0.45);
-}
-.alu-avatar {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  object-fit: cover;
-  flex-shrink: 0;
-  border: 1.5px solid var(--alu-pink-border);
-  box-shadow: 0 0 8px rgba(244, 114, 182, 0.35);
-  transition: box-shadow 0.3s;
-}
-
-/* ═══════════════════════════════════════════════════════
-   Sidebar
-   ═══════════════════════════════════════════════════════ */
-
-.alu-session-row {
-  border-bottom: 1px solid var(--alu-border);
-  cursor: pointer;
-  border-radius: 4px;
-  transition: all 0.1s;
-  font-size: 12px;
-}
-.alu-session-row:hover { background: var(--alu-hover); }
-.alu-session-row.active {
-  background: var(--alu-pink-bg);
-  color: var(--alu-pink);
-}
-
-.alu-sidebar-header {
-  color: var(--alu-text-faint);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -868,7 +609,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .ui-dialog-size-wide { width: min(760px, 100%); height: min(76vh, 680px); height: min(76dvh, 680px); }
 .ui-dialog-size-wide.ui-dialog-size-auto { height: auto; }
 .ui-dialog-size-tree { width: min(1040px, 100%); height: min(88vh, 860px); height: min(88dvh, 860px); }
-.ui-dialog-box-select:not(.ui-dialog-size-default) { min-height: 420px; }
 
 @keyframes dialogSlideIn {
   from { opacity: 0; transform: scale(0.975) translateY(10px); }
@@ -879,7 +619,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   35% { transform: translateX(-3px); border-color: var(--alu-pink-border); }
   70% { transform: translateX(3px); border-color: var(--alu-pink-border); }
 }
-.ui-dialog-attention { animation: dialogAttention 0.18s ease-out; }
 
 .ui-dialog-header {
   flex: 0 0 auto;
@@ -889,22 +628,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 .ui-dialog-title { color: var(--alu-text); font-size: 14px; font-weight: 700; letter-spacing: 0.01em; }
 .ui-dialog-body { margin-top: 4px; color: var(--alu-text-muted); font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
-.ui-dialog-viewer {
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: auto;
-  margin: 0;
-  padding: 18px 20px;
-  background: var(--alu-bg);
-  color: var(--alu-text-dim);
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  word-break: break-word;
-  scrollbar-gutter: stable;
-}
-.ui-dialog-viewer.is-structured { padding: 0; white-space: normal; }
 .message-text-dialog { height: min(78vh, 720px); height: min(78dvh, 720px); }
 .message-markdown-document { min-height: 0; flex: 1 1 auto; }
 .message-text-header {
@@ -1060,9 +783,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-project-status-chip { padding: 3px 7px; border: 1px solid var(--alu-border); border-radius: 6px; color: var(--alu-text-dim); background: var(--alu-bg); font-size: 9px; }
 .alu-project-status-resource-group + .alu-project-status-resource-group { margin-top: 12px; }
 .alu-project-status-empty,
-.alu-project-status-loading,
 .alu-project-status-note { color: var(--alu-text-muted); font-size: 10px; }
-.alu-project-status-loading { padding: 12px 0; }
 .alu-project-status-note { margin-top: 10px; color: var(--alu-amber-dim); }
 .alu-project-status-error,
 .alu-project-status-diagnostic { margin-top: 7px; padding: 6px 8px; border-left: 2px solid var(--alu-rose); color: var(--alu-rose); background: var(--alu-rose-bg); font-size: 10px; }
@@ -1684,15 +1405,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   background: var(--alu-amber);
   box-shadow: 0 0 14px rgba(245, 158, 11, 0.7);
 }
-.alu-work-state-key {
-  margin-left: auto;
-  padding: 2px 7px;
-  border: 1px solid var(--alu-border);
-  border-radius: 999px;
-  color: var(--alu-text-muted);
-  font-size: 9px;
-  letter-spacing: 0.09em;
-}
 .alu-work-state-card h1 {
   margin: 18px 0 8px;
   color: var(--alu-text);
@@ -1736,8 +1448,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.alu-work-state-error,
-.alu-work-state-notice {
+.alu-work-state-error {
   margin-top: 12px;
   padding: 8px 10px;
   border-left: 2px solid var(--alu-rose);
@@ -1746,16 +1457,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   font-size: 11px;
   line-height: 1.6;
   overflow-wrap: anywhere;
-}
-.alu-work-state-notice[data-level='notice'] {
-  border-left-color: var(--alu-blue);
-  background: rgba(126, 200, 224, 0.06);
-  color: var(--alu-blue);
-}
-.alu-work-state-notice[data-level='warning'] {
-  border-left-color: var(--alu-amber);
-  background: rgba(245, 158, 11, 0.06);
-  color: #f6c56f;
 }
 .alu-work-state-actions {
   display: flex;
@@ -1865,27 +1566,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   font-weight: 700;
   font-size: 1.15em;
 }
-
-/* ── 旧版 toolbar btn (命令面板 fallback 用) ── */
-.alu-toolbar-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--alu-border);
-  background: var(--alu-surface);
-  color: var(--alu-text-muted);
-  font-size: 11px;
-  font-family: inherit;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.12s;
-}
-.alu-toolbar-btn:hover { background: var(--alu-hover); color: var(--alu-text-dim); border-color: var(--alu-border-light); }
-.alu-toolbar-btn-danger { border-color: var(--alu-rose-border); background: var(--alu-rose-bg); color: var(--alu-rose-dim); }
-.alu-toolbar-btn-danger:hover { background: #261a1e; color: var(--alu-rose); border-color: #4a2830; }
-.alu-toolbar-btn-cmd:hover { color: var(--alu-pink); border-color: var(--alu-pink-border); background: var(--alu-pink-bg); }
 
 /* ═══════════════════════════════════════════════════════
    响应式 — 通用窄窗口
@@ -2257,56 +1937,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 .alu-extension-status[hidden] { display: none; }
 .alu-extension-status span { white-space: nowrap; }
-.alu-extension-widgets > pre,
-.alu-extension-widget-body {
-  margin: 6px 0 0;
-  padding: 7px 10px;
-  border-left: 2px solid var(--alu-pink-border);
-  background: rgba(14, 18, 32, 0.74);
-  color: var(--alu-text-dim);
-  font: inherit;
-  font-size: 11px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.alu-extension-widget {
-  margin-top: 6px;
-  border: 1px solid var(--alu-border);
-  border-left: 2px solid var(--alu-pink-border);
-  border-radius: 0 8px 8px 0;
-  background: rgba(14, 18, 32, 0.78);
-  overflow: hidden;
-}
-.alu-extension-widget-toggle {
-  display: flex;
-  width: 100%;
-  min-height: 34px;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 9px;
-  color: var(--alu-text-muted);
-  text-align: left;
-}
-.alu-extension-widget-toggle:hover,
-.alu-extension-widget-toggle:focus-visible { outline: none; background: var(--alu-hover); color: var(--alu-text); }
-.alu-extension-widget-summary { min-width: 0; flex: 1; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.alu-extension-widget-meta { flex: 0 0 auto; color: var(--alu-blue-dim); font-size: 9px; white-space: nowrap; }
-.alu-extension-widget-body {
-  max-height: min(42vh, 360px);
-  overflow: auto;
-  margin: 0;
-  border-top: 1px solid var(--alu-border);
-  border-left: none;
-  border-radius: 0;
-  scrollbar-gutter: stable;
-}
-.alu-extension-widget-body[hidden] { display: none; }
-.alu-extension-widget.is-collapsed { border-left-color: var(--alu-blue-border); }
-@media (max-width: 640px) {
-  .alu-extension-widget-body { max-height: 38vh; }
-  .alu-extension-widget-toggle { min-height: 42px; }
-  .alu-extension-widget-summary { font-size: 11px; }
-}
 
 .alu-sidebar-actions {
   padding: 10px 12px;
@@ -2406,8 +2036,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-sidebar-error { padding: 24px 16px; color: var(--alu-text-muted); font-size: 11px; }
 .alu-sidebar-error { color: var(--alu-rose); }
 
-
-
 .ui-dialog-box { position: relative; }
 .ui-dialog-close {
   position: absolute;
@@ -2425,7 +2053,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .ui-dialog-overlay[data-pending="true"] button,
 .ui-dialog-overlay[data-pending="true"] input,
 .ui-dialog-overlay[data-pending="true"] textarea { opacity: 0.58; }
-.ui-dialog-status { margin-top: 10px; color: var(--alu-text-muted); font-size: 10px; }
 
 @media (max-width: 640px) {
   .alu-queue-preview { max-width: 48vw; }
@@ -2442,11 +2069,10 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     font-size: var(--alu-control-size);
   }
 
-  .alu-tail-preview,
   .alu-bar-btn,
-  .ui-dialog-body,
-  .ui-dialog-option-detail,
-  .cmd-palette-item-desc {
+.ui-dialog-body,
+.ui-dialog-option-detail,
+.cmd-palette-item-desc {
     font-size: var(--alu-meta-size);
   }
 

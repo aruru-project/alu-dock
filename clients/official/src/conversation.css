@@ -75,14 +75,6 @@
   animation: aluAgentSpin 0.85s linear infinite;
 }
 @keyframes aluAgentSpin { to { transform: rotate(360deg); } }
-.alu-tool-staging-label {
-  margin: 3px 0 2px;
-  padding-left: 8px;
-  border-left: 2px solid var(--alu-amber);
-  color: var(--alu-text-muted);
-  font-size: 10px;
-  line-height: 1.5;
-}
 @media (prefers-reduced-motion: reduce) {
   .alu-agent-activity-spinner { animation: statusPulse 1.2s ease-in-out infinite; }
 }
@@ -447,24 +439,6 @@
   scrollbar-color: var(--alu-border-light) transparent;
 }
 
-/* ── show_image 工具：内联图片 ── */
-.msg-tool-image-container {
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--alu-border);
-  display: inline-block;
-}
-.msg-tool-image {
-  display: block;
-  cursor: pointer;
-  transition: opacity 0.2s;
-}
-.msg-tool-image:hover {
-  opacity: 0.92;
-}
-
-
-
 .alu-scroll-bottom {
   position: absolute;
   z-index: 3;
@@ -553,7 +527,6 @@
 }
 .msg-user-images .alu-conversation-image-open img { max-height: 320px; }
 
-
 /* ═══════════════════════════════════════════════════════
    消息出现动画
    ═══════════════════════════════════════════════════════ */
@@ -566,8 +539,6 @@
 .alu-msg-assistant-row, .msg-user, .msg-notice, .msg-warning, .msg-error {
   animation: msgSlideIn 0.22s ease-out;
 }
-
-
 
 @media (max-width: 640px) {
   .alu-scroll-bottom { top: -42px; right: 12px; min-height: 30px; padding: 0 10px; }
@@ -585,39 +556,6 @@
   gap: 8px;
   margin-top: 8px;
 }
-.msg-user-image-container {
-  display: inline-block;
-  max-width: 100%;
-}
-.msg-user-image {
-  display: block;
-  max-width: 100%;
-  border: 1px solid var(--alu-user-border);
-  transition: opacity 0.2s;
-}
-.msg-user-image:hover { opacity: 0.92; }
-.msg-user-image-missing {
-  display: inline-flex;
-  align-items: center;
-  padding: 10px 12px;
-  border: 1px dashed var(--alu-border-light);
-  border-radius: 8px;
-  color: var(--alu-text-faint);
-  font-size: 12px;
-}
-
-.alu-conversation-entry-anchor { display: block; width: 1px; height: 1px; pointer-events: none; }
-.alu-conversation-content-status {
-  display: block;
-  margin: -3px 0 8px 42px;
-  color: var(--alu-text-faint);
-  font-size: 9px;
-  text-align: left;
-}
-.alu-conversation-content-status:hover { color: var(--alu-text-muted); }
-.alu-conversation-content-status[hidden] { display: none; }
-
-.conversation { position: relative; min-height: 0; padding: 24px clamp(18px, 4vw, 56px) 38px; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
 .message-attachments { display: grid; gap: 5px; margin-top: 9px; }
 
 @media screen and (max-width: 1000px) {
@@ -723,14 +661,6 @@
 @media screen and (max-width: 600px) {
   .alu-output { padding: 12px 12px 24px; }
   .msg-user-bubble { max-width: 92%; }
-}
-
-@media (max-width: 1024px) {
-  .conversation { padding: 18px 20px 30px; }
-}
-
-@media (max-width: 640px) {
-  .conversation { padding: 10px 12px 20px; }
 }
 
 @media (min-width: 1200px) {
