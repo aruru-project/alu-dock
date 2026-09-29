@@ -2,11 +2,11 @@ import { InstanceRecordChannel } from "./instance-record-delivery.js";
 import { usesInstanceRecords, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
 import { ByteTransitRelay, machineFileChunkHeader, encodeRoutedRecord } from "./file-framing.js";
 import { FILE_TRANSFER_CAPABILITY } from "./protocol.js";
+import { LinkWriter, MACHINE_LINK_DIALECT, MAX_LINK_LINE_BYTES, MAX_LINK_QUEUED_INPUT_BYTES, MAX_LINK_STREAMS, StreamAcceptor, diagnosticReason, encodeLinkRecord, type LinkOutputLane, type LinkRecord } from "./stream-link.js";
 import { randomUUID, X509Certificate } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { win32 } from "node:path";
-import { Duplex } from "node:stream";
 import type { Socket } from "node:net";
 import { createServer, connect, type Server as TlsServer, type TLSSocket } from "node:tls";
 
@@ -27,13 +27,12 @@ import { type RemoteEndpointDecision, type RemoteInstanceDirectory, type RemoteP
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONSE_TRANSFER_CHUNKS } from "../core/transport-bounds.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 
-const MAX_MACHINE_LINE_BYTES = 2 * MAX_CONTROL_LINE_BYTES;
-const MAX_MACHINE_STREAMS = 256;
+const MAX_MACHINE_LINE_BYTES = MAX_LINK_LINE_BYTES;
+const MAX_MACHINE_STREAMS = MAX_LINK_STREAMS;
 const MAX_WORKSPACE_ROOTS = 26;
 export const MAX_MACHINE_CONNECTIONS = 64;
 const MACHINE_TLS_HANDSHAKE_TIMEOUT_MS = 5_000;
 const MACHINE_ADMISSION_TIMEOUT_MS = 10_000;
-const MAX_MACHINE_QUEUED_BYTES = 8 * MAX_MACHINE_LINE_BYTES;
 const MAX_MACHINE_INVENTORY_CHUNK_BYTES = Math.floor((MAX_MACHINE_LINE_BYTES - 1_024) * 3 / 4);
 const INVENTORY_INTERVAL_MS = 200;
 const RECONNECT_DELAY_MS = 250;
@@ -148,18 +147,6 @@ interface MainConnection {
   candidateOrdinal: number;
   closed: boolean;
   inventory?: InventoryTransfer;
-}
-
-interface SubHostStream {
-  fileMode?: boolean;
-  recordsMode?: boolean;
-  requestId?: string;
-  fileTransit?: ByteTransitRelay;
-  streamId: string;
-  socket: MachineVirtualSocket;
-  acceptingInput: boolean;
-  inputTail: Promise<void>;
-  queuedInputBytes: number;
 }
 
 /** Connection-fed remote directory/transport backend; InstanceManager remains the client request authority. */
@@ -1009,7 +996,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
   }
 
   private enqueueMainStream(connection: MainConnection, stream: MainStream, bytes: number, work: () => Promise<void>): void {
-    if (stream.queuedInputBytes + bytes > MAX_MACHINE_QUEUED_BYTES) {
+    if (stream.queuedInputBytes + bytes > MAX_LINK_QUEUED_INPUT_BYTES) {
       this.resetMainStream(connection, stream, "Stream input queue exceeded its bound");
       return;
     }
@@ -1354,7 +1341,7 @@ export class SubHostMachineConnection {
   private stopped = true;
   private reconnectTimer: NodeJS.Timeout | undefined;
   private inventoryTimer: NodeJS.Timeout | undefined;
-  private readonly streams = new Map<string, SubHostStream>();
+  private streams: StreamAcceptor | undefined;
   private readonly toolRequests = new Map<string, { resolve: (result: DockToolsResult) => void; reject: (error: Error) => void }>();
   private readonly sourceOffRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly observationSinks = new Map<string, ObservationDeliverySink>();
@@ -1406,8 +1393,8 @@ export class SubHostMachineConnection {
     this.notifyConnectionChanged(false);
     this.socket?.destroy();
     this.socket = undefined;
-    for (const stream of this.streams.values()) { stream.fileTransit?.close(); stream.socket.remoteClose(); }
-    this.streams.clear();
+    this.streams?.closeAll();
+    this.streams = undefined;
   }
 
   connected(): boolean { return this.ready && this.socket !== undefined && !this.socket.destroyed; }
@@ -1457,6 +1444,14 @@ export class SubHostMachineConnection {
       rejectUnauthorized: false,
     });
     this.socket = socket;
+    const streams = new StreamAcceptor({
+      hostEpoch: this.options.hostEpoch,
+      write: (record) => writeMachine(socket, machineLinkRecord(record)),
+      accept: (virtualSocket) => this.options.acceptProtocolSocket(virtualSocket),
+      linkOpen: () => !socket.destroyed,
+      failureLabel: "SubHost",
+    });
+    this.streams = streams;
     const decoder = new JsonLineDecoder(MAX_MACHINE_LINE_BYTES);
     let ready = false;
     let processing = Promise.resolve();
@@ -1483,12 +1478,7 @@ export class SubHostMachineConnection {
       socket.pause();
       processing = processing.then(async () => {
         const lines=decoder.push(chunk);
-        const partial=machineFileChunkHeader(decoder.partialRecord)??machineFileChunkHeader(decoder.partialRecord,true);
-        const fileStream=partial&&this.streams.get(partial.streamId);
-        if(ready&&partial&&fileStream?.fileTransit&&partial.requestId===fileStream.requestId&&partial.hostEpoch===this.options.hostEpoch){
-          this.lastMainRecordAt=Date.now();
-          fileStream.fileTransit.observe(decoder.recordSequence,Buffer.byteLength(decoder.partialRecord));
-        }
+        if(ready&&streams.observePartial(MACHINE_LINK_DIALECT,decoder.partialRecord,decoder.recordSequence))this.lastMainRecordAt=Date.now();
         for (const line of lines) {
           const machineRecord = parseMachineRecord(line);
           if (!ready) {
@@ -1516,8 +1506,8 @@ export class SubHostMachineConnection {
       this.ready = false;
       if (this.maintenanceSocket === socket) this.maintenanceSocket = undefined;
       this.notifyConnectionChanged(false);
-      for (const stream of this.streams.values()) { stream.fileTransit?.close(); stream.socket.remoteClose(); }
-      this.streams.clear();
+      streams.closeAll();
+      if (this.streams === streams) this.streams = undefined;
       for (const pending of this.toolRequests.values()) pending.reject(new Error("Main went offline before the Dock tool completed"));
       this.toolRequests.clear();
       for (const pending of this.sourceOffRequests.values()) pending.reject(new Error("Main went offline before Dock tools were disabled"));
@@ -1568,100 +1558,15 @@ export class SubHostMachineConnection {
       if (sink) void sink(record.notification).catch(() => {});
       return;
     }
-    if (record.kind === "machine_stream_open") {
-      if (this.streams.size >= MAX_MACHINE_STREAMS || this.streams.has(record.streamId)) {
-        await writeMachine(socket, { kind: "machine_stream_reset", streamId: record.streamId, reason: "Stream could not be opened" });
-        return;
-      }
-      let stream!: SubHostStream;
-      const virtualSocket = new MachineVirtualSocket(
-        async (data) => {
-          if(stream.fileTransit){const raw=JSON.parse(data.toString("utf8"));await stream.fileTransit.outputs[0].write(stream.fileTransit.map(1,raw));}
-          else await writeMachine(socket, { kind: "machine_stream_data", streamId: record.streamId, data: data.toString("utf8").replace(/\n$/u, "") });
-        },
-        (reason) => {
-          if (this.streams.get(record.streamId) !== stream) return;
-          stream.fileTransit?.close();
-          this.streams.delete(record.streamId);
-          if (!socket.destroyed) void writeMachine(socket, reason
-            ? { kind: "machine_stream_reset", streamId: record.streamId, reason: diagnosticReason(reason, "SubHost stream failed") }
-            : { kind: "machine_stream_close", streamId: record.streamId }).catch(() => {});
-        },
-      );
-      stream = { streamId: record.streamId, socket: virtualSocket, acceptingInput: true, inputTail: Promise.resolve(), queuedInputBytes: 0 };
-      this.streams.set(record.streamId, stream);
-      try { this.options.acceptProtocolSocket(virtualSocket as unknown as Socket); }
-      catch (error) { this.resetSubHostStream(socket, stream, diagnosticReason(error, "SubHost stream was rejected")); }
-      return;
-    }
-    if (record.kind === "machine_stream_data") {
-      const stream = this.streams.get(record.streamId);
-      if (stream?.acceptingInput) this.enqueueSubHostStream(socket, stream, Buffer.byteLength(record.data, "utf8"), async () => {
-        const raw=JSON.parse(record.data) as Record<string,unknown>;
-        if(raw.kind==="hello"){stream.fileMode=Array.isArray(raw.requiredCapabilities)&&raw.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);stream.recordsMode=Array.isArray(raw.requiredCapabilities)&&raw.requiredCapabilities.includes(INSTANCE_RECORDS_CAPABILITY);}
-        if((stream.fileMode||stream.recordsMode)&&raw.kind==="request"&&typeof raw.requestId==="string"){
-          stream.requestId=raw.requestId;
-          const identity={version:2 as const,requestId:raw.requestId,hostEpoch:this.options.hostEpoch};
-          stream.fileTransit=new ByteTransitRelay([identity,identity],[async frame=>{await writeMachine(socket,{kind:"machine_stream_data",streamId:stream.streamId,data:encodeRoutedRecord(frame)});},frame=>stream.socket.receive(Buffer.from(encodeRoutedRecord(frame)+"\n"))],error=>this.resetSubHostStream(socket,stream,diagnosticReason(error,"Byte activity failed")),stream.recordsMode?"instance_record":"file");
-        }
-        if(stream.fileTransit)await stream.fileTransit.outputs[1].write(stream.fileTransit.map(0,raw));
-        else await stream.socket.receive(Buffer.from(`${record.data}\n`,"utf8"));
-      });
-      return;
-    }
-    if (record.kind === "machine_stream_close") {
-      const stream = this.streams.get(record.streamId);
-      if (stream) {
-        stream.acceptingInput = false;
-        this.enqueueSubHostStream(socket, stream, 0, async () => {
-          stream.fileTransit?.close();
-          if (this.streams.get(stream.streamId) === stream) this.streams.delete(stream.streamId);
-          stream.socket.remoteClose();
-        });
-      }
-      return;
-    }
-    if (record.kind === "machine_stream_reset") {
-      machineWriters.get(socket)?.cancelStream(record.streamId, new Error(record.reason));
-      const stream = this.streams.get(record.streamId);
-      if (stream) {
-        stream.acceptingInput = false;
-        stream.fileTransit?.close();
-        this.streams.delete(record.streamId);
-        stream.socket.remoteReset(new Error(record.reason));
-      }
+    const stream = machineStreamRecord(record);
+    if (stream) {
+      if (stream.kind === "reset") machineWriters.get(socket)?.cancelStream(stream.streamId, new Error(stream.reason));
+      await this.streams?.handle(stream);
       return;
     }
     throw new Error("Unexpected Main machine record");
   }
 
-  private enqueueSubHostStream(socket: TLSSocket, stream: SubHostStream, bytes: number, work: () => Promise<void>): void {
-    if (stream.queuedInputBytes + bytes > MAX_MACHINE_QUEUED_BYTES) {
-      this.resetSubHostStream(socket, stream, "Stream input queue exceeded its bound");
-      return;
-    }
-    stream.queuedInputBytes += bytes;
-    const queued = stream.inputTail.then(async () => {
-      if (this.streams.get(stream.streamId) !== stream) return;
-      await work();
-    }).finally(() => { stream.queuedInputBytes -= bytes; });
-    stream.inputTail = queued.catch((error) => {
-      this.resetSubHostStream(socket, stream, diagnosticReason(error, "SubHost stream input failed"));
-    });
-  }
-
-  private resetSubHostStream(socket: TLSSocket, stream: SubHostStream, reason: string): void {
-    if (this.streams.get(stream.streamId) !== stream) return;
-    stream.acceptingInput = false;
-    stream.fileTransit?.close();
-    this.streams.delete(stream.streamId);
-    stream.socket.localReset();
-    if (!socket.destroyed) void writeMachine(socket, {
-      kind: "machine_stream_reset",
-      streamId: stream.streamId,
-      reason: diagnosticReason(reason, "SubHost stream failed"),
-    }).catch(() => {});
-  }
 
   private maintenanceTick(): void {
     const socket = this.socket;
@@ -1715,42 +1620,6 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void {
     return this.options.upstream.attachObservationSink(sourceInstanceId, sink);
   }
-}
-
-class MachineVirtualSocket extends Duplex {
-  private closedByRemote = false;
-  private closeSent = false;
-  private failureReason: string | undefined;
-  private readableDrain: (() => void) | undefined;
-  constructor(private readonly sendData: (data: Buffer) => Promise<void>, private readonly sendClose: (reason?: string) => void) {
-    super({ readableHighWaterMark: MAX_CONTROL_LINE_BYTES, writableHighWaterMark: MAX_CONTROL_LINE_BYTES });
-    this.once("close", () => {
-      this.resolveReadableDrain();
-      if (!this.closedByRemote) this.notifyClose(this.failureReason ?? (this.writableFinished ? undefined : "SubHost protocol stream closed"));
-    });
-  }
-  _read(): void { this.resolveReadableDrain(); }
-  _write(chunk: Buffer | string | Uint8Array, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
-    void this.sendData(Buffer.from(chunk)).then(() => callback(), (error) => {
-      this.failureReason = diagnosticReason(error, "SubHost stream output failed");
-      callback(error as Error);
-    });
-  }
-  _final(callback: (error?: Error | null) => void): void { this.notifyClose(); callback(); }
-  _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-    if (error) this.failureReason = diagnosticReason(error, "SubHost protocol stream failed");
-    this.resolveReadableDrain();
-    callback(error);
-  }
-  receive(data: Buffer): Promise<void> {
-    if (this.destroyed || this.push(data)) return Promise.resolve();
-    return new Promise((resolve) => { this.readableDrain = resolve; });
-  }
-  remoteClose(): void { this.closedByRemote = true; this.resolveReadableDrain(); if (!this.destroyed) { this.push(null); this.destroy(); } }
-  remoteReset(error: Error): void { this.closedByRemote = true; this.resolveReadableDrain(); if (!this.destroyed) this.destroy(error); }
-  localReset(): void { this.closedByRemote = true; this.resolveReadableDrain(); if (!this.destroyed) this.destroy(); }
-  private notifyClose(reason?: string): void { if (this.closeSent) return; this.closeSent = true; this.sendClose(reason); }
-  private resolveReadableDrain(): void { const resume = this.readableDrain; this.readableDrain = undefined; resume?.(); }
 }
 
 function isSnapshot(value: unknown): value is InstanceSnapshot {
@@ -1964,228 +1833,19 @@ function uniqueMainInstanceId(used: ReadonlySet<string>): string {
   return candidate;
 }
 
-function diagnosticReason(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
-  const reason = raw.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").trim().slice(0, 256);
-  return reason || fallback;
+
+type MachineOutputLane = LinkOutputLane;
+
+function machineStreamRecord(record: MachineWireRecord): Exclude<LinkRecord, { kind: "ping" | "pong" }> | undefined {
+  if (record.kind === "machine_stream_open") return { kind: "open", streamId: record.streamId };
+  if (record.kind === "machine_stream_data") return { kind: "data", streamId: record.streamId, data: record.data };
+  if (record.kind === "machine_stream_close") return { kind: "close", streamId: record.streamId };
+  if (record.kind === "machine_stream_reset") return { kind: "reset", streamId: record.streamId, reason: record.reason };
+  return undefined;
 }
 
-type MachineOutputLane =
-  | { kind: "urgent" }
-  | { kind: "control" }
-  | { kind: "bulk" }
-  | { kind: "stream"; streamId: string };
-
-interface PendingMachineWrite {
-  bytes: Buffer;
-  lane: MachineOutputLane;
-  resolve: () => void;
-  reject: (error: Error) => void;
-}
-
-const MAX_MACHINE_STREAM_OUTPUT_BYTES = 2 * MAX_MACHINE_LINE_BYTES;
-const MAX_MACHINE_BULK_OUTPUT_BYTES = 2 * MAX_MACHINE_LINE_BYTES;
-const MAX_MACHINE_NON_PROTECTED_OUTPUT_BYTES = 5 * MAX_MACHINE_LINE_BYTES;
-const MAX_MACHINE_CONTROL_OUTPUT_BYTES = 2 * MAX_MACHINE_LINE_BYTES;
-const MAX_MACHINE_URGENT_OUTPUT_BYTES = MAX_MACHINE_LINE_BYTES;
-const MAX_MACHINE_TOTAL_OUTPUT_BYTES = 8 * MAX_MACHINE_LINE_BYTES;
-
-class MachineWriter {
-  private readonly urgent: PendingMachineWrite[] = [];
-  private readonly capacityWaiters: PendingMachineWrite[] = [];
-  private readonly control: PendingMachineWrite[] = [];
-  private readonly normal = new Map<string, PendingMachineWrite[]>();
-  private readonly normalOrder: string[] = [];
-  private readonly streamBytes = new Map<string, number>();
-  private readonly failedStreams = new Set<string>();
-  private readonly resetWrites = new Map<string, Promise<void>>();
-  private urgentBytes = 0;
-  private controlBytes = 0;
-  private bulkBytes = 0;
-  private nonProtectedBytes = 0;
-  private totalBytes = 0;
-  private draining = false;
-  private failed: Error | undefined;
-
-  constructor(private readonly socket: TLSSocket) {
-    socket.once("close", () => {
-      this.failed ??= new Error("Machine link closed");
-      this.rejectQueued(this.failed);
-    });
-  }
-
-  write(record: MachineWireRecord): Promise<void> {
-    if (this.failed) return Promise.reject(this.failed);
-    if (record.kind === "machine_stream_reset") {
-      const existingReset = this.resetWrites.get(record.streamId);
-      if (existingReset) return existingReset;
-      this.failStreamLane(record.streamId, new Error(record.reason));
-    }
-    const bytes = Buffer.from(encodeJsonLine(record), "utf8");
-    if (bytes.byteLength > MAX_MACHINE_LINE_BYTES) return Promise.reject(new Error("Machine link record exceeds its line bound"));
-    const lane = outputLane(record);
-    // Each routed producer awaits its write. Keep at most one capacity waiter per
-    // stream; normal cross-stream congestion must not reset healthy transfers.
-    if (lane.kind === "stream" && !this.failedStreams.has(lane.streamId)
-      && (this.capacityWaiters.length > 0 || this.overflow(lane, bytes.byteLength))) {
-      if (this.capacityWaiters.some((item) => item.lane.kind === "stream" && item.lane.streamId === lane.streamId)
-        || (this.streamBytes.get(lane.streamId) ?? 0) + bytes.byteLength > MAX_MACHINE_STREAM_OUTPUT_BYTES
-        || this.capacityWaiters.length >= MAX_MACHINE_STREAMS) {
-        const error = new Error("Machine stream producer exceeded its bound");
-        this.failStreamLane(lane.streamId, error);
-        void this.write({ kind: "machine_stream_reset", streamId: lane.streamId, reason: "Stream producer exceeded its bound" }).catch(() => {});
-        return Promise.reject(error);
-      }
-      return new Promise<void>((resolve, reject) => {
-        this.capacityWaiters.push({ bytes, lane, resolve, reject });
-        this.admitCapacityWaiters();
-        void this.drain();
-      });
-    }
-    const overflow = this.overflow(lane, bytes.byteLength);
-    if (overflow) {
-      if (lane.kind === "stream") {
-        this.failStreamLane(lane.streamId, overflow);
-        void this.write({ kind: "machine_stream_reset", streamId: lane.streamId, reason: "Stream output queue exceeded its bound" }).catch(() => {});
-      }
-      return Promise.reject(overflow);
-    }
-    const write = new Promise<void>((resolve, reject) => {
-      const pending = { bytes, lane, resolve, reject };
-      this.reserve(pending);
-      this.enqueue(pending);
-      void this.drain();
-    });
-    if (record.kind === "machine_stream_reset") {
-      this.resetWrites.set(record.streamId, write);
-      const cleanup = (): void => {
-        if (this.resetWrites.get(record.streamId) === write) this.resetWrites.delete(record.streamId);
-        this.failedStreams.delete(record.streamId);
-      };
-      void write.then(cleanup, cleanup);
-    }
-    return write;
-  }
-
-  private admitCapacityWaiters(): void {
-    if (this.failed) return;
-    while (this.capacityWaiters.length) {
-      const pending = this.capacityWaiters[0]!;
-      if (this.overflow(pending.lane, pending.bytes.byteLength)) return;
-      this.capacityWaiters.shift();
-      this.reserve(pending);
-      this.enqueue(pending);
-    }
-  }
-
-  private overflow(lane: MachineOutputLane, bytes: number): Error | undefined {
-    if (lane.kind === "stream" && this.failedStreams.has(lane.streamId)) return new Error("Machine stream output queue exceeded its bound");
-    if (this.totalBytes + bytes > MAX_MACHINE_TOTAL_OUTPUT_BYTES) return new Error("Machine link aggregate output queue exceeded its bound");
-    if (lane.kind === "urgent" && this.urgentBytes + bytes > MAX_MACHINE_URGENT_OUTPUT_BYTES) return new Error("Machine link urgent output queue exceeded its bound");
-    if (lane.kind === "control" && this.controlBytes + bytes > MAX_MACHINE_CONTROL_OUTPUT_BYTES) return new Error("Machine link control output queue exceeded its bound");
-    if (lane.kind === "bulk" && (this.bulkBytes + bytes > MAX_MACHINE_BULK_OUTPUT_BYTES || this.nonProtectedBytes + bytes > MAX_MACHINE_NON_PROTECTED_OUTPUT_BYTES)) return new Error("Machine link inventory output queue exceeded its bound");
-    if (lane.kind === "stream" && ((this.streamBytes.get(lane.streamId) ?? 0) + bytes > MAX_MACHINE_STREAM_OUTPUT_BYTES || this.nonProtectedBytes + bytes > MAX_MACHINE_NON_PROTECTED_OUTPUT_BYTES)) return new Error("Machine stream output queue exceeded its bound");
-    return undefined;
-  }
-
-  private reserve(pending: PendingMachineWrite): void {
-    const bytes = pending.bytes.byteLength;
-    this.totalBytes += bytes;
-    if (pending.lane.kind === "urgent") this.urgentBytes += bytes;
-    else if (pending.lane.kind === "control") this.controlBytes += bytes;
-    else {
-      this.nonProtectedBytes += bytes;
-      if (pending.lane.kind === "bulk") this.bulkBytes += bytes;
-      else this.streamBytes.set(pending.lane.streamId, (this.streamBytes.get(pending.lane.streamId) ?? 0) + bytes);
-    }
-  }
-
-  private release(pending: PendingMachineWrite): void {
-    const bytes = pending.bytes.byteLength;
-    this.totalBytes -= bytes;
-    if (pending.lane.kind === "urgent") this.urgentBytes -= bytes;
-    else if (pending.lane.kind === "control") this.controlBytes -= bytes;
-    else {
-      this.nonProtectedBytes -= bytes;
-      if (pending.lane.kind === "bulk") this.bulkBytes -= bytes;
-      else {
-        const remaining = (this.streamBytes.get(pending.lane.streamId) ?? bytes) - bytes;
-        if (remaining === 0) this.streamBytes.delete(pending.lane.streamId);
-        else this.streamBytes.set(pending.lane.streamId, remaining);
-      }
-    }
-    this.admitCapacityWaiters();
-  }
-
-  private enqueue(pending: PendingMachineWrite): void {
-    if (pending.lane.kind === "urgent") { this.urgent.push(pending); return; }
-    if (pending.lane.kind === "control") { this.control.push(pending); return; }
-    const key = pending.lane.kind === "bulk" ? "bulk" : `stream:${pending.lane.streamId}`;
-    const queue = this.normal.get(key);
-    if (queue) queue.push(pending);
-    else { this.normal.set(key, [pending]); this.normalOrder.push(key); }
-  }
-
-  private take(): PendingMachineWrite | undefined {
-    const protectedWrite = this.urgent.shift() ?? this.control.shift();
-    if (protectedWrite) return protectedWrite;
-    const key = this.normalOrder.shift();
-    if (!key) return undefined;
-    const queue = this.normal.get(key) as PendingMachineWrite[];
-    const pending = queue.shift() as PendingMachineWrite;
-    if (queue.length === 0) this.normal.delete(key);
-    else this.normalOrder.push(key);
-    return pending;
-  }
-
-  cancelStream(streamId: string, error: Error): void { this.failStreamLane(streamId, error); this.failedStreams.delete(streamId); this.admitCapacityWaiters(); }
-
-  private failStreamLane(streamId: string, error: Error): void {
-    this.failedStreams.add(streamId);
-    for (let index = this.capacityWaiters.length - 1; index >= 0; index--) {
-      const waiter = this.capacityWaiters[index]!;
-      if (waiter.lane.kind === "stream" && waiter.lane.streamId === streamId) { this.capacityWaiters.splice(index, 1); waiter.reject(error); }
-    }
-    const key = `stream:${streamId}`;
-    const queue = this.normal.get(key);
-    if (!queue) return;
-    this.normal.delete(key);
-    const orderIndex = this.normalOrder.indexOf(key);
-    if (orderIndex >= 0) this.normalOrder.splice(orderIndex, 1);
-    for (const pending of queue) { this.release(pending); pending.reject(error); }
-  }
-
-  private async drain(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
-    try {
-      while (!this.failed) {
-        const pending = this.take();
-        if (!pending) return;
-        try {
-          await writeMachineBytes(this.socket, pending.bytes);
-          pending.resolve();
-        } catch (error) {
-          const failure = error instanceof Error ? error : new Error(String(error));
-          this.failed = failure;
-          pending.reject(failure);
-          this.rejectQueued(failure);
-        } finally {
-          this.release(pending);
-        }
-      }
-    } finally {
-      this.draining = false;
-    }
-  }
-
-  private rejectQueued(error: Error): void {
-    for (const waiter of this.capacityWaiters.splice(0)) waiter.reject(error);
-    const pending = [...this.urgent.splice(0), ...this.control.splice(0), ...[...this.normal.values()].flatMap((queue) => queue.splice(0))];
-    this.normal.clear();
-    this.normalOrder.splice(0);
-    for (const item of pending) { this.release(item); item.reject(error); }
-  }
+function machineLinkRecord(record: LinkRecord): MachineWireRecord {
+  return encodeLinkRecord(MACHINE_LINK_DIALECT, record) as MachineWireRecord;
 }
 
 function outputLane(record: MachineWireRecord): MachineOutputLane {
@@ -2195,22 +1855,17 @@ function outputLane(record: MachineWireRecord): MachineOutputLane {
   return { kind: "control" };
 }
 
-async function writeMachineBytes(socket: TLSSocket, bytes: Buffer): Promise<void> {
-  if (socket.destroyed || socket.writableEnded) throw new Error("Machine link is closed");
-  if (socket.write(bytes)) return;
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = (): void => { socket.off("drain", onDrain); socket.off("close", onClose); socket.off("error", onError); };
-    const onDrain = (): void => { cleanup(); resolve(); };
-    const onClose = (): void => { cleanup(); reject(new Error("Machine link closed during backpressure")); };
-    const onError = (error: Error): void => { cleanup(); reject(error); };
-    socket.once("drain", onDrain); socket.once("close", onClose); socket.once("error", onError);
-  });
-}
-
-const machineWriters = new WeakMap<TLSSocket, MachineWriter>();
+const machineWriters = new WeakMap<TLSSocket, LinkWriter<MachineWireRecord>>();
 export async function writeMachine(socket: TLSSocket, record: MachineWireRecord): Promise<void> {
-  const writer = machineWriters.get(socket) ?? new MachineWriter(socket);
-  machineWriters.set(socket, writer);
+  let writer = machineWriters.get(socket);
+  if (!writer) {
+    writer = new LinkWriter<MachineWireRecord>(socket, {
+      laneOf: outputLane,
+      resetOf: (item) => item.kind === "machine_stream_reset" ? { streamId: item.streamId, reason: item.reason } : undefined,
+      makeReset: (streamId, reason) => ({ kind: "machine_stream_reset", streamId, reason }),
+    });
+    machineWriters.set(socket, writer);
+  }
   await writer.write(record);
 }
 

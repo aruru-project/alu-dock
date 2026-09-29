@@ -12,7 +12,12 @@ export function encodeRoutedRecord(record: unknown): string {
 const PREFIX_CHARS = 128 + 12 * (MAX_CONTROL_REQUEST_ID_CHARS + MAX_INSTANCE_ID_CHARS);
 const TOKEN = '"(?:[^"\\\\]|\\\\.)*"';
 const chunkHeader = new RegExp('^\\{"kind":"file_chunk","version":2,"requestId":(' + TOKEN + '),"hostEpoch":(' + TOKEN + '),');
-const machineHeader = new RegExp('^\\{"kind":"machine_stream_data","streamId":(' + TOKEN + '),"data":');
+const linkHeaders = new Map<string, RegExp>();
+function linkHeader(dataKind: string): RegExp {
+  let header = linkHeaders.get(dataKind);
+  if (!header) { header = new RegExp('^\\{"kind":' + JSON.stringify(dataKind) + ',"streamId":(' + TOKEN + '),"data":'); linkHeaders.set(dataKind, header); }
+  return header;
+}
 export function instanceRecordHeader(prefix: string): {requestId:string;hostEpoch:string}|undefined {
   return fileChunkHeader(prefix.replace(/^\{"kind":"instance_record_fragment"/, '{"kind":"file_chunk"'));
 }
@@ -22,7 +27,11 @@ export function fileChunkHeader(prefix: string): {requestId:string;hostEpoch:str
   try {return {requestId:JSON.parse(match[1]!),hostEpoch:JSON.parse(match[2]!)};} catch {return;}
 }
 export function machineFileChunkHeader(prefix: string, records = false): {streamId:string;requestId:string;hostEpoch:string}|undefined {
-  const match=machineHeader.exec(prefix.slice(0,PREFIX_CHARS));
+  return linkFileChunkHeader("machine_stream_data", prefix, records);
+}
+/** The stream and file identity of a partially received link data record wrapping a file chunk or instance record fragment. */
+export function linkFileChunkHeader(dataKind: string, prefix: string, records = false): {streamId:string;requestId:string;hostEpoch:string}|undefined {
+  const match=linkHeader(dataKind).exec(prefix.slice(0,PREFIX_CHARS));
   if(!match)return;
   // Decode only the bounded JSON string envelope prefix, never base64 file data.
   const text=prefix.slice(match[0].length,match[0].length+PREFIX_CHARS);

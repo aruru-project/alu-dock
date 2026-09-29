@@ -6,7 +6,8 @@ import { ByteTransitRelay, fileChunkHeader, encodeRoutedRecord } from "./file-fr
 import { FileChannel, FileRelayActivity } from "./file-channel.js";
 import { FileReceiver } from "./file-transfer.js";
 import { sendHostFile } from "./host-file-transfer.js";
-import { FILE_TRANSFER_CAPABILITY, isByteStreamRequest } from "./protocol.js";
+import { FILE_TRANSFER_CAPABILITY, MULTIPLEX_CAPABILITY, isByteStreamRequest } from "./protocol.js";
+import { ClientLink, MAX_LINK_LINE_BYTES } from "./stream-link.js";
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
@@ -486,6 +487,7 @@ export class DockHost {
     let uploadAbortPromise: Promise<void> | undefined;
     let finishUploadTracking: (() => void) | undefined;
     let uploadIdleTimer: NodeJS.Timeout | undefined;
+    let link: ClientLink | undefined;
     let processing = Promise.resolve();
 
     const finishUpload = (): void => {
@@ -514,6 +516,7 @@ export class DockHost {
       eventUnsubscribe?.();
       eventUnsubscribe = undefined;
       this.connections.delete(socket);
+      link?.dispose();
       remoteProxy?.close();
       remoteProxy = undefined;
       fileChannel?.cancel(new Error("File connection closed"));
@@ -533,6 +536,12 @@ export class DockHost {
     const fail = async (error: unknown, requestId = upload?.request.requestId ?? currentRequestId): Promise<void> => {
       if (terminal) return;
       terminal = true;
+      if (link) {
+        // A malformed link record has no stream to answer on; the link ends and every stream with it.
+        link.dispose();
+        socket.destroy();
+        return;
+      }
       await abortUpload(error);
       if (recordChannel?.started || routedRecordsStarted) {
         recordChannel?.cancel(error);
@@ -583,9 +592,15 @@ export class DockHost {
         fileMode = hello.requiredCapabilities.includes(FILE_TRANSFER_CAPABILITY);
         recordsNegotiated = hello.requiredCapabilities.includes(INSTANCE_RECORDS_CAPABILITY);
         const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt), [...this.capabilities]));
-        if (outcome !== "written") socket.destroy();
+        if (outcome !== "written") { socket.destroy(); return; }
+        if (hello.requiredCapabilities.includes(MULTIPLEX_CAPABILITY)) {
+          // Every later record is a link record; each stream is served like a raw connection.
+          decoder.setMaxLineBytes(MAX_LINK_LINE_BYTES);
+          link = new ClientLink(socket, { hostEpoch: this.hostEpoch, accept: (stream) => this.handleConnection(stream) });
+        }
         return;
       }
+      if (link) { await link.consume(raw); return; }
 
       if (remoteProxy) {
         fileRelay?.record(raw);
@@ -757,6 +772,7 @@ export class DockHost {
       socket.pause();
       processing = processing.then(async () => {
         const lines=decoder.push(chunk);
+        link?.observePartial(decoder.partialRecord,decoder.recordSequence);
         fileChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
         recordChannel?.observeWire(chunk.byteLength,decoder.partialRecord);
         const partial=fileChunkHeader(decoder.partialRecord);

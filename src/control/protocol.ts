@@ -177,6 +177,8 @@ export const SESSION_INVENTORY_PAGES_CAPABILITY = "session.inventory.pages.v1" a
 export const MAX_SESSION_INVENTORY_CURSOR_CHARS = 256;
 /** One step: stop the current reply and return every waiting Queue message to the caller. */
 export const ABORT_RESTORE_QUEUE_CAPABILITY = "run.abort-restore-queue.v1" as const;
+/** After this hello the connection is a link: many Protocol V2 streams on one authenticated connection. */
+export const MULTIPLEX_CAPABILITY = "transport.multiplex.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -233,6 +235,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "tui.projection.v1",
   WORKSPACE_LIST_CAPABILITY,
   WORKSPACE_FILES_CAPABILITY,
+  MULTIPLEX_CAPABILITY,
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 

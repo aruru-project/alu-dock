@@ -17,7 +17,10 @@ export class JsonLineDecoder {
   get partialRecord(): string { return this.buffer; }
   get recordSequence(): number { return this.sequence; }
 
-  constructor(private readonly maxLineBytes = MAX_CONTROL_LINE_BYTES) {}
+  constructor(private maxLineBytes = MAX_CONTROL_LINE_BYTES) {}
+
+  /** A negotiated framing may carry longer records than the hello that negotiated it. */
+  setMaxLineBytes(maxLineBytes: number): void { this.maxLineBytes = maxLineBytes; }
 
   push(chunk: Buffer | string): string[] {
     this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);

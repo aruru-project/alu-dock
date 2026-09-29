@@ -121,8 +121,7 @@ test("routed records pipeline within their window and isolate malformed streams"
   link.on("data", bytes => { for (const line of linkDecoder.push(bytes)) if (JSON.parse(line).kind === "machine_pong") pongs++; });
   for (const [index, data] of ["{", "null"].entries()) {
     const requestId = `malformed-${index}`; const bad = await open(requestId); await bad.next("instance_record_fragment");
-    const streams = (upstream as unknown as { streams: Map<string, { requestId?: string }> }).streams;
-    const streamId = [...streams].find(([, stream]) => stream.requestId === requestId)![0];
+    const streamId = (upstream as unknown as { streams: { streamIdForRequest(requestId: string): string | undefined } }).streams.streamIdForRequest(requestId)!;
     await writeMachine(link, { kind: "machine_stream_data", streamId, data });
     await until(() => bad.socket.destroyed);
     const before = pongs; await writeMachine(link, { kind: "machine_ping" }); await until(() => pongs > before);
