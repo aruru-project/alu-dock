@@ -393,7 +393,7 @@ pub(crate) async fn negotiate_local_endpoint(
     negotiate_transport(endpoint.connect().await?, client_id, required_capabilities).await
 }
 
-async fn negotiate_transport(
+pub(crate) async fn negotiate_transport(
     mut connection: ConnectedTransport,
     client_id: &str,
     required_capabilities: &[&str],
@@ -401,17 +401,7 @@ async fn negotiate_transport(
     let request_id = Uuid::new_v4().to_string();
     write_json_line(
         &mut connection.stream,
-        &ClientHello {
-            kind: "hello",
-            request_id: &request_id,
-            versions: [2],
-            client: ClientDescription {
-                name: "aludock-client",
-                version: CLIENT_VERSION,
-                client_id,
-            },
-            required_capabilities,
-        },
+        &client_hello(&request_id, client_id, required_capabilities),
     )
     .await?;
     let reply: HelloReply = timeout(
@@ -422,6 +412,47 @@ async fn negotiate_transport(
     .map_err(|_| ClientError::Protocol("Host hello timed out".into()))??;
     let hello = validate_hello(reply, &request_id, required_capabilities)?;
     Ok((connection, hello))
+}
+
+fn client_hello<'a>(
+    request_id: &'a str,
+    client_id: &'a str,
+    required_capabilities: &'a [&'a str],
+) -> ClientHello<'a> {
+    ClientHello {
+        kind: "hello",
+        request_id,
+        versions: [2],
+        client: ClientDescription {
+            name: "aludock-client",
+            version: CLIENT_VERSION,
+            client_id,
+        },
+        required_capabilities,
+    }
+}
+
+/// One hello line (no newline) for a stream on a link.
+pub(crate) fn encode_client_hello(
+    request_id: &str,
+    client_id: &str,
+    required_capabilities: &[&str],
+) -> Result<String> {
+    Ok(serde_json::to_string(&client_hello(
+        request_id,
+        client_id,
+        required_capabilities,
+    ))?)
+}
+
+/// A stream's hello reply, read by the link before the stream's consumer sees any bytes.
+pub(crate) fn validate_hello_line(
+    line: &str,
+    request_id: &str,
+    required_capabilities: &[&str],
+) -> Result<HelloAck> {
+    let reply: HelloReply = serde_json::from_str(line)?;
+    validate_hello(reply, request_id, required_capabilities)
 }
 
 #[derive(Deserialize)]
@@ -785,7 +816,7 @@ enum HelloReply {
     Error(HelloError),
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HelloAck {
     kind: String,
@@ -793,17 +824,17 @@ pub(crate) struct HelloAck {
     version: u8,
     catalog_schema_version: u64,
     pub(crate) host: HelloHost,
-    capabilities: Vec<String>,
+    pub(crate) capabilities: Vec<String>,
     limits: ProtocolLimits,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HelloHost {
     pub(crate) host_epoch: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProtocolLimits {
     max_line_bytes: u64,

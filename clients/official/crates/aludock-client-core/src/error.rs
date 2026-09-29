@@ -58,11 +58,29 @@ pub enum ClientError {
         source: io::Error,
     },
     #[error(transparent)]
-    Io(#[from] io::Error),
+    Io(io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("cryptographic operation failed: {0}")]
     Crypto(String),
+}
+
+impl From<io::Error> for ClientError {
+    fn from(error: io::Error) -> Self {
+        // A stream on a Host link surfaces the Host's hello refusal through its read error.
+        if let Some(rejection) = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<crate::link::HostRejection>())
+        {
+            return Self::Host {
+                code: rejection.code.clone(),
+                message: rejection.message.clone(),
+                retryable: rejection.retryable,
+                details: rejection.details.clone(),
+            };
+        }
+        Self::Io(error)
+    }
 }
 
 impl ClientError {

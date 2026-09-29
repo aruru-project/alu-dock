@@ -19,6 +19,7 @@ mod host_registry;
 mod identity;
 mod instance_records;
 mod instances;
+mod link;
 pub use instance_records::InstanceDeliveryContext;
 mod local_transport;
 mod observation;

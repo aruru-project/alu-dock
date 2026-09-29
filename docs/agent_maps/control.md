@@ -73,6 +73,18 @@ Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
 5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
 
+### 一条连接多条流（`transport.multiplex.v1`）
+
+上面每一步都以「一条连接 = 一次 hello + 一个 request」计。远程使用时每个操作都要重新 TCP + TLS + hello，切 Work 或读图片就是一串握手；`transport.multiplex.v1` 让客户端把所有请求放在一条已经验证过的连接上：
+
+- 客户端在 hello 的 `requiredCapabilities` 里要求它。hello 成功后这条连接成为**链路**，之后的记录只能是链路记录：`{kind:"stream_open",streamId}`、`{kind:"stream_data",streamId,data}`、`{kind:"stream_close",streamId}`、`{kind:"stream_reset",streamId,reason}`、`{kind:"ping"}`、`{kind:"pong"}`。`data` 是一条完整的 Protocol V2 JSONL 记录（不含换行），链路记录因此最长可达普通记录上限的两倍。链路 hello 里的其他能力不起作用；每条流自己协商。
+- 每条流就是上面 1–5 的一条普通连接：客户端 `stream_open` 后在流上发 hello（可与 request 同发，不必等回包）、一个 request，Host 在流上回 hello 回包、response 或 follow event、文件帧。Host 把每条流交给和裸连接相同的处理入口，所以 Main→SubHost 转发、文件窗口、instance records 的行为与裸连接一致。任一方 `stream_close` 等同于这条流的连接关闭；`stream_reset` 只结束这条流并说明原因，链路和其他流继续。
+- 客户端定期 `ping`，Host 回 `pong`；客户端在一个 ping 间隔加等待期内没有任何来包就放弃链路，Host 对 60 秒没有任何来包的链路直接关闭。链路关闭时它上面的流全部结束，客户端按各自的规则重连（follow 进入「连接已中断」再重试）。链路记录不合法时 Host 关闭整条链路而不是回错误。
+- 一条链路最多 256 条流；输出按紧急（ping/pong/reset）、控制、各流轮流三档排队，单条流的输出或输入超过上限只 reset 这条流。这套流框架与 Main↔SubHost 机器链路是同一份实现（`src/control/stream-link.ts`），机器链路保留 `machine_*` 记录名以兼容已部署的 SubHost。
+- 未要求此能力的客户端（Hub/Work TUI、Rails WebConsole、旧版官方客户端）行为不变，hello 后仍只允许一个 request。吊销设备证书时 Host 照旧关闭该证书的所有连接，链路随之结束。
+
+官方 Rust core（`connection_router.rs` / `link.rs`）对每个 Host 的第一条连接仍是普通连接，从它的 hello 回包得知 Host 是否提供此能力；之后同一路由的每次请求都是链路上的一条流，链路断了才重新选址。流上的传输错误不算地址失败，链路自己的存活检测才算。
+
 TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。Host 只把与持久信任记录中 leaf certificate DER 完全相同的连接交给 Protocol V2。无证书或未知证书永远不能发送 hello，也不能调用任何 Protocol V2 request。
 
 配对使用独立于 Protocol V2 的 `pairing.*.v1` bootstrap，仅用于建立设备信任。用户在本机 Hub 的 Devices 页面显式确认并打开五分钟窗口后，同一个 TLS 端口才临时接收未知证书的配对请求。每条未知连接只接收一条有界 request、返回一条 response，然后立即关闭；人工确认只推进 Host 中有期限、有数量上限的 pairing transaction，不保留 socket、stream、callback 或等待中的网络 Promise。TLS handshake、首帧和 response close 分别有 5 秒、2 秒和 1 秒边界；用户批准后的完整证明最多持续 60 秒。
@@ -290,6 +302,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/dock-host.ts`：Host socket、request routing 与 event follow。
 - `src/control/instance-manager.ts`：唯一 instance identity/location 应用入口与 local/global profile。
 - `src/control/dock-registry.ts`：本机原生 instance 与 catalog lifecycle。
+- `src/control/stream-link.ts`：一条连接上多条 Protocol V2 流的框架——虚拟 socket、流表与输入上限、分道输出写入器、客户端链路（`transport.multiplex.v1`）的 ping/pong 与空闲关闭；机器链路复用同一套。
 - `src/control/machine-transport.ts`：InstanceManager 的 persistent remote-directory/transport backend 与 multiplexed Machine connection；不承担第二套客户端请求分类。
 - `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。
 - `src/control/catalog-*.ts`：durable catalog transaction 与 recovery。

@@ -6,6 +6,7 @@ use crate::{
     ClientError, ClientIdentity, ConnectionPolicy, Endpoint, HostConnectionProfile, IdentityStore,
     Result,
     client::{HelloAck, negotiate_local_endpoint, negotiate_pinned_endpoint},
+    link::{Link, MULTIPLEX_CAPABILITY},
     local_transport::LocalDockEndpoint,
     timing::CONNECTION_ACQUISITION_TIMEOUT,
     tls::{ConnectedTransport, PinnedTlsConnector},
@@ -55,7 +56,28 @@ struct RouterState {
     recently_failed_endpoint_id: Option<String>,
     candidates: Vec<Candidate>,
     active_endpoint_id: Option<String>,
+    /// The persistent connection to the active address; every request is a stream on it.
+    link: Option<Link>,
+    /// Whether this Host advertises `transport.multiplex.v1`, learned from its first hello reply.
+    multiplex: Option<bool>,
     closed: bool,
+}
+
+impl RouterState {
+    fn live_link(&self) -> Option<Link> {
+        self.link.as_ref().filter(|link| !link.is_closed()).cloned()
+    }
+
+    fn take_link(&mut self) -> Option<Link> {
+        self.link.take()
+    }
+}
+
+/// A negotiated connection; a multiplexed one becomes the route's link when the route commits to it.
+struct Negotiated {
+    connection: ConnectedTransport,
+    hello: HelloAck,
+    multiplexed: bool,
 }
 
 pub(crate) struct RoutedConnection {
@@ -91,6 +113,8 @@ impl ConnectionRouter {
                     recently_failed_endpoint_id: None,
                     candidates,
                     active_endpoint_id,
+                    link: None,
+                    multiplex: None,
                     closed: false,
                 }),
                 route_generation,
@@ -125,6 +149,8 @@ impl ConnectionRouter {
                         target: CandidateTarget::Pinned(endpoint),
                     }],
                     active_endpoint_id: None,
+                    link: None,
+                    multiplex: None,
                     closed: false,
                 }),
                 route_generation,
@@ -157,6 +183,8 @@ impl ConnectionRouter {
                         target: CandidateTarget::Local(endpoint),
                     }],
                     active_endpoint_id: None,
+                    link: None,
+                    multiplex: None,
                     closed: false,
                 }),
                 route_generation,
@@ -184,9 +212,11 @@ impl ConnectionRouter {
         let preferred_endpoint_id = next_candidates
             .first()
             .map(|candidate| candidate.id.as_str());
+        let mut dropped_link = None;
         if state.active_endpoint_id.as_deref() != preferred_endpoint_id {
             state.active_endpoint_id = None;
             state.recently_failed_endpoint_id = None;
+            dropped_link = state.take_link();
         }
         if state
             .recently_failed_endpoint_id
@@ -203,6 +233,10 @@ impl ConnectionRouter {
         self.inner
             .route_generation
             .send_replace(state.route_generation);
+        drop(state);
+        if let Some(link) = dropped_link {
+            link.close();
+        }
         Ok(())
     }
 
@@ -223,9 +257,14 @@ impl ConnectionRouter {
         state.last_resolution_error = None;
         state.last_resolution_capabilities = None;
         state.route_generation = state.route_generation.saturating_add(1);
+        let dropped_link = state.take_link();
         self.inner
             .route_generation
             .send_replace(state.route_generation);
+        drop(state);
+        if let Some(link) = dropped_link {
+            link.close();
+        }
         Ok(true)
     }
 
@@ -244,13 +283,18 @@ impl ConnectionRouter {
     }
 
     pub fn close(&self) {
+        let mut dropped_link = None;
         if let Ok(mut state) = self.inner.state.lock() {
             state.closed = true;
             state.active_endpoint_id = None;
             state.route_generation = state.route_generation.saturating_add(1);
+            dropped_link = state.take_link();
             self.inner
                 .route_generation
                 .send_replace(state.route_generation);
+        }
+        if let Some(link) = dropped_link {
+            link.close();
         }
     }
 
@@ -262,12 +306,18 @@ impl ConnectionRouter {
         Ok(())
     }
 
+    /// A request on this route failed at the transport. On a live link that is
+    /// one stream's failure and the address stays; the link's own liveness decides.
     pub(crate) fn report_connection_failure(&self, endpoint_id: &str, route_generation: u64) {
         if let Ok(mut state) = self.inner.state.lock()
             && !state.closed
             && state.route_generation == route_generation
             && state.active_endpoint_id.as_deref() == Some(endpoint_id)
         {
+            if state.live_link().is_some() {
+                return;
+            }
+            state.link = None;
             state.active_endpoint_id = None;
             state.route_generation = state.route_generation.saturating_add(1);
             state.last_resolution_error = None;
@@ -277,6 +327,62 @@ impl ConnectionRouter {
                 .route_generation
                 .send_replace(state.route_generation);
         }
+    }
+
+    /// Commit a negotiated connection as this route's link and open the request's stream on it.
+    fn adopt_link(
+        state: &mut RouterState,
+        inner: &Arc<RouterInner>,
+        negotiated: Negotiated,
+        endpoint_id: &str,
+        route_generation: u64,
+    ) -> Result<Link> {
+        let weak = Arc::downgrade(inner);
+        let failed_endpoint = endpoint_id.to_owned();
+        let link = Link::establish(
+            negotiated.connection,
+            negotiated.hello,
+            Box::new(move || {
+                let Some(inner) = weak.upgrade() else { return };
+                ConnectionRouter { inner }.report_link_loss(&failed_endpoint, route_generation);
+            }),
+        );
+        state.link = Some(link.clone());
+        Ok(link)
+    }
+
+    fn report_link_loss(&self, endpoint_id: &str, route_generation: u64) {
+        if let Ok(mut state) = self.inner.state.lock()
+            && !state.closed
+            && state.route_generation == route_generation
+            && state.active_endpoint_id.as_deref() == Some(endpoint_id)
+        {
+            state.link = None;
+            state.active_endpoint_id = None;
+            state.route_generation = state.route_generation.saturating_add(1);
+            state.last_resolution_error = None;
+            state.last_resolution_capabilities = None;
+            state.recently_failed_endpoint_id = Some(endpoint_id.to_owned());
+            self.inner
+                .route_generation
+                .send_replace(state.route_generation);
+        }
+    }
+
+    fn stream_on(
+        &self,
+        link: &Link,
+        required_capabilities: &[&str],
+        endpoint_id: String,
+        route_generation: u64,
+    ) -> Result<RoutedConnection> {
+        let connection = link.open_stream(&self.inner.client_id, required_capabilities)?;
+        Ok(RoutedConnection {
+            connection,
+            hello: link.hello().clone(),
+            endpoint_id,
+            route_generation,
+        })
     }
 
     pub(crate) async fn acquire(&self, required_capabilities: &[&str]) -> Result<RoutedConnection> {
@@ -313,10 +419,18 @@ impl ConnectionRouter {
         loop {
             let mut active_route_changes = self.inner.route_generation.subscribe();
             let (generation, active) = {
-                let state = self.inner.state.lock().map_err(|_| router_state_error())?;
+                let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
                 if state.closed {
                     return Err(router_closed_error());
                 }
+                if let Some(link) = state.live_link()
+                    && let Some(endpoint_id) = state.active_endpoint_id.clone()
+                {
+                    let generation = state.route_generation;
+                    drop(state);
+                    return self.stream_on(&link, required_capabilities, endpoint_id, generation);
+                }
+                state.link = None;
                 let active = state.active_endpoint_id.as_ref().and_then(|active| {
                     state
                         .candidates
@@ -329,6 +443,33 @@ impl ConnectionRouter {
 
             let mut failed_active = None;
             if let Some(candidate) = active {
+                // One link per route: concurrent callers wait for the first to establish it.
+                let link_expected = {
+                    let state = self.inner.state.lock().map_err(|_| router_state_error())?;
+                    state.multiplex == Some(true)
+                };
+                let _permit = if link_expected {
+                    let permit = self.inner.acquisition.lock().await;
+                    let state = self.inner.state.lock().map_err(|_| router_state_error())?;
+                    if state.closed {
+                        return Err(router_closed_error());
+                    }
+                    if state.route_generation != generation {
+                        continue;
+                    }
+                    if let Some(link) = state.live_link() {
+                        drop(state);
+                        return self.stream_on(
+                            &link,
+                            required_capabilities,
+                            candidate.id,
+                            generation,
+                        );
+                    }
+                    Some(permit)
+                } else {
+                    None
+                };
                 let result = tokio::select! {
                     changed = active_route_changes.changed() => {
                         changed.map_err(|_| router_closed_error())?;
@@ -337,8 +478,9 @@ impl ConnectionRouter {
                     result = self.negotiate(&candidate, required_capabilities) => result,
                 };
                 match result {
-                    Ok((connection, hello)) => {
-                        let state = self.inner.state.lock().map_err(|_| router_state_error())?;
+                    Ok(negotiated) => {
+                        let mut state =
+                            self.inner.state.lock().map_err(|_| router_state_error())?;
                         if state.closed {
                             return Err(router_closed_error());
                         }
@@ -346,15 +488,31 @@ impl ConnectionRouter {
                             && state.active_endpoint_id.as_deref() == Some(candidate.id.as_str())
                             && state.candidates.iter().any(|current| current == &candidate)
                         {
+                            if negotiated.multiplexed {
+                                let link = Self::adopt_link(
+                                    &mut state,
+                                    &self.inner,
+                                    negotiated,
+                                    &candidate.id,
+                                    generation,
+                                )?;
+                                drop(state);
+                                return self.stream_on(
+                                    &link,
+                                    required_capabilities,
+                                    candidate.id,
+                                    generation,
+                                );
+                            }
                             return Ok(RoutedConnection {
-                                connection,
-                                hello,
+                                connection: negotiated.connection,
+                                hello: negotiated.hello,
                                 endpoint_id: candidate.id,
                                 route_generation: generation,
                             });
                         }
                         drop(state);
-                        drop(connection);
+                        drop(negotiated);
                         continue;
                     }
                     Err(error) => {
@@ -447,7 +605,7 @@ impl ConnectionRouter {
                     result = self.negotiate(&candidate, required_capabilities) => result,
                 };
                 match result {
-                    Ok((connection, hello)) => {
+                    Ok(negotiated) => {
                         let mut state =
                             self.inner.state.lock().map_err(|_| router_state_error())?;
                         if state.closed {
@@ -457,7 +615,7 @@ impl ConnectionRouter {
                             || !state.candidates.iter().any(|current| current == &candidate)
                         {
                             drop(state);
-                            drop(connection);
+                            drop(negotiated);
                             stale = true;
                             break;
                         }
@@ -471,9 +629,25 @@ impl ConnectionRouter {
                         state.last_resolution_capabilities = None;
                         state.recently_failed_endpoint_id = None;
                         let route_generation = state.route_generation;
+                        if negotiated.multiplexed {
+                            let link = Self::adopt_link(
+                                &mut state,
+                                &self.inner,
+                                negotiated,
+                                &candidate.id,
+                                route_generation,
+                            )?;
+                            drop(state);
+                            return self.stream_on(
+                                &link,
+                                required_capabilities,
+                                candidate.id,
+                                route_generation,
+                            );
+                        }
                         return Ok(RoutedConnection {
-                            connection,
-                            hello,
+                            connection: negotiated.connection,
+                            hello: negotiated.hello,
                             endpoint_id: candidate.id,
                             route_generation,
                         });
@@ -520,7 +694,56 @@ impl ConnectionRouter {
         }
     }
 
+    /// The first connection to a Host is an ordinary one; its hello reply says
+    /// whether the Host carries links. From then on one link serves the route.
     async fn negotiate(
+        &self,
+        candidate: &Candidate,
+        required_capabilities: &[&str],
+    ) -> Result<Negotiated> {
+        let multiplex = {
+            let state = self.inner.state.lock().map_err(|_| router_state_error())?;
+            state.multiplex
+        };
+        if multiplex == Some(true) {
+            match self
+                .negotiate_with(candidate, &[MULTIPLEX_CAPABILITY])
+                .await
+            {
+                Ok((connection, hello)) => {
+                    return Ok(Negotiated {
+                        connection,
+                        hello,
+                        multiplexed: true,
+                    });
+                }
+                Err(error) if error.missing_capability(&[MULTIPLEX_CAPABILITY]) => {
+                    let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
+                    state.multiplex = Some(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let (connection, hello) = self
+            .negotiate_with(candidate, required_capabilities)
+            .await?;
+        if multiplex.is_none() {
+            let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
+            state.multiplex = Some(
+                hello
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == MULTIPLEX_CAPABILITY),
+            );
+        }
+        Ok(Negotiated {
+            connection,
+            hello,
+            multiplexed: false,
+        })
+    }
+
+    async fn negotiate_with(
         &self,
         candidate: &Candidate,
         required_capabilities: &[&str],
@@ -544,6 +767,16 @@ impl ConnectionRouter {
                 negotiate_local_endpoint(endpoint, &self.inner.client_id, required_capabilities)
                     .await
             }
+        }
+    }
+}
+
+impl Drop for RouterInner {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && let Some(link) = state.take_link()
+        {
+            link.close();
         }
     }
 }
@@ -849,6 +1082,8 @@ mod tests {
                         })
                         .collect(),
                     active_endpoint_id: Some(active_endpoint_id.into()),
+                    link: None,
+                    multiplex: None,
                     closed: false,
                 }),
                 route_generation,
