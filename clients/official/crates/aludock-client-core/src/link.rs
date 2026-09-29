@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::{
     ClientError, Result,
     client::{HelloAck, MAX_CONTROL_LINE_BYTES, encode_client_hello, validate_hello_line},
-    timing::{LINK_PING_INTERVAL, LINK_PONG_TIMEOUT, PROTOCOL_WRITE_TIMEOUT},
+    timing::{LINK_PING_INTERVAL, LINK_PONG_TIMEOUT},
     tls::{ConnectedTransport, ControlStream, read_json_line_observed},
 };
 
@@ -53,8 +53,6 @@ pub(crate) struct LinkTiming {
     pub ping_interval: Duration,
     /// A link with no bytes moving in either direction for a ping interval plus this is gone.
     pub pong_timeout: Duration,
-    /// One write call that makes no progress for this long is a stalled link.
-    pub write_stall: Duration,
 }
 
 impl Default for LinkTiming {
@@ -62,7 +60,6 @@ impl Default for LinkTiming {
         Self {
             ping_interval: LINK_PING_INTERVAL,
             pong_timeout: LINK_PONG_TIMEOUT,
-            write_stall: PROTOCOL_WRITE_TIMEOUT,
         }
     }
 }
@@ -373,6 +370,28 @@ impl Link {
 
     /// A record is written as long as bytes keep leaving; only a stalled write
     /// times out, so a slow upload is not cut at a whole-record deadline.
+    /// Drive an I/O future; every poll after a Pending one means the socket woke it,
+    /// which only happens when the peer made room. A write the socket accepts at
+    /// once proves nothing (its buffer may be filling towards a dead peer).
+    async fn progressing<F: std::future::Future<Output = io::Result<T>>, T>(
+        &self,
+        future: F,
+    ) -> io::Result<T> {
+        tokio::pin!(future);
+        let mut was_pending = false;
+        std::future::poll_fn(|cx| {
+            if was_pending && let Ok(mut at) = self.inner.last_activity.lock() {
+                *at = Instant::now();
+            }
+            let polled = future.as_mut().poll(cx);
+            if polled.is_pending() {
+                was_pending = true;
+            }
+            polled
+        })
+        .await
+    }
+
     async fn write_loop(
         self,
         mut writer: tokio::io::WriteHalf<Box<dyn ControlStream>>,
@@ -383,42 +402,21 @@ impl Link {
                 next = outbound.recv() => match next { Some(bytes) => bytes, None => return },
                 _ = self.inner.closed_notify.notified() => return,
             };
+            // Liveness is the only stall detector: a write or flush that makes no
+            // progress leaves the ping unanswered and the link ends there. Each time
+            // the socket wakes a pending write or flush, the peer took bytes; that
+            // counts as activity, which matters while a large upload leaves slowly
+            // with the next ping queued behind it.
             let written = async {
                 let mut offset = 0;
                 while offset < bytes.len() {
-                    let write = writer.write(&bytes[offset..]);
-                    tokio::pin!(write);
-                    // A write the socket accepts at once proves nothing (its buffer may be
-                    // filling towards a dead peer). One that had to wait for room completes
-                    // only because the peer took bytes: that is liveness, and matters while
-                    // a large upload leaves slowly with the next ping queued behind it.
-                    let (count, waited) = match poll_now(&mut write) {
-                        Some(result) => (result?, false),
-                        None => (
-                            tokio::time::timeout(self.inner.timing.write_stall, &mut write)
-                                .await
-                                .map_err(|_| {
-                                    io::Error::new(
-                                        io::ErrorKind::TimedOut,
-                                        "Host link write stalled",
-                                    )
-                                })??,
-                            true,
-                        ),
-                    };
+                    let count = self.progressing(writer.write(&bytes[offset..])).await?;
                     if count == 0 {
                         return Err(io::Error::from(io::ErrorKind::WriteZero));
                     }
                     offset += count;
-                    if waited && let Ok(mut at) = self.inner.last_activity.lock() {
-                        *at = Instant::now();
-                    }
                 }
-                tokio::time::timeout(self.inner.timing.write_stall, writer.flush())
-                    .await
-                    .map_err(|_| {
-                        io::Error::new(io::ErrorKind::TimedOut, "Host link write stalled")
-                    })?
+                self.progressing(writer.flush()).await
             }
             .await;
             self.inner
@@ -586,15 +584,6 @@ impl Drop for LinkInner {
                 task.abort();
             }
         }
-    }
-}
-
-/// One poll without a real waker: `Some` when the future was already ready.
-fn poll_now<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
-    let mut cx = Context::from_waker(Waker::noop());
-    match Pin::new(future).poll(&mut cx) {
-        Poll::Ready(output) => Some(output),
-        Poll::Pending => None,
     }
 }
 
@@ -796,8 +785,8 @@ mod tests {
         CloseAfterLinkHello,
         /// Each response is written in pieces, 90 ms apart: longer than the silence a link is allowed.
         SlowResponse,
-        /// The link is read 64 KiB at a time, 60 ms apart: a whole record takes longer than a
-        /// stalled write is allowed, while every write keeps progressing.
+        /// The link is read 64 KiB at a time, 60 ms apart: a whole record takes longer than the
+        /// silence a link is allowed, while every write keeps progressing.
         SlowReader,
     }
 
@@ -965,7 +954,6 @@ mod tests {
         super::LinkTiming {
             ping_interval: Duration::from_millis(200),
             pong_timeout: Duration::from_millis(100),
-            write_stall: Duration::from_millis(200),
         }
     }
 
@@ -1095,7 +1083,8 @@ mod tests {
         let client = client(&fixture);
         client.host_info().await.unwrap();
         // A second request on the link: the fixture drains it 64 KiB per 60 ms, so this
-        // ~900 KiB record takes about a second to leave, well past the 200 ms write stall.
+        // ~900 KiB record takes about a second to leave, well past the 300 ms of silence
+        // a link is allowed; its pings queue behind it, so only outbound progress keeps it.
         let mut routed = client.router().acquire(&["host.info"]).await.unwrap();
         let mut line =
             serde_json::to_vec(&json!({"kind":"request","pad":"a".repeat(900 * 1024)})).unwrap();
