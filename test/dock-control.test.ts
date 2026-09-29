@@ -2740,6 +2740,45 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   assert.deepEqual(bounded.query, { cwd: directory, scope: "all" });
 });
 
+test("saved-session list continues page by page until every session is listed, latest conversation first", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-pages-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  // More sessions than one page holds; file order is unrelated to conversation order.
+  const saved: SessionDto[] = Array.from({ length: 2_500 }, (_, index) => ({
+    sessionId: `saved-${index}`,
+    sessionFile: `/sessions/${index}.jsonl`,
+    cwd: directory,
+    updatedAt: "2026-09-29T00:00:00.000Z",
+    lastActivityAt: new Date(Date.UTC(2026, 0, 1) + ((index * 7_919) % 2_500) * 60_000).toISOString(),
+    ...(index % 3 === 0 ? {} : { costTotal: index / 100 }),
+  }));
+  const host = new DockHost({
+    socketPath,
+    registry: new DockRegistry(async () => { throw new Error("listing saved sessions must not start a Worker"); }),
+    sessionInventory: { list: async () => ({ sessions: saved, incomplete: false, diagnostics: [] }) },
+  });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+
+  const first = await client.sessionInventory(directory, "all");
+  assert.equal(first.total, 2_500);
+  assert.ok(first.nextCursor, "a partial first page says where to continue");
+  const listed = [...first.sessions];
+  for (let cursor: string | undefined = first.nextCursor; cursor !== undefined;) {
+    const page = await client.sessionInventory(directory, "all", undefined, cursor);
+    assert.equal(page.total, 2_500);
+    listed.push(...page.sessions);
+    cursor = page.nextCursor;
+  }
+  assert.equal(new Set(listed.map((session) => session.sessionId)).size, 2_500, "every session appears exactly once");
+  const times = listed.map((session) => Date.parse(session.lastActivityAt ?? ""));
+  assert.ok(times.every((time, index) => index === 0 || times[index - 1]! >= time), "latest conversation first across pages");
+  assert.equal(listed.find((session) => session.sessionId === "saved-1")?.costTotal, 0.01);
+  assert.equal(listed.find((session) => session.sessionId === "saved-3")?.costTotal, undefined);
+});
+
 test("concurrent adoption of one persisted session file admits only one runtime", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-race-"));
   await chmod(directory, 0o700);

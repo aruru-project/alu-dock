@@ -1,5 +1,5 @@
 import { InstanceRecordChannel, InstanceRecordInitial } from "./instance-record-delivery.js";
-import { ABORT_RESTORE_QUEUE_CAPABILITY, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
+import { ABORT_RESTORE_QUEUE_CAPABILITY, INSTANCE_RECORDS_CAPABILITY, SESSION_INVENTORY_PAGES_CAPABILITY } from "./protocol.js";
 import { writeTransferBytes } from "./file-channel.js";
 import { CONVERSATION_CONTENT_STREAM_CAPABILITY, parseConversationContentChunk, parseConversationContentStreamMetadata, parseConversationContentStreamResult, type ConversationContentStreamMetadata, type ConversationContentStreamResult } from "./protocol.js";
 import { isDeepStrictEqual } from "node:util";
@@ -617,7 +617,8 @@ export class DockClient {
   systemCatalog(cwd:string,hostId?:string,cursor?:SystemCatalogCursor,limit=MAX_SYSTEM_CATALOG_ITEMS):Promise<SystemCatalogResult>{return this.request("system.catalog",{cwd,hostId,cursor,limit},SYSTEM_TEMPLATES_CAPABILITY,parseSystemCatalogResult);}
   systemContent(cwd:string,id:string,hostId?:string,offset?:number,revision?:string):Promise<ResourceContentResult>{return this.request("system.content",{cwd,id,hostId,offset,revision},SYSTEM_TEMPLATES_CAPABILITY,parseResourceContentResult);}
   setSystemDefault(cwd:string,id:string,hostId?:string,operationId=this.createRequestId()):Promise<SystemDefaultSetResult>{return this.request("system.default.set",{cwd,id,hostId,operationId},SYSTEM_TEMPLATES_CAPABILITY,parseSystemDefaultSetResult);}
-  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd",hostId?:string):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope,hostId},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
+  /** Omit cursor for the first page; pass the previous page's nextCursor to continue. */
+  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd",hostId?:string,cursor?:string):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope,hostId,...(cursor===undefined?{}:{cursor})},["session.inventory.v1","session.inventory-diagnostics.v1",...(cursor===undefined?[]:[SESSION_INVENTORY_PAGES_CAPABILITY])],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS,hostId?:string):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit,hostId},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}

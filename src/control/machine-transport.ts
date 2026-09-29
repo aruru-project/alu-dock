@@ -17,7 +17,7 @@ import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../co
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
-import { conversationViewCapability, capabilityForRequest, decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseHelloReply, parseInstanceSnapshot, parseResponseTransferFrame, ProtocolHelloRejectedError, requiredCapabilities } from "./protocol.js";
+import { requestOptionCapabilities, capabilityForRequest, decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseHelloReply, parseInstanceSnapshot, parseResponseTransferFrame, ProtocolHelloRejectedError, requiredCapabilities } from "./protocol.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
@@ -642,7 +642,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       ended,
       helloSeen: false,
       nativeRequest: requestForNativeHost(request, identity),
-      requiredCapabilities: [...new Set([...requiredCapabilities(capabilityForRequest(request.type)), ...conversationViewCapability(request), ...(fileMode ? [FILE_TRANSFER_CAPABILITY] : [])])],
+      requiredCapabilities: [...new Set([...requiredCapabilities(capabilityForRequest(request.type)), ...requestOptionCapabilities(request), ...(fileMode ? [FILE_TRANSFER_CAPABILITY] : [])])],
       acceptingInput: true,
       inputTail: Promise.resolve(),
       queuedInputBytes: 0,

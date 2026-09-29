@@ -15,8 +15,10 @@ import {
   type TreeFilter, type VisibleTreeItem,
 } from '../lib/sessionTree'
 import { userErrorMessage as errorMessage } from '../lib/userError'
+import { useSavedSessionPages } from '../lib/savedSessions'
 import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
-import type { CompactionPromptTemplatesResult, SessionReloadResult, SessionInfo, SessionTree, Work } from '../lib/types'
+import SavedSessionList from './SavedSessionList.vue'
+import type { CompactionPromptTemplatesResult, SessionReloadResult, SavedSession, SessionTree, Work } from '../lib/types'
 import { useAppStore } from '../stores/app'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
@@ -34,11 +36,7 @@ const loading = ref(false)
 const pending = ref('')
 const error = ref('')
 const status = ref('')
-const sessionSearch = ref('')
-const sessionScope = ref<'cwd' | 'all'>('cwd')
-const sessions = ref<SessionInfo[]>([])
-const sessionsTruncated = ref(false)
-const selectedToken = ref('')
+const sessionPages = useSavedSessionPages()
 const renameDraft = ref('')
 const compactDraft = ref('')
 const promptTemplates = ref<CompactionPromptTemplatesResult | null>(null)
@@ -68,7 +66,7 @@ async function closePromptReader() {
   await nextTick()
   promptLink.value?.focus()
 }
-onUnmounted(() => { promptEpoch++; loadEpoch++; targetRevision++ })
+onUnmounted(() => { promptEpoch++; loadEpoch++; targetRevision++; sessionPages.reset() })
 async function loadPromptTemplates() {
   const epoch = ++promptEpoch
   const scope = { ...context.value }
@@ -116,11 +114,6 @@ async function currentSessionCall<T>(scope: SessionContext, operation: () => Pro
   }
   return result
 }
-const selectedSession = computed(() => sessions.value.find((item) => item.token === selectedToken.value) ?? null)
-const filteredSessions = computed(() => {
-  const query = sessionSearch.value.trim().toLowerCase()
-  return sessions.value.filter((item) => !query || `${item.name ?? ''} ${item.cwd}`.toLowerCase().includes(query))
-})
 const filterCounts = computed(() => countTreeFilters(tree.value?.nodes ?? [], tree.value?.leafId))
 const visibleTreeItems = computed(() => projectSessionTree(
   tree.value?.nodes ?? [],
@@ -158,6 +151,7 @@ watch([
   promptReaderOpen.value = false; promptSection.value = 'summarize'
   reloadScope.value = null
   error.value = ''; status.value = ''; trust.value = null
+  if (props.mode !== 'sessions') sessionPages.reset()
   if (props.mode === 'sessions') void loadSessionList()
   else if (props.mode === 'tree') void loadTree()
   else if (props.mode === 'new-session') void createNew()
@@ -169,17 +163,15 @@ watch([
 
 async function loadSessionList(): Promise<boolean> {
   const epoch = ++loadEpoch; const scope = { ...context.value }
-  loading.value = true; error.value = ''
+  const place = { machineHostId: props.work.hostId, cwd: props.work.cwd }
+  error.value = ''
   try {
-    const result = await currentSessionCall(scope, () => listSessions(scope, sessionScope.value))
-    if (epoch !== loadEpoch || scope.instanceId !== props.work.id || scope.expectedRuntimeGeneration !== props.work.runtimeGeneration) return false
-    sessions.value = result.sessions; sessionsTruncated.value = result.truncated
-    emit('title', '恢复 Session', result.truncated ? `当前显示 ${result.sessions.length} / ${result.total} 个 Session` : `${result.sessions.length} 个可恢复的 Session`)
-    if (!sessions.value.some((item) => item.token === selectedToken.value)) selectedToken.value = sessions.value.find((item) => !item.current)?.token ?? sessions.value[0]?.token ?? ''
+    const loaded = await sessionPages.load((cursor) => currentSessionCall(scope, () => listSessions(scope, place, cursor)))
+    if (!loaded || epoch !== loadEpoch || scope.instanceId !== props.work.id || scope.expectedRuntimeGeneration !== props.work.runtimeGeneration) return false
+    emit('title', '恢复 Session', `${sessionPages.total.value} 个可恢复的 Session`)
     renameDraft.value = props.work.name ?? ''
     return true
   } catch (cause) { if (epoch === loadEpoch) error.value = errorMessage(cause); return false }
-  finally { if (epoch === loadEpoch) loading.value = false }
 }
 
 async function loadTree(): Promise<boolean> {
@@ -370,9 +362,8 @@ async function createNew() {
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
-async function resumeSelected(continuation?: SessionTrustContinuation) {
-  const selected = selectedSession.value
-  if (!selected || selected.current || props.preview || pending.value) return
+async function resumeSelected(selected: Pick<SavedSession, 'token' | 'current'>, continuation?: SessionTrustContinuation) {
+  if (selected.current || props.preview || pending.value) return
   const attempt = continuation ?? { operationId: operationId() }
   let captured: OperationContext | undefined
   pending.value = 'switch'; error.value = ''; status.value = ''
@@ -473,19 +464,22 @@ function time(value?: string | null) { return treeNodeTime(value) }
     <div v-if="loading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取 {{ mode === 'tree' ? 'Session Tree' : 'Session 列表' }}…</div>
 
     <section v-if="mode === 'sessions'" class="alu-session-select">
-      <div class="ui-dialog-search-wrap"><input v-model="sessionSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称或目录…" /></div>
-      <div class="ui-dialog-options">
-        <button v-for="item in filteredSessions" :key="item.token" class="ui-dialog-option" :class="{ 'is-current': item.current }" :disabled="item.current || preview || !!pending" @click="selectedToken = item.token; resumeSelected()">
-          <span class="ui-dialog-option-marker">{{ item.current ? '●' : '•' }}</span>
-          <span class="ui-dialog-option-content">
-            <span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ item.name || '未命名 Session' }}</span><span v-if="item.current" class="ui-dialog-option-badge">当前</span></span>
-            <span class="ui-dialog-option-detail"><span>{{ item.cwd }}</span><span class="ui-dialog-option-meta">{{ time(item.updatedAt) }}</span></span>
-          </span>
-        </button>
-        <div v-if="!filteredSessions.length" class="ui-dialog-empty">当前目录没有可恢复的 session。</div>
-      </div>
-      <div v-if="sessionsTruncated" class="cmd-palette-footer">当前显示 {{ sessions.length }} 个 Session</div>
-      <div v-if="trust" class="session-trust"><strong>这个项目需要你的信任确认</strong><p>确认后会继续恢复所选 Session。</p><div><button @click="trust = null">取消</button><button @click="resumeSelected({ ...trust, projectTrustDecision: 'trust_once' })">仅本次信任</button><button class="session-primary" @click="resumeSelected({ ...trust, projectTrustDecision: 'trust_and_remember' })">信任并切换</button></div></div>
+      <SavedSessionList
+        :key="work.id"
+        :sessions="sessionPages.sessions.value"
+        :total="sessionPages.total.value"
+        :show-directory="false"
+        :loaded="sessionPages.loaded.value"
+        :loading="sessionPages.loading.value"
+        :loading-more="sessionPages.loadingMore.value"
+        :more-failed="sessionPages.moreFailed.value"
+        :incomplete="sessionPages.incomplete.value"
+        :disabled="preview || !!pending"
+        empty-text="当前目录没有可恢复的 Session。"
+        @select="resumeSelected"
+        @retry="sessionPages.retryMore()"
+      />
+      <div v-if="trust" class="session-trust"><strong>这个项目需要你的信任确认</strong><p>确认后会继续恢复所选 Session。</p><div><button @click="trust = null">取消</button><button @click="resumeSelected({ token: trust.token, current: false }, { ...trust, projectTrustDecision: 'trust_once' })">仅本次信任</button><button class="session-primary" @click="resumeSelected({ token: trust.token, current: false }, { ...trust, projectTrustDecision: 'trust_and_remember' })">信任并切换</button></div></div>
     </section>
 
     <section v-else-if="mode === 'new-session'" class="alu-session-action-state">

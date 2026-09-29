@@ -31,8 +31,7 @@ import type {
   SelectedAttachment,
   SessionCompactionResult,
   SessionForkResult,
-  SessionInventoryResult,
-  SessionListResult,
+  SavedSessionPage,
   SessionNameResult,
   SessionNavigateResult,
   SessionReloadResult,
@@ -528,13 +527,15 @@ export interface SessionTrustContinuation {
   projectTrustDecision?: CreateWorkContinuation['projectTrustDecision']
 }
 
-export async function listSessions(context: SessionContext, scope: 'cwd' | 'all'): Promise<SessionListResult> {
-  if (isTauri) return invoke<SessionListResult>('list_sessions', { ...context, scope })
+/** Resume: saved Sessions in the Work's directory on the Work's machine. */
+export async function listSessions(context: SessionContext, place: { machineHostId?: string; cwd: string }, cursor?: string): Promise<SavedSessionPage> {
+  if (isTauri) return invoke<SavedSessionPage>('list_sessions', { ...context, machineHostId: place.machineHostId ?? null, cwd: place.cwd, cursor: cursor ?? null })
   await delay(100)
   return previewSessions(context)
 }
-export async function listSessionInventory(context: ConnectionContext, machineHostId: string, cwd: string): Promise<SessionInventoryResult> {
-  if (isTauri) return invoke<SessionInventoryResult>('session_inventory', { ...context, machineHostId, cwd })
+/** New Work: every saved Session on the selected machine. */
+export async function listSessionInventory(context: ConnectionContext, machineHostId: string, cwd: string, cursor?: string): Promise<SavedSessionPage> {
+  if (isTauri) return invoke<SavedSessionPage>('session_inventory', { ...context, machineHostId, cwd, cursor: cursor ?? null })
   throw new Error('浏览器设计预览不会读取保存的 Session')
 }
 export async function newSession(context: OperationContext, operationId: string): Promise<SessionReplacementResult> {
@@ -780,19 +781,18 @@ const previewSettings: SettingsResult = {
     { key: 'warnings', value: { anthropicExtraUsage: true }, source: 'global', writable: true, valueType: 'object', reloadRequired: false, hostRestartRequired: false },
   ],
 }
-function previewSessions(context: SessionContext): SessionListResult {
+function previewSessions(context: SessionContext): SavedSessionPage {
   return {
     sessions: [
-      { token: 'preview-current', name: 'Official Client', cwd: '/workshop/alu_dock/clients/official', updatedAt: now, identity: '7c91a2', current: true },
-      { token: 'preview-review', name: 'Protocol review', cwd: '/workshop/alu_dock/clients/official', updatedAt: now, identity: '38bbd0', current: false },
-      { token: 'preview-dock', name: 'Dock integration', cwd: '/workshop/alu_dock', updatedAt: now, identity: 'a910ef', current: false },
+      { token: 'preview-current', name: 'Official Client', cwd: '/workshop/alu_dock/clients/official', lastActivityAt: now, costTotal: 3.18, current: true },
+      { token: 'preview-review', name: 'Protocol review', cwd: '/workshop/alu_dock/clients/official', lastActivityAt: now, costTotal: 0.42, current: false },
+      { token: 'preview-dock', firstUserMessage: '检查 Dock 集成的 Session 列表', cwd: '/workshop/alu_dock/clients/official', lastActivityAt: now, current: false },
     ],
     total: 3,
-    truncated: false,
+    incomplete: false,
     connectionId: context.connectionId,
     selectionGeneration: context.selectionGeneration,
     hostEpoch: context.expectedHostEpoch,
-    runtimeGeneration: context.expectedRuntimeGeneration,
   }
 }
 const previewTree: SessionTree = {

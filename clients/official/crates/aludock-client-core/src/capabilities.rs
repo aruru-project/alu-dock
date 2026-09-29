@@ -33,6 +33,7 @@ const SESSION_COMMANDS_V1: &str = "session.commands.v1";
 const SESSION_CORE: &str = "session.core";
 const SESSION_INVENTORY_V1: &str = "session.inventory.v1";
 const SESSION_INVENTORY_DIAGNOSTICS_V1: &str = "session.inventory-diagnostics.v1";
+const SESSION_INVENTORY_PAGES_V1: &str = "session.inventory.pages.v1";
 const SESSION_REOPEN: &str = "session.reopen";
 const SESSION_TREE_V2: &str = "session.tree.v2";
 const SETTINGS_V1: &str = "settings.v1";
@@ -111,12 +112,17 @@ pub(crate) const PUBLISHED_FILES: &[&str] = &[CORE_V2, PUBLISHED_FILES_V1];
 pub(crate) const WORKSPACE_FILES: &[&str] = &[CORE_V2, WORKSPACE_FILES_V1];
 pub(crate) const WORKSPACE_LIST: &[&str] = &[CORE_V2, WORKSPACE_LIST_V1];
 pub(crate) const CATALOG_MAINTENANCE: &[&str] = &[CORE_V2, CATALOG_MAINTENANCE_V1];
-pub(crate) const SESSION_CORE_REQUIRED: &[&str] =
-    &[CORE_V2, SESSION_CORE, PROJECTION_COMPLETENESS_V1];
 pub(crate) const SESSION_INVENTORY: &[&str] = &[
     CORE_V2,
     SESSION_INVENTORY_V1,
     SESSION_INVENTORY_DIAGNOSTICS_V1,
+];
+/// Continuing with a cursor needs a Host that pages; the first page does not.
+pub(crate) const SESSION_INVENTORY_PAGES: &[&str] = &[
+    CORE_V2,
+    SESSION_INVENTORY_V1,
+    SESSION_INVENTORY_DIAGNOSTICS_V1,
+    SESSION_INVENTORY_PAGES_V1,
 ];
 pub(crate) const RESOURCES: &[&str] = &[CORE_V2, RESOURCES_V1, PROJECTION_COMPLETENESS_V1];
 pub(crate) const COMMAND_DISCOVERY: &[&str] = &[CORE_V2, COMMAND_DISCOVERY_V1];

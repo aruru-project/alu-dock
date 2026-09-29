@@ -25,24 +25,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_iter()
         .find(|machine| machine.kind == MachineKind::Main)
         .ok_or("Host did not advertise Main")?;
-    let inventory = client
-        .session_inventory(&cwd, SessionScope::All, Some(&main.host_id))
+    // Follow the pages the way the client list does, until the Host has no more.
+    let first = client
+        .session_inventory(&cwd, SessionScope::All, Some(&main.host_id), None)
         .await?;
-    if inventory.sessions.len() != 1
-        || inventory.sessions[0].session_id != expected_session_id
-        || inventory.sessions[0].cwd != cwd
-    {
+    let total = first.total;
+    let mut sessions = first.sessions;
+    let mut cursor = first.next_cursor;
+    let mut pages = 1;
+    while let Some(next) = cursor {
+        let page = client
+            .session_inventory(&cwd, SessionScope::All, Some(&main.host_id), Some(&next))
+            .await?;
+        pages += 1;
+        sessions.extend(page.sessions);
+        cursor = page.next_cursor;
+    }
+    let unique = sessions
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let Some(saved) = sessions
+        .first()
+        .filter(|saved| saved.session_id == expected_session_id && saved.cwd == cwd)
+    else {
+        return Err("the most recent saved session was not listed first".into());
+    };
+    if unique != sessions.len() || sessions.len() as u64 != total {
         return Err(format!(
-            "explicit Main inventory did not return the saved session: {:?}",
-            inventory
-                .sessions
-                .iter()
-                .map(|session| (&session.session_id, &session.cwd))
-                .collect::<Vec<_>>()
+            "pages listed {} sessions ({unique} unique) of {total}",
+            sessions.len()
         )
         .into());
     }
-    println!("explicit Main inventory decoded saved session {expected_session_id}");
+    println!(
+        "explicit Main inventory decoded saved session {expected_session_id} last={} cost={} pages={pages} sessions={}",
+        saved.last_activity_at.as_deref().unwrap_or("-"),
+        saved
+            .cost_total
+            .map_or_else(|| "-".to_owned(), |cost| cost.to_string()),
+        sessions.len()
+    );
     Ok(())
 }
 

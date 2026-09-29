@@ -92,7 +92,7 @@ import {
   MACHINES_CAPABILITY,
   WORKER_CONFIG_CAPABILITY,
   capabilityForRequest,
-  conversationViewCapability,
+  requestOptionCapabilities,
   controlRequestDescriptor,
   CONTROL_PROTOCOL_VERSION,
   createHelloAck,
@@ -110,20 +110,17 @@ import {
   type InstanceReadResult,
   type HelloError,
   type HistoryResult,
-  type SessionInventoryResult,
   parseAttachmentUploadFrame,
   parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
 } from "./protocol.js";
 import { resultWithDefaultHostId } from "./machine-route-identity.js";
+import { sessionInventoryPage } from "./session-inventory-page.js";
 import { MachineMutationEffectUnknownError, RoutedControlError } from "./machine-transport.js";
 import { isWindowsNamedPipeEndpoint, normalizeLocalEndpoint } from "./local-endpoint.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
-const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
-const MAX_SESSION_INVENTORY_DIAGNOSTIC_BYTES = 64 * 1_024;
-const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_ATTACH_EVENT_QUEUE = 1_000;
 const MAX_ATTACH_EVENT_QUEUE_BYTES = 4 * MAX_CONTROL_LINE_BYTES;
 const SOCKET_DRAIN_TIMEOUT_MS = 5_000;
@@ -644,7 +641,7 @@ export class DockHost {
       const descriptor = controlRequestDescriptor(request.type);
       if (this.state === "mutation_faulted" && descriptor.effect === "command" && !descriptor.availableDuringMutationFault) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
-      for (const capability of conversationViewCapability(request)) {
+      for (const capability of requestOptionCapabilities(request)) {
         if (!this.capabilities.has(capability)) throw new ProtocolValidationError("capability_missing", `Capability ${capability} is unavailable`);
       }
       if (request.type === "instance.create" && request.params.workerConfig !== undefined && !this.capabilities.has(WORKER_CONFIG_CAPABILITY)) {
@@ -948,7 +945,7 @@ export class DockHost {
       case "file.read": { const instance=this.registry.get(request.params.instanceId); const page=await instance.readPublishedFile(request.params.fileRef,request.params.offset); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.inventory": {
         const inventory = await this.sessionInventory.list(request.params.cwd, request.params.scope);
-        this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(inventory, request.params));
+        this.sendSuccessAndEnd(socket, request.requestId, sessionInventoryPage(inventory, request.params, request.params.cursor));
         return;
       }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.listSessions(request.params.scope)); return; }
@@ -1412,37 +1409,6 @@ function mutationOperationId(request: ControlRequest): string | undefined {
   if (controlRequestDescriptor(request.type).effect !== "command") return undefined;
   const operationId = "operationId" in request.params ? request.params.operationId : undefined;
   return typeof operationId === "string" ? operationId : undefined;
-}
-
-function boundedSessionInventory(
-  source: Awaited<ReturnType<SessionInventory["list"]>>,
-  query: SessionInventoryResult["query"],
-): SessionInventoryResult {
-  const diagnostics: SessionInventoryResult["diagnostics"] = [];
-  let diagnosticBytes = 0;
-  for (const diagnostic of source.diagnostics) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(diagnostic), "utf8") + 1;
-    if (diagnosticBytes + itemBytes > MAX_SESSION_INVENTORY_DIAGNOSTIC_BYTES) break;
-    diagnostics.push(diagnostic);
-    diagnosticBytes += itemBytes;
-  }
-  const sessions: SessionInventoryResult["sessions"] = [];
-  let bytes = 256 + diagnosticBytes;
-  for (const session of source.sessions.slice(0, MAX_SESSION_INVENTORY_ITEMS)) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(session), "utf8") + 1;
-    if (bytes + itemBytes > MAX_SESSION_INVENTORY_RESULT_BYTES) break;
-    sessions.push(session);
-    bytes += itemBytes;
-  }
-  return {
-    sessions,
-    query: { cwd: query.cwd, scope: query.scope },
-    total: source.sessions.length,
-    truncated: sessions.length < source.sessions.length,
-    incomplete: source.incomplete,
-    diagnostics,
-    diagnosticsTruncated: source.diagnosticsTruncated === true || diagnostics.length < source.diagnostics.length,
-  };
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }

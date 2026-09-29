@@ -90,7 +90,7 @@ try {
     store.setCurrentDraft('original editor'); store.flushLocalState()
     const calls = []
     globalThis[stateKey] = { invoke: async (command, args) => {
-      if (command === 'list_sessions') return { sessions: [], truncated: false, total: 0 }
+      if (command === 'list_sessions') return { sessions: [], total: 0, incomplete: false }
       calls.push({ command, args })
       assert.equal(command, 'name_session')
       return { instance: { ...work, name: 'Renamed' } }
@@ -123,7 +123,7 @@ try {
     assert.equal(store.unresolvedMutations.size, state === 'unknown' ? 1 : 0)
     const calls = []
     globalThis[stateKey] = { invoke: async (command, args) => {
-      if (command === 'list_sessions') return { sessions: [], truncated: false, total: 0 }
+      if (command === 'list_sessions') return { sessions: [], total: 0, incomplete: false }
       calls.push({ command, args })
       return { instance: { ...work, name: 'Renamed' } }
     } }
@@ -195,7 +195,7 @@ try {
     const reply = new Promise(resolve => { resolveReply = resolve })
     const calls = [], resync = []
     globalThis[stateKey] = { store, invoke: async (command, args) => {
-      if (command === 'list_sessions') return { sessions: [{ token: 'saved', name: 'Saved session', cwd: '/project' }], truncated: false, total: 1 }
+      if (command === 'list_sessions') return { sessions: [{ token: 'saved', name: 'Saved session', cwd: '/project', current: false }], total: 1, incomplete: false }
       if (command === 'session_tree') return { nodes, leafId: 'current-leaf', instance: { ...work } }
       calls.push({ command, args }); return reply
     } }
@@ -230,12 +230,46 @@ try {
     console.log(`PASS: ${operation} / event-before-reply / initiating surface completion`)
   }
 
+  // #318: Resume lists the Work's directory from the Host, one row per Session
+  // (title, then time · cost), and keeps reading pages until every Session is shown.
+  {
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, cwd: '/project', hostId: 'machine-a' })
+    const store = await createStore(work)
+    const reads = []
+    const page = { total: 2, incomplete: false, connectionId: 'connection-a', selectionGeneration: 1, hostEpoch: 'epoch-a' }
+    globalThis[stateKey] = { store, invoke: async (command, args) => {
+      assert.equal(command, 'list_sessions')
+      reads.push(args)
+      return args.cursor === null
+        ? { ...page, nextCursor: 'page-2', sessions: [{ token: 'current', name: 'Current work', cwd: '/project', lastActivityAt: '2026-09-29T12:00:00.000Z', costTotal: 1.5, current: true }] }
+        : { ...page, sessions: [{ token: 'older', firstUserMessage: '整理发布清单', cwd: '/project', lastActivityAt: '2026-09-28T12:00:00.000Z', current: false }] }
+    } }
+    const container = node('root')
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
+    mounted.mount(container); await settle()
+    assert.deepEqual(reads.map(args => [args.instanceId, args.machineHostId, args.cwd, args.cursor]), [
+      ['work-a', 'machine-a', '/project', null],
+      ['work-a', 'machine-a', '/project', 'page-2'],
+    ])
+    const rows = []
+    const collect = item => { if (item.type === 'button' && hasClass('ui-dialog-option')(item)) rows.push(item); item.children.forEach(collect) }
+    collect(container)
+    assert.equal(rows.length, 2, 'the second page is appended without another click')
+    assert.match(text(rows[0]), /Current work.*当前.*9月29日.*\$1\.50/u)
+    assert.equal(rows[0].props.disabled, true, 'the current Session cannot be resumed again')
+    assert.match(text(rows[1]), /整理发布清单.*9月28日.*-\$/u, 'an unnamed Session shows its first message; no recorded cost shows -$')
+    assert.doesNotMatch(text(rows[1]), /\/project/u, 'Resume rows omit the shared directory')
+    assert.equal(rows[1].props.disabled, false)
+    mounted.unmount()
+  }
+  console.log('PASS: Resume shows Host-listed Sessions page by page with title, time and cost')
+
   {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
     const store = await createStore(work)
     let rejectReply, operationId
     globalThis[stateKey] = { store, invoke: (command, args) => command === 'list_sessions'
-      ? Promise.resolve({ sessions: [{ token: 'saved', name: 'saved', cwd: '/project' }], total: 1, truncated: false })
+      ? Promise.resolve({ sessions: [{ token: 'saved', name: 'saved', cwd: '/project', current: false }], total: 1, incomplete: false })
       : new Promise((_resolve, reject) => { rejectReply = reject; operationId = args.operationId }) }
     const container = node('root')
     const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
@@ -255,7 +289,7 @@ try {
     store.setCurrentDraft('original before trust')
     const attempts = []
     globalThis[stateKey] = { store, invoke: async (command, args) => {
-      if (command === 'list_sessions') return { sessions: [{ token: 'saved', name: 'Saved', cwd: '/project' }], total: 1, truncated: false }
+      if (command === 'list_sessions') return { sessions: [{ token: 'saved', name: 'Saved', cwd: '/project', current: false }], total: 1, incomplete: false }
       assert.equal(command, 'switch_session')
       attempts.push(args)
       if (attempts.length === 1) throw { code: 'project_trust_required', details: { operationId: args.operationId, challengeId: 'trust-original' } }

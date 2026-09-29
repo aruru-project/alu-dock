@@ -198,6 +198,13 @@ export interface SessionDto {
   firstUserMessage?: string;
   cwd: string;
   updatedAt?: string;
+  /**
+   * Latest user/assistant message time, or the session start when it has no
+   * messages. Unlike updatedAt it does not move when a file is only renamed or copied.
+   */
+  lastActivityAt?: string;
+  /** Sum of every call cost recorded in the file; absent when none was recorded. A locating aid, not billing. */
+  costTotal?: number;
 }
 export interface SessionCompactionDto { summary: string; firstKeptEntryId: string; tokensBefore: number }
 export type SettingsChangedData = {

@@ -6,62 +6,87 @@ use crate::errors::{CommandError, lifecycle_error};
 use crate::observation::FollowState;
 use aludock_client_core::{
     ClientError, NavigateOptions, ProjectTrustDecision, SafeSessionReload, SessionCompactionResult,
-    SessionForkResult, SessionNameResult, SessionNavigateResult, SessionReplacementResult,
-    SessionScope, SessionTokenScope, SessionTokenState, SessionTree, begin_session_token_request,
-    operation_association, project_session_reload, publish_session_tokens,
-    resolve_work_session_token,
+    SessionForkResult, SessionInfo, SessionInventoryResult, SessionNameResult,
+    SessionNavigateResult, SessionReplacementResult, SessionScope, SessionTokenScope,
+    SessionTokenState, SessionTree, begin_session_token_request, operation_association,
+    project_session_reload, publish_session_tokens, resolve_work_session_token,
 };
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// One row of the saved-session list shared by Resume and "new Work from a saved Session".
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SafeSession {
+pub(crate) struct SafeSavedSession {
     pub(crate) token: String,
     pub(crate) name: Option<String>,
+    pub(crate) first_user_message: Option<String>,
     pub(crate) cwd: String,
-    pub(crate) updated_at: Option<String>,
-    pub(crate) identity: String,
+    pub(crate) last_activity_at: Option<String>,
+    pub(crate) cost_total: Option<f64>,
     pub(crate) current: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SafeSessionList {
-    pub(crate) sessions: Vec<SafeSession>,
+pub(crate) struct SafeSavedSessionPage {
+    pub(crate) sessions: Vec<SafeSavedSession>,
     pub(crate) total: u64,
-    pub(crate) truncated: bool,
-    pub(crate) connection_id: String,
-    pub(crate) selection_generation: u64,
-    pub(crate) host_epoch: String,
-    pub(crate) runtime_generation: u64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SafeInventorySession {
-    pub(crate) token: String,
-    pub(crate) name: Option<String>,
-    pub(crate) first_user_message: Option<String>,
-    pub(crate) cwd: String,
-    pub(crate) updated_at: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SafeSessionInventory {
-    pub(crate) sessions: Vec<SafeInventorySession>,
-    pub(crate) total: u64,
-    pub(crate) truncated: bool,
     pub(crate) incomplete: bool,
-    pub(crate) machine_host_id: String,
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) machine_host_id: Option<String>,
     pub(crate) connection_id: String,
-    pub(crate) host_epoch: String,
     pub(crate) selection_generation: u64,
+    pub(crate) host_epoch: String,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Replaces private session paths with list-scoped tokens for the WebView.
+fn saved_session_rows(
+    sessions: Vec<SessionInfo>,
+    current_session_id: Option<&str>,
+) -> (Vec<SafeSavedSession>, HashMap<String, String>) {
+    let mut tokens = HashMap::new();
+    let rows = sessions
+        .into_iter()
+        .map(|session| {
+            let token = uuid::Uuid::new_v4().to_string();
+            let current = current_session_id == Some(session.session_id.as_str());
+            tokens.insert(token.clone(), session.session_file);
+            SafeSavedSession {
+                token,
+                name: session.name,
+                first_user_message: session.first_user_message,
+                cwd: session.cwd,
+                last_activity_at: session.last_activity_at.or(session.updated_at),
+                cost_total: session.cost_total,
+                current,
+            }
+        })
+        .collect();
+    (rows, tokens)
+}
+
+fn saved_session_page(
+    result: SessionInventoryResult,
+    sessions: Vec<SafeSavedSession>,
+    machine_host_id: Option<String>,
+    connection_id: String,
+    selection_generation: u64,
+) -> SafeSavedSessionPage {
+    SafeSavedSessionPage {
+        sessions,
+        total: result.total,
+        incomplete: result.incomplete,
+        next_cursor: result.next_cursor,
+        machine_host_id,
+        connection_id,
+        selection_generation,
+        host_epoch: result.host_epoch,
+    }
+}
+
+/// Resume: saved sessions in the Work's own directory on the Work's machine.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn list_sessions(
@@ -73,8 +98,10 @@ pub(crate) async fn list_sessions(
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
-    scope: String,
-) -> Result<SafeSessionList, CommandError> {
+    machine_host_id: Option<String>,
+    cwd: String,
+    cursor: Option<String>,
+) -> Result<SafeSavedSessionPage, CommandError> {
     let request_id = begin_session_token_request(&state)?;
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?
@@ -87,17 +114,13 @@ pub(crate) async fn list_sessions(
             expected_runtime_generation,
         )
         .map_err(CommandError::from)?;
-    let scope_value = match scope.as_str() {
-        "cwd" => SessionScope::Cwd,
-        "all" => SessionScope::All,
-        _ => {
-            return Err(CommandError::from(ClientError::Protocol(
-                "invalid Session scope".into(),
-            )));
-        }
-    };
-    let result = client
-        .list_sessions(&instance_id, scope_value)
+    let mut result = client
+        .session_inventory(
+            &cwd,
+            SessionScope::Cwd,
+            machine_host_id.as_deref(),
+            cursor.as_deref(),
+        )
         .await
         .map_err(CommandError::from)?;
     if result.host_epoch != expected_host_epoch {
@@ -105,34 +128,12 @@ pub(crate) async fn list_sessions(
             "stale Session list was discarded".into(),
         )));
     }
-    let mut tokens = HashMap::new();
-    let sessions = result
-        .sessions
-        .into_iter()
-        .map(|session| {
-            let token = uuid::Uuid::new_v4().to_string();
-            tokens.insert(token.clone(), session.session_file);
-            let identity = session
-                .session_id
-                .chars()
-                .rev()
-                .take(12)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            SafeSession {
-                token,
-                name: session.name,
-                cwd: session.cwd,
-                updated_at: session.updated_at,
-                identity,
-                current: current
-                    .as_ref()
-                    .is_some_and(|current| session.session_id == current.executor.pi_session_id),
-            }
-        })
-        .collect();
+    let (sessions, tokens) = saved_session_rows(
+        std::mem::take(&mut result.sessions),
+        current
+            .as_ref()
+            .map(|current| current.executor.pi_session_id.as_str()),
+    );
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     publish_session_tokens(
@@ -148,18 +149,18 @@ pub(crate) async fn list_sessions(
         tokens,
     )?;
     drop(lifecycle);
-    Ok(SafeSessionList {
+    Ok(saved_session_page(
+        result,
         sessions,
-        total: result.total,
-        truncated: result.truncated,
+        machine_host_id,
         connection_id,
         selection_generation,
-        host_epoch: expected_host_epoch,
-        runtime_generation: expected_runtime_generation,
-    })
+    ))
 }
 
+/// New Work: every saved session on the selected machine.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn session_inventory(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
@@ -167,30 +168,21 @@ pub(crate) async fn session_inventory(
     state: tauri::State<'_, SessionTokenState>,
     machine_host_id: String,
     cwd: String,
-) -> Result<SafeSessionInventory, CommandError> {
+    cursor: Option<String>,
+) -> Result<SafeSavedSessionPage, CommandError> {
     let request_id = begin_session_token_request(&state)?;
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
-    let result = client
-        .session_inventory(&cwd, SessionScope::All, Some(&machine_host_id))
+    let mut result = client
+        .session_inventory(
+            &cwd,
+            SessionScope::All,
+            Some(&machine_host_id),
+            cursor.as_deref(),
+        )
         .await
         .map_err(CommandError::from)?;
-    let mut tokens = HashMap::new();
-    let sessions = result
-        .sessions
-        .into_iter()
-        .map(|session| {
-            let token = uuid::Uuid::new_v4().to_string();
-            tokens.insert(token.clone(), session.session_file);
-            SafeInventorySession {
-                token,
-                name: session.name,
-                first_user_message: session.first_user_message,
-                cwd: session.cwd,
-                updated_at: session.updated_at,
-            }
-        })
-        .collect();
+    let (sessions, tokens) = saved_session_rows(std::mem::take(&mut result.sessions), None);
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     publish_session_tokens(
@@ -205,16 +197,13 @@ pub(crate) async fn session_inventory(
         tokens,
     )?;
     drop(lifecycle);
-    Ok(SafeSessionInventory {
+    Ok(saved_session_page(
+        result,
         sessions,
-        total: result.total,
-        truncated: result.truncated,
-        incomplete: result.incomplete,
-        machine_host_id,
+        Some(machine_host_id),
         connection_id,
-        host_epoch: result.host_epoch,
         selection_generation,
-    })
+    ))
 }
 
 #[tauri::command]

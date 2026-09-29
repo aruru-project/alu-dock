@@ -172,6 +172,9 @@ export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
 export const COMPACTION_PROMPTS_CAPABILITY = "session.compaction-prompts.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
 export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
+/** `session.inventory` accepts the `nextCursor` of an earlier page to continue the same listing. */
+export const SESSION_INVENTORY_PAGES_CAPABILITY = "session.inventory.pages.v1" as const;
+export const MAX_SESSION_INVENTORY_CURSOR_CHARS = 256;
 /** One step: stop the current reply and return every waiting Queue message to the caller. */
 export const ABORT_RESTORE_QUEUE_CAPABILITY = "run.abort-restore-queue.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
@@ -222,6 +225,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "session.core",
   "session.inventory.v1",
   "session.inventory-diagnostics.v1",
+  SESSION_INVENTORY_PAGES_CAPABILITY,
   "session.reopen",
   "session.tree.v2",
   "settings.v1",
@@ -319,7 +323,7 @@ export type ControlRequest =
   | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string; view?: "references" }>
   | Request<"conversation.image", { instanceId: string; contentRef: string }>
   | Request<"file.read", { instanceId: string; fileRef: string; offset?: number }>
-  | Request<"session.inventory", { cwd: string; scope: "cwd" | "all"; hostId?: string }>
+  | Request<"session.inventory", { cwd: string; scope: "cwd" | "all"; hostId?: string; cursor?: string }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
   | Request<"session.switch", { operationId: string; instanceId: string; sessionFile: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"session.new", { operationId: string; instanceId: string; parentSession?: string }>
@@ -672,6 +676,8 @@ export interface SessionInventoryResult {
   incomplete: boolean;
   diagnostics: Array<{ message: string; path?: string }>;
   diagnosticsTruncated: boolean;
+  /** Present while later sessions remain; pass it back as `cursor` to read the next page. */
+  nextCursor?: string;
 }
 export interface HistoryResult { historyRevision: number; entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
 export type ConversationHistoryResult = ConversationHistoryPageDto;
@@ -733,8 +739,9 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 /** Explicit request options, not hello advertisement, select additional delivery contracts. */
-export function conversationViewCapability(request: ControlRequest): string[] {
+export function requestOptionCapabilities(request: ControlRequest): string[] {
   if (usesInstanceRecords(request)) return [INSTANCE_RECORDS_CAPABILITY];
+  if (request.type === "session.inventory" && request.params.cursor !== undefined) return [SESSION_INVENTORY_PAGES_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
@@ -1168,11 +1175,17 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { instanceId: instanceId(), fileRef: string(params.fileRef, "params.fileRef", MAX_PUBLISHED_FILE_REF_CHARS, "invalid_request"), offset } };
     }
     case "session.inventory": {
-      exact(params, ["cwd", "scope", "hostId"], "invalid_request");
+      exact(params, ["cwd", "scope", "hostId", "cursor"], "invalid_request");
       const cwd = string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request");
       if (!isPortableAbsoluteLocalPath(cwd)) throw validation("invalid_request", "params.cwd must be absolute");
       const selectedHost = hostId();
-      return { ...base, type, params: { cwd, scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }) } };
+      const cursor = optionalString(params.cursor, "params.cursor", MAX_SESSION_INVENTORY_CURSOR_CHARS, "invalid_request");
+      return { ...base, type, params: {
+        cwd,
+        scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request"),
+        ...(selectedHost === undefined ? {} : { hostId: selectedHost }),
+        ...(cursor === undefined ? {} : { cursor }),
+      } };
     }
     case "session.list": exact(params, ["instanceId", "scope"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
     case "session.switch": {
@@ -1796,7 +1809,7 @@ export function parseSessionsResult(input: unknown): SessionsResult {
 
 export function parseSessionInventoryResult(input: unknown): SessionInventoryResult {
   const value = object(input, "session inventory result");
-  exact(value, ["sessions", "query", "total", "truncated", "incomplete", "diagnostics", "diagnosticsTruncated"]);
+  exact(value, ["sessions", "query", "total", "truncated", "incomplete", "diagnostics", "diagnosticsTruncated", "nextCursor"]);
   const query = object(value.query, "query"); exact(query, ["cwd", "scope"]);
   const sessions = parseSessionDtos(value.sessions);
   const total = unsigned(value.total, "total");
@@ -1812,6 +1825,7 @@ export function parseSessionInventoryResult(input: unknown): SessionInventoryRes
   const diagnosticsTruncated = value.diagnosticsTruncated === undefined ? false : boolean(value.diagnosticsTruncated, "diagnosticsTruncated");
   if (total < sessions.length || truncated !== (sessions.length < total)) throw validation("invalid_response", "Session inventory truncation metadata is inconsistent");
   if (!incomplete && (diagnostics.length > 0 || diagnosticsTruncated)) throw validation("invalid_response", "Complete session inventory cannot carry scan diagnostics");
+  const nextCursor = optionalString(value.nextCursor, "nextCursor", MAX_SESSION_INVENTORY_CURSOR_CHARS);
   return {
     sessions,
     query: {
@@ -1823,12 +1837,13 @@ export function parseSessionInventoryResult(input: unknown): SessionInventoryRes
     incomplete,
     diagnostics,
     diagnosticsTruncated,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
   };
 }
 
 function parseSessionDtos(input: unknown): SessionDto[] {
   const sessions = array(input, "sessions", MAX_COLLECTION).map((item, index) => {
-    const session = object(item, `sessions[${index}]`); exact(session, ["sessionId", "sessionFile", "name", "firstUserMessage", "cwd", "updatedAt"]);
+    const session = object(item, `sessions[${index}]`); exact(session, ["sessionId", "sessionFile", "name", "firstUserMessage", "cwd", "updatedAt", "lastActivityAt", "costTotal"]);
     return {
       sessionId: id(session.sessionId, `sessions[${index}].sessionId`),
       sessionFile: string(session.sessionFile, `sessions[${index}].sessionFile`, MAX_CONTROL_CWD_CHARS),
@@ -1838,6 +1853,8 @@ function parseSessionDtos(input: unknown): SessionDto[] {
       }),
       cwd: string(session.cwd, `sessions[${index}].cwd`, MAX_CONTROL_CWD_CHARS),
       updatedAt: session.updatedAt === undefined ? undefined : timestamp(session.updatedAt, `sessions[${index}].updatedAt`),
+      ...(session.lastActivityAt === undefined ? {} : { lastActivityAt: timestamp(session.lastActivityAt, `sessions[${index}].lastActivityAt`) }),
+      ...(session.costTotal === undefined ? {} : { costTotal: finiteNumber(session.costTotal, `sessions[${index}].costTotal`) }),
     };
   });
   if (new Set(sessions.map((session) => session.sessionId)).size !== sessions.length) throw validation("invalid_response", "Session IDs must be unique");

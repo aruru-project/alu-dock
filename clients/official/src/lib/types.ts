@@ -404,34 +404,25 @@ export type InteractionResponse =
   | { method: 'select' | 'input' | 'editor'; value: string }
   | { method: 'confirm'; confirmed: boolean }
 
-export interface SessionInfo {
-  token: string
-  name?: string
-  cwd: string
-  updatedAt?: string
-  identity: string
-  current: boolean
-}
-export interface SessionListResult extends ConnectionContext {
-  sessions: SessionInfo[]
-  total: number
-  truncated: boolean
-  hostEpoch: string
-  runtimeGeneration: number
-}
-export interface SessionInventoryInfo {
+/** One saved Session in the list shared by Resume and "new Work from a saved Session". */
+export interface SavedSession {
   token: string
   name?: string
   firstUserMessage?: string
   cwd: string
-  updatedAt?: string
+  /** Latest conversation time (older Hosts: last file change). */
+  lastActivityAt?: string
+  /** Recorded call costs summed over the Session; absent when none were recorded. */
+  costTotal?: number
+  current: boolean
 }
-export interface SessionInventoryResult extends ConnectionContext {
-  sessions: SessionInventoryInfo[]
+export interface SavedSessionPage extends ConnectionContext {
+  sessions: SavedSession[]
   total: number
-  truncated: boolean
   incomplete: boolean
-  machineHostId: string
+  /** Present while later Sessions remain; pass it back to read the next page. */
+  nextCursor?: string
+  machineHostId?: string
   hostEpoch: string
 }
 export interface SessionReplacementResult { cancelled: boolean; instance: Work }

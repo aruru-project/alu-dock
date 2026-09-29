@@ -355,7 +355,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
         expectedHostEpoch: work.ownerHostEpoch ?? '',
         expectedRuntimeGeneration: work.runtimeGeneration,
       })
-      if (domain === 'sessions') await currentConnectionCall(app, (context) => listSessions(sessionContext(context), 'cwd'))
+      if (domain === 'sessions') await currentConnectionCall(app, (context) => listSessions(sessionContext(context), { machineHostId: work.hostId, cwd: work.cwd }))
       else await currentConnectionCall(app, (context) => loadSessionTree(sessionContext(context)))
       return true
     }

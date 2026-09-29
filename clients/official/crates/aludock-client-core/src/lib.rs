@@ -124,11 +124,10 @@ pub use sessions::{
     ConversationHistoryEntry, ConversationHistoryPage, ConversationReadContext, NavigateOptions,
     SessionChange, SessionCompaction, SessionCompactionResult, SessionForkResult,
     SessionHistoryPage, SessionInfo, SessionInventoryDiagnostic, SessionInventoryResult,
-    SessionListResult, SessionNameResult, SessionNavigateResult, SessionReloadResult,
-    SessionReplacementResult, SessionScope, SessionTokenScope, SessionTokenState, SessionTree,
-    TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,
-    begin_session_token_request, publish_session_tokens, resolve_machine_session_token,
-    resolve_work_session_token,
+    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
+    SessionScope, SessionTokenScope, SessionTokenState, SessionTree, TreeDisplayClass, TreeNode,
+    TreeNodeKind, TreeNodeRole, TreeNodeState, begin_session_token_request, publish_session_tokens,
+    resolve_machine_session_token, resolve_work_session_token,
 };
 pub use storage::{IdentityStore, PairingMetadata, StoredPairing};
 pub use workspace_files::{

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   mkdir,
@@ -24,16 +24,18 @@ import type {
   SessionInventoryScan,
 } from "../core/session-inventory.js";
 
-const CACHE_SCHEMA_VERSION = 1;
+const CACHE_SCHEMA_VERSION = 2;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_CACHE_RECORDS = 100_000;
 const HEADER_READ_BYTES = 64 * 1024;
-const NAME_LINE_BYTES = 64 * 1024;
-const NAME_SCAN_CHUNK_BYTES = 1024 * 1024;
 const SCAN_CONCURRENCY = 4;
-const SESSION_INFO_TOKEN = Buffer.from('"session_info"', "utf8");
-const FIRST_MESSAGE_SCAN_CHUNK_BYTES = 256 * 1024;
-const MAX_FIRST_MESSAGE_LINE_BYTES = 1024 * 1024;
+const ENTRY_SCAN_CHUNK_BYTES = 1024 * 1024;
+/** Enough of an entry line to see its type and message role before buffering the rest. */
+const ENTRY_HEAD_BYTES = 512;
+/** Longer entries (pasted images, huge tool output) are skipped; the assistant reply after them still dates the session. */
+const MAX_ENTRY_LINE_BYTES = 4 * 1024 * 1024;
+/** Bytes before the resume point that must be unchanged for a larger file to count as appended to. */
+const APPEND_CHECK_BYTES = 256;
 const MAX_INVENTORY_DIAGNOSTICS = 100;
 
 interface SessionInventoryCacheRecord {
@@ -45,12 +47,21 @@ interface SessionInventoryCacheRecord {
   sessionId: string;
   cwd: string;
   name: string | null;
+  startedAtMs: number | null;
+  /** Latest user/assistant message time, as Pi dates session activity. */
+  lastActivityMs: number | null;
+  /** Null until some assistant message records a cost. */
+  costTotal: number | null;
+  /** End of the last complete line folded into the fields above; appends resume here. */
+  scannedBytes: number;
+  /** Digest of the bytes just before scannedBytes; Pi rewrites (migrations) change it and force a full rescan. */
+  scannedTail: string;
   /** In-memory only: session content is never copied into the durable metadata cache. */
   firstUserMessage?: string | null;
 }
 
 interface SessionInventoryCacheFile {
-  schemaVersion: 1;
+  schemaVersion: typeof CACHE_SCHEMA_VERSION;
   sessionsRoot: string;
   records: SessionInventoryCacheRecord[];
 }
@@ -130,11 +141,11 @@ class PiSessionMetadataIndex {
       }
     }
 
+    // The Host orders and pages the listing; see sessionInventoryPage.
     const sessions = files
       .map((path) => this.records.get(path))
       .filter((record): record is SessionInventoryCacheRecord => record !== undefined)
-      .map(projectSession)
-      .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "") || left.sessionFile.localeCompare(right.sessionFile));
+      .map(projectSession);
     return {
       sessions,
       incomplete: diagnostics.length > 0,
@@ -147,7 +158,7 @@ class PiSessionMetadataIndex {
     if (this.loaded) return;
     this.loaded = true;
     if (!this.cachePath) return;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let handle: FileHandle | undefined;
     try {
       handle = await open(this.cachePath, constants.O_RDONLY | noFollowFlag());
       await hardenWindowsPrivatePath(this.cachePath, false);
@@ -177,7 +188,7 @@ class PiSessionMetadataIndex {
     const directory = dirname(this.cachePath);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const temporary = join(directory, `.session-inventory-v1.tmp-${process.pid}-${randomUUID()}`);
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let handle: FileHandle | undefined;
     try {
       handle = await open(temporary, "wx", 0o600);
       await handle.writeFile(bytes, "utf8");
@@ -198,7 +209,7 @@ async function refreshRecord(
   path: string,
   previous: SessionInventoryCacheRecord | undefined,
 ): Promise<{ record?: SessionInventoryCacheRecord; diagnostic?: SessionInventoryDiagnostic }> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let handle: FileHandle | undefined;
   try {
     handle = await open(path, constants.O_RDONLY | noFollowFlag());
     const info = await handle.stat();
@@ -209,8 +220,10 @@ async function refreshRecord(
       && previous.ino === info.ino
       && previous.size === info.size
       && previous.mtimeMs === info.mtimeMs
-      && previous.firstUserMessage !== undefined
-    ) return { record: previous };
+    ) {
+      if (previous.firstUserMessage !== undefined) return { record: previous };
+      return { record: { ...previous, firstUserMessage: (await findFirstUserMessage(handle, info.size)) ?? null } };
+    }
 
     const header = await readSessionHeader(handle, info.size);
     if (!header) return { diagnostic: inventoryDiagnostic(path, "Persisted session has an invalid or oversized Pi header") };
@@ -218,16 +231,14 @@ async function refreshRecord(
       && previous.dev === info.dev
       && previous.ino === info.ino
       && info.size > previous.size
+      && previous.scannedBytes <= info.size
       && header.sessionId === previous.sessionId
-      && header.cwd === previous.cwd;
-    const nameResult = await findLatestSessionName(
-      handle,
-      appendOnly ? Math.max(0, previous.size - NAME_LINE_BYTES) : 0,
-      info.size,
-    );
-    const firstUserMessage = appendOnly && previous.firstUserMessage
-      ? previous.firstUserMessage
-      : await findFirstUserMessage(handle, info.size);
+      && header.cwd === previous.cwd
+      && await tailDigest(handle, previous.scannedBytes) === previous.scannedTail;
+    const summary: EntrySummary = appendOnly
+      ? { name: previous.name, lastActivityMs: previous.lastActivityMs, costTotal: previous.costTotal, firstUserMessage: previous.firstUserMessage }
+      : { name: null, lastActivityMs: null, costTotal: null, firstUserMessage: null };
+    const scannedBytes = await summarizeEntries(handle, appendOnly ? previous.scannedBytes : 0, info.size, summary);
     return { record: {
       path: resolve(path),
       dev: info.dev,
@@ -236,8 +247,16 @@ async function refreshRecord(
       mtimeMs: info.mtimeMs,
       sessionId: header.sessionId,
       cwd: header.cwd,
-      name: nameResult.found ? (nameResult.name ?? null) : (appendOnly ? previous.name : null),
-      firstUserMessage: firstUserMessage ?? null,
+      name: summary.name,
+      startedAtMs: header.startedAtMs,
+      lastActivityMs: summary.lastActivityMs,
+      costTotal: summary.costTotal,
+      scannedBytes,
+      scannedTail: await tailDigest(handle, scannedBytes),
+      // An append after a Host restart does not revisit the file start, so look the preview up once.
+      firstUserMessage: summary.firstUserMessage === undefined
+        ? (await findFirstUserMessage(handle, info.size)) ?? null
+        : summary.firstUserMessage,
     } };
   } catch (error) {
     return { diagnostic: inventoryDiagnostic(path, `Persisted session could not be read: ${errorText(error)}`) };
@@ -246,10 +265,19 @@ async function refreshRecord(
   }
 }
 
+type FileHandle = Awaited<ReturnType<typeof open>>;
+
+async function tailDigest(handle: FileHandle, end: number): Promise<string> {
+  const start = Math.max(0, end - APPEND_CHECK_BYTES);
+  const buffer = Buffer.alloc(end - start);
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+  return createHash("sha256").update(buffer.subarray(0, bytesRead)).digest("hex");
+}
+
 async function readSessionHeader(
-  handle: Awaited<ReturnType<typeof open>>,
+  handle: FileHandle,
   fileSize: number,
-): Promise<{ sessionId: string; cwd: string } | undefined> {
+): Promise<{ sessionId: string; cwd: string; startedAtMs: number | null } | undefined> {
   const length = Math.min(fileSize, HEADER_READ_BYTES);
   if (length < 1) return undefined;
   const buffer = Buffer.allocUnsafe(length);
@@ -263,127 +291,151 @@ async function readSessionHeader(
     const sessionId = boundedText(value.id, 128);
     const cwd = boundedText(value.cwd, 16_384);
     if (sessionId.length === 0) return undefined;
-    return { sessionId, cwd };
+    const startedAtMs = typeof value.timestamp === "string" ? Date.parse(value.timestamp) : Number.NaN;
+    return { sessionId, cwd, startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : null };
   } catch {
     return undefined;
   }
 }
 
-async function findFirstUserMessage(
-  handle: Awaited<ReturnType<typeof open>>,
-  fileSize: number,
-): Promise<string | undefined> {
-  let cursor = 0;
-  let parts: Buffer[] = [];
-  let lineBytes = 0;
-  let lineOversized = false;
-  while (cursor < fileSize) {
-    const chunk = Buffer.allocUnsafe(Math.min(FIRST_MESSAGE_SCAN_CHUNK_BYTES, fileSize - cursor));
-    const { bytesRead } = await handle.read(chunk, 0, chunk.length, cursor);
-    if (bytesRead < 1) break;
-    cursor += bytesRead;
-    let start = 0;
-    for (let index = 0; index < bytesRead; index += 1) {
-      if (chunk[index] !== 0x0a) continue;
-      const segment = chunk.subarray(start, index);
-      if (!lineOversized && lineBytes + segment.length <= MAX_FIRST_MESSAGE_LINE_BYTES) {
-        parts.push(segment);
-        lineBytes += segment.length;
-        const firstUserMessage = firstUserMessageFromLine(Buffer.concat(parts, lineBytes));
-        if (firstUserMessage) return firstUserMessage;
-      }
-      parts = [];
-      lineBytes = 0;
-      lineOversized = false;
-      start = index + 1;
-    }
-    const tail = chunk.subarray(start, bytesRead);
-    if (!lineOversized) {
-      if (lineBytes + tail.length <= MAX_FIRST_MESSAGE_LINE_BYTES) {
-        parts.push(tail);
-        lineBytes += tail.length;
-      } else {
-        parts = [];
-        lineBytes = 0;
-        lineOversized = true;
-      }
-    }
-  }
-  if (!lineOversized && lineBytes > 0) return firstUserMessageFromLine(Buffer.concat(parts, lineBytes));
-  return undefined;
+interface EntrySummary {
+  name: string | null;
+  lastActivityMs: number | null;
+  costTotal: number | null;
+  /** Undefined when an earlier part of the file was summarized before this Host started. */
+  firstUserMessage: string | null | undefined;
 }
 
-function firstUserMessageFromLine(line: Buffer): string | undefined {
-  try {
-    const entry = JSON.parse(line.toString("utf8")) as unknown;
-    if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "user") return undefined;
-    const content = entry.message.content;
-    const text = typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content.flatMap((block) => isRecord(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []).join(" ")
-        : "";
-    return boundedOptionalText(text.replace(/\s+/gu, " "), MAX_SESSION_FIRST_USER_MESSAGE_CHARS);
-  } catch {
-    return undefined;
-  }
+/** Fold complete entry lines in [start, end) into the summary; returns where the next scan resumes. */
+async function summarizeEntries(handle: FileHandle, start: number, end: number, summary: EntrySummary): Promise<number> {
+  return scanEntryLines(handle, start, end, mayCarrySummary, (entry) => {
+    if (entry.type === "session_info") {
+      summary.name = typeof entry.name === "string" ? boundedOptionalText(entry.name, 256) ?? null : null;
+      return false;
+    }
+    const message = conversationMessage(entry);
+    if (!message) return false;
+    const activity = typeof message.timestamp === "number" ? message.timestamp : Date.parse(String(entry.timestamp));
+    if (Number.isFinite(activity)) summary.lastActivityMs = Math.max(summary.lastActivityMs ?? activity, activity);
+    if (message.role === "user" && summary.firstUserMessage === null) summary.firstUserMessage = userMessageText(message) ?? null;
+    if (message.role === "assistant") {
+      const cost = isRecord(message.usage) && isRecord(message.usage.cost) ? message.usage.cost.total : undefined;
+      if (typeof cost === "number" && Number.isFinite(cost)) summary.costTotal = (summary.costTotal ?? 0) + cost;
+    }
+    return false;
+  });
 }
 
-async function findLatestSessionName(
-  handle: Awaited<ReturnType<typeof open>>,
+async function findFirstUserMessage(handle: FileHandle, fileSize: number): Promise<string | undefined> {
+  let firstUserMessage: string | undefined;
+  await scanEntryLines(handle, 0, fileSize, (head) => mayCarrySummary(head, "user"), (entry) => {
+    const message = conversationMessage(entry);
+    if (message?.role !== "user") return false;
+    firstUserMessage = userMessageText(message);
+    return firstUserMessage !== undefined;
+  });
+  return firstUserMessage;
+}
+
+/**
+ * Pi writes one JSON entry per line. Most bytes are tool results, so a line is
+ * only buffered and parsed when its head may be a user/assistant message or a
+ * session name; an unfamiliar layout is parsed rather than guessed.
+ */
+function mayCarrySummary(head: string, role?: "user"): boolean {
+  const type = /^\{"type":"([^"]*)"/u.exec(head)?.[1];
+  if (type === undefined) return true;
+  if (type === "session_info") return role === undefined;
+  if (type !== "message") return false;
+  const messageRole = /"message":\{"role":"([^"]*)"/u.exec(head)?.[1];
+  if (messageRole === undefined) return true;
+  if (messageRole !== "user" && messageRole !== "assistant") return false;
+  return role === undefined || messageRole === role;
+}
+
+async function scanEntryLines(
+  handle: FileHandle,
   start: number,
   end: number,
-): Promise<{ found: boolean; name?: string }> {
-  let cursor = end;
-  let suffix = Buffer.alloc(0);
-  while (cursor > start) {
-    const chunkStart = Math.max(start, cursor - NAME_SCAN_CHUNK_BYTES);
-    const chunk = Buffer.allocUnsafe(cursor - chunkStart);
-    const { bytesRead } = await handle.read(chunk, 0, chunk.length, chunkStart);
+  wanted: (head: string) => boolean,
+  visit: (entry: Record<string, unknown>) => boolean,
+): Promise<number> {
+  let cursor = start;
+  let consumed = start;
+  let parts: Buffer[] = [];
+  let lineBytes = 0;
+  let decision: boolean | undefined;
+  const chunk = Buffer.allocUnsafe(Math.min(ENTRY_SCAN_CHUNK_BYTES, Math.max(1, end - start)));
+  while (cursor < end) {
+    const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, end - cursor), cursor);
     if (bytesRead < 1) break;
-    const current = chunk.subarray(0, bytesRead);
-    const searchable = suffix.length === 0 ? current : Buffer.concat([current, suffix]);
-    let index = searchable.lastIndexOf(SESSION_INFO_TOKEN);
-    while (index >= 0) {
-      if (index < current.length) {
-        const candidate = await readMetadataLine(handle, chunkStart + index, end);
-        if (candidate?.type === "session_info" && (candidate.name === undefined || typeof candidate.name === "string")) {
-          const name = typeof candidate.name === "string" ? boundedOptionalText(candidate.name, 256) : undefined;
-          return { found: true, ...(name === undefined ? {} : { name }) };
+    let segmentStart = 0;
+    while (segmentStart < bytesRead) {
+      const newline = chunk.subarray(segmentStart, bytesRead).indexOf(0x0a);
+      const segmentEnd = newline < 0 ? bytesRead : segmentStart + newline;
+      if (decision !== false) {
+        const segment = chunk.subarray(segmentStart, segmentEnd);
+        if (lineBytes + segment.length > MAX_ENTRY_LINE_BYTES) {
+          decision = false;
+          parts = [];
+        } else {
+          parts.push(Buffer.from(segment));
+          lineBytes += segment.length;
+          if (decision === undefined && lineBytes >= ENTRY_HEAD_BYTES) decision = wanted(Buffer.concat(parts, lineBytes).toString("utf8", 0, ENTRY_HEAD_BYTES));
+          if (decision === false) parts = [];
         }
       }
-      index = searchable.lastIndexOf(SESSION_INFO_TOKEN, index - 1);
+      if (newline < 0) break;
+      const line = decision === false ? undefined : Buffer.concat(parts, lineBytes);
+      consumed = cursor + segmentEnd + 1;
+      parts = [];
+      lineBytes = 0;
+      const keep = decision ?? (line !== undefined && wanted(line.toString("utf8", 0, ENTRY_HEAD_BYTES)));
+      decision = undefined;
+      segmentStart = segmentEnd + 1;
+      if (!keep || line === undefined || line.length === 0) continue;
+      const entry = parseEntry(line);
+      if (entry && visit(entry)) return consumed;
     }
-    suffix = current.subarray(0, Math.min(SESSION_INFO_TOKEN.length - 1, current.length));
-    cursor = chunkStart;
+    cursor += bytesRead;
   }
-  return { found: false };
+  // A final line without its newline is either a write still in progress (not
+  // valid JSON yet, so it is read again later) or a finished entry that a later
+  // append will separate with a newline first.
+  if (lineBytes > 0 && decision !== false) {
+    const line = Buffer.concat(parts, lineBytes);
+    const entry = parseEntry(line);
+    if (entry) {
+      consumed = cursor;
+      if (decision ?? wanted(line.toString("utf8", 0, ENTRY_HEAD_BYTES))) visit(entry);
+    }
+  }
+  return consumed;
 }
 
-async function readMetadataLine(
-  handle: Awaited<ReturnType<typeof open>>,
-  tokenOffset: number,
-  fileSize: number,
-): Promise<Record<string, unknown> | undefined> {
-  const start = Math.max(0, tokenOffset - NAME_LINE_BYTES);
-  const end = Math.min(fileSize, tokenOffset + SESSION_INFO_TOKEN.length + NAME_LINE_BYTES);
-  const buffer = Buffer.allocUnsafe(end - start);
-  const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-  const tokenIndex = tokenOffset - start;
-  const before = buffer.subarray(0, Math.min(tokenIndex, bytesRead));
-  const previousNewline = before.lastIndexOf(0x0a);
-  if (previousNewline < 0 && start > 0) return undefined;
-  const lineStart = previousNewline < 0 ? 0 : previousNewline + 1;
-  const nextNewline = buffer.subarray(tokenIndex, bytesRead).indexOf(0x0a);
-  if (nextNewline < 0 && start + bytesRead < fileSize) return undefined;
-  const lineEnd = nextNewline < 0 ? bytesRead : tokenIndex + nextNewline;
-  if (lineEnd - lineStart > NAME_LINE_BYTES) return undefined;
+function parseEntry(line: Buffer): Record<string, unknown> | undefined {
   try {
-    const value = JSON.parse(buffer.toString("utf8", lineStart, lineEnd)) as unknown;
+    const value = JSON.parse(line.toString("utf8")) as unknown;
     return isRecord(value) ? value : undefined;
   } catch {
     return undefined;
   }
+}
+
+function conversationMessage(entry: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (entry.type !== "message" || !isRecord(entry.message)) return undefined;
+  const message = entry.message;
+  return (message.role === "user" || message.role === "assistant") && "content" in message ? message : undefined;
+}
+
+function userMessageText(message: Record<string, unknown>): string | undefined {
+  const content = message.content;
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content.flatMap((block) => isRecord(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []).join(" ")
+      : "";
+  return boundedOptionalText(text.replace(/\s+/gu, " "), MAX_SESSION_FIRST_USER_MESSAGE_CHARS);
 }
 
 interface SessionFileDiscovery {
@@ -434,6 +486,8 @@ function projectSession(record: SessionInventoryCacheRecord): SessionDto {
     ...(record.firstUserMessage ? { firstUserMessage: record.firstUserMessage } : {}),
     cwd: record.cwd,
     updatedAt: new Date(record.mtimeMs).toISOString(),
+    lastActivityAt: new Date(record.lastActivityMs ?? record.startedAtMs ?? record.mtimeMs).toISOString(),
+    ...(record.costTotal === null ? {} : { costTotal: record.costTotal }),
   };
 }
 
@@ -458,6 +512,15 @@ function parseCache(input: unknown, sessionsRoot: string): SessionInventoryCache
       || typeof item.sessionId !== "string"
       || typeof item.cwd !== "string"
       || (item.name !== null && typeof item.name !== "string")
+      || !nullableFinite(item.startedAtMs)
+      || !nullableFinite(item.lastActivityMs)
+      || !nullableFinite(item.costTotal)
+      || typeof item.scannedBytes !== "number"
+      || !Number.isSafeInteger(item.scannedBytes)
+      || item.scannedBytes < 0
+      || item.scannedBytes > item.size
+      || typeof item.scannedTail !== "string"
+      || !/^[0-9a-f]{64}$/u.test(item.scannedTail)
     ) return [];
     records.push({
       path: resolve(item.path),
@@ -468,9 +531,18 @@ function parseCache(input: unknown, sessionsRoot: string): SessionInventoryCache
       sessionId: boundedText(item.sessionId, 128),
       cwd: boundedText(item.cwd, 16_384),
       name: item.name === null ? null : boundedOptionalText(item.name, 256) ?? null,
+      startedAtMs: item.startedAtMs as number | null,
+      lastActivityMs: item.lastActivityMs as number | null,
+      costTotal: item.costTotal as number | null,
+      scannedBytes: item.scannedBytes,
+      scannedTail: item.scannedTail,
     });
   }
   return records;
+}
+
+function nullableFinite(value: unknown): boolean {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
 }
 
 function sameRecord(
@@ -485,7 +557,12 @@ function sameRecord(
     && left.mtimeMs === right.mtimeMs
     && left.sessionId === right.sessionId
     && left.cwd === right.cwd
-    && left.name === right.name;
+    && left.name === right.name
+    && left.startedAtMs === right.startedAtMs
+    && left.lastActivityMs === right.lastActivityMs
+    && left.costTotal === right.costTotal
+    && left.scannedBytes === right.scannedBytes
+    && left.scannedTail === right.scannedTail;
 }
 
 function isWithin(root: string, path: string): boolean {

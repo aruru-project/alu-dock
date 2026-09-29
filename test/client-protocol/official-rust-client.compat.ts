@@ -9,7 +9,7 @@ import test from "node:test";
 const SESSION_ID = "00000000-0000-4000-8000-000000002609";
 
 /** Cross-runtime gate. Intentionally not named *.test.ts; ordinary npm test stays Node-only. */
-test("official Rust client lists saved sessions for an explicitly selected Main", { timeout: 60_000 }, async (context) => {
+test("official Rust client pages through saved sessions, newest conversation first with time and cost, for an explicitly selected Main", { timeout: 60_000 }, async (context) => {
   assert.equal(process.platform, "linux", "test:client-protocol requires Linux isolated Unix-socket process semantics");
   const root = await mkdtemp(join(tmpdir(), "alu-dock-client-protocol-"));
   const home = join(root, "home");
@@ -33,7 +33,14 @@ test("official Rust client lists saved sessions for an explicitly selected Main"
       { type: "session", version: 3, id: SESSION_ID, timestamp: "2026-09-05T00:00:00.000Z", cwd: workspace },
       { type: "session_info", id: "info-1", parentId: null, timestamp: "2026-09-05T00:00:01.000Z", name: "Protocol gate saved session" },
       { type: "message", id: "message-1", parentId: "info-1", timestamp: "2026-09-05T00:00:02.000Z", message: { role: "user", content: "restore protocol gate", timestamp: 1 } },
+      { type: "message", id: "message-2", parentId: "message-1", timestamp: "2026-09-05T00:00:03.000Z", message: { role: "assistant", content: [{ type: "text", text: "restored" }], usage: { cost: { total: 0.42 } }, timestamp: Date.parse("2026-09-05T00:00:03.000Z") } },
     ].map((line) => JSON.stringify(line)).join("\n")}\n`, { mode: 0o600 });
+    // Older sessions than one Host page holds, so the client has to continue.
+    await Promise.all(Array.from({ length: 2_000 }, (_, index) => writeFile(
+      join(sessions, `older-${index}.jsonl`),
+      `${JSON.stringify({ type: "session", version: 3, id: `older-${index}`, timestamp: "2026-08-01T00:00:00.000Z", cwd: workspace })}\n`,
+      { mode: 0o600 },
+    )));
 
     const hostEnvironment = isolatedEnvironment(root, home, agentDir);
     host = spawn(process.execPath, ["dist/src/cli.js", "--socket", socket, "serve", "--dev", "--state", state], {
@@ -47,7 +54,7 @@ test("official Rust client lists saved sessions for an explicitly selected Main"
     const reader = join(targetDirectory, "debug", "examples", "protocol_inventory");
     const result = await run(reader, [socket, identity, workspace, SESSION_ID], process.env, context.signal);
     assert.equal(result.code, 0, `official Rust client failed:\n${result.stderr}`);
-    assert.match(result.stdout, new RegExp(`decoded saved session ${SESSION_ID}`));
+    assert.match(result.stdout, new RegExp(`decoded saved session ${SESSION_ID} last=2026-09-05T00:00:03.000Z cost=0.42 pages=2 sessions=2001`));
   } finally {
     await stopChild(host);
     await rm(root, { recursive: true, force: true });

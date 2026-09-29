@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { FolderOpen, History, RotateCcw } from '@lucide/vue'
+import { FolderOpen, RotateCcw } from '@lucide/vue'
 import {
   adoptSession,
   createWork,
@@ -22,14 +22,15 @@ import {
   machineWorkspaceStart,
   workspaceChildPath,
 } from '../lib/machines'
-import { treeNodeTime } from '../lib/sessionTree'
+import { useSavedSessionPages } from '../lib/savedSessions'
 import type { DirectoryPage } from '../lib/workspaceBrowser'
-import type { MachineDto, SystemCandidate, SystemCatalogCursor, SessionInventoryInfo, SessionInventoryResult, Work, WorkspaceCursor } from '../lib/types'
+import type { MachineDto, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import AluSelect from './AluSelect.vue'
 import DirectoryBrowser from './DirectoryBrowser.vue'
 import ResourceDocument from './ResourceDocument.vue'
+import SavedSessionList from './SavedSessionList.vue'
 
 type View = 'launcher' | 'browse' | 'sessions' | 'systems' | 'system-content'
 type DialogError = UserErrorPresentation & { copyState?: 'copied' | 'failed' }
@@ -64,9 +65,7 @@ const machineHostId = ref('')
 const browseStartPath = ref('')
 const browseVersion = ref(0)
 const workspacePath = ref('')
-const inventory = ref<SessionInventoryResult | null>(null)
-const sessionSearch = ref('')
-const inventoryLoading = ref(false)
+const sessionPages = useSavedSessionPages()
 const pending = ref<'create' | 'adopt' | 'save' | ''>('')
 const error = ref<DialogError | null>(null)
 const trust = ref<TrustAttempt | null>(null)
@@ -103,19 +102,11 @@ const workspaceRootOptions = computed(() => {
   ]
 })
 const recentWorkspaces = computed(() => machineHostId.value ? app.recentWorkspaces(machineHostId.value) : [])
-const filteredSessions = computed(() => {
-  const query = sessionSearch.value.trim().toLocaleLowerCase()
-  return inventory.value?.sessions.filter((session) => !query || sessionSearchText(session).includes(query)) ?? []
-})
 const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
   if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
   if (view.value === 'browse') return workspacePath.value
-  if (view.value === 'sessions' && inventory.value) {
-    return inventory.value.truncated
-      ? `当前显示 ${inventory.value.sessions.length} / ${inventory.value.total} 个 Session`
-      : `${inventory.value.total} 个保存的 Session`
-  }
+  if (view.value === 'sessions' && sessionPages.loaded.value) return `${sessionPages.total.value} 个保存的 Session`
   return machine.value?.homePath || ''
 })
 const actionBusy = computed(() => props.machinesLoading || !!pending.value || !!trust.value)
@@ -136,13 +127,13 @@ watch([
 ], () => {
   resetSystems()
   ++inventoryEpoch
-  inventory.value = null
+  sessionPages.reset()
   trust.value = null
   view.value = 'launcher'
   clearError()
 }, { flush: 'sync' })
 
-onUnmounted(() => { ++inventoryEpoch; ++systemEpoch })
+onUnmounted(() => { ++inventoryEpoch; ++systemEpoch; sessionPages.reset() })
 
 function resetSystems() {
   ++systemEpoch
@@ -263,14 +254,6 @@ async function confirmSystem() {
   if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection.workerConfig)
 }
 
-function sessionSearchText(session: SessionInventoryInfo) {
-  return `${session.name ?? ''} ${session.firstUserMessage ?? ''} ${session.cwd}`.toLocaleLowerCase()
-}
-
-function sessionLabel(session: SessionInventoryInfo) {
-  return session.name || session.firstUserMessage || '未命名 Session'
-}
-
 function clearError() {
   error.value = null
 }
@@ -295,13 +278,13 @@ async function selectMachine(value: string) {
   const previousView = view.value
   machineHostId.value = value
   clearError()
-  inventory.value = null
+  sessionPages.reset()
   if (previousView === 'browse') startBrowsing()
   else if (previousView === 'sessions') await loadInventory()
 }
 
 function requestClose() {
-  if (!pending.value) { ++systemEpoch; ++inventoryEpoch; emit('close') }
+  if (!pending.value) { ++systemEpoch; ++inventoryEpoch; sessionPages.reset(); emit('close') }
 }
 
 function backToLauncher() {
@@ -309,8 +292,7 @@ function backToLauncher() {
   resetSystems()
   ++inventoryEpoch
   view.value = 'launcher'
-  inventory.value = null
-  sessionSearch.value = ''
+  sessionPages.reset()
   clearError()
 }
 
@@ -349,28 +331,24 @@ async function loadInventory() {
   if (!selectedMachine?.available || actionBusy.value) return
   view.value = 'sessions'
   const epoch = ++inventoryEpoch
-  inventoryLoading.value = true
-  inventory.value = null
-  sessionSearch.value = ''
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const result = await currentConnectionCall(app, () => listSessionInventory(context, selectedMachine.hostId, machineWorkspaceStart(selectedMachine)))
-    if (epoch !== inventoryEpoch || selectedMachine.hostId !== machineHostId.value) return
-    if (result.connectionId !== context.connectionId
-      || result.selectionGeneration !== context.selectionGeneration
-      || result.machineHostId !== selectedMachine.hostId
-      || !result.hostEpoch) {
-      throw new Error('Session 列表已经变化，请重新打开后再试。')
-    }
-    inventory.value = result
+    await sessionPages.load(async (cursor) => {
+      const page = await currentConnectionCall(app, () => listSessionInventory(context, selectedMachine.hostId, machineWorkspaceStart(selectedMachine), cursor))
+      if (page.connectionId !== context.connectionId
+        || page.selectionGeneration !== context.selectionGeneration
+        || page.machineHostId !== selectedMachine.hostId
+        || !page.hostEpoch) {
+        throw new Error('Session 列表已经变化，请重新打开后再试。')
+      }
+      return page
+    })
   } catch (cause) {
     const action = selectedMachine.kind === 'main'
       ? '读取 Main 上保存的 Session 列表'
       : '读取所选机器上保存的 Session 列表'
     if (epoch === inventoryEpoch) setError(cause, action, 'session_inventory')
-  } finally {
-    if (epoch === inventoryEpoch) inventoryLoading.value = false
   }
 }
 
@@ -547,18 +525,22 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 
       <ResourceDocument v-else-if="view === 'system-content' && systemPreview" :system="{ cwd: systemPath, hostId: machineHostId, candidate: systemPreview }" @back="back" @failed="systemReadFailed" />
 
-      <template v-else-if="view === 'sessions'">
-        <div class="ui-dialog-search-wrap"><input v-model="sessionSearch" type="search" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称或目录…" :disabled="inventoryLoading" /></div>
-        <div v-if="inventoryLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取保存的 Session…</div>
-        <div v-else-if="inventory" class="ui-dialog-options">
-          <button v-for="session in filteredSessions" :key="session.token" type="button" class="ui-dialog-option" :disabled="preview || actionBusy" @click="adoptSaved(session.token)">
-            <span class="ui-dialog-option-marker"><History :size="15" /></span>
-            <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ sessionLabel(session) }}</span><span class="ui-dialog-option-detail"><span>{{ session.cwd }}</span><span class="ui-dialog-option-meta">{{ treeNodeTime(session.updatedAt) }}</span></span></span>
-          </button>
-          <div v-if="!filteredSessions.length" class="ui-dialog-empty">{{ inventory.incomplete ? '部分 Session 暂时无法读取。请稍后重试。' : '这台机器上没有保存的 Pi Session。' }}</div>
-        </div>
-        <div v-if="inventory?.incomplete" class="cmd-palette-footer">部分 Session 暂时没有载入。请稍后重新打开。</div>
-      </template>
+      <SavedSessionList
+        v-else-if="view === 'sessions'"
+        :key="machineHostId"
+        :sessions="sessionPages.sessions.value"
+        :total="sessionPages.total.value"
+        :show-directory="true"
+        :loaded="sessionPages.loaded.value"
+        :loading="sessionPages.loading.value"
+        :loading-more="sessionPages.loadingMore.value"
+        :more-failed="sessionPages.moreFailed.value"
+        :incomplete="sessionPages.incomplete.value"
+        :disabled="preview || actionBusy"
+        :empty-text="sessionPages.incomplete.value ? '部分 Session 暂时无法读取。请稍后重试。' : '这台机器上没有保存的 Pi Session。'"
+        @select="adoptSaved($event.token)"
+        @retry="sessionPages.retryMore()"
+      />
 
       <div v-if="trust" class="session-trust"><strong>这个项目需要你的信任确认</strong><p>确认后会继续创建新的 Work。</p><div><button :disabled="!!pending" @click="trust = null">取消</button><button :disabled="!!pending" @click="continueWithTrust('trust_once')">仅本次信任</button><button class="session-primary" :disabled="!!pending" @click="continueWithTrust('trust_and_remember')">信任并创建</button></div></div>
     </template>

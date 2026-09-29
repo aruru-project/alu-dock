@@ -13,8 +13,8 @@ use crate::{
     capabilities::{
         CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES, CONVERSATION_REFERENCES,
         CONVERSATION_REFERENCES_V1, SESSION_COMMANDS as SESSION_COMMAND_CAPABILITIES,
-        SESSION_CORE_REQUIRED as SESSION_CORE_CAPABILITIES,
-        SESSION_HISTORY as SESSION_HISTORY_CAPABILITIES, SESSION_TREE as SESSION_TREE_CAPABILITIES,
+        SESSION_HISTORY as SESSION_HISTORY_CAPABILITIES, SESSION_INVENTORY,
+        SESSION_INVENTORY_PAGES, SESSION_TREE as SESSION_TREE_CAPABILITIES,
     },
     conversation_images::{MAX_CONVERSATION_IMAGE_BYTES, valid_image_mime_type},
     wire::decode_canonical_base64,
@@ -46,21 +46,10 @@ pub struct SessionInfo {
     pub first_user_message: Option<String>,
     pub cwd: String,
     pub updated_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SessionsWireResult {
-    sessions: Vec<SessionInfo>,
-    total: u64,
-    truncated: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct SessionListResult {
-    pub sessions: Vec<SessionInfo>,
-    pub total: u64,
-    pub truncated: bool,
-    pub host_epoch: String,
+    /// Latest conversation time; older Hosts only report `updated_at`.
+    pub last_activity_at: Option<String>,
+    /// Recorded call costs summed over the saved session; absent when none were recorded.
+    pub cost_total: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -90,6 +79,8 @@ struct SessionInventoryWireResult {
     diagnostics: Vec<SessionInventoryDiagnostic>,
     #[serde(default)]
     diagnostics_truncated: bool,
+    #[serde(default)]
+    next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,6 +91,8 @@ pub struct SessionInventoryResult {
     pub incomplete: bool,
     pub diagnostics: Vec<SessionInventoryDiagnostic>,
     pub diagnostics_truncated: bool,
+    /// Pass back to `session_inventory` to read the next page; absent on the last page.
+    pub next_cursor: Option<String>,
     pub host_epoch: String,
 }
 
@@ -248,18 +241,13 @@ struct ConversationContentParams<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SessionListParams<'a> {
-    instance_id: &'a str,
-    scope: SessionScope,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SessionInventoryParams<'a> {
     cwd: &'a str,
     scope: SessionScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     host_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -641,11 +629,14 @@ impl DockClient {
         assembler.finish(total_blocks)
     }
 
+    /// Reads one page, newest conversation first. `cursor` is the previous
+    /// page's `next_cursor`; omit it for the first page.
     pub async fn session_inventory(
         &self,
         cwd: &str,
         scope: SessionScope,
         target_host_id: Option<&str>,
+        cursor: Option<&str>,
     ) -> Result<SessionInventoryResult> {
         let (wire, host_epoch): (SessionInventoryWireResult, String) = self
             .request_with_host_epoch(
@@ -654,8 +645,13 @@ impl DockClient {
                     cwd,
                     scope,
                     host_id: target_host_id,
+                    cursor,
                 },
-                crate::capabilities::SESSION_INVENTORY,
+                if cursor.is_some() {
+                    SESSION_INVENTORY_PAGES
+                } else {
+                    SESSION_INVENTORY
+                },
                 None,
             )
             .await?;
@@ -683,28 +679,7 @@ impl DockClient {
             incomplete: wire.incomplete,
             diagnostics: wire.diagnostics,
             diagnostics_truncated: wire.diagnostics_truncated,
-            host_epoch,
-        })
-    }
-
-    pub async fn list_sessions(
-        &self,
-        instance_id: &str,
-        scope: SessionScope,
-    ) -> Result<SessionListResult> {
-        let (wire, host_epoch): (SessionsWireResult, String) = self
-            .request_with_host_epoch(
-                "session.list",
-                &SessionListParams { instance_id, scope },
-                SESSION_CORE_CAPABILITIES,
-                None,
-            )
-            .await?;
-        validate_session_infos(&wire.sessions)?;
-        Ok(SessionListResult {
-            sessions: wire.sessions,
-            total: wire.total,
-            truncated: wire.truncated,
+            next_cursor: wire.next_cursor,
             host_epoch,
         })
     }
@@ -1520,6 +1495,7 @@ mod tests {
             cwd: "C:\\Users\\alu",
             scope: SessionScope::All,
             host_id: Some("subhost-a"),
+            cursor: Some("next-page"),
         })
         .unwrap();
         assert_eq!(
@@ -1527,7 +1503,8 @@ mod tests {
             serde_json::json!({
                 "cwd": "C:\\Users\\alu",
                 "scope": "all",
-                "hostId": "subhost-a"
+                "hostId": "subhost-a",
+                "cursor": "next-page"
             })
         );
     }
@@ -1658,6 +1635,8 @@ mod tests {
                 "firstUserMessage": "continue",
                 "cwd": "/workspace",
                 "updatedAt": "2026-09-05T00:00:00.000Z",
+                "lastActivityAt": "2026-09-04T00:00:00.000Z",
+                "costTotal": 1.25,
                 "futureSessionField": true
             }],
             "query": {
@@ -1675,12 +1654,19 @@ mod tests {
                 "futureDiagnosticField": true
             }],
             "diagnosticsTruncated": false,
+            "nextCursor": "page-2",
             "futureResultField": true
         });
         let parsed = serde_json::from_value::<SessionInventoryWireResult>(value).unwrap();
         assert_eq!(parsed.query.cwd, "/workspace");
         assert_eq!(parsed.query.scope, SessionScope::All);
         assert_eq!(parsed.sessions[0].session_id, "saved-session");
+        assert_eq!(
+            parsed.sessions[0].last_activity_at.as_deref(),
+            Some("2026-09-04T00:00:00.000Z")
+        );
+        assert_eq!(parsed.sessions[0].cost_total, Some(1.25));
+        assert_eq!(parsed.next_cursor.as_deref(), Some("page-2"));
         assert_eq!(
             parsed.diagnostics[0].message,
             "one location was unavailable"
@@ -1690,12 +1676,6 @@ mod tests {
             serde_json::from_value::<SessionInventoryWireResult>(serde_json::json!({
                 "sessions": [], "query": {"cwd": "/workspace", "scope": "future"},
                 "total": 0, "truncated": false
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<SessionsWireResult>(serde_json::json!({
-                "sessions": [], "total": "zero", "truncated": false, "futureResultField": true
             }))
             .is_err()
         );
