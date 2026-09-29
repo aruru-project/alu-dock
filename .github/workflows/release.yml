@@ -174,13 +174,10 @@ jobs:
             clients/official/src-tauri -> target
           cache-on-failure: false
 
+      # The same checks as `npm run client:check` before merge; its Vue
+      # typecheck and frontend build run once, inside the tauri build below.
       - name: Run release checks
-        shell: bash
-        run: |
-          pnpm run check:rust-format
-          cargo test --workspace --locked
-          cargo test --locked --manifest-path src-tauri/Cargo.toml
-          pnpm test
+        run: pnpm run check
 
       - name: Build the Linux executable
         run: pnpm tauri build --no-bundle --ci --config '{"version":"${{ needs.prepare.outputs.version }}"}'

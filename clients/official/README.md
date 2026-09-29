@@ -134,13 +134,11 @@ Debug APK 位于 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/ap
 ## 验证入口
 
 ```bash
-corepack pnpm test
-corepack pnpm build
-cargo test --workspace --locked
-cargo test --locked --manifest-path src-tauri/Cargo.toml
-cargo fmt --all -- --check
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+corepack pnpm check   # Rust 格式、前端测试、core 与 Tauri host 的 Rust 测试
+corepack pnpm build   # Vue 类型检查与前端产物
 ```
+
+两者合起来就是根目录的 `npm run client:check`，与发布检查相同，合并前跑一次；开发中只跑与改动相关的单项。
 
 从 monorepo 根目录运行真实 Host 与官方 Rust core 的 Protocol V2 兼容门：
 

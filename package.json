@@ -30,6 +30,7 @@
     "client:dev": "cd clients/official && corepack pnpm dev",
     "client:build": "cd clients/official && corepack pnpm build",
     "client:test": "cd clients/official && corepack pnpm test",
+    "client:check": "cd clients/official && corepack pnpm check && corepack pnpm build",
     "client:package:linux": "cd clients/official && corepack pnpm package:linux",
     "package:windows": "cd clients/official && corepack pnpm package:windows",
     "prepack": "npm run build",

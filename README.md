@@ -90,9 +90,10 @@ aludock service logs --lines 200
 npm run client:install
 npm run client:test        # Vue/TypeScript tests
 npm run client:build       # Vue typecheck 与前端产物
+npm run client:check       # 合并前一次：含 Rust 的完整客户端检查，与发布检查相同
 ```
 
-这两项检查覆盖前端；Rust core 与 Tauri host 的完整检查、Desktop 原生开发入口及各平台构建方式见 [`clients/official/README.md`](clients/official/README.md)。
+前两项只覆盖前端；Rust core 与 Tauri host 的完整检查、Desktop 原生开发入口及各平台构建方式见 [`clients/official/README.md`](clients/official/README.md)。
 
 浏览器设计预览：
 

@@ -88,6 +88,8 @@ git diff --check
 
 只有跨越多个模块或准备合并时才运行完整 `npm test`。不要为每个字段重复完整构建和全套测试。
 
+改过官方客户端的分支，合并前在根目录运行一次 `npm run client:check`：Rust 格式、前端测试、core 与 Tauri host 的 Rust 测试，再做 Vue 类型检查和前端构建，与发布检查是同一组。开发过程中不跑它，只跑与改动相关的单项；只改 Host/Worker 的分支不需要它。Tauri host 测试需要本机的 WebKit/GTK 开发包（Linux）。
+
 ## 验证层次
 
 ### Protocol 与 Host
