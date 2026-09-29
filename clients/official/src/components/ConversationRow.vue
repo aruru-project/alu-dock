@@ -55,9 +55,6 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
 </template>
 
 <style scoped>
-@media screen and (max-width: 600px) {
-  .message-text-action { min-height: 36px; padding-inline: 8px; }
-}
 /* Assistant 消息行：头像 + 内容 */
 .alu-msg-assistant-row {
   display: flex;
@@ -166,6 +163,9 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
   font-size: 10px;
   cursor: pointer;
 }
+@media (max-width: 640px) {
+  .message-text-action { min-height: 36px; padding-inline: 8px; }
+}
 .message-text-action:hover,
 .message-text-action:focus-visible {
   color: var(--alu-blue);
@@ -224,7 +224,7 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
   margin-top: 8px;
 }
 .message-attachments { display: grid; gap: 5px; margin-top: 9px; }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-msg-avatar { display: none; }
   .alu-msg-assistant-row {
     width: 100%;
@@ -267,7 +267,7 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
     margin-left: 0;
   }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .msg-user-bubble { max-width: 92%; }
 }
 @media (min-width: 1200px) {

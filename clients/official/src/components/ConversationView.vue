@@ -94,7 +94,7 @@ const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
 .history-loader button:hover { color: var(--alu-text); border-color: var(--alu-border-focus); }
 .history-loader .spinning { animation: spin .9s linear infinite; }
 .conversation-flow { width: 100%; }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .conversation-flow {
     width: min(100%, 760px);
     margin-inline: auto;

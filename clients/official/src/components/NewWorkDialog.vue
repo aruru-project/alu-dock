@@ -562,7 +562,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 }
 .alu-directory-machine:focus-within { z-index: 30; }
 .alu-directory-machine > span { flex: 0 0 auto; }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .alu-directory-machine { padding: 9px 12px; }
 }
 .alu-directory-select { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
@@ -601,7 +601,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .new-work-recent-options + .new-work-section-label { margin-top: 7px; }
 .new-work-recent-options .ui-dialog-option:last-child,
 .new-work-action-options .ui-dialog-option:last-child { border-bottom: 0; }
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .new-work-launcher { padding: 10px 12px 14px; }
 }
 </style>

@@ -83,7 +83,7 @@ button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--c-ice
 .attachment-actions { display: flex; flex: 0 0 auto; gap: 2px; }
 .attachment-actions button { display: grid; width: 34px; height: 34px; padding: 0; color: var(--c-text-2); cursor: pointer; background: transparent; border: 0; border-radius: 8px; place-items: center; }
 .attachment-actions button:hover { color: var(--c-text-1); background: var(--c-space-800); }
-@media (max-width: 599px) {
+@media (max-width: 640px) {
   .attachment-actions button { min-height: 44px; height: 44px; }
 }
 .alu-native-attachments .attachment-card.is-previewable { min-height: 82px; }

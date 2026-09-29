@@ -301,7 +301,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 .session-dot {
   box-shadow: 0 0 8px rgba(244, 114, 182, 0.45);
 }
-@media screen and (max-width: 1399px) {
+@media (max-width: 1399px) {
   .alu-navbar {
     height: var(--alu-nav-height);
     min-height: var(--alu-nav-height);
@@ -347,7 +347,6 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     gap: 4px;
     padding: 0;
   }
-  .alu-nav-files,
   .alu-nav-hamburger {
     position: relative;
     top: auto;
@@ -365,7 +364,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   .alu-nav-stats { display: inline-flex; gap: 4px; margin-left: 0; }
   .alu-nav-stat-pill { padding: 4px 6px; font-size: 10px; }
 }
-@media screen and (max-width: 839px) {
+@media (max-width: 840px) {
   .alu-nav-dock-tools { min-width: 40px; justify-content: center; padding-inline: 7px; }
   .alu-nav-dock-tools-label,
   .alu-nav-dock-tools-chevron {
@@ -403,7 +402,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     border-radius: 9px;
   }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .alu-nav-session { font-size: 13px; }
 }
 /* ── Dock V2 instance / queue surfaces ── */
@@ -429,5 +428,8 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 .alu-nav-files { position: relative; display: inline-grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--alu-text-muted); border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; }
 .alu-nav-files:hover, .alu-nav-files[aria-expanded="true"] { color: var(--alu-blue); border-color: var(--alu-blue-border); background: color-mix(in srgb, var(--alu-blue) 7%, transparent); }
 .alu-nav-files:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; }
+@media (max-width: 1399px) {
+  .alu-nav-files { width: 44px; height: 44px; border-radius: 11px; }
+}
 .alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: #07101d; border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-mint); font: 800 8px/1 var(--font-code); }
 </style>

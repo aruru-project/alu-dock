@@ -152,7 +152,7 @@ async function saveOpenImage() {
 .alu-image-preview footer strong { flex: 0 0 auto; font-weight: 600; }
 .alu-image-preview footer strong.is-success { color: #82d7b5; }
 .alu-image-preview footer strong.is-error { color: #f8a0a0; }
-@media (max-width: 680px) {
+@media (max-width: 720px) {
   .alu-image-preview-overlay { padding: 0; }
   .alu-image-preview { width: 100%; height: 100vh; height: 100dvh; border: 0; border-radius: 0; }
   .alu-image-preview-save { min-height: 44px; padding-inline: 15px; }

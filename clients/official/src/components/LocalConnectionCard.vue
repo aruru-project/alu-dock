@@ -97,7 +97,7 @@ watch(() => [props.busy, props.error] as const, ([busy, error]) => {
 .host-catalog-section .local-connection-card { grid-template-columns: 32px minmax(0, 1fr); }
 .host-catalog-section .local-connection-actions { grid-column: 1 / -1; }
 .host-catalog-section .local-connection-actions .button { flex: 1; }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .local-connection-card { grid-template-columns: 34px minmax(0, 1fr); }
   .local-connection-actions { grid-column: 1 / -1; }
   .local-connection-actions .button { flex: 1; }

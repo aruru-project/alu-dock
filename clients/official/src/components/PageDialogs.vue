@@ -147,17 +147,17 @@ const applyControlSnapshot = props.observation.acceptWork
   transform-origin: 88% 0;
   animation: dockToolsPopoverIn .16s cubic-bezier(.2, .8, .2, 1);
 }
-@media screen and (max-width: 640px) {
+@media (max-width: 640px) {
   .dock-tools-popover-surface { top: auto; right: 0; bottom: 0; left: 0; width: 100%; max-height: min(76dvh, 560px); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; transform-origin: 50% 100%; animation-name: dockToolsSheetIn; }
 }
 .modal-layer { position: fixed; z-index: 30; inset: 0; display: grid; padding: 24px; background: rgb(2 5 12 / .72); backdrop-filter: blur(5px); place-items: center; }
-@media (max-width: 599px) {
+@media (max-width: 640px) {
   .modal-layer { padding: 0; align-items: end; }
 }
 /* App settings is a quiet device-level surface, distinct from Host administration. */
 .app-settings-surface { position: relative; display: grid; width: min(760px, calc(100vw - 48px)); height: min(620px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: #0b101c; box-shadow: 0 28px 80px rgba(0, 0, 0, .5); }
 .app-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-blue) 30%, var(--alu-pink) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
-@media (max-width: 620px) {
+@media (max-width: 640px) {
   .app-settings-surface { width: 100%; height: min(92vh, 760px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
 /* Host settings is a task surface, not a wall of equally weighted forms. */
@@ -188,7 +188,7 @@ const applyControlSnapshot = props.observation.acceptWork
   opacity: .56;
   pointer-events: none;
 }
-@media (max-width: 680px) {
+@media (max-width: 720px) {
   .host-settings-surface { width: 100%; height: min(92%, 820px); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
 </style>

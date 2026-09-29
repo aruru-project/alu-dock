@@ -22,11 +22,11 @@
 .host-detail-column .pairing-card-title { padding-bottom: 10px; border-bottom-color: var(--alu-border); }
 .host-detail-column .pairing-card-title > div { min-width: 0; flex: 1; }
 .host-detail-column .pairing-card input { border-color: var(--alu-border); background: var(--alu-bg); color: var(--alu-text); }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .pairing-card { padding: 16px; }
   .pairing-card input { min-height: 46px; font-size: 14px; }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .pairing-card { gap: 13px; padding: 14px; }
   .pairing-card-title small { font-size: 9px; }
   .pairing-actions { align-items: stretch; flex-direction: column-reverse; }

@@ -664,7 +664,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
 .alu-tree-guidance button:hover { color: var(--alu-text); }
 .alu-tree-options { overflow: auto; }
 .alu-tree-option { grid-template-columns: max-content minmax(0, 1fr); }
-@media (min-width: 601px) {
+@media (min-width: 641px) {
   .alu-tree-option { padding-left: 12px; }
 }
 .alu-tree-option.is-active-path:not(.is-current) .alu-tree-path-marker { color: var(--alu-blue); }
@@ -701,7 +701,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
 .alu-tree-actions .ui-dialog-selection-summary { display: flex; flex-direction: column; gap: 2px; }
 .alu-tree-actions .ui-dialog-selection-summary span { color: var(--alu-text-faint); font-size: 8px; letter-spacing: 0.08em; }
 .alu-tree-actions .ui-dialog-selection-summary strong { overflow: hidden; color: var(--alu-text-dim); font-weight: 500; text-overflow: ellipsis; }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .ui-dialog-filters { padding: 8px 10px; }
   .ui-dialog-filter { min-height: 38px; padding: 7px 11px; }
   .alu-tree-guidance { padding: 7px 10px; }
@@ -717,7 +717,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
 .reload-summary { display: grid; gap: 4px; padding: 9px; color: var(--c-text-2); font: 9px/1.5 var(--font-reading); background: var(--c-space-850); border-radius: 7px; }
 .reload-summary span[data-severity='error'] { color: var(--c-danger); }
 .reload-summary span[data-severity='warning'] { color: var(--c-amber); }
-@media (max-width: 599px) {
+@media (max-width: 640px) {
   .session-manager { min-height: 0; flex: 1; }
 }
 .alu-session-select, .alu-tree-select { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }

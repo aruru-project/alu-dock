@@ -57,7 +57,7 @@ function act() {
   color: var(--alu-text-muted);
   font-size: 11px;
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-status-label {
     display: none;
   }

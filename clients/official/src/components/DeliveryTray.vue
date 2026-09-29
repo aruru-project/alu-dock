@@ -292,7 +292,7 @@ function dateLabel(value: string) {
   right: var(--aludock-inset-right);
   bottom: max(var(--aludock-inset-bottom), var(--aludock-ime-bottom));
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .delivery-tray {
     width: min(390px, 100%);
     max-width: 100%;

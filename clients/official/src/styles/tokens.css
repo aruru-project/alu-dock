@@ -44,13 +44,13 @@
   /* Bottom bar */
   --alu-bar-height:     44px;
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   :root {
     --alu-nav-height: 56px;
     --alu-bar-height: 48px;
   }
 }
-@media screen and (max-width: 839px) {
+@media (max-width: 840px) {
   /* 手机三行：工作与入口 / 模型与思考等级 / 用量。统计行保持紧凑。 */
   :root { --alu-nav-height: auto; }
 }

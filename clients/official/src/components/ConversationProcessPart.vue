@@ -188,7 +188,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   scrollbar-width: thin;
   scrollbar-color: var(--alu-border-light) transparent;
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-msg-assistant-body > .msg-assistant {
     margin: 0 0 7px;
     padding: 12px 14px;

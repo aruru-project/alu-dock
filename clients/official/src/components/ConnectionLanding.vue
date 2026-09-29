@@ -267,7 +267,7 @@ function inactiveState(work: Work) {
   background: var(--alu-text-muted);
   box-shadow: none;
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .alu-work-state {
     place-items: start stretch;
     padding: 18px 0 28px;
@@ -293,7 +293,7 @@ function inactiveState(work: Work) {
 .center-state p { max-width: 560px; margin: 8px 0 20px; font: 14px/1.6 var(--font-reading); }
 .error-state > svg { color: var(--c-danger); }
 .re-pair-error { width: min(620px, calc(100vw - 32px)); margin: -5px 0 12px; padding: 8px 10px; color: #f8a0a0; font: 11px/1.5 var(--font-reading); text-align: left; background: rgb(248 113 113 / .07); border: 1px solid rgb(248 113 113 / .18); border-radius: 9px; }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-work-state {
     width: min(100%, 760px);
     margin-inline: auto;

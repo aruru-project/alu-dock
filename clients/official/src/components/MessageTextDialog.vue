@@ -131,7 +131,7 @@ async function copyAllText() {
   cursor: pointer;
 }
 .message-text-footer button.is-primary { color: var(--alu-bg); border-color: var(--alu-blue); background: var(--alu-blue); font-weight: 700; }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .message-text-source { padding: 14px; font-size: 12px; }
   .message-text-footer { align-items: stretch; flex-direction: column; gap: 9px; }
   .message-text-footer > div { width: 100%; }

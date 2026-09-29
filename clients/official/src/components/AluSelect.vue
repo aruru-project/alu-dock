@@ -204,7 +204,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPoin
 .alu-select-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .alu-select-copy strong { overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .alu-select-copy small { overflow: hidden; color: var(--alu-text-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .alu-select-trigger { min-height: 40px; }
   .alu-select-option { min-height: 44px; }
 }

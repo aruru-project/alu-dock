@@ -46,7 +46,7 @@ const openWorkspaceBrowser = props.page.openWorkspaceBrowser
         <button class="alu-bar-btn" title="刷新" @click="refreshCurrent">↻<span class="sm-inline">刷新</span></button>
         <button class="alu-bar-btn" :class="{ 'alu-bar-btn-toggle-active': !detailMode }" title="切换显示模式" @click="detailMode = !detailMode"><span>▤</span><span>{{ detailMode ? '详细' : '简洁' }}</span></button>
         <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
-        <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline">{{ aborting ? '中止中' : '中止' }}</span></button>
+        <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline" :class="{ 'is-pending': aborting }">{{ aborting ? '中止中' : '中止' }}</span></button>
       </div>
     </div>
 
@@ -98,7 +98,9 @@ const openWorkspaceBrowser = props.page.openWorkspaceBrowser
   margin: 0 4px;
   flex-shrink: 0;
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
+  /* Button labels are hidden on narrow screens, but an abort in progress keeps its words. */
+  .alu-bar-btn-abort .sm-inline.is-pending { display: inline; }
   .alu-input-section > .alu-bottom-bar {
     width: min(100%, 760px);
     margin-inline: auto;
@@ -124,7 +126,7 @@ const openWorkspaceBrowser = props.page.openWorkspaceBrowser
   .alu-bar-btn-toggle-active { color: var(--alu-blue); }
   .alu-bar-sep { margin: 0 1px; }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .alu-bottom-bar-right { gap: 0; }
 }
 </style>

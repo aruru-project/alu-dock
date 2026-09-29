@@ -74,7 +74,7 @@ onBeforeUnmount(() => { void stopPairing() })
 .pairing-guide li > span { display: grid; flex: 0 0 auto; width: 25px; height: 25px; color: var(--c-pink); font-weight: 700; background: rgb(244 114 182 / .09); border: 1px solid rgb(244 114 182 / .2); border-radius: 50%; place-items: center; }
 .pairing-guide strong { font-size: 11px; }
 .pairing-guide p { margin: 5px 0 0; color: var(--c-text-3); font: 10px/1.55 var(--font-reading); }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .pairing-onboarding {
     width: min(100%, 760px);
     min-height: auto;
@@ -117,7 +117,7 @@ onBeforeUnmount(() => { void stopPairing() })
     border-left: 1px solid var(--c-line-soft);
   }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .pairing-intro {
     align-items: flex-start;
     gap: 10px;

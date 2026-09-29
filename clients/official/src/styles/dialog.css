@@ -179,7 +179,7 @@
   inset: 0;
   background: transparent;
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .ui-dialog-overlay,
   .cmd-palette-overlay {
     align-items: flex-end;
@@ -204,10 +204,8 @@
     height: 92%;
   }
 }
-@media screen and (max-width: 640px) {
+@media (max-width: 640px) {
   .dock-tools-popover-layer { background: rgba(4, 6, 13, .68); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
-}
-@media screen and (max-width: 600px) {
   .ui-dialog-overlay,
   .cmd-palette-overlay {
     background: rgba(4, 6, 14, 0.92);
@@ -246,7 +244,6 @@
     justify-content: stretch;
     padding: 8px 10px;
   }
-  .ui-dialog-close { width: 40px; height: 40px; top: 8px; right: 8px; }
   .ui-dialog-btn { min-height: 44px; }
   .ui-dialog-input,
   .ui-dialog-editor {
@@ -266,8 +263,13 @@
   border-radius: 7px;
   color: var(--alu-text-muted);
   font-size: 18px;
+  border: 0;
+  background: transparent;
 }
 .ui-dialog-close:hover { color: var(--alu-text); background: var(--alu-hover); }
+@media (max-width: 640px) {
+  .ui-dialog-close { width: 40px; height: 40px; top: 8px; right: 8px; }
+}
 .ui-dialog-overlay[data-pending="true"] .ui-dialog-box { cursor: wait; }
 .ui-dialog-overlay[data-pending="true"] button,
 .ui-dialog-overlay[data-pending="true"] input,
@@ -289,10 +291,9 @@
 .session-trust p { color: var(--c-text-2); font: 11px/1.6 var(--font-reading); }
 .session-trust > div { display: flex; gap: 8px; }
 .session-trust button { min-height: 42px; padding: 0 12px; color: var(--c-text-2); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; }
-@media (max-width: 599px) {
+@media (max-width: 640px) {
   .session-primary { min-height: 48px; }
 }
-.ui-dialog-close { border: 0; background: transparent; }
 .alu-session-form .ui-dialog-input { flex: 0 0 auto; }
 .alu-session-form .ui-dialog-editor { min-height: 160px; flex: 1 1 auto; }
 .alu-tree-select .ui-dialog-actions { overflow-x: auto; }

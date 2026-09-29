@@ -211,7 +211,7 @@ const connectionLabel = props.observation.label
   bottom: max(var(--aludock-inset-bottom), var(--aludock-ime-bottom));
   left: var(--aludock-inset-left);
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-sidebar {
     width: min(390px, 100%);
     max-width: 100%;

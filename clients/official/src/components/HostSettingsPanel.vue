@@ -170,7 +170,7 @@ onBeforeUnmount(() => { void stopPairing() })
 .endpoint-form footer svg { color: var(--c-mint); }
 .endpoint-draft-offer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; margin-top: 10px; color: var(--c-amber); font: 9px/1.45 var(--font-reading); background: rgb(251 191 36 / .06); border: 1px solid rgb(251 191 36 / .18); border-radius: 8px; }
 .endpoint-draft-offer .button { flex: 0 0 auto; }
-@media (max-width: 599px) {
+@media (max-width: 640px) {
   .host-name-field { align-items: stretch; flex-direction: column; }
   .host-name-field .button { width: 100%; }
   .connection-policy { align-items: flex-start; }
@@ -361,7 +361,7 @@ onBeforeUnmount(() => { void stopPairing() })
 @media (hover: none) {
   .host-choice-delete { opacity: .65; }
 }
-@media (max-width: 680px) {
+@media (max-width: 720px) {
   .host-settings-header { min-height: 62px; padding-left: 15px; }
   .host-settings-heading img { width: 34px; height: 34px; }
   .host-settings-panel { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }

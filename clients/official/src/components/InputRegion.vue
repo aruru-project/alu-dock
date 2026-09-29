@@ -218,7 +218,7 @@ const emit = defineEmits<{ latest: [] }>()
 .cmd-suggest-desc { flex: 1 1 auto; overflow: hidden; color: var(--alu-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .cmd-suggest-kind { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: 8px; }
 .cmd-suggest-hint { padding: 10px 12px; color: var(--alu-text-muted); font-size: 11px; }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-input-section { padding: 0 clamp(10px, 3vw, 24px); }
   .alu-composer-expand {
     min-width: 44px;
@@ -235,7 +235,7 @@ const emit = defineEmits<{ latest: [] }>()
     font-size: 13px;
   }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .alu-input-section { padding-inline: 8px; }
   .ui-dialog-composer-editor { margin: 12px 10px 0; padding: 13px; font-size: 14px; }
   .ui-dialog-composer-footer { padding: 10px; }

@@ -136,7 +136,7 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
   box-shadow: none;
 }
 .msg-user-images .alu-conversation-image-open img { max-height: 320px; }
-@media (max-width: 680px) {
+@media (max-width: 720px) {
   .alu-conversation-image { border-radius: 9px; }
   .alu-conversation-image-open img { max-height: 56vh; max-height: 56dvh; }
 }

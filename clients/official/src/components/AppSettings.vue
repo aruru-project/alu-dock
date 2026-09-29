@@ -103,7 +103,7 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .app-settings-footnote, .app-settings-error { margin: 16px 0 0; font-size: 9px; }
 .app-settings-footnote { color: var(--alu-text-faint); }
 .app-settings-error { padding: 9px 10px; border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); color: var(--alu-rose); }
-@media (max-width: 620px) {
+@media (max-width: 640px) {
   .app-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .app-settings-nav { padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--alu-border); }
   .app-settings-nav-label { display: none; }

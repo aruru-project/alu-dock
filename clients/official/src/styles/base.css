@@ -95,7 +95,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-6px); }
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   body.alu-terminal-body {
     position: fixed;
     inset: 0;
@@ -103,7 +103,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     overscroll-behavior: none;
   }
 }
-@media screen and (max-width: 640px) {
+@media (max-width: 640px) {
   @keyframes dockToolsSheetIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
 }
 @keyframes aluInstancePulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }

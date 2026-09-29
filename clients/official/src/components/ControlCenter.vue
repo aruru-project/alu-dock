@@ -1121,6 +1121,7 @@ function isCurrentModel(model: ModelInfo) {
   overflow-wrap: anywhere;
 }
 .cmd-center-output {
+  min-height: 240px;
   flex: 1 1 auto;
   overflow-y: auto;
   margin: 0 14px 12px;
@@ -1178,10 +1179,8 @@ function isCurrentModel(model: ModelInfo) {
 .dock-tools-toggle.active .dock-tools-switch i { background: var(--alu-mint); transform: translateX(16px); }
 .dock-tools-toggle.pending .dock-tools-switch i { animation: dockToolsSwitchPending .7s ease-in-out infinite alternate; }
 .dock-tools-output { max-height: 120px; margin: 0; }
-@media screen and (max-width: 640px) {
+@media (max-width: 640px) {
   .dock-tools-panel { padding: 18px max(16px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
-}
-@media screen and (max-width: 600px) {
   .alu-project-status { padding: 10px; }
   .alu-project-status-identity { grid-template-columns: auto minmax(0, 1fr); padding: 12px; }
   .alu-project-status-badges { grid-column: 2; justify-content: flex-start; }
@@ -1216,7 +1215,6 @@ function isCurrentModel(model: ModelInfo) {
 .alu-project-status { min-height: 0; overflow-y: auto; }
 .alu-project-status-section h3 .alu-project-status-count { margin-left: auto; }
 .alu-setting-editor { padding-top: 12px; }
-.cmd-center-output { min-height: 240px; }
 @media (max-width: 640px) {
   .control-center-port { min-height: 0; }
   .cmd-palette-box > .control-center-port { max-height: 92dvh; }

@@ -397,7 +397,7 @@ function interactionMethodLabel(method: string) {
 </template>
 
 <style scoped>
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-input-section .extension-ui-surface {
     width: min(100%, 760px);
     margin-inline: auto;
@@ -443,7 +443,7 @@ function interactionMethodLabel(method: string) {
 .extension-dialog footer { display: flex; justify-content: flex-end; gap: 7px; }
 .extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--c-text-2); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; }
 .extension-dialog footer button.primary { color: #190d16; font-weight: 700; background: var(--c-sakura); border-color: var(--c-sakura); }
-@media (max-width: 639px) {
+@media (max-width: 640px) {
   .extension-dialog-layer { padding: 0; place-items: end stretch; }
   .extension-dialog { width: 100%; max-height: 88dvh; padding: 15px; border-width: 1px 0 0; border-radius: 16px 16px 0 0; }
   .extension-dialog footer { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }

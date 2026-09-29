@@ -162,7 +162,7 @@
 .msg-notice, .msg-warning, .msg-error {
   animation: msgSlideIn 0.22s ease-out;
 }
-@media screen and (max-width: 1000px) {
+@media (max-width: 1000px) {
   .alu-output {
     width: 100%;
     padding: 18px clamp(14px, 4vw, 34px) 30px;
@@ -175,6 +175,6 @@
   }
   .code-block-pre { padding: 11px 12px; }
 }
-@media screen and (max-width: 600px) {
+@media (max-width: 640px) {
   .alu-output { padding: 12px 12px 24px; }
 }

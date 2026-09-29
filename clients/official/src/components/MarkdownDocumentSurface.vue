@@ -172,7 +172,7 @@ async function copySource() {
   background: rgba(40, 12, 22, .94);
   font-size: 9px;
 }
-@media (max-width: 680px) {
+@media (max-width: 720px) {
   .markdown-document-toolbar { align-items: stretch; gap: 7px; padding: 7px 9px; }
   .markdown-mode-switch { flex: 1; }
   .markdown-mode-switch button { flex: 1; }
