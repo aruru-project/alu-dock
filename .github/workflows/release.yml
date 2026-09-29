@@ -177,8 +177,7 @@ jobs:
       - name: Run release checks
         shell: bash
         run: |
-          cargo fmt --all -- --check
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+          pnpm run check:rust-format
           cargo test --workspace --locked
           cargo test --locked --manifest-path src-tauri/Cargo.toml
           pnpm test

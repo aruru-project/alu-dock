@@ -82,6 +82,7 @@ npm run check -- --pretty false
 npm run build
 node --test dist/test/<focused-test>.test.js
 npm run test:client-protocol  # Host/official Rust protocol boundary (Linux)
+(cd clients/official && corepack pnpm check:rust-format)  # 改了官方客户端 Rust 时；与发布检查相同
 git diff --check
 ```
 
