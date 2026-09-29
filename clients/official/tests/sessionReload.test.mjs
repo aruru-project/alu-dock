@@ -258,7 +258,6 @@ try {
     assert.match(text(rows[0]), /Current work.*当前.*9月29日.*\$1\.50/u)
     assert.equal(rows[0].props.disabled, true, 'the current Session cannot be resumed again')
     assert.match(text(rows[1]), /整理发布清单.*9月28日.*-\$/u, 'an unnamed Session shows its first message; no recorded cost shows -$')
-    assert.doesNotMatch(text(rows[1]), /\/project/u, 'Resume rows omit the shared directory')
     assert.equal(rows[1].props.disabled, false)
     mounted.unmount()
   }

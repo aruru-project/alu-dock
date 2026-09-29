@@ -205,7 +205,9 @@ list/get metadata 至少包含 `path/name/kind/hidden`。`kind` 为 `file | dire
 
 ## Instance 与 Agent session
 
-Host control 提供 workspace list、instance create、ensure、list、get/get-by-key、read、follow、stop、reopen、adopt、forget、catalog prune 和 persisted-session inventory。Inventory 的 session 可带有界 `firstUserMessage`，供客户端在没有 session name 时显示可辨认摘要；这是 Host→Client 的可选新增字段，不使用它的客户端按通用规则忽略。`sessionFile` 和 tree `entryId` 仍是客户端选中后提交的协议值，不应直接作为人类选择界面的标题或命令参数。
+Host control 提供 workspace list、instance create、ensure、list、get/get-by-key、read、follow、stop、reopen、adopt、forget、catalog prune 和 persisted-session inventory。Inventory 的 session 可带有界 `firstUserMessage`，供客户端在没有 session name 时显示可辨认摘要；还可带 `lastActivityAt`（最后一条 user/assistant 消息的时间，没有消息时是 session 开始时间；改名或复制文件不会改变它，不同于按文件修改时间的 `updatedAt`）和 `costTotal`（该 session 文件内全部调用已记录费用之和，分叉或复制来的记录照算，只作辨认参考、不是账单；没有任何费用记录时省略）。这些都是 Host→Client 的可选新增字段，不使用它们的客户端按通用规则忽略。
+
+Inventory 按 `lastActivityAt` 从新到旧分页。不带 `cursor` 的请求就是第一页，内容和返回格式与不分页时一致；还有后续时结果带 `nextCursor`。要继续读，把它原样作为 `cursor`（连同原来的 `cwd`、`scope`、`hostId`）再次请求，并在这次连接的 hello 里要求 `session.inventory.pages.v1`；直到结果不再带 `nextCursor`。每页的 `total` 都是整个范围的总数。`nextCursor` 是不透明的字符串，不要解析或拼装；翻页期间有新对话的 session 会移到最前面，重新读第一页才能看到它的新位置。`sessionFile` 和 tree `entryId` 仍是客户端选中后提交的协议值，不应直接作为人类选择界面的标题或命令参数。
 
 Agent session 能力包括 prompt、abort、Queue、conversation、model、thinking、tools、settings、resources、session replacement、tree、compaction 和 Extension UI。实际可用能力以 hello capability negotiation 为准。
 

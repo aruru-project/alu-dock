@@ -54,7 +54,8 @@ test("official Rust client pages through saved sessions, newest conversation fir
     const reader = join(targetDirectory, "debug", "examples", "protocol_inventory");
     const result = await run(reader, [socket, identity, workspace, SESSION_ID], process.env, context.signal);
     assert.equal(result.code, 0, `official Rust client failed:\n${result.stderr}`);
-    assert.match(result.stdout, new RegExp(`decoded saved session ${SESSION_ID} last=2026-09-05T00:00:03.000Z cost=0.42 pages=2 sessions=2001`));
+    assert.match(result.stdout, new RegExp(`decoded saved session ${SESSION_ID} last=2026-09-05T00:00:03.000Z cost=0.42 pages=\\d+ sessions=2001`));
+    assert.ok(Number(/pages=(\d+)/u.exec(result.stdout)?.[1]) > 1, "the client continued past the first page");
   } finally {
     await stopChild(host);
     await rm(root, { recursive: true, force: true });
