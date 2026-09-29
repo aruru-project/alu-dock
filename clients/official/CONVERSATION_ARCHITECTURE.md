@@ -15,7 +15,7 @@ Debug content/history from the methods returned by `useConversationContent`; deb
 
 ## Page regions and local API calls
 
-`App.vue` constructs the following concrete owners, then connects their explicit capabilities. There is no page-wide context bag, method dispatcher or second native registry:
+Current state: `App.vue` constructs the following concrete owners, then connects their explicit capabilities. The target structure is in the client [AGENTS](AGENTS.md#前端结构): shared state moves into per-domain Pinia stores that components read directly, and `App.vue` only lays out regions and starts native listeners (#323). Either way there is no method dispatcher and no second native registry:
 
 | Owner | Inputs and callers | Owned result |
 | --- | --- | --- |
