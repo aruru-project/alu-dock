@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use serde::Serialize;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufRead, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
@@ -31,7 +32,7 @@ use crate::{
     ClientError, Result,
     client::{HelloAck, MAX_CONTROL_LINE_BYTES, encode_client_hello, validate_hello_line},
     timing::{LINK_PING_INTERVAL, LINK_PONG_TIMEOUT, PROTOCOL_WRITE_TIMEOUT},
-    tls::{ConnectedTransport, ControlStream, read_json_line},
+    tls::{ConnectedTransport, ControlStream, read_json_line_observed},
 };
 
 pub(crate) const MULTIPLEX_CAPABILITY: &str = "transport.multiplex.v1";
@@ -44,6 +45,55 @@ const MAX_LINK_STREAMS: usize = 256;
 const MAX_LINK_OUTPUT_BYTES: usize = 8 * MAX_LINK_LINE_BYTES;
 /// Inbound records a stream's consumer has not read yet; the stream is reset beyond this.
 const MAX_STREAM_INPUT_BYTES: usize = 4 * MAX_LINK_LINE_BYTES;
+
+/// How the link judges liveness and stalls; the route supplies the product values.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LinkTiming {
+    /// The client pings this often while the link is open.
+    pub ping_interval: Duration,
+    /// A link with no bytes moving in either direction for a ping interval plus this is gone.
+    pub pong_timeout: Duration,
+    /// One write call that makes no progress for this long is a stalled link.
+    pub write_stall: Duration,
+}
+
+impl Default for LinkTiming {
+    fn default() -> Self {
+        Self {
+            ping_interval: LINK_PING_INTERVAL,
+            pong_timeout: LINK_PONG_TIMEOUT,
+            write_stall: PROTOCOL_WRITE_TIMEOUT,
+        }
+    }
+}
+
+/// Outbound link records. Field order is part of the wire shape: the Host
+/// recognizes a file chunk in transit from the prefix of a partially received
+/// `stream_data` record, so `kind`, `streamId`, `data` must come in this order.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LinkRecord<'a> {
+    StreamOpen {
+        #[serde(rename = "streamId")]
+        stream_id: &'a str,
+    },
+    StreamData {
+        #[serde(rename = "streamId")]
+        stream_id: &'a str,
+        data: &'a str,
+    },
+    StreamClose {
+        #[serde(rename = "streamId")]
+        stream_id: &'a str,
+    },
+    StreamReset {
+        #[serde(rename = "streamId")]
+        stream_id: &'a str,
+        reason: &'a str,
+    },
+    Ping,
+    Pong,
+}
 
 /// The Host refused a stream's hello; carried through the stream's read error.
 #[derive(Clone, Debug)]
@@ -85,13 +135,14 @@ struct StreamSlot {
 struct LinkInner {
     id: Uuid,
     hello: HelloAck,
+    timing: LinkTiming,
     outbound: mpsc::UnboundedSender<Vec<u8>>,
     outbound_bytes: AtomicUsize,
     output_waiters: Mutex<Vec<Waker>>,
     streams: Mutex<HashMap<String, StreamSlot>>,
     closed: AtomicBool,
     closed_notify: Notify,
-    last_inbound: Mutex<Instant>,
+    last_activity: Mutex<Instant>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     on_closed: Mutex<Option<LinkClosedCallback>>,
 }
@@ -106,31 +157,49 @@ impl Link {
     pub(crate) fn establish(
         connection: ConnectedTransport,
         hello: HelloAck,
+        timing: LinkTiming,
         on_closed: LinkClosedCallback,
     ) -> Self {
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let inner = Arc::new(LinkInner {
             id: Uuid::new_v4(),
             hello,
+            timing,
             outbound,
             outbound_bytes: AtomicUsize::new(0),
             output_waiters: Mutex::new(Vec::new()),
             streams: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             closed_notify: Notify::new(),
-            last_inbound: Mutex::new(Instant::now()),
+            last_activity: Mutex::new(Instant::now()),
             tasks: Mutex::new(Vec::new()),
             on_closed: Mutex::new(Some(on_closed)),
         });
+        #[cfg(test)]
+        LIVE_LINKS.fetch_add(1, Ordering::SeqCst);
         let link = Self { inner };
         let (read_half, write_half) = tokio::io::split(connection.stream);
         let reader = tokio::spawn(link.clone().read_loop(BufReader::new(read_half)));
         let writer = tokio::spawn(link.clone().write_loop(write_half, outbound_rx));
         let pinger = tokio::spawn(link.clone().ping_loop());
-        if let Ok(mut tasks) = link.inner.tasks.lock() {
+        let already_closed = {
+            let mut tasks = link.inner.tasks.lock().unwrap_or_else(|e| e.into_inner());
             tasks.extend([reader, writer, pinger]);
+            link.is_closed()
+        };
+        // The reader can end the link before its handle is registered; nothing may outlive that.
+        if already_closed {
+            link.abort_tasks();
         }
         link
+    }
+
+    fn abort_tasks(&self) {
+        if let Ok(mut tasks) = self.inner.tasks.lock() {
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+        }
     }
 
     pub(crate) fn hello(&self) -> &HelloAck {
@@ -203,11 +272,14 @@ impl Link {
                 },
             );
         }
-        self.send(&serde_json::json!({ "kind": "stream_open", "streamId": stream_id }))?;
+        self.send(&LinkRecord::StreamOpen {
+            stream_id: &stream_id,
+        })?;
         let hello = encode_client_hello(&hello_request_id, client_id, required_capabilities)?;
-        self.send(
-            &serde_json::json!({ "kind": "stream_data", "streamId": stream_id, "data": hello }),
-        )?;
+        self.send(&LinkRecord::StreamData {
+            stream_id: &stream_id,
+            data: &hello,
+        })?;
         let stream = VirtualStream {
             link: self.clone(),
             stream_id,
@@ -246,11 +318,7 @@ impl Link {
                 waker.wake();
             }
         }
-        if let Ok(mut tasks) = self.inner.tasks.lock() {
-            for task in tasks.drain(..) {
-                task.abort();
-            }
-        }
+        self.abort_tasks();
         let callback = self
             .inner
             .on_closed
@@ -262,7 +330,7 @@ impl Link {
         }
     }
 
-    fn send(&self, record: &Value) -> Result<()> {
+    fn send(&self, record: &LinkRecord<'_>) -> Result<()> {
         let mut bytes = serde_json::to_vec(record)?;
         bytes.push(b'\n');
         if bytes.len() > MAX_LINK_LINE_BYTES {
@@ -299,21 +367,59 @@ impl Link {
             .map(|mut streams| streams.remove(stream_id).is_some())
             .unwrap_or(false);
         if removed && notify_peer && !self.is_closed() {
-            let _ =
-                self.send(&serde_json::json!({ "kind": "stream_close", "streamId": stream_id }));
+            let _ = self.send(&LinkRecord::StreamClose { stream_id });
         }
     }
 
+    /// A record is written as long as bytes keep leaving; only a stalled write
+    /// times out, so a slow upload is not cut at a whole-record deadline.
     async fn write_loop(
         self,
         mut writer: tokio::io::WriteHalf<Box<dyn ControlStream>>,
         mut outbound: mpsc::UnboundedReceiver<Vec<u8>>,
     ) {
-        while let Some(bytes) = outbound.recv().await {
-            let written = tokio::time::timeout(PROTOCOL_WRITE_TIMEOUT, async {
-                writer.write_all(&bytes).await?;
-                writer.flush().await
-            })
+        loop {
+            let bytes = tokio::select! {
+                next = outbound.recv() => match next { Some(bytes) => bytes, None => return },
+                _ = self.inner.closed_notify.notified() => return,
+            };
+            let written = async {
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    let write = writer.write(&bytes[offset..]);
+                    tokio::pin!(write);
+                    // A write the socket accepts at once proves nothing (its buffer may be
+                    // filling towards a dead peer). One that had to wait for room completes
+                    // only because the peer took bytes: that is liveness, and matters while
+                    // a large upload leaves slowly with the next ping queued behind it.
+                    let (count, waited) = match poll_now(&mut write) {
+                        Some(result) => (result?, false),
+                        None => (
+                            tokio::time::timeout(self.inner.timing.write_stall, &mut write)
+                                .await
+                                .map_err(|_| {
+                                    io::Error::new(
+                                        io::ErrorKind::TimedOut,
+                                        "Host link write stalled",
+                                    )
+                                })??,
+                            true,
+                        ),
+                    };
+                    if count == 0 {
+                        return Err(io::Error::from(io::ErrorKind::WriteZero));
+                    }
+                    offset += count;
+                    if waited && let Ok(mut at) = self.inner.last_activity.lock() {
+                        *at = Instant::now();
+                    }
+                }
+                tokio::time::timeout(self.inner.timing.write_stall, writer.flush())
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::TimedOut, "Host link write stalled")
+                    })?
+            }
             .await;
             self.inner
                 .outbound_bytes
@@ -323,50 +429,57 @@ impl Link {
                     waker.wake();
                 }
             }
-            match written {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return self.finish("Host link write failed"),
-                Err(_) => return self.finish("Host link write timed out"),
+            if written.is_err() {
+                return self.finish("Host link write failed");
             }
         }
     }
 
     async fn ping_loop(self) {
         loop {
-            tokio::time::sleep(LINK_PING_INTERVAL).await;
+            tokio::select! {
+                _ = tokio::time::sleep(self.inner.timing.ping_interval) => {}
+                _ = self.inner.closed_notify.notified() => return,
+            }
             if self.is_closed() {
                 return;
             }
             let silent = self
                 .inner
-                .last_inbound
+                .last_activity
                 .lock()
                 .map(|at| at.elapsed())
                 .unwrap_or(Duration::ZERO);
-            if silent > LINK_PING_INTERVAL + LINK_PONG_TIMEOUT {
-                return self.finish("Host link stopped answering");
+            if silent > self.inner.timing.ping_interval + self.inner.timing.pong_timeout {
+                return self.finish("Host link stopped moving bytes in either direction");
             }
-            if self.send(&serde_json::json!({ "kind": "ping" })).is_err() {
+            if self.send(&LinkRecord::Ping).is_err() {
                 return;
             }
         }
     }
 
+    /// Every byte from the Host is liveness, so a large record arriving slowly
+    /// (a download chunk on a weak link) does not read as a silent Host.
+    /// (`last_activity` also advances as outbound bytes leave; see `write_loop`.)
     async fn read_loop<R: AsyncBufRead + Unpin>(self, mut reader: R) {
         loop {
-            let record: Value = match read_json_line(&mut reader, MAX_LINK_LINE_BYTES).await {
-                Ok(record) => record,
+            let received = read_json_line_observed(&mut reader, MAX_LINK_LINE_BYTES, |_, _| {
+                if let Ok(mut at) = self.inner.last_activity.lock() {
+                    *at = Instant::now();
+                }
+            })
+            .await;
+            let record: Value = match received {
+                Ok((record, _)) => record,
                 Err(_) => return self.finish("Host link ended"),
             };
-            if let Ok(mut at) = self.inner.last_inbound.lock() {
-                *at = Instant::now();
-            }
             let kind = record.get("kind").and_then(Value::as_str).unwrap_or("");
             let stream_id = record.get("streamId").and_then(Value::as_str);
             match (kind, stream_id) {
                 ("pong", None) => {}
                 ("ping", None) => {
-                    if self.send(&serde_json::json!({ "kind": "pong" })).is_err() {
+                    if self.send(&LinkRecord::Pong).is_err() {
                         return;
                     }
                 }
@@ -435,9 +548,10 @@ impl Link {
             ));
             streams.remove(stream_id);
             drop(streams);
-            let _ = self.send(&serde_json::json!({
-                "kind": "stream_reset", "streamId": stream_id, "reason": "Stream input queue exceeded its bound"
-            }));
+            let _ = self.send(&LinkRecord::StreamReset {
+                stream_id,
+                reason: "Stream input queue exceeded its bound",
+            });
             return;
         }
         let mut line = Vec::with_capacity(data.len() + 1);
@@ -460,13 +574,27 @@ impl Link {
     }
 }
 
+#[cfg(test)]
+pub(crate) static LIVE_LINKS: AtomicUsize = AtomicUsize::new(0);
+
 impl Drop for LinkInner {
     fn drop(&mut self) {
+        #[cfg(test)]
+        LIVE_LINKS.fetch_sub(1, Ordering::SeqCst);
         if let Ok(mut tasks) = self.tasks.lock() {
             for task in tasks.drain(..) {
                 task.abort();
             }
         }
+    }
+}
+
+/// One poll without a real waker: `Some` when the future was already ready.
+fn poll_now<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
+    let mut cx = Context::from_waker(Waker::noop());
+    match Pin::new(future).poll(&mut cx) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
     }
 }
 
@@ -579,7 +707,16 @@ impl AsyncWrite for VirtualStream {
                     )));
                 }
             };
-            let record = serde_json::json!({ "kind": "stream_data", "streamId": self.stream_id, "data": text });
+            if line.len() > MAX_CONTROL_LINE_BYTES {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "protocol line exceeds its bound",
+                )));
+            }
+            let record = LinkRecord::StreamData {
+                stream_id: &self.stream_id,
+                data: text,
+            };
             if let Err(error) = self.link.send(&record) {
                 return Poll::Ready(Err(io::Error::other(error.to_string())));
             }
@@ -620,6 +757,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use std::time::Duration;
+
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -643,14 +782,26 @@ mod tests {
         socket: std::path::PathBuf,
         connections: Arc<AtomicUsize>,
         pings: Arc<AtomicUsize>,
+        reads: Arc<AtomicUsize>,
     }
 
-    /// `answer_pings` false models a Host whose link went silent after a request answered.
-    fn spawn_fixture(
-        epoch: &'static str,
-        answer_pings: bool,
-        drop_link_after_streams: Option<usize>,
-    ) -> Fixture {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Normal,
+        /// The Host stops answering pings: a silent link.
+        SilentPings,
+        /// The link ends right after this many streams were answered.
+        DropAfter(usize),
+        /// The link socket closes right after the link hello reply.
+        CloseAfterLinkHello,
+        /// Each response is written in pieces, 90 ms apart: longer than the silence a link is allowed.
+        SlowResponse,
+        /// The link is read 64 KiB at a time, 60 ms apart: a whole record takes longer than a
+        /// stalled write is allowed, while every write keeps progressing.
+        SlowReader,
+    }
+
+    fn spawn_fixture(epoch: &'static str, mode: Mode) -> Fixture {
         let directory = std::env::temp_dir().join(format!(
             "link-{}",
             &uuid::Uuid::new_v4().simple().to_string()[..12]
@@ -660,12 +811,14 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
         let pings = Arc::new(AtomicUsize::new(0));
-        let (seen, ping_count) = (connections.clone(), pings.clone());
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (seen, ping_count, read_count) = (connections.clone(), pings.clone(), reads.clone());
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 seen.fetch_add(1, Ordering::SeqCst);
                 let ping_count = ping_count.clone();
+                let read_count = read_count.clone();
                 tokio::spawn(async move {
                     let mut stream = BufReader::new(stream);
                     let hello: Value = read_json_line(&mut stream, 1 << 20).await.unwrap();
@@ -686,18 +839,44 @@ mod tests {
                             .unwrap();
                         return;
                     }
+                    if mode == Mode::CloseAfterLinkHello {
+                        return;
+                    }
                     let mut hellos: std::collections::HashMap<String, bool> = Default::default();
                     let mut served = 0;
+                    let mut collected: Vec<u8> = Vec::new();
                     loop {
                         let mut line = String::new();
-                        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        if mode == Mode::SlowReader {
+                            // Drain the link slowly: one bounded read per five seconds.
+                            use tokio::io::AsyncReadExt;
+                            let mut buffer = vec![0_u8; 64 * 1024];
+                            loop {
+                                if let Some(end) = collected.iter().position(|byte| *byte == b'\n')
+                                {
+                                    line = String::from_utf8(
+                                        collected.drain(..=end).collect::<Vec<u8>>()[..end]
+                                            .to_vec(),
+                                    )
+                                    .unwrap();
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(60)).await;
+                                let count = stream.read(&mut buffer).await.unwrap_or(0);
+                                if count == 0 {
+                                    return;
+                                }
+                                read_count.fetch_add(1, Ordering::SeqCst);
+                                collected.extend_from_slice(&buffer[..count]);
+                            }
+                        } else if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
                             return;
                         }
                         let record: Value = serde_json::from_str(&line).unwrap();
                         match record["kind"].as_str().unwrap() {
                             "ping" => {
                                 ping_count.fetch_add(1, Ordering::SeqCst);
-                                if answer_pings {
+                                if mode != Mode::SilentPings {
                                     write_json_line(&mut stream, &json!({"kind":"pong"}))
                                         .await
                                         .unwrap();
@@ -738,7 +917,20 @@ mod tests {
                                     host_info(&inner, epoch)
                                 };
                                 let closes = reply["kind"] != "hello_ack";
-                                write_json_line(&mut stream, &json!({"kind":"stream_data","streamId":stream_id,"data":serde_json::to_string(&reply).unwrap()})).await.unwrap();
+                                let record = serde_json::to_vec(&json!({"kind":"stream_data","streamId":stream_id,"data":serde_json::to_string(&reply).unwrap()})).unwrap();
+                                if closes && mode == Mode::SlowResponse {
+                                    // Six pieces 90 ms apart: 540 ms for one record, past the 300 ms
+                                    // of silence a link is allowed.
+                                    for piece in record.chunks(record.len().div_ceil(6)) {
+                                        stream.write_all(piece).await.unwrap();
+                                        stream.flush().await.unwrap();
+                                        tokio::time::sleep(Duration::from_millis(90)).await;
+                                    }
+                                } else {
+                                    stream.write_all(&record).await.unwrap();
+                                }
+                                stream.write_all(b"\n").await.unwrap();
+                                stream.flush().await.unwrap();
                                 if closes {
                                     write_json_line(
                                         &mut stream,
@@ -747,7 +939,7 @@ mod tests {
                                     .await
                                     .unwrap();
                                     served += 1;
-                                    if drop_link_after_streams == Some(served) {
+                                    if mode == Mode::DropAfter(served) {
                                         stream.get_mut().shutdown().await.unwrap();
                                         return;
                                     }
@@ -764,6 +956,16 @@ mod tests {
             socket,
             connections,
             pings,
+            reads,
+        }
+    }
+
+    /// Product timings scaled to milliseconds so the tests run in real time.
+    fn fast() -> super::LinkTiming {
+        super::LinkTiming {
+            ping_interval: Duration::from_millis(200),
+            pong_timeout: Duration::from_millis(100),
+            write_stall: Duration::from_millis(200),
         }
     }
 
@@ -774,7 +976,8 @@ mod tests {
                 LocalDockEndpoint::configured(fixture.socket.to_str().unwrap()).unwrap(),
                 "link-test".into(),
             )
-            .unwrap(),
+            .unwrap()
+            .with_link_timing(fast()),
         )
     }
 
@@ -783,7 +986,7 @@ mod tests {
     #[tokio::test]
     async fn requests_after_the_first_share_one_connection_and_a_stream_refusal_is_the_hosts_error()
     {
-        let fixture = spawn_fixture("epoch", true, None);
+        let fixture = spawn_fixture("epoch", Mode::Normal);
         let client = client(&fixture);
         assert_eq!(client.host_info().await.unwrap().host.host_epoch, "epoch");
         assert_eq!(fixture.connections.load(Ordering::SeqCst), 1);
@@ -811,7 +1014,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_lost_link_is_replaced_by_the_next_request() {
-        let fixture = spawn_fixture("epoch", true, Some(1));
+        let fixture = spawn_fixture("epoch", Mode::DropAfter(1));
         let client = client(&fixture);
         client.host_info().await.unwrap();
         client.host_info().await.unwrap();
@@ -833,15 +1036,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_silent_link_is_closed_after_the_ping_timeout_and_the_route_reconnects() {
-        let fixture = spawn_fixture("epoch", false, None);
+        let fixture = spawn_fixture("epoch", Mode::SilentPings);
         let client = client(&fixture);
         client.host_info().await.unwrap();
         client.host_info().await.unwrap();
         assert_eq!(fixture.connections.load(Ordering::SeqCst), 2);
-        tokio::time::pause();
         let link_closed = async {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
                 if fixture.pings.load(Ordering::SeqCst) > 0
                     && client.router().snapshot().active_endpoint_id.is_none()
                 {
@@ -849,12 +1051,109 @@ mod tests {
                 }
             }
         };
-        tokio::time::timeout(std::time::Duration::from_secs(120), link_closed)
+        tokio::time::timeout(Duration::from_secs(10), link_closed)
             .await
             .expect("silent link must be given up");
-        tokio::time::resume();
         client.host_info().await.unwrap();
         assert_eq!(fixture.connections.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
+    }
+
+    // Expert review of #329: the Host recognizes a file chunk in transit from
+    // this exact prefix; alphabetical field order would silently disable that.
+    #[test]
+    fn stream_data_records_keep_the_prefix_the_host_recognizes() {
+        let encoded = serde_json::to_string(&super::LinkRecord::StreamData {
+            stream_id: "s1",
+            data: "{\"kind\":\"file_chunk\"}",
+        })
+        .unwrap();
+        assert!(
+            encoded.starts_with("{\"kind\":\"stream_data\",\"streamId\":\"s1\",\"data\":"),
+            "{encoded}"
+        );
+    }
+
+    // Expert review of #329: a response arriving slowly is a live Host.
+    #[tokio::test]
+    async fn a_response_arriving_slowly_keeps_the_link_alive() {
+        let fixture = spawn_fixture("epoch", Mode::SlowResponse);
+        let client = client(&fixture);
+        client.host_info().await.unwrap();
+        assert_eq!(client.host_info().await.unwrap().host.host_epoch, "epoch");
+        // Past the next liveness check: the slowly arrived record counted as activity.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(fixture.connections.load(Ordering::SeqCst), 2);
+        assert!(client.router().snapshot().active_endpoint_id.is_some());
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
+    }
+
+    // Expert review of #329: a large record leaving slowly is not a stalled write.
+    #[tokio::test]
+    async fn a_large_record_leaving_slowly_keeps_the_link_alive() {
+        let fixture = spawn_fixture("epoch", Mode::SlowReader);
+        let client = client(&fixture);
+        client.host_info().await.unwrap();
+        // A second request on the link: the fixture drains it 64 KiB per 60 ms, so this
+        // ~900 KiB record takes about a second to leave, well past the 200 ms write stall.
+        let mut routed = client.router().acquire(&["host.info"]).await.unwrap();
+        let mut line =
+            serde_json::to_vec(&json!({"kind":"request","pad":"a".repeat(900 * 1024)})).unwrap();
+        line.push(b'\n');
+        routed.connection.stream.write_all(&line).await.unwrap();
+        for _ in 0..300 {
+            if fixture.reads.load(Ordering::SeqCst) >= 15
+                || client.router().snapshot().active_endpoint_id.is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            client.router().snapshot().active_endpoint_id.is_some(),
+            "the link must survive a slow drain"
+        );
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
+    }
+
+    // Expert review of #329: one oversized submission fails alone.
+    #[tokio::test]
+    async fn an_oversized_line_fails_its_own_stream_and_the_link_keeps_serving() {
+        let fixture = spawn_fixture("epoch", Mode::Normal);
+        let client = client(&fixture);
+        client.host_info().await.unwrap();
+        client.host_info().await.unwrap();
+        let mut routed = client.router().acquire(&["host.info"]).await.unwrap();
+        let mut line = vec![b'a'; super::MAX_CONTROL_LINE_BYTES];
+        line.push(b'\n');
+        let error = routed.connection.stream.write_all(&line).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        drop(routed);
+        assert_eq!(client.host_info().await.unwrap().host.host_epoch, "epoch");
+        assert_eq!(fixture.connections.load(Ordering::SeqCst), 2);
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
+    }
+
+    // Expert review of #329: a link that dies as it is born leaves no task behind.
+    #[tokio::test]
+    async fn a_link_closed_at_birth_releases_itself() {
+        let fixture = spawn_fixture("epoch", Mode::CloseAfterLinkHello);
+        let client = client(&fixture);
+        client.host_info().await.unwrap();
+        let before = super::LIVE_LINKS.load(Ordering::SeqCst);
+        for _ in 0..50 {
+            let _ = client.host_info().await;
+        }
+        for _ in 0..200 {
+            if super::LIVE_LINKS.load(Ordering::SeqCst) <= before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            super::LIVE_LINKS.load(Ordering::SeqCst) <= before,
+            "links that ended must be released"
+        );
         std::fs::remove_dir_all(&fixture.directory).unwrap();
     }
 }

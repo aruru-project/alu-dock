@@ -6,7 +6,7 @@ use crate::{
     ClientError, ClientIdentity, ConnectionPolicy, Endpoint, HostConnectionProfile, IdentityStore,
     Result,
     client::{HelloAck, negotiate_local_endpoint, negotiate_pinned_endpoint},
-    link::{Link, MULTIPLEX_CAPABILITY},
+    link::{Link, LinkTiming, MULTIPLEX_CAPABILITY},
     local_transport::LocalDockEndpoint,
     timing::CONNECTION_ACQUISITION_TIMEOUT,
     tls::{ConnectedTransport, PinnedTlsConnector},
@@ -28,6 +28,7 @@ pub struct ConnectionRouter {
 struct RouterInner {
     connector: Option<PinnedTlsConnector>,
     client_id: String,
+    link_timing: LinkTiming,
     state: Mutex<RouterState>,
     route_generation: tokio::sync::watch::Sender<u64>,
     acquisition: tokio::sync::Mutex<()>,
@@ -102,6 +103,7 @@ impl ConnectionRouter {
             inner: Arc::new(RouterInner {
                 connector,
                 client_id,
+                link_timing: LinkTiming::default(),
                 state: Mutex::new(RouterState {
                     connection_id: profile.host_id.clone(),
                     config_revision: profile.revision,
@@ -135,6 +137,7 @@ impl ConnectionRouter {
             inner: Arc::new(RouterInner {
                 connector,
                 client_id,
+                link_timing: LinkTiming::default(),
                 state: Mutex::new(RouterState {
                     connection_id: "explicit-endpoint-probe".into(),
                     config_revision: 1,
@@ -169,6 +172,7 @@ impl ConnectionRouter {
             inner: Arc::new(RouterInner {
                 connector: None,
                 client_id: store.client_id()?,
+                link_timing: LinkTiming::default(),
                 state: Mutex::new(RouterState {
                     connection_id: context_id,
                     config_revision: 1,
@@ -191,6 +195,40 @@ impl ConnectionRouter {
                 acquisition: tokio::sync::Mutex::new(()),
             }),
         })
+    }
+
+    /// Test seam: links of this router judge liveness with these timings.
+    #[cfg(test)]
+    pub(crate) fn with_link_timing(self, link_timing: LinkTiming) -> Self {
+        let state = {
+            let state = self.inner.state.lock().expect("router state");
+            RouterState {
+                connection_id: state.connection_id.clone(),
+                config_revision: state.config_revision,
+                policy: state.policy.clone(),
+                route_generation: state.route_generation,
+                resolution_generation: state.resolution_generation,
+                last_resolution_error: None,
+                last_resolution_capabilities: None,
+                recently_failed_endpoint_id: None,
+                candidates: state.candidates.clone(),
+                active_endpoint_id: state.active_endpoint_id.clone(),
+                link: None,
+                multiplex: None,
+                closed: false,
+            }
+        };
+        let (route_generation, _) = tokio::sync::watch::channel(1);
+        Self {
+            inner: Arc::new(RouterInner {
+                connector: self.inner.connector.clone(),
+                client_id: self.inner.client_id.clone(),
+                link_timing,
+                state: Mutex::new(state),
+                route_generation,
+                acquisition: tokio::sync::Mutex::new(()),
+            }),
+        }
     }
 
     pub fn reconcile(&self, profile: &HostConnectionProfile) -> Result<()> {
@@ -346,6 +384,7 @@ impl ConnectionRouter {
         let link = Link::establish(
             negotiated.connection,
             negotiated.hello,
+            inner.link_timing,
             Box::new(move |link_id| {
                 let Some(inner) = weak.upgrade() else { return };
                 ConnectionRouter { inner }.report_link_loss(link_id, &failed_endpoint);
@@ -1068,6 +1107,7 @@ mod tests {
             inner: Arc::new(RouterInner {
                 connector: Some(connector),
                 client_id: "test-client".into(),
+                link_timing: LinkTiming::default(),
                 state: Mutex::new(RouterState {
                     connection_id: "test-host".into(),
                     config_revision: 1,
