@@ -206,6 +206,8 @@ Worker 接受副作用前失联和接受后失联是不同结果。Host 必须�
 
 消息提交中，Host 的 admission result 使用 Worker 报告的实际 delivery。`operationId` 是直接 prompt 与 Queue message 共用的提交身份；`queueItemId` 只属于确实等待过的 Queue item。一个 Host-deferred Queue item 可以在 Agent 恢复空闲后以 `prompt` delivery 被消费，此时 `message.submitted` 仍保留它真实的历史 Queue identity；普通 direct prompt 没有该 identity。若辅助关联异常，Host 省略这个可选 identity，canonical message 仍正常发布。Host 不根据 catalog 中稍早的 running 状态替 Agent 决定最终 delivery。用户必须始终能确认消息处于以下哪种状态：未接受、在 Queue 中等待，或已被 Agent 消费并出现在 conversation。
 
+`run.abort-restore-queue.v1` 提供 `command.abort_restore_queue {operationId,instanceId}`：一次 mutation 停掉当前回复（含压缩和 Tree 摘要），同时取回所有尚未交给 Agent 的 Queue 消息。结果与 `queue.dequeue` 相同，为 `{receipt:{operationId,instanceId,restored,inFlight},instance}`，instance 已不在运行、Queue 为空；`restored` 按原消费顺序给调用者放回输入框，`inFlight` 只列出已被 Agent 取走、会出现在对话中的消息。旧的 `command.abort` 与 `queue.dequeue` 语义不变。官方客户端与 Work TUI 的“中止”只调用它；仅在请求开始前明确收到缺少此能力时，才对旧 Host 依次调用取回与中止。
+
 ## Read、follow 与 Extension UI 操作
 
 `instance.records.v1` 为完整初始内容和持续事件提供显式逐条交付。客户端必须在 hello 要求该能力，并在 `instance.read / instance.follow` 发送 `delivery: "records"`；仅广告能力不改变旧 V2 响应、字段、错误、游标或传输预算。Main 同样向目标 SubHost 要求该能力，不按 Main 的版本猜测目标支持。

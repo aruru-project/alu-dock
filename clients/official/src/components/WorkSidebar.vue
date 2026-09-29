@@ -20,7 +20,7 @@ const props = defineProps<{
   page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'directoryOpen'>>
   host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'openHostSettings' | 'pairingInProgress'>>
   platform: ReadonlyRefs<Pick<ReturnType<typeof usePlatformLifecycle>, 'appSettings' | 'openAppSettings' | 'windowsAwayLabel'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'mutationOutcomeUnknown' | 'workMutating'>>
+  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'workMutating'>>
   operations: ReadonlyRefs<Pick<ReturnType<typeof useOperationResults>, 'consumeNativeOperation' | 'listResults'>>
   observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'label'>>
 }>()
@@ -30,7 +30,7 @@ const { machineListError, groupedWorks, workMachineTag, selectWork, reopenFromLi
 const { directoryOpen } = props.page
 const { openHostSettings, pairingInProgress } = props.host
 const { appSettings, windowsAwayLabel, openAppSettings } = props.platform
-const { workMutating, mutationOutcomeUnknown } = props.actions
+const { workMutating } = props.actions
 const { listResults, consumeNativeOperation } = props.operations
 
 const connectionLabel = props.observation.label
@@ -57,7 +57,7 @@ const connectionLabel = props.observation.label
             <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span></span>
             <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
           </button>
-          <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && (workMutating || mutationOutcomeUnknown))" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
+          <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && workMutating)" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
           <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
         </div>
       </section>

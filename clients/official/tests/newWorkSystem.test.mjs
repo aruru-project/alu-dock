@@ -216,7 +216,8 @@ try {
     }
     await click('确认并创建')
     if (scenario === 'save-unknown') {
-      assert.equal(unknown.length, 1); assert.equal(button('确认并创建').props.disabled, true)
+      // #326: an unconfirmed result is reported without locking the next explicit choice.
+      assert.equal(unknown.length, 1); assert.equal(button('确认并创建').props.disabled, false)
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0)
     } else if (scenario === 'save-failure') {
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0)
@@ -228,7 +229,7 @@ try {
       await click('确认并创建'); assert.equal(created.length, 1)
     } else if (scenario === 'save-create-unknown') {
       assert.equal(unknown.length, 1)
-      assert.equal(button('确认并创建').props.disabled, true)
+      assert.equal(button('确认并创建').props.disabled, false)
       assert.ok(text(container).includes('Work 是否创建成功尚不确定'))
       assert.ok(!text(container).includes('Work 尚未创建'))
       assert.ok(!text(container).includes('再确认创建'))

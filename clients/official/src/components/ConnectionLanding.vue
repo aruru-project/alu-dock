@@ -14,14 +14,14 @@ import { useAppStore } from '../stores/app'
 const props = defineProps<{
   host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'beginPairing' | 'connectLocal' | 'openHostSettings' | 'pairingMessage' | 'pairingPin' | 'pairingStage' | 'rememberPairDeviceName' | 'showHostPairingForm' | 'stopPairing' | 'updateLocalEndpoint'>> & Pick<ReturnType<typeof useHostConnection>, 'pairDeviceName' | 'pairHost' | 'pairPort' | 'pairingError'>
   platform: ReadonlyRefs<Pick<ReturnType<typeof usePlatformLifecycle>, 'desktopShell' | 'desktopShellBusy' | 'retryDesktopHost' | 'runDesktopShellAction'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'mutationOutcomeUnknown' | 'reopenSelectedWork' | 'workMutating'>>
+  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'reopenSelectedWork' | 'workMutating'>>
   busy: boolean
 }>()
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const { pairingError, openHostSettings, showHostPairingForm } = props.host
 const { desktopShell, desktopShellBusy, retryDesktopHost, runDesktopShellAction } = props.platform
-const { workMutating, mutationOutcomeUnknown, reopenSelectedWork } = props.actions
+const { workMutating, reopenSelectedWork } = props.actions
 function inactiveState(work: Work) {
   if (work.lifecycle === 'host_lost') return { label: '连接已中断', message: '这个 Work 的运行进程已经离线。继续后会恢复同一个 Work。', action: '继续这个 Work' }
   if (work.lifecycle === 'runtime_error') return { label: '工作出现故障', message: '这个 Work 已停止运行，可以重新启动后继续。', action: '重新启动这个 Work' }
@@ -88,7 +88,7 @@ function inactiveState(work: Work) {
         <dl class="alu-work-state-meta"><div><dt>Workspace</dt><dd>{{ selected.cwd }}</dd></div></dl>
         <div v-if="selected.lastError" class="alu-work-state-error">{{ selected.lastError }}</div>
         <div class="alu-work-state-actions">
-          <button v-if="selected.reopenable" class="alu-work-state-primary" :disabled="workMutating || mutationOutcomeUnknown" @click="reopenSelectedWork()">{{ workMutating ? '正在继续…' : inactiveState(selected).action }}</button>
+          <button v-if="selected.reopenable" class="alu-work-state-primary" :disabled="workMutating" @click="reopenSelectedWork()">{{ workMutating ? '正在继续…' : inactiveState(selected).action }}</button>
           <button class="alu-work-state-secondary" @click="app.workDrawerOpen = true">查看工作列表</button>
           <button class="alu-work-state-secondary" @click="app.load">刷新状态</button>
         </div>

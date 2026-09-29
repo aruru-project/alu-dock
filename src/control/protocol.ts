@@ -172,6 +172,8 @@ export const RESOURCE_CONTENT_CAPABILITY = "resource.content.v1" as const;
 export const COMPACTION_PROMPTS_CAPABILITY = "session.compaction-prompts.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
 export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
+/** One step: stop the current reply and return every waiting Queue message to the caller. */
+export const ABORT_RESTORE_QUEUE_CAPABILITY = "run.abort-restore-queue.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -212,6 +214,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "resources.v1",
   RESOURCE_CONTENT_CAPABILITY,
   "run.abort.v1",
+  ABORT_RESTORE_QUEUE_CAPABILITY,
   "service.managed.v1",
   "session.adopt.v1",
   "session.commands.v1",
@@ -294,6 +297,7 @@ export type ControlRequest =
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; images?: ImagePathDto[]; attachments?: string[]; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
+  | Request<"command.abort_restore_queue", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
   | Request<"thinking.set", { operationId: string; instanceId: string; level: ThinkingLevel }>
@@ -372,6 +376,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "command.submit": { target: "instance", effect: "command", transport: "unary" },
   "command.abort": { target: "instance", effect: "command", transport: "unary" },
   "queue.dequeue": { target: "instance", effect: "command", transport: "unary" },
+  "command.abort_restore_queue": { target: "instance", effect: "command", transport: "unary" },
   "model.list": { target: "instance", effect: "query", transport: "unary" },
   "model.set": { target: "instance", effect: "command", transport: "unary" },
   "thinking.set": { target: "instance", effect: "command", transport: "unary" },
@@ -649,6 +654,8 @@ export interface ToolsExpandedResult { instance: InstanceSnapshot }
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
 export interface AbortResult { instance: InstanceSnapshot }
 export interface QueueDequeueResult { receipt: QueueDequeueReceipt; instance: InstanceSnapshot }
+/** Same restored/in-flight receipt as Queue retrieval; the reply has also stopped. */
+export type AbortRestoreQueueResult = QueueDequeueResult;
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
 export interface ForgetResult { receipt: { operationId: string; forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error"; piSessionFilesDeleted: 0 } }
 export interface PruneResult { receipt: { operationId: string; selector: "stopped"; forgottenIds: string[]; forgottenCount: number; hasMore: boolean; piSessionFilesDeleted: 0 } }
@@ -755,6 +762,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type.startsWith("instance.")) return "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
+  if (type === "command.abort_restore_queue") return ABORT_RESTORE_QUEUE_CAPABILITY;
   if (type === "session.history") return "tui.projection.v1";
   if (type === "conversation.content.stream") return CONVERSATION_CONTENT_STREAM_CAPABILITY;
   if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
@@ -805,6 +813,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === "models.v1"
     || capability === "queue.control.v1"
     || capability === "run.abort.v1"
+    || capability === ABORT_RESTORE_QUEUE_CAPABILITY
     || capability === "session.adopt.v1"
     || capability === "session.commands.v1"
     || capability === "session.core"
@@ -1070,6 +1079,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     }
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "command.abort_restore_queue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
@@ -1690,6 +1700,11 @@ export function parseAbortResult(input: unknown): AbortResult {
   const instance = parseInstanceSnapshot(value.instance, "instance");
   if (instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
   return { instance };
+}
+export function parseAbortRestoreQueueResult(input: unknown): AbortRestoreQueueResult {
+  const result = parseQueueDequeueResult(input);
+  if (result.instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
+  return result;
 }
 export function parseQueueDequeueResult(input: unknown): QueueDequeueResult {
   const value = object(input, "queue dequeue result"); exact(value, ["receipt", "instance"]);

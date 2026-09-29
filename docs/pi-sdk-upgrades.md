@@ -31,7 +31,7 @@ Do not combine this upgrade with unrelated upstream features, plugin upgrades, c
 
 ## What the SDK gate proves
 
-The isolated gate drives Protocol V2 through `DockClient`, `DockHost`, `DockRegistry`, a default independent Pi Worker process, and the public Pi SDK adapter. A loopback OpenAI-compatible SSE fixture proves model discovery and selection, adapter-owned Pi creation options, Alu Dock identity in Pi's system prompt, opening frozen Pi 0.81.1 session records, streamed output, a real `read` tool call and continuation, canonical persisted history, Pi steer/follow-up queues with safe dequeue/abort, provider-error recovery, name/reload continuity, unexpected Worker-loss recovery, persisted-session reopen, and clean process shutdown.
+The isolated gate drives Protocol V2 through `DockClient`, `DockHost`, `DockRegistry`, a default independent Pi Worker process, and the public Pi SDK adapter. A loopback OpenAI-compatible SSE fixture proves model discovery and selection, adapter-owned Pi creation options, Alu Dock identity in Pi's system prompt, opening frozen Pi 0.81.1 session records, streamed output, a real `read` tool call and continuation, canonical persisted history, Pi steer/follow-up queues returned by a one-step abort, provider-error recovery, name/reload continuity, unexpected Worker-loss recovery, persisted-session reopen, and clean process shutdown.
 
 The test uses temporary agent/session/home directories, a literal dummy key, a minimal environment allowlist with no real provider credentials, and `PI_OFFLINE`; its provider listens only on loopback. It never calls a real provider, operates the managed service, or installs a production version. Its `.compat.ts` suffix keeps it out of ordinary `npm test`.
 
@@ -41,7 +41,7 @@ Triage the failed user capability, then inspect the relevant SDK source or chang
 
 - startup/model: provider configuration, model/auth resolution and session construction;
 - stream/tool/history: provider events, tool schemas/results and session projection;
-- queue/abort: public steer, follow-up, dequeue and abort semantics;
+- queue/abort: public steer, follow-up, queue-clear and abort semantics (queued input returns instead of starting after the abort);
 - reload/reopen/stop: session lifecycle and Worker process ownership;
 - settings: effective model/Thinking state, actual disk writes and the existing error path;
 - TUI/extension: the resolved `pi-tui`/SDK package sources and public component/extension APIs.

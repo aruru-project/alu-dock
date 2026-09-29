@@ -1110,36 +1110,25 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.equal(restoredStatus.execution, "running");
   assert.equal(restoredStatus.pending.total, 0);
 
+  // Card #326: a message the Agent already took no longer blocks Escape.
   await client.prompt(created.id, "in-flight follow-up", "followUp", "pty-follow-inflight");
   await client.prompt(created.id, "in-flight steer", "steer", "pty-steer-inflight");
   const drained = runtime.drainNextQueuedWithoutMessageStart();
   assert.equal(drained, "in-flight steer");
-  const inFlightPty = await runPtyTui([
-    process.execPath,
-    join(process.cwd(), "dist/src/cli.js"),
-    "--socket", harness.socketPath,
-    "attach", created.id,
-  ], "queue-inflight");
-  const inFlightOutput = Buffer.from(inFlightPty.output, "base64").toString("utf8");
-  assert.equal(inFlightPty.timedOut, false, inFlightOutput.slice(-4_000));
-  assert.equal(inFlightPty.status, 0, inFlightOutput.slice(-4_000));
-  assert.match(inFlightOutput, /already moving into[\s\S]*the conversation[\s\S]*finish before[\s\S]*stopping the run/u);
-  assert.equal(inFlightPty.draftVisible, true, "restoration must preserve the draft typed before the receipt arrives");
-  assert.doesNotMatch(inFlightOutput, /Run aborted/u);
-  runtime.finishDrainedQueued(drained!);
-
-  await client.prompt(created.id, "second follow-up", "followUp", "pty-follow-2");
-  await client.prompt(created.id, "second steer", "steer", "pty-steer-2");
   const abortedPty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
     "--socket", harness.socketPath,
     "attach", created.id,
-  ], "queue-abort");
+  ], "queue-inflight");
   const abortedOutput = Buffer.from(abortedPty.output, "base64").toString("utf8");
   assert.equal(abortedPty.timedOut, false, abortedOutput.slice(-4_000));
   assert.equal(abortedPty.status, 0, abortedOutput.slice(-4_000));
-  assert.match(abortedOutput, /Run aborted/);
+  assert.match(abortedOutput, /already reached the[\s\S]*Agent[\s\S]*could not be returned/u);
+  assert.match(abortedOutput, /Run aborted/u);
+  assert.match(abortedOutput, /in-flight follow-up/u, "the waiting follow-up returns to the editor");
+  assert.equal(abortedPty.draftVisible, true, "restoration must preserve the draft typed before the receipt arrives");
+  runtime.finishDrainedQueued(drained!);
   const final = await client.status(created.id);
   assert.equal(final.execution, "idle");
   assert.equal(final.lastRun, "aborted");
@@ -1814,6 +1803,59 @@ test("the same Work can queue input during manual compaction and detach without 
   ));
   assert.equal(submitted?.type === "message.submitted" ? submitted.data.delivery : undefined, "prompt");
   assert.ok(submitted?.type === "message.submitted" && submitted.data.queueItemId);
+});
+
+// Card #326: separate Queue retrieval and abort requests let Abort fail halfway
+// or let Pi start the next queued message as soon as the aborted turn ended.
+test("Abort hands every waiting message back in one step, including text held during compaction, and nothing starts afterwards", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "abort-restore-queue");
+  const runtime = harness.sessions.get(created.id)!;
+
+  await client.prompt(created.id, "later follow-up", "followUp", "abort-restore-follow");
+  await client.prompt(created.id, "urgent steer", "steer", "abort-restore-steer");
+  const promptsBeforeAbort = runtime.promptCalls;
+  const aborted = await client.abortRestoreQueue(created.id, "abort-restore-running");
+  assert.deepEqual(aborted.receipt.restored.map((item) => item.text), ["urgent steer", "later follow-up"]);
+  assert.deepEqual(aborted.receipt.inFlight, []);
+  assert.equal(aborted.instance.execution, "idle");
+  assert.equal(aborted.instance.lastRun, "aborted");
+  assert.equal(aborted.instance.pending.total, 0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(runtime.promptCalls, promptsBeforeAbort, "returned messages must not also run");
+  const cleared = harness.registry.get(created.id).eventsSince().events.filter((event) => event.type === "queue.cleared");
+  assert.deepEqual(cleared.map((event) => event.data.reason), ["abort"], "other clients see the Queue leave with the abort");
+
+  const block = runtime.blockNextCompaction();
+  const compacting = client.compactSession(created.id, undefined, "abort-restore-compaction");
+  void compacting.catch(() => {});
+  await block.entered;
+  const held = await client.prompt(created.id, "held during compaction", "auto", "abort-restore-held");
+  assert.equal(held.receipt.queued, true);
+  const promptsBeforeCompactionAbort = runtime.promptCalls;
+  const compactionAborted = await client.abortRestoreQueue(created.id, "abort-restore-compacting");
+  assert.deepEqual(compactionAborted.receipt.restored.map((item) => item.text), ["held during compaction"]);
+  assert.equal(compactionAborted.instance.compacting, false);
+  assert.equal(compactionAborted.instance.pending.total, 0);
+  await assert.rejects(compacting);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(runtime.promptCalls, promptsBeforeCompactionAbort, "the held message must not start once compaction stops");
+  assert.equal((await client.status(created.id)).execution, "idle");
+
+  // Automatic compaction ends through an Agent event, which would normally hand held text over.
+  await client.prompt(created.id, "start another run", "auto", "abort-restore-rerun");
+  runtime.armPostSettlementContinuation();
+  runtime.settle("settled into automatic compaction");
+  assert.equal((await client.status(created.id)).compacting, true);
+  await client.prompt(created.id, "held during automatic compaction", "auto", "abort-restore-auto-held");
+  const promptsBeforeAutoAbort = runtime.promptCalls;
+  const autoAborted = await client.abortRestoreQueue(created.id, "abort-restore-auto");
+  assert.deepEqual(autoAborted.receipt.restored.map((item) => item.text), ["held during automatic compaction"]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(runtime.promptCalls, promptsBeforeAutoAbort, "automatic compaction ending must not start the returned message");
 });
 
 test("Sol-style compaction keeps a concurrent cross-client prompt visible and hands it to the hidden continuation once", async (context) => {
@@ -3372,7 +3414,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" = "detach",
   readyFile?: string,
   workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {

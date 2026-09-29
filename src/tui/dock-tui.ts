@@ -26,6 +26,7 @@ import {
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
+import { ABORT_RESTORE_QUEUE_CAPABILITY, type AbortRestoreQueueResult } from "../control/protocol.js";
 import { humanControlErrorText, humanErrorText } from "../human-control-error.js";
 import { humanRelativeTime } from "../human-time.js";
 import { sessionDisplayName } from "../session-display.js";
@@ -710,11 +711,11 @@ export async function runDockTui(
     }
   }
 
-  async function restoreQueue(): Promise<boolean> {
+  async function restoreQueue(): Promise<void> {
     blockEditorSubmit();
     showStatus("returning waiting messages to the editor");
     try {
-      if (!requireCoherentControl()) return false;
+      if (!requireCoherentControl()) return;
       const result = await client.dequeue(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -722,16 +723,14 @@ export async function runDockTui(
       restoreMessagesToEditor(result.receipt.restored);
       if (result.receipt.inFlight.length > 0) {
         const count = result.receipt.inFlight.length;
-        conversation.addNotice(`${count} waiting message${count === 1 ? " is" : "s are"} already moving into the conversation. Let ${count === 1 ? "it" : "them"} finish before stopping the run.`, true);
-        return false;
+        conversation.addNotice(`${count} waiting message${count === 1 ? " is" : "s are"} already moving into the conversation and could not be returned to the editor.`, true);
+        return;
       }
       showStatus(result.receipt.restored.length > 0
         ? `Returned ${result.receipt.restored.length} waiting message${result.receipt.restored.length === 1 ? "" : "s"} to the editor`
         : "No waiting messages to return");
-      return true;
     } catch (error) {
       showError(error);
-      return false;
     } finally {
       restoreEditorSubmit();
       tui.requestRender();
@@ -748,11 +747,18 @@ export async function runDockTui(
     activity.setActivity(runActivity);
     tui.requestRender();
     try {
-      if ((instance.pending.total > 0 || pendingQueue.count > 0) && !await restoreQueue()) return;
       if (!requireCoherentControl()) return;
-      const result = await client.abort(instance.id);
+      const result = await abortRestoringQueue(instance.id);
       instance = result.instance;
       status.update(instance);
+      pendingQueue.remove([...result.receipt.restored, ...result.receipt.inFlight].map((message) => message.queueItemId));
+      restoreMessagesToEditor(result.receipt.restored);
+      if (result.receipt.inFlight.length > 0) {
+        const count = result.receipt.inFlight.length;
+        conversation.addNotice(`${count} waiting message${count === 1 ? " had" : "s had"} already reached the Agent and could not be returned to the editor.`, true);
+      } else if (result.receipt.restored.length > 0) {
+        showStatus(`Returned ${result.receipt.restored.length} waiting message${result.receipt.restored.length === 1 ? "" : "s"} to the editor`);
+      }
       runActivity = activityFromSnapshot(instance);
       activity.setActivity(runActivity);
     } catch (error) {
@@ -760,6 +766,19 @@ export async function runDockTui(
     } finally {
       restoreEditorSubmit();
       tui.requestRender();
+    }
+  }
+
+  /** One Host step; an older Host without it still gets its Queue back before the abort. */
+  async function abortRestoringQueue(instanceId: string): Promise<AbortRestoreQueueResult> {
+    try {
+      return await client.abortRestoreQueue(instanceId);
+    } catch (error) {
+      if (!(error instanceof ControlClientError) || error.code !== "capability_missing"
+        || !Array.isArray(error.details?.missing) || !error.details.missing.includes(ABORT_RESTORE_QUEUE_CAPABILITY)) throw error;
+      const dequeued = await client.dequeue(instanceId);
+      const aborted = await client.abort(instanceId);
+      return { receipt: dequeued.receipt, instance: aborted.instance };
     }
   }
 

@@ -166,10 +166,9 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
     assert.equal(steered.receipt.delivery, "steer");
     assert.equal(followed.receipt.queued, true);
     assert.equal(followed.receipt.delivery, "followUp");
-    const dequeued = await client.dequeue(created.id, "sdk-dequeue");
-    assert.deepEqual(dequeued.receipt.restored.map((item) => item.operationId).sort(), ["sdk-follow-up", "sdk-steer"]);
-    assert.equal(dequeued.instance.pending.total, 0);
-    await client.abort(created.id, "sdk-abort");
+    const restored = await client.abortRestoreQueue(created.id, "sdk-abort-restore");
+    assert.deepEqual(restored.receipt.restored.map((item) => item.operationId).sort(), ["sdk-follow-up", "sdk-steer"]);
+    assert.equal(restored.instance.pending.total, 0);
     const aborted = await waitForEvent(events, holdEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-hold-run");
     assert.equal(aborted.type, "run.settled");
     assert.equal(aborted.data.result, "aborted");

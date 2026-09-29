@@ -65,4 +65,13 @@ pub enum ClientError {
     Crypto(String),
 }
 
+impl ClientError {
+    /// The Host said, before doing anything, that it lacks one of these capabilities.
+    pub(crate) fn missing_capability(&self, capabilities: &[&str]) -> bool {
+        matches!(self, Self::Host { code, details: Some(details), .. }
+            if code == "capability_missing" && details.get("missing").and_then(serde_json::Value::as_array)
+                .is_some_and(|items| items.iter().any(|item| item.as_str().is_some_and(|name| capabilities.contains(&name)))))
+    }
+}
+
 pub type Result<T> = std::result::Result<T, ClientError>;

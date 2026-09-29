@@ -118,7 +118,7 @@ const body = computed(() => {
   }
   return machine.value?.homePath || ''
 })
-const actionBusy = computed(() => props.machinesLoading || !!pending.value || !!trust.value || props.outcomeUnknown)
+const actionBusy = computed(() => props.machinesLoading || !!pending.value || !!trust.value)
 
 watch(() => props.machines, (machines) => {
   if (machines.some((candidate) => candidate.hostId === machineHostId.value && candidate.available)) return
@@ -375,7 +375,7 @@ async function loadInventory() {
 }
 
 async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, workerConfig?: Record<string, unknown>) {
-  if (!isTauri || props.preview || !!pending.value || props.outcomeUnknown || (!!trust.value && !continuation)) return
+  if (!isTauri || props.preview || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   const epoch = systemEpoch
@@ -398,7 +398,7 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
 }
 
 async function adoptSaved(sessionToken: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation) {
-  if (!isTauri || props.preview || !!pending.value || props.outcomeUnknown || (!!trust.value && !continuation)) return
+  if (!isTauri || props.preview || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   pending.value = 'adopt'

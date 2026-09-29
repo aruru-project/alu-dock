@@ -130,12 +130,7 @@ pub(crate) const FILE_TRANSFER_CAPABILITY: &str = "file-transfer.v1";
 pub(crate) const FILE_WINDOW_BYTES: u64 = 256 * 1024;
 
 pub(crate) fn missing_file_capability(error: &ClientError) -> bool {
-    missing_stream_capability(error, &[FILE_TRANSFER_CAPABILITY])
-}
-
-fn missing_stream_capability(error: &ClientError, optional: &[&str]) -> bool {
-    matches!(error, ClientError::Host { code, details: Some(details), .. }
-        if code == "capability_missing" && details.get("missing").and_then(Value::as_array).is_some_and(|items| items.iter().any(|item| item.as_str().is_some_and(|capability| optional.contains(&capability)))))
+    error.missing_capability(&[FILE_TRANSFER_CAPABILITY])
 }
 
 pub(crate) struct RemoteFile {
@@ -237,9 +232,7 @@ impl DockClient {
         required.push(FILE_TRANSFER_CAPABILITY);
         let routed = match self.negotiate(&required).await {
             Ok(value) => value,
-            Err(error) if missing_stream_capability(&error, fallback_capabilities) => {
-                return Ok(None);
-            }
+            Err(error) if error.missing_capability(fallback_capabilities) => return Ok(None),
             Err(error) => return Err(error),
         };
         self.check_file_host_epoch(&routed.hello.host.host_epoch)?;
@@ -270,9 +263,7 @@ impl DockClient {
                     host_epoch,
                 }))
             }
-            Err(error) if !began && missing_stream_capability(&error, fallback_capabilities) => {
-                Ok(None)
-            }
+            Err(error) if !began && error.missing_capability(fallback_capabilities) => Ok(None),
             Err(error) => {
                 self.router()
                     .report_connection_failure(&routed.endpoint_id, routed.route_generation);

@@ -219,6 +219,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       }
       case "command.abort": return this.abort();
       case "queue.dequeue": return this.clearQueue();
+      case "command.abort_restore_queue": { const cleared = this.clearQueue(); await this.abort(); return cleared; }
       case "model.list": return this.listModels();
       case "model.set": return this.selectModel(p.provider, p.modelId);
       case "thinking.set": return this.setThinkingLevel(p.level);

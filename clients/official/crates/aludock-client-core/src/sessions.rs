@@ -1065,9 +1065,7 @@ fn validate_tree(tree: &SessionTree) -> Result<()> {
 }
 
 fn missing_reference_view(error: &ClientError) -> bool {
-    matches!(error, ClientError::Host { code, details: Some(details), .. }
-        if code == "capability_missing" && details.get("missing").and_then(serde_json::Value::as_array)
-            .is_some_and(|items| items.iter().any(|item| item.as_str() == Some(CONVERSATION_REFERENCES_V1))))
+    error.missing_capability(&[CONVERSATION_REFERENCES_V1])
 }
 
 #[derive(Default)]

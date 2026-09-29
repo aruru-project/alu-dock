@@ -129,7 +129,7 @@ Pi Worker 自带 `/retry`，只在用户主动输入且最近一次模型响应�
 
 命令发现按能力而不是具体名称接入。Pi adapter 从公开的 loaded prompt template 保留 `argumentHint` 和可检查正文；正文分页来自内存中的 `PromptTemplate.content`，不让 Host 或客户端读取 `filePath`。Extension command 的动态参数候选由注册时的 `getArgumentCompletions` 产生，并通过同一通用结果体返回；Dock 自带 Extension command 也沿这条 owner API 声明候选，不在 Host 建名称表。Catalog 后续读取使用 `{name,source}`，按名称和来源共同确定目标。
 
-Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
+Pi 的 abort 会等待 Agent 回到 idle；普通 `command.abort` 不动 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。像 Pi TUI 按 Esc 一样“中止并把排队文本放回输入框”由 `command.abort_restore_queue` 一步完成：Pi adapter 在同一次 Worker 调用中先清空 Pi Queue、紧接着 abort，中间不给 Agent 取下一条的机会；Host 在同一个 interrupt 期间暂停把压缩期间暂存的消息交给 Agent（已开始的那一次交付先完成），停下后把 Host 暂存和 Pi 清出的消息按原顺序返回给调用者，并以 `queue.cleared(reason: abort)` 通知其他入口。已经被 Agent 取走的消息留在对话里，只在回执的 `inFlight` 中列出，不阻止中止。客户端不再先取回再中止。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
 
 ### Agent-facing Host capability pattern
 

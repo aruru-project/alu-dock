@@ -96,7 +96,7 @@ try {
       return { instance: { ...work, name: 'Renamed' } }
     } }
     const container = node('storage-session')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode, preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode, preview: false, compactionPending: false }) })
     mounted.mount(container); await settle()
     failStorage = true
     const rename = find(container, item => item.type === 'input')
@@ -114,6 +114,30 @@ try {
     mounted.unmount(); failStorage = false
   }
   console.log('PASS: storage failure permits Session rename but gates Reload/editor handoff; original input remains unchanged')
+  // #326: a compaction still running or with an unconfirmed result is not a reason to ignore a rename click.
+  for (const state of ['pending', 'unknown']) {
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original name', compacting: state === 'pending' })
+    const store = await createStore(work)
+    store.bindNativeOperation({ operationId: `compact-${state}`, kind: 'compact_session', connectionId: 'connection-a', instanceId: 'work-a', hostEpoch: 'epoch-a',
+      runtimeGeneration: 4, sessionId: 'original-session', editor: null, state, ...(state === 'unknown' ? { error: { message: '压缩结果尚未确认。', outcomeUnknown: true } } : {}) })
+    assert.equal(store.unresolvedMutations.size, state === 'unknown' ? 1 : 0)
+    const calls = []
+    globalThis[stateKey] = { invoke: async (command, args) => {
+      if (command === 'list_sessions') return { sessions: [], truncated: false, total: 0 }
+      calls.push({ command, args })
+      return { instance: { ...work, name: 'Renamed' } }
+    } }
+    const container = node(`compaction-${state}-rename`)
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'rename-session', preview: false, compactionPending: state === 'pending' }) })
+    mounted.mount(container); await settle()
+    find(container, item => item.type === 'input').props['onUpdate:modelValue']('Renamed')
+    const confirm = find(container, item => item.type === 'button' && text(item) === '确认')
+    assert.equal(confirm.props.disabled, false, `${state} compaction leaves rename available`)
+    await confirm.props.onClick(); await settle()
+    assert.deepEqual(calls.map(call => call.command), ['name_session'], `${state} compaction does not silently drop the rename`)
+    mounted.unmount()
+  }
+  console.log('PASS: rename reaches the Host while compaction is running or its result is unconfirmed')
   for (const scenario of ['event-before-reply', 'reply-before-event', 'different-work', 'different-connection', 'different-host', 'newer-runtime', 'failure']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original work' })
     const store = await createStore(work)
@@ -123,7 +147,7 @@ try {
     const resync = []
     const container = node('root')
     const app = renderer.createApp({ render: () => h(SessionManager, {
-      work, mode: 'reload-session', preview: false, outcomeUnknown: false, hasDraft: false, compactionPending: false,
+      work, mode: 'reload-session', preview: false, compactionPending: false,
       onFinished: () => resync.push(true),
     }) })
     app.mount(container)
@@ -177,7 +201,7 @@ try {
     } }
     const container = node('root')
     const mounted = renderer.createApp({ render: () => h(SessionManager, {
-      work, mode: operation === 'new' ? 'new-session' : operation === 'switch' ? 'sessions' : 'tree', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false,
+      work, mode: operation === 'new' ? 'new-session' : operation === 'switch' ? 'sessions' : 'tree', preview: false, compactionPending: false,
       onFinished: () => resync.push(true),
     }) })
     mounted.mount(container)
@@ -214,7 +238,7 @@ try {
       ? Promise.resolve({ sessions: [{ token: 'saved', name: 'saved', cwd: '/project' }], total: 1, truncated: false })
       : new Promise((_resolve, reject) => { rejectReply = reject; operationId = args.operationId }) }
     const container = node('root')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, outcomeUnknown: false, hasDraft: false, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
     mounted.mount(container); await settle()
     const pending = find(container, hasClass('ui-dialog-option')).props.onClick()
     await settle(); work.id = 'work-b'; await settle()
@@ -238,7 +262,7 @@ try {
       return { cancelled: false, instance: { ...work, runtimeGeneration: 5 } }
     } }
     const container = node('root')
-    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false }) })
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', preview: false, compactionPending: false }) })
     mounted.mount(container); await settle()
     await find(container, hasClass('ui-dialog-option')).props.onClick(); await settle()
     store.setCurrentDraft('edited during trust')
@@ -265,7 +289,7 @@ try {
     return new Promise((resolve, reject) => { resolveTemplates = resolve; rejectTemplates = reject })
   } }
   const container = node('root')
-  const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'compact-session', preview: false, outcomeUnknown: false, hasDraft: true, compactionPending: false, onCompact: value => submitted.push(value) }) })
+  const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'compact-session', preview: false, compactionPending: false, onCompact: value => submitted.push(value) }) })
   mounted.mount(container)
   await settle()
   const button = label => find(container, item => item.type === 'button' && text(item).includes(label))

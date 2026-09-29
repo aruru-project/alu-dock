@@ -33,6 +33,10 @@ export function useOperationResults(options: {
   const workResults = computed(() => visibleResults.value.filter(operation => operation.instanceId === selected.value?.id))
   const listResults = computed(() => visibleResults.value.filter(operation => operation.instanceId === 'global'
     || !app.works.some(work => work.id === operation.instanceId)))
+  // Abort takes the waiting Queue back in the same Host step as Queue retrieval.
+  function returnsQueue(operation: NativeOperation) {
+    return operation.kind === 'dequeue_messages' || operation.kind === 'abort_run'
+  }
   function hasReturnedContent(operation: NativeOperation) {
     const result = operation.result
     if (!result) return false
@@ -59,7 +63,7 @@ export function useOperationResults(options: {
   }
   const consumeNativeOperation = async (operation: NativeOperation) => {
     if (operation.state === 'succeeded' && !appliedOperations.value.has(operation.operationId)
-      && (operation.kind === 'submit_message' || operation.kind === 'dequeue_messages' || returnedContentErrors.value[operation.operationId])) {
+      && (operation.kind === 'submit_message' || returnsQueue(operation) || returnedContentErrors.value[operation.operationId])) {
       await acceptNativeOperation(operation)
       return
     }
@@ -101,7 +105,7 @@ export function useOperationResults(options: {
           acknowledgementErrors.value.add(operation.operationId)
           return
         }
-      } else if (operation.kind === 'dequeue_messages' && result && 'receipt' in result && result.receipt && 'restored' in result.receipt) {
+      } else if (returnsQueue(operation) && result && 'receipt' in result && result.receipt && 'restored' in result.receipt) {
         options.queueRetrieved({ ...operation, sessionId: result.instance.executor.piSessionId ?? '' }, result.receipt.restored.map(item => item.queueItemId))
         if (result.receipt.restored.length && !app.restoreOperationQueue(operation.connectionId, operation.instanceId, result.receipt.restored, operation.operationId)) {
           acknowledgementErrors.value.add(operation.operationId)

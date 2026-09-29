@@ -47,7 +47,7 @@ import type {
 
 export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'models' | 'tools' | 'settings'
 
-const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean; compactionPending: boolean }>()
+const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; compactionPending: boolean }>()
 const app = useAppStore()
 const catalog = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
@@ -123,7 +123,7 @@ const selectedCommand = computed(() => catalog.commands.find((item) => item.refe
 const dockToolsCommand = computed(() => catalog.commands.find((item) => item.name === 'dock-tools') ?? null)
 const dockTools = computed(() => dockToolsState(props.work.extensionStatus))
 const dockToolsLabel = computed(() => dockTools.value === 'on' ? '已开启' : dockTools.value === 'unavailable' ? '当前不可用' : '已关闭')
-const dockToolsBusy = computed(() => pending.value === 'command:dock-tools' || commandConsole.hasActiveOperation)
+const dockToolsBusy = computed(() => pending.value === 'command:dock-tools' || (!!dockToolsOperationId.value && commandConsole.isActive(dockToolsOperationId.value)))
 const dockToolsEntries = computed(() => dockToolsOperationId.value
   ? commandConsole.entries.filter((entry) => entry.operationId === dockToolsOperationId.value)
   : [])
@@ -487,7 +487,7 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
 }
 
 async function executeCatalogCommand(command: CommandInfo, argumentsText: string): Promise<boolean> {
-  if (props.preview || pending.value || props.outcomeUnknown || commandConsole.hasActiveOperation) return false
+  if (props.preview || pending.value) return false
   const operationId = crypto.randomUUID()
   pending.value = `command:${command.name}`
   error.value = ''
@@ -522,7 +522,7 @@ async function toggleDockTools() {
 }
 
 async function chooseModel(model: ModelInfo) {
-  if (props.preview || pending.value || props.outcomeUnknown || isCurrentModel(model)) return
+  if (props.preview || pending.value || isCurrentModel(model)) return
   pending.value = `model:${model.provider}/${model.id}`
   error.value = ''
   const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
@@ -539,7 +539,7 @@ async function chooseModel(model: ModelInfo) {
 }
 
 async function chooseThinking(level: ThinkingLevel) {
-  if (props.preview || pending.value || props.outcomeUnknown || props.work.executor.thinkingLevel === level) return
+  if (props.preview || pending.value || props.work.executor.thinkingLevel === level) return
   pending.value = `thinking:${level}`
   error.value = ''
   const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
@@ -556,7 +556,7 @@ async function chooseThinking(level: ThinkingLevel) {
 }
 
 async function toggleTool(tool: ToolInfo) {
-  if (!tools.value || tools.value.truncated || props.preview || pending.value || props.outcomeUnknown) return
+  if (!tools.value || tools.value.truncated || props.preview || pending.value) return
   const names = tools.value.tools.filter((item) => item.name === tool.name ? !tool.active : item.active).map((item) => item.name)
   pending.value = `tool:${tool.name}`
   error.value = ''
@@ -613,7 +613,7 @@ function saveSettingDraft(setting: SettingInfo) {
 }
 
 async function saveSetting(setting: SettingInfo, value: SettingValue) {
-  if (!settings.value || !setting.writable || props.preview || pending.value || props.outcomeUnknown) return
+  if (!settings.value || !setting.writable || props.preview || pending.value) return
   pending.value = `setting:${setting.key}`
   error.value = ''
   const scope: SessionContext = Object.freeze({ ...(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }), instanceId: props.work.id,
@@ -669,7 +669,7 @@ function isCurrentModel(model: ModelInfo) {
 
 <template>
   <div class="control-center-port">
-    <div v-if="outcomeUnknown" class="alu-dialog-error"><span>上一次修改的结果还没有确认，请先刷新当前状态。</span><button @click="reconcileControl">刷新确认</button></div>
+    <div v-if="outcomeUnknown" class="alu-dialog-pending" role="status"><span>上一次修改的结果还没有确认。可以刷新查看，也可以直接继续操作。</span><button @click="reconcileControl">刷新确认</button></div>
     <div v-if="error" class="alu-dialog-error">{{ error }}</div>
     <div v-if="section !== 'resources' && loadErrors[section]" class="alu-dialog-error">{{ loadErrors[section] }}<button type="button" @click="loadSection(section, true)">重试</button></div>
     <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
@@ -704,9 +704,9 @@ function isCurrentModel(model: ModelInfo) {
       </template>
 
       <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
-        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending || commandConsole.hasActiveOperation" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
+        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending">{{ pending ? '运行中…' : '运行' }}</button></form>
         <div v-if="argumentCompletionsLoading || argumentCompletions.length" class="cmd-center-completions" role="listbox" aria-label="参数候选">
           <button v-for="(item, index) in argumentCompletions" :key="`${item.value}:${index}`" type="button" class="cmd-center-completion" @click="chooseArgumentCompletion(item)"><strong>{{ item.label }}</strong><span v-if="item.description">{{ item.description }}</span></button>
           <div v-if="argumentCompletionsLoading && !argumentCompletions.length" class="cmd-center-completion-loading">正在读取参数候选…</div>
@@ -741,7 +741,7 @@ function isCurrentModel(model: ModelInfo) {
       <div v-else-if="!dockToolsCommand && (catalog.state === 'idle' || catalog.state === 'loading')" class="dock-tools-loading"><span class="alu-agent-activity-spinner" />正在读取当前 Work 的可用命令…</div>
       <div v-else-if="catalog.state === 'failed'" class="alu-dialog-error">命令暂时没有读到。<button type="button" @click="loadSection('dock-tools', true)">重试读取</button></div>
       <div v-else-if="!dockToolsCommand" class="alu-dialog-error">当前 Work 没有提供 Dock Tools 开关。</div>
-      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on', pending: dockToolsBusy }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :aria-pressed="dockTools === 'on'" :disabled="preview || dockToolsBusy || outcomeUnknown" data-modal-initial @click="toggleDockTools">
+      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on', pending: dockToolsBusy }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :aria-pressed="dockTools === 'on'" :disabled="preview || dockToolsBusy" data-modal-initial @click="toggleDockTools">
         <span class="dock-tools-toggle-copy"><strong>{{ dockToolsBusy ? '正在更新…' : '允许当前 Work 使用 Dock Tools' }}</strong><small>{{ dockToolsBusy ? '等待当前 Work 确认' : dockTools === 'on' ? '已开启' : '已关闭' }}</small></span>
         <span class="dock-tools-switch" aria-hidden="true"><i /></span>
       </button>
@@ -756,8 +756,6 @@ function isCurrentModel(model: ModelInfo) {
       :work="work"
       :mode="sessionMode"
       :preview="preview"
-      :outcome-unknown="outcomeUnknown"
-      :has-draft="hasDraft"
       :compaction-pending="compactionPending"
       @unknown="forwardSessionUnknown"
       @finished="sessionActionFinished"
@@ -770,17 +768,17 @@ function isCurrentModel(model: ModelInfo) {
       <p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p>
       <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredModels, chooseModel)" /></div>
       <div class="ui-dialog-options">
-        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
+        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="preview || !!pending" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
         <div v-if="models && !filteredModels.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
     </section>
 
-    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
+    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
       <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
       <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回，暂时不能切换工具。</div>
-      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
+      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
     </section>
 
     <ResourceDocument v-else-if="section === 'resources' && selectedResource" :work="work" :resource="selectedResource" @back="closeResource" />
@@ -828,20 +826,20 @@ function isCurrentModel(model: ModelInfo) {
 
     <section v-else class="alu-session-form alu-setting-editor">
       <div v-if="selectedSetting.key === 'warnings'" class="ui-dialog-options">
-        <button class="ui-dialog-option" :disabled="preview || !!pending || outcomeUnknown" @click="saveSetting(selectedSetting, { anthropicExtraUsage: true })"><span class="ui-dialog-option-marker">{{ anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启 Anthropic 额外用量提醒</span></span></button>
-        <button class="ui-dialog-option" :disabled="preview || !!pending || outcomeUnknown" @click="saveSetting(selectedSetting, { anthropicExtraUsage: false })"><span class="ui-dialog-option-marker">{{ !anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭 Anthropic 额外用量提醒</span></span></button>
+        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, { anthropicExtraUsage: true })"><span class="ui-dialog-option-marker">{{ anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启 Anthropic 额外用量提醒</span></span></button>
+        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, { anthropicExtraUsage: false })"><span class="ui-dialog-option-marker">{{ !anthropicExtraUsageWarning(selectedSetting) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭 Anthropic 额外用量提醒</span></span></button>
       </div>
       <div v-else-if="selectedSetting.valueType === 'boolean'" class="ui-dialog-options">
-        <button class="ui-dialog-option" :disabled="preview || !!pending || outcomeUnknown" @click="saveSetting(selectedSetting, true)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === true ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启</span></span></button>
-        <button class="ui-dialog-option" :disabled="preview || !!pending || outcomeUnknown" @click="saveSetting(selectedSetting, false)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === false ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭</span></span></button>
+        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, true)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === true ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">开启</span></span></button>
+        <button class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, false)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === false ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">关闭</span></span></button>
       </div>
       <div v-else-if="selectedSetting.valueType === 'enum'" class="ui-dialog-options">
-        <button v-for="value in selectedSetting.allowedValues" :key="String(value)" class="ui-dialog-option" :disabled="preview || !!pending || outcomeUnknown" @click="saveSetting(selectedSetting, value)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === value ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ settingOptionLabel(selectedSetting.key, value) }}</span></span></button>
+        <button v-for="value in selectedSetting.allowedValues" :key="String(value)" class="ui-dialog-option" :disabled="preview || !!pending" @click="saveSetting(selectedSetting, value)"><span class="ui-dialog-option-marker">{{ selectedSetting.value === value ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">{{ settingOptionLabel(selectedSetting.key, value) }}</span></span></button>
       </div>
       <template v-else>
         <textarea v-if="selectedSetting.valueType === 'object'" v-model="settingDraft" class="ui-dialog-editor" rows="8" />
         <input v-else v-model="settingDraft" class="ui-dialog-input" :inputmode="selectedSetting.valueType === 'integer' ? 'numeric' : 'text'" />
-        <div class="ui-dialog-form-footer"><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown" @click="saveSettingDraft(selectedSetting)">确认</button></div>
+        <div class="ui-dialog-form-footer"><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending" @click="saveSettingDraft(selectedSetting)">确认</button></div>
       </template>
     </section>
   </div>

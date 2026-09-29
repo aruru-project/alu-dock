@@ -61,6 +61,15 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
                 "command.submit",
                 json!({"receipt":{"accepted":true,"operationId":"send","instanceId":"work","kind":"prompt","delivery":"prompt","queued":false,"acceptedAt":"now"},"instance":instance}),
             ),
+            (
+                "command.abort_restore_queue",
+                json!({"receipt":{"operationId":"abort","instanceId":"work","restored":[],"inFlight":[]},"instance":instance}),
+            ),
+            // #326: an older Host without one-step abort gets its Queue taken first.
+            (
+                "queue.dequeue",
+                json!({"receipt":{"operationId":"echo","instanceId":"work","restored":[],"inFlight":[]},"instance":instance}),
+            ),
             ("command.abort", json!({"instance":instance})),
             ("extension.tools_expanded.set", json!({"instance":instance})),
             (
@@ -90,20 +99,32 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
         ];
         let mut send_received = Some(send_received);
         let mut finish_wait = Some(finish_wait);
-        for (method, result) in replies {
+        let mut abort_restore_hellos = 0;
+        for (method, mut result) in replies {
             let (mut socket, hello) = loop {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = BufReader::new(socket);
                 let mut line = String::new();
                 socket.read_line(&mut line).await.unwrap();
                 let hello: Value = serde_json::from_str(&line).unwrap();
-                if hello["requiredCapabilities"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|item| item == "file-transfer.v1")
-                {
-                    let refusal = json!({"kind":"hello_error","requestId":hello["requestId"],"error":{"code":"capability_missing","message":"older Host","missing":["file-transfer.v1"]}});
+                let requires = |capability: &str| {
+                    hello["requiredCapabilities"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|item| item == capability)
+                };
+                let older_abort = requires("run.abort-restore-queue.v1") && {
+                    abort_restore_hellos += 1;
+                    abort_restore_hellos == 2
+                };
+                if older_abort || requires("file-transfer.v1") {
+                    let missing = if older_abort {
+                        "run.abort-restore-queue.v1"
+                    } else {
+                        "file-transfer.v1"
+                    };
+                    let refusal = json!({"kind":"hello_error","requestId":hello["requestId"],"error":{"code":"capability_missing","message":"older Host","missing":[missing]}});
                     socket
                         .get_mut()
                         .write_all(format!("{refusal}\n").as_bytes())
@@ -116,7 +137,7 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
             let mut line = String::new();
             let ack = json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,
                 "host":{"hostEpoch":"epoch"},"limits":{"maxLineBytes":65536},
-                "capabilities":["core.v2","extension_ui.tools-expanded.v1","git.branch-footer.v1","instance.keys.v1","instance.display-name.v1","attachments.v1","settings.v1","session.core","command.images.path.v1","queue.control.v1","run.abort.v1"]});
+                "capabilities":["core.v2","extension_ui.tools-expanded.v1","git.branch-footer.v1","instance.keys.v1","instance.display-name.v1","attachments.v1","settings.v1","session.core","command.images.path.v1","queue.control.v1","run.abort.v1","run.abort-restore-queue.v1"]});
             socket
                 .get_mut()
                 .write_all(format!("{ack}\n").as_bytes())
@@ -178,7 +199,9 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
                 send_received.take().unwrap().send(()).unwrap();
                 finish_wait.take().unwrap().await.unwrap();
             }
-            if method == "queue.dequeue" && request["params"]["operationId"] != "dequeue" {
+            if result["receipt"]["operationId"] == "echo" {
+                result["receipt"]["operationId"] = request["params"]["operationId"].clone();
+            } else if method == "queue.dequeue" && request["params"]["operationId"] != "dequeue" {
                 late_received.send(()).unwrap();
                 late_release.recv().await.unwrap();
             }
@@ -323,8 +346,14 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].token, "newer");
     assert!(images.capture(&scope).is_none());
-    let mut running = client.abort_run("work", Some("abort")).await.unwrap();
+    let mut running = client
+        .abort_run("work", Some("abort"))
+        .await
+        .unwrap()
+        .instance;
     assert_eq!(running.runtime_generation, 7);
+    let older = client.abort_run("work", Some("older-abort")).await.unwrap();
+    assert_eq!(older.receipt.operation_id, "older-abort");
     assert!(
         !client
             .set_tools_expanded("work", 7, true, Some("expand"))

@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::{
     ClientError, DockClient, ImagePath, InstanceSnapshot, PendingMessage, Result,
     capabilities::{
-        ABORT as ABORT_CAPABILITIES, QUEUE as QUEUE_CAPABILITIES, submit as submit_capabilities,
+        ABORT as ABORT_CAPABILITIES, ABORT_RESTORE_QUEUE as ABORT_RESTORE_QUEUE_CAPABILITIES,
+        QUEUE as QUEUE_CAPABILITIES, RUN_ABORT_RESTORE_QUEUE_V1, submit as submit_capabilities,
     },
 };
 
@@ -196,13 +197,49 @@ impl DockClient {
         Ok(result)
     }
 
+    /// Stop the current reply and take every waiting Queue message back in one
+    /// Host step, so none of them starts once the reply stops.
     pub async fn abort_run(
         &self,
         instance_id: &str,
         operation_id: Option<&str>,
-    ) -> Result<InstanceSnapshot> {
+    ) -> Result<QueueDequeueResult> {
         let generated = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated);
+        let result: QueueDequeueResult = match self
+            .request(
+                "command.abort_restore_queue",
+                &MutationParams {
+                    operation_id,
+                    instance_id,
+                },
+                ABORT_RESTORE_QUEUE_CAPABILITIES,
+                Some(operation_id),
+            )
+            .await
+        {
+            Err(error) if error.missing_capability(&[RUN_ABORT_RESTORE_QUEUE_V1]) => {
+                // An older Host still gets its Queue back before the abort.
+                let mut restored = self.dequeue_messages(instance_id, None).await?;
+                restored.instance = self.abort_only(instance_id, operation_id).await?;
+                restored.receipt.operation_id = operation_id.to_owned();
+                restored
+            }
+            other => other?,
+        };
+        if result.receipt.operation_id != operation_id
+            || result.receipt.instance_id != instance_id
+            || result.instance.id != instance_id
+        {
+            return Err(ClientError::EffectUnknown {
+                operation_id: operation_id.to_owned(),
+                message: "abort response returned a different Work".into(),
+            });
+        }
+        Ok(result)
+    }
+
+    async fn abort_only(&self, instance_id: &str, operation_id: &str) -> Result<InstanceSnapshot> {
         let result: InstanceResult = self
             .request(
                 "command.abort",
@@ -214,12 +251,6 @@ impl DockClient {
                 Some(operation_id),
             )
             .await?;
-        if result.instance.id != instance_id {
-            return Err(ClientError::EffectUnknown {
-                operation_id: operation_id.to_owned(),
-                message: "abort response returned a different Work".into(),
-            });
-        }
         Ok(result.instance)
     }
 }
@@ -585,6 +616,28 @@ impl RestoredImageState {
         scope: RestoredImageScope,
         operation_id: &str,
     ) -> Result<QueueDequeueResult> {
+        let work_id = scope.work_id.clone();
+        self.take_back(scope, client.dequeue_messages(&work_id, Some(operation_id)))
+            .await
+    }
+
+    /// Abort returns the Queue like `dequeue`, so its images follow the same rules.
+    pub async fn abort_run(
+        &self,
+        client: &DockClient,
+        scope: RestoredImageScope,
+        operation_id: &str,
+    ) -> Result<QueueDequeueResult> {
+        let work_id = scope.work_id.clone();
+        self.take_back(scope, client.abort_run(&work_id, Some(operation_id)))
+            .await
+    }
+
+    async fn take_back(
+        &self,
+        scope: RestoredImageScope,
+        request: impl std::future::Future<Output = Result<QueueDequeueResult>>,
+    ) -> Result<QueueDequeueResult> {
         let identity = image_session(&scope);
         let version = {
             let mut state = self
@@ -598,9 +651,7 @@ impl RestoredImageState {
                 .clear_revision;
             (state.connection_revision, revision)
         };
-        let result = client
-            .dequeue_messages(&scope.work_id, Some(operation_id))
-            .await?;
+        let result = request.await?;
         let mut state = self
             .state
             .lock()

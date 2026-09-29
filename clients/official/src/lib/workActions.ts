@@ -21,7 +21,6 @@ export type ControlCenterHandle = {
 /** Work buttons and their local feedback. Results are claimed by operationResults. */
 export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'askConfirm' | 'closeModal'>>, options: {
   observation(): ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'load' | 'active' | 'connected' | 'acceptWork'>>
-  restoreQueue(): Promise<boolean>
   panel(): Pick<ControlCenterHandle, 'reconcileDomain'> | null
 }) {
   const app = useAppStore()
@@ -30,18 +29,21 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
   watch(() => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id), () => { conversationSelectionRevision++ }, { flush: 'sync' })
   const reconcilingReopenWorkId = ref('')
 
-  const aborting = ref(false)
   const compactionWorkIds = ref<Set<string>>(new Set())
   const compactionErrors = ref<Record<string, { scope: FeedbackScope; message: string }>>({})
 
   const pendingWorkActions = ref(new Set<string>())
   const workMutating = computed(() => pendingWorkActions.value.has(feedbackIdentity.value))
+  const pendingAborts = ref(new Set<string>())
+  const aborting = computed(() => pendingAborts.value.has(feedbackIdentity.value))
   const feedbackIdentity = computed(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration,
     app.payload?.host.hostEpoch, selected.value?.id]))
   const sessionIdentity = computed(() => JSON.stringify([selected.value?.runtimeGeneration, selected.value?.executor.piSessionId]))
   let feedbackRevision = 0
   type FeedbackScope = Readonly<{ identity: string; revision: number; session?: string }>
-  const feedback = ref<{ scope: FeedbackScope; message: string | null } | null>(null)
+  // A notice reports a state (waiting, unconfirmed, partly done); an error reports a failed action.
+  type FeedbackTone = 'error' | 'notice'
+  const feedback = ref<{ scope: FeedbackScope; message: string | null; tone: FeedbackTone } | null>(null)
   function captureFeedback(session = true): FeedbackScope {
     return Object.freeze({ identity: feedbackIdentity.value, revision: feedbackRevision, session: session ? sessionIdentity.value : undefined })
   }
@@ -49,23 +51,36 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     return scope.identity === feedbackIdentity.value && scope.revision === feedbackRevision
       && (scope.session === undefined || scope.session === sessionIdentity.value)
   }
-  function reportAction(scope: FeedbackScope, message: string | null) {
-    if (feedbackMatches(scope)) feedback.value = { scope, message }
+  function reportAction(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
+    if (feedbackMatches(scope)) feedback.value = { scope, message, tone }
   }
-  const actionError = computed(() => feedback.value && feedbackMatches(feedback.value.scope) ? feedback.value.message : null)
+  function outcomeUnknown(cause: unknown) {
+    return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true
+  }
+  // A result that may still have happened is not shown as a failure.
+  function reportFailure(scope: FeedbackScope, cause: unknown) {
+    reportAction(scope, errorMessage(cause), outcomeUnknown(cause) ? 'notice' : 'error')
+  }
+  const currentFeedback = computed(() => feedback.value && feedbackMatches(feedback.value.scope) ? feedback.value : null)
+  const actionError = computed(() => currentFeedback.value?.tone === 'error' ? currentFeedback.value.message : null)
+  const actionNotice = computed(() => currentFeedback.value?.tone === 'notice' ? currentFeedback.value.message : null)
   watch(feedbackIdentity, () => { feedbackRevision++; feedback.value = null; reconcilingReopenWorkId.value = '' }, { flush: 'sync' })
   const continuedUnknowns = ref(new Set<string>())
   const unresolvedMutations = computed(() => new Map([...app.unresolvedMutations].filter(([, id]) => !continuedUnknowns.value.has(id))))
 
-  const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
-  const unresolvedDomain = computed<MutationDomain | null>(() => {
+  // An unconfirmed result is reported and can be refreshed; it does not lock other actions.
+  const unresolvedDomains = computed(() => {
     const workId = selected.value?.id ?? 'global'
+    const domains = new Set<MutationDomain>()
     for (const key of unresolvedMutations.value.keys()) {
       const [connectionId, keyWorkId, domain] = JSON.parse(key) as [string, string, MutationDomain]
-      if (connectionId === (app.activeConnectionId ?? '') && (keyWorkId === workId || keyWorkId === 'global')) return domain
+      if (connectionId === (app.activeConnectionId ?? '') && (keyWorkId === workId || keyWorkId === 'global')) domains.add(domain)
     }
-    return null
+    return domains
   })
+  const unresolvedDomain = computed<MutationDomain | null>(() => unresolvedDomains.value.values().next().value ?? null)
+  const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
+  const workOutcomeUnknown = computed(() => unresolvedDomains.value.has('work'))
   const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() => {
     const domain = unresolvedDomain.value
     return domain && domain !== 'work' ? domain : undefined
@@ -79,23 +94,28 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     return entry && feedbackMatches(entry.scope) ? entry.message : null
   })
 
+  /** One Host step stops the reply and returns the waiting Queue to the editor. */
   async function abortCurrentRun() {
     const work = selected.value
-    if (!work || work.execution !== 'running' || aborting.value || workMutating.value) return
+    if (!work || work.execution !== 'running' || aborting.value) return
     const feedbackScope = captureFeedback()
     const capturedHost = requireConnectionContext(app)
-    if (work.pending.total > 0 && !await options.restoreQueue()) return
-    if (!feedbackMatches(feedbackScope)) return
-    aborting.value = true
+    pendingAborts.value.add(feedbackScope.identity)
     reportAction(feedbackScope, null)
     try {
-      await abortRun(work.id, app.captureOperationTarget(capturedHost, work.id))
+      const result = await abortRun(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return
+      const returned = result.receipt.restored.length
+      const kept = result.receipt.inFlight.length
+      if (kept) {
+        reportAction(feedbackScope, `已中止。${returned ? `${returned} 条排队消息已放回输入框；` : ''}另有 ${kept} 条已经交给 Agent，会留在对话里。`, 'notice')
+      } else if (returned) {
+        reportAction(feedbackScope, `已中止，${returned} 条排队消息已放回输入框。`, 'notice')
+      }
     } catch (cause) {
-
-      reportAction(feedbackScope, errorMessage(cause))
+      reportFailure(feedbackScope, cause)
     } finally {
-      aborting.value = false
+      pendingAborts.value.delete(feedbackScope.identity)
     }
   }
 
@@ -115,11 +135,11 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
       const cleanupErrors = result.receipt.cleanupErrors ?? []
       reportAction(feedbackScope, cleanupErrors.length
         ? 'Work 已停止，但相关内容可能仍在更新。请刷新后确认当前状态。'
-        : null)
+        : null, 'notice')
       return true
     } catch (cause) {
 
-      reportAction(feedbackScope, errorMessage(cause))
+      reportFailure(feedbackScope, cause)
       return false
     } finally {
       pendingWorkActions.value.delete(feedbackScope.identity)
@@ -128,7 +148,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
 
   async function reopenSelectedWork() {
     const work = selected.value
-    if (!isTauri || !work || !work.reopenable || workMutating.value || mutationOutcomeUnknown.value) return
+    if (!isTauri || !work || !work.reopenable || workMutating.value) return
     const capturedHost = requireConnectionContext(app)
     const previousGeneration = work.runtimeGeneration
     const feedbackScope = captureFeedback(false)
@@ -144,14 +164,14 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
       if (failure?.code === 'project_trust_required') {
         // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
         // the native known-failure result visible; never infer a trust decision.
-        reportAction(feedbackScope, errorMessage(cause))
+        reportFailure(feedbackScope, cause)
       } else if (failure?.outcomeUnknown === true) {
 
         reconcilingReopenWorkId.value = work.id
-        reportAction(feedbackScope, 'Dock 已收到继续请求，正在确认 Work 的实际状态…')
+        reportAction(feedbackScope, 'Dock 已收到继续请求，正在确认 Work 的实际状态…', 'notice')
         void reconcileReopenOutcome(work.id, previousGeneration, capturedHost, feedbackScope)
       } else {
-        reportAction(feedbackScope, errorMessage(cause))
+        reportFailure(feedbackScope, cause)
       }
     } finally {
       pendingWorkActions.value.delete(feedbackScope.identity)
@@ -160,16 +180,16 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
 
   async function reconcileReopenOutcome(workId: string, previousGeneration: number, context: ConnectionContext, feedbackScope: FeedbackScope) {
     if (!await app.refreshWorksQuietly() || !app.contextMatches(context)) {
-      reportAction(feedbackScope, '暂时无法确认 Work 的实际状态；连接恢复后会继续以 Dock 状态为准。')
+      reportAction(feedbackScope, '暂时无法确认 Work 的实际状态；连接恢复后会继续以 Dock 状态为准。', 'notice')
       return
     }
     if (!feedbackMatches(feedbackScope)) return
     const current = app.works.find((work) => work.id === workId)
     if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) {
-      reportAction(feedbackScope, '还无法确认 Work 是否已继续。请刷新状态后确认，不要重复操作。')
+      reportAction(feedbackScope, '还无法确认 Work 是否已继续。请刷新状态后确认，不要重复操作。', 'notice')
       return
     }
-    reportAction(feedbackScope, '当前 Work 状态已更新，原操作结果仍待确认。请勿重复提交。')
+    reportAction(feedbackScope, '当前 Work 状态已更新，原操作结果仍待确认。请勿重复提交。', 'notice')
     reconcilingReopenWorkId.value = ''
     options.observation().acceptWork(current, context)
     void options.observation().load(workId, true)
@@ -190,7 +210,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
       void app.refreshWorksQuietly()
     } catch (cause) {
 
-      reportAction(feedbackScope, errorMessage(cause))
+      reportFailure(feedbackScope, cause)
     } finally {
       pendingWorkActions.value.delete(feedbackScope.identity)
     }
@@ -217,7 +237,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
 
   async function startCompaction(customInstructions?: string) {
     const work = selected.value
-    if (!isTauri || !work || mutationOutcomeUnknown.value || compactionWorkIds.value.has(work.id) || work.compacting) return
+    if (!isTauri || !work || compactionWorkIds.value.has(work.id) || work.compacting) return
     const capturedHost = requireConnectionContext(app)
     const scope: SessionContext = {
       ...capturedHost,
@@ -233,7 +253,7 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     try {
       await compactSession(app.captureOperationTarget(scope, work.id), customInstructions?.trim() || undefined, crypto.randomUUID())
     } catch (cause) {
-      reportAction(feedbackScope, errorMessage(cause))
+      reportFailure(feedbackScope, cause)
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
       const followed = options.observation().active.value
       const matchingFollow = options.observation().connected.value
@@ -242,20 +262,20 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
         && followed.instanceId === work.id
       const reportedByConversation = matchingFollow
         && ['compaction_cancelled', 'compaction_not_needed', 'compaction_failed'].includes(code)
-      if (feedbackMatches(feedbackScope) && !reportedByConversation) setCompactionError(capturedHost.connectionId, work.id, errorMessage(cause))
+      if (feedbackMatches(feedbackScope) && !reportedByConversation && !outcomeUnknown(cause)) setCompactionError(capturedHost.connectionId, work.id, errorMessage(cause))
     } finally {
       setCompactionPending(work.id, false)
     }
   }
 
-  function handleNewWorkUnknown(cause: unknown) { reportAction(captureFeedback(), errorMessage(cause)) }
+  function handleNewWorkUnknown(cause: unknown) { reportAction(captureFeedback(), errorMessage(cause), 'notice') }
   function mutationKey(workId: string, domain: MutationDomain) {
     return mutationScopeKey(app.activeConnectionId ?? '', workId, domain)
   }
   function markControlUnknown(cause: unknown, _domain: ControlMutationDomain, scope: SessionContext) {
     if (app.contextMatches(scope) && scope.instanceId === selected.value?.id
       && scope.expectedHostEpoch === selected.value.ownerHostEpoch && scope.expectedRuntimeGeneration === selected.value.runtimeGeneration) {
-      reportAction(captureFeedback(), errorMessage(cause))
+      reportAction(captureFeedback(), errorMessage(cause), 'notice')
     }
   }
 
@@ -301,11 +321,11 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
       if (!isCurrent()) return
       if (!reconciled) throw new Error('还无法确认刚才的修改是否生效。请再次刷新确认，不要重复提交。')
       continuedUnknowns.value.add(unknownId)
-      reportAction(feedbackScope, '当前状态已更新，可以开始新的操作。刚才的结果仍未确认，请勿重复提交原操作。')
+      reportAction(feedbackScope, '当前状态已刷新。刚才那次操作的结果仍未确认，不要重复提交它。', 'notice')
       if (domain === 'sessions' && workId !== 'global' && app.activeConnectionId) setCompactionError(app.activeConnectionId, workId)
     } catch (cause) {
       if (!isCurrent()) return
-      reportAction(feedbackScope, errorMessage(cause))
+      reportAction(feedbackScope, errorMessage(cause), 'notice')
     }
   }
 
@@ -342,5 +362,5 @@ export function useWorkActions(page: ReadonlyRefs<Pick<ReturnType<typeof usePage
     return false
   }
 
-  return { aborting, workMutating, actionError, mutationOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId, abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome }
+  return { aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, workOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId, abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome }
 }

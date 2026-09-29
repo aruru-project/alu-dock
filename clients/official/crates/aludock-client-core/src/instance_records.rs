@@ -36,9 +36,7 @@ impl InstanceDeliveryContext {
         self.0.store(1, Ordering::Release);
     }
     pub(crate) fn fallback(&self, error: &ClientError) -> bool {
-        let missing = matches!(error, ClientError::Host {code,details:Some(details),..}
-            if code == "capability_missing" && details["missing"].as_array().is_some_and(|values| values.iter().any(|value| value.as_str() == Some(CAPABILITY))));
-        missing
+        error.missing_capability(&[CAPABILITY])
             && self
                 .0
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)

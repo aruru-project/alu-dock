@@ -35,6 +35,11 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     return !!operation && !operation.completed
   })
 
+  function isActive(operationId: string) {
+    const operation = operations.value[operationId]
+    return !!operation && !operation.completed
+  }
+
   function bindContext(connectionId: string, selectionGeneration: number, work: Work) {
     const next = JSON.stringify([
       connectionId,
@@ -157,6 +162,7 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   return {
     entries,
     hasActiveOperation,
+    isActive,
     bindContext,
     beginOperation,
     receiveReceipt,

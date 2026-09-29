@@ -1739,6 +1739,7 @@ export class ManagedInstance {
       || this.runtimeCompactionInProgress()
       || this.manualCompactionAdmissionActive()
       || this.commandScheduler.activeCommand("control", "queue") !== undefined
+      || this.commandScheduler.activeCommand("interrupt", "restore_queue") !== undefined
       || this.commandScheduler.activeCommand("terminal") !== undefined
     ) return;
     const firstCustodyItem = this.pendingQueueMessages.find((item) => (
@@ -1788,6 +1789,7 @@ export class ManagedInstance {
       && this.runtimeGenerationValue === generation
       && !this.runtimeCompactionInProgress()
       && this.commandScheduler.activeCommand("control", "queue") === undefined
+      && this.commandScheduler.activeCommand("interrupt", "restore_queue") === undefined
       && this.commandScheduler.activeCommand("terminal") === undefined
     ) {
       const modelSettings = this.commandScheduler.activeCommand("model-settings");
@@ -1998,57 +2000,7 @@ export class ManagedInstance {
       try {
         const cleared = await this.invokeAgent<ClearedAgentQueue>("queue.dequeue", { operationId });
         await this.closeRuntimeOperationBoundary(operationId);
-        const hostDeferred = pendingBefore.filter((item) => item.phase === "host_deferred");
-        const selection = selectClearedQueueMessages(
-          pendingBefore.filter((item) => item.phase !== "host_deferred"),
-          cleared,
-          this.timestamp(),
-        );
-        const restoredIds = new Set([
-          ...hostDeferred.map((item) => item.queueItemId),
-          ...selection.restoredQueueItemIds,
-        ]);
-        const retainedIds = new Set(pendingBefore.filter((item) => !restoredIds.has(item.queueItemId)).map((item) => item.queueItemId));
-        const restored = orderPendingMessages([
-          ...pendingMessageProjection(hostDeferred),
-          ...selection.restored,
-        ]);
-        let inFlight: PendingMessageDto[] = [];
-        let removedFromQueue: PendingMessageDto[] = [];
-        await this.enqueueTransition(() => this.commitCatalogTransition(
-          { kind: "queue.dequeue", effect: "post_effect", operationId, instanceId: this.id },
-          () => {
-            const retained = this.pendingQueueMessages.filter((item) => retainedIds.has(item.queueItemId));
-            const restoredStillPending = this.pendingQueueMessages.filter((item) => restoredIds.has(item.queueItemId));
-            for (const item of retained) {
-              if (!this.inFlightQueueMessages.some((candidate) => candidate.queueItemId === item.queueItemId)) {
-                this.inFlightQueueMessages.push(item);
-              }
-            }
-            inFlight = pendingMessageProjection(retained);
-            removedFromQueue = orderPendingMessages([
-              ...pendingMessageProjection(restoredStillPending),
-              ...inFlight,
-              ...restored.filter((item) => !restoredStillPending.some((candidate) => candidate.queueItemId === item.queueItemId)),
-            ]);
-            const removedIds = new Set(pendingBefore.map((item) => item.queueItemId));
-            const remaining = this.pendingQueueMessages.filter((item) => !removedIds.has(item.queueItemId));
-            this.pendingQueueMessages.splice(0, this.pendingQueueMessages.length, ...remaining);
-            this.runtimeSteeringHashes = [];
-            this.runtimeFollowUpHashes = [];
-            this.state.pendingSteering = 0;
-            this.state.pendingFollowUp = 0;
-            this.touch();
-          },
-          () => this.appendEvent("queue.cleared", {
-            steering: removedFromQueue.filter((item) => item.delivery === "steer").length,
-            followUp: removedFromQueue.filter((item) => item.delivery === "followUp").length,
-            total: removedFromQueue.length,
-            queueItemIds: removedFromQueue.map((item) => item.queueItemId),
-            reason: "dequeued",
-          }),
-        ));
-        return { operationId, instanceId: this.id, restored, inFlight };
+        return await this.commitRestoredQueue(operationId, pendingBefore, cleared, "dequeued");
       } catch (error) {
         try { await this.closeRuntimeOperationBoundary(operationId); }
         catch (transitionError) { throw transitionError; }
@@ -2062,42 +2014,143 @@ export class ManagedInstance {
     }
   }
 
+  /** Hand Host-held and Agent-cleared Queue items back to the caller; the rest are in flight. */
+  private async commitRestoredQueue(
+    operationId: string,
+    pendingBefore: readonly PendingQueueMessage[],
+    cleared: ClearedAgentQueue,
+    reason: "dequeued" | "abort",
+  ): Promise<QueueDequeueReceipt> {
+    const hostDeferred = pendingBefore.filter((item) => item.phase === "host_deferred");
+    const selection = selectClearedQueueMessages(
+      pendingBefore.filter((item) => item.phase !== "host_deferred"),
+      cleared,
+      this.timestamp(),
+    );
+    const restoredIds = new Set([
+      ...hostDeferred.map((item) => item.queueItemId),
+      ...selection.restoredQueueItemIds,
+    ]);
+    const retainedIds = new Set(pendingBefore.filter((item) => !restoredIds.has(item.queueItemId)).map((item) => item.queueItemId));
+    const restored = orderPendingMessages([
+      ...pendingMessageProjection(hostDeferred),
+      ...selection.restored,
+    ]);
+    let inFlight: PendingMessageDto[] = [];
+    let removedFromQueue: PendingMessageDto[] = [];
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: reason === "abort" ? "command.abort_restore_queue" : "queue.dequeue", effect: "post_effect", operationId, instanceId: this.id },
+      () => {
+        const retained = this.pendingQueueMessages.filter((item) => retainedIds.has(item.queueItemId));
+        const restoredStillPending = this.pendingQueueMessages.filter((item) => restoredIds.has(item.queueItemId));
+        for (const item of retained) {
+          if (!this.inFlightQueueMessages.some((candidate) => candidate.queueItemId === item.queueItemId)) {
+            this.inFlightQueueMessages.push(item);
+          }
+        }
+        inFlight = pendingMessageProjection(retained);
+        removedFromQueue = orderPendingMessages([
+          ...pendingMessageProjection(restoredStillPending),
+          ...inFlight,
+          ...restored.filter((item) => !restoredStillPending.some((candidate) => candidate.queueItemId === item.queueItemId)),
+        ]);
+        const removedIds = new Set(pendingBefore.map((item) => item.queueItemId));
+        const remaining = this.pendingQueueMessages.filter((item) => !removedIds.has(item.queueItemId));
+        this.pendingQueueMessages.splice(0, this.pendingQueueMessages.length, ...remaining);
+        this.runtimeSteeringHashes = [];
+        this.runtimeFollowUpHashes = [];
+        this.state.pendingSteering = 0;
+        this.state.pendingFollowUp = 0;
+        this.touch();
+      },
+      () => this.appendEvent("queue.cleared", {
+        steering: removedFromQueue.filter((item) => item.delivery === "steer").length,
+        followUp: removedFromQueue.filter((item) => item.delivery === "followUp").length,
+        total: removedFromQueue.length,
+        queueItemIds: removedFromQueue.map((item) => item.queueItemId),
+        reason,
+      }),
+    ));
+    return { operationId, instanceId: this.id, restored, inFlight };
+  }
+
   async abort(operationId = this.createCommandId()): Promise<void> {
+    await this.interrupt(operationId, false);
+  }
+
+  /**
+   * Stop the current reply and hand every waiting Queue message back in one step,
+   * like Pi's Escape. Without this, Pi would start the next queued message as soon
+   * as the aborted turn ends.
+   */
+  abortRestoreQueue(operationId = this.createCommandId()): Promise<QueueDequeueReceipt> {
+    return this.interrupt(operationId, true);
+  }
+
+  private async interrupt(operationId: string, restoreQueue: boolean): Promise<QueueDequeueReceipt> {
+    const nothingRestored: QueueDequeueReceipt = { operationId, instanceId: this.id, restored: [], inFlight: [] };
     this.catalogPort?.assertWritable();
-    const decision = this.commandScheduler.admit({ class: "interrupt" });
-    if (decision.kind === "reject") this.requireCommandStart(decision, "aborting the current run");
-    if (decision.kind === "reject") return;
+    const decision = this.commandScheduler.admit(restoreQueue ? { class: "interrupt", kind: "restore_queue" } : { class: "interrupt" });
+    if (decision.kind === "reject") this.requireCommandStart(decision, restoreQueue ? "stopping the reply and returning queued messages" : "aborting the current run");
+    if (decision.kind === "reject") return nothingRestored;
     if (decision.kind === "join") throw new InstanceNotActiveError(this.id, "stopping");
     const lease = decision.lease;
+    // Host-held messages resume their normal hand-off unless the Agent may have been touched.
+    let resumeHostQueue = restoreQueue;
     try {
       if (decision.kind === "wait") await decision.forCompletion;
       await this.transitionTail;
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
       this.assertActive();
+      if (restoreQueue && this.compactionQueueDrainTask) {
+        // A hand-off already giving a Host-held message to the Agent finishes first;
+        // this lease stops the next one, so the Agent cannot start it after the abort.
+        await this.compactionQueueDrainTask;
+        await this.transitionTail;
+        this.assertCommandCurrent(lease);
+        this.assertActive();
+      }
+      const pendingBefore = restoreQueue ? [...this.pendingQueueMessages] : [];
 
       if (decision.kind === "preempt") {
         try {
           const effectStarted = await decision.preempted.effectStarted;
-          if (effectStarted) await this.invokeAgent<void>("command.abort", { operationId });
+          let cleared: ClearedAgentQueue | undefined;
+          if (effectStarted) {
+            resumeHostQueue = false;
+            cleared = await this.invokeAgent<ClearedAgentQueue | null>(restoreQueue ? "command.abort_restore_queue" : "command.abort", { operationId }) ?? undefined;
+          } else if (restoreQueue) {
+            resumeHostQueue = false;
+            cleared = await this.invokeAgent<ClearedAgentQueue>("queue.dequeue", { operationId });
+          }
           await decision.preempted.completion;
           await this.transitionTail;
-          return;
+          return restoreQueue ? await this.commitRestoredQueue(operationId, pendingBefore, cleared!, "abort") : nothingRestored;
         } catch (error) {
+          if (error instanceof AgentUnavailableBeforeEffectError) resumeHostQueue = restoreQueue;
           if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
           throw new RuntimeEffectUnknownError(operationId, error);
         }
       }
 
-      if (this.state.execution !== "running" && !this.agentState().isStreaming) return;
+      const running = this.state.execution === "running" || this.agentState().isStreaming;
+      if (!running && (!restoreQueue || (pendingBefore.length === 0 && this.state.pendingSteering === 0 && this.state.pendingFollowUp === 0))) {
+        return nothingRestored;
+      }
       this.receiptBoundaryOperationId = operationId;
       try {
-        await this.invokeAgent<void>("command.abort", { operationId });
-        await this.session.control({ type: "wait_for_idle" });
-        const compactionBoundary = this.compactionBoundary;
-        if (compactionBoundary) await compactionBoundary;
+        resumeHostQueue = false;
+        const request = !restoreQueue ? "command.abort" : running ? "command.abort_restore_queue" : "queue.dequeue";
+        const cleared = await this.invokeAgent<ClearedAgentQueue | null>(request, { operationId });
+        if (running) {
+          await this.session.control({ type: "wait_for_idle" });
+          const compactionBoundary = this.compactionBoundary;
+          if (compactionBoundary) await compactionBoundary;
+        }
         await this.closeRuntimeOperationBoundary(operationId);
-        if (this.state.execution === "running" && !this.agentState().isStreaming) {
+        const receipt = restoreQueue ? await this.commitRestoredQueue(operationId, pendingBefore, cleared!, "abort") : nothingRestored;
+        if (running && this.state.execution === "running" && !this.agentState().isStreaming) {
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: "command.abort.completed", effect: "post_effect", operationId, instanceId: this.id },
             () => {
@@ -2113,7 +2166,9 @@ export class ManagedInstance {
             },
           ));
         }
+        return receipt;
       } catch (error) {
+        if (error instanceof AgentUnavailableBeforeEffectError) resumeHostQueue = restoreQueue;
         try { await this.closeRuntimeOperationBoundary(operationId); }
         catch (transitionError) { throw transitionError; }
         if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
@@ -2123,6 +2178,7 @@ export class ManagedInstance {
       }
     } finally {
       lease.release();
+      if (resumeHostQueue) this.scheduleCompactionQueueDrain(false);
     }
   }
 

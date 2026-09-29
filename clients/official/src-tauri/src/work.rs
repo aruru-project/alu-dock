@@ -193,12 +193,14 @@ pub(crate) async fn abort_run(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     operation_id: String,
+    restored_images: tauri::State<'_, RestoredImageState>,
     connection_id: String,
     selection_generation: u64,
     instance_id: String,
-) -> Result<InstanceSnapshot, CommandError> {
+) -> Result<SafeQueueDequeueResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let restored_images = restored_images.inner().clone();
     let association = operation_association(
         &operation_id,
         "abort_run",
@@ -210,10 +212,21 @@ pub(crate) async fn abort_run(
     );
     operations
         .execute(association, async move {
-            client
-                .abort_run(&instance_id, Some(&operation_id))
+            let result = restored_images
+                .abort_run(
+                    &client,
+                    restored_image_scope(
+                        &connection_id,
+                        selection_generation,
+                        &instance_id,
+                        &expected_host_epoch,
+                        expected_runtime_generation,
+                    ),
+                    &operation_id,
+                )
                 .await
-                .map_err(CommandError::from)
+                .map_err(CommandError::from)?;
+            Ok(project_queue_dequeue(result))
         })
         .await
         .map_err(CommandError::from)?

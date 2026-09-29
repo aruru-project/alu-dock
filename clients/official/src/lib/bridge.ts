@@ -336,8 +336,9 @@ export async function submitMessage(instanceId: string, message: string, attachm
   throw new Error('浏览器设计预览不会发送消息')
 }
 
-export async function abortRun(instanceId: string, context: OperationTarget): Promise<Work> {
-  if (isTauri) return invoke<Work>('abort_run', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
+/** Stops the reply and takes the waiting Queue back in the same Host step. */
+export async function abortRun(instanceId: string, context: OperationTarget): Promise<QueueDequeueResult> {
+  if (isTauri) return invoke<QueueDequeueResult>('abort_run', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
   await delay(180)
   throw new Error('浏览器设计预览不会中止 Work')
 }

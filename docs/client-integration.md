@@ -209,6 +209,8 @@ Host control 提供 workspace list、instance create、ensure、list、get/get-b
 
 Agent session 能力包括 prompt、abort、Queue、conversation、model、thinking、tools、settings、resources、session replacement、tree、compaction 和 Extension UI。实际可用能力以 hello capability negotiation 为准。
 
+想像 Pi 按 Esc 那样“中止并把排队消息放回输入框”的客户端，调用 `command.abort_restore_queue`（`run.abort-restore-queue.v1`）。它在 Host 一步完成取回与中止，结果与 `queue.dequeue` 相同：把 `receipt.restored` 按顺序放回输入框，`receipt.inFlight` 是已被 Agent 取走、会出现在对话里的消息。不要先调 `queue.dequeue` 再调 `command.abort`：两次请求之间可能只成功一半，或让别处刚排进来的消息在中止后开始执行。只调 `command.abort` 时，Queue 中的消息会在当前回复停下后继续执行。
+
 Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`。旧 generation 的 event、cursor 和 interaction response 不能继续使用。Tool、setting、resource 和 command catalog 也是 generation-scoped projection；客户端若缓存它们，观察到 generation 改变后必须丢弃旧缓存，并按需重新读取相应 Protocol V2 能力。清空旧显示后，新 generation 的 catalog 处于待读取状态；只有 Host 返回空结果时才显示为空。
 
 ## Mutation

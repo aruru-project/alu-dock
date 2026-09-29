@@ -1,5 +1,5 @@
 import { InstanceRecordChannel, InstanceRecordInitial } from "./instance-record-delivery.js";
-import { INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
+import { ABORT_RESTORE_QUEUE_CAPABILITY, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
 import { writeTransferBytes } from "./file-channel.js";
 import { CONVERSATION_CONTENT_STREAM_CAPABILITY, parseConversationContentChunk, parseConversationContentStreamMetadata, parseConversationContentStreamResult, type ConversationContentStreamMetadata, type ConversationContentStreamResult } from "./protocol.js";
 import { isDeepStrictEqual } from "node:util";
@@ -99,6 +99,7 @@ import {
   parsePromptResult,
   parsePruneResult,
   parseQueueDequeueResult,
+  parseAbortRestoreQueueResult,
   parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
@@ -156,6 +157,7 @@ import {
   type PromptResult,
   type PruneResult,
   type QueueDequeueResult,
+  type AbortRestoreQueueResult,
   type ReopenResult,
   type SessionsResult,
   type SessionCompactionResult,
@@ -182,7 +184,7 @@ type Parser<T>=(input:unknown)=>T;
 const MAX_PENDING_STREAM_EVENTS=1_000;
 const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
   "instance.create", "instance.ensure", "instance.adopt", "instance.reopen", "instance.stop",
-  "command.abort", "session.switch", "session.new", "session.compact", "session.reload",
+  "command.abort", "command.abort_restore_queue", "session.switch", "session.new", "session.compact", "session.reload",
   "session.navigate", "session.fork", "session.clone",
 ]);
 
@@ -418,6 +420,8 @@ export class DockClient {
   setExtensionWidgetViewport(instanceId:string,leaseToken:string,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,leaseToken,expectedRuntimeGeneration,width,height},EXTENSION_WIDGET_CAPABILITY,parseWidgetViewportResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}
+  /** Stop the current reply and take back every waiting Queue message in one Host step. */
+  abortRestoreQueue(instanceId:string,operationId=this.createRequestId()):Promise<AbortRestoreQueueResult>{return this.request("command.abort_restore_queue",{operationId,instanceId},[ABORT_RESTORE_QUEUE_CAPABILITY,IMAGE_INPUT_CAPABILITY],parseAbortRestoreQueueResult,undefined,this.longMutationTimeoutMs);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:ThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}

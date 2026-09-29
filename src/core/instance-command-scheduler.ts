@@ -3,13 +3,16 @@ import type { InstanceLifecycle } from "./instance-dto.js";
 export type ExclusiveCommandKind = "general" | "navigation" | "compaction";
 export type ExclusiveAdmission = "idle" | "live" | "run_preempting";
 export type ControlCommandKind = "immediate" | "queue";
+/** An interrupt that also takes the waiting Queue back for the caller. */
+export type InterruptCommandKind = "restore_queue";
+type CommandKind = ExclusiveCommandKind | ControlCommandKind | InterruptCommandKind;
 
 export type InstanceCommandRequest =
   | { class: "terminal" }
   | { class: "exclusive"; kind: ExclusiveCommandKind; admission: ExclusiveAdmission }
   | { class: "model-settings" }
   | { class: "input" }
-  | { class: "interrupt" }
+  | { class: "interrupt"; kind?: InterruptCommandKind }
   | { class: "control"; kind: ControlCommandKind };
 
 export interface InstanceCommandFacts {
@@ -37,7 +40,7 @@ interface ActiveCommand {
 }
 
 export interface ActiveCommandView {
-  kind?: ExclusiveCommandKind | ControlCommandKind;
+  kind?: CommandKind;
   completion: Promise<void>;
   effectStarted: Promise<boolean>;
 }
@@ -52,7 +55,7 @@ export class InstanceCommandLease {
   ) {}
 
   get generation(): number { return this.command.generation; }
-  get kind(): ExclusiveCommandKind | ControlCommandKind | undefined {
+  get kind(): CommandKind | undefined {
     return "kind" in this.command.request ? this.command.request.kind : undefined;
   }
 
@@ -204,7 +207,7 @@ export class InstanceCommandScheduler {
     return { kind: "reserve", reservation: this.reserveProjection() };
   }
 
-  activeCommand(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | ControlCommandKind): ActiveCommandView | undefined {
+  activeCommand(commandClass: InstanceCommandRequest["class"], kind?: CommandKind): ActiveCommandView | undefined {
     const command = this.find(commandClass, kind);
     return command ? this.view(command) : undefined;
   }
@@ -216,7 +219,7 @@ export class InstanceCommandScheduler {
       .map((command) => command.completion);
   }
 
-  markEffectStarted(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | ControlCommandKind): void {
+  markEffectStarted(commandClass: InstanceCommandRequest["class"], kind?: CommandKind): void {
     this.find(commandClass, kind)?.resolveEffectStarted(true);
   }
 
@@ -253,7 +256,7 @@ export class InstanceCommandScheduler {
     return new InstanceCommandLease(this, command);
   }
 
-  private find(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | ControlCommandKind): ActiveCommand | undefined {
+  private find(commandClass: InstanceCommandRequest["class"], kind?: CommandKind): ActiveCommand | undefined {
     for (const command of this.active.values()) {
       if (command.request.class !== commandClass) continue;
       if (kind === undefined || ("kind" in command.request && command.request.kind === kind)) return command;

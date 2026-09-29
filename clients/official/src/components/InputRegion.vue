@@ -18,7 +18,7 @@ const props = defineProps<{
   editor: ReadonlyRefs<Pick<ReturnType<typeof useInputEditor>, 'allowAnotherSubmit' | 'applyExtensionEditorText' | 'canSubmit' | 'completeSuggest' | 'composerArgumentLoading' | 'handleComposerKeydown' | 'queueItems' | 'queueNotice' | 'queueRestoring' | 'restoreQueue' | 'slashQuery' | 'submit' | 'submitAcknowledged' | 'submitExpanded' | 'submitOutcomeUnknown' | 'submitting' | 'suggestItems' | 'suggestOpen' | 'visibleComposerError'>> & Pick<ReturnType<typeof useInputEditor>, 'composerExpanded' | 'composerTextarea' | 'draft' | 'expandedTextarea' | 'suggestIndex'> & { composer: Pick<ReturnType<typeof useInputEditor>['composer'], 'remember' | 'composition'> }
   uploads: ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'attachmentPicking' | 'attachmentPreviews' | 'cancelUpload' | 'clearQueueImages' | 'clearingRestoredImages' | 'draftAttachments' | 'handleComposerPaste' | 'launchAttachmentUpload' | 'openAttachmentPreview' | 'removeUpload' | 'removeUploaded' | 'restoredImageCount' | 'uploadDrafts'>>
   page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'bindSurface' | 'handleModalKeydown' | 'handleModalWheel' | 'modalOpen' | 'rememberModalTrigger'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'mutationOutcomeUnknown' | 'reconcileMutationOutcome' | 'reconcilingReopenWorkId'>>
+  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'actionNotice' | 'mutationOutcomeUnknown' | 'reconcileMutationOutcome' | 'reconcilingReopenWorkId'>>
   operations: ReadonlyRefs<Pick<ReturnType<typeof useOperationResults>, 'consumeNativeOperation' | 'restoreReturnedOperation' | 'returnedOperations' | 'returnedContentErrors' | 'workResults'>>
   observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'load'>>
   away: boolean
@@ -28,7 +28,9 @@ const selected = computed(() => app.selectedWork)
 const { composer, draft, composerTextarea, expandedTextarea, composerExpanded, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown } = props.editor
 const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, clearQueueImages, handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview } = props.uploads
 const { modalOpen, rememberModalTrigger, handleModalKeydown, handleModalWheel } = props.page
-const { mutationOutcomeUnknown, reconcilingReopenWorkId, reconcileMutationOutcome } = props.actions
+const { actionNotice, mutationOutcomeUnknown, reconcilingReopenWorkId, reconcileMutationOutcome } = props.actions
+// An unconfirmed result stays visible with a refresh action; other actions remain usable.
+const canConfirmOutcome = computed(() => !!selected.value && mutationOutcomeUnknown.value && reconcilingReopenWorkId.value !== selected.value.id)
 const { returnedOperations, returnedContentErrors, workResults, consumeNativeOperation, restoreReturnedOperation } = props.operations
 const { load: loadSelectedConversation } = props.observation
 const commandCatalogStore = useCommandCatalogStore()
@@ -41,7 +43,8 @@ const emit = defineEmits<{ latest: [] }>()
   <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
     <button v-if="props.away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="emit('latest')"><span aria-hidden="true">↓</span>滚到底部</button>
     <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
-      <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!submitAcknowledged" @click="allowAnotherSubmit">允许再次发送</button></template><button v-else-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
+      <div v-if="visibleComposerError" :class="submitOutcomeUnknown ? 'alu-composer-notice' : 'alu-composer-error'" :role="submitOutcomeUnknown ? 'status' : undefined"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!submitAcknowledged" @click="allowAnotherSubmit">允许再次发送</button></template></div>
+      <div v-if="actionNotice || canConfirmOutcome" class="alu-composer-notice" role="status"><span>{{ actionNotice ?? '上一次操作的结果还没有确认。可以刷新查看，其他操作照常可用。' }}</span><button v-if="canConfirmOutcome" @click="reconcileMutationOutcome()">刷新并确认</button></div>
       <div v-for="operation in returnedOperations" :key="operation.operationId" class="alu-composer-notice" role="status">
         <span>{{ returnedContentErrors[operation.operationId] ?? '操作已完成，返回内容已保留。' }}</span><button @click="restoreReturnedOperation(operation)">追加到编辑器</button>
       </div>

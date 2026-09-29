@@ -395,7 +395,7 @@ function deadlineForRequest(type: AgentRequest["type"]): "request" | "mutation" 
   if (type === "queue.dequeue") return "control";
   // Pi abort waits for the Agent to become idle. Queued input may legally start
   // another turn first, so abort completion is not a Worker liveness signal.
-  if (["command.submit", "command.abort", "session.navigate", "session.compact"].includes(type)) return "none";
+  if (["command.submit", "command.abort", "command.abort_restore_queue", "session.navigate", "session.compact"].includes(type)) return "none";
   if (controlRequestDescriptor(type).effect === "query") return "request";
   return "mutation";
 }

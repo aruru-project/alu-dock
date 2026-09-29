@@ -33,7 +33,7 @@ const input = useInputEditor({
   page: () => page, observation: () => observation, actions: () => workActions, attachments: () => attachments,
   focused: () => windowFocused.value, pairing: () => pairingInProgress.value, activity: (workId) => showAgentActivity(workId),
 })
-const { composer, composerExpanded, queueRestoring, submitting, restoreQueue } = input
+const { composer, composerExpanded, queueRestoring, submitting } = input
 const page = usePageSurfaces({
   composer: () => composer,
   extensionActive: () => !!extensionUi.activeRequest,
@@ -43,7 +43,6 @@ const page = usePageSurfaces({
 const { directoryOpen, commandOpen, deliveryOpen, workspaceBrowserOpen } = page
 const workActions = useWorkActions(page, {
   observation: () => observation,
-  restoreQueue: () => restoreQueue(),
   panel: () => controlPanel.handle.value,
 })
 const { setCompactionError } = workActions

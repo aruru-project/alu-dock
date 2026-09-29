@@ -431,6 +431,7 @@ export class PiAgentAdapter {
         }
       }
       case "command.abort": await this.abort(); return null;
+      case "command.abort_restore_queue": return this.abortRestoringQueue();
       case "queue.dequeue": return this.clearQueue();
       case "model.list": return this.listModels();
       case "model.set": return this.selectModel(request.params.provider, request.params.modelId);
@@ -1072,6 +1073,12 @@ export class PiAgentAdapter {
     const binding = this.requireActive();
     const cleared = binding.session.clearQueue();
     binding.conversation.clearQueuedInputs(cleared);
+    return cleared;
+  }
+  /** Pi TUI's Escape: take the waiting Queue, then abort with no turn in between. */
+  async abortRestoringQueue(): Promise<ClearedAgentQueue> {
+    const cleared = this.clearQueue();
+    await this.abort();
     return cleared;
   }
   async abort(): Promise<void> {

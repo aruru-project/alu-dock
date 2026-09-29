@@ -216,6 +216,13 @@ try {
   }
   emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-model', state: 'succeeded', editor: null, result: work })
   await settle()
+  // #326: a manual compaction waiting for its result must not stop the user queueing a message.
+  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-compaction', kind: 'compact_session', state: 'pending', editor: null })
+  await settle()
+  assert.equal(find(container, item => item.props.class === 'alu-send-btn').props.disabled, false, 'a pending compaction leaves send available')
+  assert.equal(text(container).includes('正在等待操作结果'), false, 'a pending compaction is not reported as an error')
+  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-compaction', kind: 'compact_session', state: 'succeeded', editor: null, result: work })
+  await settle()
   const initialSends = calls.filter(call => call.command === 'submit_message').length
   const initialAcknowledgements = calls.filter(call => call.command === 'consume_operation').length
   // #306 pre-merge review: looking at Model must not cancel the editor's command lookup.
@@ -680,7 +687,38 @@ try {
   assert.equal(nativeResults.has(sentOperation.operationId), false)
   assert.equal(calls.filter(call => call.command === 'consume_operation' && call.args.operationId === sentOperation.operationId).length, 2)
   assert.equal(calls.filter(call => call.command === 'submit_message').length, sendCount)
-  console.log('PASS: Queue insertion and automatic send success / failed confirmation / retry acknowledgement only')
+  // #326: Abort takes the waiting Queue back in the same native call and inserts it like retrieval.
+  {
+    const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', pending: { steering: 0, followUp: 2, total: 2 } }
+    const restored = [{ ...queueItem('abort-1'), text: 'queued a' }, { ...queueItem('abort-2'), text: 'queued b' }]
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
+    observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
+    compact.props['onUpdate:modelValue']('editor at abort')
+    // An unconfirmed compaction is reported, but it does not disable Abort.
+    const unconfirmedCompaction = { ...base, operationId: 'unconfirmed-compaction', kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '压缩结果尚未确认。', outcomeUnknown: true } }
+    emit('aludock://operation', unconfirmedCompaction)
+    await settle()
+    assert.ok(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), 'the unconfirmed result keeps its refresh action')
+    const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort'))
+    assert.equal(abortButton.props.disabled, false, 'an unconfirmed result elsewhere does not disable Abort')
+    const dequeues = calls.filter(call => call.command === 'dequeue_messages').length
+    let resolveAbort, abortArgs
+    abortNative = args => { abortArgs = args; return new Promise(resolve => { resolveAbort = resolve }) }
+    const pendingAbort = abortButton.props.onClick(); await settle()
+    assert.equal(abortArgs.operationEditor, null, 'Abort does not capture the editor before dispatch')
+    const result = { instance: { ...abortWork, execution: 'idle', pending: { steering: 0, followUp: 0, total: 0 } }, receipt: { instanceId: 'work', restored, inFlight: [] } }
+    const receipt = { ...base, operationId: abortArgs.operationId, kind: 'abort_run', runtimeGeneration: 2, sessionId: '', editor: null, state: 'succeeded', result }
+    nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt)
+    resolveAbort(result); await pendingAbort; await settle()
+    assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'returned messages precede the editor text')
+    assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues, 'Abort needs no separate Queue retrieval')
+    assert.ok(text(container).includes('已中止，2 条排队消息已放回输入框'))
+    emit('aludock://operation', { ...unconfirmedCompaction, state: 'succeeded', error: undefined, result: { instance: result.instance } })
+    compact.props['onUpdate:modelValue']('later input')
+    remoteSequence += 10
+    await settle()
+  }
+  console.log('PASS: Queue insertion and automatic send success / failed confirmation / retry acknowledgement only / Abort returns the Queue in one call')
   // Review P2: action feedback belongs to its initiating Work, including a
   // failure delivered after selection changes. Native failures stay retained.
   for (const timing of ['failed-before-switch', 'failed-after-switch']) {
@@ -1129,20 +1167,12 @@ try {
   const persistedEditor = storage.get('aludock.uiState')
   observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: { ...work, execution: 'running' } }, contentToken: 'storage-controls', state: 'connected' }); await settle()
   failStorage = true
-  abortNative = args => controlResult('abort_run', args, work)
+  abortNative = args => controlResult('abort_run', args, { receipt: { instanceId: 'work', restored: [], inFlight: [] }, instance: work })
   const abortsBefore = countCalls('abort_run')
   await find(uploadContainer, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort')).props.onClick(); await settle()
   assert.equal(countCalls('abort_run'), abortsBefore + 1)
   assertControlTarget('abort_run')
   assert.equal(uploadApp.currentDraft, 'draft must survive control buttons')
-  // Abort still retrieves pending Queue first, without capturing the editor.
-  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: { ...work, execution: 'running', pending: { steering: 1, followUp: 0, total: 1 } } }, contentToken: 'queued-storage-controls', state: 'connected' }); await settle()
-  dequeueNative = () => { throw { code: 'connection_failed', message: 'fixture dequeue unavailable' } }
-  const dequeuesBefore = countCalls('dequeue_messages')
-  await find(uploadContainer, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort')).props.onClick(); await settle()
-  assert.equal(countCalls('dequeue_messages'), dequeuesBefore + 1, 'Queue retrieval does not require a pre-dispatch editor save')
-  assertControlTarget('dequeue_messages')
-  assert.equal(countCalls('abort_run'), abortsBefore + 1, 'a failed retrieval still prevents the dependent Abort')
   contentSnapshot(); await settle()
   modelNative = args => controlResult('set_model', args, work)
   find(uploadContainer, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
@@ -1178,7 +1208,7 @@ try {
   assert.equal(uploadApp.currentDraft, '/stop', 'if optional command-text cleanup cannot be saved, Stop still runs and preserves that text')
   failStorage = false; modelNative = undefined
   await rebuildUploadView()
-  console.log('PASS: full storage permits target-only controls and Queue retrieval; ordinary send keeps durable capture; failed Queue retrieval still stops dependent Abort')
+  console.log('PASS: full storage permits target-only controls and Queue retrieval; ordinary send keeps durable capture')
   const uploadsBefore = calls.filter(call => call.command === 'upload_attachment').length
   await chooseJob('first')
   uploadEditor().props['onUpdate:modelValue']('keep typing while uploading'); await settle()

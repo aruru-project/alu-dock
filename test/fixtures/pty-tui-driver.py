@@ -730,7 +730,7 @@ def main() -> int:
                 os.write(fd, b"\x03")
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)
-            elif action in ("queue-restore", "queue-inflight", "queue-abort"):
+            elif action in ("queue-restore", "queue-inflight"):
                 queue_deadline = time.monotonic() + 4
                 while b"steer next" not in output and time.monotonic() < queue_deadline:
                     if read_available(fd, output, 0.05) < 0:
@@ -741,24 +741,18 @@ def main() -> int:
                     while b"Returned 2 waiting messages to the editor" not in output and time.monotonic() < restore_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
-                elif action == "queue-inflight":
+                else:
                     os.write(fd, b"current draft")
                     draft_deadline = time.monotonic() + 2
                     while b"current draft" not in output and time.monotonic() < draft_deadline:
                         if read_available(fd, output, 0.02) < 0:
                             break
-                    os.write(fd, b"\x1b")  # Escape must not abort while Pi owns an in-flight item.
-                    inflight_deadline = time.monotonic() + 4
-                    while b"already moving into" not in output and time.monotonic() < inflight_deadline:
-                        if read_available(fd, output, 0.05) < 0:
-                            break
-                    draft_visible = b"current draft" in output
-                else:
-                    os.write(fd, b"\x1b")  # Escape: restore queue, then abort the run.
+                    os.write(fd, b"\x1b")  # Escape: one step takes the Queue back and aborts.
                     abort_deadline = time.monotonic() + 5
                     while b"Run aborted" not in output and time.monotonic() < abort_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
+                    draft_visible = b"current draft" in output
                 os.write(fd, b"\x03")  # Clear restored editor text before Ctrl+D detach.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)

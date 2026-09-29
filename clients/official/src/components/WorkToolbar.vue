@@ -14,7 +14,7 @@ import { useAppStore } from '../stores/app'
 const props = defineProps<{
   page: ReadonlyRefs<Pick<ReturnType<typeof usePageSurfaces>, 'openControlCenter' | 'openWorkspaceBrowser' | 'workspaceBrowserOpen'>>
   uploads: ReadonlyRefs<Pick<ReturnType<typeof useAttachmentUploads>, 'attachmentPicking' | 'chooseAttachments' | 'draftAttachments' | 'maxMessageAttachments' | 'uploadDrafts'>>
-  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'abortCurrentRun' | 'aborting' | 'mutationOutcomeUnknown' | 'workMutating'>>
+  actions: ReadonlyRefs<Pick<ReturnType<typeof useWorkActions>, 'abortCurrentRun' | 'aborting'>>
   observation: ReadonlyRefs<Pick<ReturnType<typeof useWorkObservation>, 'label' | 'refreshCurrent' | 'status'>>
   host: ReadonlyRefs<Pick<ReturnType<typeof useHostConnection>, 'openHostSettings'>>
 }>()
@@ -22,7 +22,7 @@ const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const { workspaceBrowserOpen, openControlCenter } = props.page
 const { draftAttachments, uploadDrafts, attachmentPicking, maxMessageAttachments, chooseAttachments } = props.uploads
-const { aborting, workMutating, mutationOutcomeUnknown, abortCurrentRun } = props.actions
+const { aborting, abortCurrentRun } = props.actions
 const { status: observationStatus } = props.observation
 const { openHostSettings } = props.host
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
@@ -46,7 +46,7 @@ const openWorkspaceBrowser = props.page.openWorkspaceBrowser
         <button class="alu-bar-btn" title="刷新" @click="refreshCurrent">↻<span class="sm-inline">刷新</span></button>
         <button class="alu-bar-btn" :class="{ 'alu-bar-btn-toggle-active': !detailMode }" title="切换显示模式" @click="detailMode = !detailMode"><span>▤</span><span>{{ detailMode ? '详细' : '简洁' }}</span></button>
         <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
-        <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || workMutating || mutationOutcomeUnknown || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline">{{ aborting ? '中止中' : '中止' }}</span></button>
+        <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline">{{ aborting ? '中止中' : '中止' }}</span></button>
       </div>
     </div>
 
