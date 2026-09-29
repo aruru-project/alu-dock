@@ -34,7 +34,7 @@
 
 本项指跨 Host 切换，不是同一 Host 内切换 Work。现有 App 控件测试使用模拟原生接口，没有覆盖真实 Rust 连接关闭后的回复处理，不能作为此路径已安全的证据。
 
-代码入口：`clients/official/src/lib/hostConnection.ts` 的 `switchSavedHost`；`clients/official/src-tauri/src/lib.rs` 的 `invalidate_connection_lifecycle`、`dequeue_messages`；`clients/official/crates/aludock-client-core/src/client.rs` 的 `request_with_host_epoch_fenced`。
+代码入口：`clients/official/src/stores/host.ts` 的 `switchSavedHost`；`clients/official/src-tauri/src/lib.rs` 的 `invalidate_connection_lifecycle`、`dequeue_messages`；`clients/official/crates/aludock-client-core/src/client.rs` 的 `request_with_host_epoch_fenced`。
 
 ### 为什么现在接受
 
