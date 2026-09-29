@@ -63,3 +63,167 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
     <ConversationImage v-else-if="part.kind === 'image'" :part="part" :resource="imageResource(part)" @request="emit('imageRequest', $event)" @preview="emit('imagePreview', $event)" @failed="emit('imageFailed', $event)" />
     <div v-else :class="[part.tone === 'error' ? 'msg-error' : part.tone === 'warning' ? 'msg-warning' : 'msg-notice', { 'alu-hideable': part.tone === 'info' }]" :data-conversation-id="part.id">{{ part.text }}</div>
 </template>
+
+<style scoped>
+.msg-assistant {
+  color: var(--alu-text);
+  word-break: break-word;
+  margin: 4px 0;
+  font-size: 14px;
+  line-height: 1.7;
+}
+/* ── Thinking 折叠 ── */
+.msg-thinking {
+  color: var(--alu-text-muted);
+  font-style: italic;
+  border-left: 2px solid var(--alu-blue-border);
+  padding-left: 10px;
+  margin: 4px 0;
+  font-size: 12px;
+}
+.msg-thinking summary {
+  cursor: pointer;
+  color: var(--alu-text-muted);
+  font-size: 11px;
+}
+.msg-thinking summary:hover { color: var(--alu-blue-dim); }
+.think-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 4px;
+}
+/* ── Tool calls ── */
+.msg-toolcall {
+  width: min(900px, 100%);
+  margin: 5px 0;
+  overflow: hidden;
+  color: var(--alu-text-dim);
+  font-size: 12px;
+  background: color-mix(in srgb, var(--alu-amber) 4%, var(--alu-bg));
+  border: 1px solid color-mix(in srgb, var(--alu-amber) 24%, var(--alu-border));
+  border-radius: 8px;
+}
+.tool-call-header {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px;
+}
+.tool-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  overflow-wrap: anywhere;
+  color: var(--alu-amber);
+  font-weight: 600;
+}
+.tool-status {
+  flex: 0 0 auto;
+  color: var(--alu-text-muted);
+  font-size: 10px;
+}
+.tool-status[data-status='running'] { color: var(--alu-blue); }
+.tool-status[data-status='error'] { color: var(--alu-rose); }
+.tool-call-preview {
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px 9px;
+  border-top: 1px solid color-mix(in srgb, var(--alu-amber) 12%, var(--alu-border));
+  background: color-mix(in srgb, var(--alu-amber) 3%, var(--alu-bg));
+}
+.tool-call-preview-meta { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.tool-call-preview-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--alu-text-dim);
+  font: 600 10px/1.45 var(--font-mono);
+}
+.tool-call-preview-truncated { flex: 0 0 auto; color: var(--alu-text-faint); font-size: 9px; }
+.tool-call-preview-body {
+  margin: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--alu-text) 82%, var(--alu-text-muted));
+  font: 10.5px/1.5 var(--font-mono);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.tool-call-preview.is-diff .tool-call-preview-body { color: color-mix(in srgb, var(--alu-amber) 76%, var(--alu-text)); }
+.tool-call-preview.is-path .tool-call-preview-body { color: var(--alu-text-muted); }
+.msg-toolcall details { border-top: 1px solid color-mix(in srgb, var(--alu-amber) 14%, var(--alu-border)); }
+.msg-toolcall details summary {
+  display: flex;
+  min-height: 27px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 10px;
+  color: var(--alu-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  list-style: none;
+}
+.msg-toolcall details summary::-webkit-details-marker { display: none; }
+.msg-toolcall details summary:hover { color: var(--alu-text); background: color-mix(in srgb, var(--alu-amber) 5%, transparent); }
+.tool-disclosure { color: var(--alu-amber); font-size: 18px; line-height: 1; transition: transform .18s ease; }
+.msg-toolcall details[open] .tool-disclosure { transform: rotate(90deg); }
+.msg-toolcall.is-error { border-color: var(--alu-rose-border); }
+.msg-tool-output {
+  max-height: min(54vh, 520px);
+  padding: 10px 12px;
+  margin: 0;
+  overflow: auto;
+  color: var(--alu-text-muted);
+  font-size: 11px;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  background: color-mix(in srgb, var(--alu-bg) 92%, black);
+  border: 0;
+  border-top: 1px solid var(--alu-border);
+  border-radius: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--alu-border-light) transparent;
+}
+@media screen and (max-width: 1000px) {
+  .alu-msg-assistant-body > .msg-assistant {
+    margin: 0 0 7px;
+    padding: 12px 14px;
+    border: 1px solid #253050;
+    border-radius: 3px 14px 14px 14px;
+    background: rgba(20, 30, 52, .82);
+  }
+  .alu-msg-assistant-body > .msg-thinking {
+    min-width: 0;
+    margin: 0 0 6px;
+    padding: 8px 11px;
+    border: 1px solid var(--alu-border);
+    border-left: 2px solid var(--alu-blue-border);
+    border-radius: 3px 10px 10px 3px;
+    background: color-mix(in srgb, var(--alu-bg-raised) 78%, transparent);
+  }
+  .alu-msg-assistant-body > .msg-toolcall {
+    width: 100%;
+    margin: 0 0 6px;
+  }
+  /* 对话区是窄屏唯一的纵向滚动容器。thinking 通过 details 折叠控制密度；
+       展开后进入正常文档流，避免连续思考块形成嵌套滚动陷阱。 */
+  .alu-msg-assistant-body .think-content {
+    max-height: none;
+    overflow: visible;
+  }
+  .msg-tool-output {
+    max-height: min(34vh, 280px);
+    max-height: min(34dvh, 280px);
+    padding: 8px 10px;
+    font-size: 10px;
+    line-height: 1.55;
+  }
+}
+@media (min-width: 1200px) {
+  .msg-toolcall { font-size: var(--alu-meta-size); }
+}
+</style>

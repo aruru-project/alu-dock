@@ -75,3 +75,9 @@ const { openMessageText } = props.page
   </main>
 
 </template>
+
+<style scoped>
+.alu-conversation-switching { color: var(--alu-blue); border-color: var(--alu-blue-border); }
+.alu-welcome-error { gap: 10px; }
+.alu-welcome-error .ui-dialog-btn { margin-top: 4px; }
+</style>

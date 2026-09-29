@@ -1,0 +1,33 @@
+.pairing-card { background: rgb(14 18 32 / .9); border: 1px solid var(--c-line); border-radius: 15px; }
+.pairing-card { display: grid; gap: 12px; padding: 18px; }
+.pairing-card-title { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--c-line-soft); }
+.pairing-card-title svg { color: var(--c-ice); }
+.pairing-card-title div { display: grid; gap: 3px; }
+.pairing-card-title strong { font-size: 13px; }
+.pairing-card-title small { color: var(--c-text-3); font: 10px/1.5 var(--font-reading); }
+.pairing-card label { display: grid; gap: 6px; color: var(--c-text-2); font-size: 10px; }
+.pairing-card input { width: 100%; height: 39px; padding: 0 11px; color: var(--c-text-1); font: 12px var(--font-mono); background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; outline: none; }
+.pairing-card input:focus { border-color: var(--c-ice); box-shadow: 0 0 0 2px rgb(126 200 224 / .09); }
+.pairing-card input:disabled { opacity: .55; }
+.pairing-card .pairing-field-hint { color: var(--c-text-3); font: 9px/1.45 var(--font-reading); }
+.pairing-pin { display: grid; justify-items: center; padding: 14px; background: rgb(126 200 224 / .06); border: 1px solid rgb(126 200 224 / .22); border-radius: 11px; }
+.pairing-pin small, .pairing-pin span { color: var(--c-text-3); font: 10px var(--font-reading); }
+.pairing-pin strong { margin: 5px 0; color: var(--c-ice); font-size: 30px; letter-spacing: .25em; text-indent: .25em; }
+.pairing-progress { display: flex; align-items: center; gap: 8px; min-height: 34px; color: var(--c-text-2); font-size: 11px; }
+.pairing-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 3px; }
+.directory-error { display: flex; min-height: 48px; align-items: center; justify-content: center; gap: 9px; padding: 12px; color: var(--c-text-3); font: 12px/1.5 var(--font-reading); text-align: center; }
+.directory-error { margin: 0 16px 7px; color: var(--c-danger); background: rgb(248 113 113 / .06); border: 1px solid rgb(248 113 113 / .16); border-radius: 8px; }
+.host-detail-column .pairing-card { margin: 0 0 12px; border-color: var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.host-detail-column .pairing-card { padding: 15px; }
+.host-detail-column .pairing-card-title { padding-bottom: 10px; border-bottom-color: var(--alu-border); }
+.host-detail-column .pairing-card-title > div { min-width: 0; flex: 1; }
+.host-detail-column .pairing-card input { border-color: var(--alu-border); background: var(--alu-bg); color: var(--alu-text); }
+@media screen and (max-width: 1000px) {
+  .pairing-card { padding: 16px; }
+  .pairing-card input { min-height: 46px; font-size: 14px; }
+}
+@media screen and (max-width: 600px) {
+  .pairing-card { gap: 13px; padding: 14px; }
+  .pairing-card-title small { font-size: 9px; }
+  .pairing-actions { align-items: stretch; flex-direction: column-reverse; }
+}

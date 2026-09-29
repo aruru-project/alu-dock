@@ -98,3 +98,222 @@ const emit = defineEmits<{ latest: [] }>()
   </Transition>
 
 </template>
+
+<style scoped>
+/* ═══════════════════════════════════════════════════════
+   输入区
+   ═══════════════════════════════════════════════════════ */
+.alu-input-section {
+  position: relative;
+  z-index: 10;
+  background: var(--alu-nav-bg);
+  border-top: 1px solid var(--alu-nav-border);
+  flex-shrink: 0;
+  padding: 0 16px;
+}
+.alu-input-section.is-work-inactive {
+  display: none;
+}
+.alu-composer-expand {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--alu-border);
+  border-radius: 10px;
+  color: var(--alu-text-muted);
+  font-size: 15px;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.alu-composer-expand:hover,
+.alu-composer-expand:focus-visible {
+  outline: none;
+  color: var(--alu-blue);
+  background: var(--alu-blue-bg);
+  border-color: var(--alu-blue-border);
+}
+.alu-composer-expand:disabled { opacity: 0.35; cursor: not-allowed; }
+/* 发送按钮 */
+.alu-send-btn {
+  flex-shrink: 0;
+  padding: 10px 24px;
+  background: linear-gradient(135deg, #c8386e 0%, #a02858 100%);
+  border: none;
+  color: #fce8f0;
+  border-radius: 13px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  letter-spacing: 0.03em;
+  box-shadow: 0 2px 14px rgba(200, 56, 110, 0.40);
+}
+.alu-send-btn:hover {
+  background: linear-gradient(135deg, #dc4880 0%, #b83468 100%);
+  box-shadow: 0 4px 24px rgba(220, 72, 128, 0.50);
+  transform: translateY(-1px);
+}
+.alu-send-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(200, 56, 110, 0.32);
+}
+.ui-dialog-composer-editor {
+  min-height: 0;
+  flex: 1 1 auto;
+  resize: none;
+  margin: 14px 16px 0;
+  padding: 14px 16px;
+  outline: none;
+  border: 1px solid var(--alu-border-light);
+  border-radius: 10px;
+  background: var(--alu-bg);
+  color: var(--alu-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+  box-shadow: inset 0 1px 14px rgba(0, 0, 0, 0.2);
+}
+.ui-dialog-composer-editor:focus {
+  border-color: var(--alu-pink-border);
+  box-shadow: 0 0 0 3px rgba(244, 114, 182, 0.08), inset 0 1px 14px rgba(0, 0, 0, 0.2);
+}
+.ui-dialog-composer-footer { align-items: center; }
+.ui-dialog-composer-attachments { min-width: 0; flex: 1; color: var(--alu-text-muted); font-size: 10px; }
+.ui-dialog-composer-status { flex: 0 1 auto; color: var(--alu-amber); font-size: 10px; }
+.ui-dialog-composer-status[hidden] { display: none; }
+/* ── 输入框斜杠命令建议（锚在 .alu-input-wrap 上，贴着输入框浮出） ── */
+.cmd-suggest {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  max-height: min(320px, 46vh);
+  max-height: min(320px, 46dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  background: var(--alu-bg-raised);
+  border: 1px solid var(--alu-border-light);
+  border-radius: 12px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.62);
+}
+.cmd-suggest-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+}
+.cmd-suggest-item.selected { background: var(--alu-hover); border-color: var(--alu-border); }
+.cmd-suggest-name { max-width: 48%; flex: 0 1 auto; overflow: hidden; color: var(--alu-amber); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-suggest-desc { flex: 1 1 auto; overflow: hidden; color: var(--alu-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-suggest-kind { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: 8px; }
+.cmd-suggest-hint { padding: 10px 12px; color: var(--alu-text-muted); font-size: 11px; }
+@media screen and (max-width: 1000px) {
+  .alu-input-section { padding: 0 clamp(10px, 3vw, 24px); }
+  .alu-composer-expand {
+    min-width: 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 11px;
+  }
+  .alu-send-btn {
+    min-width: 64px;
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 11px;
+    font-size: 13px;
+  }
+}
+@media screen and (max-width: 600px) {
+  .alu-input-section { padding-inline: 8px; }
+  .ui-dialog-composer-editor { margin: 12px 10px 0; padding: 13px; font-size: 14px; }
+  .ui-dialog-composer-footer { padding: 10px; }
+  .cmd-suggest-item { min-height: 44px; }
+}
+.alu-send-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.alu-queue-tray {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border: 1px solid var(--alu-blue-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--alu-blue-bg) 82%, transparent);
+  color: var(--alu-text-dim);
+  font-size: 11px;
+}
+.alu-queue-tray[hidden] { display: none; }
+.alu-queue-title { color: var(--alu-blue); font-weight: 700; white-space: nowrap; }
+.alu-queue-preview { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alu-queue-restore {
+  color: var(--alu-blue);
+  border: 1px solid var(--alu-blue-border);
+  border-radius: 7px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+}
+.alu-queue-restore:hover { background: var(--alu-blue-bg); color: var(--alu-text); }
+@media (max-width: 640px) {
+  .alu-queue-preview { max-width: 48vw; }
+}
+@media (min-width: 1200px) {
+  .alu-send-btn {
+    font-size: var(--alu-control-size);
+  }
+}
+.alu-composer-error, .alu-composer-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 7px 10px; border-radius: 8px; font-size: 10px; }
+.alu-composer-error { color: var(--alu-rose); border: 1px solid var(--alu-rose-border); background: var(--alu-rose-bg); }
+.alu-composer-notice { color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); background: color-mix(in srgb, var(--alu-amber) 7%, transparent); }
+.alu-composer-error button, .alu-composer-notice button { color: inherit; }
+.alu-native-attachments { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 6px; max-height: 228px; margin-top: 8px; padding: 7px; overflow-y: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.alu-attachment-selection-summary { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 3px; color: var(--alu-text-dim); font-size: 10px; }
+.alu-attachment-selection-summary span { color: var(--alu-text-muted); }
+.alu-restored-images { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--alu-blue-border); border-radius: 8px; color: var(--alu-text-muted); font-size: 10px; }
+.alu-restored-images button { color: var(--alu-blue); }
+/* The overlay already excludes the keyboard; fit that space instead of moving above it. */
+.ui-dialog-box-composer { height: min(76dvh, 680px); max-height: 100%; }
+@media (max-width: 640px) {
+  .alu-native-attachments { max-height: 140px; }
+}
+.alu-scroll-bottom {
+  position: absolute;
+  z-index: 3;
+  top: -44px;
+  right: 24px;
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  border: 1px solid var(--alu-blue-border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--alu-bg-raised) 92%, transparent);
+  box-shadow: 0 8px 24px rgba(2, 6, 18, .34);
+  color: var(--alu-text-dim);
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+.alu-scroll-bottom > span { color: var(--alu-blue); font-size: 14px; line-height: 1; }
+.alu-scroll-bottom:hover { border-color: var(--alu-blue); color: var(--alu-text); transform: translateY(-1px); }
+.alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; }
+@media (max-width: 640px) {
+  .alu-scroll-bottom { top: -42px; right: 12px; min-height: 30px; padding: 0 10px; }
+}
+</style>

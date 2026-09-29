@@ -71,3 +71,73 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
     <figcaption v-if="part.name">{{ part.name }}</figcaption>
   </figure>
 </template>
+
+<style scoped>
+/* Protocol V2 portable conversation images */
+.alu-conversation-image {
+  width: min(680px, 100%);
+  margin: 10px 0 4px;
+  overflow: hidden;
+  border: 1px solid var(--alu-border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--alu-bg-raised) 90%, black);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+}
+.alu-conversation-image-open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  cursor: zoom-in;
+  border: 0;
+  background: #090b12;
+}
+.alu-conversation-image-open img {
+  display: block;
+  width: 100%;
+  max-height: min(66dvh, 720px);
+  object-fit: contain;
+}
+.alu-conversation-image-state {
+  display: flex;
+  min-height: 132px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px;
+  color: var(--alu-text-muted);
+  font-size: 10px;
+  text-align: center;
+}
+.alu-conversation-image-state.is-error strong { color: var(--alu-text); font-size: 11px; }
+.alu-conversation-image-state.is-error button {
+  min-height: 28px;
+  padding: 0 11px;
+  cursor: pointer;
+  border: 1px solid var(--alu-border-light);
+  border-radius: 7px;
+  color: var(--alu-blue);
+  background: var(--alu-bg);
+  font: inherit;
+}
+.alu-conversation-image figcaption {
+  overflow: hidden;
+  padding: 8px 11px;
+  border-top: 1px solid var(--alu-border);
+  color: var(--alu-text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-user-images .alu-conversation-image {
+  width: min(320px, 100%);
+  margin: 0;
+  border-color: var(--alu-user-border);
+  box-shadow: none;
+}
+.msg-user-images .alu-conversation-image-open img { max-height: 320px; }
+@media (max-width: 680px) {
+  .alu-conversation-image { border-radius: 9px; }
+  .alu-conversation-image-open img { max-height: 56vh; max-height: 56dvh; }
+}
+</style>

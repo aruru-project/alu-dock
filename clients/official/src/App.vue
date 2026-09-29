@@ -153,3 +153,18 @@ onMounted(async () => {
     <PageDialogs :page="page" :editor="input" :actions="workActions" :directory="workDirectory" :host="hostConnection" :platform="platform" :observation="observation" :control-panel="controlPanel" />
   </div>
 </template>
+
+<style scoped>
+/* Existing Work operation results, not a connection/recovery banner. */
+.alu-work-operation-results { width: min(calc(100% - 32px), 760px); margin: 6px auto; flex: none; }
+.alu-client-shell { position: relative; z-index: 1; display: flex; width: 100%; height: 100%; height: 100dvh; flex-direction: column; color: var(--alu-text); }
+.alu-client-shell {
+  height: var(--aludock-base-viewport-height, 100dvh);
+  max-height: var(--aludock-base-viewport-height, 100dvh);
+  padding:
+      var(--aludock-inset-top)
+      var(--aludock-inset-right)
+      max(var(--aludock-inset-bottom), var(--aludock-ime-bottom))
+      var(--aludock-inset-left);
+}
+</style>

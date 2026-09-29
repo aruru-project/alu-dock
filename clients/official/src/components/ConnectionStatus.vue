@@ -35,6 +35,33 @@ function act() {
 </template>
 
 <style scoped>
+/* 状态指示器 */
+.alu-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--alu-mint);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+  flex-shrink: 0;
+}
+.alu-status-dot.connecting {
+  background: var(--alu-amber);
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.6);
+  animation: statusPulse 1.2s ease-in-out infinite;
+}
+.alu-status-dot.error {
+  background: var(--alu-rose);
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+}
+.alu-status-label {
+  color: var(--alu-text-muted);
+  font-size: 11px;
+}
+@media screen and (max-width: 1000px) {
+  .alu-status-label {
+    display: none;
+  }
+}
 .alu-connection-status > summary { list-style: none; min-width: 24px; padding-inline: 2px; }
 .alu-connection-status > summary::-webkit-details-marker { display: none; }
 .alu-status-attention { font-size: 11px; color: var(--alu-rose); }

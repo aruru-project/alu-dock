@@ -61,3 +61,31 @@ function stateText() {
     </div>
   </article>
 </template>
+
+<style scoped>
+.attachment-card { display: flex; min-width: 0; min-height: 58px; align-items: center; gap: 9px; padding: 8px 9px; color: var(--c-text-1); font-family: var(--font-reading); background: linear-gradient(135deg, rgb(23 48 63 / .46), rgb(17 24 40 / .88)); border: 1px solid rgb(126 200 224 / .2); border-radius: 10px; }
+.attachment-card.compact { min-height: 48px; padding: 6px 8px; background: rgb(8 12 24 / .42); }
+.attachment-card.is-error { background: rgb(63 25 31 / .45); border-color: rgb(248 113 113 / .28); }
+.attachment-card.is-queued { border-color: rgb(251 191 36 / .18); }
+.attachment-preview-trigger { display: flex; min-width: 0; flex: 1; align-items: center; gap: 9px; color: inherit; font: inherit; text-align: left; }
+button.attachment-preview-trigger { margin: -4px; padding: 4px; cursor: zoom-in; background: transparent; border: 0; border-radius: 8px; }
+button.attachment-preview-trigger:hover { background: rgb(126 200 224 / .07); }
+button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--c-ice); outline-offset: 1px; }
+.attachment-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; color: var(--c-ice); background: var(--c-ice-soft); border-radius: 9px; place-items: center; }
+.attachment-icon.has-thumbnail { width: 42px; height: 42px; overflow: hidden; background: #090b12; }
+.attachment-card.compact .attachment-icon.has-thumbnail { width: 36px; height: 36px; }
+.attachment-thumbnail { display: block; width: 100%; height: 100%; object-fit: cover; }
+.attachment-card.is-error .attachment-icon { color: var(--c-danger); background: rgb(248 113 113 / .08); }
+.attachment-copy { min-width: 0; flex: 1; }
+.attachment-copy strong { display: block; overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--c-text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-copy small { color: #f4a2a2; }
+.attachment-actions { display: flex; flex: 0 0 auto; gap: 2px; }
+.attachment-actions button { display: grid; width: 34px; height: 34px; padding: 0; color: var(--c-text-2); cursor: pointer; background: transparent; border: 0; border-radius: 8px; place-items: center; }
+.attachment-actions button:hover { color: var(--c-text-1); background: var(--c-space-800); }
+@media (max-width: 599px) {
+  .attachment-actions button { min-height: 44px; height: 44px; }
+}
+.alu-native-attachments .attachment-card.is-previewable { min-height: 82px; }
+.alu-native-attachments .attachment-card.is-previewable .attachment-icon.has-thumbnail { width: 96px; height: 66px; border-radius: 8px; }
+</style>

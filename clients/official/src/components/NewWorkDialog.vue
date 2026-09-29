@@ -548,6 +548,24 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 </template>
 
 <style scoped>
+.alu-directory-machine {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--alu-border);
+  color: var(--alu-text-muted);
+  font-size: 11px;
+}
+.alu-directory-machine:focus-within { z-index: 30; }
+.alu-directory-machine > span { flex: 0 0 auto; }
+@media screen and (max-width: 600px) {
+  .alu-directory-machine { padding: 9px 12px; }
+}
+.alu-directory-select { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
 .new-work-header { display: flex; align-items: flex-start; gap: 10px; }
 .new-work-header > div { min-width: 0; }
 .new-work-back {

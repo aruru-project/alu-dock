@@ -96,3 +96,211 @@ function inactiveState(work: Work) {
     </div>
 
 </template>
+
+<style scoped>
+/* ═══════════════════════════════════════════════════════
+   非活跃 Work 状态面
+   ═══════════════════════════════════════════════════════ */
+.alu-work-state {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: clamp(28px, 6vh, 72px) 0;
+}
+.alu-work-state-card {
+  width: min(720px, 100%);
+  position: relative;
+  overflow: hidden;
+  padding: clamp(24px, 4vw, 40px);
+  border: 1px solid var(--alu-border-light);
+  border-top-color: var(--alu-amber);
+  border-radius: 2px 18px 18px 18px;
+  background: linear-gradient(145deg, rgba(20, 30, 52, 0.94), rgba(10, 16, 30, 0.96));
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28), inset 3px 0 0 rgba(245, 158, 11, 0.75);
+}
+.alu-work-state-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 120px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--alu-amber));
+  opacity: 0.75;
+}
+.alu-work-state-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f6c56f;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.alu-work-state-signal {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--alu-amber);
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.7);
+}
+.alu-work-state-card h1 {
+  margin: 18px 0 8px;
+  color: var(--alu-text);
+  font-size: clamp(22px, 3vw, 30px);
+  font-weight: 750;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.alu-work-state-message {
+  max-width: 580px;
+  margin: 0;
+  color: var(--alu-text-dim);
+  font-size: 14px;
+  line-height: 1.75;
+}
+.alu-work-state-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  margin: 26px 0 0;
+}
+.alu-work-state-meta > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--alu-border);
+  border-radius: 8px;
+  background: rgba(5, 10, 20, 0.42);
+}
+.alu-work-state-meta dt {
+  margin-bottom: 5px;
+  color: var(--alu-text-muted);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.alu-work-state-meta dd {
+  margin: 0;
+  color: var(--alu-text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.alu-work-state-error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--alu-rose);
+  background: rgba(248, 113, 113, 0.06);
+  color: var(--alu-rose);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.alu-work-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin-top: 28px;
+}
+.alu-work-state-primary,
+.alu-work-state-secondary {
+  min-height: 38px;
+  border-radius: 9px;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
+}
+.alu-work-state-primary {
+  border: 1px solid #d08a1f;
+  background: rgba(245, 158, 11, 0.13);
+  color: #ffd78d;
+  box-shadow: 0 0 24px rgba(245, 158, 11, 0.08);
+}
+.alu-work-state-primary:hover {
+  background: rgba(245, 158, 11, 0.21);
+  transform: translateY(-1px);
+}
+.alu-work-state-secondary {
+  border: 1px solid var(--alu-border-light);
+  background: rgba(20, 30, 52, 0.58);
+  color: var(--alu-text-dim);
+}
+.alu-work-state-secondary:hover {
+  border-color: var(--alu-border-focus);
+  color: var(--alu-text);
+}
+.alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-card {
+  border-top-color: var(--alu-rose);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28), inset 3px 0 0 rgba(248, 113, 113, 0.68);
+}
+.alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-card::after {
+  background: linear-gradient(90deg, transparent, var(--alu-rose));
+}
+.alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-status {
+  color: var(--alu-rose);
+}
+.alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-signal {
+  background: var(--alu-rose);
+  box-shadow: 0 0 14px rgba(248, 113, 113, 0.7);
+}
+.alu-work-state[data-lifecycle='stopped'] .alu-work-state-card,
+.alu-work-state[data-lifecycle='stopping'] .alu-work-state-card {
+  border-top-color: var(--alu-border-light);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24), inset 3px 0 0 var(--alu-border-light);
+}
+.alu-work-state[data-lifecycle='stopped'] .alu-work-state-card::after,
+.alu-work-state[data-lifecycle='stopping'] .alu-work-state-card::after {
+  background: linear-gradient(90deg, transparent, var(--alu-border-light));
+}
+.alu-work-state[data-lifecycle='stopped'] .alu-work-state-status,
+.alu-work-state[data-lifecycle='stopping'] .alu-work-state-status {
+  color: var(--alu-text-muted);
+}
+.alu-work-state[data-lifecycle='stopped'] .alu-work-state-signal,
+.alu-work-state[data-lifecycle='stopping'] .alu-work-state-signal {
+  background: var(--alu-text-muted);
+  box-shadow: none;
+}
+@media screen and (max-width: 600px) {
+  .alu-work-state {
+    place-items: start stretch;
+    padding: 18px 0 28px;
+  }
+  .alu-work-state-card {
+    padding: 22px 18px;
+    border-radius: 2px 14px 14px 14px;
+  }
+  .alu-work-state-meta {
+    grid-template-columns: 1fr;
+    margin-top: 20px;
+  }
+  .alu-work-state-actions {
+    align-items: stretch;
+    margin-top: 22px;
+  }
+  .alu-work-state-primary { flex: 1 0 100%; }
+  .alu-work-state-secondary { flex: 1 1 0; }
+}
+.center-state { min-height: 100%; }
+.center-state { display: grid; place-content: center; justify-items: center; color: var(--c-text-2); text-align: center; }
+.center-state h1 { margin: 12px 0 4px; color: var(--c-text-1); font-size: 19px; }
+.center-state p { max-width: 560px; margin: 8px 0 20px; font: 14px/1.6 var(--font-reading); }
+.error-state > svg { color: var(--c-danger); }
+.re-pair-error { width: min(620px, calc(100vw - 32px)); margin: -5px 0 12px; padding: 8px 10px; color: #f8a0a0; font: 11px/1.5 var(--font-reading); text-align: left; background: rgb(248 113 113 / .07); border: 1px solid rgb(248 113 113 / .18); border-radius: 9px; }
+@media screen and (max-width: 1000px) {
+  .alu-work-state {
+    width: min(100%, 760px);
+    margin-inline: auto;
+  }
+  .alu-work-state {
+    width: min(100%, 760px);
+    margin-inline: auto;
+  }
+}
+</style>

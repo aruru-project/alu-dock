@@ -176,3 +176,51 @@ onBeforeUnmount(() => window.removeEventListener('resize', handleResize))
     </div>
   </div>
 </template>
+
+<style scoped>
+.alu-image-zoom-stage {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #05070c;
+  touch-action: none;
+  user-select: none;
+}
+.alu-image-zoom-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+  will-change: transform;
+  -webkit-user-drag: none;
+}
+.alu-image-zoom-controls {
+  position: absolute;
+  z-index: 2;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 10px;
+  color: white;
+  background: rgba(5, 7, 12, .82);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+}
+.alu-image-zoom-controls button {
+  display: grid;
+  width: 34px;
+  height: 32px;
+  cursor: pointer;
+  border-radius: 7px;
+  color: inherit;
+  place-items: center;
+}
+.alu-image-zoom-controls button:hover:not(:disabled) { background: rgba(255, 255, 255, .12); }
+.alu-image-zoom-controls button:disabled { opacity: .35; }
+.alu-image-zoom-controls span { min-width: 44px; text-align: center; font: 10px var(--font-reading); }
+</style>

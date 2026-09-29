@@ -1,0 +1,180 @@
+/* ═══════════════════════════════════════════════════════
+   空输出区 — 阿露欢迎图
+   ═══════════════════════════════════════════════════════ */
+.alu-welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  opacity: 0.65;
+  pointer-events: none;
+  z-index: -1;
+}
+.alu-welcome img {
+  width: 96px;
+  height: 96px;
+  opacity: 0.7;
+  filter: drop-shadow(0 0 24px rgba(244, 114, 182, 0.35));
+  animation: welcomeFloat 4s ease-in-out infinite;
+}
+.alu-welcome-text {
+  color: var(--alu-text-muted);
+  font-size: 13px;
+  text-align: center;
+  line-height: 1.8;
+}
+.alu-welcome-text strong {
+  color: var(--alu-pink);
+  font-weight: 700;
+  font-size: 1.15em;
+}
+.button { display: flex; align-items: center; }
+.button { justify-content: center; min-height: 38px; gap: 8px; padding: 0 15px; font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 9px; }
+/* Conversation layout and presentation owner.
+ * Viewport behavior: lib/conversationViewport.ts
+ * Content lifecycle: lib/conversationContent.ts
+ * Rendering: components/ConversationView.vue */
+.alu-output { position: relative; min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-anchor: none; }
+/* ═══════════════════════════════════════════════════════
+   输出区
+   ═══════════════════════════════════════════════════════ */
+.alu-output {
+  padding: 28px 56px 40px;
+}
+.msg-text { word-break: break-word; }
+.msg-text.is-streaming { white-space: pre-wrap; }
+.msg-error {
+  color: var(--alu-rose);
+  font-size: 12px;
+  padding: 2px 6px;
+  background: rgba(248, 113, 113, 0.05);
+  border-radius: 4px;
+}
+.msg-warning {
+  color: #f6c56f;
+  font-size: 12px;
+  padding: 3px 7px;
+  border-left: 2px solid #f59e0b;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.07);
+}
+.msg-notice {
+  color: var(--alu-text-muted);
+  font-size: 11px;
+  padding: 1px 4px;
+}
+/* ── Markdown 渲染 ── */
+.msg-text { font-size: 14px; line-height: 1.7; }
+.msg-text p { margin-bottom: 0.5em; }
+.msg-text p:last-child { margin-bottom: 0; }
+.msg-text strong { color: var(--alu-text); font-weight: 600; }
+.msg-text em { font-style: italic; color: var(--alu-text-dim); }
+.msg-text code { background: var(--alu-active); padding: 1px 6px; border-radius: 4px; font-size: 0.86em; color: var(--alu-pink); border: 1px solid var(--alu-border); }
+.msg-text pre { margin: 8px 0; }
+.msg-text pre code { background: none; padding: 0; color: var(--alu-text-dim); font-size: 0.88em; border: none; }
+.msg-text ul, .msg-text ol { padding-left: 1.5em; margin: 0.4em 0; }
+.msg-text li { margin-bottom: 0.25em; }
+.msg-text h1, .msg-text h2, .msg-text h3, .msg-text h4 {
+  font-weight: 600;
+  margin: 0.9em 0 0.4em;
+  color: var(--alu-text);
+}
+.msg-text h1 { font-size: 1.2em; }
+.msg-text h2 { font-size: 1.12em; }
+.msg-text h3 { font-size: 1.05em; }
+.msg-text blockquote {
+  border-left: 2px solid var(--alu-pink);
+  color: var(--alu-text-muted);
+  margin: 6px 0;
+  background: var(--alu-pink-bg);
+  border-radius: 0 4px 4px 0;
+  padding: 4px 10px;
+}
+.msg-text a { color: var(--alu-blue); text-decoration: underline; }
+.msg-text a:hover { color: var(--alu-pink); }
+.msg-text hr { border: none; border-top: 1px solid var(--alu-border); margin: 10px 0; }
+.msg-text table { border-collapse: collapse; margin: 6px 0; width: 100%; }
+.msg-text th, .msg-text td {
+  border: 1px solid var(--alu-border);
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 0.92em;
+}
+.msg-text th { background: var(--alu-active); color: var(--alu-text-dim); }
+/* ── Code block with language header ── */
+.code-block-wrap {
+  border: 1px solid #253050;
+  border-radius: 10px;
+  overflow: hidden;
+  margin: 10px 0;
+  background: #0a0f1e;
+}
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 16px;
+  background: #111828;
+  border-bottom: 1px solid #1e2e48;
+}
+.code-lang {
+  color: var(--alu-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
+.code-copy-btn {
+  color: var(--alu-text-muted);
+  font-size: 11px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  transition: color 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.code-copy-btn:hover { color: var(--alu-blue); }
+.code-block-pre {
+  padding: 16px 18px;
+  overflow-x: auto;
+  margin: 0;
+  background: #0a0f1e;
+}
+.code-block-pre code {
+  background: none;
+  padding: 0;
+  color: #c9d8f0;
+  font-size: 13px;
+  border: none;
+  line-height: 1.65;
+}
+/* ── 简洁显示模式：隐藏过程块（thinking / tool call / info notice）── */
+.alu-compact-mode .alu-hideable {
+  display: none !important;
+}
+.msg-notice, .msg-warning, .msg-error {
+  animation: msgSlideIn 0.22s ease-out;
+}
+@media screen and (max-width: 1000px) {
+  .alu-output {
+    width: 100%;
+    padding: 18px clamp(14px, 4vw, 34px) 30px;
+    overscroll-behavior: contain;
+  }
+  .msg-text table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .code-block-pre { padding: 11px 12px; }
+}
+@media screen and (max-width: 600px) {
+  .alu-output { padding: 12px 12px 24px; }
+}

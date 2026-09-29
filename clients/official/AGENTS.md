@@ -15,6 +15,12 @@
 
 - 文案先说发生什么，再说用户能做什么；直接说明结果，例如“文件保留在原位置”。内部机制词、类名、状态枚举值和 ID 留在工程诊断中，不进入界面文案。
 
+## 样式
+
+- 只有一个组件用到的样式写在该组件的 `<style scoped>` 里。几个组件共用的样式放在 `src/styles/`：`tokens.css`（颜色、尺寸变量）、`base.css`（页面默认样式、动画）、`controls.css`（共用按钮等控件）、`host-connection.css`（配对与连接卡片）、`dialog.css`（通用弹窗框架的尺寸、位置和窄屏适配）、`conversation.css`（对话正文共用样式和 `v-html` 渲染的 Markdown）。
+- 同一元素的一种效果只写一处。不要靠加载顺序或更高优先级去盖掉另一个文件里的规则；窄屏不同就在同一处写明对应的媒体查询。
+- 样式要在 Android 最旧支持的 WebView（Chromium 99）上生效：`vite.config.ts` 的 `cssTarget` 保持 `chrome99`，不使用 CSS 嵌套、`:has()`、容器查询和 `(width <= …)` 这类范围写法的媒体查询。
+
 ## Project boundaries
 
 - Official Client、Dock Host/Worker 与 TUI 属于同一仓库、同一产品。改动放在拥有该事实的模块；跨边界产品变更统一沿根目录定义的 Protocol V2 路径完成。

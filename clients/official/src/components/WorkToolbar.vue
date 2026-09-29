@@ -51,3 +51,80 @@ const openWorkspaceBrowser = props.page.openWorkspaceBrowser
     </div>
 
 </template>
+
+<style scoped>
+/* ═══════════════════════════════════════════════════════
+   底部工具栏
+   ═══════════════════════════════════════════════════════ */
+.alu-bottom-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  height: var(--alu-bar-height);
+  border-top: 1px solid var(--alu-nav-border);
+}
+.alu-bottom-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.alu-bottom-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.alu-bar-btn-abort {
+  color: var(--alu-rose-dim);
+}
+.alu-bar-btn-abort:hover {
+  background: var(--alu-rose-bg);
+  color: var(--alu-rose);
+}
+/* 显示模式切换按钮：激活（简洁模式）高亮 */
+.alu-bar-btn-toggle-active {
+  background: var(--alu-hover);
+  color: var(--alu-blue);
+}
+.alu-bar-btn-toggle-active:hover {
+  color: var(--alu-blue);
+}
+.alu-bar-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--alu-border);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+@media screen and (max-width: 1000px) {
+  .alu-input-section > .alu-bottom-bar {
+    width: min(100%, 760px);
+    margin-inline: auto;
+  }
+  .alu-bar-session-action,
+  .alu-bottom-bar kbd {
+    display: none;
+  }
+  .alu-bottom-bar {
+    height: var(--alu-bar-height);
+    min-height: var(--alu-bar-height);
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 2px 0;
+  }
+  .alu-bottom-bar-left,
+  .alu-bottom-bar-right {
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 2px;
+  }
+  .alu-bottom-bar-right { margin-left: auto; }
+  .alu-bar-btn-toggle-active { color: var(--alu-blue); }
+  .alu-bar-sep { margin: 0 1px; }
+}
+@media screen and (max-width: 600px) {
+  .alu-bottom-bar-right { gap: 0; }
+}
+</style>

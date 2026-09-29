@@ -59,3 +59,82 @@ async function copyAllText() {
     </footer>
   </template>
 </template>
+
+<style scoped>
+.message-markdown-document { min-height: 0; flex: 1 1 auto; }
+.message-text-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--alu-border);
+  background: color-mix(in srgb, var(--alu-bg-raised) 94%, var(--alu-blue) 6%);
+}
+.message-text-header > div { display: grid; gap: 3px; }
+.message-text-header span { color: var(--alu-blue); font: 700 9px/1.2 var(--font-reading); letter-spacing: .14em; text-transform: uppercase; }
+.message-text-header strong { color: var(--alu-text); font: 700 14px/1.35 var(--font-reading); }
+.message-text-close {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  color: var(--alu-text-muted);
+  border: 1px solid var(--alu-border);
+  border-radius: 10px;
+  cursor: pointer;
+  place-items: center;
+}
+.message-text-close:hover { color: var(--alu-text); background: var(--alu-hover); }
+.message-text-source {
+  width: 100%;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 18px;
+  resize: none;
+  overflow: auto;
+  color: var(--alu-text);
+  outline: none;
+  background: color-mix(in srgb, var(--alu-bg) 96%, black);
+  border: 0;
+  border-radius: 0;
+  font: 12px/1.7 var(--font-mono);
+  overflow-wrap: normal;
+  tab-size: 2;
+  touch-action: auto;
+  user-select: text;
+  white-space: pre-wrap;
+}
+.message-text-source:focus { box-shadow: inset 0 0 0 1px var(--alu-blue-border); }
+.message-text-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--alu-border);
+  background: var(--alu-bg-raised);
+}
+.message-text-footer > span { min-width: 0; color: var(--alu-text-muted); font-size: 10px; line-height: 1.45; }
+.message-text-footer > div { display: flex; flex: 0 0 auto; gap: 8px; }
+.message-text-footer button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 11px;
+  color: var(--alu-text-dim);
+  border: 1px solid var(--alu-border-light);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.message-text-footer button.is-primary { color: var(--alu-bg); border-color: var(--alu-blue); background: var(--alu-blue); font-weight: 700; }
+@media screen and (max-width: 600px) {
+  .message-text-source { padding: 14px; font-size: 12px; }
+  .message-text-footer { align-items: stretch; flex-direction: column; gap: 9px; }
+  .message-text-footer > div { width: 100%; }
+  .message-text-footer button { min-height: 44px; flex: 1; justify-content: center; }
+}
+</style>

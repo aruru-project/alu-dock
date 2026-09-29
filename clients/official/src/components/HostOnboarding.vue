@@ -56,3 +56,86 @@ onBeforeUnmount(() => { void stopPairing() })
     </div>
 
 </template>
+
+<style scoped>
+.eyebrow { color: var(--c-sakura); font-size: 10px; font-weight: 700; letter-spacing: .16em; }
+.pairing-onboarding { width: min(920px, 100%); min-height: 100%; padding: 12px 0 26px; margin: 0 auto; }
+.pairing-intro { display: flex; align-items: center; gap: 18px; margin: 0 auto 18px; }
+.pairing-intro > img { width: 108px; height: 116px; object-fit: contain; object-position: bottom; filter: drop-shadow(0 12px 18px rgb(0 0 0 / .28)); }
+.pairing-intro h1 { margin: 5px 0 6px; font-size: clamp(23px, 3vw, 32px); letter-spacing: -.03em; }
+.pairing-intro p { max-width: 620px; margin: 0; color: var(--c-text-2); font: 13px/1.65 var(--font-reading); }
+.pairing-layout { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(260px, .82fr); gap: 14px; align-items: start; }
+.pairing-guide { background: rgb(14 18 32 / .9); border: 1px solid var(--c-line); border-radius: 15px; }
+.pairing-method-divider { display: flex; align-items: center; gap: 9px; color: var(--c-text-3); font-size: 8px; }
+.pairing-method-divider::before, .pairing-method-divider::after { height: 1px; flex: 1; content: ''; background: var(--c-line-soft); }
+.pairing-guide { padding: 9px 15px; margin: 0; list-style: none; }
+.pairing-guide li { display: flex; gap: 11px; padding: 13px 2px; }
+.pairing-guide li + li { border-top: 1px solid var(--c-line-soft); }
+.pairing-guide li > span { display: grid; flex: 0 0 auto; width: 25px; height: 25px; color: var(--c-pink); font-weight: 700; background: rgb(244 114 182 / .09); border: 1px solid rgb(244 114 182 / .2); border-radius: 50%; place-items: center; }
+.pairing-guide strong { font-size: 11px; }
+.pairing-guide p { margin: 5px 0 0; color: var(--c-text-3); font: 10px/1.55 var(--font-reading); }
+@media screen and (max-width: 1000px) {
+  .pairing-onboarding {
+    width: min(100%, 760px);
+    min-height: auto;
+    margin-inline: auto;
+    padding: 8px 0 28px;
+  }
+  .pairing-intro {
+    gap: 14px;
+    margin: 0 0 16px;
+  }
+  .pairing-intro > img {
+    width: 76px;
+    height: 82px;
+    flex: 0 0 auto;
+  }
+  .pairing-intro h1 {
+    margin: 4px 0 5px;
+    font-size: 25px;
+  }
+  .pairing-intro p { font-size: 12px; line-height: 1.6; }
+  .pairing-layout {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  .pairing-layout > * {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+  }
+  .pairing-guide {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    padding: 8px;
+  }
+  .pairing-guide li { min-width: 0; padding: 11px; }
+  .pairing-guide li + li {
+    border-top: 0;
+    border-left: 1px solid var(--c-line-soft);
+  }
+}
+@media screen and (max-width: 600px) {
+  .pairing-intro {
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .pairing-intro > img {
+    width: 60px;
+    height: 68px;
+  }
+  .pairing-intro h1 { font-size: 21px; }
+  .pairing-intro p { font-size: 11px; }
+  .pairing-guide {
+    display: block;
+    padding: 5px 13px;
+  }
+  .pairing-guide li { padding: 12px 2px; }
+  .pairing-guide li + li {
+    border-top: 1px solid var(--c-line-soft);
+    border-left: 0;
+  }
+}
+</style>
