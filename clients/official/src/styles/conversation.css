@@ -31,7 +31,7 @@
   font-weight: 700;
   font-size: 1.15em;
 }
-/* Conversation scroller. It stays global because lib/ code and several components look it up.
+/* Conversation scroller. It stays global because ConversationImage looks it up with closest().
  * Viewport behavior: lib/conversationViewport.ts
  * Content lifecycle: lib/conversationContent.ts */
 .alu-output { position: relative; min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-anchor: none; padding: 28px 56px 40px; }

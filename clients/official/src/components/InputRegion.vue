@@ -310,7 +310,7 @@ const emit = defineEmits<{ latest: [] }>()
 }
 .alu-scroll-bottom > span { color: var(--alu-blue); font-size: 14px; line-height: 1; }
 .alu-scroll-bottom:hover { border-color: var(--alu-blue); color: var(--alu-text); transform: translateY(-1px); }
-.alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; }
+.alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; box-shadow: var(--focus-ring); }
 @media (max-width: 640px) {
   .alu-scroll-bottom { top: -42px; right: 12px; min-height: 30px; padding: 0 10px; }
 }
