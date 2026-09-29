@@ -20,10 +20,11 @@ export function conversationBoundaryKey(
 
 /** Matches WebConsole's compact metric density exactly. */
 export function formatTokenCount(value?: number | null): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-  if (value >= 1_000) return `${Math.floor(value / 1_000)}k`
-  return String(value)
+  const number = value == null ? NaN : Number(value)
+  if (!Number.isFinite(number)) return '—'
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`
+  if (number >= 1_000) return `${Math.floor(number / 1_000)}k`
+  return String(number)
 }
 
 /** Same session-total cache ratio as the Work TUI; output tokens are not input cache usage. */

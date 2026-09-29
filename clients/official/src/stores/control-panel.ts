@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { getResources, getSettings, listModels, listSessions, listTools, loadSessionTree, sessionContext } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import type { ControlSection } from '../lib/localCommands'
@@ -30,7 +30,13 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   const loading = ref(new Set<ControlSection>())
   const loadErrors = ref<Partial<Record<ControlSection, string>>>({})
   const writeFailed = createSignal<[message: string]>()
-  const sessionsChanged = createSignal<[domain: 'sessions' | 'tree']>()
+  // An open Session list or Tree reads the Host itself; its result answers the outcome check.
+  type SessionReloader = (domain: 'sessions' | 'tree') => Promise<boolean> | null
+  let sessionReloader: SessionReloader | null = null
+  function setSessionReloader(reloader: SessionReloader) {
+    sessionReloader = reloader
+    return () => { if (sessionReloader === reloader) sessionReloader = null }
+  }
   let loadEpoch = 0
 
   watch([
@@ -113,15 +119,16 @@ export const useControlPanelStore = defineStore('control-panel', () => {
     }
   }
 
-  /** Reads the domain again after an unconfirmed change. An open Session panel reloads its own view too. */
+  /** Reads the domain again after an unconfirmed change. */
   async function reconcileDomain(domain: ControlMutationDomain): Promise<boolean> {
     if (domain === 'conversation') return false
     if (domain === 'sessions' || domain === 'tree') {
+      const shown = sessionReloader?.(domain)
+      if (shown) return shown
       const work = selected.value
       if (!work) return false
       if (domain === 'sessions') await currentConnectionCall(app, (context) => listSessions(sessionContext(context, work), { machineHostId: work.hostId, cwd: work.cwd }))
       else await currentConnectionCall(app, (context) => loadSessionTree(sessionContext(context, work)))
-      sessionsChanged.emit(domain)
       return true
     }
     return loadSection(domain, true)
@@ -147,7 +154,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
       models.value.instance = selected.value
     }
   }
-  observation.onConfigChanged(applyConfigEvent)
+  onScopeDispose(observation.onConfigChanged(applyConfigEvent))
 
-  return { models, tools, resources, settings, loading, loadErrors, reset, loadSection, reconcileDomain, onWriteFailed: writeFailed.on, onSessionsChanged: sessionsChanged.on }
+  return { models, tools, resources, settings, loading, loadErrors, reset, loadSection, reconcileDomain, onWriteFailed: writeFailed.on, setSessionReloader }
 })

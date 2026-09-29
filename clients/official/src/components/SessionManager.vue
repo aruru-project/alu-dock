@@ -451,10 +451,11 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
   }
   error.value = errorMessage(cause)
 }
-// An unconfirmed Session change was checked elsewhere; show the Host's current list or tree.
-onUnmounted(useControlPanelStore().onSessionsChanged((domain) => {
-  if (domain === 'sessions' && props.mode === 'sessions') void loadSessionList()
-  else if (domain === 'tree' && props.mode === 'tree') void loadTree()
+// An unconfirmed Session change is checked by reading the list or Tree shown here.
+onUnmounted(useControlPanelStore().setSessionReloader((domain) => {
+  if (domain === 'sessions' && props.mode === 'sessions') return loadSessionList()
+  if (domain === 'tree' && props.mode === 'tree') return loadTree()
+  return null
 }))
 function time(value?: string | null) { return treeNodeTime(value) }
 </script>

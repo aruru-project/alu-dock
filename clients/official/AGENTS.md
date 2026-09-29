@@ -21,11 +21,11 @@
 
 - `App.vue` 只摆放页面区域，并在挂载时按顺序启动一次页面级监听（先监听，再读取），卸载时释放这些 store。它不创建业务模块再往下传。
 - 跨区域共享的状态放 `src/stores/` 的 Pinia setup store，按领域分开：`host`（连接与配对）、`observation`（当前 Work 的实时观察、窗口焦点与暂离）、`surfaces`（弹窗、预览、焦点归还、输入框展开）、`input`、`work-actions`、`attachments`、`operations`、`deliveries`、`control-panel`、`conversation`、`platform`。要避免的是一个装下所有东西的万能对象，不是全局 store。
-- store 之间只朝一个方向依赖：`app`、`surfaces`、`platform` ← `observation` ← 各类操作 ← `input`。下层有变化要让上层知道时，由上层 watch 下层状态，或订阅下层提供的通知（`lib/signal.ts`，如 `observation.onReplaced`）；下层不 import 上层。出现互相引用，说明有状态该放到更下层。
+- store 之间只朝一个方向依赖：`app`、`surfaces`、`platform` ← `observation` ← 各类操作 ← `input`。各类操作之间也只单向引用（如 `attachments` 用 `host`，`operations` 用 `attachments`，`work-actions` 用 `control-panel` 和 `host`）。下层有变化要让上层知道时，由上层 watch 下层状态，或订阅下层提供的通知（`lib/signal.ts`，如 `observation.onReplaced`）；下层不 import 上层。出现互相引用，说明有状态该放到更下层。
 - 按 Work 区分的数据（草稿、附件、操作结果、已取回的图片数）在 store 内以 Work 为键保存，切换 Work 不串。
-- 组件从 store 读状态（`storeToRefs`）、调用 store 的动作；父子之间用 props 和 emit，不调用别的组件通过 `defineExpose` 暴露的方法。元素引用、滚动、焦点和键盘留在组件里；只有别的区域也要用的元素（弹窗外框、输入框）才由 store 持有。
+- 组件从 store 读状态（`storeToRefs`）、调用 store 的动作；父子之间用 props 和 emit，不调用别的组件通过 `defineExpose` 暴露的方法。元素引用、滚动、焦点和键盘留在组件里；只有 store 的动作要用到的元素（弹窗外框、输入框、对话滚动区、Dock Tools 按钮）才由 store 持有。
 - 组件不接收整个 store 或模块对象作 props，也不手抄 `Pick<ReturnType<...>>` 接口列表。
-- store 里的清理写在 `onScopeDispose`，不用 `onMounted` / `onUnmounted`（store 没有组件实例）。
+- 订阅下层通知后，在 `onScopeDispose` 里退订。store 里的清理写在 `onScopeDispose`，不用 `onMounted` / `onUnmounted`（store 没有组件实例）。
 - 浏览器预览的样例数据只在 `src/preview/native.ts`，由 `lib/bridge.ts` 在开发模式、非 App 环境下使用；正式包不含它，在 App 外打开只显示“请在 AluDock 客户端中打开”。业务代码不写预览专用数据或参数；预览配对页和离线页用 `?preview=onboarding` / `?preview=offline`。
 
 ## 样式

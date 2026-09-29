@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
+import { getActivePinia } from 'pinia'
 import { isTauri } from './lib/bridge'
 import DeliveryTray from './components/DeliveryTray.vue'
 import OperationResults from './components/OperationResults.vue'
@@ -40,6 +41,7 @@ const workActions = useWorkActionsStore()
 const controlPanel = useControlPanelStore()
 const conversation = useConversationStore()
 const selected = computed(() => app.selectedWork)
+const pinia = getActivePinia()
 
 onMounted(async () => {
   surfaces.listenWindow()
@@ -60,9 +62,12 @@ onMounted(async () => {
   await host.initializePairDeviceName()
   if (!app.needsPairing) app.workDrawerOpen = !app.selectedWork
 })
-// The page's stores stop their listeners and timers with the page.
+// The page's stores stop their listeners and timers with the page; a later page starts from fresh state.
 onUnmounted(() => {
-  for (const store of [input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces]) store.$dispose()
+  for (const store of [input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces]) {
+    store.$dispose()
+    if (pinia) delete pinia.state.value[store.$id]
+  }
 })
 </script>
 

@@ -8,7 +8,6 @@ import NewWorkDialog from './NewWorkDialog.vue'
 import MessageTextDialog from './MessageTextDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useInputStore } from '../stores/input'
-import { useObservationStore } from '../stores/observation'
 import { usePlatformStore } from '../stores/platform'
 import { useSurfacesStore } from '../stores/surfaces'
 import { useWorkActionsStore } from '../stores/work-actions'
@@ -25,7 +24,6 @@ const { stopSelectedWork, startCompaction, handleNewWorkUnknown, markControlUnkn
 const platform = usePlatformStore()
 const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
 const { chooseWindowsAwayDelay } = platform
-const { acceptWork: applyControlSnapshot } = useObservationStore()
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 </script>
 
@@ -50,7 +48,6 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
           :compaction-pending="selectedCompactionPending"
           @section="controlSection = $event"
           @prefill="prefillSlashCommand"
-          @snapshot="applyControlSnapshot"
           @unknown="markControlUnknown"
           @reconcile="reconcileMutationOutcome"
           @compact="startCompaction"
