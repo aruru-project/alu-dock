@@ -1,3 +1,4 @@
+.button { display: flex; align-items: center; justify-content: center; min-height: 38px; gap: 8px; padding: 0 15px; font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 9px; }
 .alu-input-wrap {
   position: relative;
   display: flex;

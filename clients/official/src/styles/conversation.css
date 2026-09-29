@@ -31,19 +31,10 @@
   font-weight: 700;
   font-size: 1.15em;
 }
-.button { display: flex; align-items: center; }
-.button { justify-content: center; min-height: 38px; gap: 8px; padding: 0 15px; font-size: 12px; font-weight: 600; cursor: pointer; border-radius: 9px; }
-/* Conversation layout and presentation owner.
+/* Conversation scroller. It stays global because lib/ code and several components look it up.
  * Viewport behavior: lib/conversationViewport.ts
- * Content lifecycle: lib/conversationContent.ts
- * Rendering: components/ConversationView.vue */
-.alu-output { position: relative; min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-anchor: none; }
-/* ═══════════════════════════════════════════════════════
-   输出区
-   ═══════════════════════════════════════════════════════ */
-.alu-output {
-  padding: 28px 56px 40px;
-}
+ * Content lifecycle: lib/conversationContent.ts */
+.alu-output { position: relative; min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-anchor: none; padding: 28px 56px 40px; }
 .msg-text { word-break: break-word; }
 .msg-text.is-streaming { white-space: pre-wrap; }
 .msg-error {

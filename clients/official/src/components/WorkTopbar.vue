@@ -405,7 +405,6 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 @media (max-width: 640px) {
   .alu-nav-session { font-size: 13px; }
 }
-/* ── Dock V2 instance / queue surfaces ── */
 .alu-nav-selector:disabled {
   opacity: 0.38;
   cursor: not-allowed;

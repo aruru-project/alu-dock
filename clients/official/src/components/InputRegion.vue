@@ -111,9 +111,6 @@ const emit = defineEmits<{ latest: [] }>()
   flex-shrink: 0;
   padding: 0 16px;
 }
-.alu-input-section.is-work-inactive {
-  display: none;
-}
 .alu-composer-expand {
   display: inline-grid;
   width: 34px;
@@ -151,6 +148,7 @@ const emit = defineEmits<{ latest: [] }>()
   letter-spacing: 0.03em;
   box-shadow: 0 2px 14px rgba(200, 56, 110, 0.40);
 }
+.alu-send-btn:focus-visible { box-shadow: var(--focus-ring); }
 .alu-send-btn:hover {
   background: linear-gradient(135deg, #dc4880 0%, #b83468 100%);
   box-shadow: 0 4px 24px rgba(220, 72, 128, 0.50);

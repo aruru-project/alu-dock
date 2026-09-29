@@ -118,6 +118,7 @@ async function saveOpenImage() {
   box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
   font: 600 11px var(--font-reading);
 }
+.alu-image-preview-save:focus-visible { box-shadow: var(--focus-ring); }
 .alu-image-preview-save:disabled { cursor: wait; opacity: .65; }
 .alu-image-preview-close {
   position: absolute;

@@ -222,6 +222,8 @@ function inactiveState(work: Work) {
   color: #ffd78d;
   box-shadow: 0 0 24px rgba(245, 158, 11, 0.08);
 }
+.alu-work-state-primary:focus-visible { box-shadow: var(--focus-ring); }
+.alu-work-state-primary:disabled { cursor: not-allowed; }
 .alu-work-state-primary:hover {
   background: rgba(245, 158, 11, 0.21);
   transform: translateY(-1px);
