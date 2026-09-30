@@ -112,8 +112,10 @@ export const useObservationStore = defineStore('observation', () => {
       await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()))
     }
     if (matches(payload)) {
+      // Native sends nothing more until this delivery is acknowledged, so a
+      // failed acknowledgement stops updates: say so instead of waiting silently.
       try { await acknowledgeConversationFollow(payload, payload.instanceId, payload.subscriptionId, payload.deliveryId) }
-      catch (cause) { error.value = userErrorMessage(cause) }
+      catch (cause) { if (matches(payload)) followFailed(cause) }
     }
   }
   function accept(payload: ObservationEmission) {
@@ -216,9 +218,14 @@ export const useObservationStore = defineStore('observation', () => {
       await startConversationFollow(instanceId, subscriptionId, context, app.payload?.host.hostEpoch ?? '', refresh || refreshOnEntry)
       return active.value?.subscriptionId === subscriptionId && app.contextMatches(context)
     } catch (cause) {
-      if (active.value?.subscriptionId === subscriptionId && app.contextMatches(context)) { loading.value = false; error.value = userErrorMessage(cause) }
+      if (active.value?.subscriptionId === subscriptionId && app.contextMatches(context)) followFailed(cause)
       return false
     }
+  }
+  /** Updates for this Work stopped and nothing retries by itself; the user reconnects. */
+  function followFailed(cause: unknown) {
+    status.value = 'follow_failed'; connected.value = false; loading.value = false
+    error.value = userErrorMessage(cause)
   }
   function canContinue(instanceId: string) {
     const current = facts.value
@@ -265,7 +272,7 @@ export const useObservationStore = defineStore('observation', () => {
   function reportRouteError(cause: unknown) { error.value = userErrorMessage(cause) }
   const connectionLabel = computed(() => {
     if (!isTauri) return '浏览器预览'
-    if (app.payload && app.selectedWork?.lifecycle === 'active') return ({ connected: '已连接', connecting: '正在连接', disconnected: '连接已中断', paused: '已暂停观察', identity_error: '身份验证失败', content_error: '对话暂时无法显示', host_changed: 'Host 状态已变化', stopped: 'Work 已停止', unavailable: 'Work 当前不可用' } as Record<string, string>)[status.value] ?? '连接异常'
+    if (app.payload && app.selectedWork?.lifecycle === 'active') return ({ connected: '已连接', connecting: '正在连接', disconnected: '连接已中断', paused: '已暂停观察', follow_failed: '没有收到更新', identity_error: '身份验证失败', content_error: '对话暂时无法显示', host_changed: 'Host 状态已变化', stopped: 'Work 已停止', unavailable: 'Work 当前不可用' } as Record<string, string>)[status.value] ?? '连接异常'
     if (app.error) return '连接异常'
     if (app.loading) return '正在连接'
     return app.payload ? 'Dock 已连接' : '等待连接'

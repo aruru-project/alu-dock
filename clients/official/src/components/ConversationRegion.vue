@@ -16,7 +16,7 @@ const conversationStore = useConversationStore()
 const { readingError, output, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError } = storeToRefs(conversationStore)
 const { setReadInterest, handleOutputScroll, handleOutputMediaLoad, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration } = conversationStore
 const observation = useObservationStore()
-const { loading: conversationLoading, error: conversationError } = storeToRefs(observation)
+const { loading: conversationLoading, error: conversationError, status: observationStatus } = storeToRefs(observation)
 const { load: loadSelectedConversation } = observation
 const attachments = useAttachmentsStore()
 const { attachmentPreviews } = storeToRefs(attachments)
@@ -31,6 +31,10 @@ const { openMessageText } = useSurfacesStore()
     </div>
     <div v-if="readingError" class="alu-preview-notice" role="status">{{ readingError }}</div>
     <div v-if="conversationSwitching && selected" class="alu-conversation-switching" role="status">正在打开 {{ selected.displayName }}…</div>
+    <div v-if="observationStatus === 'follow_failed' && conversation.length && selected?.lifecycle === 'active'" class="alu-follow-failed" role="alert">
+      <span>没有收到这个 Work 的最新更新，下面可能不是最新内容。{{ conversationError }}</span>
+      <button type="button" @click="loadSelectedConversation(selected.id)">重新连接</button>
+    </div>
 
     <slot v-if="!selected || selected.lifecycle !== 'active'" />
 
@@ -78,6 +82,8 @@ const { openMessageText } = useSurfacesStore()
 
 <style scoped>
 .alu-conversation-switching { color: var(--alu-blue); border-color: var(--alu-blue-border); }
+.alu-follow-failed { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px auto; max-width: 760px; padding: 7px 10px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font-size: 11px; }
+.alu-follow-failed button { flex: none; color: inherit; }
 .alu-welcome-error { gap: 10px; }
 .alu-welcome-error .ui-dialog-btn { margin-top: 4px; }
 </style>

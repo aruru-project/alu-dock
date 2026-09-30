@@ -39,7 +39,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
 let startPairingNative, cancelPairingNative, downloadNative
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
-let savedHosts = ['host', 'spare'], failHostRemoval = false
+let savedHosts = ['host', 'spare'], failHostRemoval = false, failFollowStart = false, failAck = false
 const hostCatalog = () => ({ revision: 3 - savedHosts.length, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: 'host' },
   hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: [], policy: { mode: 'automatic' } } })) })
 const emit = (name, payload) => listeners.get(name)?.({ payload })
@@ -86,8 +86,9 @@ const invoke = async (command, args = {}) => {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
     return { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([work, otherWork]), total: 2, maxAttachmentsPerMessage: 32 }
   }
+  if (command === 'acknowledge_conversation_follow' && failAck) throw { code: 'connection_failed', message: '更新确认没有送达，请重试。' }
   if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); if (immediateAck) assert.equal(frames, beforeBatchFrame, 'cached data does not wait for a visible frame'); else assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
-  if (command === 'start_conversation_follow') { binding = { ...args }; return }
+  if (command === 'start_conversation_follow') { if (failFollowStart) throw { code: 'connection_failed', message: '暂时连不上这项工作，请重试。' }; binding = { ...args }; return }
   if (command === 'list_deliverables') return args.instanceId === 'work' ? [{ deliveryRef: 'report', name: 'report.pdf', sizeBytes: 10 }] : []
   if (command === 'download_deliverable') return downloadNative(args)
   if (command === 'restored_image_count') return restoredImageCount
@@ -812,6 +813,36 @@ try {
   assert.equal(binding.instanceId, 'work')
   assert.notEqual(binding.subscriptionId, followedBeforeLeaving.subscriptionId, 'returning follows the Work again')
   app.removeWorkSnapshot('stopped-work'); await settle()
+  // #313: when updates for the current Work cannot start or stop arriving, the page says so; nothing claims to retry.
+  {
+    const followNotice = () => find(container, item => item.props.class === 'alu-follow-failed')
+    const statusDetails = () => text(find(container, item => item.type === 'details' && item.props['aria-label'] === '连接状态'))
+    const liveWork = JSON.parse(JSON.stringify(app.selectedWork))
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: liveWork, cursor: { ...cursor, runtimeGeneration: liveWork.runtimeGeneration, sequence: 900 }, records: [], activeEvents: [], queue: [] }, contentToken: 'follow-failure', state: 'connected' })
+    const record = { ...bootstrap.records[0], recordId: 'follow-record', entryId: 'follow-record', content: [{ type: 'text', text: 'FOLLOWED MESSAGE' }] }
+    observation({ kind: 'content', token: 'follow-failure', change: { kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true } })
+    observation({ kind: 'content', token: 'follow-failure', change: { kind: 'checkpoint_end' } }); await settle()
+    assert.ok(text(container).includes('FOLLOWED MESSAGE'))
+    failFollowStart = true
+    await find(container, item => item.type === 'button' && item.props.title === '刷新').props.onClick(); await settle()
+    failFollowStart = false
+    assert.ok(text(container).includes('FOLLOWED MESSAGE'), 'the conversation stays on screen')
+    assert.ok(followNotice() && text(followNotice()).includes('暂时连不上这项工作'), 'a failed start is shown over the existing conversation')
+    assert.ok(statusDetails().includes('客户端不会自动重试'), 'the status no longer says it reconnects by itself')
+    assert.equal(statusDetails().includes('客户端会自动重连'), false)
+    const followsBefore = calls.filter(call => call.command === 'start_conversation_follow').length
+    find(followNotice(), item => item.type === 'button').props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'start_conversation_follow').length, followsBefore + 1, 'reconnect starts following again')
+    observation({ kind: 'status', state: 'connected' }); await settle()
+    assert.equal(followNotice(), undefined)
+    failAck = true
+    emit('aludock://observation', { ...binding, revision: ++revision, deliveryId: 1, update: { kind: 'status', state: 'connected' } }); await settle()
+    failAck = false
+    assert.ok(followNotice() && text(followNotice()).includes('更新确认没有送达'), 'a failed acknowledgement, after which no updates arrive, is shown')
+    find(followNotice(), item => item.type === 'button').props.onClick(); await settle()
+    observation({ kind: 'status', state: 'connected' }); await settle()
+    assert.equal(followNotice(), undefined)
+  }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
   allowExtension = true
