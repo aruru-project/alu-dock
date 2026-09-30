@@ -17,8 +17,8 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const workActions = useWorkActionsStore()
-const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions)
-const { workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory } = workActions
+const { machineListError, groupedWorks, workMutating, globalOutcomeUnknown, globalReconciling, globalReconcileMessage } = storeToRefs(workActions)
+const { workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, reconcileGlobalOutcome } = workActions
 const { directoryOpen } = storeToRefs(useSurfacesStore())
 const host = useHostStore()
 const { pairingInProgress } = storeToRefs(host)
@@ -44,6 +44,10 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="pairingInProgress" @click="openDirectory">＋ 新建工作</button></div>
     <div class="alu-instance-list">
       <OperationResults v-if="listResults.length && !directoryOpen" :operations="listResults" :acknowledge="consumeNativeOperation" />
+      <div v-if="globalOutcomeUnknown || globalReconcileMessage" class="alu-sidebar-notice" role="status">
+        <span>{{ globalReconcileMessage || '上一次新建工作的结果还没有确认。刷新列表查看它是否已经出现，不要重复提交。' }}</span>
+        <button v-if="globalOutcomeUnknown" :disabled="globalReconciling" @click="reconcileGlobalOutcome">{{ globalReconciling ? '正在刷新…' : '刷新确认' }}</button>
+      </div>
       <div v-if="machineListError" class="alu-sidebar-error">{{ machineListError }}</div>
       <section v-for="group in (['current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group">
         <div class="alu-instance-group-title">{{ group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作' }}<span>{{ groupedWorks[group].length }}</span></div>
@@ -181,6 +185,8 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   font-size: 11px;
 }
 .alu-sidebar-error { color: var(--alu-rose); }
+.alu-sidebar-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--alu-amber) 7%, transparent); font-size: 10px; }
+.alu-sidebar-notice button { flex: none; color: inherit; }
 @media (max-width: 640px) {
   .alu-instance-link { padding-top: 10px; padding-bottom: 10px; }
 }

@@ -732,6 +732,34 @@ try {
     await settle()
   }
   console.log('PASS: Queue insertion and automatic send success / failed confirmation / retry acknowledgement only / Abort returns the Queue in one call')
+  // #313 (from #312): an unconfirmed New Work is reported in the Work list, not on every Work of the Host.
+  {
+    const bootstraps = () => calls.filter(call => call.command === 'bootstrap').length
+    emit('aludock://operation', { ...base, operationId: 'unconfirmed-create', kind: 'create_work', instanceId: 'global', runtimeGeneration: 0, sessionId: '', editor: null, state: 'unknown', error: { message: '新建结果尚未确认。', outcomeUnknown: true } })
+    await settle()
+    assert.equal(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), undefined, 'an unconfirmed New Work is not reported on the current Work')
+    const workList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
+    assert.ok(text(workList).includes('上一次新建工作的结果还没有确认'), 'the Work list reports the unconfirmed New Work')
+    const beforeListCheck = bootstraps()
+    await find(workList, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
+    assert.equal(bootstraps(), beforeListCheck + 1, 'checking reloads the Work list')
+    assert.ok(text(workList).includes('暂时无法刷新工作列表'), 'an offline check says so and keeps the check available')
+    failCatalog = false
+    await find(workList, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
+    failCatalog = true
+    assert.ok(text(workList).includes('工作列表已刷新'))
+    assert.equal(find(workList, item => item.type === 'button' && text(item) === '刷新确认'), undefined)
+    // The Work's own unconfirmed Stop is refreshed from the command center, not silently ignored.
+    emit('aludock://operation', { ...base, operationId: 'unconfirmed-stop', kind: 'stop_work', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '停止结果尚未确认。', outcomeUnknown: true } })
+    await settle()
+    find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+    const beforeControlCheck = bootstraps()
+    const controlDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
+    await find(controlDialog, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
+    assert.equal(bootstraps(), beforeControlCheck + 1, "the command center's refresh checks the Work's unconfirmed Stop")
+    controlDialog.parent.props.onKeydown({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} }); await settle()
+    assert.equal(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined)
+  }
   // Review P2: action feedback belongs to its initiating Work, including a
   // failure delivered after selection changes. Native failures stay retained.
   for (const timing of ['failed-before-switch', 'failed-after-switch']) {

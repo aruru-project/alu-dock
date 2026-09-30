@@ -68,22 +68,25 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const unresolvedMutations = computed(() => new Map([...app.unresolvedMutations].filter(([, id]) => !continuedUnknowns.value.has(id))))
 
   // An unconfirmed result is reported and can be refreshed; it does not lock other actions.
-  const unresolvedDomains = computed(() => {
-    const workId = selected.value?.id ?? 'global'
+  // It is shown where it belongs: a Work's own results on that Work; New Work,
+  // saved-Session adoption and directory defaults ('global') in the Work list
+  // and the New Work dialog, not on every Work of the Host.
+  function unresolvedDomainsFor(workId: string) {
     const domains = new Set<MutationDomain>()
     for (const key of unresolvedMutations.value.keys()) {
       const [connectionId, keyWorkId, domain] = JSON.parse(key) as [string, string, MutationDomain]
-      if (connectionId === (app.activeConnectionId ?? '') && (keyWorkId === workId || keyWorkId === 'global')) domains.add(domain)
+      if (connectionId === (app.activeConnectionId ?? '') && keyWorkId === workId) domains.add(domain)
     }
     return domains
-  })
+  }
+  const unresolvedDomains = computed(() => unresolvedDomainsFor(selected.value?.id ?? 'global'))
   const unresolvedDomain = computed<MutationDomain | null>(() => unresolvedDomains.value.values().next().value ?? null)
   const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
-  const workOutcomeUnknown = computed(() => unresolvedDomains.value.has('work'))
-  const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() => {
-    const domain = unresolvedDomain.value
-    return domain && domain !== 'work' ? domain : undefined
-  })
+  const globalOutcomeUnknown = computed(() => unresolvedDomainsFor('global').has('work'))
+  const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =>
+    [...unresolvedDomains.value].find((domain): domain is ControlMutationDomain => domain !== 'work'))
+  const globalReconcileMessage = ref('')
+  const globalReconciling = ref(false)
 
   const selectedCompactionPending = computed(() => !!selected.value && compactionWorkIds.value.has(selected.value.id))
   const currentCompactionError = computed(() => {
@@ -273,6 +276,28 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     }
   }
 
+  /** The Work list's check of an unconfirmed New Work: refresh the list and report there. */
+  async function reconcileGlobalOutcome() {
+    const unknownId = unresolvedMutations.value.get(mutationKey('global', 'work'))
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    if (!unknownId || !context || globalReconciling.value) return
+    globalReconciling.value = true
+    globalReconcileMessage.value = ''
+    try {
+      const refreshed = await app.loadActive()
+      if (!app.contextMatches(context)) return
+      if (!refreshed || app.error) {
+        globalReconcileMessage.value = '暂时无法刷新工作列表。请稍后再试，不要重复创建。'
+        return
+      }
+      continuedUnknowns.value.add(unknownId)
+      globalReconcileMessage.value = '工作列表已刷新。如果新建的 Work 没有出现，它的结果仍未确认，不要重复创建。'
+    } finally {
+      globalReconciling.value = false
+    }
+  }
+  watch([() => app.activeConnectionId, () => app.workDrawerOpen], () => { globalReconcileMessage.value = '' })
+
   async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
     const workId = selected.value?.id ?? 'global'
     const context = app.connectionContext ? { ...app.connectionContext } : null
@@ -281,10 +306,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     const isCurrent = () => !!context && app.contextMatches(context) && revision === conversationSelectionRevision && feedbackMatches(feedbackScope)
     const domain = requestedDomain ?? unresolvedDomain.value
     if (!domain) return
-    const selectedKey = mutationKey(workId, domain)
-    const globalKey = mutationKey('global', domain)
-    const key = unresolvedMutations.value.has(selectedKey) ? selectedKey : globalKey
-    const unknownId = unresolvedMutations.value.get(key)
+    const unknownId = unresolvedMutations.value.get(mutationKey(workId, domain))
     if (!unknownId) return
     try {
       let reconciled = false
@@ -445,7 +467,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
 
   return {
-    aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, workOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId,
+    aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, globalOutcomeUnknown, globalReconciling, globalReconcileMessage, reconcileGlobalOutcome, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome,
     hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, acceptCreatedWork,
   }

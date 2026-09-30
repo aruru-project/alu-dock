@@ -19,7 +19,7 @@ const { directoryOpen, commandOpen, controlSection, controlTitleOverride, contro
 const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const workActions = useWorkActionsStore()
-const { mutationOutcomeUnknown, workOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact } = storeToRefs(workActions)
+const { mutationOutcomeUnknown, globalOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
 const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
@@ -84,7 +84,7 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
           :machines="hostMachines"
           :machines-loading="newWorkMachinesLoading"
           :machine-error="machineListError"
-          :outcome-unknown="workOutcomeUnknown"
+          :outcome-unknown="globalOutcomeUnknown"
           @close="closeModal"
           @created="acceptCreatedWork"
           @unknown="handleNewWorkUnknown"

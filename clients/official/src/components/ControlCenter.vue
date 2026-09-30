@@ -49,7 +49,7 @@ const commandConsole = useCommandConsoleStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
   unknown: [cause: unknown, domain: ControlMutationDomain, scope: SessionContext]
-  reconcile: [domain: ControlMutationDomain]
+  reconcile: [domain?: ControlMutationDomain]
   section: [section: ControlSection]
   prefill: [name: string]
   compact: [customInstructions?: string]
@@ -217,7 +217,8 @@ async function closeResource() {
 }
 
 function reconcileControl() {
-  emit('reconcile', props.unknownDomain ?? sectionDomain(props.section))
+  // Without an unconfirmed setting, the Work's own unconfirmed result (Stop, Continue) is refreshed.
+  emit('reconcile', props.unknownDomain)
 }
 
 function forwardSessionUnknown(cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext) {
@@ -525,14 +526,6 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
 function mutationFailure(cause: unknown, domain: ControlMutationDomain, scope: SessionContext) {
   error.value = errorMessage(cause)
   if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain, scope)
-}
-
-function sectionDomain(section: ControlSection): ControlMutationDomain {
-  if (section === 'commands' || section === 'dock-tools') return 'conversation'
-  if (section === 'models' || section === 'thinking') return 'models'
-  if (section === 'resources') return 'conversation'
-  if (['sessions', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return 'sessions'
-  return section as ControlMutationDomain
 }
 
 function runLabel(value: string) {
