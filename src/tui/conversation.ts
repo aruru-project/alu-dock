@@ -138,6 +138,9 @@ export class DockConversation implements Component {
         || event.type === "tool.args_updated"
         || event.type === "tool.output_updated"
         || event.type === "tool.completed"
+        || event.type === "bash.started"
+        || event.type === "bash.output"
+        || event.type === "bash.completed"
         || event.type === "extension.notification"
         || event.type === "extension.error") this.apply(event);
     }
@@ -268,6 +271,50 @@ export class DockConversation implements Component {
         break;
       }
 
+      // A user shell command (Pi `!` / `!!`) shares the tool surface: header, streamed
+      // output, and a final state. Pi writes its run record after the current reply.
+      case "bash.started": {
+        const callId = `shell:${event.data.operationId}`;
+        const projected: ToolProjection = this.tools.get(callId) ?? {
+          entry: this.addTool(callId, false),
+          id: callId,
+          name: event.data.excludeFromContext ? "!!" : "!",
+          omitted: [],
+        };
+        projected.summary = commandPreview(event.data.command);
+        projected.args = safeTerminalText(event.data.command);
+        projected.output = "";
+        projected.entry.complete = false;
+        this.tools.set(callId, projected);
+        this.updateTool(projected, "running");
+        break;
+      }
+
+      case "bash.output": {
+        const tool = this.tools.get(`shell:${event.data.operationId}`);
+        if (!tool || event.data.delta.length === 0) break;
+        tool.output = truncateTail(`${tool.output ?? ""}${event.data.delta}`, MAX_TOOL_OUTPUT);
+        this.updateTool(tool, "running");
+        break;
+      }
+
+      case "bash.completed": {
+        const callId = `shell:${event.data.operationId}`;
+        const tool = this.tools.get(callId);
+        if (!tool) break;
+        const outcome = shellOutcome(event.data);
+        if (outcome.notice) tool.output = [tool.output, outcome.notice].filter(Boolean).join("\n");
+        tool.entry.complete = true;
+        this.updateTool(tool, outcome.state);
+        if (tool.entry.toolErrorSummary !== outcome.summary) {
+          tool.entry.toolErrorSummary = outcome.summary;
+          this.touchEntry(tool.entry);
+          this.markOutputChanged();
+        }
+        this.tools.delete(callId);
+        break;
+      }
+
       case "model.changed": {
         const provider = stringData(event, "provider") ?? "unknown";
         const id = stringData(event, "id") ?? "unknown";
@@ -305,14 +352,16 @@ export class DockConversation implements Component {
         if (this.currentThinking) this.currentThinking.complete = true;
         this.currentAssistant = undefined;
         this.currentThinking = undefined;
-        for (const tool of this.tools.values()) {
+        for (const [callId, tool] of this.tools) {
+          // A user shell command is not part of the reply; it reports its own completion.
+          if (callId.startsWith("shell:")) continue;
           tool.entry.complete = true;
           const interruption = result === "succeeded" ? undefined : `interrupted by ${result ?? "settlement"}`;
           if (interruption) tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, result === "succeeded" ? "done" : "failed");
           if (interruption) tool.entry.toolErrorSummary = interruption;
+          this.tools.delete(callId);
         }
-        this.tools.clear();
         if (result === "failed") this.add("error", stringData(event, "error") ?? "Run failed");
         else if (result === "aborted") this.add("system", "Run aborted.");
         break;
@@ -1486,6 +1535,19 @@ function safeTerminalLine(text: string): string {
 
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+}
+
+/** Streamed shell output keeps its newest lines, like a terminal scrollback. */
+function truncateTail(text: string, limit: number): string {
+  return text.length <= limit ? text : `…${text.slice(text.length - limit)}`;
+}
+
+function shellOutcome(data: Extract<DockEvent, { type: "bash.completed" }>["data"]): { state: ToolState; summary?: string; notice?: string } {
+  if (data.error !== undefined) return { state: "failed", summary: "could not run", notice: safeTerminalText(data.error) };
+  const fullOutput = data.truncated && data.fullOutputPath ? `Output shortened here. Full output on the Work's machine: ${safeTerminalLine(data.fullOutputPath)}` : undefined;
+  if (data.cancelled) return { state: "failed", summary: "stopped", notice: ["(command stopped)", fullOutput].filter(Boolean).join("\n") };
+  if (data.exitCode !== undefined && data.exitCode !== 0) return { state: "failed", summary: `exit ${data.exitCode}`, notice: fullOutput };
+  return { state: "done", notice: fullOutput };
 }
 
 function toolPresentationsEqual(left: BuiltInToolPresentation | undefined, right: BuiltInToolPresentation | undefined): boolean {

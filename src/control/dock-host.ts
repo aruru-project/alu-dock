@@ -935,6 +935,14 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.abortRestoreQueue(request.params.operationId);return {receipt,instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
+      case "bash.run": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.runBash(request.params.operationId,request.params.command,request.params.excludeFromContext);return {receipt,instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
+      case "bash.abort": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.abortBash(request.params.operationId);return {instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
       case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{...result,instance:instance.snapshot()}); return; }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});

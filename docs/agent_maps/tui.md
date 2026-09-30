@@ -48,6 +48,8 @@ Work 的主要对象是一个已打开的 Dock instance。它负责：
 
 Work 使用可流动的 main buffer 和终端原生 scrollback/selection。Detach 只断开客户端，不停止 Host 中的 instance。
 
+编辑器里的 `!COMMAND` / `!!COMMAND` 是 Pi 的同名前缀：通过 `bash.run` 在 Work 所在机器和目录运行，输出以 tool surface 的样式流入 conversation（头部是 `!`/`!!` 加命令预览，结束后显示退出码、已停止或完整输出路径）。`/abort-shell` 调 `bash.abort`，与 `/abort` 分开；回复结束（`run.settled`）不会把还在跑的命令行标成完成。
+
 Pi Session Tree UI 只做一次逻辑 `session.tree.v2` 调用并得到完整 compact snapshot。搜索、过滤、active-first 顺序和折叠都在这份完整拓扑上本地完成；TUI 不收集业务分页、不维护 revision，也没有 partial/capped Tree 状态。大型 response 的 bounded transport framing 由 DockClient 透明重组，UI 看不到 frame。
 
 ## 状态归属

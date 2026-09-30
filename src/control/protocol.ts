@@ -32,6 +32,7 @@ import {
 } from "../core/source-file.js";
 import {
   CONVERSATION_FRAME_TYPES,
+  MAX_BASH_COMMAND_CHARS,
   MAX_CONVERSATION_CHUNK_CHARS,
   MAX_CONVERSATION_CONTENT_BLOCKS,
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
@@ -69,6 +70,7 @@ import {
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "../core/managed-instance.js";
 import type {
+  BashRunReceipt,
   CommandReceipt,
   ContentBlockDto,
   ConversationFrame,
@@ -177,6 +179,8 @@ export const SESSION_INVENTORY_PAGES_CAPABILITY = "session.inventory.pages.v1" a
 export const MAX_SESSION_INVENTORY_CURSOR_CHARS = 256;
 /** One step: stop the current reply and return every waiting Queue message to the caller. */
 export const ABORT_RESTORE_QUEUE_CAPABILITY = "run.abort-restore-queue.v1" as const;
+/** Run a user shell command in the Work's directory through the Agent (Pi `!` / `!!`) and record it in the session. */
+export const BASH_CAPABILITY = "bash.v1" as const;
 /** After this hello the connection is a link: many Protocol V2 streams on one authenticated connection. */
 export const MULTIPLEX_CAPABILITY = "transport.multiplex.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
@@ -220,6 +224,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   RESOURCE_CONTENT_CAPABILITY,
   "run.abort.v1",
   ABORT_RESTORE_QUEUE_CAPABILITY,
+  BASH_CAPABILITY,
   "service.managed.v1",
   "session.adopt.v1",
   "session.commands.v1",
@@ -305,6 +310,8 @@ export type ControlRequest =
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
   | Request<"command.abort_restore_queue", { operationId: string; instanceId: string }>
+  | Request<"bash.run", { operationId: string; instanceId: string; command: string; excludeFromContext: boolean }>
+  | Request<"bash.abort", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
   | Request<"thinking.set", { operationId: string; instanceId: string; level: ThinkingLevel }>
@@ -384,6 +391,8 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "command.abort": { target: "instance", effect: "command", transport: "unary" },
   "queue.dequeue": { target: "instance", effect: "command", transport: "unary" },
   "command.abort_restore_queue": { target: "instance", effect: "command", transport: "unary" },
+  "bash.run": { target: "instance", effect: "command", transport: "unary" },
+  "bash.abort": { target: "instance", effect: "command", transport: "unary" },
   "model.list": { target: "instance", effect: "query", transport: "unary" },
   "model.set": { target: "instance", effect: "command", transport: "unary" },
   "thinking.set": { target: "instance", effect: "command", transport: "unary" },
@@ -663,6 +672,9 @@ export interface AbortResult { instance: InstanceSnapshot }
 export interface QueueDequeueResult { receipt: QueueDequeueReceipt; instance: InstanceSnapshot }
 /** Same restored/in-flight receipt as Queue retrieval; the reply has also stopped. */
 export type AbortRestoreQueueResult = QueueDequeueResult;
+export interface BashRunResult { receipt: BashRunReceipt; instance: InstanceSnapshot }
+/** Every running shell command of this Work was told to stop; each one still reports its own bash.completed. */
+export interface BashAbortResult { instance: InstanceSnapshot }
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
 export interface ForgetResult { receipt: { operationId: string; forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error"; piSessionFilesDeleted: 0 } }
 export interface PruneResult { receipt: { operationId: string; selector: "stopped"; forgottenIds: string[]; forgottenCount: number; hasMore: boolean; piSessionFilesDeleted: 0 } }
@@ -773,6 +785,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "command.abort_restore_queue") return ABORT_RESTORE_QUEUE_CAPABILITY;
+  if (type === "bash.run" || type === "bash.abort") return BASH_CAPABILITY;
   if (type === "session.history") return "tui.projection.v1";
   if (type === "conversation.content.stream") return CONVERSATION_CONTENT_STREAM_CAPABILITY;
   if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
@@ -824,6 +837,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === "queue.control.v1"
     || capability === "run.abort.v1"
     || capability === ABORT_RESTORE_QUEUE_CAPABILITY
+    || capability === BASH_CAPABILITY
     || capability === "session.adopt.v1"
     || capability === "session.commands.v1"
     || capability === "session.core"
@@ -1090,6 +1104,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "command.abort_restore_queue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "bash.run": {
+      exact(params, ["operationId", "instanceId", "command", "excludeFromContext"], "invalid_request");
+      const command = boundedString(params.command, "params.command", MAX_BASH_COMMAND_CHARS, "invalid_request");
+      if (command.trim().length === 0) throw validation("invalid_request", "bash.run requires a command");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), command, excludeFromContext: boolean(params.excludeFromContext, "params.excludeFromContext", "invalid_request") } };
+    }
+    case "bash.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
@@ -1721,6 +1742,22 @@ export function parseAbortRestoreQueueResult(input: unknown): AbortRestoreQueueR
   const result = parseQueueDequeueResult(input);
   if (result.instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
   return result;
+}
+/** Worker-produced receipt body; the Host only adds the instance snapshot. */
+export function parseBashRunReceipt(input: unknown, field = "receipt"): BashRunReceipt {
+  const receipt = object(input, field); exact(receipt, ["operationId", "instanceId", "startedAt"]);
+  return { operationId: id(receipt.operationId, `${field}.operationId`), instanceId: id(receipt.instanceId, `${field}.instanceId`), startedAt: timestamp(receipt.startedAt, `${field}.startedAt`) };
+}
+export function parseBashRunResult(input: unknown): BashRunResult {
+  const value = object(input, "bash run result"); exact(value, ["receipt", "instance"]);
+  const instance = parseInstanceSnapshot(value.instance, "instance");
+  const receipt = parseBashRunReceipt(value.receipt);
+  if (receipt.instanceId !== instance.id) throw validation("invalid_response", "Bash receipt does not match instance state");
+  return { receipt, instance };
+}
+export function parseBashAbortResult(input: unknown): BashAbortResult {
+  const value = object(input, "bash abort result"); exact(value, ["instance"]);
+  return { instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 export function parseQueueDequeueResult(input: unknown): QueueDequeueResult {
   const value = object(input, "queue dequeue result"); exact(value, ["receipt", "instance"]);
@@ -2539,6 +2576,15 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
       const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, toolName, isError);
       return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(data.omittedFields, "omittedFields") };
     }
+    case "bash.started": exact(data, ["operationId", "command", "excludeFromContext"]); return { operationId: text("operationId", 128), command: boundedString(data.command, `${field}.command`, MAX_BASH_COMMAND_CHARS), excludeFromContext: boolean(data.excludeFromContext, "excludeFromContext") };
+    case "bash.output": exact(data, ["operationId", "delta"]); return { operationId: text("operationId", 128), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
+    case "bash.completed": {
+      exact(data, ["operationId", "exitCode", "cancelled", "truncated", "fullOutputPath", "error"]);
+      const exitCode = data.exitCode === undefined ? undefined : safeInteger(data.exitCode, `${field}.exitCode`);
+      const fullOutputPath = optionalText("fullOutputPath", MAX_CONTROL_CWD_CHARS);
+      const error = parseOptionalAgentErrorText(data.error, `${field}.error`);
+      return { operationId: text("operationId", 128), ...(exitCode === undefined ? {} : { exitCode }), cancelled: boolean(data.cancelled, "cancelled"), truncated: boolean(data.truncated, "truncated"), ...(fullOutputPath === undefined ? {} : { fullOutputPath }), ...(error === undefined ? {} : { error }) };
+    }
     case "queue.changed": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
     case "queue.cleared": exact(data, ["steering", "followUp", "total", "queueItemIds", "reason"]); return { ...parsePending({ steering: data.steering, followUp: data.followUp, total: data.total }, field), queueItemIds: strings(data.queueItemIds, `${field}.queueItemIds`, MAX_PENDING_QUEUE_ITEMS, 128), reason: enumeration(data.reason, `${field}.reason`, ["dequeued", "abort", "stop", "replacement", "host_draining"]) };
     case "compaction.started": exact(data, ["reason", "operationId"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128) };
@@ -2855,6 +2901,7 @@ function id(input: unknown, field: string, code = "invalid_response"): string { 
 function optionalString(input: unknown, field: string, max = MAX_CONTROL_CWD_CHARS, code = "invalid_response"): string | undefined { return input === undefined ? undefined : string(input, field, max, code); }
 function boolean(input: unknown, field: string, code = "invalid_response"): boolean { if (typeof input !== "boolean") throw validation(code, `${field} must be boolean`); return input; }
 function optionalBoolean(input: unknown, field: string, code: string): boolean | undefined { return input === undefined ? undefined : boolean(input, field, code); }
+function safeInteger(input: unknown, field: string, code = "invalid_response"): number { if (!Number.isSafeInteger(input)) throw validation(code, `${field} must be a safe integer`); return input as number; }
 function unsigned(input: unknown, field: string, code = "invalid_response"): number { if (!Number.isSafeInteger(input) || (input as number) < 0) throw validation(code, `${field} must be a non-negative safe integer`); return input as number; }
 function canonicalBase64(input: unknown, field: string, maxDecodedBytes: number): string { const value = string(input, field, Math.ceil(maxDecodedBytes / 3) * 4 + 4); const bytes = Buffer.from(value, "base64"); if (bytes.length > maxDecodedBytes || bytes.toString("base64") !== value) throw validation("invalid_response", `${field} must be canonical bounded base64`); return value; }
 function positive(input: unknown, field: string, code = "invalid_response"): number { const value = unsigned(input, field, code); if (value === 0) throw validation(code, `${field} must be positive`); return value; }

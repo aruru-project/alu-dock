@@ -222,6 +222,14 @@ Worker 接受副作用前失联和接受后失联是不同结果。Host 必须�
 
 `run.abort-restore-queue.v1` 提供 `command.abort_restore_queue {operationId,instanceId}`：一次 mutation 停掉当前回复（含压缩和 Tree 摘要），同时取回所有尚未交给 Agent 的 Queue 消息。结果与 `queue.dequeue` 相同，为 `{receipt:{operationId,instanceId,restored,inFlight},instance}`，instance 已不在运行、Queue 为空；`restored` 按原消费顺序给调用者放回输入框，`inFlight` 只列出已被 Agent 取走、会出现在对话中的消息。旧的 `command.abort` 与 `queue.dequeue` 语义不变。官方客户端与 Work TUI 的“中止”只调用它；仅在请求开始前明确收到缺少此能力时，才对旧 Host 依次调用取回与中止。
 
+### 用户 shell 命令（`bash.v1`）
+
+`bash.run {operationId,instanceId,command,excludeFromContext}` 对应 Pi 的 `!`（`excludeFromContext:false`）与 `!!`（`true`）：在 Work 所在机器和目录运行一条命令，并由 Agent 记进 session。Worker 一开始执行就返回 `{receipt:{operationId,instanceId,startedAt},instance}`；输出与结束以 conversation frame 到达：`bash.started {operationId,command,excludeFromContext}`、`bash.output {operationId,delta}`、`bash.completed {operationId,exitCode?,cancelled,truncated,fullOutputPath?,error?}`。运行中的命令不改变 `execution`，也不占用 admission；Agent 正在回复时也可以执行，记录由 Pi 在本轮结束后按序写入。`bash.abort {operationId,instanceId}` 让这个 Work 正在跑的**全部**命令停止，与 `command.abort` 无关，各命令仍各自发 `bash.completed`。会话替换期间拒绝为 `instance_busy`；替换本身会让 Pi 中止旧命令并把已中止记录留在旧 session，新 generation 不出现它们。
+
+Host 只记「有哪些命令在跑」：`bash.started` 与 `bash.completed` 进入 conversation bootstrap 的 active frame，并在 Worker checkpoint 指名该命令记录尚未写入时继续保留；`bash.output` 只走 event ring 和 follow，不为迟到的读者缓冲或补发。
+
+**路径显示特例**：`bash.completed.fullOutputPath` 与持久 `bash_execution.fullOutputPath` 是 Pi 在 Worker 所在机器写下的临时完整输出文件路径。Dock 只显示它（供用户复制、或让 Agent 用自己的 `read` 去读），不接受客户端拿任何路径让 Host 读文件；这不是欠账。
+
 ## Read、follow 与 Extension UI 操作
 
 `instance.records.v1` 为完整初始内容和持续事件提供显式逐条交付。客户端必须在 hello 要求该能力，并在 `instance.read / instance.follow` 发送 `delivery: "records"`；仅广告能力不改变旧 V2 响应、字段、错误、游标或传输预算。Main 同样向目标 SubHost 要求该能力，不按 Main 的版本猜测目标支持。

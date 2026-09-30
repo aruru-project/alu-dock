@@ -358,9 +358,10 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       exactKeys(event, ["type", "stopReason", "error", "operationId"], "Worker agent-settled event");
       optionalString(event.stopReason, 128); parseOptionalAgentErrorText(event.error); optionalString(event.operationId, 128); return;
     case "conversation_checkpoint":
-      exactKeys(event, ["type", "history"], "Worker conversation checkpoint");
+      exactKeys(event, ["type", "history", "unpersistedBash"], "Worker conversation checkpoint");
       if (!Array.isArray(event.history) || event.history.length > 100_000) throw new Error("Worker checkpoint history is invalid");
       event.history.forEach((entry, index) => parseHistoryEntry(entry, `Worker checkpoint history[${index}]`));
+      if (event.unpersistedBash !== undefined) stringArray(event.unpersistedBash, 1_000, 128, "Worker unpersisted bash operations");
       return;
     case "agent_end":
       exactKeys(event, ["type", "willRetry"], "Worker agent-end event");
@@ -381,6 +382,7 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       event.frame = frame;
       return;
     }
+
     case "dock_queue_consumed":
       exactKeys(event, ["type", "operationId"], "Worker queue-consumed event"); boundedString(event.operationId, 128, "Worker queue operation id"); return;
     case "thinking_level_changed":
@@ -477,6 +479,12 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
           if (typeof source[key] !== "number" || !Number.isFinite(source[key])) throw new Error(`Worker source ${key} is invalid`);
         }
       }
+      return;
+    }
+    case "bash.run": {
+      const result = record(raw, "Worker bash receipt");
+      exactKeys(result, ["operationId", "startedAt"], "Worker bash receipt");
+      boundedString(result.operationId, 128, "Worker bash operation ID"); boundedString(result.startedAt, 64, "Worker bash start time");
       return;
     }
     case "model.list": parseModelListBody(raw); return;

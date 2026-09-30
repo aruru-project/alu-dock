@@ -49,6 +49,8 @@ export const MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS = 512_000;
 export const MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS = 512_000;
 export const MAX_IMAGE_BYTES = 20 * 1_024 * 1_024;
 export const MAX_IMAGE_AGGREGATE_BYTES = 80 * 1_024 * 1_024;
+/** One shell command line submitted through bash.run; the persisted bash_execution record keeps the same bound. */
+export const MAX_BASH_COMMAND_CHARS = 8_000;
 
 export interface PendingDto { steering: number; followUp: number; total: number }
 export interface PendingMessageDto {
@@ -238,6 +240,11 @@ export interface EventDataMap {
   "tool.args_updated": { toolCallId: string; args: JsonObject; omittedFields?: string[] };
   "tool.output_updated": { toolCallId: string; text: string; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation };
   "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] };
+  /** A user shell command (Pi `!` / `!!`) started in the Work's directory; operationId is the execution identity. */
+  "bash.started": { operationId: string; command: string; excludeFromContext: boolean };
+  "bash.output": { operationId: string; delta: string };
+  /** Pi keeps only the output tail in its record; fullOutputPath is a Worker-machine path shown for the user or Agent to read, never accepted as input. */
+  "bash.completed": { operationId: string; exitCode?: number; cancelled: boolean; truncated: boolean; fullOutputPath?: string; error?: string };
   "queue.changed": PendingDto;
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };
@@ -276,6 +283,9 @@ export const CONVERSATION_FRAME_TYPES = [
   "tool.args_updated",
   "tool.output_updated",
   "tool.completed",
+  "bash.started",
+  "bash.output",
+  "bash.completed",
 ] as const;
 export type ConversationFrameType = typeof CONVERSATION_FRAME_TYPES[number];
 export type ConversationFrame = {
@@ -372,6 +382,13 @@ export interface CommandReceipt {
   delivery: Exclude<DeliveryMode, "auto">;
   queued: boolean;
   acceptedAt: string;
+}
+
+/** The shell command has started; output and completion arrive as bash.* conversation frames. */
+export interface BashRunReceipt {
+  operationId: string;
+  instanceId: string;
+  startedAt: string;
 }
 
 export const MAX_STOP_CLEANUP_ERRORS = 100;
