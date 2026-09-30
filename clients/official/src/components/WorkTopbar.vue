@@ -378,22 +378,52 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     grid-template-areas: "work tools files menu" "models models models models" "stats stats stats stats";
     height: auto;
     min-height: 0;
-    padding: 4px 10px 6px;
-    gap: 4px 6px;
+    padding: 4px 10px 8px;
+    gap: 0 6px;
   }
   .alu-navbar-left { grid-area: work; width: auto; padding: 0; }
   .alu-navbar-right { display: contents; }
   .alu-nav-session { max-width: none; }
-  .alu-nav-model-controls { grid-area: models; gap: 6px; }
-  .alu-nav-model-controls .alu-nav-selector { min-height: 40px; }
+  /* 手机上第二、三行合成一张状态卡：一圈边框，上半是模型｜思考等级两个整块可点的分段，
+     下半是用量文字。桌面横排的胶囊样式不受影响。 */
+  .alu-navbar::before {
+    content: '';
+    grid-row: models / stats;
+    grid-column: 1 / -1;
+    align-self: stretch;
+    margin-top: 6px;
+    border: 1px solid var(--alu-border-light);
+    border-radius: 12px;
+    background: rgba(20, 28, 46, 0.8);
+  }
+  .alu-nav-model-controls { grid-area: models; z-index: 1; min-height: 42px; margin-top: 6px; gap: 0; }
+  .alu-nav-model-controls .alu-nav-selector {
+    min-height: 42px;
+    padding: 0 12px;
+    gap: 7px;
+    border: 0;
+    border-radius: 12px 12px 0 0;
+    background: transparent;
+    font-size: 12px;
+  }
+  .alu-nav-model-controls .alu-nav-selector:hover { box-shadow: none; }
+  .alu-nav-model-controls .alu-nav-selector-value { max-width: none; font-size: 12px; text-align: left; }
   .alu-nav-selector-model { flex: 1 1 0; min-width: 0; }
-  .alu-nav-selector-model .alu-nav-selector-value { max-width: none; }
-  .alu-nav-model-provider { display: none; }
-  .alu-nav-selector-thinking { flex: 0 0 auto; }
-  .alu-nav-selector-thinking .alu-nav-selector-value { max-width: none; }
-  .alu-nav-stats { grid-area: stats; min-width: 0; gap: 6px; }
+  .alu-nav-model-provider { color: var(--alu-text-dim); font-weight: 500; }
+  .alu-nav-selector-thinking { flex: 0 0 auto; border-left: 1px solid var(--alu-border-light); }
+  .alu-nav-stats {
+    grid-area: stats;
+    z-index: 1;
+    min-width: 0;
+    min-height: 30px;
+    padding: 0 12px;
+    gap: 12px;
+    border-top: 1px solid var(--alu-border-light);
+  }
+  .alu-nav-stat-pill { padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 11px; }
   .alu-nav-stat-tokens { display: none; }
-  .alu-nav-stat-cost { margin-left: auto; }
+  .alu-nav-stat-cache { gap: 3px; color: var(--alu-text-muted); }
+  .alu-nav-stat-cost { margin-left: auto; color: var(--alu-text); }
   .alu-navbar .alu-nav-dock-tools { grid-area: tools; width: 53px; min-height: 40px; }
   .alu-navbar .alu-nav-files { grid-area: files; }
   .alu-navbar .alu-nav-hamburger { grid-area: menu; }
