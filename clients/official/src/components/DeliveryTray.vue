@@ -239,7 +239,7 @@ function dateLabel(value: string) {
 .delivery-tray-head > button:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
 .delivery-tray-head > button:disabled { opacity: .4; cursor: default; }
 .delivery-tray-body { min-height: 0; flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain; padding: 14px; }
-.delivery-tray-message { margin-bottom: 12px; padding: 10px 12px; border-radius: 9px; font: 12px/1.5 var(--font-reading); }
+.delivery-tray-message { margin-bottom: 12px; padding: 10px 12px; border-radius: 9px; white-space: pre-line; font: 12px/1.5 var(--font-reading); }
 .delivery-tray-message.is-error { color: var(--alu-rose); border: 1px solid var(--alu-rose-border); background: var(--alu-rose-bg); }
 .delivery-tray-section + .delivery-tray-section { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--alu-border); }
 .delivery-section-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 0 2px 12px; }

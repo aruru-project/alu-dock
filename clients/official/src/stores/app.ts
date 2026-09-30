@@ -120,8 +120,11 @@ export const useAppStore = defineStore('app', () => {
     error.value = null
     hostUnreachable.value = false
     try {
-      const nextCatalog = await getHostCatalog()
+      const fetchedCatalog = await getHostCatalog()
       if (epoch !== loadEpoch) return
+      // A deletion may have committed while this read was in flight. Keep its
+      // newer catalog without cancelling reads of the still-current Work.
+      const nextCatalog = catalog.value && catalog.value.revision > fetchedCatalog.revision ? catalog.value : fetchedCatalog
       catalog.value = nextCatalog
       needsPairing.value = nextCatalog.hosts.length === 0 && nextCatalog.activeTarget?.kind !== 'local'
       const connectionId = nextCatalog.activeTarget?.kind === 'local'

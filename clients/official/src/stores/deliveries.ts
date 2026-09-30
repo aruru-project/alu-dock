@@ -29,7 +29,7 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
     const instanceId = selected.value?.id
     return context && instanceId ? workKey(context.connectionId, instanceId) : ''
   })
-  const deliveryError = computed(() => deliveryActionErrors.value[currentWorkKey.value] || deliveryListError.value)
+  const deliveryError = computed(() => [deliveryListError.value, deliveryActionErrors.value[currentWorkKey.value]].filter(Boolean).join('\n'))
   const downloadingDeliveries = ref<Set<string>>(new Set())
   const deliveryProgress = ref<Record<string, number>>({})
   const openingDeliveryKey = ref('')

@@ -278,18 +278,21 @@ export const useObservationStore = defineStore('observation', () => {
     return app.payload ? 'Dock 已连接' : '等待连接'
   })
 
-  const refreshing = ref(false)
+  const pendingRefreshes = ref(new Set<string>())
+  const refreshTarget = computed(() => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, app.selectedWork?.id))
+  const refreshing = computed(() => pendingRefreshes.value.has(refreshTarget.value))
   async function refreshCurrent() {
-    if (refreshing.value) return
-    refreshing.value = true
+    const target = refreshTarget.value
+    if (pendingRefreshes.value.has(target)) return
+    const workId = app.selectedWork?.id
+    pendingRefreshes.value.add(target)
     try {
-      const workId = app.selectedWork?.id
       await app.load()
-      if (workId && app.selectedWork?.id === workId && app.selectedWork.lifecycle === 'active') {
+      if (target === refreshTarget.value && workId && app.selectedWork?.lifecycle === 'active') {
         await load(workId, true)
       }
     } finally {
-      refreshing.value = false
+      pendingRefreshes.value.delete(target)
     }
   }
 

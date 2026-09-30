@@ -40,8 +40,9 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
 let startPairingNative, cancelPairingNative, downloadNative
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
-let savedHosts = ['host', 'spare'], failHostRemoval = false, failFollowStart = false, failAck = false
-const hostCatalog = () => ({ revision: 3 - savedHosts.length, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: 'host' },
+let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
+let bootstrapNative, hostCatalogNative, deliveryListNative
+const hostCatalog = () => ({ revision: hostCatalogRevision, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: context.connectionId },
   hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: [], policy: { mode: 'automatic' } } })) })
 const emit = (name, payload) => listeners.get(name)?.({ payload })
 const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
@@ -77,20 +78,25 @@ const invoke = async (command, args = {}) => {
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
   if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([work, otherWork]), total: 2 }
-  if (command === 'get_host_catalog') return hostCatalog()
+  if (command === 'get_host_catalog') { const cut = hostCatalog(); return hostCatalogNative ? hostCatalogNative(cut) : cut }
+  if (command === 'set_active_host') {
+    context.connectionId = args.hostId; context.selectionGeneration++; hostCatalogRevision++
+    return hostCatalog()
+  }
   if (command === 'remove_saved_host') {
     if (failHostRemoval) throw { code: 'io_error', message: '本机存储暂时无法写入，请重试。' }
-    savedHosts = savedHosts.filter(hostId => hostId !== args.hostId)
+    savedHosts = savedHosts.filter(hostId => hostId !== args.hostId); hostCatalogRevision++
     return hostCatalog()
   }
   if (command === 'bootstrap') {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
-    return { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([work, otherWork]), total: 2, maxAttachmentsPerMessage: 32 }
+    const cut = { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([work, otherWork]), total: 2, maxAttachmentsPerMessage: 32 }
+    return bootstrapNative ? bootstrapNative(cut) : cut
   }
   if (command === 'acknowledge_conversation_follow' && failAck) throw { code: 'connection_failed', message: '更新确认没有送达，请重试。' }
   if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); if (immediateAck) assert.equal(frames, beforeBatchFrame, 'cached data does not wait for a visible frame'); else assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
   if (command === 'start_conversation_follow') { if (failFollowStart) throw { code: 'connection_failed', message: '暂时连不上这项工作，请重试。' }; binding = { ...args }; return }
-  if (command === 'list_deliverables') return args.instanceId === 'work' ? [{ deliveryRef: 'report', name: 'report.pdf', sizeBytes: 10 }] : []
+  if (command === 'list_deliverables') return deliveryListNative ? deliveryListNative(args) : args.instanceId === 'work' ? [{ deliveryRef: 'report', name: 'report.pdf', sizeBytes: 10 }] : []
   if (command === 'download_deliverable') return downloadNative(args)
   if (command === 'restored_image_count') return restoredImageCount
   if (command === 'attachment_snapshot') {
@@ -163,18 +169,31 @@ const focusSelector = (item, selector) => selector.split(',').some(part => {
   return false
 })
 const windowEvents = new Map()
-// History models only what Android Back uses: entry count and async popstate.
-let historyDepth = 0
+// Browser traversal changes position asynchronously; writes made before its
+// completion cannot change the destination that Chrome has already selected.
+let historyDepth = 0, holdHistoryTraversal = false
+const heldHistoryMoves = []
 const firePopstate = () => { for (const handler of windowEvents.get('popstate') ?? []) handler({}) }
+const traverseHistory = delta => {
+  const destination = historyDepth + delta
+  const move = () => {
+    historyDepth = destination
+    if (destination < 0) { window.location.href = 'about:blank'; return }
+    firePopstate()
+  }
+  if (holdHistoryTraversal) heldHistoryMoves.push(move)
+  else setTimeout(move, 0)
+}
+const finishHistoryTraversal = () => { holdHistoryTraversal = false; while (heldHistoryMoves.length) heldHistoryMoves.shift()() }
 const systemBack = () => { historyDepth--; firePopstate() }
 globalThis.Document = class {}; globalThis.ShadowRoot = class {}; globalThis.HTMLElement = class { static [Symbol.hasInstance](item) { return typeof item?.tagName === 'string' } }; globalThis.Element = class {}; globalThis.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 }
 globalThis.document = Object.assign(new Document(), { visibilityState: 'visible', activeElement: null, documentElement: { dataset: {}, style: {} }, body: { offsetHeight: 0 },
   hasFocus: () => true, addEventListener() {}, removeEventListener() {}, querySelector: () => null, querySelectorAll: () => [], createElement: tag => element(tag) })
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'test', platform: 'Linux' } })
-globalThis.window = { __TAURI_INTERNALS__: {}, location: { search: '' }, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+globalThis.window = { __TAURI_INTERNALS__: {}, location: { search: '', href: 'http://fixture/aludock' }, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (failStorage) throw new Error('fixture storage unavailable'); storage.set(key, value) }, removeItem: key => storage.delete(key) },
   setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame: fn => setTimeout(() => { frames++; fn() }, 0), cancelAnimationFrame: clearTimeout,
-  addEventListener(name, handler) { const handlers = windowEvents.get(name) ?? new Set(); handlers.add(handler); windowEvents.set(name, handlers) }, removeEventListener(name, handler) { windowEvents.get(name)?.delete(handler) }, history: { pushState() { historyDepth++ }, back() { this.go(-1) }, go(delta) { historyDepth += delta; setTimeout(firePopstate, 0) } }, getComputedStyle: () => ({ lineHeight: '20px', transitionDelay: '0s', transitionDuration: '0s', animationDelay: '0s', animationDuration: '0s' }) }
+  addEventListener(name, handler) { const handlers = windowEvents.get(name) ?? new Set(); handlers.add(handler); windowEvents.set(name, handlers) }, removeEventListener(name, handler) { windowEvents.get(name)?.delete(handler) }, history: { pushState() { historyDepth++ }, back() { this.go(-1) }, go: traverseHistory }, getComputedStyle: () => ({ lineHeight: '20px', transitionDelay: '0s', transitionDuration: '0s', animationDelay: '0s', animationDuration: '0s' }) }
 globalThis.getComputedStyle = window.getComputedStyle
 globalThis.requestAnimationFrame = window.requestAnimationFrame
 globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} }
@@ -802,6 +821,12 @@ try {
   assert.equal(text(deliveryTray()).includes('没有下载完成'), false, "A's late failure does not appear in B's file panel")
   app.selectWork('work'); await settle()
   assert.ok(text(deliveryTray()).includes('“report.pdf”没有下载完成。'), 'returning to A shows which file failed')
+  // 2026-09-30 review: a retained download failure must not hide a later file-list failure.
+  deliveryListNative = async () => { throw { code: 'deliverable_list_failed', message: '暂时无法读取文件列表，请重试。' } }
+  find(deliveryTray(), item => item.props['aria-label'] === '刷新当前 Work 的文件').props.onClick(); await settle()
+  assert.ok(text(deliveryTray()).includes('暂时无法读取文件列表'), 'the failed list refresh is visible beside the retained download failure')
+  assert.ok(text(deliveryTray()).includes('“report.pdf”没有下载完成。'), 'reading the list does not erase the original file failure')
+  deliveryListNative = undefined
   find(deliveryTray(), item => item.props['aria-label'] === '关闭文件列表' && item.type === 'button' && !String(item.props.class ?? '').includes('scrim')).props.onClick(); await settle()
   // #316: leaving a running Work for a stopped one releases the old observation; the Work itself keeps running.
   const followedBeforeLeaving = { ...binding }
@@ -1097,6 +1122,73 @@ try {
   // Mount the input region without App/Layout or a conversation view. It reads
   // the real stores and typed native interface, which are enough to edit and submit.
   mounted.unmount(); await settle(); allowExtension = false
+  // 2026-09-30 review: switching Hosts must not inherit an old refresh's disabled controls,
+  // and a delayed list read must not bring back a Host whose deletion already succeeded.
+  {
+    const previousCatalog = { context: { ...context }, savedHosts, revision: hostCatalogRevision, failCatalog }
+    const previousHistory = { depth: historyDepth, url: window.location.href }
+    historyDepth = 0; window.location.href = 'http://fixture/aludock'
+    savedHosts = ['host', 'spare']; hostCatalogRevision = 1; failCatalog = false
+    Object.assign(context, { connectionId: 'host', selectionGeneration: 1 })
+    const switchPinia = createPinia(), switchApp = useAppStore(switchPinia), switchView = element('switch-host-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(switchPinia)
+    mounted.mount(switchView); await settle(); switchApp.selectWork('work'); await settle()
+    const refreshButton = () => find(switchView, item => item.type === 'button' && ['刷新', '正在刷新'].includes(item.props.title))
+    const openHosts = async () => {
+      observation({ kind: 'status', state: 'identity_error' }); await settle()
+      const details = find(switchView, item => item.type === 'details' && item.props['aria-label'] === '连接状态')
+      find(details, item => item.type === 'button' && text(item) === 'Host 设置').props.onClick(); await settle()
+    }
+    try {
+      let finishA, finishB
+      bootstrapNative = cut => { bootstrapNative = undefined; return new Promise(resolve => { finishA = () => resolve(cut) }) }
+      const refreshA = refreshButton().props.onClick(); await settle()
+      await openHosts()
+      // 2026-09-30 Chrome: the new Work drawer appeared before the old settings
+      // panel's history.go completed; selecting its Work then left for about:blank.
+      holdHistoryTraversal = true
+      await find(switchView, item => item.type === 'button' && item.props.class === 'host-choice-main' && text(item).includes('Spare')).props.onClick(); await settle()
+      finishHistoryTraversal(); await settle()
+      find(switchView, item => item.type === 'button' && item.props.class === 'alu-instance-link').props.onClick(); await settle()
+      assert.equal(window.location.href, 'http://fixture/aludock', 'selecting the new Host Work stays in the App after the old panel closes')
+      assert.equal(switchApp.selectedWorkId, 'work')
+      assert.equal(switchApp.activeConnectionId, 'spare')
+      assert.equal(refreshButton().props.disabled, false, "Host B's refresh is available while Host A is still waiting")
+      bootstrapNative = cut => { bootstrapNative = undefined; return new Promise(resolve => { finishB = () => resolve(cut) }) }
+      const refreshB = refreshButton().props.onClick(); await settle()
+      assert.equal(typeof finishB, 'function', "Host B's refresh reaches its own request")
+      assert.equal(refreshButton().props.disabled, true, 'the current refresh prevents duplicate clicks')
+      finishA(); await refreshA; await settle()
+      assert.equal(refreshButton().props.disabled, true, "Host A finishing does not clear Host B's pending feedback")
+      finishB(); await refreshB; await settle()
+      assert.equal(refreshButton().props.disabled, false, "Host B's own completion clears its pending feedback")
+
+      let finishCatalogRead
+      hostCatalogNative = cut => { hostCatalogNative = undefined; return new Promise(resolve => { finishCatalogRead = () => resolve(cut) }) }
+      const lateRefresh = refreshButton().props.onClick(); await settle()
+      await openHosts()
+      const deleting = find(switchView, item => item.props['aria-label'] === '从此设备删除 Host').props.onClick(); await settle()
+      find(switchView, item => item.type === 'button' && text(item) === '确认').props.onClick(); await deleting; await settle()
+      const deletedHostButton = () => find(switchView, item => item.props['aria-label'] === '从此设备删除 Host')
+      assertSameReference(deletedHostButton(), undefined, 'the deleted Host leaves the settings list')
+      const editor = find(switchView, item => item.type === 'textarea')
+      editor.props['onUpdate:modelValue']('keep editing on Host B')
+      finishCatalogRead(); await lateRefresh; await settle()
+      assertSameReference(deletedHostButton(), undefined, 'the late old list does not bring the deleted Host back')
+      assert.equal(switchApp.activeConnectionId, 'spare')
+      assert.equal(switchApp.selectedWorkId, 'work')
+      assert.equal(switchApp.currentDraft, 'keep editing on Host B')
+      assertSameReference(find(switchView, item => item.type === 'textarea'), editor, 'accepting the current list preserves the editor')
+    } finally {
+      mounted.unmount(); await settle()
+      holdHistoryTraversal = false; heldHistoryMoves.length = 0
+      historyDepth = previousHistory.depth; window.location.href = previousHistory.url
+      Object.assign(context, previousCatalog.context); savedHosts = previousCatalog.savedHosts
+      hostCatalogRevision = previousCatalog.revision; failCatalog = previousCatalog.failCatalog
+      bootstrapNative = undefined; hostCatalogNative = undefined
+    }
+  }
+  console.log('PASS: new Host refresh stays available / each refresh owns its feedback / delayed list cannot undo deletion or editing')
   const standalonePinia = createPinia()
   const standaloneStore = useAppStore(standalonePinia)
   const standaloneContainer = element('standalone-input')
