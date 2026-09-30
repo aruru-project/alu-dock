@@ -101,6 +101,19 @@ const commandSearchInput = ref<HTMLInputElement | null>(null)
 const commandArgsInput = ref<HTMLInputElement | null>(null)
 const selectedResource = ref<ResourceInfo | null>(null)
 const pending = ref('')
+/** What a slow Model, Thinking, tool or setting change is doing while its controls are disabled. */
+const pendingChange = computed(() => {
+  const [kind, ...rest] = pending.value.split(':')
+  const target = rest.join(':')
+  if (kind === 'model') return `正在切换 Model 到 ${target}…`
+  if (kind === 'thinking') return `正在把 Thinking 改为 ${target}…`
+  if (kind === 'tool') return `正在更新工具 ${target}…`
+  if (kind === 'setting') {
+    const setting = settings.value?.settings.find((item) => item.key === target)
+    return setting ? `正在保存“${settingLabel(setting.key)}”…` : '正在保存设置…'
+  }
+  return ''
+})
 const error = ref('')
 const dockToolsOperationId = ref('')
 // A settings write that fails after the reply is reported by the live event.
@@ -542,6 +555,7 @@ function isCurrentModel(model: ModelInfo) {
 <template>
   <div class="control-center-port">
     <div v-if="outcomeUnknown" class="alu-dialog-pending" role="status"><span>上一次修改的结果还没有确认。可以刷新查看，也可以直接继续操作。</span><button @click="reconcileControl">刷新确认</button></div>
+    <div v-if="pendingChange" class="alu-dialog-status" role="status"><span><span class="alu-agent-activity-spinner" /> {{ pendingChange }}</span></div>
     <div v-if="error" class="alu-dialog-error">{{ error }}</div>
     <div v-if="section !== 'resources' && loadErrors[section]" class="alu-dialog-error">{{ loadErrors[section] }}<button type="button" @click="loadSection(section, true)">重试</button></div>
     <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>

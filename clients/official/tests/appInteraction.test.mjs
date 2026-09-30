@@ -843,6 +843,18 @@ try {
     observation({ kind: 'status', state: 'connected' }); await settle()
     assert.equal(followNotice(), undefined)
   }
+  // #313: a slow Model change says what it is doing while the choices are disabled.
+  {
+    let finishModel
+    modelNative = () => new Promise(resolve => { finishModel = resolve })
+    find(container, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
+    const modelDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model')
+    find(modelDialog, item => item.type === 'button' && text(item).includes('fixture/model')).props.onClick(); await settle()
+    assert.ok(text(modelDialog).includes('正在切换 Model 到 fixture/model'), 'the pending change is named')
+    finishModel(JSON.parse(JSON.stringify(app.selectedWork))); await settle()
+    modelNative = undefined
+    assert.equal(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model'), undefined)
+  }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
   allowExtension = true
