@@ -758,6 +758,12 @@ try {
   const answer = find(teleport, item => item.type === 'input')
   assert.ok(answer)
   answer.props['onUpdate:modelValue']('unfinished extension answer'); await settle(); answer.focus()
+  // #315: Escape that only dismisses input-method candidates keeps the question and its answer.
+  const answersBeforeComposingEscape = calls.filter(call => call.command === 'respond_extension_interaction').length
+  find(teleport, item => item.type === 'section' && item.props.role === 'dialog').props.onKeydown({ key: 'Escape', isComposing: true, preventDefault() {}, stopPropagation() {} }); await settle()
+  assert.equal(calls.filter(call => call.command === 'respond_extension_interaction').length, answersBeforeComposingEscape, 'composing Escape does not cancel the question')
+  assert.equal(find(teleport, item => item.type === 'input'), answer)
+  assert.equal(answer.value, 'unfinished extension answer')
   const commandsButton = find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心'))
   commandsButton.props.onClick(); await settle()
   assert.equal(find(teleport, item => item.type === 'input'), answer)

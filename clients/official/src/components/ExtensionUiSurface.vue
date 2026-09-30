@@ -239,6 +239,14 @@ async function respond(cancelled = false) {
   }
 }
 
+/** Escape while an input method is composing only dismisses the candidates. */
+function cancelByEscape(event: KeyboardEvent) {
+  if (event.isComposing) return
+  event.preventDefault()
+  event.stopPropagation()
+  void respond(true)
+}
+
 async function reconcile() {
   const handle = extension.controller?.handle
   const interactionId = unknownInteractionId
@@ -366,7 +374,7 @@ function interactionMethodLabel(method: string) {
 
     <Teleport to="body">
       <div v-if="request" v-show="!focusSuspended" class="extension-dialog-layer" role="presentation">
-        <section ref="dialog" class="extension-dialog" role="dialog" aria-modal="true" :aria-labelledby="`extension-dialog-${request.interactionId}`" @keydown.esc.prevent.stop="respond(true)">
+        <section ref="dialog" class="extension-dialog" role="dialog" aria-modal="true" :aria-labelledby="`extension-dialog-${request.interactionId}`" @keydown.esc="cancelByEscape">
           <header><div><small>互动 · {{ interactionMethodLabel(request.method) }}</small><h2 :id="`extension-dialog-${request.interactionId}`">{{ request.title }}</h2></div><span v-if="secondsRemaining !== null">{{ secondsRemaining }}s</span></header>
 
           <template v-if="request.method === 'select'">
