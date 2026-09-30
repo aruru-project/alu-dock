@@ -67,8 +67,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
      每一层打开的浮层/抽屉各压入一个占位历史条目，返回键触发 popstate 时只关闭最上面
-     那一层；通过 ×/Esc/背景手动关闭时用 history.go 同步消费对应数量的占位，
-     避免下一次返回键落空。 */
+     那一层；通过 ×/Esc/背景手动关闭时用 history.go 回收对应数量的占位。
+     后退完成前不写入新记录，避免新面板的占位被正在进行的后退吞掉。 */
   const dockToolsOpen = computed(() => commandOpen.value && controlSection.value === 'dock-tools')
   const backLayers = {
     drawer: () => app.workDrawerOpen,
@@ -88,18 +88,19 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   /** Open layers in the order they appeared; the last one is what Back closes. */
   let backStack: BackLayer[] = []
   let backEntries = 0
-  let consumingManualCloses = 0
+  let pendingBackSteps = 0
   function syncBackHistory() {
     const open = openBackLayers.value
     backStack = [...backStack.filter((layer) => open.includes(layer)), ...open.filter((layer) => !backStack.includes(layer))]
     const depth = backStack.length
+    // Panels remain interactive; only their history writes wait for the browser
+    // to finish the previous traversal. Its destination is already selected.
+    if (pendingBackSteps) return
     if (depth > backEntries) {
       for (; backEntries < depth; backEntries++) window.history.pushState({ aluLayer: true }, '')
     } else if (depth < backEntries) {
-      const closed = backEntries - depth
-      backEntries = depth
-      consumingManualCloses++
-      window.history.go(-closed)
+      pendingBackSteps = backEntries - depth
+      window.history.go(-pendingBackSteps)
     }
   }
   watch(openBackLayers, syncBackHistory)
@@ -123,8 +124,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function handlePopstate() {
-    if (consumingManualCloses) {
-      consumingManualCloses--
+    if (pendingBackSteps) {
+      backEntries -= pendingBackSteps
+      pendingBackSteps = 0
+      syncBackHistory()
       return
     }
     if (!backEntries) return
