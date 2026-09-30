@@ -39,6 +39,9 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
 let startPairingNative, cancelPairingNative
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
+let savedHosts = ['host', 'spare'], failHostRemoval = false
+const hostCatalog = () => ({ revision: 3 - savedHosts.length, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: 'host' },
+  hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: [], policy: { mode: 'automatic' } } })) })
 const emit = (name, payload) => listeners.get(name)?.({ payload })
 const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
 const contentChange = change => observation({ kind: 'content', token: 'native-content', change })
@@ -73,7 +76,12 @@ const invoke = async (command, args = {}) => {
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
   if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([work, otherWork]), total: 2 }
-  if (command === 'get_host_catalog') return { revision: 1, hosts: [{ hostId: 'host', displayName: 'Host', profile: { revision: 1, hostId: 'host', displayName: 'Host', endpoints: [], policy: { mode: 'automatic' } } }], selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: 'host' } }
+  if (command === 'get_host_catalog') return hostCatalog()
+  if (command === 'remove_saved_host') {
+    if (failHostRemoval) throw { code: 'io_error', message: '本机存储暂时无法写入，请重试。' }
+    savedHosts = savedHosts.filter(hostId => hostId !== args.hostId)
+    return hostCatalog()
+  }
   if (command === 'bootstrap') {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
     return { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([work, otherWork]), total: 2, maxAttachmentsPerMessage: 32 }
@@ -815,6 +823,26 @@ try {
   assert.equal(find(container, item => item.props.role === 'dialog' && String(item.props['aria-label']).startsWith('从此设备删除')), undefined, 'first Back closes the confirmation')
   assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title'), 'Host settings stays open after the first Back')
   assert.equal(historyDepth, historyWithSettings, 'Host settings still owns a Back entry')
+  // #316: removing another saved Host leaves the current Work, its question and its answer in place.
+  const bootstrapsBeforeRemoval = calls.filter(call => call.command === 'bootstrap').length
+  const releasesBeforeRemoval = calls.filter(call => call.command === 'release_extension_control').length
+  const removeSpare = async () => {
+    const removing = find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Spare').props.onClick(); await settle()
+    find(container, item => item.type === 'button' && text(item) === '确认').props.onClick(); await removing; await settle()
+  }
+  failHostRemoval = true
+  await removeSpare()
+  assert.ok(text(hostDialog).includes('“Spare”没有删除。'), 'a failed removal is reported next to the Host list')
+  assert.ok(find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Spare'), 'the Host stays listed after a failed removal')
+  failHostRemoval = false
+  await removeSpare()
+  assert.equal(find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Spare'), undefined, 'the removed Host leaves the list')
+  assert.equal(text(hostDialog).includes('没有删除'), false)
+  assert.equal(app.selectedWorkId, 'work', 'the current Work stays selected')
+  assert.equal(find(teleport, item => item.type === 'input'), answer, 'the open question stays on screen')
+  assert.equal(answer.value, 'unfinished extension answer')
+  assert.equal(calls.filter(call => call.command === 'release_extension_control').length, releasesBeforeRemoval, 'the question is not released')
+  assert.equal(calls.filter(call => call.command === 'bootstrap').length, bootstrapsBeforeRemoval, 'the current Host is not reloaded')
   // #321: the actual connection form starts one live authorization. Native
   // start/cancel acknowledgements may lag, but old events never own a new form.
   find(hostDialog, item => item.type === 'button' && text(item) === '连接 Host').props.onClick(); await settle()

@@ -247,6 +247,18 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  /** Removing another saved Host leaves the current page, its selection and
+   * in-flight reads alone. Failures are thrown to the Host settings caller. */
+  async function removeOtherHost(hostId: string) {
+    const current = catalog.value
+    if (!current || hostId === activeConnectionId.value) return
+    const next = await removeSavedHost(hostId, current.revision)
+    if (catalog.value && next.revision < catalog.value.revision) return
+    // Native kept the selection for another Host; if it did not, show what it chose.
+    if (next.selectionGeneration !== current.selectionGeneration) return load()
+    catalog.value = next
+  }
+
   async function removeHost(hostId: string) {
     if (!catalog.value) return
     const epoch = ++loadEpoch
@@ -574,7 +586,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
-    load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
+    load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, removeOtherHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
     operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, unresolvedMutations, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })

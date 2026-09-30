@@ -10,7 +10,7 @@ import { useSurfacesStore } from '../stores/surfaces'
 
 const app = useAppStore()
 const hostStore = useHostStore()
-const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost } = storeToRefs(hostStore)
+const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost } = storeToRefs(hostStore)
 const { rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel } = hostStore
 const { pairingInProgress: busy } = storeToRefs(hostStore)
 const { closeModal } = useSurfacesStore()
@@ -46,6 +46,7 @@ onBeforeUnmount(() => { void stopPairing() })
                 <button class="host-choice-delete" :aria-label="`从此设备删除 ${host.displayName}`" :disabled="busy" @click="removeSavedHost(host.hostId, host.displayName)"><Trash2 :size="14" /></button>
               </article>
             </div>
+            <div v-if="hostRemovalError" class="directory-error" role="alert">{{ hostRemovalError }}</div>
             <button class="host-connect-new" :disabled="busy" @click="showHostPairingForm"><Plus :size="15" />连接 Host</button>
           </aside>
           <div class="host-detail-column">

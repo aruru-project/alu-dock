@@ -46,6 +46,7 @@ export const useHostStore = defineStore('host', () => {
   const hostNameSaving = ref(false)
   const hostNameError = ref('')
   const hostNameSaved = ref(false)
+  const hostRemovalError = ref('')
 
   async function confirmRestoredImagesBeforeHostTransition() {
     return !app.hasRestoredImages || await page.askConfirm('切换 Host？', '切换会移除尚未发送的已取回附件。')
@@ -129,6 +130,7 @@ export const useHostStore = defineStore('host', () => {
     endpointCanSaveDraft.value = false
     hostNameError.value = ''
     hostNameSaved.value = false
+    hostRemovalError.value = ''
     hostDisplayName.value = app.payload?.host.profile?.displayName ?? app.activeHost?.displayName ?? ''
   }
 
@@ -179,6 +181,15 @@ export const useHostStore = defineStore('host', () => {
     const imageWarning = app.hasRestoredImages && hostId === app.activeConnectionId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
     const body = `这台 Host 会从此设备的列表中移除。电脑端仍会保留此设备的访问权限；如需一并撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
     if (!await page.askConfirm(`从此设备删除“${displayName}”？`, body)) return
+    hostRemovalError.value = ''
+    if (hostId !== app.activeConnectionId) {
+      try {
+        await app.removeOtherHost(hostId)
+      } catch (cause) {
+        hostRemovalError.value = `“${displayName}”没有删除。${errorMessage(cause, '请重试。')}`
+      }
+      return
+    }
     await extensionUi.clear()
     await app.removeHost(hostId)
     if (!app.catalog?.hosts.length) page.closeModal()
@@ -386,5 +397,5 @@ export const useHostStore = defineStore('host', () => {
     if (disposed) release(); else unlisten = release
   }
   onScopeDispose(() => { disposed = true; unlisten?.(); const id = pairingRequestId.value; pairingRequestId.value = ''; if (id) void (startingPairing ?? Promise.resolve()).catch(() => {}).then(() => cancelPairing(id)).catch(() => {}) })
-  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, listenNative }
+  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, listenNative }
 })
