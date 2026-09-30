@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { partVisibleWhenCollapsed } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
 import ConversationProcessPart from './ConversationProcessPart.vue'
 
@@ -12,6 +13,9 @@ const props = defineProps<{
   /** 正在流式增长的条目 id：这些条目按纯文本渲染，等 message.completed 后再做 markdown 排版，
    *  避免每个 token 都对全文跑一遍 marked + DOMPurify。 */
   streamingParts?: ReadonlySet<string>
+  /** Inside a collapsed turn only images, warnings/errors and the final reply remain. */
+  collapsed?: boolean
+  finalRow?: boolean
 }>()
 const emit = defineEmits<{
   toolToggle: [id: string, event: Event]
@@ -19,10 +23,10 @@ const emit = defineEmits<{
   imagePreview: [part: ImagePart]
   imageFailed: [part: ImagePart]
 }>()
-const orderedParts = computed(() => [
-  ...props.parts.filter((part) => part.kind === 'thinking'),
-  ...props.parts.filter((part) => part.kind !== 'thinking'),
-])
+const orderedParts = computed(() => {
+  const parts = props.collapsed ? props.parts.filter((part) => partVisibleWhenCollapsed(part, props.finalRow === true)) : props.parts
+  return [...parts.filter((part) => part.kind === 'thinking'), ...parts.filter((part) => part.kind !== 'thinking')]
+})
 </script>
 
 <template>

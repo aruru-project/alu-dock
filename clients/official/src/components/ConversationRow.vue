@@ -2,8 +2,7 @@
 import { FileText } from '@lucide/vue'
 import AttachmentCard from './AttachmentCard.vue'
 import ConversationProcessParts from './ConversationProcessParts.vue'
-import { hasCompactConversationContent } from '../lib/conversation'
-import { assistantMarkdownSource, type ConversationRow } from '../lib/conversationPresentation'
+import { assistantMarkdownSource, partVisibleWhenCollapsed, type ConversationRow } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 defineProps<{
@@ -12,6 +11,10 @@ defineProps<{
   attachmentPreviews: Record<string, { url: string; mediaType: string }>
   toolOpen: (id: string) => boolean
   imageResource: (part: ImagePart) => ConversationImageResource
+  /** Inside a collapsed turn only images, warnings/errors and the final reply remain. */
+  collapsed?: boolean
+  /** This row is the turn's final Agent message: its text stays when collapsed. */
+  finalRow?: boolean
 }>()
 const emit = defineEmits<{
   toolToggle: [id: string, event: Event]
@@ -22,6 +25,9 @@ const emit = defineEmits<{
   openText: [title: string, text: string, markdown?: boolean]
 }>()
 const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => part.kind === 'assistant')
+/** The final reply's row stays while its text is still being read, or when the run
+ * ended before any text; say so instead of leaving an empty bubble. */
+const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((part) => partVisibleWhenCollapsed(part, true))
 </script>
 
 <template>
@@ -34,24 +40,19 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
         </div>
       </article>
 
-      <article v-else-if="row.kind === 'assistant-group'" class="conversation-row alu-msg-assistant-row" :class="{ 'is-compact-empty': !hasCompactConversationContent(row.parts) }" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
+      <article v-else-if="row.kind === 'assistant-group'" class="conversation-row alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
         <img src="../assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
         <div class="alu-msg-assistant-content">
-          <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div>
+          <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /><div v-if="collapsed && finalRow && finalReplyMissing(row.parts)" class="msg-notice">回复正文未显示；点上方摘要行可查看这一轮的过程。</div></div>
           <div v-if="hasAssistant(row.parts) || row.time" class="msg-assistant-timestamp"><button v-if="hasAssistant(row.parts)" type="button" class="message-text-action" aria-label="查看 Agent 回复原文" @click="emit('openText', 'Agent 回复', assistantMarkdownSource(row.parts), true)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
         </div>
       </article>
 
-      <article v-else-if="row.kind === 'activity'" class="conversation-row alu-msg-assistant-row is-agent-active" :data-conversation-id="row.id">
-        <img src="../assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
-        <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
-      </article>
+      <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></details>
 
-      <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></details>
+      <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
 
-      <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
-
-      <div v-else class="conversation-row alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
+      <div v-else-if="row.kind === 'notice'" class="conversation-row alu-live-notice-row" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
 </template>
 
 <style scoped>
@@ -84,15 +85,6 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
   padding: 14px 18px;
   font-size: 14px;
   line-height: 1.7;
-}
-.alu-msg-assistant-row.is-agent-active .alu-msg-assistant-content { flex: 0 0 auto; }
-.alu-msg-assistant-row.is-agent-active .alu-msg-assistant-body { padding: 11px 14px; }
-.alu-agent-activity {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
 }
 /* 用户消息 — 右对齐卡片 */
 .msg-user {
@@ -208,11 +200,6 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
 .alu-record-summary { border-left-color: var(--alu-blue-border); }
 .alu-record-extension { border-left-color: var(--alu-pink); }
 .alu-record-tool, .alu-record-shell { border-left-color: var(--alu-amber); }
-/* 可见性由投影内容显式标记，不依赖旧版 Android WebView 缺失的关系选择器。 */
-.alu-compact-mode .alu-msg-assistant-row.is-compact-empty,
-.alu-compact-mode .alu-record-panel.is-compact-empty {
-  display: none !important;
-}
 .alu-msg-assistant-row, .msg-user {
   animation: msgSlideIn 0.22s ease-out;
 }
@@ -243,16 +230,6 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
     border: 0;
     border-radius: 0;
     background: transparent;
-  }
-  .alu-msg-assistant-row.is-agent-active .alu-msg-assistant-body {
-    display: grid;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border: 1px solid var(--alu-border);
-    border-radius: 12px;
-    background: var(--alu-bg-raised);
-    place-items: center;
   }
   .msg-user { margin: 18px 0; }
   .msg-user-bubble {

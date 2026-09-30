@@ -431,5 +431,7 @@ export function useConversationViewport(surfaceRef: Ref<HTMLElement | null>, per
     captureAnchor,
     restoreAnchor,
     isFollowing: () => following,
+    /** The saved entry a rebuilt view still has to scroll back to. */
+    restoringAnchorId: () => (pending && !pending.following ? pending.id : undefined),
   }
 }

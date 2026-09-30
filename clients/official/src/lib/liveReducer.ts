@@ -20,7 +20,7 @@ export type LiveReduction =
 const conversationEvents = new Set([
   'message.submitted', 'message.delta', 'message.completed',
   'tool.started', 'tool.args_updated', 'tool.output_updated', 'tool.completed',
-  'run.settled', 'run.retry_started', 'run.retry_completed',
+  'run.started', 'run.settled', 'run.retry_started', 'run.retry_completed',
   'compaction.started', 'compaction.completed',
   'instance.stopped', 'instance.runtime_error', 'instance.error', 'command.rejected',
   'resources.reloaded', 'settings.write_failed',

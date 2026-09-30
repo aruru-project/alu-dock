@@ -108,10 +108,6 @@ export const useAppStore = defineStore('app', () => {
       connection.attachmentRevisions[editorKey(id, work.id, attachment.fileId)] = selection.revision
     })
   }
-  const detailMode = computed(() => {
-    const connectionId = localUiState.value.activeConnectionId
-    return connectionId ? localUiState.value.connections[connectionId]?.detailMode ?? true : true
-  })
 
   async function load() {
     const epoch = ++loadEpoch
@@ -561,14 +557,6 @@ export const useAppStore = defineStore('app', () => {
     return consumed
   }
 
-  function setDetailMode(value: boolean) {
-    const connectionId = localUiState.value.activeConnectionId
-    const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
-    if (!connection) return
-    connection.detailMode = value
-    saveLocalState()
-  }
-
   function recentWorkspaces(machineHostId: string) {
     const connectionId = localUiState.value.activeConnectionId
     return connectionId ? [...(localUiState.value.connections[connectionId]?.recentWorkspaces[machineHostId] ?? [])] : []
@@ -588,9 +576,9 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
-    currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
+    currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, removeOtherHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, unresolvedMutations, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
+    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, unresolvedMutations, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

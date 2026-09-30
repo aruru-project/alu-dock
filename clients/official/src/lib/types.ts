@@ -566,15 +566,30 @@ export type ConversationProcessItem = (
   | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; historyEntryId?: string; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 
-) & { sourceEntryIds?: string[] }
+) & { sourceEntryIds?: string[]; turnId?: string }
+
+export type ConversationTurnStatus = 'running' | 'completed' | 'aborted' | 'failed' | 'interrupted'
+/** One Agent run. Live turns are exact (`run.started` → `run.settled`); history turns
+ * are inferred from record order, so their timestamps and status are approximate. */
+export interface ConversationTurnItem {
+  id: string
+  kind: 'turn'
+  turnId: string
+  status: ConversationTurnStatus
+  startedAt?: string
+  endedAt?: string
+  error?: string
+  /** A running segment observed without its own `run.started` continues the turn before it. */
+  continuation?: boolean
+}
 
 export type ConversationItem = (
   | { id: string; kind: 'user'; text: string; time: string; attachments?: AttachmentDto[]; images?: Array<Extract<ConversationProcessItem, { kind: 'image' }>> }
-  | { id: string; kind: 'activity' }
+  | ConversationTurnItem
   | ConversationProcessItem
   | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[] }
 
-) & { sourceEntryIds?: string[] }
+) & { sourceEntryIds?: string[]; turnId?: string }
 
 export interface SystemCandidate {
   id: string

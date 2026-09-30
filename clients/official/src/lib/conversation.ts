@@ -5,6 +5,8 @@ import type {
   ConversationItem,
   ConversationProcessItem,
   ConversationRecord,
+  ConversationTurnItem,
+  ConversationTurnStatus,
   ProjectedEvent,
   PublishedFileDto,
   ToolCallPreview,
@@ -103,16 +105,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-export interface ConversationProjectionOptions {
-  compact?: boolean
+/** A run.settled result or a Work's lastRun, as the turn the user sees. */
+export function turnStatusFromRunResult(result: unknown): ConversationTurnStatus {
+  return result === 'failed' ? 'failed' : result === 'aborted' ? 'aborted' : result === 'interrupted' ? 'interrupted' : 'completed'
 }
-
-export function hasCompactConversationContent(parts: ConversationProcessItem[]) {
-  return parts.some((part) => part.kind === 'assistant'
-    || part.kind === 'image'
-    || (part.kind === 'notice' && part.tone !== 'info'))
-}
-
 
 export function liveDeltaKey(data: Record<string, unknown>): string | null {
   const messageId = typeof data.messageId === 'string' ? data.messageId : ''
@@ -160,40 +156,81 @@ export function mergeLiveEvents(previous: ProjectedEvent, event: ProjectedEvent)
 
 const toolStagingGroup = (toolCallId: string) => `live-tool-staging:${toolCallId}`
 
-export function projectConversation(bootstrap: ConversationBootstrap, options: ConversationProjectionOptions = {}): ConversationItem[] {
-  const live = createLiveConversationProjector(bootstrap, options)
+export function projectConversation(bootstrap: ConversationBootstrap): ConversationItem[] {
+  const live = createLiveConversationProjector(bootstrap)
   for (const event of bootstrap.activeEvents) live.apply(event)
   return [...projectRecordGroups(bootstrap.records), ...live.snapshot()]
 }
+
+const CONTINUATION_TURN_ID = 'live-turn-continuation'
 
 /** One canonical live algorithm, used both by bootstrap replay and incremental Follow.
  * Maps retain message/tool ownership; settled history is never revisited by apply. */
 export function createLiveConversationProjector(
   bootstrap: ConversationBootstrap,
-  options: ConversationProjectionOptions = {},
   observe: <T extends object>(value: T) => T = (value) => value,
 ) {
-  const processIsVisible = options.compact !== true
   const items = observe<ConversationItem[]>([])
   const messageItems = observe(new Map<string, ConversationItem>())
   const toolItems = observe(new Map<string, ToolProjection>())
   const toolOwners = new Map<string, string>()
   const imageItems = observe(new Map<string, ImageItem>())
-  let activityVisible = bootstrap.instance.execution === 'running'
-  let activityId = `activity-${bootstrap.instance.id}`
+  // The running turn. Items pushed while it is open belong to it; between
+  // run.settled and the next run.started, items stand on their own.
+  let turn: ConversationTurnItem | undefined
+  let turnHasItems = false
+
+  function openTurn(id: string, startedAt: string | undefined, continuation: boolean) {
+    turn = observe<ConversationTurnItem>({ id, kind: 'turn', turnId: id, status: 'running', ...(startedAt ? { startedAt } : {}), ...(continuation ? { continuation: true } : {}) })
+    turnHasItems = false
+    items.push(turn)
+  }
+  /** A running segment seen without run.started turns out to be a new run after all. */
+  function adoptTurn(sequence: number, startedAt: string) {
+    if (!turn) return
+    turn.id = turn.turnId = `live-turn-${sequence}`
+    turn.startedAt = startedAt
+    turn.continuation = false
+  }
+  function settleTurn(status: ConversationTurnStatus, endedAt?: string, error?: string) {
+    if (!turn) return
+    turn.status = status
+    if (endedAt) turn.endedAt = endedAt
+    if (error) turn.error = error
+    turn = undefined
+  }
+  // A read can find the run already in progress: its earlier part is history and
+  // its run.started is not replayed, so this segment continues the turn before it.
+  // A replay whose first run boundary is a settle also started inside that run,
+  // even when the Work has since gone idle.
+  const firstRunBoundary = (bootstrap.activeEvents ?? []).find((event) => event.eventType === 'run.started' || event.eventType === 'run.settled')
+  if (bootstrap.instance.execution === 'running' || firstRunBoundary?.eventType === 'run.settled') openTurn(CONTINUATION_TURN_ID, undefined, true)
 
   function apply(event: ProjectedEvent) {
+    const before = items.length
+    applyEvent(event)
+    if (turn) for (let index = before; index < items.length; index++) {
+      const item = items[index]!
+      if (item.kind === 'turn') continue
+      item.turnId = turn.turnId
+      turnHasItems = true
+    }
+  }
 
+  function applyEvent(event: ProjectedEvent) {
     const data = event.data
     let formattedTime: string | undefined
     const time = () => formattedTime ??= shortTime(event.occurredAt)
     switch (event.eventType) {
       case 'run.started':
-        activityVisible = true
-        activityId = `live-activity-${event.sequence}`
+        if (turn?.continuation && !turnHasItems) adoptTurn(event.sequence, event.occurredAt)
+        else {
+          settleTurn('completed')
+          openTurn(`live-turn-${event.sequence}`, event.occurredAt, false)
+        }
         break
       case 'message.submitted': {
-        activityVisible = true
+        if (turn?.continuation && !turnHasItems && data.delivery === 'prompt') adoptTurn(event.sequence, event.occurredAt)
         const messageId = String(data.messageId || `submitted-${event.sequence}`)
         const item: ConversationItem = {
           id: `live-${messageId}`,
@@ -210,7 +247,6 @@ export function createLiveConversationProjector(
         const messageId = String(data.messageId || `message-${event.sequence}`)
         const groupId = `live-message:${messageId}`
         const block = data.block === 'thinking' ? 'thinking' : 'text'
-        if (processIsVisible || block === 'text') activityVisible = false
         const delta = String(data.delta || '')
         let item = messageItems.get(`${messageId}:${block}`)
         if (!item) {
@@ -245,7 +281,6 @@ export function createLiveConversationProjector(
         }
 
         if (data.role === 'tool') {
-          if (processIsVisible || blocks.some(compactVisibleBlock)) activityVisible = false
           const result = blocks.find((block) => block.type === 'tool_result')
           const toolCallId = result?.type === 'tool_result' ? result.toolCallId : typeof data.toolCallId === 'string' ? data.toolCallId : undefined
           const groupId = toolCallId ? toolOwners.get(toolCallId) ?? toolStagingGroup(toolCallId) : `live-message:${messageId}`
@@ -258,12 +293,10 @@ export function createLiveConversationProjector(
         }
 
         if (data.role !== 'assistant') {
-          if (processIsVisible || Boolean(data.error)) activityVisible = false
           if (text) items.push({ id: `live-${messageId}`, kind: 'notice', tone: data.error ? 'error' : 'info', text })
           break
         }
 
-        if (processIsVisible || blocks.some(compactVisibleBlock) || Boolean(data.error)) activityVisible = false
         const groupId = `live-message:${messageId}`
         const textItem = messageItems.get(`${messageId}:text`)
         if (textItem?.kind === 'assistant') {
@@ -285,7 +318,8 @@ export function createLiveConversationProjector(
           messageItems.set(`${messageId}:thinking`, item)
         }
         blocks.forEach((block, index) => applyLiveContentBlock(block, groupId, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items, time()))
-        if (typeof data.error === 'string' && data.error) {
+        // Inside a run the same error ends it and reaches the turn summary through run.settled.
+        if (typeof data.error === 'string' && data.error && !turn) {
           items.push({ id: `live-${messageId}-error`, kind: 'notice', groupId, tone: 'error', text: data.error, groupTime: time() })
         }
         break
@@ -314,7 +348,6 @@ export function createLiveConversationProjector(
           }
         })
         const publishedFile = publishedFileFrom(data.publishedFile)
-        if (processIsVisible || eventContent.some(compactVisibleBlock) || publishedFile) activityVisible = false
         if (publishedFile) ensurePublishedImage(tool, publishedFile, items, imageItems)
         if (tool.item.name === 'show_image' && (typeof data.text === 'string' || publishedFile)) {
           tool.outputText = safeShowImageOutput(Boolean(data.isError), publishedFile)
@@ -379,7 +412,6 @@ export function createLiveConversationProjector(
         break
       }
       case 'run.settled': {
-        activityVisible = false
         const result = typeof data.result === 'string' ? data.result : ''
         for (const tool of toolItems.values()) {
           if (tool.item.status !== 'running') continue
@@ -387,13 +419,8 @@ export function createLiveConversationProjector(
           tool.item.summary = result === 'succeeded' ? '工具调用完成' : result === 'aborted' ? '工具调用已中止' : '工具调用未完成'
         }
         toolItems.clear()
-        if (result === 'failed') {
-          items.push({ id: `live-run-settled-${event.sequence}`, kind: 'notice', tone: 'error', text: typeof data.error === 'string' ? data.error : '运行失败。' })
-        } else if (result === 'aborted') {
-          items.push({ id: `live-run-settled-${event.sequence}`, kind: 'notice', tone: 'warning', text: '当前运行已中止。' })
-        } else if (result === 'interrupted') {
-          items.push({ id: `live-run-settled-${event.sequence}`, kind: 'notice', tone: 'warning', text: '当前运行已被打断。' })
-        }
+        // The turn summary carries the outcome; a separate notice would repeat it.
+        settleTurn(turnStatusFromRunResult(result), event.occurredAt, result === 'failed' ? (typeof data.error === 'string' && data.error ? data.error : '运行失败。') : undefined)
         break
       }
     }
@@ -416,41 +443,92 @@ export function createLiveConversationProjector(
     if (Array.isArray(event.data.content)) for (const block of event.data.content) {
       if (isRecord(block) && typeof block.toolCallId === 'string') tool(block.toolCallId)
     }
-    if (event.eventType === 'run.settled') for (const projection of toolItems.values()) {
-      if (projection.item.status === 'running') add(projection.item)
+    if (event.eventType === 'run.settled') {
+      for (const projection of toolItems.values()) if (projection.item.status === 'running') add(projection.item)
+      add(turn)
     }
     // Entries without an existing target append at the live tail. Historical
     // layout changes/hydration use the separate unconditional anchor path.
     return ids
   }
-  function reconcileActivity(instance: ConversationBootstrap['instance']) {
-    // A recovery read can confirm completion without replaying run.settled.
-    // Running facts contain no output: do not revive a placeholder that already
-    // yielded to visible content. New output keeps its existing event/seed path.
-    if (instance.execution !== 'running') activityVisible = false
+  /** A recovery read can confirm completion without replaying run.settled, or
+   * find a run in progress whose events were never delivered here. */
+  function reconcileRun(instance: ConversationBootstrap['instance']) {
+    if (instance.execution !== 'running') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
+    else if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true)
   }
-  let activity: ConversationItem | undefined
-  function snapshot(): ConversationItem[] {
-    if (!activityVisible) return items
-    if (activity?.id !== activityId) activity = observe<ConversationItem>({ id: activityId, kind: 'activity' })
-    return [...items, activity!]
-  }
-  return { apply, snapshot, affectedIds, reconcileActivity, structureKey: () => `${items.length}:${activityVisible ? activityId : ""}` }
+  return { apply, snapshot: () => items, affectedIds, reconcileRun, structureKey: () => `${items.length}` }
 }
 
 export function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {
   const output: ConversationItem[] = []
-  for (const group of groupRecords(records)) {
+  const groups = groupRecords(records)
+  const turns = historyTurns(groups)
+  groups.forEach((group, index) => {
+    const turn = turns.get(index)
+    if (turn?.opener === index) output.push(turn.item)
     const start = output.length
     projectGroup(group, output)
+    // The turn summary already shows the error that ended the turn.
+    if (turn?.errorRecordId) {
+      const carried = output.findIndex((item, position) => position >= start && item.id === `${turn.errorRecordId}-error`)
+      if (carried >= 0) output.splice(carried, 1)
+    }
     const entryIds = group.records.map(record => record.entryId)
     for (let index = start; index < output.length; index++) {
       const item = output[index]!
       item.sourceEntryIds = entryIds
+      if (turn) item.turnId = turn.item.turnId
       if (item.kind === 'record') for (const part of item.parts) part.sourceEntryIds = entryIds
     }
-  }
+  })
   return output
+}
+
+interface HistoryTurn { opener: number; item: ConversationTurnItem; errorRecordId?: string }
+
+/** History has no run boundaries. A user message opens a turn that runs to the last
+ * message record before the next user message; later summaries or shell records
+ * between two turns stand on their own. Duration is the span of record timestamps,
+ * which Pi writes at message end, so both ends sit close to the real run. */
+function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
+  const turns = new Map<number, HistoryTurn>()
+  const openers = groups.flatMap((group, index) => isUserMessageGroup(group) ? [index] : [])
+  openers.forEach((opener, position) => {
+    const next = openers[position + 1] ?? groups.length
+    let end = opener
+    for (let index = opener + 1; index < next; index++) if (groups[index]!.records[0]!.kind === 'message') end = index
+    const records = groups.slice(opener, end + 1).flatMap((group) => group.records)
+    const user = groups[opener]!.records[0]!
+    const lastAssistant = lastWhere(records, (record) => record.kind === 'message' && record.source === 'assistant')
+    const endedAt = lastWhere(records, (record) => record !== user && Boolean(record.timestamp))?.timestamp
+    const status: ConversationTurnStatus = lastAssistant?.error || lastAssistant?.stopReason === 'error' ? 'failed'
+      : lastAssistant?.stopReason === 'aborted' ? 'aborted'
+      // Only the last turn can still be unfinished; an earlier one that ends in a
+      // tool call was continued by the next user message (a steer).
+      : position === openers.length - 1 && (!lastAssistant || lastAssistant.stopReason === 'toolUse') ? 'interrupted'
+      : 'completed'
+    const turnId = `turn:${user.recordId}`
+    const item: ConversationTurnItem = {
+      id: turnId, kind: 'turn', turnId, status,
+      ...(user.timestamp ? { startedAt: user.timestamp } : {}),
+      ...(endedAt ? { endedAt } : {}),
+      ...(status === 'failed' ? { error: lastAssistant?.error || '运行失败。' } : {}),
+    }
+    const turn: HistoryTurn = { opener, item, ...(status === 'failed' && lastAssistant?.error ? { errorRecordId: lastAssistant.recordId } : {}) }
+    for (let index = opener; index <= end; index++) turns.set(index, turn)
+  })
+  return turns
+}
+
+function lastWhere<T>(values: T[], predicate: (value: T) => boolean): T | undefined {
+  for (let index = values.length - 1; index >= 0; index--) if (predicate(values[index]!)) return values[index]
+  return undefined
+}
+
+function isUserMessageGroup(group: RecordGroup) {
+  const first = group.records[0]
+  return Boolean(first && first.kind === 'message' && first.source === 'user' && group.records.length === 1)
 }
 
 function groupRecords(records: ConversationRecord[]) {
@@ -480,7 +558,7 @@ function groupRecords(records: ConversationRecord[]) {
 function projectGroup(group: RecordGroup, output: ConversationItem[]) {
   const first = group.records[0]
   if (!first) return
-  if (first.kind === 'message' && first.source === 'user' && group.records.length === 1) {
+  if (isUserMessageGroup(group)) {
     output.push({ id: first.recordId, kind: 'user', ...projectUserMessage(first.content, first.attachments ?? [], first.recordId, shortTime(first.timestamp), first.entryId) })
     return
   }
@@ -737,12 +815,6 @@ function projectUserMessage(blocks: ContentBlock[], attachments: AttachmentDto[]
     ...(visibleAttachments.length ? { attachments: visibleAttachments } : {}),
     ...(images.length ? { images } : {}),
   }
-}
-
-function compactVisibleBlock(block: ContentBlock) {
-  return (block.type === 'text' && Boolean(block.text))
-    || block.type === 'image'
-    || (block.type === 'tool_result' && Boolean(publishedFileFrom(block.publishedFile)))
 }
 
 function blockText(blocks: ContentBlock[], type: 'text' | 'thinking') {

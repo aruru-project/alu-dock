@@ -13,8 +13,8 @@ import { useSurfacesStore } from '../stores/surfaces'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const conversationStore = useConversationStore()
-const { readingError, output, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError } = storeToRefs(conversationStore)
-const { setReadInterest, handleOutputScroll, handleOutputMediaLoad, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration } = conversationStore
+const { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError } = storeToRefs(conversationStore)
+const { setReadInterest, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration } = conversationStore
 const observation = useObservationStore()
 const { loading: conversationLoading, error: conversationError, status: observationStatus } = storeToRefs(observation)
 const { load: loadSelectedConversation } = observation
@@ -58,9 +58,12 @@ const { openMessageText } = useSurfacesStore()
       :history-hydrating="historyHydrating"
       :history-truncated="historyTruncated"
       :history-error="historyError"
+      :away-from-bottom="outputAwayFromBottom"
       :attachment-previews="attachmentPreviews"
       :tool-open="toolDetailOpen"
       :image-resource="imageResource"
+      :hold-reading-position="holdReadingPosition"
+      :restoring-anchor-id="restoringAnchorId"
       @read-interest="setReadInterest"
       @load-earlier="loadEarlierHistory"
       @retry-history="retryConversationHydration"

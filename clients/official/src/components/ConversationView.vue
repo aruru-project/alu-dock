@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onUnmounted, type Directive } from 'vue'
+import { computed, onUnmounted, reactive, watch, type Directive } from 'vue'
 import { RefreshCw } from '@lucide/vue'
 import ConversationRow from './ConversationRow.vue'
-import { conversationRows } from '../lib/conversationPresentation'
+import ConversationTurnSummary from './ConversationTurnSummary.vue'
+import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnHidingAnchor, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationItem, ConversationProcessItem } from '../lib/types'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
@@ -15,9 +16,14 @@ const props = defineProps<{
   historyHydrating: boolean
   historyTruncated: boolean
   historyError: string | null
+  /** The reader has scrolled away from the latest output. */
+  awayFromBottom: boolean
   attachmentPreviews: Record<string, { url: string; mediaType: string }>
   toolOpen: (id: string) => boolean
   imageResource: (part: ImagePart) => ConversationImageResource
+  holdReadingPosition: (change: () => void) => void
+  /** The saved reading entry the viewport is still waiting to find after a rebuild. */
+  restoringAnchorId: () => string | undefined
 }>()
 
 const emit = defineEmits<{
@@ -64,11 +70,39 @@ const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
   const prior = new Map(previous?.map((row) => [row.id, row]))
   return conversationRows(props.items).map((row) => {
     const old = prior.get(row.id)
-    if (row.kind === 'assistant-group' && old?.kind === 'assistant-group' && row.time === old.time
+    if (row.kind === 'assistant-group' && old?.kind === 'assistant-group' && row.time === old.time && row.turnId === old.turnId
       && row.parts.length === old.parts.length && row.parts.every((part, index) => part === old.parts[index])) return old
     return row
   })
 })
+const sections = computed(() => conversationSections(rows.value))
+
+// A running turn shows its process; a settled one folds it away unless the
+// reader chose otherwise. The choice lives with this view of the conversation.
+const turnOverrides = reactive(new Map<string, boolean>())
+const runningTurns = new Set<string>()
+function turnOpen(section: ConversationTurnSection) {
+  return turnOverrides.get(section.id) ?? section.status === 'running'
+}
+function toggleTurn(section: ConversationTurnSection) {
+  props.holdReadingPosition(() => { turnOverrides.set(section.id, !turnOpen(section)) })
+}
+const turnIds = (list: readonly ConversationSection[]) => list.flatMap((section) => section.kind === 'turn' ? [section.id] : [])
+watch(sections, (current, previous) => {
+  const running = new Set<string>()
+  for (const section of current) if (section.kind === 'turn' && section.status === 'running') running.add(section.id)
+  const settled = [...runningTurns].filter((id) => !running.has(id))
+  reconcileTurnOverrides(turnOverrides, turnIds(previous ?? []), turnIds(current), settled, props.awayFromBottom)
+  runningTurns.clear()
+  for (const id of running) runningTurns.add(id)
+  // A saved reading position inside a turn's process (F5) needs that turn open
+  // before the viewport looks for its entry; otherwise it falls back to the end.
+  const hiding = turnHidingAnchor(current, props.restoringAnchorId())
+  if (hiding && !turnOpen(hiding)) turnOverrides.set(hiding.id, true)
+}, { immediate: true })
+function bodyRows(section: ConversationTurnSection) {
+  return turnOpen(section) ? section.body : section.body.filter((row) => rowVisibleWhenCollapsed(row, section.finalRowId))
+}
 </script>
 
 <template>
@@ -79,8 +113,18 @@ const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
       <span v-if="historyHydrating">正在载入图片与较长内容…</span>
       <span v-if="historyError">{{ historyError }}</span>
     </div>
-    <template v-for="row in rows" :key="row.id">
-      <ConversationRow v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+    <template v-for="section in sections" :key="section.id">
+      <template v-if="section.kind === 'turn'">
+        <ConversationRow v-for="row in section.openers" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+          @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
+          @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
+        <ConversationTurnSummary :section="section" :open="turnOpen(section)" @toggle="toggleTurn(section)" />
+        <ConversationRow v-for="row in bodyRows(section)" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+          :collapsed="!turnOpen(section)" :final-row="row.id === section.finalRowId"
+          @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
+          @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
+      </template>
+      <ConversationRow v-else v-read-interest="section.row.sourceEntryIds" :row="section.row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
         @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
         @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
     </template>

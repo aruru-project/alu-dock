@@ -19,7 +19,6 @@ export const useConversationStore = defineStore('conversation', () => {
   const page = useSurfacesStore()
   const observation = useObservationStore()
   const selected = computed(() => app.selectedWork)
-  const detailMode = computed(() => app.detailMode)
   const extensionUi = useExtensionUiStore()
   const toolExpansionOverrides = ref<Record<string, boolean>>({})
   const output = ref<HTMLElement | null>(null)
@@ -40,7 +39,6 @@ export const useConversationStore = defineStore('conversation', () => {
   let imageLoadEpoch = 0
 
   const conversationContent = useConversationContent({
-    compact: computed(() => !detailMode.value),
     beforeLayoutChange: conversationViewport.captureAnchor,
     afterLayoutChange: (snapshot, stickToBottom) => conversationViewport.restoreAnchor(snapshot as ConversationReadingAnchor | null, stickToBottom),
     isFollowing: conversationViewport.isFollowing,
@@ -70,14 +68,19 @@ export const useConversationStore = defineStore('conversation', () => {
     selected.value && conversationState.value && selected.value.id !== conversationState.value.instance.id,
   ))
 
-  watch(detailMode, () => {
-    if (conversationState.value) conversationContent.reproject(conversationState.value)
-  })
   watch(() => extensionUi.toolsResetRevision, () => { toolExpansionOverrides.value = {} })
 
   function showAgentActivity(workId: string) {
-    conversationContent.showActivity(workId)
+    conversationContent.showPendingTurn(workId)
     conversationViewport.scrollToBottom()
+  }
+
+  const restoringAnchorId = conversationViewport.restoringAnchorId
+  /** Expanding or collapsing a turn keeps the row the reader is on where it is. */
+  function holdReadingPosition(change: () => void) {
+    const anchor = conversationViewport.captureAnchor()
+    change()
+    void conversationViewport.restoreAnchor(anchor, false)
   }
 
   const handleOutputScroll = conversationViewport.handleScroll
@@ -279,5 +282,5 @@ export const useConversationStore = defineStore('conversation', () => {
     const resource = imageResources.value[imageKey]
     if (resource?.state === 'ready') setImageResource(imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
   }
-  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, setReadInterest: conversationSession.setInterest, showAgentActivity, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
+  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, setReadInterest: conversationSession.setInterest, showAgentActivity, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
 })

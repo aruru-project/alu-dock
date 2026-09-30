@@ -1,4 +1,4 @@
-import { computed, reactive, ref, type Ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { conversationEventChanged } from './liveReducer'
 import {
   createLiveConversationProjector,
@@ -13,7 +13,6 @@ import type { ConversationBootstrap, ConversationRecord, ConversationItem, Proje
 type LayoutSnapshot = unknown
 
 interface ConversationContentOptions {
-  compact: Ref<boolean>
   beforeLayoutChange: (preserveText?: boolean, changedIds?: Set<string>) => LayoutSnapshot
   afterLayoutChange: (snapshot: LayoutSnapshot, stickToBottom: boolean) => Promise<void>
   isFollowing: () => boolean
@@ -77,7 +76,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   function initializeLive(current: ConversationBootstrap) {
-    live = createLiveConversationProjector(current, { compact: options.compact.value }, reactive as <T extends object>(value: T) => T)
+    live = createLiveConversationProjector(current, reactive as <T extends object>(value: T) => T)
     liveState = current
     const cache = streamCache(current)
     cache.fold.clear(); cache.tools.clear(); cache.streaming.clear()
@@ -124,7 +123,7 @@ export function useConversationContent(options: ConversationContentOptions) {
         current.instance = latest.instance
         if (live && liveState === current) {
           drainEvents(current)
-          live.reconcileActivity(latest.instance)
+          live.reconcileRun(latest.instance)
           // Also remove a local send placeholder, which is outside live's key.
           if (latest.instance.execution !== 'running') publishedStructure = ''
           publishLive()
@@ -143,16 +142,6 @@ export function useConversationContent(options: ConversationContentOptions) {
     publishLive()
     options.projected(items.value)
     options.layoutChanged()
-  }
-
-  function reproject(current: ConversationBootstrap) {
-    if (checkpoint && preserveHandoff) return
-    const snapshot = options.beforeLayoutChange()
-    const stick = !prepending && options.isFollowing()
-    prepending = false
-    initializeLive(current)
-    rebuildProjection(current)
-    void options.afterLayoutChange(snapshot, stick)
   }
 
   function resetProjectionSchedule() {
@@ -231,7 +220,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   function applyConversationEvent(current: ConversationBootstrap, event: ProjectedEvent, conversationChanged: boolean) {
-    if (!conversationChanged && event.eventType !== 'run.started') return
+    if (!conversationChanged) return
     if (liveState !== current) initializeLive(current)
     freshRead = false
     // A retained handoff builds the new canonical tail in the existing log,
@@ -264,9 +253,12 @@ export function useConversationContent(options: ConversationContentOptions) {
     return true
   }
 
-  function showActivity(workId: string) {
-    if (items.value.some((item) => item.kind === 'activity')) return
-    items.value = [...items.value, { id: `local-activity-${workId}`, kind: 'activity' }]
+  /** A sent message shows its turn as running before run.started arrives. The
+   * next structural publish replaces this local placeholder with the real turn. */
+  function showPendingTurn(workId: string) {
+    if (items.value.some((item) => item.kind === 'turn' && item.status === 'running')) return
+    const turnId = `local-turn-${workId}`
+    items.value = [...items.value, { id: turnId, kind: 'turn', turnId, status: 'running', startedAt: new Date().toISOString() }]
     options.layoutChanged()
   }
 
@@ -409,7 +401,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   return {
     state, items, streamingPartIds, seeding, preparingView, historyTruncated, historyLoading, historyError,
     hydrationActiveEntries, hydrationErrors, historyHydrating,
-    reproject, applyConversationEvent, applyReplayEvent, acceptReadCut, showActivity,
+    applyConversationEvent, applyReplayEvent, acceptReadCut, showPendingTurn,
     publish, clear, applyContent, bindingFailed, dispose,
   }
 }

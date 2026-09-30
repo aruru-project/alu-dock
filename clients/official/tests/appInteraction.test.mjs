@@ -276,8 +276,9 @@ try {
   initialEditor.props['onUpdate:modelValue']('F5 draft preserved'); catalogNative = undefined
   contentSnapshot(); await settle()
   // User report: after a long absence, fresh idle facts must stop the cached
-  // reply spinner without requiring a replayed run.settled or a content reload.
-  const activityVisible = () => !!find(container, item => item.props['aria-label'] === '正在处理')
+  // running turn without requiring a replayed run.settled or a content reload.
+  const runningTurns = () => all(container, item => typeof item.props.class === 'string' && item.props.class.split(' ').includes('alu-turn-summary') && item.props.class.split(' ').includes('is-running'))
+  const activityVisible = () => runningTurns().length > 0
   const cachedRunning = { ...bootstrap, instance: { ...work, execution: 'running' }, records: [], activeEvents: [], cursor: { ...cursor, sequence: 20 } }
   observation({ kind: 'snapshot', bootstrap: cachedRunning, contentToken: 'resume-activity', state: 'connected' })
   for (const record of bootstrap.records) observation({ kind: 'content', token: 'resume-activity', change: { kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true } })
@@ -301,10 +302,13 @@ try {
   assert.equal(activityVisible(), true, 'an older idle read cannot overwrite a newer running state')
   const textDelta = { instanceId: 'work', runtimeGeneration: 1, sequence: 41, occurredAt: 'now', eventType: 'message.delta', data: { messageId: 'resumed-answer', block: 'text', delta: 'Visible answer' } }
   observation({ kind: 'event', event: textDelta }); await settle()
-  assert.equal(activityVisible(), false, 'normal visible output still replaces the placeholder')
+  assert.equal(activityVisible(), true, 'the turn stays running while its output streams')
+  assert.ok(text(container).includes('Visible answer'), 'streamed output shows inside the running turn')
   // Tauri facts deliberately contain no activeEvents, unlike the content seed.
   observation({ kind: 'facts', bootstrap: { ...freshRunning, cursor: { ...cursor, sequence: 42 }, activeEvents: [] } }); await settle()
-  assert.equal(activityVisible(), false, 'running facts do not revive the placeholder after visible output')
+  assert.equal(runningTurns().length, 1, 'running facts do not add a second turn to the one already running')
+  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 1, sequence: 43, occurredAt: 'now', eventType: 'run.settled', data: { result: 'succeeded' } } }); await settle()
+  assert.equal(activityVisible(), false, 'run.settled closes the running turn')
   contentSnapshot(); await settle()
   assert.ok(text(container).includes('OLD SESSION MESSAGE'), 'actual ConversationView displays the original Session')
   assert.ok(find(container, item => item.type === 'img' && item.props.src === 'http://aludock-media.localhost/verified-local-handle'), 'descriptor image displays through a native opaque handle while unrelated history/body loading is held')

@@ -72,7 +72,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="alu-client-shell" :class="{ 'alu-compact-mode': !app.detailMode }">
+  <div class="alu-client-shell">
     <WorkTopbar />
 
     <ConversationRegion>
