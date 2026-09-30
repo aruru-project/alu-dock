@@ -66,45 +66,77 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
 
   /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
-     浮层/抽屉打开时压入一个占位历史条目，返回键触发 popstate 时关闭最上层；
-     通过 ×/Esc/背景手动关闭时用 history.back() 同步消费占位，避免下一次返回键落空。 */
+     每一层打开的浮层/抽屉各压入一个占位历史条目，返回键触发 popstate 时只关闭最上面
+     那一层；通过 ×/Esc/背景手动关闭时用 history.go 同步消费对应数量的占位，
+     避免下一次返回键落空。 */
   const dockToolsOpen = computed(() => commandOpen.value && controlSection.value === 'dock-tools')
-  const backLayerOpen = computed(() => modalOpen.value || app.workDrawerOpen)
-  let backLayerArmed = false
-  let backLayerPopClosing = false
-  let backLayerConsumingManualClose = false
-  watch(backLayerOpen, (open, wasOpen) => {
-    if (open && !wasOpen && !backLayerPopClosing) {
-      window.history.pushState({ aluLayer: true }, '')
-      backLayerArmed = true
-    } else if (!open && wasOpen && backLayerArmed && !backLayerPopClosing) {
-      backLayerArmed = false
-      backLayerConsumingManualClose = true
-      window.history.back()
-    } else if (!open && wasOpen) {
-      backLayerArmed = false
+  const backLayers = {
+    drawer: () => app.workDrawerOpen,
+    'workspace-browser': () => workspaceBrowserOpen.value,
+    delivery: () => deliveryOpen.value,
+    directory: () => directoryOpen.value,
+    control: () => commandOpen.value,
+    'app-settings': () => appSettingsOpen.value,
+    'host-settings': () => hostSettingsOpen.value,
+    expanded: () => composerExpanded.value,
+    image: () => !!imagePreview.value,
+    text: () => !!messageTextView.value,
+    confirm: () => !!confirmDialog.value,
+  }
+  type BackLayer = keyof typeof backLayers
+  const openBackLayers = computed(() => (Object.keys(backLayers) as BackLayer[]).filter((layer) => backLayers[layer]()))
+  /** Open layers in the order they appeared; the last one is what Back closes. */
+  let backStack: BackLayer[] = []
+  let backEntries = 0
+  let consumingManualCloses = 0
+  function syncBackHistory() {
+    const open = openBackLayers.value
+    backStack = [...backStack.filter((layer) => open.includes(layer)), ...open.filter((layer) => !backStack.includes(layer))]
+    const depth = backStack.length
+    if (depth > backEntries) {
+      for (; backEntries < depth; backEntries++) window.history.pushState({ aluLayer: true }, '')
+    } else if (depth < backEntries) {
+      const closed = backEntries - depth
+      backEntries = depth
+      consumingManualCloses++
+      window.history.go(-closed)
     }
-  })
+  }
+  watch(openBackLayers, syncBackHistory)
+
+  function closeBackLayer(layer: BackLayer) {
+    if (layer === 'confirm') settleConfirm(false)
+    else if (layer === 'drawer') app.workDrawerOpen = false
+    else if (layer === 'workspace-browser') workspaceBrowserOpen.value = false
+    else if (layer === 'delivery') deliveryOpen.value = false
+    else if (layer === 'directory') directoryOpen.value = false
+    else if (layer === 'control') commandOpen.value = false
+    else if (layer === 'app-settings') appSettingsOpen.value = false
+    else if (layer === 'host-settings') hostSettingsOpen.value = false
+    else if (layer === 'expanded') composerExpanded.value = false
+    else if (layer === 'text') messageTextView.value = null
+    else {
+      imagePreview.value = null
+      imageSaving.value = false
+      imageSaveStatus.value = null
+    }
+  }
 
   function handlePopstate() {
-    if (backLayerConsumingManualClose) {
-      backLayerConsumingManualClose = false
+    if (consumingManualCloses) {
+      consumingManualCloses--
       return
     }
-    if (!backLayerOpen.value) return
-    if (directoryOpen.value && directoryBusy.value) {
-      window.history.pushState({ aluLayer: true }, '')
-      backLayerArmed = true
+    if (!backEntries) return
+    // The browser already removed this layer's history entry.
+    backEntries--
+    const top = backStack[backStack.length - 1]
+    if (!top) return
+    if (top === 'directory' && directoryBusy.value) {
+      syncBackHistory()
       return
     }
-    backLayerPopClosing = true
-    backLayerArmed = false
-    if (confirmDialog.value) settleConfirm(false)
-    else {
-      closeModal()
-      app.workDrawerOpen = false
-    }
-    void nextTick(() => { backLayerPopClosing = false })
+    closeBackLayer(top)
   }
 
   watch(confirmDialog, async (dialog) => {

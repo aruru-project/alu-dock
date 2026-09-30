@@ -16,7 +16,7 @@ const retainedOperations = new Map()
 globalThis.document = { activeElement: null, title: '' }
 globalThis.HTMLElement = class {}
 globalThis.window = {
-  history: { pushState() {}, back() {} },
+  history: { pushState() {}, back() {}, go() {} },
   localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (storageFails) throw Error("fixture storage failure"); storageWrites++; storage.set(key, value) }, removeItem: key => storage.delete(key) },
   __TAURI_INTERNALS__: { invoke: async (command, args) => {
     if (command === 'pending_operations') return [...retainedOperations.values()]

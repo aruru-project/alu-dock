@@ -152,6 +152,10 @@ const focusSelector = (item, selector) => selector.split(',').some(part => {
   return false
 })
 const windowEvents = new Map()
+// History models only what Android Back uses: entry count and async popstate.
+let historyDepth = 0
+const firePopstate = () => { for (const handler of windowEvents.get('popstate') ?? []) handler({}) }
+const systemBack = () => { historyDepth--; firePopstate() }
 globalThis.Document = class {}; globalThis.ShadowRoot = class {}; globalThis.HTMLElement = class { static [Symbol.hasInstance](item) { return typeof item?.tagName === 'string' } }; globalThis.Element = class {}; globalThis.Node = { TEXT_NODE: 3, ELEMENT_NODE: 1 }
 globalThis.document = Object.assign(new Document(), { visibilityState: 'visible', activeElement: null, documentElement: { dataset: {}, style: {} }, body: { offsetHeight: 0 },
   hasFocus: () => true, addEventListener() {}, removeEventListener() {}, querySelector: () => null, querySelectorAll: () => [], createElement: tag => element(tag) })
@@ -159,7 +163,7 @@ Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { us
 globalThis.window = { __TAURI_INTERNALS__: {}, location: { search: '' }, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (failStorage) throw new Error('fixture storage unavailable'); storage.set(key, value) }, removeItem: key => storage.delete(key) },
   setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame: fn => setTimeout(() => { frames++; fn() }, 0), cancelAnimationFrame: clearTimeout,
-  addEventListener(name, handler) { const handlers = windowEvents.get(name) ?? new Set(); handlers.add(handler); windowEvents.set(name, handlers) }, removeEventListener(name, handler) { windowEvents.get(name)?.delete(handler) }, history: { pushState() {}, back() {} }, getComputedStyle: () => ({ lineHeight: '20px', transitionDelay: '0s', transitionDuration: '0s', animationDelay: '0s', animationDuration: '0s' }) }
+  addEventListener(name, handler) { const handlers = windowEvents.get(name) ?? new Set(); handlers.add(handler); windowEvents.set(name, handlers) }, removeEventListener(name, handler) { windowEvents.get(name)?.delete(handler) }, history: { pushState() { historyDepth++ }, back() { this.go(-1) }, go(delta) { historyDepth += delta; setTimeout(firePopstate, 0) } }, getComputedStyle: () => ({ lineHeight: '20px', transitionDelay: '0s', transitionDuration: '0s', animationDelay: '0s', animationDuration: '0s' }) }
 globalThis.getComputedStyle = window.getComputedStyle
 globalThis.requestAnimationFrame = window.requestAnimationFrame
 globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} }
@@ -803,6 +807,14 @@ try {
   find(confirmation, item => item.type === 'button' && text(item) === '取消').props.onClick(); await removal; await settle()
   assert.equal(toRaw(document.activeElement), removeHost, 'cancelling the covering confirmation restores the underlying surface trigger')
   assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title'))
+  // #315: Android Back closes one layer at a time: the confirmation, then the panel under it.
+  const historyWithSettings = historyDepth
+  const backRemoval = removeHost.props.onClick(); await settle()
+  assert.equal(historyDepth, historyWithSettings + 1, 'the confirmation over Host settings has its own Back entry')
+  systemBack(); await backRemoval; await settle()
+  assert.equal(find(container, item => item.props.role === 'dialog' && String(item.props['aria-label']).startsWith('从此设备删除')), undefined, 'first Back closes the confirmation')
+  assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title'), 'Host settings stays open after the first Back')
+  assert.equal(historyDepth, historyWithSettings, 'Host settings still owns a Back entry')
   // #321: the actual connection form starts one live authorization. Native
   // start/cancel acknowledgements may lag, but old events never own a new form.
   find(hostDialog, item => item.type === 'button' && text(item) === '连接 Host').props.onClick(); await settle()
@@ -853,6 +865,7 @@ try {
   assert.equal(app.activeConnectionId, 'host', 'cancel/retry does not replace the saved selection')
   console.log('PASS: actual Host form start/cancel/fresh retry/exit; no recovery UI; late progress and cancel cannot alter the next attempt')
   find(hostDialog, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
+  assert.equal(historyDepth, historyWithSettings - 1, 'closing the panel by hand consumes exactly its own Back entry')
   assert.equal(toRaw(document.activeElement), answer)
   assert.equal(answer.value, 'unfinished extension answer')
   // #306: static commands render before a refreshed catalog; resource/tool reads are independent.
