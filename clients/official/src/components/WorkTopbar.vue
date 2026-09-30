@@ -58,7 +58,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
       </div>
-      <button ref="dockToolsTrigger" class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on', open: dockToolsOpen }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : selectedDockTools === 'unavailable' ? '当前不可用' : '已关闭'}`" aria-haspopup="dialog" :aria-expanded="dockToolsOpen" @click="openDockTools">
+      <button ref="dockToolsTrigger" class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on', unavailable: selectedDockTools === 'unavailable', open: dockToolsOpen }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : selectedDockTools === 'unavailable' ? '当前不可用' : '已关闭'}`" aria-haspopup="dialog" :aria-expanded="dockToolsOpen" @click="openDockTools">
         <Wrench :size="13" />
         <span class="alu-nav-dock-tools-label">Dock Tools</span>
         <b>{{ selectedDockToolsLabel }}</b>
@@ -367,11 +367,39 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   .alu-nav-stat-pill { padding: 4px 6px; font-size: 10px; }
 }
 @media (max-width: 840px) {
-  .alu-nav-dock-tools { min-width: 40px; justify-content: center; padding-inline: 7px; }
+  /* 手机上 Dock Tools 是和文件、菜单同尺寸的方块图标按钮：扮手颜色 + 角标表示开关，
+     文字状态留给 aria-label。 */
+  .alu-navbar .alu-nav-dock-tools {
+    position: relative;
+    grid-area: tools;
+    width: 40px;
+    min-height: 40px;
+    justify-content: center;
+    padding: 0;
+    border-radius: 9px;
+    color: var(--alu-text-muted);
+  }
+  .alu-nav-dock-tools > svg { width: 17px; height: 17px; }
+  .alu-nav-dock-tools b,
   .alu-nav-dock-tools-label,
   .alu-nav-dock-tools-chevron {
     display: none;
   }
+  .alu-navbar .alu-nav-dock-tools.active { color: var(--alu-mint); }
+  .alu-navbar .alu-nav-dock-tools.unavailable { color: var(--alu-text-faint); }
+  .alu-nav-dock-tools.active::after,
+  .alu-nav-dock-tools.unavailable::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 9px;
+    height: 9px;
+    border: 2px solid var(--alu-nav-bg);
+    border-radius: 50%;
+    background: var(--alu-mint);
+  }
+  .alu-nav-dock-tools.unavailable::after { background: var(--alu-rose); }
   .alu-navbar {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto auto;
@@ -424,7 +452,6 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   .alu-nav-stat-tokens { display: none; }
   .alu-nav-stat-cache { gap: 3px; color: var(--alu-text-muted); }
   .alu-nav-stat-cost { margin-left: auto; color: var(--alu-text); }
-  .alu-navbar .alu-nav-dock-tools { grid-area: tools; width: 53px; min-height: 40px; }
   .alu-navbar .alu-nav-files { grid-area: files; }
   .alu-navbar .alu-nav-hamburger { grid-area: menu; }
   .alu-navbar .alu-nav-files,
