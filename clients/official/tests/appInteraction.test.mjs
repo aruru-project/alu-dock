@@ -36,7 +36,7 @@ nativeResults.set('create-failure', { ...nativeResults.get('new_session'), opera
 storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnectionId: 'host', connections: { host: {
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
-let startPairingNative, cancelPairingNative
+let startPairingNative, cancelPairingNative, downloadNative
 let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], failHostRemoval = false
@@ -88,7 +88,8 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); if (immediateAck) assert.equal(frames, beforeBatchFrame, 'cached data does not wait for a visible frame'); else assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
   if (command === 'start_conversation_follow') { binding = { ...args }; return }
-  if (command === 'list_deliverables') return []
+  if (command === 'list_deliverables') return args.instanceId === 'work' ? [{ deliveryRef: 'report', name: 'report.pdf', sizeBytes: 10 }] : []
+  if (command === 'download_deliverable') return downloadNative(args)
   if (command === 'restored_image_count') return restoredImageCount
   if (command === 'attachment_snapshot') {
     const cut = { revision: ++jobsRevision, jobs: structuredClone([...nativeJobs.values()].filter(job => job.workId === args.workId)) }
@@ -756,6 +757,18 @@ try {
     app.selectWork('work'); await settle()
   }
   console.log('PASS: Work action feedback / failure before and after changing Work / native result remains unconsumed')
+  // #316: a late download failure stays with the Work whose file panel started it.
+  let rejectDownload
+  downloadNative = () => new Promise((_resolve, reject) => { rejectDownload = reject })
+  const deliveryTray = () => find(container, item => item.props['aria-labelledby'] === 'delivery-tray-title')
+  find(container, item => item.props['aria-label'] === '打开文件列表').props.onClick(); await settle()
+  find(deliveryTray(), item => item.props['aria-label'] === '下载 report.pdf').props.onClick(); await settle()
+  app.selectWork('other'); await settle()
+  rejectDownload({ code: 'io_error', message: '保存位置暂时不可用，请重试。' }); await settle()
+  assert.equal(text(deliveryTray()).includes('没有下载完成'), false, "A's late failure does not appear in B's file panel")
+  app.selectWork('work'); await settle()
+  assert.ok(text(deliveryTray()).includes('“report.pdf”没有下载完成。'), 'returning to A shows which file failed')
+  find(deliveryTray(), item => item.props['aria-label'] === '关闭文件列表' && item.type === 'button' && !String(item.props.class ?? '').includes('scrim')).props.onClick(); await settle()
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
   allowExtension = true

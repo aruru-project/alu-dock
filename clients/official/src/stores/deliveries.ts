@@ -10,6 +10,7 @@ import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { DeliverableDto, DeliverableDownloadProgress } from '../lib/types'
 import { useAppStore } from './app'
 import { useSurfacesStore } from './surfaces'
+const workKey = (connectionId: string, instanceId: string) => JSON.stringify([connectionId, instanceId])
 /** Files the Agent delivered for the selected Work and this device's download history. */
 export const useDeliveriesStore = defineStore('deliveries', () => {
   const app = useAppStore()
@@ -18,7 +19,17 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
   const deliverables = ref<DeliverableDto[]>([])
   const deliveryLoading = ref(false)
   const deliveryListLoaded = ref(false)
-  const deliveryError = ref('')
+  /** Loading the current Work's file list; only the current Work's read reports here. */
+  const deliveryListError = ref('')
+  /** Download/open failures stay with the Work whose file panel started them,
+   * so a late failure from A never appears in B's panel. */
+  const deliveryActionErrors = ref<Record<string, string>>({})
+  const currentWorkKey = computed(() => {
+    const context = app.connectionContext
+    const instanceId = selected.value?.id
+    return context && instanceId ? workKey(context.connectionId, instanceId) : ''
+  })
+  const deliveryError = computed(() => deliveryActionErrors.value[currentWorkKey.value] || deliveryListError.value)
   const downloadingDeliveries = ref<Set<string>>(new Set())
   const deliveryProgress = ref<Record<string, number>>({})
   const openingDeliveryKey = ref('')
@@ -81,7 +92,7 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
     }
     const epoch = ++deliveryLoadEpoch
     deliveryLoading.value = true
-    deliveryError.value = ''
+    deliveryListError.value = ''
     try {
       const items = await listDeliverables(instanceId, context)
       if (epoch !== deliveryLoadEpoch || !app.contextMatches(context) || selected.value?.id !== instanceId) return
@@ -89,7 +100,7 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
       deliveryListLoaded.value = true
     } catch (cause) {
       if (epoch !== deliveryLoadEpoch || !app.contextMatches(context) || selected.value?.id !== instanceId) return
-      deliveryError.value = errorMessage(cause, '无法加载当前 Work 的文件。请检查连接后重试。')
+      deliveryListError.value = errorMessage(cause, '无法加载当前 Work 的文件。请检查连接后重试。')
     } finally {
       if (epoch === deliveryLoadEpoch) deliveryLoading.value = false
     }
@@ -106,9 +117,10 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
     }
     const key = deliveryHistoryKey(context.connectionId, work.id, deliverable.deliveryRef)
     if (downloadingDeliveries.value.has(key)) return
+    const origin = workKey(context.connectionId, work.id)
     downloadingDeliveries.value = new Set(downloadingDeliveries.value).add(key)
     deliveryProgress.value = { ...deliveryProgress.value, [key]: 0 }
-    deliveryError.value = ''
+    setActionError(origin, '')
     try {
       const result = await downloadDeliverable(work.id, deliverable, context)
       if (result.status === 'cancelled') return
@@ -125,9 +137,9 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
       })
       const persisted = persistDownloadHistory(downloadHistoryStorage, next)
       downloadHistory.value = next
-      if (!persisted) deliveryError.value = '文件已保存，但下载记录未能更新。下次打开客户端时可能仍显示“下载”。'
+      if (!persisted) setActionError(origin, `“${result.deliverable.name}”已保存，但下载记录未能更新。下次打开客户端时可能仍显示“下载”。`)
     } catch (cause) {
-      deliveryError.value = errorMessage(cause, '文件没有下载完成，请重试。')
+      setActionError(origin, `“${deliverable.name}”没有下载完成。${errorMessage(cause, '请重试。')}`)
     } finally {
       const pending = new Set(downloadingDeliveries.value)
       pending.delete(key)
@@ -141,15 +153,16 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
   async function openDownloadedDeliverable(item: DownloadedDeliverable) {
     const key = deliveryHistoryKey(item.connectionId, item.instanceId, item.deliveryRef)
     if (openingDeliveryKey.value) return
+    const origin = currentWorkKey.value
     openingDeliveryKey.value = key
-    deliveryError.value = ''
+    setActionError(origin, '')
     try {
       await openSavedDeliverable(item.savedLocation)
     } catch (cause) {
       const fallback = item.savedLocation.kind === 'path'
         ? '暂时无法打开保存位置。请稍后重试。'
         : '暂时无法打开这个文件。请稍后重试。'
-      deliveryError.value = errorMessage(cause, fallback)
+      setActionError(origin, errorMessage(cause, fallback))
     } finally {
       if (openingDeliveryKey.value === key) openingDeliveryKey.value = ''
     }
@@ -158,22 +171,31 @@ export const useDeliveriesStore = defineStore('deliveries', () => {
   /** Resolves to whether the past records were removed. */
   async function clearLocalDownloadHistory(): Promise<boolean> {
     if (!olderDownloadHistory.value.length) return false
+    const origin = currentWorkKey.value
     const confirmed = await page.askConfirm('清空过去的下载记录？', '这些记录将从列表移除。已保存的文件保留在原位置。')
     if (!confirmed) return false
     const next = removeDownloadedDeliveries(downloadHistory.value, olderDownloadHistory.value)
     if (!persistDownloadHistory(downloadHistoryStorage, next)) {
-      deliveryError.value = '下载记录未能清空，请重试。'
+      setActionError(origin, '下载记录未能清空，请重试。')
       return false
     }
     downloadHistory.value = next
-    deliveryError.value = ''
+    setActionError(origin, '')
     return true
   }
 
   watch(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id]), () => {
-    ++deliveryLoadEpoch; deliverables.value = []; deliveryListLoaded.value = false; deliveryError.value = ''
+    ++deliveryLoadEpoch; deliverables.value = []; deliveryListLoaded.value = false; deliveryListError.value = ''
     if (selected.value) void refreshDeliverables()
   })
+  function setActionError(origin: string, message: string) {
+    if (!origin) return
+    const next = { ...deliveryActionErrors.value }
+    if (message) next[origin] = message
+    else delete next[origin]
+    deliveryActionErrors.value = next
+  }
+
   let unlisten: UnlistenFn | undefined
   let disposed = false
   async function listenNative() {
