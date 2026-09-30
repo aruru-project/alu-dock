@@ -67,9 +67,15 @@ assert.equal(failedTurn.status, 'failed')
 assert.equal(failedTurn.error, 'model failed')
 assert.equal(failedTurn.endedAt, '2026-01-01T00:00:04Z', 'run.settled closes the live turn at its own time')
 assert.equal(failedProjection.find((item) => item.kind === 'tool')?.turnId, 'live-turn-1', 'tool calls belong to the turn that ran them')
-const settledWithoutRun = projectConversation(bootstrap(state, [event(2, 'extension.notification', { level: 'info', message: '空闲通知' }), event(3, 'run.settled', { result: 'succeeded' })]))
-assert.equal(settledWithoutRun.some((item) => item.kind === 'turn'), false, 'a settle with no run in this segment does not invent a turn')
-assert.equal(settledWithoutRun.find((item) => item.kind === 'notice')?.turnId, undefined, 'notices between runs belong to no turn')
+// A rebuilt replay can carry the settle of a run that was in progress when the
+// read began, with the Work already idle: that segment still belongs to the run.
+const settledInReplay = projectConversation(bootstrap(state, [event(2, 'message.delta', { messageId: 'tail', block: 'text', delta: '收尾' }), event(3, 'run.settled', { result: 'aborted' })]))
+const replayTurn = settledInReplay.find((item) => item.kind === 'turn')
+assert.ok(replayTurn?.kind === 'turn' && replayTurn.continuation === true && replayTurn.status === 'aborted', 'a replay whose first run boundary is a settle continues the run it settles')
+assert.equal(settledInReplay.find((item) => item.kind === 'assistant')?.turnId, 'live-turn-continuation', 'its output stays inside that turn')
+const idleNotices = projectConversation(bootstrap(state, [event(2, 'extension.notification', { level: 'info', message: '空闲通知' })]))
+assert.equal(idleNotices.some((item) => item.kind === 'turn'), false, 'an idle segment with no run boundary has no turn')
+assert.equal(idleNotices.find((item) => item.kind === 'notice')?.turnId, undefined, 'notices between runs belong to no turn')
 const runningProjectionState = { ...state, instance: { ...state.instance, execution: 'running' as const } }
 const waitingProjection = projectConversation(bootstrap(runningProjectionState, [event(1, 'run.started', {})]))
 const waitingTurn = waitingProjection.find((item) => item.kind === 'turn')

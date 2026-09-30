@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { projectRecordGroups, createLiveConversationProjector, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
-import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, turnDurationMs, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
+import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, turnDurationMs, turnHidingAnchor, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
 import type { HistoryRecord, ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
 const parts: ConversationProcessItem[] = [
@@ -155,6 +155,16 @@ reconcileTurnOverrides(untouched, ['live-turn-10'], ['live-turn-10'], ['live-tur
 assert.equal(untouched.size, 0, '没有选择过的轮在底部结束时按默认收起')
 reconcileTurnOverrides(untouched, ['live-turn-10'], ['live-turn-10'], ['live-turn-10'], true)
 assert.equal(untouched.get('live-turn-10'), true, '读者已离开底部时，结束的轮保持展开')
+const handedOff = new Map<string, boolean>()
+reconcileTurnOverrides(handedOff, ['turn:u1', 'live-turn-11'], ['turn:u1', 'turn:u11'], ['live-turn-11'], true)
+assert.equal(handedOff.get('turn:u11'), true, '结束和实时转历史同时发生时，保持展开落到同一位置的新 id 上')
+
+// A saved reading position inside a collapsed turn's process names the turn to open.
+assert.equal(turnHidingAnchor(historySections, 'a1-1')?.id, 'turn:u1', '阅读位置落在折起的工具调用上时，需要展开那一轮')
+assert.equal(turnHidingAnchor(historySections, 'a2-0'), undefined, '最终回复本来就可见，不用展开')
+assert.equal(turnHidingAnchor(historySections, 'record:a1')?.id, 'turn:u1', '阅读位置落在被折起的中间回复行上时同样展开')
+assert.equal(turnHidingAnchor(historySections, 'u1'), undefined, '用户消息不在折叠范围内')
+assert.equal(turnHidingAnchor(historySections, undefined), undefined)
 assert.equal(turnToolCallsLabel({ status: 'running', toolCalls: 2, failedToolCalls: 0 }), '已调用 2 个工具')
 assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolCalls: 1 }), '3 次工具调用（1 次失败）')
 

@@ -201,7 +201,10 @@ export function createLiveConversationProjector(
   }
   // A read can find the run already in progress: its earlier part is history and
   // its run.started is not replayed, so this segment continues the turn before it.
-  if (bootstrap.instance.execution === 'running') openTurn(CONTINUATION_TURN_ID, undefined, true)
+  // A replay whose first run boundary is a settle also started inside that run,
+  // even when the Work has since gone idle.
+  const firstRunBoundary = (bootstrap.activeEvents ?? []).find((event) => event.eventType === 'run.started' || event.eventType === 'run.settled')
+  if (bootstrap.instance.execution === 'running' || firstRunBoundary?.eventType === 'run.settled') openTurn(CONTINUATION_TURN_ID, undefined, true)
 
   function apply(event: ProjectedEvent) {
     const before = items.length

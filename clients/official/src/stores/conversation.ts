@@ -75,6 +75,7 @@ export const useConversationStore = defineStore('conversation', () => {
     conversationViewport.scrollToBottom()
   }
 
+  const restoringAnchorId = conversationViewport.restoringAnchorId
   /** Expanding or collapsing a turn keeps the row the reader is on where it is. */
   function holdReadingPosition(change: () => void) {
     const anchor = conversationViewport.captureAnchor()
@@ -281,5 +282,5 @@ export const useConversationStore = defineStore('conversation', () => {
     const resource = imageResources.value[imageKey]
     if (resource?.state === 'ready') setImageResource(imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
   }
-  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, setReadInterest: conversationSession.setInterest, showAgentActivity, holdReadingPosition, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
+  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, setReadInterest: conversationSession.setInterest, showAgentActivity, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
 })

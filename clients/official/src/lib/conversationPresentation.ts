@@ -149,18 +149,43 @@ export function reconcileTurnOverrides(
   awayFromBottom: boolean,
 ) {
   const known = new Set(before)
-  for (const [id, open] of [...overrides]) {
+  // Where a turn known before now lives: itself, or the new id at its position.
+  const landed = (id: string) => {
+    if (after.includes(id)) return id
     const position = before.indexOf(id)
-    if (position < 0 || after.includes(id)) continue
+    const successor = position >= 0 ? after[position] : undefined
+    return successor && !known.has(successor) ? successor : undefined
+  }
+  for (const [id, open] of [...overrides]) {
+    if (after.includes(id) || !before.includes(id)) continue
     overrides.delete(id)
-    const successor = after[position]
-    if (successor && !known.has(successor)) overrides.set(successor, open)
+    const successor = landed(id)
+    if (successor) overrides.set(successor, open)
   }
   // Settling folds the process by default, but not out from under someone reading it.
   for (const id of settled) {
-    if (!after.includes(id) || overrides.has(id)) continue
-    if (awayFromBottom) overrides.set(id, true)
+    const target = landed(id)
+    if (!target || overrides.has(target)) continue
+    if (awayFromBottom) overrides.set(target, true)
   }
+}
+
+/** The turn whose collapsed body hides the row or part a saved reading position
+ * points at; opening it lets the viewport find that element again. */
+export function turnHidingAnchor(sections: readonly ConversationSection[], anchorId: string | undefined): ConversationTurnSection | undefined {
+  if (!anchorId) return undefined
+  for (const section of sections) {
+    if (section.kind !== 'turn') continue
+    for (const row of section.body) {
+      if (row.id === anchorId) return rowVisibleWhenCollapsed(row, section.finalRowId) ? undefined : section
+      if (row.kind !== 'assistant-group' && row.kind !== 'record') continue
+      const part = row.parts.find((candidate) => candidate.id === anchorId)
+      if (!part) continue
+      const visible = rowVisibleWhenCollapsed(row, section.finalRowId) && partVisibleWhenCollapsed(part, row.id === section.finalRowId)
+      return visible ? undefined : section
+    }
+  }
+  return undefined
 }
 
 /** Only a running turn is measured against the clock; a settled turn without an

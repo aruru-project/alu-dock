@@ -3,7 +3,7 @@ import { computed, onUnmounted, reactive, watch, type Directive } from 'vue'
 import { RefreshCw } from '@lucide/vue'
 import ConversationRow from './ConversationRow.vue'
 import ConversationTurnSummary from './ConversationTurnSummary.vue'
-import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
+import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnHidingAnchor, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationItem, ConversationProcessItem } from '../lib/types'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
@@ -22,6 +22,8 @@ const props = defineProps<{
   toolOpen: (id: string) => boolean
   imageResource: (part: ImagePart) => ConversationImageResource
   holdReadingPosition: (change: () => void) => void
+  /** The saved reading entry the viewport is still waiting to find after a rebuild. */
+  restoringAnchorId: () => string | undefined
 }>()
 
 const emit = defineEmits<{
@@ -93,6 +95,10 @@ watch(sections, (current, previous) => {
   reconcileTurnOverrides(turnOverrides, turnIds(previous ?? []), turnIds(current), settled, props.awayFromBottom)
   runningTurns.clear()
   for (const id of running) runningTurns.add(id)
+  // A saved reading position inside a turn's process (F5) needs that turn open
+  // before the viewport looks for its entry; otherwise it falls back to the end.
+  const hiding = turnHidingAnchor(current, props.restoringAnchorId())
+  if (hiding && !turnOpen(hiding)) turnOverrides.set(hiding.id, true)
 }, { immediate: true })
 function bodyRows(section: ConversationTurnSection) {
   return turnOpen(section) ? section.body : section.body.filter((row) => rowVisibleWhenCollapsed(row, section.finalRowId))
