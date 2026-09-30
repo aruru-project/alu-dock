@@ -184,7 +184,7 @@ test("generated user unit runs the fixed installed CLI with private state", () =
     'Environment="PATH=/opt/node/bin:/home/tester/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"',
     "Restart=on-failure",
     "OOMPolicy=continue",
-    "MemoryMax=20G",
+    "MemoryMax=64G",
     "MemorySwapMax=0",
     "RuntimeDirectory=alu-dock",
     "RuntimeDirectoryMode=0700",

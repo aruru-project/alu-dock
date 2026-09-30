@@ -94,9 +94,10 @@ KillMode=mixed
 # 2026-09-30: a 66 GiB test process in one Worker was OOM-killed and systemd's
 # default OOMPolicy=stop then stopped the whole Dock. Keep Host and the other
 # Works running; the kernel only kills the runaway process. The hard total,
-# with swap excluded, ends a runaway before the machine starts thrashing.
+# with swap excluded, ends a runaway before the machine starts thrashing; it
+# leaves room for a local LLM (llama) started from a Work.
 OOMPolicy=continue
-MemoryMax=20G
+MemoryMax=64G
 MemorySwapMax=0
 RuntimeDirectory=alu-dock
 RuntimeDirectoryMode=0700

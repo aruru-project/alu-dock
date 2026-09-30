@@ -146,7 +146,7 @@ Managed Host、Worker，以及 Agent 从 Worker 中启动并继续运行的开�
 
 2026-08-21 的只读快照中，service cgroup 的主要占用来自 Android Emulator、Gradle/Kotlin、ADB、Vite 和可回收 file cache；这些是 Agent 启动的开发工作负载，Host 进程自身保持在正常规模。
 
-2026-09-30 一个 Worker 里的测试进程占用 66 GiB 被内核 OOM 杀掉，systemd 默认的 `OOMPolicy=stop` 随即停掉整个 Dock。处理（#331）：unit 改为 `OOMPolicy=continue`，并给整个 service 设 `MemoryMax=20G`、`MemorySwapMax=0`。失控进程在拖垮机器前被杀，Host 和其他 Work 继续运行。仍未做的：按 Worker 分 cgroup，以便把「内存超限」归到具体 Work 并在客户端显示；目前只能从 journal 和内核日志查到被杀的进程。
+2026-09-30 一个 Worker 里的测试进程占用 66 GiB 被内核 OOM 杀掉，systemd 默认的 `OOMPolicy=stop` 随即停掉整个 Dock。处理（#331）：unit 改为 `OOMPolicy=continue`，并给整个 service 设 `MemoryMax=64G`、`MemorySwapMax=0`。失控进程在拖垮机器前被杀，Host 和其他 Work 继续运行。仍未做的：按 Worker 分 cgroup，以便把「内存超限」归到具体 Work 并在客户端显示；目前只能从 journal 和内核日志查到被杀的进程。
 
 ### 为什么现在接受
 
@@ -158,7 +158,7 @@ Managed Host、Worker，以及 Agent 从 Worker 中启动并继续运行的开�
 
 - 需要 per-instance 资源计量、限额或清理；
 - 要求大型构建、模拟器或失控子进程不能影响 Host 控制面可用性；
-- 需要在客户端看到是哪个 Work 因内存超限被停，或 20 GiB 的 service 总上限开始影响正常工作；
+- 需要在客户端看到是哪个 Work 因内存超限被停，或 64 GiB 的 service 总上限开始影响正常工作；
 - 需要把后台子进程的归属和 instance stop/Host loss 行为定义为产品契约。
 
 未来做隔离时，先定义 Agent 启动的后台进程由谁拥有、何时继续、何时终止。调整 cgroup 归属的方案必须保持 Worker fencing、Host-loss shutdown 和用户正在运行的工作。
