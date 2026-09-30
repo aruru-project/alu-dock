@@ -128,9 +128,9 @@ body::before {
       radial-gradient(circle, rgb(196 214 255 / .18) .5px, transparent .7px) 63% 72% / 193px 193px,
       var(--c-space-950);
 }
-time { display: block; margin-top: 5px; color: var(--c-text-3); font: 10px/1.3 'JetBrains Mono', monospace; text-align: right; }
+time { display: block; margin-top: 5px; color: var(--c-text-3); font: var(--alu-meta-size)/1.3 'JetBrains Mono', monospace; text-align: right; }
 @keyframes spin { to { transform: rotate(1turn); } }
-kbd { padding: 1px 4px; color: var(--c-text-3); font: 9px 'JetBrains Mono'; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 4px; }
+kbd { padding: 1px 4px; color: var(--c-text-3); font: var(--alu-micro-size) 'JetBrains Mono'; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 4px; }
 .fade-enter-active, .fade-leave-active { transition: opacity 180ms; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {

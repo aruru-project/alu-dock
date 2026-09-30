@@ -76,19 +76,19 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .app-settings-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
 .app-settings-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-blue-border); border-radius: 10px; background: var(--alu-blue-bg); color: var(--alu-blue); place-items: center; }
 .app-settings-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
-.app-settings-heading p { margin: 3px 0 0; color: var(--alu-text-muted); font-size: 9px; }
+.app-settings-heading p { margin: 3px 0 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .app-settings-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .app-settings-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
 .app-settings-layout { display: grid; min-height: 0; grid-template-columns: 190px minmax(0, 1fr); }
 .app-settings-nav { padding: 20px 12px; border-right: 1px solid var(--alu-border); background: #080d17; }
-.app-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: 8px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
-.app-settings-nav-item { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: 10px; }
+.app-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
+.app-settings-nav-item { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .app-settings-nav-item.is-active { border-color: var(--alu-blue-border); background: var(--alu-blue-bg); color: var(--alu-blue); }
 .app-settings-content { min-width: 0; min-height: 0; padding: 28px 30px 34px; overflow-y: auto; }
 .app-settings-intro { padding-bottom: 20px; border-bottom: 1px solid var(--alu-border); }
-.app-settings-intro > span { color: var(--alu-blue); font-size: 8px; font-weight: 750; letter-spacing: .15em; }
+.app-settings-intro > span { color: var(--alu-blue); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .15em; }
 .app-settings-intro h3 { margin: 6px 0 8px; color: var(--alu-text); font-size: 20px; font-weight: 650; }
-.app-settings-intro p { max-width: 520px; margin: 0; color: var(--alu-text-muted); font-size: 10px; line-height: 1.7; }
+.app-settings-intro p { max-width: 520px; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
 .away-options { display: grid; gap: 7px; margin-top: 20px; }
 .away-option { display: grid; min-height: 58px; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 11px; width: 100%; padding: 9px 12px; cursor: pointer; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); color: var(--alu-text); text-align: left; transition: border-color .14s ease, background .14s ease, transform .14s ease; }
 .away-option:hover { border-color: var(--alu-border-light); background: var(--alu-hover); transform: translateX(2px); }
@@ -97,10 +97,10 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .away-option-indicator { width: 13px; height: 13px; border: 1px solid var(--alu-text-faint); border-radius: 50%; box-shadow: 0 0 0 3px transparent inset; }
 .away-option.is-selected .away-option-indicator { border-color: var(--alu-blue); background: var(--alu-blue); box-shadow: 0 0 0 3px #0d1725 inset; }
 .away-option-copy { display: grid; min-width: 0; gap: 3px; }
-.away-option-copy strong { font-size: 11px; font-weight: 650; }
-.away-option-copy small { color: var(--alu-text-muted); font-size: 9px; }
-.away-option-badge { padding: 3px 6px; border-radius: 999px; background: rgba(126, 200, 224, .1); color: var(--alu-blue); font-size: 8px; }
-.app-settings-footnote, .app-settings-error { margin: 16px 0 0; font-size: 9px; }
+.away-option-copy strong { font-size: var(--alu-meta-size); font-weight: 650; }
+.away-option-copy small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.away-option-badge { padding: 3px 6px; border-radius: 999px; background: rgba(126, 200, 224, .1); color: var(--alu-blue); font-size: var(--alu-micro-size); }
+.app-settings-footnote, .app-settings-error { margin: 16px 0 0; font-size: var(--alu-micro-size); }
 .app-settings-footnote { color: var(--alu-text-faint); }
 .app-settings-error { padding: 9px 10px; border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); color: var(--alu-rose); }
 @media (max-width: 640px) {

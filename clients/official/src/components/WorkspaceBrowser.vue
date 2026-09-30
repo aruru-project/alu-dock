@@ -514,9 +514,9 @@ onBeforeUnmount(() => {
   background: linear-gradient(105deg, rgba(16, 27, 45, .98), rgba(10, 16, 29, .98));
 }
 .workspace-heading { min-width: 0; flex: 1; }
-.workspace-kicker { display: block; color: var(--alu-blue); font-size: 8px; font-weight: 700; letter-spacing: .2em; }
+.workspace-kicker { display: block; color: var(--alu-blue); font-size: var(--alu-micro-size); font-weight: 700; letter-spacing: .2em; }
 .workspace-heading h1 { margin: 3px 0 2px; color: var(--alu-text); font-size: 18px; line-height: 1.1; }
-.workspace-heading p { overflow: hidden; margin: 0; color: var(--alu-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-heading p { overflow: hidden; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .workspace-heading code { color: var(--alu-pink); }
 .workspace-header-actions { display: flex; align-items: center; gap: 8px; }
 .workspace-icon-button,
@@ -535,7 +535,7 @@ onBeforeUnmount(() => {
   background: rgba(18, 28, 45, .8);
 }
 .workspace-icon-button { width: 38px; padding: 0; }
-.workspace-toggle { padding: 0 12px; font-size: 10px; }
+.workspace-toggle { padding: 0 12px; font-size: var(--alu-meta-size); }
 .workspace-icon-button:hover,
 .workspace-toggle:hover,
 .workspace-secondary-button:hover { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-hover); }
@@ -565,9 +565,9 @@ onBeforeUnmount(() => {
 .workspace-preview-toolbar > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .workspace-preview-toolbar strong,
 .workspace-preview-toolbar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-preview-toolbar strong { color: var(--alu-text); font-size: 11px; }
-.workspace-preview-toolbar span { color: var(--alu-text-faint); font-size: 8px; }
-.workspace-save-button { flex: 0 0 auto; min-height: 34px; padding: 0 11px; color: var(--alu-blue); font-size: 9px; }
+.workspace-preview-toolbar strong { color: var(--alu-text); font-size: var(--alu-meta-size); }
+.workspace-preview-toolbar span { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.workspace-save-button { flex: 0 0 auto; min-height: 34px; padding: 0 11px; color: var(--alu-blue); font-size: var(--alu-micro-size); }
 .workspace-save-button:hover { color: #dff8ff; border-color: var(--alu-blue-border); background: var(--alu-blue-bg); }
 .workspace-preview-empty,
 .workspace-preview-state,
@@ -585,11 +585,11 @@ onBeforeUnmount(() => {
 .workspace-preview-empty strong,
 .workspace-preview-state strong { color: var(--alu-text); font-size: 13px; }
 .workspace-preview-empty p,
-.workspace-preview-state p { max-width: 470px; margin: 0; color: var(--alu-text-muted); font-family: var(--font-reading); font-size: 11px; line-height: 1.7; }
+.workspace-preview-state p { max-width: 470px; margin: 0; color: var(--alu-text-muted); font-family: var(--font-reading); font-size: var(--alu-meta-size); line-height: 1.7; }
 .workspace-confirm-mark { display: grid; width: 42px; height: 42px; color: #14100a; border-radius: 50%; background: var(--alu-amber); font-size: 22px; font-weight: 900; place-items: center; }
 .workspace-preview-state > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .workspace-primary-button,
-.workspace-secondary-button { min-height: 38px; padding: 0 14px; font-size: 10px; }
+.workspace-secondary-button { min-height: 38px; padding: 0 14px; font-size: var(--alu-meta-size); }
 .workspace-primary-button { color: #07121b; border-color: var(--alu-blue); background: var(--alu-blue); font-weight: 700; }
 .workspace-primary-button:hover { background: #a5e7f5; }
 .workspace-progress { width: min(360px, 75%); height: 5px; overflow: hidden; border-radius: 5px; background: var(--alu-border); }
@@ -602,7 +602,7 @@ onBeforeUnmount(() => {
   padding: 19px 22px 50px;
   color: #d4e3ee;
   background: #070b13;
-  font: 11px/1.65 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
+  font: var(--alu-meta-size)/1.65 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
   tab-size: 2;
   white-space: pre;
   scrollbar-color: var(--alu-border) transparent;
@@ -611,7 +611,7 @@ onBeforeUnmount(() => {
 .workspace-image-preview :deep(.alu-image-zoom-stage) { width: 100%; height: 100%; }
 .workspace-preview-state.error strong,
 .workspace-preview-state.error p { color: var(--alu-rose); }
-.workspace-save-status { position: absolute; right: 14px; bottom: 14px; max-width: calc(100% - 28px); padding: 9px 12px; color: var(--alu-text); border: 1px solid var(--alu-blue-border); border-radius: 8px; background: rgba(12, 29, 41, .96); box-shadow: 0 8px 28px rgba(0, 0, 0, .42); font-size: 9px; }
+.workspace-save-status { position: absolute; right: 14px; bottom: 14px; max-width: calc(100% - 28px); padding: 9px 12px; color: var(--alu-text); border: 1px solid var(--alu-blue-border); border-radius: 8px; background: rgba(12, 29, 41, .96); box-shadow: 0 8px 28px rgba(0, 0, 0, .42); font-size: var(--alu-micro-size); }
 .workspace-mobile-back { display: none; }
 .workspace-fade-enter-active,
 .workspace-fade-leave-active { transition: opacity .16s ease; }
@@ -625,7 +625,7 @@ onBeforeUnmount(() => {
   .workspace-header { min-height: calc(66px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 10px 0; }
   .workspace-mobile-back { display: inline-flex; }
   .workspace-heading h1 { font-size: 15px; }
-  .workspace-heading p { font-size: 9px; }
+  .workspace-heading p { font-size: var(--alu-micro-size); }
   .workspace-kicker { display: none; }
   .workspace-toggle { width: 40px; min-height: 40px; padding: 0; }
   .workspace-toggle span { display: none; }
@@ -638,7 +638,7 @@ onBeforeUnmount(() => {
   .workspace-body.mobile-preview-open .workspace-preview { display: grid; }
   .workspace-preview-toolbar { padding: 0 11px; }
   .workspace-save-button { min-width: 88px; min-height: 40px; }
-  .workspace-text-preview { padding: 15px 14px 44px; font-size: 10px; }
+  .workspace-text-preview { padding: 15px 14px 44px; font-size: var(--alu-meta-size); }
   .workspace-preview-empty,
   .workspace-preview-state,
   .workspace-image-preview { padding: 22px 18px; }

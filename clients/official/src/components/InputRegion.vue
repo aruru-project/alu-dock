@@ -183,8 +183,8 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   box-shadow: 0 0 0 3px rgba(244, 114, 182, 0.08), inset 0 1px 14px rgba(0, 0, 0, 0.2);
 }
 .ui-dialog-composer-footer { align-items: center; }
-.ui-dialog-composer-attachments { min-width: 0; flex: 1; color: var(--alu-text-muted); font-size: 10px; }
-.ui-dialog-composer-status { flex: 0 1 auto; color: var(--alu-amber); font-size: 10px; }
+.ui-dialog-composer-attachments { min-width: 0; flex: 1; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.ui-dialog-composer-status { flex: 0 1 auto; color: var(--alu-amber); font-size: var(--alu-meta-size); }
 .ui-dialog-composer-status[hidden] { display: none; }
 /* ── 输入框斜杠命令建议（锚在 .alu-input-wrap 上，贴着输入框浮出） ── */
 .cmd-suggest {
@@ -216,10 +216,10 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   text-align: left;
 }
 .cmd-suggest-item.selected { background: var(--alu-hover); border-color: var(--alu-border); }
-.cmd-suggest-name { max-width: 48%; flex: 0 1 auto; overflow: hidden; color: var(--alu-amber); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.cmd-suggest-desc { flex: 1 1 auto; overflow: hidden; color: var(--alu-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.cmd-suggest-kind { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: 8px; }
-.cmd-suggest-hint { padding: 10px 12px; color: var(--alu-text-muted); font-size: 11px; }
+.cmd-suggest-name { max-width: 48%; flex: 0 1 auto; overflow: hidden; color: var(--alu-amber); font-size: var(--alu-ui-size); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-suggest-desc { flex: 1 1 auto; overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
+.cmd-suggest-kind { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.cmd-suggest-hint { padding: 10px 12px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 @media (max-width: 1000px) {
   .alu-input-section { padding: 0 clamp(10px, 3vw, 24px); }
   .alu-composer-expand {
@@ -257,7 +257,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   border-radius: 10px;
   background: color-mix(in srgb, var(--alu-blue-bg) 82%, transparent);
   color: var(--alu-text-dim);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
 }
 .alu-queue-tray[hidden] { display: none; }
 .alu-queue-title { color: var(--alu-blue); font-weight: 700; white-space: nowrap; }
@@ -278,14 +278,14 @@ const applyExtensionTitle = (title: string) => { document.title = title }
     font-size: var(--alu-control-size);
   }
 }
-.alu-composer-error, .alu-composer-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 7px 10px; border-radius: 8px; font-size: 10px; }
+.alu-composer-error, .alu-composer-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 7px 10px; border-radius: 8px; font-size: var(--alu-meta-size); }
 .alu-composer-error { color: var(--alu-rose); border: 1px solid var(--alu-rose-border); background: var(--alu-rose-bg); }
 .alu-composer-notice { color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); background: color-mix(in srgb, var(--alu-amber) 7%, transparent); }
 .alu-composer-error button, .alu-composer-notice button { color: inherit; }
 .alu-native-attachments { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 6px; max-height: 228px; margin-top: 8px; padding: 7px; overflow-y: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
-.alu-attachment-selection-summary { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 3px; color: var(--alu-text-dim); font-size: 10px; }
+.alu-attachment-selection-summary { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 3px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
 .alu-attachment-selection-summary span { color: var(--alu-text-muted); }
-.alu-restored-images { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--alu-blue-border); border-radius: 8px; color: var(--alu-text-muted); font-size: 10px; }
+.alu-restored-images { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--alu-blue-border); border-radius: 8px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .alu-restored-images button { color: var(--alu-blue); }
 /* The overlay already excludes the keyboard; fit that space instead of moving above it. */
 .ui-dialog-box-composer { height: min(76dvh, 680px); max-height: 100%; }
@@ -307,7 +307,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   background: color-mix(in srgb, var(--alu-bg-raised) 92%, transparent);
   box-shadow: 0 8px 24px rgba(2, 6, 18, .34);
   color: var(--alu-text-dim);
-  font-size: 10px;
+  font-size: var(--alu-meta-size);
   font-weight: 650;
   cursor: pointer;
   backdrop-filter: blur(10px);

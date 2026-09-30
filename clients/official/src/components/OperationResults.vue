@@ -42,7 +42,7 @@ async function acknowledge(operation: NativeOperation) {
 </template>
 
 <style scoped>
-.alu-operation-results { color: var(--alu-text-dim); border: 1px solid var(--alu-rose-border); border-radius: 8px; font-size: 11px; }
+.alu-operation-results { color: var(--alu-text-dim); border: 1px solid var(--alu-rose-border); border-radius: 8px; font-size: var(--alu-meta-size); }
 summary { cursor: pointer; padding: 8px 10px; color: var(--alu-rose); }
 .alu-operation-results-link { margin-left: 10px; text-decoration: underline; }
 article { padding: 8px 10px; border-top: 1px solid var(--alu-border); }

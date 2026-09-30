@@ -161,7 +161,7 @@ async function copyDiagnostic(text: string) {
   align-items: center;
   gap: 8px;
   color: #f6c56f;
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -204,7 +204,7 @@ async function copyDiagnostic(text: string) {
 .alu-work-state-meta dt {
   margin-bottom: 5px;
   color: var(--alu-text-muted);
-  font-size: 9px;
+  font-size: var(--alu-micro-size);
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -212,7 +212,7 @@ async function copyDiagnostic(text: string) {
   margin: 0;
   color: var(--alu-text-dim);
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -222,13 +222,13 @@ async function copyDiagnostic(text: string) {
   border-left: 2px solid var(--alu-rose);
   background: rgba(248, 113, 113, 0.06);
   color: var(--alu-rose);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
 .alu-diagnostic {
   margin-top: 12px;
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
   line-height: 1.6;
   text-align: left;
 }
@@ -242,7 +242,7 @@ async function copyDiagnostic(text: string) {
   border-left: 2px solid var(--alu-rose);
   background: rgba(248, 113, 113, 0.06);
   color: var(--alu-rose);
-  font: 11px/1.6 var(--font-mono);
+  font: var(--alu-meta-size)/1.6 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -271,7 +271,7 @@ async function copyDiagnostic(text: string) {
   border-radius: 9px;
   padding: 8px 14px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--alu-ui-size);
   font-weight: 700;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
@@ -354,7 +354,7 @@ async function copyDiagnostic(text: string) {
 .center-state h1 { margin: 12px 0 4px; color: var(--c-text-1); font-size: 19px; }
 .center-state p { max-width: 560px; margin: 8px 0 20px; font: 14px/1.6 var(--font-reading); }
 .error-state > svg { color: var(--c-danger); }
-.re-pair-error { width: min(620px, calc(100vw - 32px)); margin: -5px 0 12px; padding: 8px 10px; color: #f8a0a0; font: 11px/1.5 var(--font-reading); text-align: left; background: rgb(248 113 113 / .07); border: 1px solid rgb(248 113 113 / .18); border-radius: 9px; }
+.re-pair-error { width: min(620px, calc(100vw - 32px)); margin: -5px 0 12px; padding: 8px 10px; color: #f8a0a0; font: var(--alu-meta-size)/1.5 var(--font-reading); text-align: left; background: rgb(248 113 113 / .07); border: 1px solid rgb(248 113 113 / .18); border-radius: 9px; }
 @media (max-width: 1000px) {
   .alu-work-state {
     width: min(100%, 760px);

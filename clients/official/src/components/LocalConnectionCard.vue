@@ -80,18 +80,18 @@ watch(() => [props.busy, props.error] as const, ([busy, error]) => {
 .local-connection-card.connected { border-color: color-mix(in srgb, var(--alu-mint) 48%, var(--c-line)); }
 .local-connection-icon { display: grid; width: 32px; height: 32px; place-items: center; border-radius: 8px; color: var(--alu-mint); background: color-mix(in srgb, var(--alu-mint) 10%, transparent); }
 .local-connection-copy { display: grid; min-width: 0; gap: 3px; }
-.local-connection-copy strong { color: var(--c-text-1); font-size: 11px; }
-.local-connection-copy small { color: var(--c-text-3); font: 9px/1.4 var(--font-reading); }
-.local-connection-copy code { overflow: hidden; color: color-mix(in srgb, var(--alu-mint) 75%, var(--c-text-3)); font: 8px/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.local-connection-copy strong { color: var(--c-text-1); font-size: var(--alu-meta-size); }
+.local-connection-copy small { color: var(--c-text-3); font: var(--alu-micro-size)/1.4 var(--font-reading); }
+.local-connection-copy code { overflow: hidden; color: color-mix(in srgb, var(--alu-mint) 75%, var(--c-text-3)); font: var(--alu-micro-size)/1.4 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .local-connection-actions { display: flex; align-items: center; gap: 6px; }
 .local-connection-config { display: grid; width: 34px; height: 34px; cursor: pointer; border: 1px solid var(--c-line); border-radius: 8px; color: var(--c-text-2); place-items: center; }
 .local-connection-config:hover { color: var(--alu-mint); border-color: color-mix(in srgb, var(--alu-mint) 38%, var(--c-line)); }
 .local-connection-config:disabled { cursor: default; opacity: .45; }
 .local-endpoint-editor { display: grid; grid-column: 1 / -1; gap: 8px; padding-top: 10px; border-top: 1px solid var(--c-line-soft); }
-.local-endpoint-editor label { display: grid; gap: 5px; color: var(--c-text-2); font-size: 9px; }
-.local-endpoint-editor input { width: 100%; height: 36px; padding: 0 10px; color: var(--c-text-1); font: 10px var(--font-mono); background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; outline: none; }
+.local-endpoint-editor label { display: grid; gap: 5px; color: var(--c-text-2); font-size: var(--alu-micro-size); }
+.local-endpoint-editor input { width: 100%; height: 36px; padding: 0 10px; color: var(--c-text-1); font: var(--alu-meta-size) var(--font-mono); background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; outline: none; }
 .local-endpoint-editor input:focus { border-color: var(--alu-mint); box-shadow: 0 0 0 2px color-mix(in srgb, var(--alu-mint) 10%, transparent); }
-.local-endpoint-editor p { margin: 0; color: var(--c-text-3); font: 8px/1.5 var(--font-reading); }
+.local-endpoint-editor p { margin: 0; color: var(--c-text-3); font: var(--alu-micro-size)/1.5 var(--font-reading); }
 .local-endpoint-editor footer { display: flex; justify-content: flex-end; gap: 7px; }
 .host-catalog-section > .local-connection-card { margin-bottom: 14px; border-color: color-mix(in srgb, var(--alu-mint) 24%, var(--alu-border)); background: var(--alu-bg-raised); }
 .host-catalog-section .local-connection-card { grid-template-columns: 32px minmax(0, 1fr); }

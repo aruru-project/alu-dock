@@ -68,7 +68,7 @@ const filtered = computed(() => {
 <style scoped>
 .saved-session-list { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
 .saved-session-title { font-size: 13px; font-weight: 600; }
-.saved-session-meta { display: flex; min-width: 0; align-items: baseline; color: var(--alu-text-muted); font-size: 10px; line-height: 1.4; white-space: nowrap; }
+.saved-session-meta { display: flex; min-width: 0; align-items: baseline; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.4; white-space: nowrap; }
 .saved-session-meta > span { flex: 0 0 auto; }
 .saved-session-meta > span + span::before { content: '·'; margin: 0 6px; color: var(--alu-text-faint); }
 .saved-session-meta > .saved-session-cwd { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }

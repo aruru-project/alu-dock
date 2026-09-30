@@ -77,8 +77,8 @@ button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--c-ice
 .attachment-thumbnail { display: block; width: 100%; height: 100%; object-fit: cover; }
 .attachment-card.is-error .attachment-icon { color: var(--c-danger); background: rgb(248 113 113 / .08); }
 .attachment-copy { min-width: 0; flex: 1; }
-.attachment-copy strong { display: block; overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--c-text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-copy strong { display: block; overflow: hidden; font-size: var(--alu-meta-size); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--c-text-3); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
 .attachment-copy small { color: #f4a2a2; }
 .attachment-actions { display: flex; flex: 0 0 auto; gap: 2px; }
 .attachment-actions button { display: grid; width: 34px; height: 34px; padding: 0; color: var(--c-text-2); cursor: pointer; background: transparent; border: 0; border-radius: 8px; place-items: center; }
