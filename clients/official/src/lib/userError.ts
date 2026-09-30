@@ -51,6 +51,9 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '还无法确认刚才的操作是否完成。请刷新状态后确认，不要重复提交。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
+    // The trust question is answered where the flow shows it; a caller without
+    // that UI (Reopen, see #304) must not tell the user to refresh.
+    if (code === 'project_trust_required') return '这项操作需要先确认信任对应的目录，这个客户端还不能在这里确认。请在电脑上的 Alu Dock 终端里完成。'
     if (code === 'invalid_tree_target') return '这个节点已不在当前 Session 中。请重新打开 Session Tree 后再选择。'
     if (code === 'host_unreachable') return '无法连接这台 AluDock。请检查电脑状态、网络和保存的地址，然后重试。'
     if ('message' in cause && (!code || SAFE_ERROR_CODES.has(code))) {

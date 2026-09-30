@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import HostOnboarding from './HostOnboarding.vue'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { FileText, Monitor, Plus, RefreshCw, Settings, Waypoints, WifiOff } from '@lucide/vue'
 import { openDesktopHostLog, openDesktopTui } from '../lib/bridge'
+import { copyPlainText } from '../lib/clipboard'
 import type { Work } from '../lib/types'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
@@ -30,6 +31,23 @@ function inactiveState(work: Work) {
   return { label: 'Work 当前不可用', message: '当前无法连接这个 Work。', action: '' }
 }
 
+/** Raw diagnostics (Host or shell wording, often English) stay behind “查看详情”;
+ * the sentence the user reads first is always ours. */
+const diagnosticCopyState = ref<{ text: string; state: 'copied' | 'failed' } | null>(null)
+function diagnosticCopyLabel(text: string) {
+  const current = diagnosticCopyState.value
+  if (current?.text !== text) return '复制诊断信息'
+  return current.state === 'copied' ? '诊断信息已复制' : '复制失败，请重试'
+}
+async function copyDiagnostic(text: string) {
+  try {
+    await copyPlainText(text)
+    diagnosticCopyState.value = { text, state: 'copied' }
+  } catch {
+    diagnosticCopyState.value = { text, state: 'failed' }
+  }
+}
+
 </script>
 
 <template>
@@ -41,7 +59,12 @@ function inactiveState(work: Work) {
     <div v-else-if="desktopShell?.supported && desktopShell.autoStartLocalHost && !app.payload && desktopShell.startupError" class="center-state error-state offline-host-state">
       <WifiOff :size="28" />
       <h1>Alu Dock 需要你的操作</h1>
-      <p>{{ desktopShell.startupError }}</p>
+      <p>本机 Alu Dock 没有启动成功。可以重新启动，或打开日志查看原因。</p>
+      <details class="alu-diagnostic">
+        <summary>查看详情</summary>
+        <pre>{{ desktopShell.startupError }}</pre>
+        <button type="button" @click="copyDiagnostic(desktopShell.startupError)">{{ diagnosticCopyLabel(desktopShell.startupError) }}</button>
+      </details>
       <div class="pairing-actions">
         <button class="button primary" :disabled="desktopShellBusy" @click="retryDesktopHost"><RefreshCw :size="16" />{{ desktopShellBusy ? '正在启动…' : '重新启动' }}</button>
         <button v-if="desktopShell.logsPath" class="button secondary" @click="runDesktopShellAction(openDesktopHostLog)"><FileText :size="16" />打开日志</button>
@@ -86,7 +109,11 @@ function inactiveState(work: Work) {
         <h1 id="alu-work-state-title">{{ selected.displayName }}</h1>
         <p class="alu-work-state-message">{{ inactiveState(selected).message }}</p>
         <dl class="alu-work-state-meta"><div><dt>Workspace</dt><dd>{{ selected.cwd }}</dd></div></dl>
-        <div v-if="selected.lastError" class="alu-work-state-error">{{ selected.lastError }}</div>
+        <details v-if="selected.lastError" class="alu-diagnostic alu-work-state-diagnostic">
+          <summary>查看详情</summary>
+          <pre>{{ selected.lastError }}</pre>
+          <button type="button" @click="copyDiagnostic(selected.lastError)">{{ diagnosticCopyLabel(selected.lastError) }}</button>
+        </details>
         <div v-if="app.error" class="alu-work-state-error" role="alert">状态没有刷新，下面可能不是最新情况。{{ app.error }}</div>
         <div class="alu-work-state-actions">
           <button v-if="selected.reopenable" class="alu-work-state-primary" :disabled="workMutating" @click="reopenSelectedWork()">{{ workMutating ? '正在继续…' : inactiveState(selected).action }}</button>
@@ -198,6 +225,38 @@ function inactiveState(work: Work) {
   font-size: 11px;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+.alu-diagnostic {
+  margin-top: 12px;
+  font-size: 11px;
+  line-height: 1.6;
+  text-align: left;
+}
+.alu-diagnostic > summary {
+  color: var(--alu-text-muted);
+  cursor: pointer;
+}
+.alu-diagnostic > pre {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--alu-rose);
+  background: rgba(248, 113, 113, 0.06);
+  color: var(--alu-rose);
+  font: 11px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.alu-diagnostic > button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--alu-blue);
+  font: inherit;
+  cursor: pointer;
+}
+.center-state .alu-diagnostic {
+  width: min(560px, calc(100vw - 32px));
+  margin: -8px 0 16px;
 }
 .alu-work-state-actions {
   display: flex;

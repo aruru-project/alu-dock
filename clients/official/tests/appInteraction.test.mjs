@@ -831,8 +831,25 @@ try {
   // #316: leaving a running Work for a stopped one releases the old observation; the Work itself keeps running.
   const followedBeforeLeaving = { ...binding }
   const stopsBeforeLeaving = calls.filter(call => call.command === 'stop_work' || call.command === 'abort_run').length
-  app.applyWorkSnapshot({ ...otherWork, id: 'stopped-work', lifecycle: 'stopped', execution: 'idle' }); await settle()
+  const hostDiagnostic = 'Previous runtime owner release was not confirmed; this instance cannot be reopened'
+  app.applyWorkSnapshot({ ...otherWork, id: 'stopped-work', lifecycle: 'stopped', execution: 'idle', lastError: hostDiagnostic }); await settle()
   app.selectWork('stopped-work'); await settle()
+  // #313: the Host's engineering wording stays behind “查看详情” and can be copied; the sentence shown first is ours.
+  {
+    const stateCard = find(container, item => item.props.class === 'alu-work-state-card')
+    assert.ok(text(find(stateCard, item => item.props.class === 'alu-work-state-message')).includes('这是一个已经结束的历史 Work'), 'the stopped Work page leads with our own sentence')
+    const details = find(stateCard, item => item.type === 'details')
+    assert.ok(details, 'the Host diagnostic has a “查看详情” fold')
+    assert.equal(text(find(details, item => item.type === 'summary')), '查看详情')
+    assert.equal(text(find(details, item => item.type === 'pre')), hostDiagnostic, 'the Host diagnostic is only inside the details')
+    assert.equal(text(stateCard).split(hostDiagnostic).length - 1, 1, 'the diagnostic is not repeated outside the details')
+    let copied = ''
+    navigator.clipboard = { writeText: async value => { copied = value } }
+    await find(details, item => item.type === 'button').props.onClick(); await settle()
+    assert.equal(copied, hostDiagnostic, 'copying the diagnostic copies the original Host wording')
+    assert.equal(text(find(details, item => item.type === 'button')), '诊断信息已复制')
+    delete navigator.clipboard
+  }
   assert.ok(calls.some(call => call.command === 'stop_conversation_follow' && call.args.instanceId === 'work' && call.args.subscriptionId === followedBeforeLeaving.subscriptionId), 'the running Work is no longer followed from a stopped Work page')
   assert.equal(calls.filter(call => call.command === 'stop_work' || call.command === 'abort_run').length, stopsBeforeLeaving, 'leaving does not stop or abort the Work')
   app.selectWork('work'); await settle()

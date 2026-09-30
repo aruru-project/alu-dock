@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert'
-import { userErrorPresentation } from '../src/lib/userError.ts'
+import { userErrorMessage, userErrorPresentation } from '../src/lib/userError.ts'
 
 const parsingFailure = userErrorPresentation({
   code: 'client_error',
@@ -22,3 +22,9 @@ assert.doesNotMatch(parsingFailure.message, /expected value|client_error|更改/
 
 const unrelatedFailure = userErrorPresentation({ code: 'host_unreachable', message: 'raw transport detail' })
 assert.equal(unrelatedFailure.diagnostic, undefined)
+
+// #313: a trust decision this client cannot answer here must not be told to "refresh and retry".
+const trustRequired = userErrorMessage({ code: 'project_trust_required', message: 'Project trust decision required', details: { challengeId: 'c', cwd: '/p' } })
+assert.doesNotMatch(trustRequired, /刷新|Project trust/u)
+assert.match(trustRequired, /信任.*目录/u)
+assert.match(trustRequired, /Alu Dock 终端/u)
