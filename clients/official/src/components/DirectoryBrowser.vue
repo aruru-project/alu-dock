@@ -302,7 +302,11 @@ defineExpose({ goBack })
 .directory-tree-root > span, .directory-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .directory-tree-root > svg, .directory-tree-row > svg { flex-shrink: 0; }
 .directory-tree-row:hover:not(:disabled), .directory-tree-root:hover:not(:disabled), .directory-more:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
-.selected { color: var(--alu-text); background: var(--alu-blue-bg); box-shadow: inset 2px 0 var(--alu-blue); }
+/* 选中目录沿用 Work 列表和 Host 列表的选中样式：樱花粉底、粉边和左侧粉条。 */
+.selected { position: relative; color: var(--alu-text); background: var(--alu-pink-bg); box-shadow: inset 0 0 0 1px var(--alu-pink-border); }
+.selected::before { position: absolute; top: 8px; bottom: 8px; left: 0; width: 2px; border-radius: 0 2px 2px 0; background: var(--alu-pink); content: ''; }
+.selected > svg { color: var(--alu-pink); }
+.selected:hover:not(:disabled) { background: var(--alu-pink-bg); }
 button:disabled { opacity: .5; }
 .directory-chevron { width: 14px; flex: 0 0 14px; }
 .directory-detail { flex: 0 0 auto; color: var(--alu-text-faint); font-size: 8px; }
