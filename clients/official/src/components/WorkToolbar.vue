@@ -27,7 +27,6 @@ const { status: observationStatus, label: connectionLabel, refreshing } = storeT
 const { refreshCurrent } = observation
 const { openHostSettings } = useHostStore()
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
-const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) => app.setDetailMode(value) })
 </script>
 
 <template>
@@ -42,7 +41,6 @@ const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) =
         <ConnectionStatus :state="observationStatus" :label="connectionLabel" @reconnect="refreshCurrent" @settings="openHostSettings" @works="app.workDrawerOpen = true" />
         <div class="alu-bar-sep" />
         <button class="alu-bar-btn" :title="refreshing ? '正在刷新' : '刷新'" :aria-label="refreshing ? '正在刷新' : '刷新'" :disabled="refreshing" @click="refreshCurrent">↻<span class="sm-inline">{{ refreshing ? '正在刷新…' : '刷新' }}</span></button>
-        <button class="alu-bar-btn" :class="{ 'alu-bar-btn-toggle-active': !detailMode }" title="切换显示模式" @click="detailMode = !detailMode"><span>▤</span><span>{{ detailMode ? '详细' : '简洁' }}</span></button>
         <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
         <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline" :class="{ 'is-pending': aborting }">{{ aborting ? '中止中' : '中止' }}</span></button>
       </div>
@@ -81,14 +79,6 @@ const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) =
   background: var(--alu-rose-bg);
   color: var(--alu-rose);
 }
-/* 显示模式切换按钮：激活（简洁模式）高亮 */
-.alu-bar-btn-toggle-active {
-  background: var(--alu-hover);
-  color: var(--alu-blue);
-}
-.alu-bar-btn-toggle-active:hover {
-  color: var(--alu-blue);
-}
 .alu-bar-sep {
   width: 1px;
   height: 16px;
@@ -121,7 +111,6 @@ const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) =
     gap: 2px;
   }
   .alu-bottom-bar-right { margin-left: auto; }
-  .alu-bar-btn-toggle-active { color: var(--alu-blue); }
   .alu-bar-sep { margin: 0 1px; }
 }
 @media (max-width: 640px) {

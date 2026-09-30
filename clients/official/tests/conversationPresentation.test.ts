@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { projectRecordGroups, createLiveConversationProjector, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
-import { assistantMarkdownSource } from '../src/lib/conversationPresentation.ts'
+import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, turnDurationMs, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
 import type { HistoryRecord, ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
 const parts: ConversationProcessItem[] = [
@@ -54,12 +54,13 @@ projector.apply(toolEvent(1, 'tool.started', { toolCallId: 'write-1', toolName: 
 const liveTool = projector.snapshot().find((part) => part.kind === 'tool') as Extract<ConversationProcessItem, { kind: 'tool' }>
 for (let index = 1; index <= 500; index++) projector.apply(toolEvent(index + 1, 'tool.args_updated', { toolCallId: 'write-1', args: { path: 'tmp/result.md', content: '文'.repeat(index * 10) } }))
 for (let index = 1; index <= 200; index++) projector.apply(toolEvent(index + 501, 'tool.output_updated', { toolCallId: 'write-1', text: `output-${index}` }))
-assert.equal(projector.snapshot()[0], liveTool, 'tool updates preserve the original part')
+assert.equal(projector.snapshot()[0]?.kind, 'turn', 'a projector created while running opens the turn the read found in progress')
+assert.equal(projector.snapshot()[1], liveTool, 'tool updates preserve the original part')
 assert.equal(liveTool.preview?.body, `…${'文'.repeat(280)}`)
 assert.equal(liveTool.detail, undefined, 'full detail is assembled only on explicit expansion')
 assert.match(toolDetailText(liveTool), /"content": "文+/)
 projector.apply(toolEvent(702, 'tool.completed', { toolCallId: 'write-1', text: '写入完成' }))
-assert.equal(projector.snapshot()[0], liveTool, 'completion updates the same indexed tool')
+assert.equal(projector.snapshot()[1], liveTool, 'completion updates the same indexed tool')
 assert.equal(liveTool.status, 'done')
 assert.match(toolDetailText(liveTool), /结果\n写入完成/)
 assert.match(toolDetailText(liveTool), /参数\n\{/)
@@ -77,5 +78,63 @@ const afterImage = imageParts({ ...imageRecord, content: [{ ...imageRecord.conte
 assert.equal(afterImage.imageKey, beforeImage.imageKey)
 assert.equal(afterImage.id, beforeImage.id)
 assert.equal(afterImage.source?.type, 'native', 'resource source can improve without retiring the displayed image')
+
+// History has no run boundaries: a user message opens a turn that ends at the last
+// message record before the next user message.
+const record = (recordId: string, source: string, content: HistoryRecord['content'], extra: Partial<HistoryRecord> = {}): HistoryRecord =>
+  ({ recordId, entryId: recordId, kind: 'message', source, visibility: 'conversation', content, ...extra }) as HistoryRecord
+const historyItems = projectRecordGroups([
+  record('u1', 'user', [{ type: 'text', text: '查一下' }], { timestamp: '2026-01-01T00:00:00Z' }),
+  record('a1', 'assistant', [{ type: 'text', text: '好' }, { type: 'tool_call', toolCallId: 'c1', toolName: 'read', args: { path: 'a' } }], { timestamp: '2026-01-01T00:00:05Z', stopReason: 'toolUse' }),
+  record('t1', 'tool', [{ type: 'tool_result', toolCallId: 'c1', toolName: 'read', text: 'ok', isError: false }], { timestamp: '2026-01-01T00:00:09Z', toolCallId: 'c1' }),
+  record('a2', 'assistant', [{ type: 'text', text: '查完了。' }], { timestamp: '2026-01-01T00:04:13Z', stopReason: 'stop' }),
+  { recordId: 's1', entryId: 's1', kind: 'compaction_summary', source: 'runtime', visibility: 'conversation', timestamp: '2026-01-01T00:05:00Z', content: [{ type: 'text', text: '摘要' }] } as HistoryRecord,
+  record('u2', 'user', [{ type: 'text', text: '再来' }], { timestamp: '2026-01-01T00:06:00Z' }),
+  record('a3', 'assistant', [{ type: 'text', text: '开始' }, { type: 'tool_call', toolCallId: 'c2', toolName: 'bash', args: { command: 'ls' } }], { timestamp: '2026-01-01T00:06:03Z', stopReason: 'toolUse' }),
+  record('t2', 'tool', [{ type: 'tool_result', toolCallId: 'c2', toolName: 'bash', text: 'aborted', isError: true }], { timestamp: '2026-01-01T00:06:20Z', toolCallId: 'c2' }),
+])
+const historyTurns = historyItems.filter((item) => item.kind === 'turn')
+assert.equal(historyTurns.length, 2, '每条用户消息开启一轮')
+assert.ok(historyTurns[0]?.kind === 'turn' && historyTurns[1]?.kind === 'turn')
+assert.deepEqual([historyTurns[0].status, historyTurns[0].startedAt, historyTurns[0].endedAt], ['completed', '2026-01-01T00:00:00Z', '2026-01-01T00:04:13Z'], '历史轮用时 = 最后一条记录时间戳 − 用户消息时间戳')
+assert.equal(historyItems.find((item) => item.id === 's1')?.turnId, undefined, '两轮之间的上下文摘要是独立行')
+assert.equal(historyItems.find((item) => item.kind === 'tool' && item.toolCallId === 'c1')?.turnId, 'turn:u1')
+assert.deepEqual([historyTurns[1].status, historyTurns[1].endedAt], ['interrupted', '2026-01-01T00:06:20Z'], '最后一轮停在工具调用上就是未完成')
+const historySections = conversationSections(conversationRows(historyItems))
+assert.deepEqual(historySections.map((section) => section.kind === 'turn' ? `turn:${section.id}` : `row:${section.id}`), ['turn:turn:u1', 'row:record:s1', 'turn:turn:u2'])
+const firstSection = historySections[0]
+assert.ok(firstSection?.kind === 'turn')
+assert.equal(firstSection.toolCalls, 1)
+assert.equal(firstSection.finalPartId, 'a2-0', '最终回复是这一轮最后一段 Agent 正文')
+
+const failedHistoryItems = projectRecordGroups([
+  record('u9', 'user', [{ type: 'text', text: '试试' }], { timestamp: '2026-01-01T01:00:00Z' }),
+  record('a9', 'assistant', [], { timestamp: '2026-01-01T01:00:02Z', stopReason: 'error', error: 'model failed' }),
+])
+const failedHistory = failedHistoryItems.find((item) => item.kind === 'turn')
+assert.ok(failedHistory?.kind === 'turn' && failedHistory.status === 'failed' && failedHistory.error === 'model failed', '失败的历史轮把错误带到摘要行')
+assert.equal(failedHistoryItems.some((item) => item.kind === 'notice'), false, '摘要行已经显示的错误不再重复成一条提示')
+
+// A read that finds the run in progress: the live segment continues the last history turn.
+const liveRunning = createLiveConversationProjector({ instance: { id: 'work', execution: 'running' } } as ConversationBootstrap)
+liveRunning.apply(toolEvent(30, 'message.delta', { messageId: 'reply', block: 'text', delta: '继续' }))
+const merged = conversationSections(conversationRows([...historyItems, ...liveRunning.snapshot()]))
+assert.equal(merged.length, 3, '续上的实时段不会多出一轮')
+const continued = merged[2]
+assert.ok(continued?.kind === 'turn' && continued.status === 'running' && continued.startedAt === '2026-01-01T00:06:00Z' && continued.endedAt === undefined, '合并后用历史的开始时间和实时的运行状态')
+assert.equal(continued.finalPartId, 'live-reply')
+liveRunning.apply(toolEvent(31, 'run.settled', { result: 'aborted' }))
+const settled = conversationSections(conversationRows([...historyItems, ...liveRunning.snapshot()]))[2]
+assert.ok(settled?.kind === 'turn' && settled.status === 'aborted' && settled.endedAt === '2026-08-25T00:00:00Z')
+
+assert.equal(formatTurnDuration(253_000, false), '4m 13s')
+assert.equal(formatTurnDuration(42_000, true), '0:42')
+assert.equal(formatTurnDuration(3_725_000, true), '1:02:05')
+assert.equal(formatTurnDuration(3_725_000, false), '1h 02m')
+assert.equal(formatTurnDuration(9_000, false), '9s')
+assert.equal(turnDurationMs({ startedAt: '2026-01-01T00:00:00Z' }, Date.parse('2026-01-01T00:00:42Z')), 42_000, '运行中的轮按当前时间计时')
+assert.equal(turnDurationMs({ endedAt: '2026-01-01T00:00:42Z' }, 0), undefined, '没有开始时间就不显示用时')
+assert.equal(turnToolCallsLabel({ status: 'running', toolCalls: 2, failedToolCalls: 0 }), '已调用 2 个工具')
+assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolCalls: 1 }), '3 次工具调用（1 次失败）')
 
 console.log('conversation presentation tests passed')

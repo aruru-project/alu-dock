@@ -1,7 +1,8 @@
 import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
+import { projectConversation, toolDetailText } from '../src/lib/conversation.ts'
+import { conversationRows, conversationSections, rowVisibleWhenCollapsed } from '../src/lib/conversationPresentation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
 import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, formatCacheHitRate, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
@@ -51,6 +52,7 @@ assert.equal(state.instance.lastRun, 'failed')
 assert.equal(state.instance.lastError, 'model failed')
 
 const failedProjection = projectConversation(bootstrap(state, [
+  event(1, 'run.started', {}),
   event(2, 'tool.started', { toolCallId: 'tool-1', toolName: 'bash', args: { command: 'rg runtime src/' } }),
   event(3, 'tool.args_updated', { toolCallId: 'tool-1', toolName: 'bash', args: { command: 'rg -n "runtimeGeneration" src/' } }),
   event(4, 'run.settled', { result: 'failed', error: 'model failed' }),
@@ -58,31 +60,54 @@ const failedProjection = projectConversation(bootstrap(state, [
 assert.equal(failedProjection.find((item) => item.kind === 'tool')?.kind, 'tool')
 assert.equal(failedProjection.find((item) => item.kind === 'tool' && item.id === 'live-tool-tool-1')?.status, 'error', 'settlement terminalizes unfinished tools')
 assert.equal(failedProjection.find((item) => item.kind === 'tool' && item.id === 'live-tool-tool-1')?.preview?.body, 'rg -n "runtimeGeneration" src/', 'updated live standard tool arguments replace the earlier collapsed preview')
-assert.equal(failedProjection.some((item) => item.kind === 'notice' && item.tone === 'error' && item.text === 'model failed'), true)
+assert.equal(failedProjection.some((item) => item.kind === 'notice' && item.text === 'model failed'), false, 'the turn summary owns the run outcome; no separate notice repeats it')
+const failedTurn = failedProjection.find((item) => item.kind === 'turn')
+assert.ok(failedTurn?.kind === 'turn')
+assert.equal(failedTurn.status, 'failed')
+assert.equal(failedTurn.error, 'model failed')
+assert.equal(failedTurn.endedAt, '2026-01-01T00:00:04Z', 'run.settled closes the live turn at its own time')
+assert.equal(failedProjection.find((item) => item.kind === 'tool')?.turnId, 'live-turn-1', 'tool calls belong to the turn that ran them')
+const settledWithoutRun = projectConversation(bootstrap(state, [event(2, 'extension.notification', { level: 'info', message: '空闲通知' }), event(3, 'run.settled', { result: 'succeeded' })]))
+assert.equal(settledWithoutRun.some((item) => item.kind === 'turn'), false, 'a settle with no run in this segment does not invent a turn')
+assert.equal(settledWithoutRun.find((item) => item.kind === 'notice')?.turnId, undefined, 'notices between runs belong to no turn')
 const runningProjectionState = { ...state, instance: { ...state.instance, execution: 'running' as const } }
 const waitingProjection = projectConversation(bootstrap(runningProjectionState, [event(1, 'run.started', {})]))
-assert.equal(waitingProjection.some((item) => item.kind === 'activity'), true, 'an accepted run shows the WebConsole Assistant activity row')
+const waitingTurn = waitingProjection.find((item) => item.kind === 'turn')
+assert.ok(waitingTurn?.kind === 'turn' && waitingTurn.status === 'running', 'an accepted run shows as a running turn before any output')
+assert.equal(waitingTurn.startedAt, '2026-01-01T00:00:01Z')
+assert.equal(waitingTurn.continuation, false, 'a replayed run.started makes the bootstrap continuation an exact turn')
+assert.equal(waitingProjection.filter((item) => item.kind === 'turn').length, 1)
 const respondingProjection = projectConversation(bootstrap(runningProjectionState, [event(1, 'run.started', {}), event(2, 'message.delta', { messageId: 'reply', block: 'text', delta: '开始回复' })]))
-assert.equal(respondingProjection.some((item) => item.kind === 'activity'), false, 'the spinner yields to the first visible Assistant output')
-const compactThinkingProjection = projectConversation(bootstrap(runningProjectionState, [
-  event(1, 'run.started', {}),
-  event(2, 'message.delta', { messageId: 'reply', block: 'thinking', delta: '检查图片内容' }),
-]), { compact: true })
-assert.equal(compactThinkingProjection.some((item) => item.kind === 'activity'), true, '简洁模式隐藏思考时仍显示正在处理状态')
-assert.equal(hasCompactConversationContent([
-  { id: 'thinking-only', kind: 'thinking', groupId: 'process-only', title: '思考过程', text: '检查中' },
-  { id: 'tool-only', kind: 'tool', groupId: 'process-only', name: 'read', summary: '完成', status: 'done' },
-  { id: 'info-only', kind: 'notice', groupId: 'process-only', tone: 'info', text: '资源已载入' },
-]), false, '简洁模式把只有过程内容的整行标为不可见，避免残留行占位和时间戳')
-assert.equal(hasCompactConversationContent([{ id: 'reply', kind: 'assistant', groupId: 'reply', text: '完成', time: '10:58' }]), true)
-assert.equal(hasCompactConversationContent([{ id: 'image', kind: 'image', groupId: 'image', imageKey: 'image', mimeType: 'image/png' }]), true)
-assert.equal(hasCompactConversationContent([{ id: 'warning', kind: 'notice', groupId: 'warning', tone: 'warning', text: '需要确认' }]), true, '警告和错误在简洁模式仍可见')
-const compactReadImageProjection = projectConversation(bootstrap(runningProjectionState, [
-  event(1, 'run.started', {}),
-  event(2, 'message.completed', { messageId: 'tool-result', role: 'tool', content: [{ type: 'image', mimeType: 'image/png', contentRef: 'read-image' }] }),
-]), { compact: true })
-assert.equal(compactReadImageProjection.some((item) => item.kind === 'image'), true, 'read 返回的图片在简洁模式仍是可见对话内容')
-assert.equal(compactReadImageProjection.some((item) => item.kind === 'activity'), false, 'read 图片出现后正在处理状态让位给图片')
+assert.equal(respondingProjection.find((item) => item.kind === 'assistant')?.turnId, 'live-turn-1', 'streamed output belongs to the running turn')
+const continuedProjection = projectConversation(bootstrap(runningProjectionState, [event(2, 'message.delta', { messageId: 'reply', block: 'thinking', delta: '检查图片内容' })]))
+const continuedTurn = continuedProjection.find((item) => item.kind === 'turn')
+assert.ok(continuedTurn?.kind === 'turn' && continuedTurn.continuation === true && continuedTurn.status === 'running', 'a read that finds the run in progress continues the turn already in history')
+const freshPromptProjection = projectConversation(bootstrap(runningProjectionState, [event(3, 'message.submitted', { messageId: 'user-3', text: '新的一轮', delivery: 'prompt' })]))
+const freshTurn = freshPromptProjection.find((item) => item.kind === 'turn')
+assert.ok(freshTurn?.kind === 'turn' && freshTurn.continuation === false && freshTurn.id === 'live-turn-3', 'a prompt seen without run.started opens its own turn instead of continuing the previous one')
+const steerProjection = projectConversation(bootstrap(runningProjectionState, [event(3, 'message.submitted', { messageId: 'user-3', text: '补充', delivery: 'steer' })]))
+assert.equal(steerProjection.find((item) => item.kind === 'turn')?.continuation, true, 'a steer message stays inside the running turn')
+assert.equal(steerProjection.find((item) => item.kind === 'user')?.turnId, 'live-turn-continuation')
+
+// Collapsed turns keep the reader's messages, images, warnings and the final reply; process folds behind the summary.
+const collapsedRows = conversationRows([
+  { id: 'turn-a', kind: 'turn', turnId: 'turn-a', status: 'completed', startedAt: '2026-01-01T00:00:00Z', endedAt: '2026-01-01T00:04:13Z' },
+  { id: 'ask', kind: 'user', text: '请查一下', time: '10:00', turnId: 'turn-a' },
+  { id: 'thinking-only', kind: 'thinking', groupId: 'process-only', title: '思考过程', text: '检查中', turnId: 'turn-a' },
+  { id: 'tool-only', kind: 'tool', groupId: 'process-only', name: 'read', summary: '完成', status: 'error', turnId: 'turn-a' },
+  { id: 'info-only', kind: 'notice', groupId: 'process-only', tone: 'info', text: '资源已载入', turnId: 'turn-a' },
+  { id: 'image', kind: 'image', groupId: 'image', imageKey: 'image', mimeType: 'image/png', turnId: 'turn-a' },
+  { id: 'warning', kind: 'notice', groupId: 'warning', tone: 'warning', text: '需要确认', turnId: 'turn-a' },
+  { id: 'reply', kind: 'assistant', groupId: 'reply', text: '完成', time: '10:04', turnId: 'turn-a' },
+  { id: 'after', kind: 'notice', tone: 'info', text: '资源已重新加载（2）' },
+])
+const [turnSection, afterSection] = conversationSections(collapsedRows)
+assert.ok(turnSection?.kind === 'turn' && afterSection?.kind === 'row', 'a notice after the turn stands on its own row')
+assert.deepEqual(turnSection.openers.map((row) => row.id), ['ask'], 'the user message that opened the turn sits above its summary line')
+assert.equal(turnSection.finalPartId, 'reply')
+assert.equal(turnSection.toolCalls, 1)
+assert.equal(turnSection.failedToolCalls, 1, 'a failed tool call is counted in the summary rather than hidden')
+assert.deepEqual(turnSection.body.filter((row) => rowVisibleWhenCollapsed(row, turnSection.finalPartId)).map((row) => row.id), ['image', 'warning', 'reply'], '收起后只保留图片、警告和最终回复')
 
 const groupedBootstrap = bootstrap(state, [])
 groupedBootstrap.records = [
@@ -217,8 +242,9 @@ const liveNotices = projectConversation(bootstrap(state, [
 assert.equal(liveNotices.some((item) => item.kind === 'notice' && item.text === '这是一条完整且不可手动关闭的 Extension 通知。'), true)
 assert.equal(liveNotices.some((item) => item.kind === 'notice' && item.text === '资源已重新加载（2）'), true)
 
-const aborted = projectConversation(bootstrap(state, [event(8, 'run.settled', { result: 'aborted' })]))
-assert.equal(aborted.some((item) => item.kind === 'notice' && item.tone === 'warning' && item.text.includes('中止')), true)
+const aborted = projectConversation(bootstrap(state, [event(7, 'run.started', {}), event(8, 'run.settled', { result: 'aborted' })]))
+assert.equal(aborted.find((item) => item.kind === 'turn')?.status, 'aborted', 'the turn summary reports an abort')
+assert.equal(aborted.some((item) => item.kind === 'notice'), false)
 
 let compactionState = applied(state, event(4, 'compaction.started', {}))
 compactionState = applied(compactionState, event(5, 'run.settled', { result: 'succeeded' }))
@@ -227,8 +253,8 @@ assert.equal(compactionState.instance.execution, 'running', 'older run settlemen
 const cancelledCompaction = projectConversation(bootstrap(state, [
   event(6, 'compaction.started', { reason: 'manual' }),
   event(7, 'compaction.completed', { reason: 'manual', aborted: true, willRetry: false }),
-]), { compact: true })
-assert.equal(cancelledCompaction.some((item) => item.kind === 'notice' && item.tone === 'warning' && item.text.includes('取消')), true, '用户中止上下文压缩后，简洁模式仍显示终止结果')
+]))
+assert.equal(cancelledCompaction.some((item) => item.kind === 'notice' && item.tone === 'warning' && item.text.includes('取消')), true, '用户中止上下文压缩后显示终止结果')
 
 const watchedHostId = ref<string | null>('host-a')
 const watchedGeneration = ref<number | null>(4)

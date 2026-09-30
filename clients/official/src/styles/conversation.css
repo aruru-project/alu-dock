@@ -146,10 +146,6 @@
   border: none;
   line-height: 1.65;
 }
-/* ── 简洁显示模式：隐藏过程块（thinking / tool call / info notice）── */
-.alu-compact-mode .alu-hideable {
-  display: none !important;
-}
 .msg-notice, .msg-warning, .msg-error {
   animation: msgSlideIn 0.22s ease-out;
 }

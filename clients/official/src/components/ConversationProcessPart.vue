@@ -41,12 +41,12 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
 
 <template>
 
-    <details v-if="part.kind === 'thinking'" class="msg-thinking alu-hideable" :open="thinkingIsOpen(part)" :data-conversation-id="part.id" @toggle="rememberThinkingState(part, $event)">
+    <details v-if="part.kind === 'thinking'" class="msg-thinking" :open="thinkingIsOpen(part)" :data-conversation-id="part.id" @toggle="rememberThinkingState(part, $event)">
       <summary @click="markThinkingInteraction(part)">thinking...</summary><div class="think-content">{{ part.text }}</div>
     </details>
     <div v-else-if="part.kind === 'assistant' && streamingParts?.has(part.id)" class="msg-assistant msg-text is-streaming" :data-conversation-id="part.id">{{ part.text }}</div>
     <MarkdownContent v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" :source="part.text" />
-    <div v-else-if="part.kind === 'tool'" class="msg-toolcall alu-hideable" :class="{ 'is-error': part.status === 'error' }" :data-conversation-id="part.id">
+    <div v-else-if="part.kind === 'tool'" class="msg-toolcall" :class="{ 'is-error': part.status === 'error' }" :data-conversation-id="part.id">
       <div class="tool-call-header">
         <span class="tool-name"><span aria-hidden="true">⚙</span>{{ part.name }}</span>
         <span class="tool-status" :data-status="part.status">{{ part.summary }}</span>
@@ -61,7 +61,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
       </details>
     </div>
     <ConversationImage v-else-if="part.kind === 'image'" :part="part" :resource="imageResource(part)" @request="emit('imageRequest', $event)" @preview="emit('imagePreview', $event)" @failed="emit('imageFailed', $event)" />
-    <div v-else :class="[part.tone === 'error' ? 'msg-error' : part.tone === 'warning' ? 'msg-warning' : 'msg-notice', { 'alu-hideable': part.tone === 'info' }]" :data-conversation-id="part.id">{{ part.text }}</div>
+    <div v-else :class="part.tone === 'error' ? 'msg-error' : part.tone === 'warning' ? 'msg-warning' : 'msg-notice'" :data-conversation-id="part.id">{{ part.text }}</div>
 </template>
 
 <style scoped>

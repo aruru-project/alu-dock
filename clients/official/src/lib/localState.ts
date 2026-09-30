@@ -23,7 +23,6 @@ export interface ConnectionLocalUiState {
   attachments: Record<string, AttachmentDto[]>
   pendingAttachments: Record<string, PendingAttachmentSelection[]>
   recentWorkspaces: Record<string, string[]>
-  detailMode: boolean
 }
 
 export interface LocalUiState {
@@ -79,7 +78,6 @@ export function migrateLocalUiState(
       attachments: dictionary<AttachmentDto[]>(),
       pendingAttachments: dictionary<PendingAttachmentSelection[]>(),
       recentWorkspaces: dictionary<string[]>(),
-      detailMode: true,
     }
   }
   return next
@@ -155,7 +153,6 @@ function normalizeLocalUiState(value: unknown): LocalUiState | null {
       attachments,
       pendingAttachments: normalizePendingAttachments(hostValue.pendingAttachments),
       recentWorkspaces,
-      detailMode: typeof hostValue.detailMode === 'boolean' ? hostValue.detailMode : true,
     }
   }
   return {
@@ -255,7 +252,6 @@ export function cloneLocalUiState(state: LocalUiState): LocalUiState {
       attachments,
       pendingAttachments: normalizePendingAttachments(connection.pendingAttachments),
       recentWorkspaces,
-      detailMode: connection.detailMode,
     }
   }
   return {

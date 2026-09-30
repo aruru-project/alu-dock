@@ -33,7 +33,7 @@ function paint() { const callbacks = [...frames.values()]; frames.clear(); for (
 try {
   const { useConversationContent } = await server.ssrLoadModule('/src/lib/conversationContent.ts')
   const { useConversationSession } = await server.ssrLoadModule('/src/lib/conversationSession.ts')
-  const content = useConversationContent({ compact: { value: false }, beforeLayoutChange: () => null,
+  const content = useConversationContent({ beforeLayoutChange: () => null,
     afterLayoutChange: async () => {}, isFollowing: () => false, layoutChanged: () => {}, projected: () => {} })
   content.publish(initial())
   const scope = ref({ connectionId: 'local', selectionGeneration: 1, instanceId: 'work-1', hostEpoch: 'epoch-1' })
@@ -93,7 +93,7 @@ try {
   assert.equal(content.state.value.records.length, 2, 'a late old-domain body cannot enter a new binding')
   content.dispose()
 
-  const makeView = () => useConversationContent({ compact: { value: false }, beforeLayoutChange: () => null,
+  const makeView = () => useConversationContent({ beforeLayoutChange: () => null,
     afterLayoutChange: async () => {}, isFollowing: () => false, layoutChanged: () => {}, projected: () => {} })
   function chunks(view: ReturnType<typeof makeView>, record: ConversationRecord, beforeEntryId?: string) {
     const bytes = Buffer.from(JSON.stringify(record)), decoder = new TextDecoder()

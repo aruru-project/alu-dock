@@ -81,7 +81,6 @@ try {
   const { useConversationContent } = await server.ssrLoadModule('/src/lib/conversationContent.ts')
   const anchors: { preserve: boolean; ids?: Set<string> }[] = []
   const content = useConversationContent({
-    compact: { value: false },
     beforeLayoutChange: (preserve: boolean, ids?: Set<string>) => { anchors.push({ preserve, ids }); return null }, afterLayoutChange: async () => {},
     isFollowing: () => false, layoutChanged: () => {}, projected: () => {},
   })
@@ -114,10 +113,9 @@ try {
   assert.equal(content.streamingPartIds.value.has('live-m'), true)
 
   delta(6, '!')
-  content.reproject(content.state.value)
   delta(7, '?')
   flush()
-  assert.equal(text(), 'Hello world!?', 'a synchronous rebuild consumes queued text exactly once')
+  assert.equal(text(), 'Hello world!?')
   delta(8, '.')
   send(9, 'tool.started', { toolCallId: 't', toolName: 'bash', args: { command: 'pwd' } })
   flush()
