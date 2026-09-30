@@ -3,7 +3,7 @@ import { computed, onUnmounted, reactive, watch, type Directive } from 'vue'
 import { RefreshCw } from '@lucide/vue'
 import ConversationRow from './ConversationRow.vue'
 import ConversationTurnSummary from './ConversationTurnSummary.vue'
-import { conversationRows, conversationSections, rowVisibleWhenCollapsed, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
+import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationItem, ConversationProcessItem } from '../lib/types'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
@@ -87,31 +87,15 @@ function toggleTurn(section: ConversationTurnSection) {
 }
 const turnIds = (list: readonly ConversationSection[]) => list.flatMap((section) => section.kind === 'turn' ? [section.id] : [])
 watch(sections, (current, previous) => {
-  // A settled run is handed from live events to history records under a new
-  // turn id; the reader's choice for that turn follows it to the same position.
-  const before = turnIds(previous ?? [])
-  const after = turnIds(current)
-  const known = new Set(before)
-  for (const [id, open] of [...turnOverrides]) {
-    const position = before.indexOf(id)
-    if (position < 0 || after.includes(id)) continue
-    turnOverrides.delete(id)
-    const successor = after[position]
-    if (successor && !known.has(successor)) turnOverrides.set(successor, open)
-  }
   const running = new Set<string>()
   for (const section of current) if (section.kind === 'turn' && section.status === 'running') running.add(section.id)
-  for (const id of runningTurns) {
-    if (running.has(id) || !after.includes(id)) continue
-    // Settling folds the process, but not out from under someone reading it.
-    if (props.awayFromBottom) turnOverrides.set(id, true)
-    else turnOverrides.delete(id)
-  }
+  const settled = [...runningTurns].filter((id) => !running.has(id))
+  reconcileTurnOverrides(turnOverrides, turnIds(previous ?? []), turnIds(current), settled, props.awayFromBottom)
   runningTurns.clear()
   for (const id of running) runningTurns.add(id)
 }, { immediate: true })
 function bodyRows(section: ConversationTurnSection) {
-  return turnOpen(section) ? section.body : section.body.filter((row) => rowVisibleWhenCollapsed(row, section.finalPartId))
+  return turnOpen(section) ? section.body : section.body.filter((row) => rowVisibleWhenCollapsed(row, section.finalRowId))
 }
 </script>
 
@@ -130,7 +114,7 @@ function bodyRows(section: ConversationTurnSection) {
           @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
         <ConversationTurnSummary :section="section" :open="turnOpen(section)" @toggle="toggleTurn(section)" />
         <ConversationRow v-for="row in bodyRows(section)" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
-          :collapsed="!turnOpen(section)" :final-part-id="section.finalPartId"
+          :collapsed="!turnOpen(section)" :final-row="row.id === section.finalRowId"
           @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
           @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
       </template>

@@ -51,8 +51,9 @@ export interface ConversationTurnSection {
   body: ConversationRow[]
   toolCalls: number
   failedToolCalls: number
-  /** The last Agent text of the turn, which stays visible when the body is collapsed. */
-  finalPartId?: string
+  /** The last Agent message of the turn. Its row stays when the body is collapsed,
+   * so its text is visible and an incomplete preview still gets read in full. */
+  finalRowId?: string
 }
 export type ConversationSection = ConversationTurnSection | { kind: 'row'; id: string; row: ConversationRow }
 
@@ -65,10 +66,12 @@ export function conversationSections(rows: readonly ConversationRow[]): Conversa
       if (previous) {
         // The live segment continues the history turn: the run is still this
         // one, so anything projected between them is part of its process.
+        const trailing: ConversationRow[] = []
         while (sections[sections.length - 1] !== previous) {
-          const trailing = sections.pop()!
-          if (trailing.kind === 'row') previous.body.unshift(trailing.row)
+          const section = sections.pop()!
+          if (section.kind === 'row') trailing.unshift(section.row)
         }
+        previous.body.push(...trailing)
         applyTurnFacts(previous, row)
         owners.set(row.turnId, previous)
         continue
@@ -91,11 +94,12 @@ export function conversationSections(rows: readonly ConversationRow[]): Conversa
     if (section.kind !== 'turn') continue
     for (const row of section.body) {
       if (row.kind !== 'assistant-group') continue
+      section.finalRowId = row.id
       for (const part of row.parts) {
         if (part.kind === 'tool') {
           section.toolCalls += 1
           if (part.status === 'error') section.failedToolCalls += 1
-        } else if (part.kind === 'assistant') section.finalPartId = part.id
+        }
       }
     }
   }
@@ -120,24 +124,53 @@ function applyTurnFacts(section: ConversationTurnSection, turn: ConversationTurn
 }
 
 /** What a collapsed turn still shows: the reader's own messages, images the Agent
- * produced, warnings and errors, and the final reply. Everything else is process. */
-export function partVisibleWhenCollapsed(part: ConversationProcessItem, finalPartId: string | undefined): boolean {
-  return part.kind === 'image'
-    || (part.kind === 'assistant' && part.id === finalPartId)
-    || (part.kind === 'notice' && part.tone !== 'info')
+ * produced, warnings and errors, and the final reply. Everything else is process.
+ * In the final message every text block and notice stays; only its thinking and
+ * tool calls fold. */
+export function partVisibleWhenCollapsed(part: ConversationProcessItem, finalRow: boolean): boolean {
+  if (finalRow) return part.kind !== 'thinking' && part.kind !== 'tool'
+  return part.kind === 'image' || (part.kind === 'notice' && part.tone !== 'info')
 }
 
-export function rowVisibleWhenCollapsed(row: ConversationRow, finalPartId: string | undefined): boolean {
-  if (row.kind === 'user') return true
-  if (row.kind === 'assistant-group' || row.kind === 'record') return row.parts.some((part) => partVisibleWhenCollapsed(part, finalPartId))
+export function rowVisibleWhenCollapsed(row: ConversationRow, finalRowId: string | undefined): boolean {
+  if (row.kind === 'user' || row.id === finalRowId) return true
+  if (row.kind === 'assistant-group' || row.kind === 'record') return row.parts.some((part) => partVisibleWhenCollapsed(part, false))
   if (row.kind === 'notice') return row.tone !== 'info'
   return false
 }
 
-export function turnDurationMs(section: Pick<ConversationTurnSection, 'startedAt' | 'endedAt'>, now: number): number | undefined {
+/** The reader's own open/closed choice for a turn outlives the run's settlement
+ * and the live→history id change, which lands the same turn at the same position. */
+export function reconcileTurnOverrides(
+  overrides: Map<string, boolean>,
+  before: readonly string[],
+  after: readonly string[],
+  settled: Iterable<string>,
+  awayFromBottom: boolean,
+) {
+  const known = new Set(before)
+  for (const [id, open] of [...overrides]) {
+    const position = before.indexOf(id)
+    if (position < 0 || after.includes(id)) continue
+    overrides.delete(id)
+    const successor = after[position]
+    if (successor && !known.has(successor)) overrides.set(successor, open)
+  }
+  // Settling folds the process by default, but not out from under someone reading it.
+  for (const id of settled) {
+    if (!after.includes(id) || overrides.has(id)) continue
+    if (awayFromBottom) overrides.set(id, true)
+  }
+}
+
+/** Only a running turn is measured against the clock; a settled turn without an
+ * end time has no duration. */
+export function turnDurationMs(section: Pick<ConversationTurnSection, 'status' | 'startedAt' | 'endedAt'>, now: number): number | undefined {
   if (!section.startedAt) return undefined
+  const running = section.status === 'running'
+  if (!running && !section.endedAt) return undefined
   const started = Date.parse(section.startedAt)
-  const ended = section.endedAt ? Date.parse(section.endedAt) : now
+  const ended = running ? now : Date.parse(section.endedAt!)
   if (!Number.isFinite(started) || !Number.isFinite(ended)) return undefined
   return Math.max(0, ended - started)
 }

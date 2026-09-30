@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { projectConversation, toolDetailText } from '../src/lib/conversation.ts'
-import { conversationRows, conversationSections, rowVisibleWhenCollapsed } from '../src/lib/conversationPresentation.ts'
+import { conversationRows, conversationSections, partVisibleWhenCollapsed, rowVisibleWhenCollapsed } from '../src/lib/conversationPresentation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
 import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, formatCacheHitRate, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
@@ -98,16 +98,31 @@ const collapsedRows = conversationRows([
   { id: 'info-only', kind: 'notice', groupId: 'process-only', tone: 'info', text: '资源已载入', turnId: 'turn-a' },
   { id: 'image', kind: 'image', groupId: 'image', imageKey: 'image', mimeType: 'image/png', turnId: 'turn-a' },
   { id: 'warning', kind: 'notice', groupId: 'warning', tone: 'warning', text: '需要确认', turnId: 'turn-a' },
-  { id: 'reply', kind: 'assistant', groupId: 'reply', text: '完成', time: '10:04', turnId: 'turn-a' },
+  { id: 'reply-thinking', kind: 'thinking', groupId: 'reply', title: '思考过程', text: '总结', turnId: 'turn-a' },
+  { id: 'reply-1', kind: 'assistant', groupId: 'reply', text: '第一段', time: '10:04', turnId: 'turn-a' },
+  { id: 'reply-2', kind: 'assistant', groupId: 'reply', text: '第二段', time: '10:04', turnId: 'turn-a' },
   { id: 'after', kind: 'notice', tone: 'info', text: '资源已重新加载（2）' },
 ])
 const [turnSection, afterSection] = conversationSections(collapsedRows)
 assert.ok(turnSection?.kind === 'turn' && afterSection?.kind === 'row', 'a notice after the turn stands on its own row')
 assert.deepEqual(turnSection.openers.map((row) => row.id), ['ask'], 'the user message that opened the turn sits above its summary line')
-assert.equal(turnSection.finalPartId, 'reply')
+assert.equal(turnSection.finalRowId, 'reply', 'the final reply is the last Agent message, not one text block')
 assert.equal(turnSection.toolCalls, 1)
 assert.equal(turnSection.failedToolCalls, 1, 'a failed tool call is counted in the summary rather than hidden')
-assert.deepEqual(turnSection.body.filter((row) => rowVisibleWhenCollapsed(row, turnSection.finalPartId)).map((row) => row.id), ['image', 'warning', 'reply'], '收起后只保留图片、警告和最终回复')
+assert.deepEqual(turnSection.body.filter((row) => rowVisibleWhenCollapsed(row, turnSection.finalRowId)).map((row) => row.id), ['image', 'warning', 'reply'], '收起后只保留图片、警告和最终回复')
+const finalRow = turnSection.body.find((row) => row.id === 'reply')
+assert.ok(finalRow?.kind === 'assistant-group')
+assert.deepEqual(finalRow.parts.filter((part) => partVisibleWhenCollapsed(part, true)).map((part) => part.id), ['reply-1', 'reply-2'], '最终回复的每一段正文都保留，只折起它的思考')
+// A long thinking block can use up the history preview budget, leaving the final
+// message with no text until its full body is read. The row must still render so
+// that reading interest reaches it while the turn is collapsed.
+const previewOnlySection = conversationSections(conversationRows([
+  { id: 'turn-b', kind: 'turn', turnId: 'turn-b', status: 'completed', startedAt: '2026-01-01T00:00:00Z', endedAt: '2026-01-01T00:00:30Z' },
+  { id: 'ask-b', kind: 'user', text: '问', time: '10:00', turnId: 'turn-b' },
+  { id: 'final-thinking', kind: 'thinking', groupId: 'final', title: '思考过程', text: '很长的思考', turnId: 'turn-b', sourceEntryIds: ['entry-final'] },
+]))[0]
+assert.ok(previewOnlySection?.kind === 'turn' && previewOnlySection.finalRowId === 'final')
+assert.deepEqual(previewOnlySection.body.filter((row) => rowVisibleWhenCollapsed(row, previewOnlySection.finalRowId)).map((row) => row.id), ['final'], '只有思考预览的最终回复在收起时仍占一行，才能被读取补全')
 
 const groupedBootstrap = bootstrap(state, [])
 groupedBootstrap.records = [

@@ -15,7 +15,7 @@ const props = defineProps<{
   streamingParts?: ReadonlySet<string>
   /** Inside a collapsed turn only images, warnings/errors and the final reply remain. */
   collapsed?: boolean
-  finalPartId?: string
+  finalRow?: boolean
 }>()
 const emit = defineEmits<{
   toolToggle: [id: string, event: Event]
@@ -24,7 +24,7 @@ const emit = defineEmits<{
   imageFailed: [part: ImagePart]
 }>()
 const orderedParts = computed(() => {
-  const parts = props.collapsed ? props.parts.filter((part) => partVisibleWhenCollapsed(part, props.finalPartId)) : props.parts
+  const parts = props.collapsed ? props.parts.filter((part) => partVisibleWhenCollapsed(part, props.finalRow === true)) : props.parts
   return [...parts.filter((part) => part.kind === 'thinking'), ...parts.filter((part) => part.kind !== 'thinking')]
 })
 </script>

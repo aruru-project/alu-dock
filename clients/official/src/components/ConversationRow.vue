@@ -2,7 +2,7 @@
 import { FileText } from '@lucide/vue'
 import AttachmentCard from './AttachmentCard.vue'
 import ConversationProcessParts from './ConversationProcessParts.vue'
-import { assistantMarkdownSource, type ConversationRow } from '../lib/conversationPresentation'
+import { assistantMarkdownSource, partVisibleWhenCollapsed, type ConversationRow } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 defineProps<{
@@ -13,7 +13,8 @@ defineProps<{
   imageResource: (part: ImagePart) => ConversationImageResource
   /** Inside a collapsed turn only images, warnings/errors and the final reply remain. */
   collapsed?: boolean
-  finalPartId?: string
+  /** This row is the turn's final Agent message: its text stays when collapsed. */
+  finalRow?: boolean
 }>()
 const emit = defineEmits<{
   toolToggle: [id: string, event: Event]
@@ -24,6 +25,9 @@ const emit = defineEmits<{
   openText: [title: string, text: string, markdown?: boolean]
 }>()
 const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => part.kind === 'assistant')
+/** The final reply's row stays while its text is still being read, or when the run
+ * ended before any text; say so instead of leaving an empty bubble. */
+const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((part) => partVisibleWhenCollapsed(part, true))
 </script>
 
 <template>
@@ -39,14 +43,14 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
       <article v-else-if="row.kind === 'assistant-group'" class="conversation-row alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
         <img src="../assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
         <div class="alu-msg-assistant-content">
-          <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-part-id="finalPartId" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div>
+          <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /><div v-if="collapsed && finalRow && finalReplyMissing(row.parts)" class="msg-notice">回复正文未显示；点上方摘要行可查看这一轮的过程。</div></div>
           <div v-if="hasAssistant(row.parts) || row.time" class="msg-assistant-timestamp"><button v-if="hasAssistant(row.parts)" type="button" class="message-text-action" aria-label="查看 Agent 回复原文" @click="emit('openText', 'Agent 回复', assistantMarkdownSource(row.parts), true)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
         </div>
       </article>
 
-      <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-part-id="finalPartId" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></details>
+      <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></details>
 
-      <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-part-id="finalPartId" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
+      <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
 
       <div v-else-if="row.kind === 'notice'" class="conversation-row alu-live-notice-row" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
 </template>
