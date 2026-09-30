@@ -1,5 +1,6 @@
 // #275: exercise the real Reload confirmation button with event/reply reordering.
 import assert from 'node:assert/strict'
+import { assertSameReference } from './referenceAssertion.mjs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
@@ -171,12 +172,12 @@ try {
     if (scenario === 'event-before-reply' || scenario === 'reply-before-event') {
       assert.equal(resync.length, 1, `${scenario}: successful Reload reports completion in its initiating surface`)
       assert.ok(find(container, hasClass('reload-summary')), `${scenario}: completion remains visible after the receipt`)
-      assert.equal(find(container, hasClass('alu-dialog-error')), undefined, `${scenario}: no false target-switch error`)
+      assertSameReference(find(container, hasClass('alu-dialog-error')), undefined, `${scenario}: no false target-switch error`)
     } else {
       assert.equal(resync.length, 0, `${scenario}: do not apply an old or failed result`)
-      assert.equal(find(container, hasClass('reload-summary')), undefined)
+      assertSameReference(find(container, hasClass('reload-summary')), undefined)
       if (scenario === 'failure') assert.ok(find(container, hasClass('alu-dialog-error')))
-      else assert.equal(find(container, hasClass('alu-dialog-error')), undefined, 'stale result does not publish into the new target')
+      else assertSameReference(find(container, hasClass('alu-dialog-error')), undefined, 'stale result does not publish into the new target')
     }
     app.unmount()
     console.log(`PASS: Reload confirmation / ${scenario}`)
@@ -225,7 +226,7 @@ try {
     resolveReply({ cancelled: false, instance: { ...work }, editorText: 'navigation draft', selectedText: 'fork draft' })
     await settle()
     assert.equal(resync.length, 1, `${operation} accepts its own returned generation`)
-    assert.equal(find(container, hasClass('alu-dialog-error')), undefined)
+    assertSameReference(find(container, hasClass('alu-dialog-error')), undefined)
     mounted.unmount()
     console.log(`PASS: ${operation} / event-before-reply / initiating surface completion`)
   }
@@ -277,7 +278,7 @@ try {
     await settle(); work.id = 'work-b'; await settle()
     rejectReply({ code: 'project_trust_required', details: { challengeId: 'old-challenge', operationId } })
     await pending; await settle()
-    assert.equal(find(container, hasClass('session-trust')), undefined, 'old trust challenge is never shown for another Work')
+    assertSameReference(find(container, hasClass('session-trust')), undefined, 'old trust challenge is never shown for another Work')
     mounted.unmount()
   }
   console.log('PASS: late Session trust continuation is fenced')
@@ -357,7 +358,7 @@ try {
   await settle()
   oldResolve(templates)
   await settle()
-  assert.equal(find(container, hasClass('markdown-document')), undefined, 'late templates cannot publish into another Work')
+  assertSameReference(find(container, hasClass('markdown-document')), undefined, 'late templates cannot publish into another Work')
   await click('查看默认压缩提示')
   rejectTemplates({ code: 'capability_missing' })
   await settle()

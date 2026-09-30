@@ -1,6 +1,7 @@
 // #301/#302: mount the real App and Pinia stores. Only native IPC and the
 // browser-only Markdown leaf are fixtures; no extracted recovery handlers.
 import assert from 'node:assert/strict'
+import { assertSameReference } from './referenceAssertion.mjs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
@@ -268,7 +269,7 @@ try {
   observation({ kind: 'facts', bootstrap: freshIdle }); await settle()
   assert.equal(app.selectedWork.execution, 'idle')
   assert.equal(activityVisible(), false, 'fresh idle status stops the reply spinner before any history handoff')
-  assert.equal(find(container, item => item.props['data-conversation-id'] === 'old-message'), retainedReply, 'status correction leaves the displayed messages in place')
+  assertSameReference(find(container, item => item.props['data-conversation-id'] === 'old-message'), retainedReply, 'status correction leaves the displayed messages in place')
   observation({ kind: 'content', token: 'resume-activity', change: { kind: 'checkpoint_begin', bootstrap: freshIdle } })
   for (const record of bootstrap.records) observation({ kind: 'content', token: 'resume-activity', change: { kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true } })
   observation({ kind: 'content', token: 'resume-activity', change: { kind: 'checkpoint_end' } }); await settle()
@@ -439,8 +440,8 @@ try {
   recordChunk({ ...bootstrap.records[0], content: [{ type: 'text', text: 'OLD SESSION MESSAGE — COMPLETE BODY' }] })
   await settle()
   assert.ok(text(container).includes('COMPLETE BODY'), 'fast body completion paints while earlier history and another body are held')
-  assert.equal(find(container, item => item.type === 'textarea'), compact)
-  assert.equal(document.activeElement, compact)
+  assertSameReference(find(container, item => item.type === 'textarea'), compact)
+  assertSameReference(document.activeElement, compact)
   assert.deepEqual([compact.selectionStart, compact.selectionEnd], [3, 8])
   releaseHistory(); await settle()
   assert.ok(text(container).includes('EARLIER NATIVE RECORD'), 'the actual earlier button displays the native increment')
@@ -448,7 +449,7 @@ try {
   await find(container, item => item.type === 'button' && text(item) === '重试读取').props.onClick(); await settle()
   assert.equal(calls.at(-1).command, 'read_conversation_content')
   assert.equal(calls.at(-1).args.intent, 'retry')
-  assert.equal(find(container, item => item.type === 'textarea'), compact)
+  assertSameReference(find(container, item => item.type === 'textarea'), compact)
   failCatalog = true
   observation({ kind: 'status', state: 'disconnected', message: 'offline' })
   const refresh = find(container, item => item.type === 'button' && item.props.title === '刷新')
@@ -457,13 +458,13 @@ try {
   assert.ok(text(offlineList).includes('工作列表没有刷新'), '#313: a failed refresh is visible in the Work list')
   assert.ok(text(offlineList).includes('Other Work') || all(offlineList, item => item.props.class === 'alu-instance-link').length === 2, 'the list keeps its Works')
   assert.equal(text(offlineList).includes('暂无工作'), false)
-  assert.equal(find(container, item => item.type === 'textarea'), compact)
-  assert.equal(document.activeElement, compact)
+  assertSameReference(find(container, item => item.type === 'textarea'), compact)
+  assertSameReference(document.activeElement, compact)
   assert.deepEqual([compact.selectionStart, compact.selectionEnd], [3, 8])
   assert.equal(compact.props.disabled, undefined); assert.equal(compact.props.readonly, undefined)
   compact.props['onUpdate:modelValue']('still editing offline'); assert.equal(app.currentDraft, 'still editing offline')
   assert.ok(text(container).includes('OLD SESSION MESSAGE'))
-  assert.equal(find(container, item => String(item.props.class).includes('alu-recovery-notice')), undefined)
+  assertSameReference(find(container, item => String(item.props.class).includes('alu-recovery-notice')), undefined)
   compact.props.onCompositionend({ type: 'compositionend', currentTarget: compact })
   find(container, item => item.props['aria-label'] === '展开编辑').props.onClick(); await settle()
   const expanded = all(container, item => item.type === 'textarea').find(item => item !== compact)
@@ -473,7 +474,7 @@ try {
   recordChunk({ ...bootstrap.records[0], content: [{ type: 'text', text: 'OLD SESSION MESSAGE — EXPANDED BODY' }] }); await settle()
   assert.ok(text(container).includes('EXPANDED BODY'))
   assert.ok(all(container, item => item.type === 'textarea').includes(expanded))
-  assert.equal(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
+  assertSameReference(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
   observation({ kind: 'facts', bootstrap: { ...bootstrap, records: [], cursor: { ...cursor, sequence: 12 } } }); await settle()
   emit('aludock://observation', { ...binding, revision: 0, update: { kind: 'event', replayToken: 'native-content', event: {
     instanceId: 'work', runtimeGeneration: 1, sequence: 13, eventType: 'message.completed', occurredAt: 'now', data: { messageId: 'native-post-cut', role: 'assistant', content: [{ type: 'text', text: 'NATIVE POST-CUT REPLAY' }] },
@@ -482,7 +483,7 @@ try {
   assert.ok(text(container).includes('OLD SESSION MESSAGE'), 'observation facts do not retire an unproven content prefix')
   observation({ kind: 'status', state: 'connected' }); await refresh.props.onClick(); await settle()
   assert.ok(all(container, item => item.type === 'textarea').includes(expanded))
-  assert.equal(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
+  assertSameReference(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
   beforeBatchFrame = frames
   const updates = [
     { revision: ++revision, update: { kind: 'status', state: 'disconnected' } },
@@ -508,7 +509,7 @@ try {
   observation({ kind: 'status', state: 'host_changed' }); await settle()
   assert.ok(find(statusEntry, item => item.type === 'button' && text(item) === '刷新状态'))
 
-  assert.ok(text(container).includes('OLD SESSION MESSAGE')); assert.equal(document.activeElement, expanded)
+  assert.ok(text(container).includes('OLD SESSION MESSAGE')); assertSameReference(document.activeElement, expanded)
   observation({ kind: 'status', state: 'connected' }); await settle()
   const captured = app.captureSubmitDraft('host', 'work', [])
   const base = { operationId: 'new-1', kind: 'new_session', ...context, instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'old', editor: captured }
@@ -524,9 +525,9 @@ try {
   observation({ kind: 'snapshot', target: refreshed, bootstrap: newerHeader, contentToken: 'native-content', canLoadEarlier: false, state: 'connected' })
   await settle()
   assert.ok(text(container).includes(retainedBody), 'newer same-token header keeps the already displayed complete body before any seed')
-  assert.equal(find(container, item => item.props['data-conversation-id'] === 'old-message'), oldRow)
+  assertSameReference(find(container, item => item.props['data-conversation-id'] === 'old-message'), oldRow)
   assert.equal(app.works.find(item => item.id === 'work').name, 'Same Session refreshed', 'newer header control facts still advance')
-  assert.equal(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
+  assertSameReference(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
   recordChunk({ ...bootstrap.records[0], recordId: 'earlier-record', entryId: 'earlier-record', content: [{ type: 'text', text: 'EARLIER NATIVE RECORD' }] })
   recordChunk({ ...bootstrap.records[0], content: [{ type: 'text', text: 'OLD SESSION MESSAGE — EXPANDED BODY' }] })
   contentChange({ kind: 'entry_state', entryId: 'old-message', loading: false, error: '这部分内容暂时无法读取，请重试。' })
@@ -536,8 +537,8 @@ try {
   contentChange({ kind: 'checkpoint_end' }); await settle()
   assert.ok(text(container).includes(retainedBody), 'a body-read failure after a retained header cannot erase its complete row')
   assert.ok(text(container).includes('NEW SEED RECORD'))
-  assert.equal(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'read-to-start remains current after an older truncated checkpoint ends')
-  assert.equal(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
+  assertSameReference(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'read-to-start remains current after an older truncated checkpoint ends')
+  assertSameReference(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
 
   observation({ kind: 'snapshot', target: refreshed, bootstrap: { ...newerHeader, cursor: { ...cursor, sequence: 21 } }, contentToken: 'different-native-branch', canLoadEarlier: false, state: 'connected' })
   await settle()
@@ -546,12 +547,12 @@ try {
     text: JSON.stringify({ ...bootstrap.records[0], recordId: 'branch-record', entryId: 'branch-record', content: [{ type: 'text', text: 'NEW BRANCH BODY' }] }) } })
   observation({ kind: 'content', token: 'different-native-branch', change: { kind: 'checkpoint_end' } }); await settle()
   assert.ok(text(container).includes('NEW BRANCH BODY'))
-  assert.equal(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'a fresh native header owns the boundary even without a State before End')
+  assertSameReference(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'a fresh native header owns the boundary even without a State before End')
   const replacement = { ...work, name: 'New Session', runtimeGeneration: 2, executor: { ...work.executor, piSessionId: 'new' } }
   observation({ kind: 'replacement_snapshot', target: replacement }); await settle()
   assert.equal(text(container).includes('OLD SESSION MESSAGE'), false, 'accepted new retires old before any read or Extension cleanup')
   assert.equal(text(container).includes('NEW BRANCH BODY'), false)
-  assert.equal(find(container, item => item.type === 'textarea'), compact)
+  assertSameReference(find(container, item => item.type === 'textarea'), compact)
   expanded.props['onUpdate:modelValue']('later input')
   emit('aludock://operation', { ...base, state: 'succeeded', result: { instance: replacement, cancelled: false } }); await settle()
   assert.equal(app.currentDraft, 'later input', 'event-before-reply cannot consume later input')
@@ -621,7 +622,7 @@ try {
     assert.deepEqual(app.currentAttachments.map(item => item.fileId), [currentAttachment.fileId, queueAttachment.fileId])
     assert.ok(text(container).includes('queued.png') && text(container).includes('current.png'))
     assert.ok(text(container).includes('已取回 1 个附件'))
-    assert.equal(find(container, item => item.type === 'button' && text(item) === '追加到编辑器'), undefined, 'retrieval completes without a second editing action')
+    assertSameReference(find(container, item => item.type === 'button' && text(item) === '追加到编辑器'), undefined, 'retrieval completes without a second editing action')
     if (ordering === 'event-first') {
       assert.equal(nativeResults.has(receipt.operationId), true)
       const retry = find(container, item => item.type === 'button' && text(item) === '重试关闭')
@@ -695,7 +696,7 @@ try {
   app.selectWork('work'); await settle()
   assert.equal(app.currentDraft, 'send changed later', 'late native send cannot clear a later revision in the original editor')
   assert.ok(text(container).includes('操作已完成，本机保存或确认尚未完成'), 'automatic success acknowledgement failure is visible on the original Work without implying an unknown operation outcome')
-  assert.equal(find(container, item => item.type === 'button' && text(item) === '追加到编辑器'), undefined, 'a send result has no returned text to append')
+  assertSameReference(find(container, item => item.type === 'button' && text(item) === '追加到编辑器'), undefined, 'a send result has no returned text to append')
   compact.props['onUpdate:modelValue']('edited after automatic claim')
   const sendCount = calls.filter(call => call.command === 'submit_message').length
   emit('aludock://operation', sentOperation); await settle()
@@ -742,7 +743,7 @@ try {
     const bootstraps = () => calls.filter(call => call.command === 'bootstrap').length
     emit('aludock://operation', { ...base, operationId: 'unconfirmed-create', kind: 'create_work', instanceId: 'global', runtimeGeneration: 0, sessionId: '', editor: null, state: 'unknown', error: { message: '新建结果尚未确认。', outcomeUnknown: true } })
     await settle()
-    assert.equal(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), undefined, 'an unconfirmed New Work is not reported on the current Work')
+    assertSameReference(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), undefined, 'an unconfirmed New Work is not reported on the current Work')
     const workList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
     assert.ok(text(workList).includes('上一次新建工作的结果还没有确认'), 'the Work list reports the unconfirmed New Work')
     const beforeListCheck = bootstraps()
@@ -753,7 +754,7 @@ try {
     await find(workList, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
     failCatalog = true
     assert.ok(text(workList).includes('工作列表已刷新'))
-    assert.equal(find(workList, item => item.type === 'button' && text(item) === '刷新确认'), undefined)
+    assertSameReference(find(workList, item => item.type === 'button' && text(item) === '刷新确认'), undefined)
     // The Work's own unconfirmed Stop is refreshed from the command center, not silently ignored.
     emit('aludock://operation', { ...base, operationId: 'unconfirmed-stop', kind: 'stop_work', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '停止结果尚未确认。', outcomeUnknown: true } })
     await settle()
@@ -763,7 +764,7 @@ try {
     await find(controlDialog, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
     assert.equal(bootstraps(), beforeControlCheck + 1, "the command center's refresh checks the Work's unconfirmed Stop")
     controlDialog.parent.props.onKeydown({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} }); await settle()
-    assert.equal(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined)
+    assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined)
   }
   // Review P2: action feedback belongs to its initiating Work, including a
   // failure delivered after selection changes. Native failures stay retained.
@@ -834,14 +835,14 @@ try {
     find(followNotice(), item => item.type === 'button').props.onClick(); await settle()
     assert.equal(calls.filter(call => call.command === 'start_conversation_follow').length, followsBefore + 1, 'reconnect starts following again')
     observation({ kind: 'status', state: 'connected' }); await settle()
-    assert.equal(followNotice(), undefined)
+    assertSameReference(followNotice(), undefined)
     failAck = true
     emit('aludock://observation', { ...binding, revision: ++revision, deliveryId: 1, update: { kind: 'status', state: 'connected' } }); await settle()
     failAck = false
     assert.ok(followNotice() && text(followNotice()).includes('更新确认没有送达'), 'a failed acknowledgement, after which no updates arrive, is shown')
     find(followNotice(), item => item.type === 'button').props.onClick(); await settle()
     observation({ kind: 'status', state: 'connected' }); await settle()
-    assert.equal(followNotice(), undefined)
+    assertSameReference(followNotice(), undefined)
   }
   // #313: a slow Model change says what it is doing while the choices are disabled.
   {
@@ -853,7 +854,7 @@ try {
     assert.ok(text(modelDialog).includes('正在切换 Model 到 fixture/model'), 'the pending change is named')
     finishModel(JSON.parse(JSON.stringify(app.selectedWork))); await settle()
     modelNative = undefined
-    assert.equal(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model'), undefined)
+    assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model'), undefined)
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
@@ -873,11 +874,11 @@ try {
   const answersBeforeComposingEscape = calls.filter(call => call.command === 'respond_extension_interaction').length
   find(teleport, item => item.type === 'section' && item.props.role === 'dialog').props.onKeydown({ key: 'Escape', isComposing: true, preventDefault() {}, stopPropagation() {} }); await settle()
   assert.equal(calls.filter(call => call.command === 'respond_extension_interaction').length, answersBeforeComposingEscape, 'composing Escape does not cancel the question')
-  assert.equal(find(teleport, item => item.type === 'input'), answer)
+  assertSameReference(find(teleport, item => item.type === 'input'), answer)
   assert.equal(answer.value, 'unfinished extension answer')
   const commandsButton = find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心'))
   commandsButton.props.onClick(); await settle()
-  assert.equal(find(teleport, item => item.type === 'input'), answer)
+  assertSameReference(find(teleport, item => item.type === 'input'), answer)
   assert.equal(answer.value, 'unfinished extension answer')
   const commandDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
   assert.ok(commandDialog)
@@ -892,14 +893,14 @@ try {
   assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), 'modal ancestor Escape also respects composition')
   compact.props.onCompositionend({ type: 'compositionend', currentTarget: compact })
   find(commandDialog, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
-  assert.equal(find(teleport, item => item.type === 'input'), answer)
+  assertSameReference(find(teleport, item => item.type === 'input'), answer)
   assert.equal(answer.value, 'unfinished extension answer')
-  assert.equal(toRaw(document.activeElement), answer, 'Extension answer wins focus after a normal modal closes')
+  assertSameReference(toRaw(document.activeElement), answer, 'Extension answer wins focus after a normal modal closes')
   // Work-state events must not apply an unrelated snapshot to the Extension's
   // local answer or reset the conversation's tool-expansion choices.
   observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 201, occurredAt: '2026-09-20', eventType: 'session.metrics_changed', data: { metrics: { cost: 1 } } } })
   await settle()
-  assert.equal(find(teleport, item => item.type === 'input'), answer)
+  assertSameReference(find(teleport, item => item.type === 'input'), answer)
   assert.equal(answer.value, 'unfinished extension answer')
   observation({ kind: 'status', state: 'identity_error' }); await settle()
   const connectionStatus = find(container, item => item.type === 'details' && item.props['aria-label'] === '连接状态')
@@ -912,14 +913,14 @@ try {
   const confirmation = find(container, item => item.props.role === 'dialog' && String(item.props['aria-label']).startsWith('从此设备删除'))
   assert.ok(confirmation)
   find(confirmation, item => item.type === 'button' && text(item) === '取消').props.onClick(); await removal; await settle()
-  assert.equal(toRaw(document.activeElement), removeHost, 'cancelling the covering confirmation restores the underlying surface trigger')
+  assertSameReference(toRaw(document.activeElement), removeHost, 'cancelling the covering confirmation restores the underlying surface trigger')
   assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title'))
   // #315: Android Back closes one layer at a time: the confirmation, then the panel under it.
   const historyWithSettings = historyDepth
   const backRemoval = removeHost.props.onClick(); await settle()
   assert.equal(historyDepth, historyWithSettings + 1, 'the confirmation over Host settings has its own Back entry')
   systemBack(); await backRemoval; await settle()
-  assert.equal(find(container, item => item.props.role === 'dialog' && String(item.props['aria-label']).startsWith('从此设备删除')), undefined, 'first Back closes the confirmation')
+  assertSameReference(find(container, item => item.props.role === 'dialog' && String(item.props['aria-label']).startsWith('从此设备删除')), undefined, 'first Back closes the confirmation')
   assert.ok(find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title'), 'Host settings stays open after the first Back')
   assert.equal(historyDepth, historyWithSettings, 'Host settings still owns a Back entry')
   // #316: removing another saved Host leaves the current Work, its question and its answer in place.
@@ -935,10 +936,10 @@ try {
   assert.ok(find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Spare'), 'the Host stays listed after a failed removal')
   failHostRemoval = false
   await removeSpare()
-  assert.equal(find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Spare'), undefined, 'the removed Host leaves the list')
+  assertSameReference(find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Spare'), undefined, 'the removed Host leaves the list')
   assert.equal(text(hostDialog).includes('没有删除'), false)
   assert.equal(app.selectedWorkId, 'work', 'the current Work stays selected')
-  assert.equal(find(teleport, item => item.type === 'input'), answer, 'the open question stays on screen')
+  assertSameReference(find(teleport, item => item.type === 'input'), answer, 'the open question stays on screen')
   assert.equal(answer.value, 'unfinished extension answer')
   assert.equal(calls.filter(call => call.command === 'release_extension_control').length, releasesBeforeRemoval, 'the question is not released')
   assert.equal(calls.filter(call => call.command === 'bootstrap').length, bootstrapsBeforeRemoval, 'the current Host is not reloaded')
@@ -988,12 +989,12 @@ try {
     return true
   }
   await find(pairingForm, item => item.props['aria-label'] === '收起配对表单').props.onClick(); await settle()
-  assert.equal(find(hostDialog, item => item.type === 'form' && String(item.props.class).includes('host-pairing-card')), undefined)
+  assertSameReference(find(hostDialog, item => item.type === 'form' && String(item.props.class).includes('host-pairing-card')), undefined)
   assert.equal(app.activeConnectionId, 'host', 'cancel/retry does not replace the saved selection')
   console.log('PASS: actual Host form start/cancel/fresh retry/exit; no recovery UI; late progress and cancel cannot alter the next attempt')
   find(hostDialog, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
   assert.equal(historyDepth, historyWithSettings - 1, 'closing the panel by hand consumes exactly its own Back entry')
-  assert.equal(toRaw(document.activeElement), answer)
+  assertSameReference(toRaw(document.activeElement), answer)
   assert.equal(answer.value, 'unfinished extension answer')
   // #306: static commands render before a refreshed catalog; resource/tool reads are independent.
   observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 202, occurredAt: 'now', eventType: 'resources.reloaded', data: {} } }); await settle()
@@ -1039,7 +1040,7 @@ try {
     assert.equal(submittedAnswer?.interactionId, `new-${outcome}`)
     assert.equal(submittedAnswer.value, 'new answer')
     assert.equal(calls.filter(call => call.command === 'respond_extension_interaction' && call.args.interactionId === `new-${outcome}`).length, 1)
-    assert.equal(find(teleport, item => item.props.role === 'dialog'), undefined, 'successful answering closes the interaction, not just the submit promise')
+    assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined, 'successful answering closes the interaction, not just the submit promise')
   }
   // #306 pre-merge review: background detach/reacquire keeps the same question, not the old connection object.
   for (const outcome of ['success', 'failure', 'unknown']) {
@@ -1067,7 +1068,7 @@ try {
     await replying; await settle()
     assert.equal(calls.filter(call => call.command === 'respond_extension_interaction' && call.args.interactionId === id).length, 1, 'recovery does not replay the answer')
     if (outcome === 'success') {
-      assert.equal(find(teleport, item => item.props.role === 'dialog'), undefined, 'the same question closes when its original answer succeeded')
+      assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined, 'the same question closes when its original answer succeeded')
       continue
     }
     if (outcome === 'unknown') {
@@ -1086,7 +1087,7 @@ try {
     assert.equal(submittedAnswer?.interactionId, id)
     assert.equal(submittedAnswer.value, outcome === 'unknown' ? 'confirmed answer' : 'answer survives background')
     assert.equal(submittedAnswer.handle, extensionBinding.handle)
-    assert.equal(find(teleport, item => item.props.role === 'dialog'), undefined)
+    assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined)
   }
   console.log('PASS: Model preserves command completion; same-question foreground recovery handles failure/unknown without replay; successful answers close their dialogs')
   console.log('PASS: ready command/resource sections and independent Extension answers; late success/failure/unknown stays with the original question')
@@ -1122,7 +1123,7 @@ try {
   assert.equal(standaloneCapture.message, 'independently mounted input')
   assert.equal(standaloneCapture.operationEditor.text, standaloneCapture.message)
   assert.equal(standaloneStore.currentDraft, '')
-  assert.equal(find(standaloneContainer, item => item.type === 'textarea'), standaloneEditor)
+  assertSameReference(find(standaloneContainer, item => item.type === 'textarea'), standaloneEditor)
   console.log('PASS: independently mounted input / real editor owner and native API / Enter sends / operation claims the frozen draft')
 
   // #301/#302 upload retention: real App/Pinia/controls, native IPC fixture only.
@@ -1176,7 +1177,7 @@ try {
   assert.equal(text(uploadContainer).includes('LATEST HOST RESULT'), false)
   contentChange({ kind: 'checkpoint_end' }); await settle()
   assert.ok(text(uploadContainer).includes('LATEST HOST RESULT'))
-  assert.equal(uploadEditor(), editorDuringRefresh)
+  assertSameReference(uploadEditor(), editorDuringRefresh)
   assert.equal(uploadApp.currentDraft, 'keep this draft')
   uploadApp.selectWork('work'); await settle(); contentSnapshot(); await settle()
   console.log('PASS: Work switch displays cached content once / requests latest asynchronously / applies refresh once / editor preserved')

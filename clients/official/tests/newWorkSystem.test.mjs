@@ -1,5 +1,6 @@
 // Card 271: real Vue buttons and TS bridge; only native IPC is a fixture.
 import assert from 'node:assert/strict'
+import { assertSameReference } from './referenceAssertion.mjs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
@@ -175,7 +176,7 @@ try {
     await click('选择的模板')
     await click('阅读 选择的模板')
     if (scenario.startsWith('body-')) {
-      assert.equal(find(container, hasClass('new-work-back')), undefined, 'Reader owns the only back action')
+      assertSameReference(find(container, hasClass('new-work-back')), undefined, 'Reader owns the only back action')
       if (scenario === 'body-back') await click('返回 system 选择')
       if (scenario === 'body-close') await click('关闭')
       if (scenario === 'body-connection') store.catalog.selectionGeneration++
