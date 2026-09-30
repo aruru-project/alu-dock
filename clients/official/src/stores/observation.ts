@@ -271,11 +271,18 @@ export const useObservationStore = defineStore('observation', () => {
     return app.payload ? 'Dock 已连接' : '等待连接'
   })
 
+  const refreshing = ref(false)
   async function refreshCurrent() {
-    const workId = app.selectedWork?.id
-    await app.load()
-    if (workId && app.selectedWork?.id === workId && app.selectedWork.lifecycle === 'active') {
-      await load(workId, true)
+    if (refreshing.value) return
+    refreshing.value = true
+    try {
+      const workId = app.selectedWork?.id
+      await app.load()
+      if (workId && app.selectedWork?.id === workId && app.selectedWork.lifecycle === 'active') {
+        await load(workId, true)
+      }
+    } finally {
+      refreshing.value = false
     }
   }
 
@@ -413,7 +420,7 @@ export const useObservationStore = defineStore('observation', () => {
   })
 
   return {
-    label: connectionLabel, refreshCurrent, loading, error, status, connected, active, windowFocused,
+    label: connectionLabel, refreshCurrent, refreshing, loading, error, status, connected, active, windowFocused,
     queue: computed(() => facts.value?.queue ?? []), listenNative, listenFocus, afterLoad, load, detach, canContinue, reportRouteError, acceptWork, queueRetrieved,
     attachDisplay, onConfigChanged: configChanged.on, onCompactionSettled: compactionSettled.on, onReplaced: replaced.on,
   }

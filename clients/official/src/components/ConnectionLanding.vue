@@ -87,10 +87,11 @@ function inactiveState(work: Work) {
         <p class="alu-work-state-message">{{ inactiveState(selected).message }}</p>
         <dl class="alu-work-state-meta"><div><dt>Workspace</dt><dd>{{ selected.cwd }}</dd></div></dl>
         <div v-if="selected.lastError" class="alu-work-state-error">{{ selected.lastError }}</div>
+        <div v-if="app.error" class="alu-work-state-error" role="alert">状态没有刷新，下面可能不是最新情况。{{ app.error }}</div>
         <div class="alu-work-state-actions">
           <button v-if="selected.reopenable" class="alu-work-state-primary" :disabled="workMutating" @click="reopenSelectedWork()">{{ workMutating ? '正在继续…' : inactiveState(selected).action }}</button>
           <button class="alu-work-state-secondary" @click="app.workDrawerOpen = true">查看工作列表</button>
-          <button class="alu-work-state-secondary" @click="app.load">刷新状态</button>
+          <button class="alu-work-state-secondary" :disabled="app.loading" @click="app.load">{{ app.loading ? '正在刷新…' : '刷新状态' }}</button>
         </div>
       </section>
     </div>

@@ -23,7 +23,7 @@ const workActions = useWorkActionsStore()
 const { aborting } = storeToRefs(workActions)
 const { abortCurrentRun } = workActions
 const observation = useObservationStore()
-const { status: observationStatus, label: connectionLabel } = storeToRefs(observation)
+const { status: observationStatus, label: connectionLabel, refreshing } = storeToRefs(observation)
 const { refreshCurrent } = observation
 const { openHostSettings } = useHostStore()
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
@@ -41,7 +41,7 @@ const detailMode = computed({ get: () => app.detailMode, set: (value: boolean) =
       <div class="alu-bottom-bar-right">
         <ConnectionStatus :state="observationStatus" :label="connectionLabel" @reconnect="refreshCurrent" @settings="openHostSettings" @works="app.workDrawerOpen = true" />
         <div class="alu-bar-sep" />
-        <button class="alu-bar-btn" title="刷新" @click="refreshCurrent">↻<span class="sm-inline">刷新</span></button>
+        <button class="alu-bar-btn" :title="refreshing ? '正在刷新' : '刷新'" :aria-label="refreshing ? '正在刷新' : '刷新'" :disabled="refreshing" @click="refreshCurrent">↻<span class="sm-inline">{{ refreshing ? '正在刷新…' : '刷新' }}</span></button>
         <button class="alu-bar-btn" :class="{ 'alu-bar-btn-toggle-active': !detailMode }" title="切换显示模式" @click="detailMode = !detailMode"><span>▤</span><span>{{ detailMode ? '详细' : '简洁' }}</span></button>
         <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
         <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline" :class="{ 'is-pending': aborting }">{{ aborting ? '中止中' : '中止' }}</span></button>

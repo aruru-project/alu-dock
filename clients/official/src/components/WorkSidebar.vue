@@ -38,11 +38,15 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     <div class="alu-sidebar-head">
       <img :src="dockIconUrl" class="alu-sidebar-avatar" alt="Alu Dock" />
       <div class="alu-sidebar-title">AluDock Client</div>
-      <button class="alu-sidebar-refresh" title="刷新" @click="refreshWorkDrawer">↻</button>
+      <button class="alu-sidebar-refresh" :class="{ spinning: app.loading }" :title="app.loading ? '正在刷新工作列表' : '刷新工作列表'" :aria-label="app.loading ? '正在刷新工作列表' : '刷新工作列表'" :disabled="app.loading" @click="refreshWorkDrawer">↻</button>
       <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
     </div>
     <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="pairingInProgress" @click="openDirectory">＋ 新建工作</button></div>
     <div class="alu-instance-list">
+      <div v-if="app.error && app.works.length" class="alu-sidebar-refresh-error" role="alert">
+        <span>工作列表没有刷新，下面可能不是最新状态。{{ app.error }}</span>
+        <button :disabled="app.loading" @click="refreshWorkDrawer">{{ app.loading ? '正在刷新…' : '重试' }}</button>
+      </div>
       <OperationResults v-if="listResults.length && !directoryOpen" :operations="listResults" :acknowledge="consumeNativeOperation" />
       <div v-if="globalOutcomeUnknown || globalReconcileMessage" class="alu-sidebar-notice" role="status">
         <span>{{ globalReconcileMessage || '上一次新建工作的结果还没有确认。刷新列表查看它是否已经出现，不要重复提交。' }}</span>
@@ -61,7 +65,15 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
           <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
         </div>
       </section>
-      <div v-if="!app.works.length" class="alu-sidebar-empty">暂无工作</div>
+      <template v-if="!app.works.length">
+        <div v-if="app.loading" class="alu-sidebar-empty" role="status">正在读取工作列表…</div>
+        <div v-else-if="app.error" class="alu-sidebar-offline" role="alert">
+          <strong>无法读取工作列表</strong>
+          <span>{{ app.error }}</span>
+          <div><button @click="refreshWorkDrawer">重新连接</button><button @click="openHostSettings">Host 设置</button></div>
+        </div>
+        <div v-else class="alu-sidebar-empty">暂无工作</div>
+      </template>
     </div>
     <button v-if="appSettings?.windowsAwaySupported" class="alu-sidebar-settings-entry" aria-label="App 设置" @click="openAppSettings">
       <span class="alu-sidebar-settings-icon"><Settings :size="17" /></span>
@@ -185,6 +197,16 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   font-size: 11px;
 }
 .alu-sidebar-error { color: var(--alu-rose); }
+.alu-sidebar-refresh:disabled { cursor: default; opacity: .6; }
+.alu-sidebar-refresh.spinning { animation: aluSidebarSpin 1s linear infinite; }
+@keyframes aluSidebarSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .alu-sidebar-refresh.spinning { animation: none; } }
+.alu-sidebar-refresh-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font-size: 10px; }
+.alu-sidebar-refresh-error button { flex: none; color: inherit; }
+.alu-sidebar-offline { display: flex; flex-direction: column; gap: 6px; margin: 12px; padding: 12px; color: var(--alu-text-muted); border: 1px solid var(--alu-rose-border); border-radius: 9px; background: var(--alu-rose-bg); font-size: 11px; line-height: 1.5; }
+.alu-sidebar-offline strong { color: var(--alu-rose); font-size: 12px; }
+.alu-sidebar-offline div { display: flex; gap: 12px; margin-top: 2px; }
+.alu-sidebar-offline button { color: var(--alu-blue); font-size: 11px; }
 .alu-sidebar-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--alu-amber) 7%, transparent); font-size: 10px; }
 .alu-sidebar-notice button { flex: none; color: inherit; }
 @media (max-width: 640px) {
