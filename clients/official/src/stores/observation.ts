@@ -246,10 +246,22 @@ export const useObservationStore = defineStore('observation', () => {
       facts.value = null
     }
     selection = identity
-    const id = app.selectedWork?.id
-    if (isTauri && windowFocused.value && id) void load(id)
-    else if (!id) void extensionUi.clear()
+    const work = app.selectedWork
+    if (work?.lifecycle === 'active') {
+      if (isTauri && windowFocused.value) void load(work.id)
+      return
+    }
+    // Nothing on this page can be observed: let go of the Work we left.
+    // Its Worker keeps running; only this client stops following it.
+    stopFollowing()
+    void extensionUi.clear()
   })
+  function stopFollowing() {
+    const followed = active.value
+    if (!followed) return
+    active.value = null; connected.value = false; loading.value = false
+    void stopConversationFollow(followed.instanceId, followed.subscriptionId, followed).catch(() => undefined)
+  }
   function reportRouteError(cause: unknown) { error.value = userErrorMessage(cause) }
   const connectionLabel = computed(() => {
     if (!isTauri) return '浏览器预览'

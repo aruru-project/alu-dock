@@ -769,6 +769,17 @@ try {
   app.selectWork('work'); await settle()
   assert.ok(text(deliveryTray()).includes('“report.pdf”没有下载完成。'), 'returning to A shows which file failed')
   find(deliveryTray(), item => item.props['aria-label'] === '关闭文件列表' && item.type === 'button' && !String(item.props.class ?? '').includes('scrim')).props.onClick(); await settle()
+  // #316: leaving a running Work for a stopped one releases the old observation; the Work itself keeps running.
+  const followedBeforeLeaving = { ...binding }
+  const stopsBeforeLeaving = calls.filter(call => call.command === 'stop_work' || call.command === 'abort_run').length
+  app.applyWorkSnapshot({ ...otherWork, id: 'stopped-work', lifecycle: 'stopped', execution: 'idle' }); await settle()
+  app.selectWork('stopped-work'); await settle()
+  assert.ok(calls.some(call => call.command === 'stop_conversation_follow' && call.args.instanceId === 'work' && call.args.subscriptionId === followedBeforeLeaving.subscriptionId), 'the running Work is no longer followed from a stopped Work page')
+  assert.equal(calls.filter(call => call.command === 'stop_work' || call.command === 'abort_run').length, stopsBeforeLeaving, 'leaving does not stop or abort the Work')
+  app.selectWork('work'); await settle()
+  assert.equal(binding.instanceId, 'work')
+  assert.notEqual(binding.subscriptionId, followedBeforeLeaving.subscriptionId, 'returning follows the Work again')
+  app.removeWorkSnapshot('stopped-work'); await settle()
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
   allowExtension = true
