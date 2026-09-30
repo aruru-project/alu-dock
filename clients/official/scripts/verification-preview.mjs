@@ -21,7 +21,11 @@ export async function startVerificationPreview({ port = 1422, fixtureFile } = {}
   const cacheDir = await mkdtemp(join(tmpdir(), 'aludock-verification-vite-'))
   let server
   const close = async () => {
-    try { await server?.close() } finally { await rm(cacheDir, { recursive: true, force: true }) }
+    try {
+      // Let the first import crawl finish before Vite cancels it during shutdown.
+      await server?.waitForRequestsIdle()
+      await server?.close()
+    } finally { await rm(cacheDir, { recursive: true, force: true }) }
   }
   try {
     const config = await resolveConfig({
