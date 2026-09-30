@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { projectRecordGroups, createLiveConversationProjector, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
+import { projectRecordGroups, createLiveConversationProjector, shellRunQuote, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
 import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, turnDurationMs, turnHidingAnchor, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
 import type { HistoryRecord, ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
@@ -167,5 +167,46 @@ assert.equal(turnHidingAnchor(historySections, 'u1'), undefined, '用户消息�
 assert.equal(turnHidingAnchor(historySections, undefined), undefined)
 assert.equal(turnToolCallsLabel({ status: 'running', toolCalls: 2, failedToolCalls: 0 }), '已调用 2 个工具')
 assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolCalls: 1 }), '3 次工具调用（1 次失败）')
+
+// Card #336: a user shell command (`!` / `!!`) is its own row beside the Agent's
+// turn, streams output, and the same row later comes from its bash_execution record.
+{
+  const shell = createLiveConversationProjector({ instance: { id: 'work', execution: 'idle' } } as ConversationBootstrap)
+  shell.apply(toolEvent(1, 'run.started', { operationId: 'reply' }))
+  shell.apply(toolEvent(2, 'bash.started', { operationId: 'sh-1', command: 'git status', excludeFromContext: true }))
+  shell.apply(toolEvent(3, 'bash.output', { operationId: 'sh-1', delta: 'On branch ' }))
+  shell.apply(toolEvent(4, 'bash.output', { operationId: 'sh-1', delta: 'master\n' }))
+  const running = shell.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(running?.kind === 'shell')
+  assert.equal(running.status, 'running')
+  assert.equal(running.output, 'On branch master\n')
+  assert.equal(running.turnId, undefined, '命令行不归进正在运行的 Agent 轮')
+  shell.apply(toolEvent(5, 'run.settled', { operationId: 'reply', result: 'succeeded' }))
+  assert.equal(running.status, 'running', '回复结束不会把还在跑的命令标成结束')
+  shell.apply(toolEvent(6, 'bash.completed', { operationId: 'sh-1', exitCode: 0, cancelled: false, truncated: true, fullOutputPath: '/tmp/pi-bash-1.log' }))
+  assert.equal(running.status, 'done')
+  assert.equal(running.fullOutputPath, '/tmp/pi-bash-1.log')
+  const sections = conversationSections(conversationRows(shell.snapshot()))
+  assert.deepEqual(sections.map((section) => section.kind), ['turn', 'row'], '命令行是独立行，不在轮里')
+  assert.equal(shellRunQuote(running), 'Ran `git status`\n```\nOn branch master\n\n```\n[Output truncated. Full output: /tmp/pi-bash-1.log]', '引用文字与 Pi 给模型的正文同形，截断时带路径')
+  shell.apply(toolEvent(7, 'bash.started', { operationId: 'sh-2', command: 'sleep 30', excludeFromContext: false }))
+  shell.apply(toolEvent(8, 'bash.completed', { operationId: 'sh-2', cancelled: true, truncated: false }))
+  const stopped = shell.snapshot().find((item) => item.kind === 'shell' && item.operationId === 'sh-2')
+  assert.ok(stopped?.kind === 'shell')
+  assert.equal(stopped.status, 'stopped')
+  assert.equal(shellRunQuote(stopped), 'Ran `sleep 30`\n(no output)\n(command cancelled)')
+
+  const recorded = projectRecordGroups([{
+    recordId: 'bash-1', entryId: 'bash-1', kind: 'bash_execution', source: 'runtime', visibility: 'conversation', timestamp: '2026-09-30T08:05:00Z',
+    content: [{ type: 'text', text: '! false\nnothing here' }], command: 'false', exitCode: 1, cancelled: false, truncated: false, excludeFromContext: false,
+  } as HistoryRecord])
+  const record = recorded[0]
+  assert.ok(record?.kind === 'shell', '历史里的 bash_execution 记录也是同一种命令行')
+  assert.equal(record.command, 'false')
+  assert.equal(record.output, 'nothing here', '记录正文里的命令前缀不当作输出')
+  assert.equal(record.status, 'failed')
+  assert.equal(record.exitCode, 1)
+  assert.equal(record.excludeFromContext, false)
+}
 
 console.log('conversation presentation tests passed')

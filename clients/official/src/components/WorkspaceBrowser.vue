@@ -7,6 +7,7 @@ import {
   Eye,
   EyeOff,
   File,
+  Terminal,
   X,
 } from '@lucide/vue'
 import {
@@ -26,6 +27,7 @@ import { userErrorMessage } from '../lib/userError'
 import DirectoryBrowser from './DirectoryBrowser.vue'
 import ImageZoomSurface from './ImageZoomSurface.vue'
 import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
+import WorkspaceCommandArea from './WorkspaceCommandArea.vue'
 import {
   classifyWorkspacePreview as classifyPreview,
   formatWorkspaceBytes as formatBytes,
@@ -86,6 +88,10 @@ const selectedPathLabel = computed(() => {
   const path = selectedEntry.value?.path
   return path ? displayPath(path) : '选择一个文件查看内容'
 })
+
+// The command area (Pi `!` / `!!`) is its own component; this file only places it.
+// On a phone it is a third full-screen view beside the tree and the preview.
+const mobileCommand = ref(false)
 const progressPercent = computed(() => {
   if (!progressTotal.value) return 0
   return Math.max(0, Math.min(100, Math.round(progressBytes.value / progressTotal.value * 100)))
@@ -332,6 +338,10 @@ async function saveCached(cacheId: string, context: WorkspaceFileContext, expect
 }
 
 async function handleMobileBack() {
+  if (mobileCommand.value) {
+    mobileCommand.value = false
+    return
+  }
   if (mobilePreview.value) {
     await invalidateFile(true)
     return
@@ -353,9 +363,11 @@ watch(
     const changed = !previous || current.slice(1).some((value, index) => value !== previous[index + 1])
     if (!props.open) {
       if (!changed && !previous?.[0]) return
+      mobileCommand.value = false
       void invalidateFile(true)
       return
     }
+    if (changed) mobileCommand.value = false
     if (props.work?.lifecycle !== 'active' || !currentContext()) {
       emit('close')
       return
@@ -404,6 +416,9 @@ onBeforeUnmount(() => {
             <p>{{ work?.displayName }} · 根目录 <code>.</code></p>
           </div>
           <div class="workspace-header-actions">
+            <button v-if="isMobile" type="button" class="workspace-toggle workspace-command-toggle" :aria-pressed="mobileCommand" aria-label="命令" @click="mobileCommand = !mobileCommand">
+              <Terminal :size="16" />
+            </button>
             <button type="button" class="workspace-toggle" :aria-pressed="showHidden" @click="showHidden = !showHidden">
               <Eye v-if="showHidden" :size="16" /><EyeOff v-else :size="16" />
               <span>{{ showHidden ? '隐藏隐藏文件' : '显示隐藏文件' }}</span>
@@ -412,7 +427,7 @@ onBeforeUnmount(() => {
           </div>
         </header>
 
-        <div class="workspace-body" :class="{ 'mobile-preview-open': mobilePreview }">
+        <div class="workspace-body" :class="{ 'mobile-preview-open': mobilePreview, 'mobile-command-open': mobileCommand }">
           <DirectoryBrowser
             :key="directoryKey"
             ref="directoryBrowser"
@@ -474,6 +489,8 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="saveStatus" class="workspace-save-status" role="status">{{ saveStatus }}</div>
           </main>
+
+          <WorkspaceCommandArea v-if="!isMobile || mobileCommand" :work="work" :ready="!!currentContext()" :mobile="isMobile" @close="$emit('close')" />
         </div>
       </section>
     </div>
@@ -539,7 +556,7 @@ onBeforeUnmount(() => {
 .workspace-icon-button:hover,
 .workspace-toggle:hover,
 .workspace-secondary-button:hover { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-hover); }
-.workspace-body { display: grid; min-height: 0; grid-template-columns: minmax(280px, 38%) minmax(0, 1fr); }
+.workspace-body { display: grid; min-height: 0; grid-template-columns: minmax(280px, 38%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) fit-content(46%); }
 .workspace-preview-toolbar {
   display: flex;
   min-width: 0;
@@ -636,6 +653,8 @@ onBeforeUnmount(() => {
   .workspace-preview { display: none; grid-template-rows: 54px minmax(0, 1fr); }
   .workspace-body.mobile-preview-open .workspace-tree { display: none; }
   .workspace-body.mobile-preview-open .workspace-preview { display: grid; }
+  .workspace-body.mobile-command-open .workspace-tree,
+  .workspace-body.mobile-command-open .workspace-preview { display: none; }
   .workspace-preview-toolbar { padding: 0 11px; }
   .workspace-save-button { min-width: 88px; min-height: 40px; }
   .workspace-text-preview { padding: 15px 14px 44px; font-size: var(--alu-meta-size); }

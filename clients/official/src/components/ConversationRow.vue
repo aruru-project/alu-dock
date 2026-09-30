@@ -2,8 +2,9 @@
 import { FileText } from '@lucide/vue'
 import AttachmentCard from './AttachmentCard.vue'
 import ConversationProcessParts from './ConversationProcessParts.vue'
+import ShellRunRow from './ShellRunRow.vue'
 import { assistantMarkdownSource, partVisibleWhenCollapsed, type ConversationRow } from '../lib/conversationPresentation'
-import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
+import type { ConversationImageResource, ConversationProcessItem, ShellRunItem } from '../lib/types'
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 defineProps<{
   row: ConversationRow
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   imageFailed: [part: ImagePart]
   attachmentPreview: [fileId: string, name: string]
   openText: [title: string, text: string, markdown?: boolean]
+  shellQuote: [item: ShellRunItem]
 }>()
 const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => part.kind === 'assistant')
 /** The final reply's row stays while its text is still being read, or when the run
@@ -53,6 +55,8 @@ const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((par
       <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
 
       <div v-else-if="row.kind === 'notice'" class="conversation-row alu-live-notice-row" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
+
+      <div v-else-if="row.kind === 'shell'" class="conversation-row alu-shell-row"><ShellRunRow :item="row" @quote="emit('shellQuote', $event)" /></div>
 </template>
 
 <style scoped>
@@ -199,7 +203,9 @@ const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((par
 .alu-record-body { min-width: 0; }
 .alu-record-summary { border-left-color: var(--alu-blue-border); }
 .alu-record-extension { border-left-color: var(--alu-pink); }
-.alu-record-tool, .alu-record-shell { border-left-color: var(--alu-amber); }
+.alu-record-tool { border-left-color: var(--alu-amber); }
+/* A user shell command stands beside the Agent's rows, aligned with its content. */
+.alu-shell-row { margin: 6px 0 6px 68px; max-width: calc(100% - 68px); }
 .alu-msg-assistant-row, .msg-user {
   animation: msgSlideIn 0.22s ease-out;
 }
@@ -238,7 +244,8 @@ const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((par
     border-radius: 14px 14px 3px 14px;
   }
   .alu-live-notice-row,
-  .alu-record-panel {
+  .alu-record-panel,
+  .alu-shell-row {
     max-width: 100%;
     margin-right: 0;
     margin-left: 0;

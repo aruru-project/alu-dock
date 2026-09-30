@@ -13,9 +13,13 @@ use crate::{
     ClientError, DockClient, ImagePath, InstanceSnapshot, PendingMessage, Result,
     capabilities::{
         ABORT as ABORT_CAPABILITIES, ABORT_RESTORE_QUEUE as ABORT_RESTORE_QUEUE_CAPABILITIES,
-        QUEUE as QUEUE_CAPABILITIES, RUN_ABORT_RESTORE_QUEUE_V1, submit as submit_capabilities,
+        BASH as BASH_CAPABILITIES, QUEUE as QUEUE_CAPABILITIES, RUN_ABORT_RESTORE_QUEUE_V1,
+        submit as submit_capabilities,
     },
 };
+
+/// One shell command line, the same bound the Host applies to `bash.run`.
+pub const MAX_BASH_COMMAND_CHARS: usize = 8_000;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum DeliveryMode {
@@ -70,6 +74,30 @@ struct MutationParams<'a> {
 #[derive(Debug, Deserialize)]
 struct InstanceResult {
     instance: InstanceSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BashRunParams<'a> {
+    operation_id: &'a str,
+    instance_id: &'a str,
+    command: &'a str,
+    exclude_from_context: bool,
+}
+
+/// The shell command has started; its output and completion arrive as `bash.*` events.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashRunReceipt {
+    pub operation_id: String,
+    pub instance_id: String,
+    pub started_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct BashRunResult {
+    pub receipt: BashRunReceipt,
+    pub instance: InstanceSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -237,6 +265,75 @@ impl DockClient {
             });
         }
         Ok(result)
+    }
+
+    /// Pi's `!` (`exclude_from_context: false`) or `!!` (`true`): run one shell command
+    /// in the Work's directory on its machine. The receipt only says it started.
+    pub async fn run_bash(
+        &self,
+        instance_id: &str,
+        command: &str,
+        exclude_from_context: bool,
+        operation_id: Option<&str>,
+    ) -> Result<BashRunResult> {
+        if command.trim().is_empty() || command.chars().count() > MAX_BASH_COMMAND_CHARS {
+            return Err(ClientError::Protocol(
+                "a shell command must be non-empty and at most 8000 characters".into(),
+            ));
+        }
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        let result: BashRunResult = self
+            .request(
+                "bash.run",
+                &BashRunParams {
+                    operation_id,
+                    instance_id,
+                    command,
+                    exclude_from_context,
+                },
+                BASH_CAPABILITIES,
+                Some(operation_id),
+            )
+            .await?;
+        if result.receipt.operation_id != operation_id
+            || result.receipt.instance_id != instance_id
+            || result.instance.id != instance_id
+        {
+            return Err(ClientError::EffectUnknown {
+                operation_id: operation_id.to_owned(),
+                message: "shell command receipt did not correlate to the request".into(),
+            });
+        }
+        Ok(result)
+    }
+
+    /// Stops every shell command this Work is running; the Agent reply and Queue are untouched.
+    pub async fn abort_bash(
+        &self,
+        instance_id: &str,
+        operation_id: Option<&str>,
+    ) -> Result<InstanceSnapshot> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        let result: InstanceResult = self
+            .request(
+                "bash.abort",
+                &MutationParams {
+                    operation_id,
+                    instance_id,
+                },
+                BASH_CAPABILITIES,
+                Some(operation_id),
+            )
+            .await?;
+        if result.instance.id != instance_id {
+            return Err(ClientError::EffectUnknown {
+                operation_id: operation_id.to_owned(),
+                message: "shell abort response returned a different Work".into(),
+            });
+        }
+        Ok(result.instance)
     }
 
     async fn abort_only(&self, instance_id: &str, operation_id: &str) -> Result<InstanceSnapshot> {

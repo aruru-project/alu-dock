@@ -328,6 +328,10 @@ export interface ConversationRecord {
   command?: string
   exitCode?: number
   cancelled?: boolean
+  truncated?: boolean
+  /** Pi's temporary full-output file on the Work's machine; shown for copying or for the Agent to read, never sent back. */
+  fullOutputPath?: string
+  excludeFromContext?: boolean
   label?: string
   stopReason?: string
 }
@@ -369,6 +373,10 @@ export interface AttachmentUploadResult {
 }
 export interface QueueDequeueResult {
   receipt: { instanceId: string; restored: QueueItem[]; inFlight: QueueItem[] }
+  instance: Work
+}
+export interface ShellRunResult {
+  receipt: { operationId: string; instanceId: string; startedAt: string }
   instance: Work
 }
 export interface ProjectedEvent { sequence: number; runtimeGeneration: number; occurredAt: string; eventType: string; data: Record<string, unknown> }
@@ -583,11 +591,31 @@ export interface ConversationTurnItem {
   continuation?: boolean
 }
 
+export type ShellRunStatus = 'running' | 'done' | 'failed' | 'stopped'
+/** One user shell command (Pi `!` / `!!`), live from bash.* events or from its bash_execution record.
+ * It stands on its own in the timeline: it is not part of the Agent turn running beside it. */
+export interface ShellRunItem {
+  id: string
+  kind: 'shell'
+  operationId: string
+  command: string
+  excludeFromContext: boolean
+  status: ShellRunStatus
+  /** Live output tail while running, or the recorded output afterwards. */
+  output: string
+  exitCode?: number
+  truncated: boolean
+  fullOutputPath?: string
+  error?: string
+  time: string
+}
+
 export type ConversationItem = (
   | { id: string; kind: 'user'; text: string; time: string; attachments?: AttachmentDto[]; images?: Array<Extract<ConversationProcessItem, { kind: 'image' }>> }
   | ConversationTurnItem
   | ConversationProcessItem
   | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[] }
+  | ShellRunItem
 
 ) & { sourceEntryIds?: string[]; turnId?: string }
 

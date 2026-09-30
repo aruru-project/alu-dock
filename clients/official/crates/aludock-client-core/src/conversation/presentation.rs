@@ -60,6 +60,9 @@ pub fn project_conversation_read(read: crate::InstanceReadResult) -> Result<Conv
                     | "tool.args_updated"
                     | "tool.output_updated"
                     | "tool.completed"
+                    | "bash.started"
+                    | "bash.output"
+                    | "bash.completed"
             )
         })
         .cloned()
