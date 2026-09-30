@@ -56,7 +56,7 @@ function act() {
 }
 .alu-status-label {
   color: var(--alu-text-muted);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
 }
 @media (max-width: 1000px) {
   .alu-status-label {
@@ -65,7 +65,7 @@ function act() {
 }
 .alu-connection-status > summary { list-style: none; min-width: 24px; padding-inline: 2px; }
 .alu-connection-status > summary::-webkit-details-marker { display: none; }
-.alu-status-attention { font-size: 11px; color: var(--alu-rose); }
-.alu-status-details { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 30; width: min(320px, calc(100vw - 24px)); padding: 12px; box-sizing: border-box; border: 1px solid var(--alu-border-light); border-radius: 8px; background: var(--alu-surface); color: var(--alu-text); font-size: 12px; }
+.alu-status-attention { font-size: var(--alu-meta-size); color: var(--alu-rose); }
+.alu-status-details { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 30; width: min(320px, calc(100vw - 24px)); padding: 12px; box-sizing: border-box; border: 1px solid var(--alu-border-light); border-radius: 8px; background: var(--alu-surface); color: var(--alu-text); font-size: var(--alu-ui-size); }
 .alu-status-details p { margin: 8px 0; line-height: 1.5; overflow-wrap: anywhere; }
 </style>

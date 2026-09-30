@@ -101,7 +101,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   border-radius: 9px;
   background: var(--alu-pink-bg);
   color: var(--alu-pink);
-  font-size: 12px;
+  font-size: var(--alu-ui-size);
   font-weight: 650;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -127,7 +127,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   justify-content: space-between;
   padding: 5px 7px;
   color: var(--alu-text-faint);
-  font-size: 10px;
+  font-size: var(--alu-meta-size);
   font-weight: 800;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -174,18 +174,18 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   border-radius: 5px;
   background: var(--alu-active);
   color: var(--alu-pink);
-  font: 9px/1.45 var(--alu-font-mono);
+  font: var(--alu-micro-size)/1.45 var(--alu-font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.alu-instance-cwd { color: var(--alu-text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.alu-instance-meta { color: var(--alu-text-faint); font-size: 10px; }
+.alu-instance-cwd { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alu-instance-meta { color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
 .alu-instance-action {
   position: absolute;
   right: 7px;
   bottom: 7px;
   color: var(--alu-blue);
-  font-size: 9px;
+  font-size: var(--alu-micro-size);
   padding: 2px 4px;
 }
 .alu-instance-action.is-muted { color: var(--alu-text-muted); }
@@ -194,20 +194,20 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-sidebar-error {
   padding: 24px 16px;
   color: var(--alu-text-muted);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
 }
 .alu-sidebar-error { color: var(--alu-rose); }
 .alu-sidebar-refresh:disabled { cursor: default; opacity: .6; }
 .alu-sidebar-refresh.spinning { animation: aluSidebarSpin 1s linear infinite; }
 @keyframes aluSidebarSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .alu-sidebar-refresh.spinning { animation: none; } }
-.alu-sidebar-refresh-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font-size: 10px; }
+.alu-sidebar-refresh-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font-size: var(--alu-meta-size); }
 .alu-sidebar-refresh-error button { flex: none; color: inherit; }
-.alu-sidebar-offline { display: flex; flex-direction: column; gap: 6px; margin: 12px; padding: 12px; color: var(--alu-text-muted); border: 1px solid var(--alu-rose-border); border-radius: 9px; background: var(--alu-rose-bg); font-size: 11px; line-height: 1.5; }
-.alu-sidebar-offline strong { color: var(--alu-rose); font-size: 12px; }
+.alu-sidebar-offline { display: flex; flex-direction: column; gap: 6px; margin: 12px; padding: 12px; color: var(--alu-text-muted); border: 1px solid var(--alu-rose-border); border-radius: 9px; background: var(--alu-rose-bg); font-size: var(--alu-meta-size); line-height: 1.5; }
+.alu-sidebar-offline strong { color: var(--alu-rose); font-size: var(--alu-ui-size); }
 .alu-sidebar-offline div { display: flex; gap: 12px; margin-top: 2px; }
-.alu-sidebar-offline button { color: var(--alu-blue); font-size: 11px; }
-.alu-sidebar-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--alu-amber) 7%, transparent); font-size: 10px; }
+.alu-sidebar-offline button { color: var(--alu-blue); font-size: var(--alu-meta-size); }
+.alu-sidebar-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--alu-amber) 7%, transparent); font-size: var(--alu-meta-size); }
 .alu-sidebar-notice button { flex: none; color: inherit; }
 @media (max-width: 640px) {
   .alu-instance-link { padding-top: 10px; padding-bottom: 10px; }
@@ -228,8 +228,8 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-sidebar-settings-icon { border: 1px solid var(--alu-blue-border); background: var(--alu-blue-bg); color: var(--alu-blue); }
 .alu-sidebar-settings-entry > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .alu-sidebar-settings-entry strong, .alu-sidebar-settings-entry small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.alu-sidebar-settings-entry strong { color: var(--alu-text); font-size: 11px; }
-.alu-sidebar-settings-entry small { color: var(--alu-text-muted); font-size: 9px; }
+.alu-sidebar-settings-entry strong { color: var(--alu-text); font-size: var(--alu-meta-size); }
+.alu-sidebar-settings-entry small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .alu-sidebar {
   top: var(--aludock-inset-top);
   bottom: max(var(--aludock-inset-bottom), var(--aludock-ime-bottom));

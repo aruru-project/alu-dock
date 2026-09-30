@@ -13,8 +13,10 @@
   /* Text hierarchy */
   --alu-text:           #dce8f4;
   --alu-text-dim:       #8898b0;
-  --alu-text-muted:     #505a6a;
-  --alu-text-faint:     #303848;
+  /* muted 是要读的次要信息（路径、说明、时间），面板底色上 ≈4.8:1；
+     faint 只给装饰和禁用态，≈2.7:1。两者都不能低于此，2K 屏 100% 缩放下会看不清。 */
+  --alu-text-muted:     #74819a;
+  --alu-text-faint:     #4f5a70;
   /* Accents — from Alu's character design */
   --alu-pink:           #f472b6;
   --alu-pink-bg:        #1e0f20;
@@ -38,9 +40,13 @@
   --alu-nav-bg:         #0c1020;
   --alu-nav-border:     #1a2436;
   --alu-nav-height:     68px;
-  /* Responsive control scale: mobile stays compact; large desktop controls remain legible. */
+  /* 外壳文字的字号阶梯（侧栏、设置、面板、顶栏；会话正文不用）：
+     手机和笔记本取下限，2K 及以上取上限。ui 是可交互项和主要文字，meta 是路径/说明/时间，
+     micro 是大写小标题、角标和计数。 */
   --alu-control-size: clamp(13px, calc(11.8px + 0.12vw), 15px);
+  --alu-ui-size: clamp(12px, calc(11px + 0.08vw), 13px);
   --alu-meta-size: clamp(11px, calc(10px + 0.08vw), 12px);
+  --alu-micro-size: clamp(10px, calc(9px + 0.08vw), 11px);
   /* Bottom bar */
   --alu-bar-height:     44px;
 }

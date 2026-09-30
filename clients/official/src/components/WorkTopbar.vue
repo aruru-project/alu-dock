@@ -169,13 +169,13 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   border: 1px solid var(--alu-blue-border);
   border-radius: 999px;
   color: var(--alu-blue);
-  font-size: 10px;
+  font-size: var(--alu-meta-size);
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .alu-nav-git-branch[hidden] { display: none; }
-.alu-navbar-breadcrumb-arrow { color: var(--alu-text-faint); font-size: 9px; }
+.alu-navbar-breadcrumb-arrow { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .alu-navbar-right {
   display: flex;
   align-items: center;
@@ -203,7 +203,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   border: 1px solid var(--alu-border-light);
   background: rgba(16, 22, 35, 0.8);
   color: var(--alu-text-dim);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
   line-height: 1;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -238,7 +238,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 }
 .alu-nav-selector-label {
   color: var(--alu-text-muted);
-  font-size: 12px;
+  font-size: var(--alu-ui-size);
 }
 .alu-nav-selector-value {
   color: var(--alu-text);
@@ -251,7 +251,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 }
 .alu-nav-selector-arrow {
   color: var(--alu-text-muted);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
   margin-left: 2px;
 }
 .alu-nav-dock-tools {
@@ -264,7 +264,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   border-radius: 999px;
   color: var(--alu-text-muted);
   background: rgba(20, 28, 46, .8);
-  font-size: 10px;
+  font-size: var(--alu-meta-size);
   white-space: nowrap;
   transition: color .14s ease, border-color .14s ease, background .14s ease, box-shadow .14s ease;
 }
@@ -275,10 +275,10 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   background: var(--alu-blue-bg);
 }
 .alu-nav-dock-tools.open { box-shadow: 0 0 0 3px color-mix(in srgb, var(--alu-blue) 10%, transparent); }
-.alu-nav-dock-tools b { min-width: 20px; color: var(--alu-text-faint); font-size: 8px; letter-spacing: .08em; text-align: center; }
+.alu-nav-dock-tools b { min-width: 20px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); letter-spacing: .08em; text-align: center; }
 .alu-nav-dock-tools.active { color: var(--alu-mint); border-color: color-mix(in srgb, var(--alu-mint) 32%, var(--alu-border)); background: color-mix(in srgb, var(--alu-mint) 7%, transparent); }
 .alu-nav-dock-tools.active b { color: var(--alu-mint); }
-.alu-nav-dock-tools-chevron { color: var(--alu-text-faint); font-size: 9px; transition: transform .14s ease; }
+.alu-nav-dock-tools-chevron { color: var(--alu-text-faint); font-size: var(--alu-micro-size); transition: transform .14s ease; }
 .alu-nav-dock-tools.open .alu-nav-dock-tools-chevron { transform: rotate(180deg); }
 .alu-nav-hamburger {
   width: 40px;
@@ -359,12 +359,12 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   }
   /* 窄屏收缩但保留运行身份与统计（对齐 WebConsole 紧凑策略）：选择器去 label，
        模型值与统计胶囊收紧；更窄档位继续收敛。 */
-  .alu-nav-selector { min-width: 0; padding: 5px 8px 5px 7px; gap: 4px; font-size: 11px; }
+  .alu-nav-selector { min-width: 0; padding: 5px 8px 5px 7px; gap: 4px; font-size: var(--alu-meta-size); }
   .alu-nav-selector-label { display: none; }
-  .alu-nav-selector-value { max-width: 64px; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-  .alu-nav-selector-arrow { font-size: 9px; }
+  .alu-nav-selector-value { max-width: 64px; overflow: hidden; font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
+  .alu-nav-selector-arrow { font-size: var(--alu-micro-size); }
   .alu-nav-stats { display: inline-flex; gap: 4px; margin-left: 0; }
-  .alu-nav-stat-pill { padding: 4px 6px; font-size: 10px; }
+  .alu-nav-stat-pill { padding: 4px 6px; font-size: var(--alu-meta-size); }
 }
 @media (max-width: 840px) {
   /* 手机上 Dock Tools 是和文件、菜单同尺寸的方块图标按钮：扮手颜色 + 角标表示开关，
@@ -432,10 +432,10 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     border: 0;
     border-radius: 12px 12px 0 0;
     background: transparent;
-    font-size: 12px;
+    font-size: var(--alu-ui-size);
   }
   .alu-nav-model-controls .alu-nav-selector:hover { box-shadow: none; }
-  .alu-nav-model-controls .alu-nav-selector-value { max-width: none; font-size: 12px; text-align: left; }
+  .alu-nav-model-controls .alu-nav-selector-value { max-width: none; font-size: var(--alu-ui-size); text-align: left; }
   .alu-nav-selector-model { flex: 1 1 0; min-width: 0; }
   .alu-nav-model-provider { color: var(--alu-text-dim); font-weight: 500; }
   .alu-nav-selector-thinking { flex: 0 0 auto; border-left: 1px solid var(--alu-border-light); }
@@ -448,7 +448,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     gap: 12px;
     border-top: 1px solid var(--alu-border-light);
   }
-  .alu-nav-stat-pill { padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 11px; }
+  .alu-nav-stat-pill { padding: 0; border: 0; border-radius: 0; background: transparent; font-size: var(--alu-meta-size); }
   .alu-nav-stat-tokens { display: none; }
   .alu-nav-stat-cache { gap: 3px; color: var(--alu-text-muted); }
   .alu-nav-stat-cost { margin-left: auto; color: var(--alu-text); }
@@ -482,12 +482,12 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     font-size: var(--alu-meta-size);
   }
 }
-.alu-operation-count { margin-left: 3px; color: var(--alu-rose); font-size: 10px; }
+.alu-operation-count { margin-left: 3px; color: var(--alu-rose); font-size: var(--alu-meta-size); }
 .alu-nav-files { position: relative; display: inline-grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--alu-text-muted); border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; }
 .alu-nav-files:hover, .alu-nav-files[aria-expanded="true"] { color: var(--alu-blue); border-color: var(--alu-blue-border); background: color-mix(in srgb, var(--alu-blue) 7%, transparent); }
 .alu-nav-files:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; }
 @media (max-width: 1399px) {
   .alu-nav-files { width: 44px; height: 44px; border-radius: 11px; }
 }
-.alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: #07101d; border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-mint); font: 800 8px/1 var(--font-code); }
+.alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: #07101d; border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-mint); font: 800 var(--alu-micro-size)/1 var(--font-code); }
 </style>

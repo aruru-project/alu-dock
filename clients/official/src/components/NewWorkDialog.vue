@@ -557,7 +557,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
   padding: 10px 16px;
   border-bottom: 1px solid var(--alu-border);
   color: var(--alu-text-muted);
-  font-size: 11px;
+  font-size: var(--alu-meta-size);
 }
 .alu-directory-machine:focus-within { z-index: 30; }
 .alu-directory-machine > span { flex: 0 0 auto; }
@@ -582,18 +582,18 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .new-work-back:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
 .new-work-dialog { position: relative; }
 .directory-confirm { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
-.directory-confirm > span { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.directory-confirm > span { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .directory-confirm > button { flex-shrink: 0; min-height: 40px; }
 .system-option { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid var(--alu-border); }
 .system-option .ui-dialog-option { flex: 1; min-width: 0; border-bottom: 0; }
 .system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-active); }
 .system-confirm { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
-.system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: 12px; }
+.system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
 .system-confirm input { accent-color: var(--alu-blue); }
 .new-work-dialog > .resource-document { flex: 1; min-height: 0; }
 .alu-dialog-error > span { display: block; }
 .new-work-launcher { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-y: auto; padding: 12px 16px 18px; }
-.new-work-section-label { padding: 8px 4px 6px; color: var(--alu-text-faint); font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
+.new-work-section-label { padding: 8px 4px 6px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
 .new-work-recent-options,
 .new-work-action-options { flex: 0 0 auto; overflow: visible; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg); }
 .new-work-recent-options { max-height: 250px; overflow-y: auto; }
