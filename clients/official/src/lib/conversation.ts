@@ -528,14 +528,18 @@ export function createLiveConversationProjector(
     if (instance.execution !== 'running') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
     else if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true)
   }
-  /** A rebuild from a read keeps what this client already saw of a command that is still running. */
+  /** A rebuild from a read keeps what this client already saw of every command the record has not
+   * taken over yet: output is never replayed, so the rebuilt row starts empty whether the command
+   * is still running or finished while Pi holds its record for the current reply. What was seen
+   * from the start stays complete; what was seen after joining stays marked as incomplete. */
   function adoptShellOutput(previous: readonly ConversationItem[]) {
     for (const item of previous) {
-      if (item.kind !== 'shell' || item.outputMissing) continue
+      if (item.kind !== 'shell') continue
       const current = shellItems.get(item.operationId)
-      if (!current || current.status !== 'running') continue
+      if (!current) continue
       current.output = item.output
-      delete current.outputMissing
+      if (item.outputMissing) current.outputMissing = true
+      else delete current.outputMissing
     }
   }
   return { apply, snapshot: () => items, affectedIds, reconcileRun, adoptShellOutput, structureKey: () => `${items.length}` }

@@ -212,6 +212,18 @@ assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolC
   assert.ok(adopted?.kind === 'shell')
   assert.equal(adopted.output, 'seen so far\n', '重建后保留这个客户端已经看到的输出')
   assert.equal(adopted.outputMissing, undefined)
+  // A command that finished while the agent was replying: Pi holds its record until the reply ends, so
+  // the completion-triggered rebuild still shows it as a live row. The output seen must survive that too.
+  const heldBack = createLiveConversationProjector({ instance: { id: 'work', execution: 'running' } } as ConversationBootstrap)
+  heldBack.apply(toolEvent(33, 'bash.started', { operationId: 'sh-1', command: 'git status', excludeFromContext: true }), true)
+  heldBack.apply(toolEvent(34, 'bash.completed', { operationId: 'sh-1', exitCode: 0, cancelled: false, truncated: false }), true)
+  heldBack.adoptShellOutput([{ ...running, status: 'done', exitCode: 0, output: 'all of it\n' }])
+  const held = heldBack.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(held?.kind === 'shell')
+  assert.deepEqual([held.status, held.output, held.outputMissing], ['done', 'all of it\n', undefined], '回复结束前记录还没写入，已经看到的完整输出和「发给 agent」不能消失')
+  // Joined mid-command, then saw the rest: the part received stays, still marked incomplete.
+  heldBack.adoptShellOutput([{ ...running, status: 'done', exitCode: 0, output: 'the rest\n', outputMissing: true }])
+  assert.deepEqual([held.output, held.outputMissing], ['the rest\n', true], '中途进入后收到的部分保留，仍然标为不完整')
 
   const recorded = projectRecordGroups([{
     recordId: 'bash-1', entryId: 'bash-1', kind: 'bash_execution', source: 'runtime', visibility: 'conversation', timestamp: '2026-09-30T08:05:00Z',
