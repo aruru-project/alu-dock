@@ -46,11 +46,14 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
   const port = await reservePort();
   const settings = new MachineSettingsState(join(root, "listener"));
   await settings.writeMainConnections({ enabled: true, port });
-  const mainRegistry = new DockRegistry(async () => { throw new Error("This flow creates Work only on the SubHost"); });
+  const mainSessions = join(root, "main-sessions");
+  await mkdir(mainSessions);
+  const mainRegistry = new DockRegistry((input) => createPiInstance({ ...input, agentDir, sessionDir: mainSessions, workerEnvironment: env }));
   const controller = new MainMachineController({ state: mainState, settingsState: settings, bindAddress: "127.0.0.1",
-    mainHostEpoch: mainRegistry.hostEpoch, localSnapshots: () => [] });
+    mainHostEpoch: mainRegistry.hostEpoch, localSnapshots: () => mainRegistry.list() });
   const main = new DockHost({ socketPath: join(root, "main.sock"), registry: mainRegistry, remoteInstances: controller,
-    modelVisibility: new ModelVisibilityService(new ModelVisibilityStore(mainStateRoot), { read: async () => ({ models: [], total: 0, truncated: false }) }) });
+    modelVisibility: new ModelVisibilityService(new ModelVisibilityStore(mainStateRoot),
+      createPiModelCatalogReader({ agentDir, homeDir: home, environment: async () => ({ ...env }) })) });
   const upstream = new SubHostMachineConnection({ state: joined, address: "127.0.0.1", port, hostEpoch: registry.hostEpoch,
     snapshots: () => registry.list(), acceptProtocolSocket: (socket) => subHost.acceptProtocolSocket(socket) });
   const client = new DockClient({ socketPath: main.socketPath, timeoutMs: 20_000 });
@@ -69,6 +72,9 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
     const targets = (await readFile(launches, "utf8")).split("\n").filter(Boolean);
     assert.ok(targets.length > 0 && targets.every((target) => !target.includes("pi-model-catalog-entry")), `extension launch targets: ${targets.join(", ")}`);
 
+    const mainCatalog = await client.modelVisibility();
+    assert.ok(mainCatalog.models.some((model) => model.provider === "openai" && model.id === "gpt-4o-mini"));
+    const mainWork = await client.create(cwd, "Main picker");
     const work = await client.create(cwd, "Picker", undefined, undefined, laptop.hostId);
     const full = await client.models(work.id);
     assert.equal(await listed(work.id), true);
@@ -82,6 +88,12 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
     assert.equal((await client.setModel(work.id, "openai", "gpt-4o-mini")).instance.executor.model?.id, "gpt-4o-mini");
     // Each machine keeps its own list.
     assert.deepEqual((await client.modelVisibility()).hidden, []);
+    assert.equal(await listed(mainWork.id), true, "the real Main picker is unaffected by SubHost settings");
+    await client.setModelVisibility([hiddenModel]);
+    assert.equal(await listed(mainWork.id), false, "Main's own saved list filters its real Work");
+    await client.setModelVisibility([]);
+    assert.equal(await listed(mainWork.id), true);
+    assert.equal(await listed(work.id), false, "restoring Main does not restore SubHost models");
 
     // A hand edit with a mistake hides nothing and is reported until the list is saved again.
     await writeFile(join(subState, "model-visibility.json"), "{ \"hiddenModels\": [ { \"provider\": \"openai\" } ] }\n");
