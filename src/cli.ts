@@ -14,6 +14,7 @@ import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
 import { AttachmentService } from "./control/attachment-service.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
+import { ModelVisibilityService, ModelVisibilityStore, modelVisibilityStateRoot } from "./control/model-visibility.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultLocalEndpoint } from "./control/local-endpoint.js";
@@ -266,6 +267,13 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   const attachmentService = catalogPath
     ? new AttachmentService(new AttachmentStorageState(attachmentStorageStateRoot(catalogPath)))
     : undefined;
+  const { createPiModelCatalogReader } = await import("./pi/pi-model-catalog.js");
+  const modelVisibility = catalogPath
+    ? new ModelVisibilityService(
+      new ModelVisibilityStore(modelVisibilityStateRoot(catalogPath)),
+      createPiModelCatalogReader(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
+    )
+    : undefined;
   const incidentRecorder = catalogPath
     ? new WorkerIncidentStore(workerIncidentStoreRoot(catalogPath)).recorder(options.machineName ?? "This computer")
     : undefined;
@@ -324,6 +332,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       initialize: () => registry.initializeCatalog(),
       sessionInventory,
       attachmentService,
+      modelVisibility,
       listen: false,
     });
   } else {
@@ -366,6 +375,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       sessionInventory,
       attachmentService,
       remoteInstances,
+      modelVisibility,
     });
   }
 

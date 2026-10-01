@@ -57,6 +57,8 @@ Pi 继续唯一拥有 `~/.pi/agent`（或 `PI_CODING_AGENT_DIR` 指定目录）�
 
 本机 Hub 通过 bundled Pi 的 public model/auth API 读取当前 Providers、models 与非秘密 access 状态，并让 Pi 自己执行 API-key login、OAuth login/logout 和 token persistence/refresh。`aludock pi:install <source>` 直接调用 bundled Pi package manager 并写入 Pi 的 global package settings；source 只承诺 Pi Package conventions。`aludock update model` 在 Windows/Linux 都直接调用 bundled Pi 的公开 `ModelRuntime.refresh({ allowNetwork: true, force: true })`，由 Pi 更新自己的持久模型目录；Dock 不复制下载、解析或合并逻辑。现有 Worker 不被 Host 热改配置，用户通过 `/reload` 采用 package/model 环境变化。普通 `/reload` 与插件 `ctx.reload()` 在新插件注册完成、`session_start` 前，调用 Pi 的 `ModelRuntime.refresh({ allowNetwork: false })` 重读本地 `models.json` 与已下载模型目录，再更新当前和 scoped model 引用；不为模型目录刷新访问上游，不主动切换当前模型。`/new` 与 resume 沿 Pi 原有 session replacement 重建本地模型环境，Worker 进程不变。
 
+Work 的 `model.list` 与 Host 设置页使用的机器级可选模型列表共用 `src/pi/pi-model-list.ts` 的投影、排序和上限。后者由 Host 启动一个短命进程（`pi-model-catalog-entry.ts`），以和 Worker 相同的 login-shell 环境与 `agentDir` 加载 Pi 的全局配置和 extensions，返回一次 `getAvailable()` 后结束并清理进程组；extension 代码不进入 Host。隐藏列表由 Host 在返回前过滤，Worker 和 Pi 不知道它，见 [control.md](control.md#模型隐藏列表modelvisibilityv1)。
+
 每个 Pi Worker 的 resource prompt 会追加稳定的 Alu Dock 身份说明：它知道自身是由 Dock 管理、终端断开后 Work 仍可继续，并知道 Pi 原生配置与 Session 仍归 Pi。`ALU_DOCK_PI_WORKER=1` 只是私有进程 bootstrap marker，不是 Agent 的产品身份接口。
 
 `instance.create` 可携带 bounded JSON `workerConfig`。这个对象在 generic Protocol/Host/catalog 中保持 opaque，随 durable reopen 原样交给选中的 Worker adapter；Host 不枚举字段、不把 Pi option 提升为 Dock 语义。Pi adapter 把其中 JSON-safe create fields 交给 Pi 的 session constructor，Worker-owned services、SessionManager、identity 与 transport 不能由该对象替换。不同 Agent adapter 可以按自己的原生 contract 解释同一容器。

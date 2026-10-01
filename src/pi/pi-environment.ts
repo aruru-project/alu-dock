@@ -9,6 +9,9 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
+import { configurePiNetwork } from "./configure-pi-network.js";
+import { projectPiModelList, type PiModelListBody } from "./pi-model-list.js";
+
 export type PiLoginInteraction = Parameters<ModelRuntime["login"]>[2];
 export type PiLoginType = Parameters<ModelRuntime["login"]>[1];
 
@@ -117,6 +120,20 @@ export async function inspectPiEnvironment(options: PiEnvironmentOptions = {}): 
       models,
       diagnostics: [...diagnostics, ...(runtime.getError() === undefined ? [] : [runtime.getError() as string])],
     };
+  } finally {
+    environment.close();
+  }
+}
+
+/**
+ * The models a new Work on this computer can select, in the same list shape a Work reports.
+ * It applies Pi's process-wide network setup like a Worker, so call it only from its own process.
+ */
+export async function listAvailablePiModels(options: PiEnvironmentOptions = {}): Promise<PiModelListBody> {
+  const environment = await openPiEnvironment(options);
+  try {
+    configurePiNetwork(environment.settings);
+    return projectPiModelList(await environment.runtime.getAvailable());
   } finally {
     environment.close();
   }

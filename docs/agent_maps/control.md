@@ -93,7 +93,10 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 
 远程地址不属于身份。已配对客户端可以从新的 IP、域名或映射端口连接同一个 Host，只要双方仍使用原来的证书。每次连接仍执行完整 TLS handshake；session resumption 被关闭，不能替代证书检查。吊销删除精确客户端证书信任，并由 Host 关闭该证书的现有远程连接。
 
-Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，以及 Settings 中的 attachment storage directory，是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过本地 IPC 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin endpoint 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程改变 Host 设置、开启或延长连接窗口。
+Host 设置按一条分界线开放：决定“谁能连进来、从哪连进来”的设置只在本机改，其余 Agent 工作相关的设置配对过的设备也能改。这是防君子不防小人：配对过的设备本就能通过 Worker 做任何事，这里只保证设置页上不能随手改掉信任关系。
+
+- 只在本机：Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，SubHost 加入 Main 的信任，以及本机 Dock 角色和 Main 地址。它们是本机 `aludock` Hub 的 service-management surface，不属于 Protocol V2，不通过本地 IPC 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin endpoint 中提供；远程客户端不能开启或延长连接窗口。既有的 `machine.remove` 仍对所有连接开放，收紧待单独处理。
+- 配对过的设备也能改：逐项以 Protocol V2 能力开放，当前是模型隐藏列表（`model.visibility.v1`，见下文）。attachment storage directory 仍只在 Hub Settings 中提供。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。持久 record 的 `contentRef` 由 Agent 原生 session 与 entry identity 决定，append、refresh 和 Worker restart 不改变它；revision 与 cursor 只隔离一次分页 scan。
 
@@ -271,6 +274,18 @@ watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 tur
 
 Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source` 返回路径；拥有该实例的 Host 使用 `readResourceContent` 读取当前磁盘文件，产出既有结果并复用 `protocol.ts` 的唯一 parser。旧页读取在同一次 instance 查询内完成；连续读取只让来源解析占用短查询，随后由 Host 订阅生命周期取消长传输，来源不跨请求缓存。官方客户端在项目状态点击资源后复用 MarkdownDocumentSurface 的阅读、原文和复制功能，返回列表后再次打开重新读盘。
 
+## 模型隐藏列表（`model.visibility.v1`）
+
+每台 Host（Main 与各 SubHost）持有自己的隐藏列表，按 Pi 的 `provider + id` 精确到单个模型。它只是选择列表的显示过滤，不是禁用：
+
+- 拥有 Worker 的 Host 在 `model.list` 把 Worker 结果返回前删去隐藏条目，`total` 同步减去，响应形状不变，所有客户端不改就搜不到它们。Main 把 SubHost Work 的 `model.list` 原样转给 SubHost，因此各机器只用自己的列表。
+- `model.set`、Pi 自己的 scoped models 与 extension 的模型调用不受影响；当前模型即使被隐藏，snapshot 仍照常报告它。
+- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是这台机器新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要该机器上有 Work。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
+- `model.visibility.set {operationId,hostId?,hidden}` → `{hidden}`：整份替换，去重并排序后原子写入，最后一次保存为准；沿用 operation ledger。写入失败返回 `model_visibility_write_failed`，原列表不变。
+- 两条请求都是 directory-scoped，按可选 `hostId` 复用 InstanceManager 的机器路由；Main 向目标 SubHost 要求同一能力，旧 SubHost 得到 `capability_missing`。`hidden` 的序列化上限 `MAX_HIDDEN_MODELS_BYTES` 定义在 `protocol.ts`，请求、响应和文件共用同一 parser。
+
+列表存为 Host 私有状态目录下的普通 JSON `model-visibility.json`（位置与格式见 [local-install](../local-install.md#隐藏的模型)）。Host 每次返回模型列表时现读，人或 Agent 直接改文件无需重启。没有持久状态目录的 Host 不提供这项能力，模型列表原样返回。
+
 ## 创建前 system 选择
 
 `system.templates.v1` 提供 directory-scoped 能力，三条请求都接受绝对 `cwd` 和可选 `hostId`；Main/SubHost 复用 InstanceManager 的 directory routing，不创建临时 Work、不触发 trust 或加载 extensions。
@@ -319,6 +334,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/remote-access-server.ts`：TLS admission、pairing bootstrap、listener reconfiguration 与 revocation。
 - `src/control/remote-pairing.ts`：客户端可复用的 pairing wire types，以及 SRP、identity encryption 和 certificate proof helpers。
 - `src/control/attachment-storage-state.ts`：本机 storage directory 设置。
+- `src/control/model-visibility.ts`：本机模型隐藏列表文件与 `model.list` 过滤；可选模型由 `src/pi/pi-model-catalog.ts` 的短命 Pi 进程提供。
 - `src/control/attachment-service.ts`：stream sink、hash verification、manifest、dedupe 与 Agent path resolution。
 - `src/core/instance-deliverables.ts`：instance-lifetime 临时交付 registry、path-free DTO 与 producer bounds。
 - `src/core/source-file.ts`：文件来源 canonicalize/stat/open/unchanged check；`src/control/published-file-reader.ts`：Host 对既有 `file.read` 分页接口的字节读取。

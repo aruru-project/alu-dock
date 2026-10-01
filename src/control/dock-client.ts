@@ -9,6 +9,7 @@ import { FileChannel } from "./file-channel.js";
 import { sendFile, FileReceiver, FileTransferSourceError } from "./file-transfer.js";
 import { FILE_TRANSFER_CAPABILITY, parseFileTransferFrame, parseFileDownloadResult, parsePublishedFileDto, parseDeliverableDto, parseWorkspaceEntryDto, type PublishedFileTransferResult, type DeliverableDownloadResult, ProtocolHelloRejectedError, type FileTransferRequest } from "./protocol.js";
 import { SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
+import { MODEL_VISIBILITY_CAPABILITY, parseModelVisibilityResult, parseModelVisibilitySetResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -625,6 +626,10 @@ export class DockClient {
   systemCatalog(cwd:string,hostId?:string,cursor?:SystemCatalogCursor,limit=MAX_SYSTEM_CATALOG_ITEMS):Promise<SystemCatalogResult>{return this.request("system.catalog",{cwd,hostId,cursor,limit},SYSTEM_TEMPLATES_CAPABILITY,parseSystemCatalogResult);}
   systemContent(cwd:string,id:string,hostId?:string,offset?:number,revision?:string):Promise<ResourceContentResult>{return this.request("system.content",{cwd,id,hostId,offset,revision},SYSTEM_TEMPLATES_CAPABILITY,parseResourceContentResult);}
   setSystemDefault(cwd:string,id:string,hostId?:string,operationId=this.createRequestId()):Promise<SystemDefaultSetResult>{return this.request("system.default.set",{cwd,id,hostId,operationId},SYSTEM_TEMPLATES_CAPABILITY,parseSystemDefaultSetResult);}
+  /** One machine's selectable models and hidden list; omit hostId for this Host. */
+  modelVisibility(hostId?:string):Promise<ModelVisibilityResult>{return this.request("model.visibility.get",{hostId},MODEL_VISIBILITY_CAPABILITY,parseModelVisibilityResult);}
+  /** Replace one machine's hidden list; that Host leaves these models out of every Work's model list. */
+  setModelVisibility(hidden:ModelRef[],hostId?:string,operationId=this.createRequestId()):Promise<ModelVisibilitySetResult>{return this.request("model.visibility.set",{operationId,hostId,hidden},MODEL_VISIBILITY_CAPABILITY,parseModelVisibilitySetResult);}
   /** Omit cursor for the first page; pass the previous page's nextCursor to continue. */
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd",hostId?:string,cursor?:string):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope,hostId,...(cursor===undefined?{}:{cursor})},["session.inventory.v1","session.inventory-diagnostics.v1",...(cursor===undefined?[]:[SESSION_INVENTORY_PAGES_CAPABILITY])],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS,hostId?:string):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit,hostId},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
