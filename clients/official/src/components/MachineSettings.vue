@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { Eye, EyeOff, Server, X } from '@lucide/vue'
-import { getModelVisibility, setModelVisibility } from '../lib/bridge'
-import { currentConnectionCall } from '../lib/hostResult'
+import { getModelVisibility } from '../lib/bridge'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { defaultMachineHostId, machineDisplayLabel, machineSelectorVisible } from '../lib/machines'
 import { hideModels, modelRowMatches, modelVisibilityChanges, modelVisibilityColumns, showModels, type ModelVisibilityRow } from '../lib/modelVisibility'
 import type { MachineDto, ModelRef, ModelVisibilityResult } from '../lib/types'
 import { userErrorMessage } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import { useSurfacesStore } from '../stores/surfaces'
+import { useModelVisibilityStore } from '../stores/model-visibility'
 import AluSelect from './AluSelect.vue'
+import MachineSettingsResults from './MachineSettingsResults.vue'
 
 const props = defineProps<{
   machines: readonly MachineDto[]
@@ -18,9 +20,10 @@ const props = defineProps<{
   /** Opened from a Work: start on that Work's machine. */
   initialHostId?: string
 }>()
-const emit = defineEmits<{ close: []; dirty: [dirty: boolean]; busy: [busy: boolean] }>()
+const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
 const app = useAppStore()
 const surfaces = useSurfacesStore()
+const submissions = useModelVisibilityStore()
 
 /** Empty when the Dock has no machine list: the connected Host itself. */
 const hostId = ref('')
@@ -29,9 +32,9 @@ const saved = ref<ModelRef[]>([])
 const draft = ref<ModelRef[]>([])
 const loading = ref(false)
 const loadError = ref('')
-const saving = ref(false)
-const saveError = ref('')
-const notice = ref('')
+const targetHostId = computed(() => machine.value?.kind === 'main' ? undefined : hostId.value || undefined)
+const submission = computed(() => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value))
+const saving = computed(() => submission.value?.state === 'pending')
 const shownQuery = ref('')
 const hiddenQuery = ref('')
 let loadEpoch = 0
@@ -48,21 +51,27 @@ const columns = computed(() => modelVisibilityColumns(result.value?.models ?? []
 const shownRows = computed(() => columns.value.shown.filter((row) => modelRowMatches(row, shownQuery.value)))
 const hiddenRows = computed(() => columns.value.hidden.filter((row) => modelRowMatches(row, hiddenQuery.value)))
 const changes = computed(() => modelVisibilityChanges(saved.value, draft.value))
-const canSave = computed(() => !!result.value && !saving.value && (changes.value > 0 || !!result.value.fileProblem))
-const status = computed(() => notice.value || (changes.value ? `已改动 ${changes.value} 项，尚未保存` : ''))
+const retained = computed(() => !!submission.value && submission.value.state !== 'succeeded'
+  && modelVisibilityChanges(submission.value.hidden, draft.value) === 0)
+const dirty = computed(() => !!result.value && !retained.value && (changes.value > 0 || submission.value?.state === 'unknown'))
+const canSave = computed(() => !!result.value && !saving.value && (changes.value > 0 || !!result.value.fileProblem || submission.value?.state === 'unknown'))
+const status = computed(() => saving.value ? submission.value?.message
+  : dirty.value ? (changes.value ? `已改动 ${changes.value} 项，尚未保存` : '已改回上次读取的列表，点保存确认这份设置。') : submission.value?.message ?? '')
 
-watch(changes, (value) => emit('dirty', value > 0), { immediate: true })
-// A save already sent will change the Host either way; closing waits for its answer.
-watch(saving, (value) => emit('busy', value), { immediate: true })
+watch(dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
+watch(() => submission.value?.state, (state) => {
+  if (state !== 'succeeded' || !result.value || !submission.value) return
+  saved.value = submission.value.hidden
+  draft.value = [...saved.value]
+  result.value = { ...result.value, hidden: saved.value, fileProblem: undefined }
+})
 onUnmounted(() => { loadEpoch++ })
 
 watch(() => props.machines, (machines) => {
   // Without a machine list, stay on the machine the page was opened for rather than
   // quietly editing the connected Host instead.
-  if (!machines.length) { hostId.value = props.initialHostId ?? ''; return }
-  if (machines.some((candidate) => candidate.hostId === hostId.value && candidate.available)) return
-  const preferred = machines.find((candidate) => candidate.hostId === props.initialHostId && candidate.available)
-  hostId.value = preferred?.hostId ?? defaultMachineHostId(machines)
+  if (hostId.value) return // A disconnected machine must not silently switch the editor to another machine.
+  hostId.value = props.initialHostId ?? defaultMachineHostId(machines) ?? ''
 }, { immediate: true })
 
 watch([
@@ -74,21 +83,23 @@ watch([
 
 async function load() {
   const epoch = ++loadEpoch
-  const target = hostId.value || undefined
+  const target = targetHostId.value
+  const pendingAtStart = saving.value ? submission.value : undefined
   loading.value = true
-  saving.value = false
   loadError.value = ''
-  saveError.value = ''
-  notice.value = ''
   result.value = null
   saved.value = []
   draft.value = []
   try {
     const value = await currentConnectionCall(app, (context) => getModelVisibility(context, target))
     if (epoch !== loadEpoch) return
-    result.value = value
-    saved.value = value.hidden
-    draft.value = [...value.hidden]
+    // A save can finish while the read is in flight. Its confirmed response wins
+    // over that older read; reopening later still reads current Host settings.
+    const completedDuringRead = pendingAtStart && pendingAtStart === submission.value && pendingAtStart.state === 'succeeded'
+    const hidden = completedDuringRead ? pendingAtStart.hidden : value.hidden
+    result.value = completedDuringRead ? { ...value, hidden, fileProblem: undefined } : value
+    saved.value = hidden
+    draft.value = [...(submission.value && submission.value.state !== 'succeeded' ? submission.value.hidden : hidden)]
   } catch (cause) {
     if (epoch === loadEpoch) loadError.value = userErrorMessage(cause, '暂时读不到这台机器上的模型。请稍后重试。')
   } finally {
@@ -98,44 +109,33 @@ async function load() {
 
 async function chooseMachine(value: string) {
   if (value === hostId.value) return
-  if (changes.value && !await surfaces.askConfirm('切换机器？', '这台机器的改动还没有保存，切换后会丢失。')) return
+  if (dirty.value && !await surfaces.askConfirm('切换机器？', '这台机器的改动还没有保存，切换后会丢失。')) return
   hostId.value = value
 }
 
-async function save() {
+function save() {
   if (!canSave.value) return
-  const epoch = loadEpoch
-  const target = hostId.value || undefined
-  const hidden = draft.value.map((model) => ({ provider: model.provider, id: model.id }))
-  saving.value = true
-  saveError.value = ''
-  notice.value = ''
-  try {
-    const value = await currentConnectionCall(app, (context) => setModelVisibility(hidden, context, target))
-    if (epoch !== loadEpoch) return
-    saved.value = value.hidden
-    draft.value = [...value.hidden]
-    if (result.value) result.value = { ...result.value, hidden: value.hidden, fileProblem: undefined }
-    notice.value = '已保存。下次打开模型选择时生效。'
-  } catch (cause) {
-    if (epoch !== loadEpoch) return
-    const unknown = !!cause && typeof cause === 'object' && (('code' in cause && cause.code === 'effect_unknown') || ('outcomeUnknown' in cause && cause.outcomeUnknown === true))
-    saveError.value = unknown
-      ? '还无法确认是否已经保存。再点一次保存不会出问题；也可以关闭后重新打开，查看这台机器现在的设置。'
-      : userErrorMessage(cause, '隐藏列表没有保存成功，原来的设置不变。请稍后重试。')
-  } finally {
-    if (epoch === loadEpoch) saving.value = false
-  }
+  const connection = requireConnectionContext(app)
+  const hostName = app.activeHost?.displayName ?? '本机'
+  const machineName = machine.value?.name ?? 'Host'
+  const label = machineName === hostName ? hostName : `${hostName} · ${machineName}`
+  void submissions.save(connection, targetHostId.value, label, draft.value)
 }
 
 function edit(next: ModelRef[]) {
   draft.value = next
-  notice.value = ''
-  saveError.value = ''
+  // Explicitly undoing a failed submission retires its retained draft. An unknown
+  // save is different: the user can still save this desired list to confirm it.
+  if (submission.value?.state === 'failed' && modelVisibilityChanges(saved.value, next) === 0) {
+    submissions.discard(submission.value.key)
+  }
 }
 function hide(rows: readonly ModelVisibilityRow[]) { edit(hideModels(draft.value, rows)) }
 function show(rows: readonly ModelVisibilityRow[]) { edit(showModels(draft.value, rows)) }
-function discard() { edit([...saved.value]) }
+function discard() {
+  if (submission.value) submissions.discard(submission.value.key)
+  edit([...saved.value])
+}
 </script>
 
 <template>
@@ -164,9 +164,10 @@ function discard() { edit([...saved.value]) }
 
       <label v-if="showMachineSelector" class="machine-settings-machine">
         <span>机器</span>
-        <AluSelect :value="hostId" :options="machineOptions" label="选择机器" :disabled="saving || loading || machinesLoading" @select="chooseMachine" />
+        <AluSelect :value="hostId" :options="machineOptions" label="选择机器" :disabled="loading || machinesLoading" @select="chooseMachine" />
       </label>
       <p v-if="machineError" class="machine-settings-note is-warning" role="status">{{ machineError }}</p>
+      <MachineSettingsResults embedded :exclude-key="submission?.key" />
 
       <div v-if="machinesLoading || loading" class="machine-settings-status" role="status">正在读取这台机器上的模型…</div>
       <div v-else-if="loadError" class="machine-settings-error" role="alert"><span>{{ loadError }}</span><button type="button" class="button secondary" @click="load">重试</button></div>
@@ -205,9 +206,8 @@ function discard() { edit([...saved.value]) }
   </div>
 
   <footer class="machine-settings-footer">
-    <p v-if="saveError" class="machine-settings-error" role="alert">{{ saveError }}</p>
-    <span v-else class="machine-settings-footer-status" role="status">{{ status }}</span>
-    <button type="button" class="button secondary" :disabled="!changes || saving" @click="discard">放弃改动</button>
+    <span class="machine-settings-footer-status" :class="{ 'machine-settings-error': submission?.state === 'failed' && !dirty }" :role="submission?.state === 'failed' && !dirty ? 'alert' : 'status'">{{ status }}</span>
+    <button type="button" class="button secondary" :disabled="saving || (!changes && submission?.state !== 'failed' && submission?.state !== 'unknown')" @click="discard">放弃改动</button>
     <button type="button" class="button primary" :disabled="!canSave" @click="save">{{ saving ? '正在保存…' : '保存' }}</button>
   </footer>
 </template>

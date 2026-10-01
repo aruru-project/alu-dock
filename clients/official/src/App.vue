@@ -13,6 +13,8 @@ import ConnectionLanding from './components/ConnectionLanding.vue'
 import WorkSidebar from './components/WorkSidebar.vue'
 import ImagePreviewDialog from './components/ImagePreviewDialog.vue'
 import PageDialogs from './components/PageDialogs.vue'
+import MachineSettingsResults from './components/MachineSettingsResults.vue'
+import { useModelVisibilityStore } from './stores/model-visibility'
 import { useAppStore } from './stores/app'
 import { useAttachmentsStore } from './stores/attachments'
 import { useControlPanelStore } from './stores/control-panel'
@@ -40,6 +42,7 @@ const input = useInputStore()
 const workActions = useWorkActionsStore()
 const controlPanel = useControlPanelStore()
 const conversation = useConversationStore()
+const modelVisibility = useModelVisibilityStore()
 const selected = computed(() => app.selectedWork)
 const pinia = getActivePinia()
 
@@ -64,7 +67,7 @@ onMounted(async () => {
 })
 // The page's stores stop their listeners and timers with the page; a later page starts from fresh state.
 onUnmounted(() => {
-  for (const store of [input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces]) {
+  for (const store of [input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelVisibility]) {
     store.$dispose()
     if (pinia) delete pinia.state.value[store.$id]
   }
@@ -82,6 +85,8 @@ onUnmounted(() => {
     <div v-if="operations.workResults.length && !surfaces.commandOpen && !surfaces.directoryOpen && !surfaces.composerExpanded" class="alu-work-operation-results" aria-label="当前 Work 操作结果">
       <OperationResults :key="`${app.activeConnectionId}:${selected?.id}`" :operations="operations.workResults" :acknowledge="operations.consumeNativeOperation" />
     </div>
+
+    <MachineSettingsResults />
 
     <InputRegion>
       <WorkToolbar />

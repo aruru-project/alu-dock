@@ -42,6 +42,7 @@ let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNa
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
+let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative
 const hostCatalog = () => ({ revision: hostCatalogRevision, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: context.connectionId },
   hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: [], policy: { mode: 'automatic' } } })) })
 const emit = (name, payload) => listeners.get(name)?.({ payload })
@@ -113,7 +114,9 @@ const invoke = async (command, args = {}) => {
   if (command === 'remove_attachment') return nativeJobs.delete(args.token)
 
   if (command === 'pending_operations') return structuredClone([...nativeResults.values()])
-  if (command === 'list_machines') return []
+  if (command === 'list_machines') return machinesFixture
+  if (command === 'model_visibility') return modelVisibilityNative(args)
+  if (command === 'set_model_visibility') return saveModelVisibilityNative(args)
   if (command === 'consume_operation') {
     if (consumeFailures.has(args.operationId)) throw { code: 'io_error', message: 'fixture acknowledgement unavailable' }
     nativeResults.delete(args.operationId); return
@@ -901,6 +904,152 @@ try {
     finishModel(JSON.parse(JSON.stringify(app.selectedWork))); await settle()
     modelNative = undefined
     assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model'), undefined)
+  }
+  // #339: the real App/PageDialogs wiring owns leaving; submitted saves survive the editor.
+  {
+    const originalWork = JSON.parse(JSON.stringify(app.selectedWork))
+    const originalContext = { ...context }
+    app.applyWorkSnapshot({ ...originalWork, hostId: 'laptop' })
+    machinesFixture = [
+      { hostId: 'main', name: '工作站', kind: 'main', available: true },
+      { hostId: 'laptop', name: '笔记本', kind: 'subhost', available: true },
+    ]
+    const models = [
+      { provider: 'azure', id: 'one', name: 'Model One' },
+      { provider: 'azure', id: 'two', name: 'Model Two' },
+      { provider: 'openai', id: 'three', name: 'Model Three' },
+    ]
+    let hidden = [{ provider: 'retired', id: 'old' }]
+    modelVisibilityNative = async args => ({ models, total: 3, truncated: false, hidden: args.targetHostId === 'laptop' ? hidden : [] })
+    const dialog = () => find(container, item => item.props['aria-labelledby'] === 'machine-settings-title')
+    const results = () => find(container, item => item.props['aria-label'] === 'Host 设置保存结果')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || item.props.title === label || text(item).includes(label)))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(target, `button exists: ${label}`)
+      assert.equal(!!target.props.disabled, false, `${label} is available`)
+      target.props.onClick(); await settle()
+    }
+    const openSettings = async () => { await click(container, 'Host 设置'); assert.ok(dialog()) }
+    const escapeSettings = async () => {
+      for (const handler of windowEvents.get('keydown') ?? []) handler({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} })
+      await settle()
+    }
+    const chooseMachine = async label => { await click(dialog(), '选择机器'); await click(dialog(), label) }
+    const rowCount = label => all(find(dialog(), item => item.props['aria-label'] === label), item => item.type === 'button' && String(item.props.class).includes('model-row')).length
+    // Opening through the real model selector also transfers keyboard focus.
+    find(container, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
+    await click(container, '管理隐藏的模型')
+    assert.equal(calls.filter(call => call.command === 'model_visibility').at(-1).args.targetHostId, 'laptop')
+    assertSameReference(document.activeElement, button(dialog(), '关闭'))
+    assert.ok(text(dialog()).includes('当前不可用'))
+    const filter = find(dialog(), item => item.props['aria-label'] === '过滤显示中的模型')
+    filter.value = 'azure'; filter['event:input']({ target: filter }); await settle()
+    await click(dialog(), '隐藏筛选出的 2 个')
+    assert.ok(text(dialog()).includes('已改动 2 项'))
+    await escapeSettings()
+    assert.ok(text(container).includes('放弃未保存的修改？'), 'real PageDialogs forwards dirty state')
+    await click(container, '取消')
+    await chooseMachine('工作站 · Main')
+    assert.ok(text(container).includes('切换机器？'))
+    await click(container, '取消')
+    let finishSave, rejectSave
+    saveModelVisibilityNative = args => new Promise((resolve, reject) => {
+      finishSave = () => { hidden = args.hidden; resolve({ hidden: args.hidden }) }
+      rejectSave = reject
+    })
+    await click(dialog(), '保存')
+    assert.ok(text(dialog()).includes('关闭设置不会取消保存'))
+    await click(dialog(), '关闭')
+    assertSameReference(dialog(), undefined, 'closing unmounts the real editor during a save')
+    assert.ok(text(results()).includes('笔记本') && text(results()).includes('正在保存'))
+    await openSettings()
+    assert.equal(button(dialog(), '正在保存…').props.disabled, true, 'reopening cannot submit the same pending save twice')
+    await chooseMachine('工作站 · Main')
+    assert.equal(rowCount('已隐藏的模型'), 0)
+    finishSave(); await settle()
+    assert.equal(rowCount('已隐藏的模型'), 0, 'the laptop response does not overwrite Main')
+    assert.ok(text(results()).includes('笔记本') && text(results()).includes('已保存'), 'other machine results remain visible inside the open editor')
+    await escapeSettings()
+    assert.ok(text(results()).includes('已保存'), 'the original machine reports success after leaving')
+    await click(results(), '知道了')
+
+    // Back closes pending saves too. Failed and unknown submissions keep their draft across reopening.
+    for (const outcome of ['failed', 'unknown']) {
+      await openSettings()
+      await click(dialog(), '隐藏 openai/three')
+      await click(dialog(), '保存')
+      if (outcome === 'failed') { systemBack(); await settle() } else await escapeSettings()
+      assertSameReference(dialog(), undefined)
+      rejectSave(outcome === 'unknown'
+        ? { code: 'effect_unknown', outcomeUnknown: true, message: 'fixture' }
+        : { code: 'io_error', message: '保存没有完成，请重试。' })
+      await settle()
+      assert.ok(text(results()).includes(outcome === 'unknown' ? '无法确认' : '改动已保留'), text(results()))
+      assert.equal(find(results(), item => item.props.role === 'alert') !== undefined, outcome === 'failed', 'unknown is not presented as failure')
+      const saveCount = calls.filter(call => call.command === 'set_model_visibility').length
+      if (outcome === 'unknown') {
+        const normalRead = modelVisibilityNative
+        let rejectRead
+        modelVisibilityNative = () => new Promise((_, reject) => { rejectRead = reject })
+        await openSettings(); await click(dialog(), '关闭')
+        assertSameReference(dialog(), undefined, 'a pending read does not invent unsaved edits')
+        rejectRead({ code: 'connection_failed' }); await settle()
+        modelVisibilityNative = async () => { throw { code: 'connection_failed' } }
+        await openSettings(); await click(dialog(), '关闭')
+        assertSameReference(dialog(), undefined, 'a failed read does not invent unsaved edits')
+        modelVisibilityNative = normalRead
+      }
+      await openSettings()
+      assert.equal(rowCount('已隐藏的模型'), 4, 'reopening restores the submitted draft, not only the Host baseline')
+      assert.equal(calls.filter(call => call.command === 'set_model_visibility').length, saveCount, 'reopening never automatically retries')
+      if (outcome === 'failed') {
+        await click(dialog(), '恢复显示 openai/three')
+        await click(dialog(), '关闭'); await openSettings()
+        assert.equal(rowCount('已隐藏的模型'), 3, 'manually reverting the failed edit does not resurrect its old draft')
+      } else {
+        await click(dialog(), '恢复显示 openai/three')
+        await click(dialog(), '关闭')
+        assert.ok(text(container).includes('放弃未保存的修改？'), 'edits after an unknown save still need confirmation even at the old baseline')
+        await click(container, '取消')
+        assert.equal(button(dialog(), '保存').props.disabled, false)
+        await click(dialog(), '放弃改动')
+      }
+      await click(dialog(), '关闭')
+    }
+
+    // An old connection's real success is not relabelled as a failure after switching Hosts.
+    const previousCatalogFailure = failCatalog
+    failCatalog = false
+    await openSettings(); await click(dialog(), '隐藏 openai/three'); await click(dialog(), '保存'); await click(dialog(), '关闭')
+    await app.switchHost('spare'); await settle()
+    finishSave(); await settle()
+    assert.ok(text(results()).includes('Host · 笔记本') && text(results()).includes('已保存'))
+    assert.equal(text(results()).includes('没有保存成功'), false)
+    await click(results(), '知道了')
+    await app.switchHost('host'); await settle(); app.selectWork('work'); app.applyWorkSnapshot({ ...app.selectedWork, hostId: 'laptop' }); await settle()
+
+    // Existing user-facing cases stay on the same real entry, not a second hand-wired page.
+    modelVisibilityNative = async () => { throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } } }
+    await openSettings()
+    assert.ok(text(dialog()).includes('请更新对应机器上的 Dock'))
+    await click(dialog(), '关闭')
+    const brokenFile = { models, total: 3, truncated: false, hidden: [], fileProblem: '文件不是有效的 JSON' }
+    modelVisibilityNative = async () => brokenFile
+    let finishRepair, finishOldRead
+    saveModelVisibilityNative = args => new Promise(resolve => { finishRepair = () => resolve({ hidden: args.hidden }) })
+    await openSettings(); await click(dialog(), '保存')
+    assert.deepEqual(calls.filter(call => call.command === 'set_model_visibility').at(-1).args.hidden, [])
+    await click(dialog(), '关闭')
+    modelVisibilityNative = () => new Promise(resolve => { finishOldRead = () => resolve(brokenFile) })
+    await openSettings()
+    finishRepair(); await settle(); finishOldRead(); await settle()
+    assert.equal(text(dialog()).includes('文件不是有效的 JSON'), false, 'an older read cannot undo the confirmed repair')
+    await click(dialog(), '关闭'); await click(results(), '知道了')
+    machinesFixture = []; app.applyWorkSnapshot(originalWork); failCatalog = previousCatalogFailure
+    Object.assign(context, originalContext)
+    app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
+    await settle()
+    console.log('PASS: Host settings real App wiring / pending close, Esc and Back / scoped late results / failed draft recovery')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
