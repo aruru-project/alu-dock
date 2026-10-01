@@ -528,7 +528,7 @@ try {
   assert.equal(calls.filter(call => call.command === 'bootstrap').length, readsBeforeAction + 1)
   observation({ kind: 'status', state: 'identity_error' }); await settle()
   assert.ok(text(find(statusEntry, item => item.type === 'summary')).includes('身份'))
-  assert.ok(find(statusEntry, item => item.type === 'button' && text(item) === 'Host 设置'))
+  assert.ok(find(statusEntry, item => item.type === 'button' && text(item) === '连接与配对'))
   observation({ kind: 'status', state: 'host_changed' }); await settle()
   assert.ok(find(statusEntry, item => item.type === 'button' && text(item) === '刷新状态'))
 
@@ -951,7 +951,7 @@ try {
   observation({ kind: 'status', state: 'identity_error' }); await settle()
   const connectionStatus = find(container, item => item.type === 'details' && item.props['aria-label'] === '连接状态')
   connectionStatus.open = true
-  await find(connectionStatus, item => item.type === 'button' && text(item) === 'Host 设置').props.onClick(); await settle()
+  await find(connectionStatus, item => item.type === 'button' && text(item) === '连接与配对').props.onClick(); await settle()
   const hostDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title')
   const removeHost = find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Host')
   removeHost.focus()
@@ -1158,7 +1158,7 @@ try {
     const openHosts = async () => {
       observation({ kind: 'status', state: 'identity_error' }); await settle()
       const details = find(switchView, item => item.type === 'details' && item.props['aria-label'] === '连接状态')
-      find(details, item => item.type === 'button' && text(item) === 'Host 设置').props.onClick(); await settle()
+      find(details, item => item.type === 'button' && text(item) === '连接与配对').props.onClick(); await settle()
     }
     try {
       let finishA, finishB

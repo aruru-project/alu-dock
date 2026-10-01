@@ -19,7 +19,10 @@ import type {
   InteractionMethod,
   InteractionResponse,
   MachineDto,
+  ModelRef,
   ModelsResult,
+  ModelVisibilityResult,
+  ModelVisibilitySetResult,
   NativeMedia,
   PublishedFileDto,
   QueueDequeueResult,
@@ -555,6 +558,15 @@ export async function saveWorkspaceCachedFile(cacheId: string, context: Workspac
 
 export async function listMachines(context: ConnectionContext): Promise<MachineDto[]> {
   return native<MachineDto[]>('list_machines', { ...context })
+}
+
+/** Omit targetHostId for the connected Host itself. */
+export async function getModelVisibility(context: ConnectionContext, targetHostId?: string): Promise<ModelVisibilityResult> {
+  return native<ModelVisibilityResult>('model_visibility', { ...context, targetHostId: targetHostId ?? null })
+}
+
+export async function setModelVisibility(hidden: ModelRef[], context: ConnectionContext, targetHostId?: string): Promise<ModelVisibilitySetResult> {
+  return native<ModelVisibilitySetResult>('set_model_visibility', { ...context, targetHostId: targetHostId ?? null, hidden })
 }
 
 export async function listWorkspace(

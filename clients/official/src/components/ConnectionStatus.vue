@@ -3,7 +3,7 @@ import { computed } from 'vue'
 const props = defineProps<{ state: string; label: string }>()
 const emit = defineEmits<{ reconnect: []; settings: []; works: [] }>()
 const attention = computed(() => ({
-  identity_error: { short: '身份', message: '无法确认 Host 的身份或连接授权。请核对保存的地址与 Host 设置，不要直接覆盖原有配对。', action: 'Host 设置', target: 'settings' },
+  identity_error: { short: '身份', message: '无法确认 Host 的身份或连接授权。请在“连接与配对”中核对保存的地址，不要直接覆盖原有配对。', action: '连接与配对', target: 'settings' },
   host_changed: { short: 'Host', message: 'Host 状态已经变化。请刷新工作列表后继续；本地编辑内容仍保留。', action: '刷新状态', target: 'reconnect' },
   follow_failed: { short: '更新', message: '没有收到这个 Work 的最新更新，客户端不会自动重试。请重新连接；本地编辑内容仍保留。', action: '重新连接', target: 'reconnect' },
   content_error: { short: '正文', message: '对话暂时无法显示。请重新读取；本地编辑内容仍保留。', action: '重新读取', target: 'reconnect' },

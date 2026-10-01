@@ -22,6 +22,7 @@ mod instances;
 mod link;
 pub use instance_records::InstanceDeliveryContext;
 mod local_transport;
+mod model_visibility;
 mod observation;
 mod operations;
 mod pairing;
@@ -142,6 +143,8 @@ pub use systems::{
     SystemCandidate, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
     SystemSourceKind,
 };
+
+pub use model_visibility::{ModelRef, ModelVisibilityResult, ModelVisibilitySetResult};
 
 pub use actions::{
     SafeQueueDequeueReceipt, SafeQueueDequeueResult, project_queue_dequeue, restored_image_scope,

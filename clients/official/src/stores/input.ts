@@ -81,7 +81,7 @@ export const useInputStore = defineStore('input', () => {
       && operation.connectionId === app.activeConnectionId && operation.hostEpoch === app.payload?.host.hostEpoch
       && operation.instanceId === selected.value?.id && selected.value.lifecycle === 'active'
       && operation.runtimeGeneration === selected.value.runtimeGeneration && operation.sessionId === selected.value.executor.piSessionId
-      && !app.workDrawerOpen && !surfaces.commandOpen && !surfaces.directoryOpen && !surfaces.hostSettingsOpen && !surfaces.appSettingsOpen
+      && !app.workDrawerOpen && !surfaces.commandOpen && !surfaces.directoryOpen && !surfaces.hostSettingsOpen && !surfaces.appSettingsOpen && !surfaces.machineSettingsOpen
       && !surfaces.workspaceBrowserOpen && !surfaces.deliveryOpen && !surfaces.imagePreview && !surfaces.messageTextView && !surfaces.confirmDialog
       && !extensionUi.activeRequest
     if (!canPresent()) return

@@ -414,6 +414,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const hostMachines = ref<MachineDto[]>([])
   const machineListError = ref('')
   const newWorkMachinesLoading = ref(false)
+  const machineSettingsLoading = ref(false)
   const newWorkCompact = ref(true)
   let machineLoadEpoch = 0
 
@@ -514,6 +515,21 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     }
   }
 
+  /** Host 设置 lists the Dock's machines; without a machine list it manages the connected Host itself. */
+  async function openMachineSettings(hostId?: string) {
+    page.openMachineSettings(hostId)
+    machineSettingsLoading.value = true
+    machineListError.value = ''
+    try {
+      await loadHostMachines()
+    } catch (cause) {
+      const code = cause && typeof cause === 'object' && 'code' in cause ? cause.code : ''
+      if (page.machineSettingsOpen && code !== 'capability_missing') machineListError.value = errorMessage(cause, '无法读取可用机器，请检查连接后重试。')
+    } finally {
+      machineSettingsLoading.value = false
+    }
+  }
+
   function acceptCreatedWork(work: Work) {
     page.directoryBusy = false
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
@@ -528,6 +544,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, globalOutcomeUnknown, globalReconciling, globalReconcileMessage, reconcileGlobalOutcome, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, acceptCreatedWork,
   }
 })

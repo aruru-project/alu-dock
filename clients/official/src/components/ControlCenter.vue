@@ -26,6 +26,7 @@ import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
 import { useControlPanelStore, type ControlMutationDomain } from '../stores/control-panel'
+import { useWorkActionsStore } from '../stores/work-actions'
 import type {
   CommandArgumentCompletion,
   CommandInfo,
@@ -46,6 +47,7 @@ const { models, tools, resources, settings, loading, loadErrors } = storeToRefs(
 const { loadSection } = panel
 const catalog = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
+const { openMachineSettings } = useWorkActionsStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
   unknown: [cause: unknown, domain: ControlMutationDomain, scope: SessionContext]
@@ -655,6 +657,7 @@ function isCurrentModel(model: ModelInfo) {
         <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="!!pending" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
         <div v-if="models && !filteredModels.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
+      <div class="alu-model-visibility-entry"><span>有些模型不常用？</span><button type="button" @click="openMachineSettings(work.hostId)">管理隐藏的模型</button></div>
     </section>
 
     <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="!!pending" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
@@ -1103,6 +1106,9 @@ function isCurrentModel(model: ModelInfo) {
   .control-center-port { min-height: 0; }
   .cmd-palette-box > .control-center-port { max-height: 92dvh; }
 }
+.alu-model-visibility-entry { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--alu-border); color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.alu-model-visibility-entry button { padding: 3px 8px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 7px; color: var(--alu-blue); font-size: var(--alu-meta-size); }
+.alu-model-visibility-entry button:hover, .alu-model-visibility-entry button:focus-visible { border-color: var(--alu-blue-border); background: var(--alu-hover); }
 .resource-read-button { display: inline-flex; align-items: center; gap: 4px; font-family: inherit; cursor: pointer; }
 .resource-read-button:hover, .resource-read-button:focus-visible { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-hover); }
 .resource-read-button:disabled { cursor: default; opacity: .55; }
