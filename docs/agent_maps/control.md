@@ -91,6 +91,8 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 
 客户端首请求只携带 TLS 客户端证书、设备名和随机数，绝不发送 PIN 或可离线枚举的 PIN verifier。用户在本机选择明确请求并输入客户端显示的四位 PIN。PIN 阶段采用 HomeKit Pair Setup 使用的 SRP-6a 3072-bit/SHA-512 参数；确认出的 session key 再按 HomeKit 的 domain-separated HKDF、ChaCha20-Poly1305 和签名交换形状，绑定 server-generated pairing ID、双方完整证书、本次随机数和双方私钥证明。事务顺序同时遵循 Moonlight/Sunshine 的经验：候选证书保持 provisional、阶段严格单调、全部验证后才原子写入客户端信任，客户端最后以精确 Host certificate pin 建立新的 TLS/Protocol V2 连接再提交 Host 信任。
 
+配对最终保存通过原子认领窗口文件与本机关闭互斥：关闭先认领则不写信任，保存先认领则由保存任务负责收尾。窗口轮询不能把保存认领造成的文件暂时消失当成手动关闭；期间同一次配对的重复请求仍返回正在保存。listener 停止及正常窗口到期仍按原关闭规则处理。
+
 远程地址不属于身份。已配对客户端可以从新的 IP、域名或映射端口连接同一个 Host，只要双方仍使用原来的证书。每次连接仍执行完整 TLS handshake；session resumption 被关闭，不能替代证书检查。吊销删除精确客户端证书信任，并由 Host 关闭该证书的现有远程连接。
 
 Host 设置按一条分界线开放：决定“谁能连进来、从哪连进来”的设置只在本机改，其余 Agent 工作相关的设置配对过的设备也能改。这是防君子不防小人：配对过的设备本就能通过 Worker 做任何事，这里只保证设置页上不能随手改掉信任关系。

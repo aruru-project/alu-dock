@@ -520,6 +520,12 @@ export class RemoteAccessServer {
     const now = Date.now();
     const next = stored && Date.parse(stored.expiresAt) > now ? stored : undefined;
     if (!next) {
+      // commitPairedClient claims the window by renaming it before writing trust.
+      // Only that temporary absence belongs to the save; listener shutdown and an
+      // expired stored window must still close pairing normally.
+      const saving = this.activePairingId ? this.pending.get(this.activePairingId) : undefined;
+      if (listenerAvailable && !stored && saving?.phase === "committing" && !saving.closed
+        && saving.windowId === this.activeWindow?.id) return;
       if (stored) await this.options.state.closePairingWindow(stored.id).catch(() => false);
       if (this.activeWindow || this.pending.size > 0) await this.closePairingWindow(false);
       return;
