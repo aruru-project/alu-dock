@@ -16,7 +16,7 @@ const results = computed(() => [...saves.saves.values()].filter(save => !save.ac
 <template>
   <section v-if="results.length && (embedded || !surfaces.machineSettingsOpen)" class="machine-save-results" :class="{ 'is-embedded': embedded }" aria-label="Host 设置保存结果">
     <div v-for="save in results" :key="save.key" class="machine-save-result" :class="{ 'is-error': save.state === 'failed' }" :role="save.state === 'failed' ? 'alert' : 'status'">
-      <span><strong>{{ save.label }}</strong>：{{ save.message }}<template v-if="save.connectionId !== app.activeConnectionId"> 切回对应的 Host 后可查看设置。</template></span>
+      <span><strong>{{ save.label }}</strong>：{{ save.message }}<template v-if="save.state === 'failed'"> 改动已保留，可打开 Host 设置重试。</template><template v-else-if="save.state === 'unknown'"> 改动已保留，可打开 Host 设置查看或再次保存。</template><template v-if="save.connectionId !== app.activeConnectionId"> 切回对应的 Host 后可查看设置。</template></span>
       <button v-if="!embedded && save.connectionId === app.activeConnectionId" class="button secondary" @click="actions.openMachineSettings(save.targetHostId)">查看设置</button>
       <button v-if="save.state !== 'pending'" class="button secondary" @click="saves.dismiss(save.key)">知道了</button>
     </div>

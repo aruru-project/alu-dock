@@ -32,6 +32,7 @@ const saved = ref<ModelRef[]>([])
 const draft = ref<ModelRef[]>([])
 const loading = ref(false)
 const loadError = ref('')
+const currentNotice = ref('')
 const targetHostId = computed(() => machine.value?.kind === 'main' ? undefined : hostId.value || undefined)
 const submission = computed(() => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value))
 const saving = computed(() => submission.value?.state === 'pending')
@@ -55,8 +56,13 @@ const retained = computed(() => !!submission.value && submission.value.state !==
   && modelVisibilityChanges(submission.value.hidden, draft.value) === 0)
 const dirty = computed(() => !!result.value && !retained.value && (changes.value > 0 || submission.value?.state === 'unknown'))
 const canSave = computed(() => !!result.value && !saving.value && (changes.value > 0 || !!result.value.fileProblem || submission.value?.state === 'unknown'))
-const status = computed(() => saving.value ? submission.value?.message
-  : dirty.value ? (changes.value ? `已改动 ${changes.value} 项，尚未保存` : '已改回上次读取的列表，点保存确认这份设置。') : submission.value?.message ?? '')
+const status = computed(() => {
+  const entry = submission.value
+  if (saving.value) return entry?.message
+  if (dirty.value) return changes.value ? `已改动 ${changes.value} 项，尚未保存` : '已改回上次读取的列表，点保存确认这份设置。'
+  if (result.value && (entry?.state === 'failed' || entry?.state === 'unknown')) return `${entry.message} 改动已保留，可以再点保存。`
+  return entry?.message ?? currentNotice.value
+})
 
 watch(dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
 watch(() => submission.value?.state, (state) => {
@@ -65,6 +71,13 @@ watch(() => submission.value?.state, (state) => {
   draft.value = [...saved.value]
   result.value = { ...result.value, hidden: saved.value, fileProblem: undefined }
 })
+// A success rendered in its own editor needs no second acknowledgement outside.
+// Keep its receipt while the editor reads, so an older read cannot undo it.
+watch([submission, () => submission.value?.state, loading, result], () => {
+  if (surfaces.machineSettingsOpen && !loading.value && result.value && submission.value?.state === 'succeeded') {
+    submissions.markSuccessSeen(submission.value.key)
+  }
+}, { flush: 'post' })
 onUnmounted(() => { loadEpoch++ })
 
 watch(() => props.machines, (machines) => {
@@ -85,8 +98,10 @@ async function load() {
   const epoch = ++loadEpoch
   const target = targetHostId.value
   const pendingAtStart = saving.value ? submission.value : undefined
+  const unknownAtStart = submission.value?.state === 'unknown' ? submission.value : undefined
   loading.value = true
   loadError.value = ''
+  currentNotice.value = ''
   result.value = null
   saved.value = []
   draft.value = []
@@ -99,6 +114,13 @@ async function load() {
     const hidden = completedDuringRead ? pendingAtStart.hidden : value.hidden
     result.value = completedDuringRead ? { ...value, hidden, fileProblem: undefined } : value
     saved.value = hidden
+    if (unknownAtStart && unknownAtStart === submission.value && !value.fileProblem
+      && modelVisibilityChanges(value.hidden, unknownAtStart.hidden) === 0) {
+      // This fresh read confirms the desired settings, not the old request's outcome.
+      // Retire only that submission's reminder; do not manufacture a success receipt.
+      submissions.discard(unknownAtStart.key)
+      currentNotice.value = '当前设置已与你提交的列表一致。'
+    }
     draft.value = [...(submission.value && submission.value.state !== 'succeeded' ? submission.value.hidden : hidden)]
   } catch (cause) {
     if (epoch === loadEpoch) loadError.value = userErrorMessage(cause, '暂时读不到这台机器上的模型。请稍后重试。')
@@ -123,6 +145,7 @@ function save() {
 }
 
 function edit(next: ModelRef[]) {
+  currentNotice.value = ''
   draft.value = next
   // Explicitly undoing a failed submission retires its retained draft. An unknown
   // save is different: the user can still save this desired list to confirm it.

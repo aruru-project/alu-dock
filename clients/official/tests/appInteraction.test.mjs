@@ -1001,6 +1001,9 @@ try {
       }
       await openSettings()
       assert.equal(rowCount('已隐藏的模型'), 4, 'reopening restores the submitted draft, not only the Host baseline')
+      const footer = text(find(dialog(), item => item.type === 'footer'))
+      assert.ok(footer.includes('可以再点保存'), 'the editor offers an action available right here')
+      assert.equal(footer.includes('可打开 Host 设置'), false)
       assert.equal(calls.filter(call => call.command === 'set_model_visibility').length, saveCount, 'reopening never automatically retries')
       if (outcome === 'failed') {
         await click(dialog(), '恢复显示 openai/three')
@@ -1016,6 +1019,27 @@ try {
       }
       await click(dialog(), '关闭')
     }
+
+    // Review: a fresh matching read settles the desired settings, not the old request outcome.
+    await openSettings(); await click(dialog(), '隐藏 openai/three'); await click(dialog(), '保存'); await click(dialog(), '关闭')
+    hidden = [...calls.filter(call => call.command === 'set_model_visibility').at(-1).args.hidden].reverse()
+    rejectSave({ code: 'effect_unknown', outcomeUnknown: true }); await settle()
+    const savesBeforeMatchingRead = calls.filter(call => call.command === 'set_model_visibility').length
+    await openSettings()
+    assert.ok(text(dialog()).includes('当前设置已与你提交的列表一致'))
+    assert.equal(text(dialog()).includes('还无法确认'), false)
+    assert.equal(text(dialog()).includes('已保存'), false, 'reading current settings does not fabricate a successful save receipt')
+    assert.equal(button(dialog(), '保存').props.disabled, true)
+    assert.equal(calls.filter(call => call.command === 'set_model_visibility').length, savesBeforeMatchingRead)
+    await click(dialog(), '关闭')
+    assertSameReference(results(), undefined, 'a matching current read retires the obsolete unknown reminder')
+    await openSettings(); await click(dialog(), '恢复显示 openai/three'); await click(dialog(), '关闭')
+    assert.ok(text(container).includes('放弃未保存的修改？'), 'later edits still need leave confirmation')
+    await click(container, '取消'); await click(dialog(), '保存')
+    finishSave(); await settle()
+    assert.ok(text(dialog()).includes('已保存'))
+    await click(dialog(), '关闭')
+    assertSameReference(results(), undefined, 'success already shown in its editor does not demand another acknowledgement outside')
 
     // An old connection's real success is not relabelled as a failure after switching Hosts.
     const previousCatalogFailure = failCatalog
@@ -1044,7 +1068,8 @@ try {
     await openSettings()
     finishRepair(); await settle(); finishOldRead(); await settle()
     assert.equal(text(dialog()).includes('文件不是有效的 JSON'), false, 'an older read cannot undo the confirmed repair')
-    await click(dialog(), '关闭'); await click(results(), '知道了')
+    await click(dialog(), '关闭')
+    assertSameReference(results(), undefined, 'the repaired settings result was already shown in the editor')
     machinesFixture = []; app.applyWorkSnapshot(originalWork); failCatalog = previousCatalogFailure
     Object.assign(context, originalContext)
     app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }

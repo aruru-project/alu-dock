@@ -44,9 +44,14 @@ export const useModelVisibilityStore = defineStore('model-visibility', () => {
         && (('code' in cause && cause.code === 'effect_unknown') || ('outcomeUnknown' in cause && cause.outcomeUnknown === true))
       submission.state = unknown ? 'unknown' : 'failed'
       submission.message = unknown
-        ? '还无法确认是否已保存。改动已保留，可打开 Host 设置查看或再次保存。'
-        : `${userErrorMessage(cause, '隐藏列表没有保存成功，请稍后重试。')} 改动已保留，可打开 Host 设置重试。`
+        ? '还无法确认是否已保存。'
+        : userErrorMessage(cause, '隐藏列表没有保存成功，请稍后重试。')
     }
+  }
+
+  function markSuccessSeen(key: string) {
+    const entry = saves.value.get(key)
+    if (entry?.state === 'succeeded') entry.acknowledged = true
   }
 
   function dismiss(key: string) {
@@ -58,5 +63,5 @@ export const useModelVisibilityStore = defineStore('model-visibility', () => {
   function discard(key: string) {
     if (saves.value.get(key)?.state !== 'pending') saves.value.delete(key)
   }
-  return { saves, forTarget, save, dismiss, discard }
+  return { saves, forTarget, save, markSuccessSeen, dismiss, discard }
 })
