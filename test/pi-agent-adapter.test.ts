@@ -15,6 +15,7 @@ import { AgentConversationCursorError } from "../src/core/agent-worker.js";
 import { PiAgentAdapter, type PiAgentAdapterOptions, PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
+import type { JsonObject } from "../src/core/json-value.js";
 
 const ATTACHMENT_CONTEXT_KEY = Buffer.alloc(32, 7);
 
@@ -254,8 +255,8 @@ test("#301 read image descriptors survive preview trimming and completeness desc
   const summary = manager.appendCompaction("summary", short, 42);
   const metadata = manager.appendSessionInfo("named");
   const publishedId = add({ role: "toolResult", toolCallId: "show", toolName: "show_image", isError: false, timestamp: 4,
-    content: [{ type: "text", text: "Published image." }], details: { [PUBLISHED_FILE_DETAIL_KEY]: published } });
-  const assistant = (argumentsValue: Record<string, unknown>) => add({ role: "assistant", content: [
+    content: [{ type: "text", text: "Published image." }], details: { [PUBLISHED_FILE_DETAIL_KEY]: { ...published } } });
+  const assistant = (argumentsValue: JsonObject) => add({ role: "assistant", content: [
     { type: "toolCall", id: "args", name: "read", arguments: argumentsValue },
   ], api: "openai-responses", provider: "fixture", model: "fixture", stopReason: "toolUse", timestamp: 5,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
