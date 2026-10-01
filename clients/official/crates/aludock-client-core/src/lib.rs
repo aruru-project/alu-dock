@@ -46,8 +46,8 @@ mod wire;
 mod workspace_files;
 
 pub use actions::{
-    DeliveryMode, QueueDequeueReceipt, QueueDequeueResult, RestoredImageScope, RestoredImageState,
-    SubmitReceipt, SubmitResult,
+    BashRunReceipt, BashRunResult, DeliveryMode, MAX_BASH_COMMAND_CHARS, QueueDequeueReceipt,
+    QueueDequeueResult, RestoredImageScope, RestoredImageState, SubmitReceipt, SubmitResult,
 };
 pub use attachment_jobs::{
     AttachmentSnapshot, AttachmentSource, AttachmentState, AttachmentUploadScope, NativeAttachment,

@@ -24,6 +24,7 @@ import {
   type SessionEntry,
   type SessionTreeNode,
   type SourceInfo,
+  type UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
 
 import { ResourceContentError } from "../core/resource-content.js";
@@ -226,7 +227,18 @@ interface Binding {
   conversation: PiConversationProjector;
   runOperationId?: string;
   conversationReadState?: ConversationReadState;
+  /** User shell commands (bash.run) still executing against this session, with what bash.started announced. */
+  runningBash: Map<string, { command: string; excludeFromContext: boolean }>;
+  /** Their executions, so a Worker shutdown can let Pi record the cancellations first. */
+  bashTasks: Set<Promise<void>>;
+  /** Finished commands whose record Pi is still holding until the current agent run ends. */
+  deferredBash: Set<string>;
 }
+
+/** Pi's abortBash kills the process tree; its record is appended once the process is gone. */
+const BASH_RECORD_SETTLE_MS = 1_500;
+
+type PiBashResult = Awaited<ReturnType<AgentSession["executeBash"]>>;
 
 interface ConversationReadEntry {
   source: SessionEntry;
@@ -432,6 +444,8 @@ export class PiAgentAdapter {
       }
       case "command.abort": await this.abort(); return null;
       case "command.abort_restore_queue": return this.abortRestoringQueue();
+      case "bash.run": return this.runBash(request.params.operationId, request.params.command, request.params.excludeFromContext);
+      case "bash.abort": this.requireActive().session.abortBash(); return null;
       case "queue.dequeue": return this.clearQueue();
       case "model.list": return this.listModels();
       case "model.set": return this.selectModel(request.params.provider, request.params.modelId);
@@ -1109,6 +1123,106 @@ export class PiAgentAdapter {
   }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
+  /**
+   * Pi's `!` / `!!`: run one user shell command in the session cwd and record it as a
+   * bash_execution entry. Same path as Pi's own TUI/RPC modes: extensions may intercept
+   * through user_bash, execution streams through the session, and Pi decides whether
+   * the record is appended now or held until the running agent turn ends.
+   */
+  async runBash(operationId: string, command: string, excludeFromContext: boolean): Promise<{ operationId: string; startedAt: string }> {
+    const binding = this.requireActive();
+    const { session } = binding;
+    if (binding.runningBash.has(operationId) || binding.deferredBash.has(operationId)) {
+      throw new Error("A shell command with this operation ID was already started");
+    }
+    let intercepted: UserBashEventResult | undefined;
+    try {
+      intercepted = await session.extensionRunner.emitUserBash({ type: "user_bash", command, excludeFromContext, cwd: session.sessionManager.getCwd() });
+    } catch (error) {
+      throw new Error(`An extension rejected this shell command: ${boundedErrorMessage(error)}`);
+    }
+    if (this.active !== binding || !binding.token.active) throw new Error("Pi runtime is unavailable");
+    const startedAt = new Date().toISOString();
+    binding.runningBash.set(operationId, { command, excludeFromContext });
+    this.publishFromBinding(binding, bashFrame({ type: "bash.started", data: { operationId, command, excludeFromContext } }));
+    const task = this.completeBash(binding, operationId, command, excludeFromContext, intercepted);
+    binding.bashTasks.add(task);
+    void task.finally(() => binding.bashTasks.delete(task));
+    return { operationId, startedAt };
+  }
+
+  /** A reload keeps the session, and with it any running command, but the Host starts a
+   * new generation whose live view knows nothing about them: announce them again. */
+  private announceRunningBash(binding: Binding): void {
+    for (const [operationId, { command, excludeFromContext }] of binding.runningBash) {
+      this.publishFromBinding(binding, bashFrame({ type: "bash.started", data: { operationId, command, excludeFromContext } }));
+    }
+  }
+
+  /** Give Pi the moment it needs to record cancelled commands before the Worker exits. */
+  private async settleRunningBash(tasks: readonly Promise<void>[]): Promise<void> {
+    if (tasks.length === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(tasks),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, BASH_RECORD_SETTLE_MS); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async completeBash(binding: Binding, operationId: string, command: string, excludeFromContext: boolean, intercepted: UserBashEventResult | undefined): Promise<void> {
+    const { session } = binding;
+    let completion: AgentEvent;
+    try {
+      let result: PiBashResult;
+      if (intercepted?.result) {
+        result = intercepted.result;
+        for (const frame of bashOutputFrames(operationId, result.output)) this.publishFromBinding(binding, frame);
+        session.recordBashResult(command, result, { excludeFromContext });
+      } else {
+        result = await session.executeBash(command, undefined, {
+          excludeFromContext,
+          id: operationId,
+          ...(intercepted?.operations === undefined ? {} : { operations: intercepted.operations }),
+        });
+      }
+      completion = bashFrame({ type: "bash.completed", data: {
+        operationId,
+        ...(typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode) ? { exitCode: result.exitCode } : {}),
+        cancelled: result.cancelled === true,
+        truncated: result.truncated === true,
+        ...(typeof result.fullOutputPath === "string" && result.fullOutputPath.length > 0 ? { fullOutputPath: boundedString(result.fullOutputPath, 16_384, "") } : {}),
+      } });
+    } catch (error) {
+      completion = bashFrame({ type: "bash.completed", data: { operationId, cancelled: false, truncated: false, error: boundedErrorMessage(error) } });
+    }
+    binding.runningBash.delete(operationId);
+    if (!binding.token.active) return; // Pi already cancelled it while replacing the session; the old session keeps the record.
+    // Pi records immediately when idle, otherwise it holds the entry until the run ends.
+    if (session.hasPendingBashMessages) binding.deferredBash.add(operationId);
+    this.publishFromBinding(binding, completion);
+    // An idle session appends the record without any event of its own, so publish the boundary here.
+    if (!session.isStreaming) this.publishFromBinding(binding, this.checkpoint(binding));
+  }
+
+  private checkpoint(binding: Binding): AgentEvent {
+    if (!binding.session.hasPendingBashMessages) binding.deferredBash.clear();
+    const unpersistedBash = [...binding.runningBash.keys(), ...binding.deferredBash];
+    return {
+      type: "conversation_checkpoint",
+      history: this.conversationEntries(binding),
+      ...(unpersistedBash.length === 0 ? {} : { unpersistedBash }),
+    };
+  }
+
+  private publishFromBinding(binding: Binding, event: AgentEvent): void {
+    if (this.active === binding && !binding.bufferEvents) this.publish(event);
+    else binding.buffered.push(event);
+  }
+
   async resolveSessionTarget(path: string): Promise<AgentSessionTarget> {
     const manager = SessionManager.open(path);
     return { canonicalCwd: await realpath(resolve(manager.getCwd())) };
@@ -1228,6 +1342,7 @@ export class PiAgentAdapter {
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
         binding.bufferEvents = false;
         this.publishReplacement(operationId, "reload", previousSessionFile, binding.session.sessionFile);
+        this.announceRunningBash(binding);
         await this.options.extensionUiBroker?.completeGenerationChange();
         this.publishReplacementBuffer(buffered);
         return { cancelled: false };
@@ -1261,7 +1376,9 @@ export class PiAgentAdapter {
       try {
         await this.abort().catch((error: unknown) => { captureCleanupError("abort", error); });
         await this.mutationTail.catch(() => {});
+        const runningBash = [...(this.active?.bashTasks ?? [])];
         await this.disposeRuntimeOnce();
+        await this.settleRunningBash(runningBash);
         return { cleanupErrors };
       } finally {
         this.invalidateBindingsSynchronously();
@@ -1354,9 +1471,19 @@ export class PiAgentAdapter {
       buffered: [],
       bufferEvents: true,
       conversation: new PiConversationProjector(this.options.attachmentContextKey),
+      runningBash: new Map(),
+      bashTasks: new Set(),
+      deferredBash: new Set(),
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
+      if (event.type === "bash_execution_update") {
+        // Only commands started through bash.run carry an id; output arrives as conversation frames.
+        if (typeof event.id === "string" && binding.runningBash.has(event.id) && typeof event.delta === "string") {
+          for (const frame of bashOutputFrames(event.id, event.delta)) this.publishFromBinding(binding, frame);
+        }
+        return;
+      }
       if (event.type === "queue_update") binding.conversation.observeQueueUpdate(event.steering, event.followUp);
       const projectedEvents = projectAgentSessionEvents(event, this.options.publishedFiles)
         .map((projected) => this.attributeLifecycleEvent(binding, projected));
@@ -1366,11 +1493,8 @@ export class PiAgentAdapter {
         projectedEvents.push({ type: "conversation_checkpoint" });
       }
       for (const projected of projectedEvents.flatMap((item) => binding.conversation.project(item))) {
-        const outbound = projected.type === "conversation_checkpoint"
-          ? { ...projected, history: this.conversationEntries(binding) }
-          : projected;
-        if (this.active === binding && !binding.bufferEvents) this.publish(outbound);
-        else binding.buffered.push(outbound);
+        const outbound = projected.type === "conversation_checkpoint" ? this.checkpoint(binding) : projected;
+        this.publishFromBinding(binding, outbound);
       }
       if (event.type === "agent_settled") binding.runOperationId = undefined;
     });
@@ -2579,6 +2703,22 @@ function conversationPreviewIsComplete(blocks: readonly ConversationSourceBlock[
         return preview.type === "omitted" && preview.kind === source.kind && preview.description === source.description;
     }
   });
+}
+
+function bashFrame(frame: ConversationFrame): AgentEvent {
+  return { type: "dock_conversation_frame", frame };
+}
+
+/** Shell output is split like assistant deltas so one frame never exceeds the event text bound. */
+function bashOutputFrames(operationId: string, output: string): AgentEvent[] {
+  const frames: AgentEvent[] = [];
+  let offset = 0;
+  while (offset < output.length) {
+    const end = unicodeSafeEnd(output, Math.min(output.length, offset + 8_000));
+    frames.push(bashFrame({ type: "bash.output", data: { operationId, delta: output.slice(offset, end) } }));
+    offset = end;
+  }
+  return frames;
 }
 
 function unicodeSafeEnd(value: string, requestedEnd: number): number {

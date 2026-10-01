@@ -7,6 +7,7 @@ import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
 import { useAttachmentsStore } from '../stores/attachments'
 import { useConversationStore } from '../stores/conversation'
+import { useInputStore } from '../stores/input'
 import { useObservationStore } from '../stores/observation'
 import { useSurfacesStore } from '../stores/surfaces'
 
@@ -22,6 +23,7 @@ const attachments = useAttachmentsStore()
 const { attachmentPreviews } = storeToRefs(attachments)
 const { openAttachmentPreview } = attachments
 const { openMessageText } = useSurfacesStore()
+const { appendShellQuote } = useInputStore()
 </script>
 
 <template>
@@ -73,6 +75,7 @@ const { openMessageText } = useSurfacesStore()
       @image-failed="markConversationImageFailed"
       @attachment-preview="openAttachmentPreview"
       @open-text="openMessageText"
+      @shell-quote="appendShellQuote"
     />
 
     <div v-else class="alu-welcome">

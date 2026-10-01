@@ -123,6 +123,8 @@ Conversation 读取位置由 Worker 的当前 Session/branch 管理。只有确�
 
 Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应完整接入 Dock，跨进程适配保留其语义；各客户端按需实现界面，未来 Agent 按各自运行方式接入。
 
+用户 shell 命令（Protocol `bash.run` / `bash.abort`）在 adapter 内走 Pi 自己 TUI/RPC 的同一条路：先发 `user_bash` 让扩展拦截（远程 operations 或整个结果），再 `executeBash(command, undefined, {excludeFromContext, id: operationId, operations})`，中止对应 `abortBash()`。adapter 在开始前发 `bash.started`，把带 `id` 的 `bash_execution_update` 投影成 `bash.output`，结束后发 `bash.completed`；不带 `id` 的执行不是 Dock 发起的，不转发。Pi 空闲时立即追加 `bashExecution` 记录但不发任何事件，所以 adapter 在命令结束后自己补一次 `conversation_checkpoint`；Pi 正在回复时记录被挂起到本轮结束，此间每次 checkpoint 都在 `unpersistedBash` 里列出还在跑或记录未落地的 operationId，Host 据此保留它们的 active frame。会话替换或 Worker 停止时 Pi 自己中止命令并把记录写进旧 session；旧 binding 已失效，它的完成事件不再发布。
+
 Pi Worker 自带 `/retry`，只在用户主动输入且最近一次模型响应失败、当前空闲时触发。命令使用公开的 extension `sendMessage` 进入 Pi 原有 Session 流程，并等待该轮结束；隐藏的 `alu-dock-retry` 标记保留在 Pi journal 里供识别，但由同一插件的 `context` hook 从模型上下文移除，因此不追加用户聊天指令，也不重放已经完成的工具。它不使用私有 SDK 补丁，不增加自动重试策略；Pi 原有重试、压缩和收尾照常生效。
 
 项目状态的资源正文通过 `resource.content.v1` 读取。Pi adapter 为已加载的 Skill、Prompt、Project Context 及文件来源的 SYSTEM.md / APPEND_SYSTEM.md 生成 opaque `contentRef`；只有这些当前登记的资源可以读取，不接收客户端任意路径。Worker 经私有 `resolve_file_source` 将已登记资源的路径交给 Host，不读取或传输正文。Host 从磁盘当前 UTF-8 文件按字节续读，复用 source-file 检查，文件变化时要求重新打开，不保存正文快照、不执行资源或触发 Reload。全局文件不受 workspace 根目录限制；Project Context 中的 system 文件项只对应实际磁盘文件，Pi 内置生成提示不作为文件资源列出。

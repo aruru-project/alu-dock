@@ -28,6 +28,7 @@ const QUEUE_CONTROL_V1: &str = "queue.control.v1";
 const RESOURCES_V1: &str = "resources.v1";
 const RUN_ABORT_V1: &str = "run.abort.v1";
 pub(crate) const RUN_ABORT_RESTORE_QUEUE_V1: &str = "run.abort-restore-queue.v1";
+const BASH_V1: &str = "bash.v1";
 const SESSION_ADOPT_V1: &str = "session.adopt.v1";
 const SESSION_COMMANDS_V1: &str = "session.commands.v1";
 const SESSION_CORE: &str = "session.core";
@@ -65,6 +66,7 @@ snapshot_capabilities!(
     COMMAND_IMAGES_PATH_V1,
     RUN_ABORT_RESTORE_QUEUE_V1
 );
+snapshot_capabilities!(BASH, BASH_V1);
 snapshot_capabilities!(INSTANCE_CATALOG, INSTANCE_CATALOG_CAPABILITY);
 snapshot_capabilities!(INSTANCE_ADOPT, SESSION_ADOPT_V1);
 snapshot_capabilities!(INSTANCE_REOPEN, SESSION_REOPEN);

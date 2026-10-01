@@ -295,9 +295,12 @@ impl ConversationObservation {
                     loop {
                         match stream.next_event().await {
                             Ok(event) => {
+                                // A finished user shell command is a checkpoint too: its
+                                // record replaces the live row, which carries no output for
+                                // a client that joined after the command started.
                                 let settled = matches!(
                                     event.event_type.as_str(),
-                                    "run.settled" | "compaction.completed"
+                                    "run.settled" | "compaction.completed" | "bash.completed"
                                 );
                                 match self.accept(&key, owner, SessionUpdate::Event(event)) {
                                     Ok(Admission::Continue) => {}

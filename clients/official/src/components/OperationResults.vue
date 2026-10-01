@@ -13,7 +13,7 @@ const labels: Record<string, string> = {
   submit_message: '发送消息', new_session: '新建 Session', switch_session: '切换 Session', reload_session: 'Reload', navigate_session: '切换分支',
   fork_session: 'Fork', clone_session: 'Clone', name_session: '重命名', compact_session: '压缩上下文',
   set_model: '切换模型', set_thinking: '修改 Thinking', set_active_tools: '修改工具', update_setting: '修改设置',
-  run_catalog_command: '运行命令', dequeue_messages: '取回 Queue',
+  run_catalog_command: '运行命令', dequeue_messages: '取回 Queue', run_shell_command: '运行 shell 命令', abort_shell_commands: '停止 shell 命令',
   stop_work: '停止 Work', abort_run: '中止运行', reopen_work: '继续 Work', forget_work: '移除 Work',
   create_work: '新建 Work', adopt_session: '恢复 Work', set_system_default: '保存目录默认',
 }

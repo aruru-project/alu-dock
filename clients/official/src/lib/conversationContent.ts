@@ -76,18 +76,20 @@ export function useConversationContent(options: ConversationContentOptions) {
   }
 
   function initializeLive(current: ConversationBootstrap) {
+    const previous = live?.snapshot() ?? []
     live = createLiveConversationProjector(current, reactive as <T extends object>(value: T) => T)
     liveState = current
     const cache = streamCache(current)
     cache.fold.clear(); cache.tools.clear(); cache.streaming.clear()
     current.activeEvents.forEach((event, index) => {
-      live!.apply(event)
+      live!.apply(event, true)
       updateStreaming(current, event)
       const key = liveDeltaKey(event.data)
       if (event.sequence > foldCut && event.eventType === 'message.delta' && key) cache.fold.set(key, event)
       if (event.sequence > foldCut && foldableToolEvent(event)) cache.tools.set(`${event.eventType}:${event.data.toolCallId}`, index)
       resetFoldBoundary(current, event)
     })
+    live.adoptShellOutput(previous)
     pendingEvents.length = 0
   }
 

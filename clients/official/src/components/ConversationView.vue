@@ -4,7 +4,7 @@ import { RefreshCw } from '@lucide/vue'
 import ConversationRow from './ConversationRow.vue'
 import ConversationTurnSummary from './ConversationTurnSummary.vue'
 import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnHidingAnchor, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
-import type { ConversationImageResource, ConversationItem, ConversationProcessItem } from '../lib/types'
+import type { ConversationImageResource, ConversationItem, ConversationProcessItem, ShellRunItem } from '../lib/types'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 
@@ -36,6 +36,7 @@ const emit = defineEmits<{
   imageFailed: [part: ImagePart]
   attachmentPreview: [fileId: string, name: string]
   openText: [title: string, text: string, markdown?: boolean]
+  shellQuote: [item: ShellRunItem]
 }>()
 
 const sources = new Map<Element, string[]>()
@@ -117,16 +118,16 @@ function bodyRows(section: ConversationTurnSection) {
       <template v-if="section.kind === 'turn'">
         <ConversationRow v-for="row in section.openers" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
           @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
-          @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
+          @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" @shell-quote="emit('shellQuote', $event)" />
         <ConversationTurnSummary :section="section" :open="turnOpen(section)" @toggle="toggleTurn(section)" />
         <ConversationRow v-for="row in bodyRows(section)" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
           :collapsed="!turnOpen(section)" :final-row="row.id === section.finalRowId"
           @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
-          @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
+          @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" @shell-quote="emit('shellQuote', $event)" />
       </template>
       <ConversationRow v-else v-read-interest="section.row.sourceEntryIds" :row="section.row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
         @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
-        @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" />
+        @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" @shell-quote="emit('shellQuote', $event)" />
     </template>
   </div>
 </template>

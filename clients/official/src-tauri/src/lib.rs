@@ -195,6 +195,8 @@ pub fn run() {
             work::clear_restored_images,
             work::restored_image_count,
             work::abort_run,
+            work::run_shell_command,
+            work::abort_shell_commands,
             work::stop_work,
             configuration::command_catalog,
             configuration::command_content,

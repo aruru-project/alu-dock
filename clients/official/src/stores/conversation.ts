@@ -226,6 +226,7 @@ export const useConversationStore = defineStore('conversation', () => {
   const retryHistoryEntry = conversationSession.retry
   const retryConversationHydration = () => conversationSession.retry()
   const loadEarlierHistory = conversationSession.loadEarlier
+  const requestFullRecords = conversationSession.requestFull
 
   function toolDetailOpen(id: string) {
     return toolExpansionOverrides.value[id] ?? extensionUi.toolsExpanded
@@ -282,5 +283,5 @@ export const useConversationStore = defineStore('conversation', () => {
     const resource = imageResources.value[imageKey]
     if (resource?.state === 'ready') setImageResource(imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
   }
-  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError, setReadInterest: conversationSession.setInterest, showAgentActivity, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
+  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyHydrationActiveEntries, historyHydrationErrors, historyError, setReadInterest: conversationSession.setInterest, requestFullRecords, showAgentActivity, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
 })

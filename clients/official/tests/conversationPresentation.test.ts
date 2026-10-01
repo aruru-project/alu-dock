@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { projectRecordGroups, createLiveConversationProjector, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
+import { projectRecordGroups, createLiveConversationProjector, shellRunQuote, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
 import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, turnDurationMs, turnHidingAnchor, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
 import type { HistoryRecord, ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
@@ -167,5 +167,75 @@ assert.equal(turnHidingAnchor(historySections, 'u1'), undefined, '用户消息�
 assert.equal(turnHidingAnchor(historySections, undefined), undefined)
 assert.equal(turnToolCallsLabel({ status: 'running', toolCalls: 2, failedToolCalls: 0 }), '已调用 2 个工具')
 assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolCalls: 1 }), '3 次工具调用（1 次失败）')
+
+// Card #336: a user shell command (`!` / `!!`) is its own row beside the Agent's
+// turn, streams output, and the same row later comes from its bash_execution record.
+{
+  const shell = createLiveConversationProjector({ instance: { id: 'work', execution: 'idle' } } as ConversationBootstrap)
+  shell.apply(toolEvent(1, 'run.started', { operationId: 'reply' }))
+  shell.apply(toolEvent(2, 'bash.started', { operationId: 'sh-1', command: 'git status', excludeFromContext: true }))
+  shell.apply(toolEvent(3, 'bash.output', { operationId: 'sh-1', delta: 'On branch ' }))
+  shell.apply(toolEvent(4, 'bash.output', { operationId: 'sh-1', delta: 'master\n' }))
+  const running = shell.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(running?.kind === 'shell')
+  assert.equal(running.status, 'running')
+  assert.equal(running.output, 'On branch master\n')
+  assert.equal(running.turnId, undefined, '命令行不归进正在运行的 Agent 轮')
+  shell.apply(toolEvent(5, 'run.settled', { operationId: 'reply', result: 'succeeded' }))
+  assert.equal(running.status, 'running', '回复结束不会把还在跑的命令标成结束')
+  shell.apply(toolEvent(6, 'bash.completed', { operationId: 'sh-1', exitCode: 0, cancelled: false, truncated: true, fullOutputPath: '/tmp/pi-bash-1.log' }))
+  assert.equal(running.status, 'done')
+  assert.equal(running.fullOutputPath, '/tmp/pi-bash-1.log')
+  const sections = conversationSections(conversationRows(shell.snapshot()))
+  assert.deepEqual(sections.map((section) => section.kind), ['turn', 'row'], '命令行是独立行，不在轮里')
+  assert.equal(shellRunQuote(running), 'Ran `git status`\n```\nOn branch master\n\n```\n[Output truncated. Full output: /tmp/pi-bash-1.log]', '引用文字与 Pi 给模型的正文同形，截断时带路径')
+  shell.apply(toolEvent(7, 'bash.started', { operationId: 'sh-2', command: 'sleep 30', excludeFromContext: false }))
+  shell.apply(toolEvent(8, 'bash.completed', { operationId: 'sh-2', cancelled: true, truncated: false }))
+  const stopped = shell.snapshot().find((item) => item.kind === 'shell' && item.operationId === 'sh-2')
+  assert.ok(stopped?.kind === 'shell')
+  assert.equal(stopped.status, 'stopped')
+  assert.equal(shellRunQuote(stopped), 'Ran `sleep 30`\n(no output)\n(command cancelled)')
+
+  // Review follow-up: a client that opens the Work mid-command has not seen its output. It must
+  // say so rather than show an empty result, while a rebuild keeps what this client did see.
+  const late = createLiveConversationProjector({ instance: { id: 'work', execution: 'idle' } } as ConversationBootstrap)
+  late.apply(toolEvent(30, 'bash.started', { operationId: 'sh-late', command: 'make', excludeFromContext: true }), true)
+  const lateItem = late.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(lateItem?.kind === 'shell')
+  assert.equal(lateItem.outputMissing, true, '回放的开始事件意味着之前的输出没有到达这里')
+  late.apply(toolEvent(31, 'bash.completed', { operationId: 'sh-late', exitCode: 0, cancelled: false, truncated: false }))
+  assert.equal(lateItem.outputMissing, true, '完成不会把缺失的输出变成「没有输出」')
+  const rebuilt = createLiveConversationProjector({ instance: { id: 'work', execution: 'idle' } } as ConversationBootstrap)
+  rebuilt.apply(toolEvent(32, 'bash.started', { operationId: 'sh-1', command: 'git status', excludeFromContext: true }), true)
+  rebuilt.adoptShellOutput([{ ...running, status: 'running', output: 'seen so far\n' }])
+  const adopted = rebuilt.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(adopted?.kind === 'shell')
+  assert.equal(adopted.output, 'seen so far\n', '重建后保留这个客户端已经看到的输出')
+  assert.equal(adopted.outputMissing, undefined)
+  // A command that finished while the agent was replying: Pi holds its record until the reply ends, so
+  // the completion-triggered rebuild still shows it as a live row. The output seen must survive that too.
+  const heldBack = createLiveConversationProjector({ instance: { id: 'work', execution: 'running' } } as ConversationBootstrap)
+  heldBack.apply(toolEvent(33, 'bash.started', { operationId: 'sh-1', command: 'git status', excludeFromContext: true }), true)
+  heldBack.apply(toolEvent(34, 'bash.completed', { operationId: 'sh-1', exitCode: 0, cancelled: false, truncated: false }), true)
+  heldBack.adoptShellOutput([{ ...running, status: 'done', exitCode: 0, output: 'all of it\n' }])
+  const held = heldBack.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(held?.kind === 'shell')
+  assert.deepEqual([held.status, held.output, held.outputMissing], ['done', 'all of it\n', undefined], '回复结束前记录还没写入，已经看到的完整输出和「发给 agent」不能消失')
+  // Joined mid-command, then saw the rest: the part received stays, still marked incomplete.
+  heldBack.adoptShellOutput([{ ...running, status: 'done', exitCode: 0, output: 'the rest\n', outputMissing: true }])
+  assert.deepEqual([held.output, held.outputMissing], ['the rest\n', true], '中途进入后收到的部分保留，仍然标为不完整')
+
+  const recorded = projectRecordGroups([{
+    recordId: 'bash-1', entryId: 'bash-1', kind: 'bash_execution', source: 'runtime', visibility: 'conversation', timestamp: '2026-09-30T08:05:00Z',
+    content: [{ type: 'text', text: '! false\nnothing here' }], command: 'false', exitCode: 1, cancelled: false, truncated: false, excludeFromContext: false,
+  } as HistoryRecord])
+  const record = recorded[0]
+  assert.ok(record?.kind === 'shell', '历史里的 bash_execution 记录也是同一种命令行')
+  assert.equal(record.command, 'false')
+  assert.equal(record.output, 'nothing here', '记录正文里的命令前缀不当作输出')
+  assert.equal(record.status, 'failed')
+  assert.equal(record.exitCode, 1)
+  assert.equal(record.excludeFromContext, false)
+}
 
 console.log('conversation presentation tests passed')

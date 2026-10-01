@@ -39,6 +39,7 @@ import type {
   CompactionPromptTemplatesResult,
   SessionReplacementResult,
   SessionTree,
+  ShellRunResult,
   SettingKey,
   SettingsResult,
   SettingUpdateResult,
@@ -288,6 +289,16 @@ export async function submitMessage(instanceId: string, message: string, attachm
 /** Stops the reply and takes the waiting Queue back in the same Host step. */
 export async function abortRun(instanceId: string, context: OperationTarget): Promise<QueueDequeueResult> {
   return native<QueueDequeueResult>('abort_run', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
+}
+
+/** Pi's `!` (`excludeFromContext: false`) or `!!` (`true`) in the Work's directory; output arrives as bash.* events. */
+export async function runShellCommand(instanceId: string, command: string, excludeFromContext: boolean, context: OperationTarget): Promise<ShellRunResult> {
+  return native<ShellRunResult>('run_shell_command', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId, command, excludeFromContext })
+}
+
+/** Stops every shell command this Work is running; the Agent reply is untouched. */
+export async function abortShellCommands(instanceId: string, context: OperationTarget): Promise<Work> {
+  return native<Work>('abort_shell_commands', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
 }
 
 export async function stopWork(instanceId: string, context: OperationTarget): Promise<StopResult> {

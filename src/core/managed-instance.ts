@@ -95,6 +95,7 @@ import {
   MAX_ATTACHMENT_NAME_CHARS,
 } from "./instance-attachments.js";
 import {
+  CONVERSATION_FRAME_TYPES,
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
@@ -108,6 +109,7 @@ import { MAX_CONVERSATION_CONTENT_BLOCKS } from "./instance-dto.js";
 import type {
   AttachProjection,
   AttachmentDto,
+  BashRunReceipt,
   CommandReceipt,
   ContentBlockDto,
   ConversationFrame,
@@ -139,6 +141,7 @@ import type {
 } from "./instance-dto.js";
 export type {
   AttachProjection,
+  BashRunReceipt,
   CommandReceipt,
   ContentBlockDto,
   ConversationFrame,
@@ -2182,6 +2185,50 @@ export class ManagedInstance {
     }
   }
 
+  /**
+   * Pi `!` / `!!` from a Dock client. The Worker starts the command and answers at once;
+   * output and completion arrive as bash.* conversation frames, and Pi appends the
+   * bash_execution record on its own schedule. Running commands neither hold the
+   * scheduler nor change the Agent's execution state.
+   */
+  async runBash(operationId: string, command: string, excludeFromContext: boolean): Promise<BashRunReceipt> {
+    const lease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "control", kind: "immediate" }),
+      "running a shell command",
+    );
+    try {
+      this.catalogPort?.assertWritable();
+      this.assertActive();
+      if (this.replacementIntent !== undefined || this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "running a shell command during session replacement");
+      const started = await this.invokeAgent<{ operationId: string; startedAt: string }>("bash.run", { operationId, command, excludeFromContext });
+      return { operationId: started.operationId, instanceId: this.id, startedAt: started.startedAt };
+    } catch (error) {
+      // The Worker may have started the command before it was lost; a plain failure would invite a second run.
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
+    } finally {
+      lease.release();
+    }
+  }
+
+  /** Pi abortBash: every running shell command of this Work stops; the Agent reply and Queue are untouched. */
+  async abortBash(operationId: string): Promise<void> {
+    const lease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "control", kind: "immediate" }),
+      "stopping shell commands",
+    );
+    try {
+      this.assertActive();
+      if (this.replacementIntent !== undefined || this.extensionUi.isSuspended()) return;
+      await this.invokeAgent<null>("bash.abort", { operationId });
+    } catch (error) {
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
+    } finally {
+      lease.release();
+    }
+  }
+
   async waitForIdle(): Promise<void> {
     await this.session.control({ type: "wait_for_idle" });
     if (this.backgroundTasks.size > 0) {
@@ -3443,7 +3490,8 @@ export class ManagedInstance {
   private installConversationCheckpoint(event: AgentEvent): void {
     if (!Array.isArray(event.history)) throw new Error("Worker conversation checkpoint is missing its authoritative history");
     const history = event.history.map((entry) => projectAgentHistoryEntry(entry as AgentHistoryEntry));
-    this.journal.installConversationCheckpoint(history);
+    const unpersistedBash = Array.isArray(event.unpersistedBash) ? event.unpersistedBash.filter((id): id is string => typeof id === "string") : [];
+    this.journal.installConversationCheckpoint(history, unpersistedBash);
   }
 
   private touch(timestamp = this.timestamp()): void {
@@ -3604,13 +3652,7 @@ function selectClearedQueueMessages(
 }
 
 function isConversationFrameType(type: string): type is ConversationFrame["type"] {
-  return type === "message.submitted"
-    || type === "message.delta"
-    || type === "message.completed"
-    || type === "tool.started"
-    || type === "tool.args_updated"
-    || type === "tool.output_updated"
-    || type === "tool.completed";
+  return (CONVERSATION_FRAME_TYPES as readonly string[]).includes(type);
 }
 
 function refreshesHistory(event: AgentEvent): boolean {

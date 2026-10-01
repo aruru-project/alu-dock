@@ -1,7 +1,7 @@
 import type { ConversationItem, ConversationProcessItem, ConversationTurnItem, ConversationTurnStatus } from './types'
 
 export type GroupedProcessItem = ConversationProcessItem & { groupId: string }
-export type StandaloneConversationRow = Extract<ConversationItem, { kind: 'user' | 'turn' | 'record' }> | Extract<ConversationProcessItem, { kind: 'notice' }>
+export type StandaloneConversationRow = Extract<ConversationItem, { kind: 'user' | 'turn' | 'record' | 'shell' }> | Extract<ConversationProcessItem, { kind: 'notice' }>
 export type AssistantGroupRow = { id: string; kind: 'assistant-group'; parts: GroupedProcessItem[]; time: string; sourceEntryIds?: string[]; turnId?: string }
 export type ConversationRow = StandaloneConversationRow | AssistantGroupRow
 
@@ -34,7 +34,7 @@ export function conversationRows(items: readonly ConversationItem[]): Conversati
 }
 
 function isGroupedProcessItem(item: ConversationItem): item is GroupedProcessItem {
-  return item.kind !== 'user' && item.kind !== 'turn' && item.kind !== 'record' && Boolean(item.groupId)
+  return item.kind !== 'user' && item.kind !== 'turn' && item.kind !== 'record' && item.kind !== 'shell' && Boolean(item.groupId)
 }
 
 /** One turn as the view lays it out: the user message(s) that opened it, its

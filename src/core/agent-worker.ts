@@ -268,7 +268,7 @@ export type AgentCommandCompletionsBody = CommandCompletionsResult;
 export type AgentResourceProjectionBody = ResourcesResult;
 
 export const AGENT_REQUEST_TYPES = [
-  "command.submit", "command.abort", "queue.dequeue", "command.abort_restore_queue",
+  "command.submit", "command.abort", "queue.dequeue", "command.abort_restore_queue", "bash.run", "bash.abort",
   "model.list", "model.set", "thinking.set",
   "tool.list", "tool.set_active", "settings.get", "settings.update",
   "resource.get", "command.catalog", "command.content", "command.complete", "session.history",

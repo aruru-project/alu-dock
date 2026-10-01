@@ -6,7 +6,7 @@ import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-t
 import { projectDisplayEditDiff } from "../src/core/edit-diff-projection.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "../src/tui/conversation.js";
-import { commandCatalog, workHelpText } from "../src/tui/dock-tui.js";
+import { commandCatalog, shellCommandInput, workHelpText } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
@@ -324,6 +324,55 @@ test("conversation projects replay and live deltas into readable messages", () =
   assert.match(rendered[1] ?? "", /^ hello\[2J\s+$/u);
   assert.equal(rendered[2], " ".repeat(24), "Pi-style user box reserves a full-width bottom padding row");
   assert.match(rendered.join("\n"), /secret reasoning/);
+});
+
+// Card #336: a user shell command typed as `!` / `!!` in Work TUI shows as its own
+// running row with streamed output and survives the Agent reply settling around it.
+test("user shell commands stream output in their own row and outlive the reply that was running (card #336)", () => {
+  assert.deepEqual(shellCommandInput("!git status"), { command: "git status", excludeFromContext: false });
+  assert.deepEqual(shellCommandInput("!! ls -la "), { command: "ls -la", excludeFromContext: true });
+  assert.equal(shellCommandInput("hello!"), undefined);
+
+  const conversation = new DockConversation();
+  conversation.applyReplay([
+    event(1, "run.started", { operationId: "reply-1" }),
+    event(2, "bash.started", { operationId: "sh-1", command: "printf 'a\\nb\\n'", excludeFromContext: true }),
+    event(3, "bash.output", { operationId: "sh-1", delta: "a\n" }),
+    event(4, "run.settled", { operationId: "reply-1", result: "succeeded" }),
+  ], false);
+  assert.deepEqual(conversation.snapshot(), [
+    { kind: "tool", text: "!! running\nargs\nprintf 'a\\nb\\n'\nresult\na\n", complete: false },
+  ], "the reply settling does not finish a shell command the user started");
+
+  conversation.apply(event(5, "bash.output", { operationId: "sh-1", delta: "b\n" }));
+  conversation.apply(event(6, "bash.completed", { operationId: "sh-1", exitCode: 0, cancelled: false, truncated: false }));
+  assert.deepEqual(conversation.snapshot(), [
+    { kind: "tool", text: "!! done\nargs\nprintf 'a\\nb\\n'\nresult\na\nb\n", complete: true },
+  ]);
+  assert.match(conversation.render(40).join("\n"), /✓ !! · printf 'a\\nb\\n'/u);
+
+  conversation.apply(event(7, "bash.started", { operationId: "sh-2", command: "sleep 30", excludeFromContext: false }));
+  conversation.apply(event(8, "bash.completed", { operationId: "sh-2", cancelled: true, truncated: true, fullOutputPath: "/tmp/pi-bash-1.log" }));
+  const stopped = conversation.render(60).join("\n");
+  assert.match(stopped, /× ! · sleep 30 · stopped/u);
+  assert.match(stopped, /\/tmp\/pi-bash-1\.log/u, "the full-output path is shown so the user or Pi can read it on that machine");
+
+  conversation.apply(event(9, "bash.started", { operationId: "sh-3", command: "false", excludeFromContext: false }));
+  conversation.apply(event(10, "bash.completed", { operationId: "sh-3", exitCode: 1, cancelled: false, truncated: false }));
+  assert.match(conversation.render(60).join("\n"), /× ! · false · exit 1/u);
+
+  // Review follow-up: a long output must not push the full-output path past the display bound.
+  conversation.apply(event(11, "bash.started", { operationId: "sh-4", command: "yes", excludeFromContext: true }));
+  for (let index = 0; index < 3; index++) conversation.apply(event(12 + index, "bash.output", { operationId: "sh-4", delta: `${"y\n".repeat(2_000)}` }));
+  conversation.apply(event(15, "bash.completed", { operationId: "sh-4", exitCode: 0, cancelled: false, truncated: true, fullOutputPath: "/tmp/pi-bash-long.log" }));
+  conversation.setToolsExpanded(true);
+  assert.match(conversation.render(80).join("\n"), /\/tmp\/pi-bash-long\.log/u, "the path stays visible after a long output");
+
+  // A window opened mid-command did not see the earlier output; it must not look empty.
+  const late = new DockConversation();
+  late.applyBootstrapReplay([event(20, "bash.started", { operationId: "sh-5", command: "make", excludeFromContext: true })]);
+  late.apply(event(21, "bash.completed", { operationId: "sh-5", exitCode: 0, cancelled: false, truncated: false }));
+  assert.match(late.snapshot()[0]?.text ?? "", /not shown; the run record has it/u);
 });
 
 test("user messages mirror Pi box padding and Markdown semantics with a full-width surface", () => {

@@ -9,6 +9,7 @@ import type {
   ConversationTurnStatus,
   ProjectedEvent,
   PublishedFileDto,
+  ShellRunItem,
   ToolCallPreview,
 } from './types'
 
@@ -29,6 +30,41 @@ interface RecordGroup {
 const COMMAND_PREVIEW_CHARS = 320
 const CONTENT_PREVIEW_CHARS = 280
 const EDIT_SIDE_PREVIEW_CHARS = 120
+/** Live shell output shown in the client keeps its newest characters, like a terminal; Pi's record and the full-output file stay complete. */
+export const SHELL_OUTPUT_TAIL_CHARS = 64_000
+
+/** The text a reader hands to the Agent: the same shape Pi puts in the model context for `!`,
+ * so a shortened output points at the full file on that machine instead of pretending to be complete. */
+export function shellRunQuote(item: ShellRunItem): string {
+  const lines = [`Ran \`${item.command}\``]
+  lines.push(item.output ? `\`\`\`\n${item.output}\n\`\`\`` : '(no output)')
+  if (item.error) lines.push(`(command could not run: ${item.error})`)
+  else if (item.status === 'stopped') lines.push('(command cancelled)')
+  else if (item.exitCode !== undefined && item.exitCode !== 0) lines.push(`Command exited with code ${item.exitCode}`)
+  if (item.truncated && item.fullOutputPath) lines.push(`[Output truncated. Full output: ${item.fullOutputPath}]`)
+  return lines.join('\n')
+}
+
+function shellStatus(data: { cancelled?: unknown; exitCode?: unknown; error?: unknown }): Pick<ShellRunItem, 'status' | 'exitCode' | 'error'> {
+  if (typeof data.error === 'string' && data.error) return { status: 'failed', error: data.error }
+  if (data.cancelled === true) return { status: 'stopped' }
+  const exitCode = typeof data.exitCode === 'number' && Number.isSafeInteger(data.exitCode) ? data.exitCode : undefined
+  return { status: exitCode === undefined || exitCode === 0 ? 'done' : 'failed', ...(exitCode === undefined ? {} : { exitCode }) }
+}
+
+/** Pi's record text is `! command` followed by the retained output; the item keeps them apart. */
+function shellRecordItem(record: ConversationRecord, id: string): ShellRunItem {
+  const command = record.command ?? ''
+  const text = blockText(record.content, 'text')
+  const prefix = `! ${command}`
+  const output = text.startsWith(`${prefix}\n`) ? text.slice(prefix.length + 1) : text === prefix ? '' : text
+  return {
+    id, kind: 'shell', operationId: record.recordId, command, excludeFromContext: record.excludeFromContext === true,
+    output, truncated: record.truncated === true, time: shortTime(record.timestamp),
+    ...(record.fullOutputPath ? { fullOutputPath: record.fullOutputPath } : {}),
+    ...shellStatus({ cancelled: record.cancelled, exitCode: record.exitCode, error: record.error }),
+  }
+}
 export function toolDetailText(item: ToolItem): string {
   if (item.detailArgs === undefined && item.detailOutputText === undefined && !item.detailOmittedFields?.length) return item.detail ?? ''
   const sections: string[] = []
@@ -175,6 +211,8 @@ export function createLiveConversationProjector(
   const toolItems = observe(new Map<string, ToolProjection>())
   const toolOwners = new Map<string, string>()
   const imageItems = observe(new Map<string, ImageItem>())
+  // User shell commands by operationId. They run beside the Agent, not inside its turn.
+  const shellItems = observe(new Map<string, ShellRunItem>())
   // The running turn. Items pushed while it is open belong to it; between
   // run.settled and the next run.started, items stand on their own.
   let turn: ConversationTurnItem | undefined
@@ -206,18 +244,19 @@ export function createLiveConversationProjector(
   const firstRunBoundary = (bootstrap.activeEvents ?? []).find((event) => event.eventType === 'run.started' || event.eventType === 'run.settled')
   if (bootstrap.instance.execution === 'running' || firstRunBoundary?.eventType === 'run.settled') openTurn(CONTINUATION_TURN_ID, undefined, true)
 
-  function apply(event: ProjectedEvent) {
+  /** `replay` marks events restored from a read rather than followed live. */
+  function apply(event: ProjectedEvent, replay = false) {
     const before = items.length
-    applyEvent(event)
+    applyEvent(event, replay)
     if (turn) for (let index = before; index < items.length; index++) {
       const item = items[index]!
-      if (item.kind === 'turn') continue
+      if (item.kind === 'turn' || item.kind === 'shell') continue
       item.turnId = turn.turnId
       turnHasItems = true
     }
   }
 
-  function applyEvent(event: ProjectedEvent) {
+  function applyEvent(event: ProjectedEvent, replay: boolean) {
     const data = event.data
     let formattedTime: string | undefined
     const time = () => formattedTime ??= shortTime(event.occurredAt)
@@ -359,6 +398,37 @@ export function createLiveConversationProjector(
         renderToolDetail(tool)
         break
       }
+      case 'bash.started': {
+        const operationId = stringValue(data.operationId) || `shell-${event.sequence}`
+        let item = shellItems.get(operationId)
+        if (!item) {
+          // The Host does not replay shell output, so a replayed start means the output so far is missing here.
+          item = observe<ShellRunItem>({ id: `live-shell-${operationId}`, kind: 'shell', operationId, command: '', excludeFromContext: false, status: 'running', output: '', truncated: false, time: time(), ...(replay ? { outputMissing: true } : {}) })
+          shellItems.set(operationId, item)
+          items.push(item)
+        }
+        item.command = stringValue(data.command)
+        item.excludeFromContext = data.excludeFromContext === true
+        break
+      }
+      case 'bash.output': {
+        const item = shellItems.get(stringValue(data.operationId))
+        const delta = stringValue(data.delta)
+        if (!item || !delta) break
+        const output = item.output + delta
+        item.output = output.length > SHELL_OUTPUT_TAIL_CHARS ? `…${output.slice(output.length - SHELL_OUTPUT_TAIL_CHARS)}` : output
+        break
+      }
+      case 'bash.completed': {
+        const operationId = stringValue(data.operationId)
+        const item = shellItems.get(operationId)
+        if (!item) break
+        Object.assign(item, shellStatus(data))
+        item.truncated = data.truncated === true
+        const fullOutputPath = stringValue(data.fullOutputPath)
+        if (fullOutputPath) item.fullOutputPath = fullOutputPath
+        break
+      }
       case 'extension.notification': {
         const message = stringValue(data.message)
         if (message) appendLiveNotice(items, event, notificationTone(data.level), message)
@@ -440,6 +510,7 @@ export function createLiveConversationProjector(
     }
     if (typeof event.data.messageId === 'string') message(event.data.messageId)
     if (typeof event.data.toolCallId === 'string') tool(event.data.toolCallId)
+    if (event.eventType.startsWith('bash.') && typeof event.data.operationId === 'string') add(shellItems.get(event.data.operationId))
     if (Array.isArray(event.data.content)) for (const block of event.data.content) {
       if (isRecord(block) && typeof block.toolCallId === 'string') tool(block.toolCallId)
     }
@@ -457,7 +528,21 @@ export function createLiveConversationProjector(
     if (instance.execution !== 'running') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
     else if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true)
   }
-  return { apply, snapshot: () => items, affectedIds, reconcileRun, structureKey: () => `${items.length}` }
+  /** A rebuild from a read keeps what this client already saw of every command the record has not
+   * taken over yet: output is never replayed, so the rebuilt row starts empty whether the command
+   * is still running or finished while Pi holds its record for the current reply. What was seen
+   * from the start stays complete; what was seen after joining stays marked as incomplete. */
+  function adoptShellOutput(previous: readonly ConversationItem[]) {
+    for (const item of previous) {
+      if (item.kind !== 'shell') continue
+      const current = shellItems.get(item.operationId)
+      if (!current) continue
+      current.output = item.output
+      if (item.outputMissing) current.outputMissing = true
+      else delete current.outputMissing
+    }
+  }
+  return { apply, snapshot: () => items, affectedIds, reconcileRun, adoptShellOutput, structureKey: () => `${items.length}` }
 }
 
 export function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {
@@ -567,7 +652,7 @@ function projectGroup(group: RecordGroup, output: ConversationItem[]) {
     return
   }
   if (first.kind === 'bash_execution') {
-    output.push(projectPanel(group, '运行记录', 'alu-record-shell', true))
+    output.push(shellRecordItem(first, group.key))
     return
   }
   if (first.kind === 'custom_message') {

@@ -619,6 +619,20 @@ export async function runDockTui(
       await abortRun();
       return;
     }
+    if (text === "/abort-shell") {
+      await abortShell();
+      return;
+    }
+    const shell = shellCommandInput(text);
+    if (shell !== undefined) {
+      if (shell.command.length === 0) {
+        conversation.addNotice("Usage: !COMMAND runs it here and shows the output to Pi; !!COMMAND keeps it out of Pi's context.", true);
+        tui.requestRender();
+        return;
+      }
+      await runShell(shell.command, shell.excludeFromContext);
+      return;
+    }
     if (text === "/stop") {
       blockEditorSubmit();
       runActivity = { phase: "aborting", label: "stopping" };
@@ -696,6 +710,39 @@ export async function runDockTui(
     } finally {
       clearTimeout(feedbackTimer);
       submittingFeedbackVisible = false;
+      restoreEditorSubmit();
+      tui.requestRender();
+    }
+  }
+
+  /** Pi's `!` / `!!`: the command runs in the Work directory on the Work's machine; output streams into the conversation. */
+  async function runShell(command: string, excludeFromContext: boolean): Promise<void> {
+    blockEditorSubmit();
+    try {
+      if (!requireCoherentControl()) return;
+      const result = await client.runBash(instance.id, command, excludeFromContext, randomUUID());
+      instance = result.instance;
+      status.update(instance);
+    } catch (error) {
+      editor.setText(`${excludeFromContext ? "!!" : "!"}${command}`);
+      showError(error);
+    } finally {
+      restoreEditorSubmit();
+      tui.requestRender();
+    }
+  }
+
+  async function abortShell(): Promise<void> {
+    blockEditorSubmit();
+    try {
+      if (!requireCoherentControl()) return;
+      const result = await client.abortBash(instance.id);
+      instance = result.instance;
+      status.update(instance);
+      showStatus("Told every running shell command to stop");
+    } catch (error) {
+      showError(error);
+    } finally {
       restoreEditorSubmit();
       tui.requestRender();
     }
@@ -2382,6 +2429,9 @@ export function workHelpText(): string {
     "  /steer MESSAGE            redirect the current response",
     "  /follow MESSAGE           send after the current response",
     "  /abort                    stop the current response",
+    "  !COMMAND                  run a shell command here; Pi sees the output",
+    "  !!COMMAND                 run a shell command here; Pi does not see it",
+    "  /abort-shell              stop every running shell command",
     "  /status                   refresh work status",
     "  /stop                     end this work and remove it from Dock",
     "  /detach                   leave Work; work keeps running",
@@ -2393,6 +2443,13 @@ export function workHelpText(): string {
     "  Alt+O                     toggle the latest detail",
     "  Type / to discover extension, skill, and prompt commands.",
   ].join("\n");
+}
+
+/** Pi's editor prefixes: `!cmd` runs and shows Pi the output, `!!cmd` runs without adding it to context. */
+export function shellCommandInput(text: string): { command: string; excludeFromContext: boolean } | undefined {
+  if (!text.startsWith("!")) return undefined;
+  const excludeFromContext = text.startsWith("!!");
+  return { command: text.slice(excludeFromContext ? 2 : 1).trim(), excludeFromContext };
 }
 
 export function commandCatalog(commands: CommandDto[]): Array<{ name: string; description: string; argumentHint?: string }> {

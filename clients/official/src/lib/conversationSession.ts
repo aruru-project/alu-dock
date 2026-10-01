@@ -37,5 +37,11 @@ export function useConversationSession(scope: Ref<ConversationScope | null>, con
       }
     }
   }
-  return { bind, accept, failed: content.bindingFailed, matchesToken: (value: string) => token.value === value, loadEarlier: () => request('earlier'), retry: (entryId?: string) => request('retry', entryId ? [entryId] : []), setInterest: (entryIds: string[]) => request('interest', entryIds) }
+  return {
+    bind, accept, failed: content.bindingFailed, matchesToken: (value: string) => token.value === value,
+    loadEarlier: () => request('earlier'), retry: (entryId?: string) => request('retry', entryId ? [entryId] : []),
+    setInterest: (entryIds: string[]) => request('interest', entryIds),
+    /** A surface outside the conversation viewport wants these records whole, not as previews. */
+    requestFull: (entryIds: string[]) => request('retry', entryIds),
+  }
 }

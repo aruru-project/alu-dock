@@ -7,9 +7,10 @@ import { currentConnectionCall, requireConnectionContext } from '../lib/hostResu
 import { conversationBoundaryKey } from '../lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from '../lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type LocalControlCommand } from '../lib/localCommands'
+import { shellRunQuote } from '../lib/conversation'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { EditorCapture, NativeOperation } from '../lib/operationBinding'
-import type { CommandArgumentCompletion, CommandInfo } from '../lib/types'
+import type { CommandArgumentCompletion, CommandInfo, ShellRunItem } from '../lib/types'
 import { useAppStore } from './app'
 import { useAttachmentsStore } from './attachments'
 import { useCommandCatalogStore } from './command-catalog'
@@ -382,6 +383,13 @@ export const useInputStore = defineStore('input', () => {
     draft.value = text
   }
 
+  /** 「发给 agent」: the shell run is quoted into the draft after whatever is there; the reader still decides whether to send. */
+  function appendShellQuote(item: ShellRunItem) {
+    if (!selected.value) return
+    draft.value = [draft.value, shellRunQuote(item)].filter(Boolean).join('\n\n')
+    void nextTick(() => { if (!surfaces.modalOpen || composerExpanded.value) composer.compact.value?.focus({ preventScroll: true }) })
+  }
+
   const resizeComposer = composer.resize
 
   function handleComposerKeydown(event: KeyboardEvent, expanded = false) {
@@ -479,6 +487,6 @@ export const useInputStore = defineStore('input', () => {
     draft, composerTextarea, expandedTextarea, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit,
     suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading,
     rememberSelection: composer.remember, trackComposition: composer.composition,
-    submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
+    submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
   }
 })

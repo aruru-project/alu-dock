@@ -1,15 +1,16 @@
 use crate::connection_state::{
-    ConnectionRuntimeState, attachment_authority, dock_client, resolve_connection_store,
+    ConnectionRuntimeState, attachment_authority, dock_client, observation_key,
+    resolve_connection_store,
 };
 use crate::errors::CommandError;
 use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
-    AttachmentState, ExtensionControlState, InstanceSnapshot, Machine, ResourceContentResult,
-    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
-    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
-    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
-    restored_image_scope,
+    AttachmentState, BashRunResult, ExtensionControlState, InstanceSnapshot, Machine,
+    ResourceContentResult, RestoredImageState, SafeQueueDequeueResult, SessionTokenState,
+    StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
+    WorkspaceCursor, WorkspacePage, operation_association, project_queue_dequeue,
+    resolve_machine_session_token, restored_image_scope,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -227,6 +228,107 @@ pub(crate) async fn abort_run(
                 .await
                 .map_err(CommandError::from)?;
             Ok(project_queue_dequeue(result))
+        })
+        .await
+        .map_err(CommandError::from)?
+}
+
+/// Pi's `!` / `!!` from the workspace command area; output follows as `bash.*` events.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_shell_command(
+    content: tauri::State<'_, aludock_client_core::SessionContent>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    command: String,
+    exclude_from_context: bool,
+) -> Result<BashRunResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    // The command runs in the Work directory of the Session this page is showing: a
+    // Session replaced by another entry point since then gets no command from here.
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .with_host_epoch(&expected_host_epoch);
+    let target_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let content = content.inner().clone();
+    let association = operation_association(
+        &operation_id,
+        "run_shell_command",
+        &connection_id,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+        operation_editor,
+    );
+    operations
+        .execute(association, async move {
+            content
+                .check_target(
+                    &target_key,
+                    &expected_host_epoch,
+                    expected_runtime_generation,
+                )
+                .map_err(CommandError::from)?;
+            client
+                .run_bash(
+                    &instance_id,
+                    &command,
+                    exclude_from_context,
+                    Some(&operation_id),
+                )
+                .await
+                .map_err(CommandError::from)
+        })
+        .await
+        .map_err(CommandError::from)?
+}
+
+#[tauri::command]
+pub(crate) async fn abort_shell_commands(
+    content: tauri::State<'_, aludock_client_core::SessionContent>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
+    operation_editor: Value,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    operation_id: String,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+) -> Result<InstanceSnapshot, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .with_host_epoch(&expected_host_epoch);
+    let target_key = observation_key(&runtime, &connection_id, &instance_id, &expected_host_epoch)?;
+    let content = content.inner().clone();
+    let association = operation_association(
+        &operation_id,
+        "abort_shell_commands",
+        &connection_id,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+        operation_editor,
+    );
+    operations
+        .execute(association, async move {
+            content
+                .check_target(
+                    &target_key,
+                    &expected_host_epoch,
+                    expected_runtime_generation,
+                )
+                .map_err(CommandError::from)?;
+            client
+                .abort_bash(&instance_id, Some(&operation_id))
+                .await
+                .map_err(CommandError::from)
         })
         .await
         .map_err(CommandError::from)?

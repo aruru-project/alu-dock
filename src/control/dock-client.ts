@@ -1,5 +1,5 @@
 import { InstanceRecordChannel, InstanceRecordInitial } from "./instance-record-delivery.js";
-import { ABORT_RESTORE_QUEUE_CAPABILITY, INSTANCE_RECORDS_CAPABILITY, SESSION_INVENTORY_PAGES_CAPABILITY } from "./protocol.js";
+import { ABORT_RESTORE_QUEUE_CAPABILITY, BASH_CAPABILITY, INSTANCE_RECORDS_CAPABILITY, SESSION_INVENTORY_PAGES_CAPABILITY } from "./protocol.js";
 import { writeTransferBytes } from "./file-channel.js";
 import { CONVERSATION_CONTENT_STREAM_CAPABILITY, parseConversationContentChunk, parseConversationContentStreamMetadata, parseConversationContentStreamResult, type ConversationContentStreamMetadata, type ConversationContentStreamResult } from "./protocol.js";
 import { isDeepStrictEqual } from "node:util";
@@ -100,6 +100,8 @@ import {
   parsePruneResult,
   parseQueueDequeueResult,
   parseAbortRestoreQueueResult,
+  parseBashAbortResult,
+  parseBashRunResult,
   parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
@@ -158,6 +160,8 @@ import {
   type PruneResult,
   type QueueDequeueResult,
   type AbortRestoreQueueResult,
+  type BashAbortResult,
+  type BashRunResult,
   type ReopenResult,
   type SessionsResult,
   type SessionCompactionResult,
@@ -422,6 +426,10 @@ export class DockClient {
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}
   /** Stop the current reply and take back every waiting Queue message in one Host step. */
   abortRestoreQueue(instanceId:string,operationId=this.createRequestId()):Promise<AbortRestoreQueueResult>{return this.request("command.abort_restore_queue",{operationId,instanceId},[ABORT_RESTORE_QUEUE_CAPABILITY,IMAGE_INPUT_CAPABILITY],parseAbortRestoreQueueResult,undefined,this.longMutationTimeoutMs);}
+  /** Run one shell command in the Work's directory like Pi's `!` (`excludeFromContext:false`) or `!!` (`true`); output arrives as bash.* events. */
+  runBash(instanceId:string,command:string,excludeFromContext:boolean,operationId=this.createRequestId()):Promise<BashRunResult>{return this.request("bash.run",{operationId,instanceId,command,excludeFromContext},BASH_CAPABILITY,parseBashRunResult);}
+  /** Stop every shell command this Work is running; it does not touch the Agent reply or the Queue. */
+  abortBash(instanceId:string,operationId=this.createRequestId()):Promise<BashAbortResult>{return this.request("bash.abort",{operationId,instanceId},BASH_CAPABILITY,parseBashAbortResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:ThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}

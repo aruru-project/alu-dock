@@ -2,10 +2,12 @@
 
 ## 这部分负责什么
 
-Alu Dock 的 SSH 界面由两个客户端 surface 组成：
+Alu Dock 的终端界面由两个客户端 surface 组成：
 
 - **Hub**：创建、继续和管理 Dock instance；
 - **Session Work**：连接一个 instance，与当前 Agent session 交互。
+
+TUI 随 Alu Dock 同包安装、同版本发布，和 Host 用同一份 Protocol V2 代码；不存在“旧 TUI 连新 Host”的组合。它只连本机 Host：所谓 SSH 使用，是登录到运行 Host 的机器后在那里运行 `aludock`，TUI 本身不走网络、不配对。远程设备是另一件事：Devices 页是 Host 在管理官方 Desktop/Android 等远程客户端的配对，不是 TUI 自己的连接方式。SubHost 上的 Work 在 Main 的 TUI 里出现，是因为本机 Main 按 [instance.md](instance.md) 把请求转发给了 SubHost，TUI 仍然只连本机。
 
 Hub 和 Work 的运行中 Agent 工作能力都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。本机管理页面按事实来源接入：Devices/attachment directory 直接管理当前用户的 Host private state；Settings → Pi 使用随包 Pi 的 public API 管理原生 Pi environment。这些管理操作仅在本机提供，不开放远程 Dock admin 协议；凭据由 Pi 保存。
 
@@ -47,6 +49,8 @@ Work 的主要对象是一个已打开的 Dock instance。它负责：
 - editor、viewport、focus、搜索和本地 modal 状态。
 
 Work 使用可流动的 main buffer 和终端原生 scrollback/selection。Detach 只断开客户端，不停止 Host 中的 instance。
+
+编辑器里的 `!COMMAND` / `!!COMMAND` 是 Pi 的同名前缀：通过 `bash.run` 在 Work 所在机器和目录运行，输出以 tool surface 的样式流入 conversation（头部是 `!`/`!!` 加命令预览，结束后显示退出码、已停止或完整输出路径）。`/abort-shell` 调 `bash.abort`，与 `/abort` 分开；回复结束（`run.settled`）不会把还在跑的命令行标成完成。
 
 Pi Session Tree UI 只做一次逻辑 `session.tree.v2` 调用并得到完整 compact snapshot。搜索、过滤、active-first 顺序和折叠都在这份完整拓扑上本地完成；TUI 不收集业务分页、不维护 revision，也没有 partial/capped Tree 状态。大型 response 的 bounded transport framing 由 DockClient 透明重组，UI 看不到 frame。
 

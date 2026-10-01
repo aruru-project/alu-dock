@@ -1,13 +1,15 @@
 import { sliceSemanticHistory } from "./history-pagination.js";
 import { cloneJson } from "./json-value.js";
-import type {
-  DockEvent,
-  EventCursor,
-  EventDataMap,
-  EventPage,
-  HistoryEntryDto,
-  HistoryPageDto,
-  InstanceSnapshot,
+import {
+  CONVERSATION_FRAME_TYPES,
+  type ConversationFrame,
+  type DockEvent,
+  type EventCursor,
+  type EventDataMap,
+  type EventPage,
+  type HistoryEntryDto,
+  type HistoryPageDto,
+  type InstanceSnapshot,
 } from "./instance-dto.js";
 
 export class InvalidHistoryCursorError extends Error {
@@ -119,9 +121,15 @@ export class InstanceEventJournal {
     this.historyRevisionValue += 1;
   }
 
-  installConversationCheckpoint(history: HistoryEntryDto[]): void {
+  /**
+   * The Worker states that every conversation frame up to now is expressed by this
+   * history, except the shell commands it names: those are still running, or Pi is
+   * holding their record until the current agent run ends, so their start/completion
+   * frames stay visible to a client that opens the Work in the meantime.
+   */
+  installConversationCheckpoint(history: HistoryEntryDto[], unpersistedBash: readonly string[] = []): void {
     this.replaceHistory(history);
-    this.releasePersistedConversation(this.nextEventSequence - 1);
+    this.releasePersistedConversation(this.nextEventSequence - 1, new Set(unpersistedBash));
   }
 
   historyPage(beforeEntryId: string | undefined, limit: number): HistoryPageDto {
@@ -156,6 +164,9 @@ export class InstanceEventJournal {
 
   private captureActiveConversationEvent(event: DockEvent): void {
     if (!isConversationFrame(event)) return;
+    // Shell output is unbounded and not replayed: a client that opens the Work mid-command
+    // sees it running (bash.started without bash.completed) and then the final record.
+    if (event.type === "bash.output") return;
     const copy = cloneJson(event);
     const previous = this.activeConversationEvents.at(-1);
     if (previous?.type === "message.delta" && copy.type === "message.delta"
@@ -176,8 +187,9 @@ export class InstanceEventJournal {
     this.activeConversationEvents.push(copy);
   }
 
-  private releasePersistedConversation(sequence: number): void {
-    const retained = this.activeConversationEvents.filter((event) => event.sequence > sequence);
+  private releasePersistedConversation(sequence: number, unpersistedBash: ReadonlySet<string>): void {
+    const retained = this.activeConversationEvents.filter((event) => event.sequence > sequence
+      || ((event.type === "bash.started" || event.type === "bash.completed") && unpersistedBash.has(event.data.operationId)));
     this.activeConversationEvents.splice(0, this.activeConversationEvents.length, ...retained);
   }
 
@@ -186,15 +198,6 @@ export class InstanceEventJournal {
   }
 }
 
-function isConversationFrame(event: DockEvent): event is Extract<DockEvent, {
-  type: "message.submitted" | "message.delta" | "message.completed"
-    | "tool.started" | "tool.args_updated" | "tool.output_updated" | "tool.completed";
-}> {
-  return event.type === "message.submitted"
-    || event.type === "message.delta"
-    || event.type === "message.completed"
-    || event.type === "tool.started"
-    || event.type === "tool.args_updated"
-    || event.type === "tool.output_updated"
-    || event.type === "tool.completed";
+function isConversationFrame(event: DockEvent): event is Extract<DockEvent, { type: ConversationFrame["type"] }> {
+  return (CONVERSATION_FRAME_TYPES as readonly string[]).includes(event.type);
 }

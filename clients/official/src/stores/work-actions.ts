@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import {
-  abortRun, compactSession, forgetWork, isTauri, listMachines, reopenWork, sessionContext, stopWork,
+  abortRun, abortShellCommands, compactSession, forgetWork, isTauri, listMachines, reopenWork, runShellCommand, sessionContext, stopWork,
   type SessionContext
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
@@ -118,6 +118,64 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       reportFailure(feedbackScope, cause)
     } finally {
       pendingAborts.value.delete(feedbackScope.identity)
+    }
+  }
+
+  // ── Workspace shell commands (Pi `!` / `!!`) ──
+  // The receipt only says the command started; its output and completion are
+  // conversation events, so the rows live in the conversation projection and
+  // survive closing the workspace panel.
+  const pendingShellStarts = ref(new Set<string>())
+  const shellStarting = computed(() => pendingShellStarts.value.has(feedbackIdentity.value))
+  const pendingShellAborts = ref(new Set<string>())
+  const shellAborting = computed(() => pendingShellAborts.value.has(feedbackIdentity.value))
+  const shellFeedback = ref<{ scope: FeedbackScope; message: string; tone: FeedbackTone } | null>(null)
+  const shellError = computed(() => shellFeedback.value && feedbackMatches(shellFeedback.value.scope) ? shellFeedback.value : null)
+  function reportShell(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
+    if (feedbackMatches(scope)) shellFeedback.value = message === null ? null : { scope, message, tone }
+  }
+
+  /** Returns true once the Host says the command started. */
+  async function runShell(command: string, excludeFromContext: boolean): Promise<boolean> {
+    const work = selected.value
+    if (!work || work.lifecycle !== 'active' || shellStarting.value || !command.trim()) return false
+    const feedbackScope = captureFeedback()
+    const capturedHost = requireConnectionContext(app)
+    pendingShellStarts.value.add(feedbackScope.identity)
+    reportShell(feedbackScope, null)
+    try {
+      await runShellCommand(work.id, command, excludeFromContext, app.captureOperationTarget(capturedHost, work.id))
+      return app.contextMatches(capturedHost)
+    } catch (cause) {
+      if (app.contextMatches(capturedHost)) {
+        reportShell(feedbackScope, outcomeUnknown(cause)
+          ? '还无法确认命令是否已经开始执行。等一下看对话里有没有它的运行行；再次运行可能会执行两次。'
+          : errorMessage(cause, '命令没有开始执行。请检查连接后重试。'), outcomeUnknown(cause) ? 'notice' : 'error')
+      }
+      return false
+    } finally {
+      pendingShellStarts.value.delete(feedbackScope.identity)
+    }
+  }
+
+  /** Pi stops every running shell command of the Work at once; each one then reports its own end. */
+  async function abortShell() {
+    const work = selected.value
+    if (!work || work.lifecycle !== 'active' || shellAborting.value) return
+    const feedbackScope = captureFeedback()
+    const capturedHost = requireConnectionContext(app)
+    pendingShellAborts.value.add(feedbackScope.identity)
+    reportShell(feedbackScope, null)
+    try {
+      await abortShellCommands(work.id, app.captureOperationTarget(capturedHost, work.id))
+    } catch (cause) {
+      if (app.contextMatches(capturedHost)) {
+        reportShell(feedbackScope, outcomeUnknown(cause)
+          ? '还无法确认停止请求是否送到。看对话里的运行行是否已结束；必要时再点一次。'
+          : errorMessage(cause, '没有停下正在运行的命令。请重试。'), outcomeUnknown(cause) ? 'notice' : 'error')
+      }
+    } finally {
+      pendingShellAborts.value.delete(feedbackScope.identity)
     }
   }
 
@@ -469,6 +527,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   return {
     aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, globalOutcomeUnknown, globalReconciling, globalReconcileMessage, reconcileGlobalOutcome, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome,
+    shellStarting, shellAborting, shellError, runShell, abortShell,
     hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, acceptCreatedWork,
   }
 })
