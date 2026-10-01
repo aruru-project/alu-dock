@@ -76,6 +76,7 @@ try {
     await app.load()
     const surfaces = useSurfacesStore()
     const calls = [], dirty = []
+    let finishSave
     const saved = { laptop: [{ provider: 'azure-openai-responses', id: 'gpt-4.1' }, { provider: 'retired', id: 'old-model' }], main: [] }
     globalThis[stateKey] = { invoke: async (command, args) => {
       calls.push({ command, args })
@@ -86,6 +87,7 @@ try {
       }
       if (command === 'set_model_visibility') {
         if (scenario === 'save-unknown') throw { code: 'effect_unknown', outcomeUnknown: true, message: 'fixture' }
+        if (scenario === 'slow-save') await new Promise(resolve => { finishSave = resolve })
         saved[args.targetHostId] = args.hidden
         return { hidden: args.hidden }
       }
@@ -95,14 +97,14 @@ try {
     surfaces.openMachineSettings('laptop')
     const container = node('root')
     // Same wiring as PageDialogs: the page reports unsaved edits, the surfaces store guards closing.
-    const view = renderer.createApp({ render: () => h(MachineSettings, { ...props, onDirty: value => { dirty.push(value); surfaces.machineSettingsDirty = value }, onClose: () => surfaces.closeModal() }) })
+    const view = renderer.createApp({ render: () => h(MachineSettings, { ...props, onDirty: value => { dirty.push(value); surfaces.machineSettingsDirty = value }, onBusy: value => { surfaces.machineSettingsBusy = value }, onClose: () => surfaces.closeModal() }) })
     view.mount(container); await settle()
     const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props.title === label || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} is enabled`); target.props.onClick(); await settle() }
     const filter = async (label, value) => { const input = find(container, item => item.type === 'input' && item.props['aria-label'] === label); input.value = value; input.input({ target: input }); await settle() }
     const column = label => find(container, item => item.type === 'section' && item.props['aria-label'] === label)
     const rows = label => findAll(column(label), item => item.type === 'button' && String(item.props.class).includes('model-row')).map(text)
-    return { view, container, surfaces, calls, dirty, saved, click, button, filter, rows }
+    return { view, container, surfaces, calls, dirty, saved, click, button, filter, rows, finishSave: () => finishSave() }
   }
 
   {
@@ -154,6 +156,22 @@ try {
     assert.equal(page.surfaces.machineSettingsOpen, true, 'keeping the edits keeps the page open')
     await page.click('关闭')
     page.surfaces.settleConfirm(true); await settle()
+    assert.equal(page.surfaces.machineSettingsOpen, false)
+    page.view.unmount()
+  }
+
+  // A save already sent changes the Host either way: closing waits for it instead of claiming the edits are lost.
+  {
+    const page = await open('slow-save')
+    await page.click('隐藏 openai/gpt-5.6')
+    await page.click('保存')
+    page.button('关闭').props.onClick(); await settle()
+    assert.equal(page.surfaces.confirmDialog, null, 'no "discard" question while the save is on its way')
+    assert.equal(page.surfaces.machineSettingsOpen, true, 'the page stays until the save answers')
+    page.finishSave(); await settle()
+    assert.ok(text(page.container).includes('已保存'))
+    await page.click('关闭')
+    assert.equal(page.surfaces.confirmDialog, null)
     assert.equal(page.surfaces.machineSettingsOpen, false)
     page.view.unmount()
   }

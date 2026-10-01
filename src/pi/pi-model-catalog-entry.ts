@@ -2,6 +2,7 @@
 // computer could select. It loads Pi like a Worker does (login-shell
 // environment, global extensions) so extension code never runs inside the Host.
 import { listAvailablePiModels } from "./pi-environment.js";
+import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 
 type CatalogMessage = { ok: true; body: unknown } | { ok: false; message: string };
 
@@ -13,14 +14,15 @@ async function main(): Promise<void> {
   } catch (error) {
     message = { ok: false, message: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) };
   }
-  await new Promise<void>((resolveSent) => {
-    if (!process.send) { resolveSent(); return; }
-    process.send(message, undefined, {}, () => resolveSent());
-  });
-  // Extensions may leave timers or handles open; the answer is already delivered.
-  process.exit(0);
+  // Stay alive after answering: the Host ends this process together with anything an
+  // extension started, which on Windows needs the parent still running to find them.
+  process.send?.(message);
 }
 
-// The Host stopped waiting (it stopped or gave up); there is no one left to answer.
-process.on("disconnect", () => process.exit(0));
-void main();
+if (typeof process.send === "function") {
+  // Like a Worker: extensions that start Pi through process.argv[1] must reach Pi's CLI, not this entry.
+  enterPiWorkerRuntime();
+  // The Host stopped waiting (it stopped or gave up); there is no one left to answer.
+  process.on("disconnect", () => process.exit(0));
+  void main();
+}

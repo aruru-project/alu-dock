@@ -16,7 +16,7 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const surfaces = useSurfacesStore()
-const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
+const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, machineSettingsBusy, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
 const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const workActions = useWorkActionsStore()
@@ -87,6 +87,7 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
           :initial-host-id="machineSettingsHostId"
           @close="closeModal"
           @dirty="machineSettingsDirty = $event"
+          @busy="machineSettingsBusy = $event"
         />
       </section>
     </div>

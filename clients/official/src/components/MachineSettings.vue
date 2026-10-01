@@ -18,7 +18,7 @@ const props = defineProps<{
   /** Opened from a Work: start on that Work's machine. */
   initialHostId?: string
 }>()
-const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
+const emit = defineEmits<{ close: []; dirty: [dirty: boolean]; busy: [busy: boolean] }>()
 const app = useAppStore()
 const surfaces = useSurfacesStore()
 
@@ -52,6 +52,8 @@ const canSave = computed(() => !!result.value && !saving.value && (changes.value
 const status = computed(() => notice.value || (changes.value ? `已改动 ${changes.value} 项，尚未保存` : ''))
 
 watch(changes, (value) => emit('dirty', value > 0), { immediate: true })
+// A save already sent will change the Host either way; closing waits for its answer.
+watch(saving, (value) => emit('busy', value), { immediate: true })
 onUnmounted(() => { loadEpoch++ })
 
 watch(() => props.machines, (machines) => {

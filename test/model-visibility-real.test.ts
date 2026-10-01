@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,14 @@ test("hiding a model on one machine removes it from that machine's model picker 
   const subState = join(root, "sub-dock-state"), mainStateRoot = join(root, "main-dock-state");
   await Promise.all([mkdir(cwd, { recursive: true }), mkdir(agentDir, { recursive: true }), mkdir(sessions, { recursive: true })]);
   await writeFile(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "unused-no-model" } }));
+  // Extensions start Pi through process.argv[1]; in the model listing process it must be Pi's CLI,
+  // or such an extension would start the listing process again and again.
+  const launches = join(root, "extension-launch-targets.txt");
+  await mkdir(join(agentDir, "extensions"));
+  await writeFile(join(agentDir, "extensions", "launch-target.ts"), `
+import { appendFileSync } from "node:fs";
+export default function() { appendFileSync(${JSON.stringify(launches)}, process.argv[1] + "\\n"); }
+`);
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, USERPROFILE: home,
     XDG_CONFIG_HOME: join(home, "config"), XDG_CACHE_HOME: join(home, "cache"), XDG_DATA_HOME: join(home, "data"), XDG_STATE_HOME: join(home, "state"), XDG_RUNTIME_DIR: join(home, "run"),
     APPDATA: join(home, "appdata"), LOCALAPPDATA: join(home, "localappdata"), TMPDIR: root, TEMP: root, TMP: root,
@@ -58,6 +66,8 @@ test("hiding a model on one machine removes it from that machine's model picker 
     const before = await client.modelVisibility(laptop.hostId);
     assert.ok(before.models.some((model) => model.provider === "openai" && model.id === "gpt-4o-mini"));
     assert.deepEqual(before.hidden, []);
+    const targets = (await readFile(launches, "utf8")).split("\n").filter(Boolean);
+    assert.ok(targets.length > 0 && targets.every((target) => !target.includes("pi-model-catalog-entry")), `extension launch targets: ${targets.join(", ")}`);
 
     const work = await client.create(cwd, "Picker", undefined, undefined, laptop.hostId);
     const full = await client.models(work.id);

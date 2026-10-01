@@ -42,6 +42,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const machineSettingsHostId = ref<string | undefined>()
   /** The page has unsaved changes; closing it asks first. */
   const machineSettingsDirty = ref(false)
+  /** The page is saving; like New Work, Back and closing wait for the answer. */
+  const machineSettingsBusy = ref(false)
 
   const imagePreview = ref<ImagePreview | null>(null)
   const messageTextView = ref<{ title: string; text: string; markdown: boolean } | null>(null)
@@ -142,7 +144,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     backEntries--
     const top = backStack[backStack.length - 1]
     if (!top) return
-    if (top === 'directory' && directoryBusy.value) {
+    if ((top === 'directory' && directoryBusy.value) || (top === 'machine-settings' && machineSettingsBusy.value)) {
       syncBackHistory()
       return
     }
@@ -155,15 +157,17 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     if (confirmDialog.value !== dialog) return
     modalSurface.value?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled)')?.focus()
   })
-  watch(controlSection, async (section) => {
-    if (!commandOpen.value) return
-    await nextTick()
-    if (!commandOpen.value || controlSection.value !== section) return
-    const surface = modalSurface.value
+  function focusModalInitial(surface: HTMLElement | null | undefined) {
     const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
       ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
     if (initial) initial.focus()
     else surface?.focus()
+  }
+  watch(controlSection, async (section) => {
+    if (!commandOpen.value) return
+    await nextTick()
+    if (!commandOpen.value || controlSection.value !== section) return
+    focusModalInitial(modalSurface.value)
   })
   let composerOwnsModalFocus = false
   watch(modalOpen, async (open, wasOpen) => {
@@ -171,11 +175,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
       composerOwnsModalFocus = composerExpanded.value
       await nextTick()
       if (!modalOpen.value || composerExpanded.value) return
-      const surface = modalSurface.value
-      const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
-        ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
-      if (initial) initial.focus()
-      else surface?.focus()
+      focusModalInitial(modalSurface.value)
     } else if (!open && wasOpen) {
       const trigger = modalTrigger
       modalTrigger = null
@@ -211,6 +211,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   /** Resolves false when the user keeps unsaved Host settings open. */
   async function closeMachineSettings(): Promise<boolean> {
+    if (machineSettingsBusy.value) return false
     if (machineSettingsDirty.value && confirmDialog.value) return false
     if (machineSettingsDirty.value && !await askConfirm('放弃未保存的修改？', '隐藏模型的改动还没有保存，关闭后会丢失。')) return false
     machineSettingsOpen.value = false
@@ -220,6 +221,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   function closeModal() {
     if (directoryOpen.value && directoryBusy.value) return
+    if (machineSettingsOpen.value && machineSettingsBusy.value) return
     if (machineSettingsOpen.value && machineSettingsDirty.value) {
       void closeMachineSettings()
       return
@@ -420,8 +422,12 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
   /** Opens Host 设置, preselecting a machine (for example the current Work's). */
   function openMachineSettings(hostId?: string) {
-    rememberModalTrigger(); machineSettingsHostId.value = hostId; machineSettingsDirty.value = false; machineSettingsOpen.value = true
+    const handoff = modalOpen.value
+    rememberModalTrigger(); machineSettingsHostId.value = hostId; machineSettingsDirty.value = false; machineSettingsBusy.value = false; machineSettingsOpen.value = true
     appSettingsOpen.value = false; hostSettingsOpen.value = false; directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
+    // From another dialog (the model picker) a modal stays open throughout, so the
+    // open-watch never moves focus; without this the keyboard stays on the page behind.
+    if (handoff) void nextTick(() => { if (machineSettingsOpen.value) focusModalInitial(surfaceElements.get('machine-settings')) })
   }
   function openDeliveryTray() { rememberModalTrigger(); app.workDrawerOpen = false; deliveryOpen.value = true }
   function closeWorkPanels() { deliveryOpen.value = false; workspaceBrowserOpen.value = false }
@@ -437,5 +443,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, machineSettingsBusy, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

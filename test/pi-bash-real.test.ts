@@ -76,6 +76,9 @@ test("user runs shell commands from a client: output streams, abort stops them, 
     assert.ok(output.split("\n")[0]?.endsWith("cwd"), `command must run in the Work directory, saw ${JSON.stringify(output)}`);
 
     // The record lands in the session on Pi's own terms and is readable by any client.
+    // bash.completed and the Worker's record checkpoint are separate messages, so a read made
+    // the moment completion arrives can still be ahead of the record (full-suite flake, #339).
+    await waitForAsync(async () => (await client.history(created.id)).entries.some((entry) => entry.kind === "bash_execution"), "session history must show the run record");
     const quietRecord = (await client.history(created.id)).entries.find((entry) => entry.kind === "bash_execution");
     assert.ok(quietRecord, "session history must show the run record");
     assert.equal(quietRecord.command, "pwd && printf 'first line\\nsecond line\\n'");
@@ -111,8 +114,9 @@ test("user runs shell commands from a client: output streams, abort stops them, 
       assert.equal(cancelled.data.cancelled, true);
       assert.equal(cancelled.data.exitCode, undefined);
     }
-    const afterAbort = await client.read(created.id, undefined, "conversation_bootstrap");
-    assert.equal(afterAbort.page.events.some((event) => event.type === "bash.started"), false, "the finished command left the live view once its record was written");
+    // Same as above: the live rows leave when the record checkpoint arrives, just after completion.
+    await waitForAsync(async () => !(await client.read(created.id, undefined, "conversation_bootstrap")).page.events.some((event) => event.type === "bash.started"),
+      "the finished command left the live view once its record was written");
     const records = (await client.history(created.id)).entries.filter((entry) => entry.kind === "bash_execution");
     assert.deepEqual(records.map((entry) => [entry.command, entry.excludeFromContext, entry.cancelled]), [
       ["pwd && printf 'first line\\nsecond line\\n'", true, false],
