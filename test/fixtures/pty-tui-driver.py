@@ -87,14 +87,20 @@ def main() -> int:
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
         system_confirmed = False
-        while startup_marker not in output and time.monotonic() < deadline:
+        # #342: a Hub title can arrive before the tail of its first frame. Wait
+        # for both, or that tail can be mistaken for the subsequent resize frame
+        # and a mouse click is sent against the old 80x24 hit regions.
+        def startup_ready():
+            return startup_marker in output and (action not in hub_actions or b"\x1b[?2026l" in output)
+
+        while not startup_ready() and time.monotonic() < deadline:
             if read_available(fd, output, 0.1) < 0:
                 break
             if action not in hub_actions and not system_confirmed and b"Choose a system" in output and b"pi-default.json" in output:
                 os.write(fd, b"\r")  # Direct new/miss requires an explicit system confirmation.
                 system_confirmed = True
-        if startup_marker not in output:
-            timed_out = True
+        if not startup_ready():
+            raise TimeoutError("initial screen did not finish")
         else:
             before_resize = len(output)
             completed_renders = bytes(output).count(b"\x1b[?2026l")
@@ -111,6 +117,8 @@ def main() -> int:
             while bytes(output).count(b"\x1b[?2026l") <= completed_renders and time.monotonic() < resize_deadline:
                 if read_available(fd, output, 0.05) < 0:
                     break
+            if bytes(output).count(b"\x1b[?2026l") <= completed_renders:
+                raise TimeoutError("resized screen did not finish; no input was sent")
             resized_bytes = len(output) - before_resize
             ready_file = os.environ.get("ALU_DOCK_PTY_READY_FILE")
             if ready_file:
@@ -123,7 +131,7 @@ def main() -> int:
                         pass
                 os.write(fd, b"\x03" if action == "hub-narrow" else b"\x1b")  # Keyboard leave without mutation.
             elif action == "hub-click-leave":
-                y = hub_item_y(40, 120, 6, 7)
+                y = hub_item_y(40, 120, 7, 8)
                 os.write(fd, f"\x1b[<0;30;{y}M".encode("ascii"))
             elif action == "hub-signal":
                 os.kill(pid, signal.SIGTERM)
@@ -967,6 +975,12 @@ def main() -> int:
             os.kill(pid, signal.SIGKILL)
             _, wait_status = os.waitpid(pid, 0)
             status = os.waitstatus_to_exitcode(wait_status)
+    except TimeoutError as error:
+        timed_out = True
+        output.extend(f"\nPTY driver: {error}\n".encode("utf-8"))
+        os.kill(pid, signal.SIGKILL)
+        _, wait_status = os.waitpid(pid, 0)
+        status = os.waitstatus_to_exitcode(wait_status)
     finally:
         try:
             os.close(fd)
