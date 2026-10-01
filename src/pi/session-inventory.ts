@@ -313,17 +313,24 @@ async function summarizeEntries(handle: FileHandle, start: number, end: number, 
       summary.name = typeof entry.name === "string" ? boundedOptionalText(entry.name, 256) ?? null : null;
       return false;
     }
+    if (entry.type === "usage") {
+      // Pi 0.99 records paid requests outside the conversation (such as cache warming) here.
+      addCost(summary, entry.usage);
+      return false;
+    }
     const message = conversationMessage(entry);
     if (!message) return false;
     const activity = typeof message.timestamp === "number" ? message.timestamp : Date.parse(String(entry.timestamp));
     if (Number.isFinite(activity)) summary.lastActivityMs = Math.max(summary.lastActivityMs ?? activity, activity);
     if (message.role === "user" && summary.firstUserMessage === null) summary.firstUserMessage = userMessageText(message) ?? null;
-    if (message.role === "assistant") {
-      const cost = isRecord(message.usage) && isRecord(message.usage.cost) ? message.usage.cost.total : undefined;
-      if (typeof cost === "number" && Number.isFinite(cost)) summary.costTotal = (summary.costTotal ?? 0) + cost;
-    }
+    if (message.role === "assistant") addCost(summary, message.usage);
     return false;
   });
+}
+
+function addCost(summary: EntrySummary, usage: unknown): void {
+  const cost = isRecord(usage) && isRecord(usage.cost) ? usage.cost.total : undefined;
+  if (typeof cost === "number" && Number.isFinite(cost)) summary.costTotal = (summary.costTotal ?? 0) + cost;
 }
 
 async function findFirstUserMessage(handle: FileHandle, fileSize: number): Promise<string | undefined> {
@@ -345,7 +352,7 @@ async function findFirstUserMessage(handle: FileHandle, fileSize: number): Promi
 function mayCarrySummary(head: string, role?: "user"): boolean {
   const type = /^\{"type":"([^"]*)"/u.exec(head)?.[1];
   if (type === undefined) return true;
-  if (type === "session_info") return role === undefined;
+  if (type === "session_info" || type === "usage") return role === undefined;
   if (type !== "message") return false;
   const messageRole = /"message":\{"role":"([^"]*)"/u.exec(head)?.[1];
   if (messageRole === undefined) return true;

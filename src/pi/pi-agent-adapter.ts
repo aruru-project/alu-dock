@@ -227,6 +227,9 @@ interface Binding {
   bufferEvents: boolean;
   conversation: PiConversationProjector;
   runOperationId?: string;
+  /** Pi published agent_start and has not yet published the matching agent_settled. */
+  awaitingSettled: boolean;
+  settledWaiters: Array<() => void>;
   conversationReadState?: ConversationReadState;
   /** User shell commands (bash.run) still executing against this session, with what bash.started announced. */
   runningBash: Map<string, { command: string; excludeFromContext: boolean }>;
@@ -238,6 +241,12 @@ interface Binding {
 
 /** Pi's abortBash kills the process tree; its record is appended once the process is gone. */
 const BASH_RECORD_SETTLE_MS = 1_500;
+
+/** How Pi dispatched accepted input. Pi does not report rejected input; prompt() throws instead. */
+type PiPromptDisposition = Parameters<NonNullable<PromptOptions["preflightResult"]>>[0];
+interface PiPromptOptions extends Omit<AgentPromptOptions, "preflightResult"> {
+  preflightResult?: (disposition: PiPromptDisposition) => void;
+}
 
 type PiBashResult = Awaited<ReturnType<AgentSession["executeBash"]>>;
 
@@ -363,6 +372,7 @@ export class PiAgentAdapter {
       case "command.submit": {
         const { operationId, delivery: requestedDelivery, message, images } = request.params;
         const binding = this.requireActive();
+        await this.waitForSettledBoundary(binding);
         const attachments = context !== undefined && context.type !== "session_switch" ? context.attachments : undefined;
         const inputKind = this.classifyInput(message);
         if (inputKind === "extension_command" && ((images?.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
@@ -417,11 +427,10 @@ export class PiAgentAdapter {
           images,
           attachments,
         });
-        const reportPreflight = (success: boolean): void => {
-          if (!success) {
-            preflightResult?.({ success: false });
-            return;
-          }
+        const reportPreflight = (disposition: PiPromptDisposition): void => {
+          // Input an extension handled never becomes a Pi message, so it must not
+          // claim the operation identity of the next run.
+          if (disposition === "handled") binding.conversation.cancelInput(input);
           const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
           input.delivery = actualDelivery;
           input.fromQueue = hostQueued || actualDelivery !== "prompt";
@@ -512,13 +521,25 @@ export class PiAgentAdapter {
       : "extension_command";
   }
 
-  async prompt(text: string, options?: AgentPromptOptions): Promise<void> {
+  async prompt(text: string, options?: PiPromptOptions): Promise<void> {
     const { images, ...promptOptions } = options ?? {};
     const visualContent = await loadPiImages(images);
     await this.requireActive().session.prompt(text, {
       ...promptOptions,
       ...(visualContent === undefined ? {} : { images: visualContent }),
-    } as PromptOptions);
+    });
+  }
+
+  /**
+   * Pi 0.99 defers input that arrives while extensions still handle agent_settled:
+   * prompt() then returns before reporting a disposition and runs the input later.
+   * Start Dock input after Pi publishes agent_settled instead.
+   */
+  private async waitForSettledBoundary(binding: Binding): Promise<void> {
+    while (binding.token.active && binding.awaitingSettled && !binding.session.isStreaming) {
+      await new Promise<void>((resolve) => binding.settledWaiters.push(resolve));
+    }
+    if (!binding.token.active) throw new Error("Pi session changed before this input could start");
   }
 
   async queueMessage(text: string, delivery: "steer" | "followUp", images?: ImagePathDto[]): Promise<void> {
@@ -534,7 +555,7 @@ export class PiAgentAdapter {
     const appliedSynchronously = this.queueUpdateSequence > updateSequenceBefore || (delivery === "steer"
       ? session.getSteeringMessages().length
       : session.getFollowUpMessages().length) > before;
-    return mutation.catch((error: unknown) => {
+    return mutation.then(() => {}, (error: unknown) => {
       if (!appliedSynchronously) throw new AgentQueueRejectedBeforeEffectError(error);
       throw new AgentQueueEffectUnknownError(error);
     });
@@ -1340,6 +1361,7 @@ export class PiAgentAdapter {
         return { cancelled: false };
       } catch (error) {
         binding.token.active = false;
+        releaseSettledWaiters(binding);
         binding.unsubscribe();
         binding.gitBranchObserver?.dispose();
         this.active = undefined;
@@ -1463,12 +1485,15 @@ export class PiAgentAdapter {
       buffered: [],
       bufferEvents: true,
       conversation: new PiConversationProjector(this.options.attachmentContextKey),
+      awaitingSettled: false,
+      settledWaiters: [],
       runningBash: new Map(),
       bashTasks: new Set(),
       deferredBash: new Set(),
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
+      if (event.type === "agent_start") binding.awaitingSettled = true;
       if (event.type === "bash_execution_update") {
         // Only commands started through bash.run carry an id; output arrives as conversation frames.
         if (typeof event.id === "string" && binding.runningBash.has(event.id) && typeof event.delta === "string") {
@@ -1488,7 +1513,11 @@ export class PiAgentAdapter {
         const outbound = projected.type === "conversation_checkpoint" ? this.checkpoint(binding) : projected;
         this.publishFromBinding(binding, outbound);
       }
-      if (event.type === "agent_settled") binding.runOperationId = undefined;
+      if (event.type === "agent_settled") {
+        binding.runOperationId = undefined;
+        binding.awaitingSettled = false;
+        releaseSettledWaiters(binding);
+      }
     });
     this.staged = binding;
     const previousProcessCwd = this.processCwdValue;
@@ -1516,6 +1545,7 @@ export class PiAgentAdapter {
         : GitBranchObserver.create(binding.cwd, publishBranch));
     } catch (error) {
       token.active = false;
+      releaseSettledWaiters(binding);
       binding.unsubscribe();
       binding.gitBranchObserver?.dispose();
       if (this.staged === binding) this.staged = undefined;
@@ -1627,6 +1657,7 @@ export class PiAgentAdapter {
     for (const binding of [this.active, this.staged]) {
       if (!binding) continue;
       binding.token.active = false;
+      releaseSettledWaiters(binding);
       binding.unsubscribe();
       binding.gitBranchObserver?.dispose();
     }
@@ -2150,7 +2181,8 @@ export class PiConversationProjector {
 
   private projectMessageEnd(event: AgentEvent): AgentEvent[] {
     const message = isRecord(event.message) ? event.message : undefined;
-    if (!message) return [];
+    // Pi 0.99 records system prompt and tool changes as system messages; they are not conversation.
+    if (!message || message.role === "system") return [];
     const role = typeof message.role === "string" ? message.role : "system";
     if (role === "toolResult") {
       const toolCallId = safeRequiredText(message.toolCallId, 128, "unknown");
@@ -2264,6 +2296,10 @@ export class PiConversationProjector {
   }
 }
 
+function releaseSettledWaiters(binding: Binding): void {
+  for (const resolve of binding.settledWaiters.splice(0)) resolve();
+}
+
 function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): AgentHistoryEntry {
   const base = {
     recordId: entry.id,
@@ -2352,7 +2388,8 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       ...base,
       kind: custom ? "custom_message" : "message",
       source: custom ? "extension" : role === "user" ? "user" : role === "assistant" ? "assistant" : "system",
-      visibility: custom && message.display === false ? "hidden" : "conversation",
+      // Pi 0.99 system messages carry system prompt and tool changes, not conversation.
+      visibility: custom && message.display === false ? "hidden" : message.role === "system" ? "metadata" : "conversation",
       content: userProjection?.content ?? projectDockContent(message.content, undefined, publishedFiles),
       ...(userProjection?.attachments === undefined ? {} : { attachments: userProjection.attachments }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
@@ -2432,15 +2469,20 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       ...(entry.name === undefined ? {} : { name: boundedString(entry.name, 256, "") }),
     };
   }
-  return {
-    ...base,
-    kind: "label",
-    source: "runtime",
-    visibility: "metadata",
-    content: [],
-    targetEntryId: boundedString(entry.targetId, 128, "unknown"),
-    ...(entry.label === undefined ? {} : { label: boundedString(entry.label, 256, "") }),
-  };
+  if (entry.type === "label") {
+    return {
+      ...base,
+      kind: "label",
+      source: "runtime",
+      visibility: "metadata",
+      content: [],
+      targetEntryId: boundedString(entry.targetId, 128, "unknown"),
+      ...(entry.label === undefined ? {} : { label: boundedString(entry.label, 256, "") }),
+    };
+  }
+  // Pi 0.99 usage and context-edit records have no Protocol V2 kind. They stay
+  // runtime metadata that conversation views skip.
+  return { ...base, kind: "custom", source: "runtime", visibility: "metadata", content: [], customType: boundedString(entry.type, 256, "runtime") };
 }
 
 function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): { content: ContentBlockDto[]; attachments?: AttachmentDto[] } {
@@ -2763,10 +2805,8 @@ function projectTreeNode(
   attachmentContextKey: Uint8Array,
 ): void {
   const entry = node.entry;
-  const kind = entry.type;
-  if (!["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"].includes(kind)) {
-    throw new Error(`Unsupported Pi session tree entry kind: ${kind}`);
-  }
+  // Pi 0.99 usage and context-edit records have no Protocol V2 tree kind; they are metadata nodes.
+  const kind: TreeNodeDto["kind"] = TREE_NODE_KINDS.has(entry.type) ? entry.type as TreeNodeDto["kind"] : "custom";
   const message = entry.type === "message" ? entry.message as unknown as Record<string, unknown> : undefined;
   const role = message === undefined ? undefined : treeMessageRole(message.role);
   const state = message === undefined ? undefined : treeMessageState(message);
@@ -2775,7 +2815,7 @@ function projectTreeNode(
     entryId: entry.id,
     ...(parentId === undefined ? {} : { parentId }),
     depth,
-    kind: kind as TreeNodeDto["kind"],
+    kind,
     ...(role === undefined ? {} : { role }),
     displayClass,
     ...(state === undefined ? {} : { state }),
@@ -2802,6 +2842,7 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
         return treeLine(message.errorMessage, 2_048, "Assistant error");
       }
       if (message.role === "assistant" && message.stopReason === "aborted") return "(aborted)";
+      if (message.role === "system") return "System prompt update";
       const summaryText = contentText(message.content);
       return treeLine(message.role === "user" && summaryText !== undefined ? extractDockAttachmentContext(summaryText, attachmentContextKey).text : summaryText, 2_048, `${treeMessageRole(message.role)} message`);
     }
@@ -2813,8 +2854,12 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
     case "custom_message": return treeLine(contentText(entry.content), 2_048, `Custom message: ${entry.customType}`);
     case "label": return treeLine(entry.label ? `Label ${entry.targetId}: ${entry.label}` : `Label cleared: ${entry.targetId}`, 2_048, "Label change");
     case "session_info": return treeLine(entry.name ? `Session name: ${entry.name}` : "Session name cleared", 2_048, "Session info");
+    case "usage": return treeLine(`Usage: ${entry.kind}`, 2_048, "Usage");
+    case "context_edit": return treeLine(`Context ${entry.replacement === null ? "omit" : "replace"}: ${entry.targetId}`, 2_048, "Context edit");
   }
 }
+
+const TREE_NODE_KINDS: ReadonlySet<string> = new Set<TreeNodeDto["kind"]>(["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
 
 function treeMessageRole(value: unknown): "user" | "assistant" | "tool" | "system" {
   if (value === "user" || value === "assistant") return value;
@@ -2839,6 +2884,7 @@ function treeDisplayClass(
   if (entry.type === "message") {
     const message = entry.message as unknown as Record<string, unknown>;
     if (role === "tool") return "tool";
+    if (message.role === "system") return "metadata";
     if (role === "assistant" && state === undefined && !hasTreeText(message.content) && hasTreeToolCall(message.content)) return "structural";
     return "content";
   }

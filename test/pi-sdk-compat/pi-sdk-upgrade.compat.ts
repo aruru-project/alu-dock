@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
@@ -20,6 +21,9 @@ const ERROR_PROMPT = "SDK_COMPAT_ERROR: surface the provider failure";
 const RECOVERY_PROMPT = "SDK_COMPAT_RECOVERY: prove the worker recovered";
 const TEMPLATE_COMMAND = "/queued-template";
 const TEMPLATE_PROMPT = "SDK_COMPAT_TEMPLATE_EXPANDED: consume this queued template";
+const HANDLED_PROMPT = "SDK_COMPAT_HANDLED: an input hook takes this over";
+const SETTLE_FIRST_PROMPT = "SDK_COMPAT_SETTLE_FIRST: finish while an extension holds settlement";
+const SETTLE_SECOND_PROMPT = "SDK_COMPAT_SETTLE_SECOND: sent before settlement finished";
 const FIXTURE_TEXT = "sdk-compat-read-sentinel";
 
 /** Pi SDK admission gate. Intentionally not named *.test.ts; ordinary npm test must not collect it. */
@@ -31,6 +35,8 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
   const homeDir = join(root, "home");
   const socketPath = join(root, "dock.sock");
   const priorSessionFile = join(sessionDir, "pi-0.81.1-session.jsonl");
+  const holdSettle = join(root, "hold-settle");
+  const settleEntered = join(root, "settle-entered");
   const fixture = new LoopbackChatFixture();
   const workerPids: number[] = [];
   const events: DockEvent[] = [];
@@ -39,7 +45,7 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
   let follower: Awaited<ReturnType<DockClient["streamEvents"]>> | undefined;
 
   try {
-    await Promise.all([mkdir(cwd), mkdir(join(agentDir, "prompts"), { recursive: true }), mkdir(sessionDir), mkdir(homeDir), chmod(root, 0o700)]);
+    await Promise.all([mkdir(cwd), mkdir(join(agentDir, "prompts"), { recursive: true }), mkdir(join(agentDir, "extensions"), { recursive: true }), mkdir(sessionDir), mkdir(homeDir), chmod(root, 0o700)]);
     await Promise.all([
       writeFile(join(cwd, "fixture.txt"), `${FIXTURE_TEXT}\n`, "utf8"),
       writeFile(priorSessionFile, priorPiSession(cwd), { encoding: "utf8", mode: 0o600 }),
@@ -69,6 +75,17 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
         defaultModel: MODEL,
         retry: { enabled: false },
       }), "utf8"),
+      writeFile(join(agentDir, "extensions", "sdk-compat-hooks.ts"), `
+import { existsSync, writeFileSync } from "node:fs";
+export default function (pi) {
+  pi.on("input", async (event) => event.text.startsWith(${JSON.stringify(HANDLED_PROMPT)}) ? { action: "handled" } : { action: "continue" });
+  pi.on("agent_settled", async () => {
+    if (!existsSync(${JSON.stringify(holdSettle)})) return;
+    writeFileSync(${JSON.stringify(settleEntered)}, "");
+    for (let attempt = 0; attempt < 500 && existsSync(${JSON.stringify(holdSettle)}); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+}
+`, "utf8"),
       writeFile(join(agentDir, "prompts", "queued-template.md"), [
         "---",
         "description: SDK compatibility queued template",
@@ -121,6 +138,13 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
 
     follower = await client.streamEvents(created.id, { onEvent: (event) => events.push(event) });
 
+    // An input hook may take over a message. The receipt stays as before, and the
+    // handled message must not claim the next run: the tool run below waits for its own ID.
+    const handledEvent = events.length;
+    const handled = await client.prompt(created.id, HANDLED_PROMPT, "prompt", "sdk-handled");
+    assert.equal(handled.receipt.queued, false);
+    await waitForEvent(events, handledEvent, (event) => event.type === "command.handled" && event.data.operationId === "sdk-handled");
+
     const firstEvent = events.length;
     const accepted = await client.prompt(created.id, TOOL_PROMPT, "prompt", "sdk-tool-run");
     assert.equal(accepted.receipt.delivery, "prompt");
@@ -134,8 +158,11 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
     assert.ok(firstRunEvents.some((event) => event.type === "tool.completed" && event.data.toolName === "read" && !event.data.isError && event.data.text.includes(FIXTURE_TEXT)));
     assert.ok(fixture.requests.some((body) => hasToolResult(body, FIXTURE_TEXT)), "Pi must continue the provider turn with the real read result");
     assert.ok(fixture.requests.some((body) => JSON.stringify(body).includes("Pi Worker managed by Alu Dock")), "the managed Worker identity must reach Pi's system prompt");
+    // Pi 0.99 records system prompt and tool changes as system messages; clients never show them as conversation.
+    assert.equal(firstRunEvents.some((event) => event.type === "message.completed" && event.data.role === "system"), false);
 
     const initialHistory = (await client.history(created.id)).entries;
+    assert.equal(initialHistory.some((entry) => entry.visibility === "conversation" && entry.source === "system"), false);
     assert.ok(initialHistory.some((entry) => entry.source === "user" && textOf(entry.content).includes(TOOL_PROMPT)));
     assert.ok(initialHistory.some((entry) => entry.source === "tool" && entry.toolName === "read" && textOf(entry.content).includes(FIXTURE_TEXT)));
     assert.ok(initialHistory.some((entry) => entry.source === "assistant" && textOf(entry.content).includes("read completed successfully")));
@@ -187,6 +214,24 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
     const recovered = await waitForEvent(events, recoveryEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-recovery-run");
     assert.equal(recovered.type, "run.settled");
     assert.equal(recovered.data.result, "succeeded");
+
+    // Pi 0.99 defers input that arrives while an extension still handles agent_settled.
+    // Dock starts it after that boundary instead of reporting a rejected message that Pi runs later.
+    await writeFile(holdSettle, "");
+    const settleEvent = events.length;
+    await client.prompt(created.id, SETTLE_FIRST_PROMPT, "prompt", "sdk-settle-first");
+    await waitForFile(settleEntered);
+    const duringSettle = client.prompt(created.id, SETTLE_SECOND_PROMPT, "auto", "sdk-settle-second").then((value) => value, (error: unknown) => error);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await rm(holdSettle);
+    const settleAccepted = await duringSettle;
+    assert.ok(!(settleAccepted instanceof Error), `input sent before settlement must be accepted: ${String(settleAccepted)}`);
+    assert.equal((settleAccepted as Awaited<ReturnType<DockClient["prompt"]>>).receipt.queued, false);
+    const settledSecond = await waitForEvent(events, settleEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-settle-second");
+    assert.equal(settledSecond.type, "run.settled");
+    assert.equal(settledSecond.data.result, "succeeded");
+    assert.ok(fixture.requests.some((body) => lastUserText(body).includes(SETTLE_SECOND_PROMPT)));
+    assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(HANDLED_PROMPT)), false, "handled input never reaches the model");
 
     await client.nameSession(created.id, "SDK compatibility persisted", "sdk-name");
     const beforeReloadHistory = (await client.history(created.id)).entries;
@@ -416,6 +461,14 @@ async function waitForEvent(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail(`timed out waiting for event; recent events: ${events.slice(from).map((event) => event.type).join(", ")}`);
+}
+
+async function waitForFile(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (existsSync(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`timed out waiting for ${path}`);
 }
 
 async function waitForStatus(

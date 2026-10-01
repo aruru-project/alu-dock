@@ -187,3 +187,57 @@ export default function (pi) {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a saved Pi 0.99 session keeps its conversation, tree and total cost alongside system, cache-warming and retry records", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-real-tree-records-"));
+  const cwd = join(root, "cwd");
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(sessionDir)]);
+  const sessionFile = join(sessionDir, "pi-0.99-records.jsonl");
+  const at = (second: number) => `2026-10-01T00:00:0${second}.000Z`;
+  const paid = (total: number) => ({ ...ZERO_USAGE, cost: { ...ZERO_USAGE.cost, total } });
+  // Pi 0.99 opens a session with its system prompt as a message, records cache warming
+  // between runs, and removes a failed attempt from model context before retrying.
+  await writeFile(sessionFile, [
+    { type: "session", version: 3, id: "pi-0.99-records", timestamp: at(0), cwd },
+    { type: "message", id: "s1", parentId: null, timestamp: at(1), message: { role: "system", content: "", sections: { preamble: "Fixture system prompt." }, timestamp: 1 } },
+    { type: "message", id: "u1", parentId: "s1", timestamp: at(2), message: { role: "user", content: "first prompt", timestamp: 2 } },
+    { type: "message", id: "a1", parentId: "u1", timestamp: at(3), message: { ...assistant("first answer", 3), usage: paid(0.5) } },
+    { type: "usage", id: "w1", parentId: "a1", timestamp: at(4), kind: "cache_warm", provider: "fixture", model: "fixture", usage: paid(0.125) },
+    { type: "message", id: "u2", parentId: "w1", timestamp: at(5), message: { role: "user", content: "second prompt", timestamp: 5 } },
+    { type: "message", id: "a2", parentId: "u2", timestamp: at(6), message: { ...assistant("", 6), content: [], stopReason: "error", errorMessage: "provider overloaded" } },
+    { type: "context_edit", id: "e1", parentId: "a2", timestamp: at(7), targetId: "a2", replacement: null },
+    { type: "message", id: "a3", parentId: "e1", timestamp: at(8), message: assistant("second answer", 8) },
+  ].map((entry) => `${JSON.stringify(entry)}\n`).join(""), { mode: 0o600 });
+
+  const instance = await createPiInstance({
+    id: "real-tree-records",
+    creationOperationId: "create-real-tree-records",
+    hostEpoch: "real-tree-records-host",
+    cwd,
+    agentDir,
+    sessionDir,
+    sessionFile,
+    projectTrusted: true,
+    tools: [],
+  });
+  try {
+    const conversation = ["u1", "a1", "u2", "a2", "a3"];
+    const history = (await instance.getHistoryPage(undefined, 200)).entries;
+    assert.deepEqual(history.filter((entry) => entry.visibility === "conversation").map((entry) => entry.entryId), conversation);
+    assert.equal(history.some((entry) => entry.kind === "label"), false, "runtime records must not read as label changes");
+    const page = await instance.getConversationHistory();
+    assert.deepEqual(page.entries.filter((item) => item.entry.visibility === "conversation").map((item) => item.entry.entryId), conversation);
+
+    const tree = await instance.getTree();
+    assert.deepEqual(tree.nodes.filter((node) => node.displayClass !== "metadata").map((node) => node.entryId), conversation);
+    const byId = new Map(tree.nodes.map((node) => [node.entryId, node]));
+    assert.deepEqual(["s1", "w1", "e1"].map((id) => byId.get(id)?.displayClass), ["metadata", "metadata", "metadata"]);
+
+    assert.equal(instance.snapshot().metrics?.cost, 0.625, "cache warming counts toward the session total");
+  } finally {
+    await instance.disposeUnpublished();
+    await rm(root, { recursive: true, force: true });
+  }
+});
