@@ -13,6 +13,9 @@ const props = defineProps<{
   /** Pi is told to stop every running command of the Work, not just this row. */
   canStop?: boolean
   stopping?: boolean
+  /** The full recorded output is still being read, or could not be read. */
+  hydrating?: boolean
+  hydrationError?: string
 }>()
 const emit = defineEmits<{ quote: [item: ShellRunItem]; stop: [] }>()
 
@@ -64,9 +67,12 @@ async function copyPath() {
       <span class="shell-run-status" :class="`is-${item.status}`" role="status">{{ statusLabel }}</span>
       <span v-if="item.time" class="shell-run-time">{{ item.time }}</span>
     </header>
+    <p v-if="item.outputMissing" class="shell-run-note">{{ item.status === 'running' ? '这里只显示打开这个 Work 之后的输出；跑完后会换成完整的运行记录。' : '这里没有完整输出，完整的运行记录马上就到；没到的话刷新对话。' }}</p>
+    <p v-if="hydrating" class="shell-run-note">正在载入完整输出…</p>
+    <p v-else-if="hydrationError" class="shell-run-note shell-run-error">{{ hydrationError }}</p>
     <pre v-if="item.output" ref="output" class="shell-run-output" tabindex="0"><code>{{ item.output }}</code></pre>
-    <p v-else-if="item.status === 'running'" class="shell-run-note">正在运行，还没有输出。</p>
-    <p v-else-if="!item.error" class="shell-run-note">没有输出。</p>
+    <p v-else-if="item.status === 'running' && !item.outputMissing" class="shell-run-note">正在运行，还没有输出。</p>
+    <p v-else-if="!item.error && !item.outputMissing" class="shell-run-note">没有输出。</p>
     <p v-if="item.error" class="shell-run-note shell-run-error">{{ item.error }}</p>
     <div v-if="item.truncated" class="shell-run-note shell-run-truncated">
       <span>这里只保留了输出的末尾。{{ item.fullOutputPath ? `完整输出在${machineName ? ` ${machineName} 上` : ' Work 所在机器的'}：` : '' }}</span>
@@ -77,7 +83,7 @@ async function copyPath() {
     <footer class="shell-run-actions">
       <span class="shell-run-mode" :title="modeTitle">{{ modeLabel }}</span>
       <button v-if="item.status === 'running' && canStop" type="button" class="shell-run-action shell-run-stop" :disabled="stopping" title="停止这个 Work 正在运行的全部命令" @click="emit('stop')"><Square :size="13" />{{ stopping ? '正在停止…' : '停止全部命令' }}</button>
-      <button v-else-if="item.status !== 'running'" type="button" class="shell-run-action shell-run-quote" title="把命令和输出引用进输入框，由你决定是否发送" @click="emit('quote', item)"><Send :size="13" />发给 agent</button>
+      <button v-else-if="item.status !== 'running' && !item.outputMissing" type="button" class="shell-run-action shell-run-quote" :disabled="hydrating" title="把命令和输出引用进输入框，由你决定是否发送" @click="emit('quote', item)"><Send :size="13" />发给 agent</button>
     </footer>
   </article>
 </template>

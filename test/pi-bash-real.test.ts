@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,6 +90,19 @@ test("user runs shell commands from a client: output streams, abort stops them, 
     const midwayStarted = midway.page.events.filter((event) => event.type === "bash.started").map((event) => event.data.operationId);
     assert.deepEqual(midwayStarted, ["bash-long"], "a running command is visible to a client that opens the Work now");
     assert.equal(midway.page.events.some((event) => event.type === "bash.output"), false, "output is not replayed for late readers");
+
+    // Review follow-up: a Reload keeps the session and the running command, but opens a new
+    // generation; the command must stay visible there and its output must keep arriving.
+    const reloaded = await client.reloadSession(created.id, "bash-reload");
+    assert.equal(reloaded.instance.runtimeGeneration, 2);
+    const afterReload = await client.read(created.id, undefined, "conversation_bootstrap");
+    assert.deepEqual(afterReload.page.events.filter((event) => event.type === "bash.started").map((event) => event.data.operationId), ["bash-long"], "the running command is announced again in the new generation");
+    subscription.close();
+    events.length = 0;
+    subscription = await client.streamEvents(created.id, { since: afterReload.page.latest, onEvent: (event) => {
+      events.push(event);
+      for (const waiter of waiters.splice(0)) { if (waiter.match(event)) waiter.resolve(event); else waiters.push(waiter); }
+    } });
 
     const aborted = await client.abortBash(created.id, "bash-abort");
     assert.equal(aborted.instance.id, created.id);
@@ -188,6 +201,18 @@ test("user runs a shell command while the Agent is replying: it finishes now and
     await waitForAsync(async () => (await historyKinds()).includes("bash_execution"), "the record did not land after the reply");
     assert.deepEqual(await liveBashRows(), [], "the live rows leave once the record is written");
     assert.deepEqual((await historyKinds()).slice(-4), ["message:assistant", "message:tool", "message:assistant", "bash_execution"], "the record follows the reply it ran under");
+
+    // Review follow-up: stopping the Work while a command runs still leaves its cancellation in the saved session.
+    // (Pi only writes the session file once a reply exists, which this test has.)
+    await client.runBash(work.id, "sleep 25", true, "bash-stopped");
+    await waitFor(() => events.some((event) => event.type === "bash.started" && event.data.operationId === "bash-stopped"), "stopped command did not start");
+    const sessionFile = (await client.status(work.id)).executor.sessionFile;
+    assert.ok(sessionFile);
+    await client.stop(work.id, "bash-stop");
+    const saved = (await readFile(sessionFile, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; message?: { role?: string; command?: string; cancelled?: boolean } });
+    const stoppedRecord = saved.find((entry) => entry.type === "message" && entry.message?.role === "bashExecution" && entry.message.command === "sleep 25");
+    assert.ok(stoppedRecord, "the stopped command is recorded in the saved session");
+    assert.equal(stoppedRecord.message?.cancelled, true);
   } finally {
     follower?.close(); await follower?.done.catch(() => {});
     client?.closeActiveConnections();

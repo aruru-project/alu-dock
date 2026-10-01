@@ -6,7 +6,9 @@ import ShellRunRow from './ShellRunRow.vue'
 import { useConversationStore } from '../stores/conversation'
 import { useInputStore } from '../stores/input'
 import { useWorkActionsStore } from '../stores/work-actions'
-import type { ShellRunItem, Work } from '../lib/types'
+import type { ConversationItem, ShellRunItem, Work } from '../lib/types'
+
+type ShellRun = Extract<ConversationItem, { kind: 'shell' }>
 
 /** The workspace command area: Pi's `!` / `!!` in the Work's directory on its machine.
  * Runs are conversation rows fed by bash.* events, so closing this panel changes nothing
@@ -21,7 +23,9 @@ const emit = defineEmits<{ close: [] }>()
 
 const workActions = useWorkActionsStore()
 const { shellStarting, shellAborting, shellError, hostMachines } = storeToRefs(workActions)
-const { conversation } = storeToRefs(useConversationStore())
+const conversationStore = useConversationStore()
+const { conversation, historyHydrationActiveEntries, historyHydrationErrors } = storeToRefs(conversationStore)
+const { requestFullRecords } = conversationStore
 const { appendShellQuote } = useInputStore()
 
 const open = ref(true)
@@ -30,8 +34,20 @@ const quiet = ref(true)
 const input = ref<HTMLTextAreaElement | null>(null)
 const list = ref<HTMLElement | null>(null)
 
-const runs = computed(() => conversation.value.filter((item): item is ShellRunItem => item.kind === 'shell'))
+const runs = computed(() => conversation.value.filter((item): item is ShellRun => item.kind === 'shell'))
 const running = computed(() => runs.value.some((item) => item.status === 'running'))
+// Records only hydrate when their timeline row is on screen; this list is outside that
+// viewport, so it asks for the whole recorded output of every run it shows, once.
+const requestedRecords = new Set<string>()
+watch(() => runs.value.flatMap((item) => item.sourceEntryIds ?? []), (entryIds) => {
+  const missing = entryIds.filter((id) => !requestedRecords.has(id))
+  if (!missing.length) return
+  for (const id of missing) requestedRecords.add(id)
+  void requestFullRecords(missing)
+}, { immediate: true })
+const recordEntryId = (item: ShellRun) => item.sourceEntryIds?.[0]
+const hydrating = (item: ShellRun) => { const id = recordEntryId(item); return !!id && historyHydrationActiveEntries.value.has(id) }
+const hydrationError = (item: ShellRun) => { const id = recordEntryId(item); return id ? historyHydrationErrors.value[id] : undefined }
 const machineName = computed(() => hostMachines.value.find((machine) => machine.hostId === props.work?.hostId)?.name ?? '')
 const place = computed(() => {
   const cwd = props.work?.cwd ?? ''
@@ -97,7 +113,7 @@ onMounted(() => {
     <template v-if="expanded">
       <div ref="list" class="workspace-shell-list">
         <p v-if="!runs.length" class="workspace-shell-empty">在下面输入一条命令。跑完后可以把输出引用给 agent，它也会作为「运行记录」留在对话里。</p>
-        <ShellRunRow v-for="item in runs" :key="item.id" :item="item" :machine-name="machineName" can-stop :stopping="shellAborting" @quote="quote" @stop="workActions.abortShell()" />
+        <ShellRunRow v-for="item in runs" :key="item.id" :item="item" :machine-name="machineName" can-stop :stopping="shellAborting" :hydrating="hydrating(item)" :hydration-error="hydrationError(item)" @quote="quote" @stop="workActions.abortShell()" />
       </div>
       <p v-if="shellError" class="workspace-shell-feedback" :class="shellError.tone" :role="shellError.tone === 'error' ? 'alert' : 'status'">{{ shellError.message }}</p>
       <form class="workspace-command-input" @submit.prevent="run">

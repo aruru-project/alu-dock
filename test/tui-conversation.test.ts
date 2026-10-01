@@ -360,6 +360,19 @@ test("user shell commands stream output in their own row and outlive the reply t
   conversation.apply(event(9, "bash.started", { operationId: "sh-3", command: "false", excludeFromContext: false }));
   conversation.apply(event(10, "bash.completed", { operationId: "sh-3", exitCode: 1, cancelled: false, truncated: false }));
   assert.match(conversation.render(60).join("\n"), /× ! · false · exit 1/u);
+
+  // Review follow-up: a long output must not push the full-output path past the display bound.
+  conversation.apply(event(11, "bash.started", { operationId: "sh-4", command: "yes", excludeFromContext: true }));
+  for (let index = 0; index < 3; index++) conversation.apply(event(12 + index, "bash.output", { operationId: "sh-4", delta: `${"y\n".repeat(2_000)}` }));
+  conversation.apply(event(15, "bash.completed", { operationId: "sh-4", exitCode: 0, cancelled: false, truncated: true, fullOutputPath: "/tmp/pi-bash-long.log" }));
+  conversation.setToolsExpanded(true);
+  assert.match(conversation.render(80).join("\n"), /\/tmp\/pi-bash-long\.log/u, "the path stays visible after a long output");
+
+  // A window opened mid-command did not see the earlier output; it must not look empty.
+  const late = new DockConversation();
+  late.applyBootstrapReplay([event(20, "bash.started", { operationId: "sh-5", command: "make", excludeFromContext: true })]);
+  late.apply(event(21, "bash.completed", { operationId: "sh-5", exitCode: 0, cancelled: false, truncated: false }));
+  assert.match(late.snapshot()[0]?.text ?? "", /not shown; the run record has it/u);
 });
 
 test("user messages mirror Pi box padding and Markdown semantics with a full-width surface", () => {

@@ -603,6 +603,8 @@ export interface ShellRunItem {
   status: ShellRunStatus
   /** Live output tail while running, or the recorded output afterwards. */
   output: string
+  /** This client joined after the command started: output before that is not shown, the run record will have it. */
+  outputMissing?: boolean
   exitCode?: number
   truncated: boolean
   fullOutputPath?: string

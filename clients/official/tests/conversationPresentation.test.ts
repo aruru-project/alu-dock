@@ -196,6 +196,23 @@ assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolC
   assert.equal(stopped.status, 'stopped')
   assert.equal(shellRunQuote(stopped), 'Ran `sleep 30`\n(no output)\n(command cancelled)')
 
+  // Review follow-up: a client that opens the Work mid-command has not seen its output. It must
+  // say so rather than show an empty result, while a rebuild keeps what this client did see.
+  const late = createLiveConversationProjector({ instance: { id: 'work', execution: 'idle' } } as ConversationBootstrap)
+  late.apply(toolEvent(30, 'bash.started', { operationId: 'sh-late', command: 'make', excludeFromContext: true }), true)
+  const lateItem = late.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(lateItem?.kind === 'shell')
+  assert.equal(lateItem.outputMissing, true, '回放的开始事件意味着之前的输出没有到达这里')
+  late.apply(toolEvent(31, 'bash.completed', { operationId: 'sh-late', exitCode: 0, cancelled: false, truncated: false }))
+  assert.equal(lateItem.outputMissing, true, '完成不会把缺失的输出变成「没有输出」')
+  const rebuilt = createLiveConversationProjector({ instance: { id: 'work', execution: 'idle' } } as ConversationBootstrap)
+  rebuilt.apply(toolEvent(32, 'bash.started', { operationId: 'sh-1', command: 'git status', excludeFromContext: true }), true)
+  rebuilt.adoptShellOutput([{ ...running, status: 'running', output: 'seen so far\n' }])
+  const adopted = rebuilt.snapshot().find((item) => item.kind === 'shell')
+  assert.ok(adopted?.kind === 'shell')
+  assert.equal(adopted.output, 'seen so far\n', '重建后保留这个客户端已经看到的输出')
+  assert.equal(adopted.outputMissing, undefined)
+
   const recorded = projectRecordGroups([{
     recordId: 'bash-1', entryId: 'bash-1', kind: 'bash_execution', source: 'runtime', visibility: 'conversation', timestamp: '2026-09-30T08:05:00Z',
     content: [{ type: 'text', text: '! false\nnothing here' }], command: 'false', exitCode: 1, cancelled: false, truncated: false, excludeFromContext: false,

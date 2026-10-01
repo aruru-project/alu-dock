@@ -244,9 +244,10 @@ export function createLiveConversationProjector(
   const firstRunBoundary = (bootstrap.activeEvents ?? []).find((event) => event.eventType === 'run.started' || event.eventType === 'run.settled')
   if (bootstrap.instance.execution === 'running' || firstRunBoundary?.eventType === 'run.settled') openTurn(CONTINUATION_TURN_ID, undefined, true)
 
-  function apply(event: ProjectedEvent) {
+  /** `replay` marks events restored from a read rather than followed live. */
+  function apply(event: ProjectedEvent, replay = false) {
     const before = items.length
-    applyEvent(event)
+    applyEvent(event, replay)
     if (turn) for (let index = before; index < items.length; index++) {
       const item = items[index]!
       if (item.kind === 'turn' || item.kind === 'shell') continue
@@ -255,7 +256,7 @@ export function createLiveConversationProjector(
     }
   }
 
-  function applyEvent(event: ProjectedEvent) {
+  function applyEvent(event: ProjectedEvent, replay: boolean) {
     const data = event.data
     let formattedTime: string | undefined
     const time = () => formattedTime ??= shortTime(event.occurredAt)
@@ -401,7 +402,8 @@ export function createLiveConversationProjector(
         const operationId = stringValue(data.operationId) || `shell-${event.sequence}`
         let item = shellItems.get(operationId)
         if (!item) {
-          item = observe<ShellRunItem>({ id: `live-shell-${operationId}`, kind: 'shell', operationId, command: '', excludeFromContext: false, status: 'running', output: '', truncated: false, time: time() })
+          // The Host does not replay shell output, so a replayed start means the output so far is missing here.
+          item = observe<ShellRunItem>({ id: `live-shell-${operationId}`, kind: 'shell', operationId, command: '', excludeFromContext: false, status: 'running', output: '', truncated: false, time: time(), ...(replay ? { outputMissing: true } : {}) })
           shellItems.set(operationId, item)
           items.push(item)
         }
@@ -526,7 +528,17 @@ export function createLiveConversationProjector(
     if (instance.execution !== 'running') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
     else if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true)
   }
-  return { apply, snapshot: () => items, affectedIds, reconcileRun, structureKey: () => `${items.length}` }
+  /** A rebuild from a read keeps what this client already saw of a command that is still running. */
+  function adoptShellOutput(previous: readonly ConversationItem[]) {
+    for (const item of previous) {
+      if (item.kind !== 'shell' || item.outputMissing) continue
+      const current = shellItems.get(item.operationId)
+      if (!current || current.status !== 'running') continue
+      current.output = item.output
+      delete current.outputMissing
+    }
+  }
+  return { apply, snapshot: () => items, affectedIds, reconcileRun, adoptShellOutput, structureKey: () => `${items.length}` }
 }
 
 export function projectRecordGroups(records: ConversationRecord[]): ConversationItem[] {

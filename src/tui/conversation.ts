@@ -143,6 +143,11 @@ export class DockConversation implements Component {
         || event.type === "bash.completed"
         || event.type === "extension.notification"
         || event.type === "extension.error") this.apply(event);
+      // Output is not replayed for a window that opens mid-command; say so instead of showing it as empty.
+      if (event.type === "bash.started") {
+        const tool = this.tools.get(`shell:${event.data.operationId}`);
+        if (tool) { tool.output = "(output before this window opened is not shown; the run record has it)"; this.updateTool(tool, "running"); }
+      }
     }
   }
 
@@ -303,7 +308,9 @@ export class DockConversation implements Component {
         const tool = this.tools.get(callId);
         if (!tool) break;
         const outcome = shellOutcome(event.data);
-        if (outcome.notice) tool.output = [tool.output, outcome.notice].filter(Boolean).join("\n");
+        // The outcome line (and the full-output path) must survive the output bound: the
+        // output keeps its tail, the notice stays whole.
+        if (outcome.notice) tool.output = [truncateTail(tool.output ?? "", MAX_TOOL_OUTPUT - outcome.notice.length - 2), outcome.notice].filter(Boolean).join("\n");
         tool.entry.complete = true;
         this.updateTool(tool, outcome.state);
         if (tool.entry.toolErrorSummary !== outcome.summary) {
@@ -1537,7 +1544,7 @@ function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
-/** Streamed shell output keeps its newest lines, like a terminal scrollback. */
+/** Streamed shell output keeps its newest lines, like a terminal scrollback; the result is at most limit + 1 chars. */
 function truncateTail(text: string, limit: number): string {
   return text.length <= limit ? text : `…${text.slice(text.length - limit)}`;
 }

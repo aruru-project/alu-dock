@@ -2202,6 +2202,10 @@ export class ManagedInstance {
       if (this.replacementIntent !== undefined || this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "running a shell command during session replacement");
       const started = await this.invokeAgent<{ operationId: string; startedAt: string }>("bash.run", { operationId, command, excludeFromContext });
       return { operationId: started.operationId, instanceId: this.id, startedAt: started.startedAt };
+    } catch (error) {
+      // The Worker may have started the command before it was lost; a plain failure would invite a second run.
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
     } finally {
       lease.release();
     }
@@ -2217,6 +2221,9 @@ export class ManagedInstance {
       this.assertActive();
       if (this.replacementIntent !== undefined || this.extensionUi.isSuspended()) return;
       await this.invokeAgent<null>("bash.abort", { operationId });
+    } catch (error) {
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
     } finally {
       lease.release();
     }

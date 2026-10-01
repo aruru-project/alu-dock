@@ -227,11 +227,16 @@ interface Binding {
   conversation: PiConversationProjector;
   runOperationId?: string;
   conversationReadState?: ConversationReadState;
-  /** User shell commands (bash.run) still executing against this session. */
-  runningBash: Set<string>;
+  /** User shell commands (bash.run) still executing against this session, with what bash.started announced. */
+  runningBash: Map<string, { command: string; excludeFromContext: boolean }>;
+  /** Their executions, so a Worker shutdown can let Pi record the cancellations first. */
+  bashTasks: Set<Promise<void>>;
   /** Finished commands whose record Pi is still holding until the current agent run ends. */
   deferredBash: Set<string>;
 }
+
+/** Pi's abortBash kills the process tree; its record is appended once the process is gone. */
+const BASH_RECORD_SETTLE_MS = 1_500;
 
 type PiBashResult = Awaited<ReturnType<AgentSession["executeBash"]>>;
 
@@ -1138,10 +1143,34 @@ export class PiAgentAdapter {
     }
     if (this.active !== binding || !binding.token.active) throw new Error("Pi runtime is unavailable");
     const startedAt = new Date().toISOString();
-    binding.runningBash.add(operationId);
+    binding.runningBash.set(operationId, { command, excludeFromContext });
     this.publishFromBinding(binding, bashFrame({ type: "bash.started", data: { operationId, command, excludeFromContext } }));
-    void this.completeBash(binding, operationId, command, excludeFromContext, intercepted);
+    const task = this.completeBash(binding, operationId, command, excludeFromContext, intercepted);
+    binding.bashTasks.add(task);
+    void task.finally(() => binding.bashTasks.delete(task));
     return { operationId, startedAt };
+  }
+
+  /** A reload keeps the session, and with it any running command, but the Host starts a
+   * new generation whose live view knows nothing about them: announce them again. */
+  private announceRunningBash(binding: Binding): void {
+    for (const [operationId, { command, excludeFromContext }] of binding.runningBash) {
+      this.publishFromBinding(binding, bashFrame({ type: "bash.started", data: { operationId, command, excludeFromContext } }));
+    }
+  }
+
+  /** Give Pi the moment it needs to record cancelled commands before the Worker exits. */
+  private async settleRunningBash(tasks: readonly Promise<void>[]): Promise<void> {
+    if (tasks.length === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled(tasks),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, BASH_RECORD_SETTLE_MS); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   private async completeBash(binding: Binding, operationId: string, command: string, excludeFromContext: boolean, intercepted: UserBashEventResult | undefined): Promise<void> {
@@ -1181,7 +1210,7 @@ export class PiAgentAdapter {
 
   private checkpoint(binding: Binding): AgentEvent {
     if (!binding.session.hasPendingBashMessages) binding.deferredBash.clear();
-    const unpersistedBash = [...binding.runningBash, ...binding.deferredBash];
+    const unpersistedBash = [...binding.runningBash.keys(), ...binding.deferredBash];
     return {
       type: "conversation_checkpoint",
       history: this.conversationEntries(binding),
@@ -1313,6 +1342,7 @@ export class PiAgentAdapter {
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
         binding.bufferEvents = false;
         this.publishReplacement(operationId, "reload", previousSessionFile, binding.session.sessionFile);
+        this.announceRunningBash(binding);
         await this.options.extensionUiBroker?.completeGenerationChange();
         this.publishReplacementBuffer(buffered);
         return { cancelled: false };
@@ -1346,7 +1376,9 @@ export class PiAgentAdapter {
       try {
         await this.abort().catch((error: unknown) => { captureCleanupError("abort", error); });
         await this.mutationTail.catch(() => {});
+        const runningBash = [...(this.active?.bashTasks ?? [])];
         await this.disposeRuntimeOnce();
+        await this.settleRunningBash(runningBash);
         return { cleanupErrors };
       } finally {
         this.invalidateBindingsSynchronously();
@@ -1439,7 +1471,8 @@ export class PiAgentAdapter {
       buffered: [],
       bufferEvents: true,
       conversation: new PiConversationProjector(this.options.attachmentContextKey),
-      runningBash: new Set(),
+      runningBash: new Map(),
+      bashTasks: new Set(),
       deferredBash: new Set(),
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
