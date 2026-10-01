@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import { hardenWindowsPrivatePath, syncPrivateDirectory } from "../platform/private-state.js";
+import { hardenWindowsPrivatePath, replaceStateFile, syncPrivateDirectory } from "../platform/private-state.js";
 
 const SETTINGS_SCHEMA = 1 as const;
 const MAX_SETTINGS_BYTES = 64 * 1024;
-const WINDOWS_REPLACE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
 const SUBHOST_STATUS_RECONCILE_INTERVAL_MS = 1_000;
 const MAX_DIAGNOSTIC_FIELD_CHARS = 64;
 export const DEFAULT_MACHINE_PORT = 43_127;
@@ -343,17 +342,10 @@ export class MachineSettingsState {
   }
 
   private async replaceAtomicFile(temporary: string, path: string): Promise<void> {
-    for (let attempt = 0;; attempt += 1) {
-      try {
-        await this.options.fault?.("replace", path);
-        await rename(temporary, path);
-        return;
-      } catch (error) {
-        if (process.platform !== "win32" || !windowsReplacementContention(error) || attempt >= WINDOWS_REPLACE_RETRY_DELAYS_MS.length) {
-          throw new Error(`Alu Dock could not replace its machine state at ${path}. Check that the directory is writable and no program is locking the file, then try again.`, { cause: error });
-        }
-        await new Promise((resolveDelay) => setTimeout(resolveDelay, WINDOWS_REPLACE_RETRY_DELAYS_MS[attempt]));
-      }
+    try {
+      await replaceStateFile(temporary, path, () => this.options.fault?.("replace", path));
+    } catch (error) {
+      throw new Error(`Alu Dock could not replace its machine state at ${path}. Check that the directory is writable and no program is locking the file, then try again.`, { cause: error });
     }
   }
 }
@@ -541,9 +533,4 @@ function exact(value: Record<string, unknown>, allowed: readonly string[]): void
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
-}
-
-function windowsReplacementContention(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "EPERM" || code === "EACCES" || code === "EBUSY";
 }

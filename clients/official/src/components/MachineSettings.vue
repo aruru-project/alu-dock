@@ -55,6 +55,9 @@ watch(changes, (value) => emit('dirty', value > 0), { immediate: true })
 onUnmounted(() => { loadEpoch++ })
 
 watch(() => props.machines, (machines) => {
+  // Without a machine list, stay on the machine the page was opened for rather than
+  // quietly editing the connected Host instead.
+  if (!machines.length) { hostId.value = props.initialHostId ?? ''; return }
   if (machines.some((candidate) => candidate.hostId === hostId.value && candidate.available)) return
   const preferred = machines.find((candidate) => candidate.hostId === props.initialHostId && candidate.available)
   hostId.value = preferred?.hostId ?? defaultMachineHostId(machines)
@@ -139,7 +142,7 @@ function discard() { edit([...saved.value]) }
       <span class="machine-settings-mark"><Server :size="20" /></span>
       <div>
         <h2 id="machine-settings-title">Host 设置</h2>
-        <p>{{ machine ? machineDisplayLabel(machine) : '当前连接的 AluDock' }}</p>
+        <p>{{ machine ? machineDisplayLabel(machine) : hostId ? '当前 Work 所在的机器' : '当前连接的 AluDock' }}</p>
       </div>
     </div>
     <button class="machine-settings-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
@@ -166,15 +169,15 @@ function discard() { edit([...saved.value]) }
       <div v-if="machinesLoading || loading" class="machine-settings-status" role="status">正在读取这台机器上的模型…</div>
       <div v-else-if="loadError" class="machine-settings-error" role="alert"><span>{{ loadError }}</span><button type="button" class="button secondary" @click="load">重试</button></div>
       <template v-else-if="result">
-        <p v-if="result.fileProblem" class="machine-settings-note is-warning" role="status">隐藏列表文件有问题：{{ result.fileProblem }}。现在这台机器没有隐藏任何模型；点保存会写回正确的内容。</p>
+        <p v-if="result.fileProblem" class="machine-settings-note is-warning" role="status">隐藏列表文件有问题：{{ result.fileProblem }}。现在这台机器没有隐藏任何模型。点保存会用这里的列表覆盖那个文件，文件里原来的内容不会保留。</p>
         <p v-if="result.truncated" class="machine-settings-note">这台机器的模型太多，这里只列出了 {{ result.models.length }}/{{ result.total }} 个。</p>
         <div class="model-columns">
           <section class="model-column" aria-label="显示中的模型">
             <header><strong>显示中</strong><span>{{ columns.shown.length }}</span></header>
             <input v-model="shownQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤显示中的模型" spellcheck="false" />
-            <button v-if="shownQuery.trim() && shownRows.length" type="button" class="model-column-bulk" @click="hide(shownRows)">隐藏筛选出的 {{ shownRows.length }} 个</button>
+            <button v-if="shownQuery.trim() && shownRows.length" type="button" class="model-column-bulk" :disabled="saving" @click="hide(shownRows)">隐藏筛选出的 {{ shownRows.length }} 个</button>
             <div class="model-list">
-              <button v-for="row in shownRows" :key="row.key" type="button" class="model-row" :title="`隐藏 ${row.provider}/${row.id}`" @click="hide([row])">
+              <button v-for="row in shownRows" :key="row.key" type="button" class="model-row" :title="`隐藏 ${row.provider}/${row.id}`" :disabled="saving" @click="hide([row])">
                 <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
                 <EyeOff :size="15" aria-hidden="true" />
               </button>
@@ -184,9 +187,9 @@ function discard() { edit([...saved.value]) }
           <section class="model-column is-hidden" aria-label="已隐藏的模型">
             <header><strong>已隐藏</strong><span>{{ columns.hidden.length }}</span></header>
             <input v-model="hiddenQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤已隐藏的模型" spellcheck="false" />
-            <button v-if="hiddenQuery.trim() && hiddenRows.length" type="button" class="model-column-bulk" @click="show(hiddenRows)">恢复显示筛选出的 {{ hiddenRows.length }} 个</button>
+            <button v-if="hiddenQuery.trim() && hiddenRows.length" type="button" class="model-column-bulk" :disabled="saving" @click="show(hiddenRows)">恢复显示筛选出的 {{ hiddenRows.length }} 个</button>
             <div class="model-list">
-              <button v-for="row in hiddenRows" :key="row.key" type="button" class="model-row" :title="`恢复显示 ${row.provider}/${row.id}`" @click="show([row])">
+              <button v-for="row in hiddenRows" :key="row.key" type="button" class="model-row" :title="`恢复显示 ${row.provider}/${row.id}`" :disabled="saving" @click="show([row])">
                 <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
                 <span v-if="row.unavailable" class="model-row-badge">当前不可用</span>
                 <Eye :size="15" aria-hidden="true" />
@@ -236,7 +239,8 @@ function discard() { edit([...saved.value]) }
 .model-column-bulk:hover { background: var(--alu-hover); }
 .model-list { display: grid; min-height: 0; flex: 1 1 auto; align-content: start; gap: 4px; overflow-y: auto; }
 .model-row { display: flex; min-width: 0; align-items: center; gap: 8px; width: 100%; padding: 7px 9px; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); text-align: left; }
-.model-row:hover { border-color: var(--alu-border-light); background: var(--alu-hover); color: var(--alu-text); }
+.model-row:disabled, .model-column-bulk:disabled { cursor: wait; opacity: .6; }
+.model-row:hover:not(:disabled) { border-color: var(--alu-border-light); background: var(--alu-hover); color: var(--alu-text); }
 .model-row-copy { display: grid; min-width: 0; flex: 1 1 auto; gap: 2px; }
 .model-row-copy strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .model-row-copy small { overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }

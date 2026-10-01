@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import type { AgentModelInfo } from "../core/agent-worker.js";
-import { syncPrivateDirectory } from "../platform/private-state.js";
+import { hardenWindowsPrivatePath, replaceStateFile, syncPrivateDirectory } from "../platform/private-state.js";
 import {
   MAX_HIDDEN_MODELS_BYTES,
   parseModelRefs,
@@ -17,7 +17,6 @@ import {
 export const MODEL_VISIBILITY_FILE = "model-visibility.json";
 // Leaves room for hand formatting around the largest accepted list.
 const MAX_FILE_BYTES = 4 * MAX_HIDDEN_MODELS_BYTES;
-const WINDOWS_REPLACE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
 
 interface ModelList {
   models: AgentModelInfo[];
@@ -63,7 +62,7 @@ export class ModelVisibilityStore {
       bytes = await readFile(this.filePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return { hidden: [] };
-      return { hidden: [], problem: `${MODEL_VISIBILITY_FILE} 读不出来（${(error as NodeJS.ErrnoException).code ?? "未知原因"}）` };
+      return { hidden: [], problem: `${MODEL_VISIBILITY_FILE} 读不出来，请检查它的权限` };
     }
     if (bytes.byteLength > MAX_FILE_BYTES) return { hidden: [], problem: `${MODEL_VISIBILITY_FILE} 太大，隐藏的模型太多` };
     let value: unknown;
@@ -108,13 +107,15 @@ export class ModelVisibilityStore {
       } finally {
         await handle.close();
       }
-      await replaceWithRetry(temporary, this.filePath);
-      await syncPrivateDirectory(root);
+      await hardenWindowsPrivatePath(temporary, false);
+      await replaceStateFile(temporary, this.filePath);
     } catch (error) {
       throw new ModelVisibilityError("model_visibility_write_failed", "隐藏列表没有保存成功，原来的设置不变。请检查这台机器的磁盘空间和 Alu Dock 状态目录的权限，然后再试。", true, { cause: error });
     } finally {
       await rm(temporary, { force: true }).catch(() => {});
     }
+    // The new list is already in effect; flushing the directory entry only adds crash durability.
+    await syncPrivateDirectory(root).catch(() => {});
   }
 }
 
@@ -141,7 +142,7 @@ export class ModelVisibilityService {
     try {
       return await this.catalog.read();
     } catch (error) {
-      throw new ModelVisibilityError("model_catalog_unavailable", "暂时读不到这台机器上可选的模型。请稍后再试；如果一直这样，请在这台机器上新建一个 Work，确认 Pi 能正常启动。", true, { cause: error });
+      throw new ModelVisibilityError("model_catalog_unavailable", "暂时读不到这台机器上可选的模型。请稍后再试；如果一直这样，请确认这台机器上能正常新建 Work。", true, { cause: error });
     }
   }
 }
@@ -168,16 +169,3 @@ function modelKey(model: ModelRef): string {
   return `${model.provider}\u0000${model.id}`;
 }
 
-async function replaceWithRetry(temporary: string, path: string): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await rename(temporary, path);
-      return;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      // A reader on Windows can briefly hold the file open while a model list is being filtered.
-      if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") || attempt >= WINDOWS_REPLACE_RETRY_DELAYS_MS.length) throw error;
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, WINDOWS_REPLACE_RETRY_DELAYS_MS[attempt]));
-    }
-  }
-}

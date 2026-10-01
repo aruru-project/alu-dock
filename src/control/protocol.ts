@@ -129,6 +129,10 @@ export const MAX_CONTROL_CWD_CHARS = 16_384;
 export const MAX_PROMPT_CHARS = 256_000;
 export const MAX_MODEL_PROVIDER_CHARS = 256;
 export const MAX_MODEL_ID_CHARS = 512;
+export const MAX_MODEL_NAME_CHARS = 256;
+export const MAX_MODEL_LIST_ITEMS = 2_000;
+/** An Agent adapter caps one model list (a Work's picker or a machine's catalog) at this many JSON bytes. */
+export const MAX_MODEL_LIST_BYTES = 600_000;
 export const MAX_CAPABILITIES = 128;
 export const MAX_CAPABILITY_CHARS = 128;
 export const MAX_REPLAY_EVENTS = 1_000;
@@ -185,8 +189,8 @@ export const BASH_CAPABILITY = "bash.v1" as const;
 export const MULTIPLEX_CAPABILITY = "transport.multiplex.v1" as const;
 /** Read and replace one machine's hidden-model list; that Host omits listed models from `model.list`. */
 export const MODEL_VISIBILITY_CAPABILITY = "model.visibility.v1" as const;
-/** Serialized hidden list bound: with the Worker's 600 KB model list it keeps one visibility response under a control line. */
-export const MAX_HIDDEN_MODELS_BYTES = 192 * 1024;
+/** Serialized hidden-list bound: the room a full model list leaves in one visibility response line, less envelope headroom. */
+export const MAX_HIDDEN_MODELS_BYTES = MAX_CONTROL_LINE_BYTES - MAX_MODEL_LIST_BYTES - 64 * 1024;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -1839,7 +1843,7 @@ export function parsePruneResult(input: unknown): PruneResult {
   } };
 }
 function modelInfoList(value: Record<string, unknown>): Pick<ModelsResult, "models" | "total" | "truncated"> {
-  const models = array(value.models, "models", MAX_COLLECTION).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", 256), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
+  const models = array(value.models, "models", MAX_MODEL_LIST_ITEMS).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", MAX_MODEL_NAME_CHARS), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
   return { models, ...parseCollectionCompleteness(value, models.length) };
 }
 function modelListFields(value: Record<string, unknown>): Omit<ModelsResult, "instance"> {

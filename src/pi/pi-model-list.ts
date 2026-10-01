@@ -1,10 +1,11 @@
 import type { AgentModelInfo } from "../core/agent-worker.js";
-import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "../control/protocol.js";
-
-/** Producer bound for one Pi model list, shared by a Work's picker list and the machine catalog. */
-export const MAX_MODEL_LIST_BYTES = 600_000;
-const MAX_MODEL_LIST_ITEMS = 2_000;
-const MAX_MODEL_NAME_CHARS = 256;
+import {
+  MAX_MODEL_ID_CHARS,
+  MAX_MODEL_LIST_BYTES,
+  MAX_MODEL_LIST_ITEMS,
+  MAX_MODEL_NAME_CHARS,
+  MAX_MODEL_PROVIDER_CHARS,
+} from "../control/protocol.js";
 
 export interface PiModelListBody {
   models: AgentModelInfo[];
@@ -19,7 +20,7 @@ interface PiModelLike {
   reasoning: boolean;
 }
 
-/** Pi's selectable models in picker order (provider, then display name). */
+/** Pi's selectable models in picker order (provider, then display name), within the protocol's model-list bounds. */
 export function projectPiModelList(available: readonly PiModelLike[]): PiModelListBody {
   const models = available
     .filter((model) => validReference(model.provider, MAX_MODEL_PROVIDER_CHARS) && validReference(model.id, MAX_MODEL_ID_CHARS))

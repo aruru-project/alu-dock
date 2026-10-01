@@ -280,9 +280,9 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 - 拥有 Worker 的 Host 在 `model.list` 把 Worker 结果返回前删去隐藏条目，`total` 同步减去，响应形状不变，所有客户端不改就搜不到它们。Main 把 SubHost Work 的 `model.list` 原样转给 SubHost，因此各机器只用自己的列表。
 - `model.set`、Pi 自己的 scoped models 与 extension 的模型调用不受影响；当前模型即使被隐藏，snapshot 仍照常报告它。
-- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是这台机器新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要该机器上有 Work。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
+- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是这台机器新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要该机器上有 Work。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。同一 Host 同时只运行一个这样的进程，并发读取共用结果；整次读取在 20 秒内给出结果或错误，留在客户端 30 秒请求期限之内。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
 - `model.visibility.set {operationId,hostId?,hidden}` → `{hidden}`：整份替换，去重并排序后原子写入，最后一次保存为准；沿用 operation ledger。写入失败返回 `model_visibility_write_failed`，原列表不变。
-- 两条请求都是 directory-scoped，按可选 `hostId` 复用 InstanceManager 的机器路由；Main 向目标 SubHost 要求同一能力，旧 SubHost 得到 `capability_missing`。`hidden` 的序列化上限 `MAX_HIDDEN_MODELS_BYTES` 定义在 `protocol.ts`，请求、响应和文件共用同一 parser。
+- 两条请求都是 directory-scoped，按可选 `hostId` 复用 InstanceManager 的机器路由；Main 向目标 SubHost 要求同一能力，旧 SubHost 得到 `capability_missing`。模型列表上限（`MAX_MODEL_LIST_BYTES` 等）与 `hidden` 的序列化上限 `MAX_HIDDEN_MODELS_BYTES` 都定义在 `protocol.ts`，后者取一条控制记录减去完整模型列表后剩余的空间；请求、响应和文件共用同一 parser。
 
 列表存为 Host 私有状态目录下的普通 JSON `model-visibility.json`（位置与格式见 [local-install](../local-install.md#隐藏的模型)）。Host 每次返回模型列表时现读，人或 Agent 直接改文件无需重启。没有持久状态目录的 Host 不提供这项能力，模型列表原样返回。
 

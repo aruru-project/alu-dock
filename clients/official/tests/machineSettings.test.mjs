@@ -92,10 +92,12 @@ try {
       throw new Error(`Unexpected IPC ${command}`)
     } }
     const props = reactive({ machines, machinesLoading: false, initialHostId: 'laptop' })
+    surfaces.openMachineSettings('laptop')
     const container = node('root')
-    const view = renderer.createApp({ render: () => h(MachineSettings, { ...props, onDirty: value => dirty.push(value), onClose: () => {} }) })
+    // Same wiring as PageDialogs: the page reports unsaved edits, the surfaces store guards closing.
+    const view = renderer.createApp({ render: () => h(MachineSettings, { ...props, onDirty: value => { dirty.push(value); surfaces.machineSettingsDirty = value }, onClose: () => surfaces.closeModal() }) })
     view.mount(container); await settle()
-    const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props.title === label))
+    const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props.title === label || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} is enabled`); target.props.onClick(); await settle() }
     const filter = async (label, value) => { const input = find(container, item => item.type === 'input' && item.props['aria-label'] === label); input.value = value; input.input({ target: input }); await settle() }
     const column = label => find(container, item => item.type === 'section' && item.props['aria-label'] === label)
@@ -133,7 +135,8 @@ try {
     await chooseMain()
     assert.ok(page.surfaces.confirmDialog, 'unsaved edits are not dropped silently')
     page.surfaces.settleConfirm(false); await settle()
-    assert.equal(page.calls.filter(call => call.command === 'model_visibility').length, 1, 'declining keeps the laptop and its edit')
+    assert.ok(text(page.container).includes('笔记本 · SubHost'), 'declining stays on the laptop')
+    assert.ok(page.rows('已隐藏的模型').some(row => row.includes('openai/gpt-5.6')), 'declining keeps the unsaved edit')
     await chooseMain()
     page.surfaces.settleConfirm(true); await settle()
     assert.equal(page.calls.at(-1).args.targetHostId, 'main')
@@ -144,13 +147,12 @@ try {
   // Closing with unsaved edits asks first; Esc/close cannot silently drop them.
   {
     const page = await open('normal')
-    page.surfaces.openMachineSettings('laptop')
-    page.surfaces.machineSettingsDirty = true
-    page.surfaces.closeModal(); await settle()
+    await page.click('隐藏 openai/gpt-5.6')
+    await page.click('关闭')
     assert.ok(page.surfaces.confirmDialog, 'closing unsaved edits asks first')
     page.surfaces.settleConfirm(false); await settle()
     assert.equal(page.surfaces.machineSettingsOpen, true, 'keeping the edits keeps the page open')
-    page.surfaces.closeModal(); await settle()
+    await page.click('关闭')
     page.surfaces.settleConfirm(true); await settle()
     assert.equal(page.surfaces.machineSettingsOpen, false)
     page.view.unmount()

@@ -253,7 +253,8 @@ export class DockHost {
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
-    if (!this.modelVisibility && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
+    // A Main that routes to SubHosts keeps its own list too (the CLI always gives it a state directory).
+    if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState

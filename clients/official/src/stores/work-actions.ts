@@ -517,6 +517,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   /** Host 设置 lists the Dock's machines; without a machine list it manages the connected Host itself. */
   async function openMachineSettings(hostId?: string) {
+    if (host.pairingInProgress) return
     page.openMachineSettings(hostId)
     machineSettingsLoading.value = true
     machineListError.value = ''

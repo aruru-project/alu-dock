@@ -21,4 +21,6 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
+// The Host stopped waiting (it stopped or gave up); there is no one left to answer.
+process.on("disconnect", () => process.exit(0));
 void main();
