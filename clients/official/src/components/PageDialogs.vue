@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import HostSettingsPanel from './HostSettingsPanel.vue'
 import AppSettings from './AppSettings.vue'
+import MachineSettings from './MachineSettings.vue'
 import ControlCenter from './ControlCenter.vue'
 import NewWorkDialog from './NewWorkDialog.vue'
 import MessageTextDialog from './MessageTextDialog.vue'
@@ -15,11 +16,11 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const surfaces = useSurfacesStore()
-const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
+const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
 const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const workActions = useWorkActionsStore()
-const { mutationOutcomeUnknown, globalOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact } = storeToRefs(workActions)
+const { mutationOutcomeUnknown, globalOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
 const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
@@ -71,6 +72,21 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
           :error="appSettingsError"
           @close="closeModal"
           @update="chooseWindowsAwayDelay"
+        />
+      </section>
+    </div>
+  </Transition>
+
+  <Transition name="fade">
+    <div v-if="machineSettingsOpen" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+      <section :ref="element => bindSurface('machine-settings', element)" class="machine-settings-surface" role="dialog" aria-modal="true" aria-labelledby="machine-settings-title" tabindex="-1" @wheel="handleModalWheel">
+        <MachineSettings
+          :machines="hostMachines"
+          :machines-loading="machineSettingsLoading"
+          :machine-error="machineListError"
+          :initial-host-id="machineSettingsHostId"
+          @close="closeModal"
+          @dirty="machineSettingsDirty = $event"
         />
       </section>
     </div>
@@ -142,7 +158,13 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 @media (max-width: 640px) {
   .app-settings-surface { width: 100%; height: min(92vh, 760px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
-/* Host settings is a task surface, not a wall of equally weighted forms. */
+/* Host 设置 edits settings kept on one machine; it needs room for two model lists. */
+.machine-settings-surface { position: relative; display: grid; width: min(980px, calc(100vw - 48px)); height: min(720px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: #0b101c; box-shadow: 0 28px 80px rgba(0, 0, 0, .5); }
+.machine-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-pink) 30%, var(--alu-blue) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
+@media (max-width: 640px) {
+  .machine-settings-surface { width: 100%; height: min(94vh, 820px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
+}
+/* Connection and pairing is a task surface, not a wall of equally weighted forms. */
 .host-settings-surface {
   position: relative;
   display: grid;

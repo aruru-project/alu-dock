@@ -135,32 +135,37 @@ export class PiWorkerProcess {
   }
 
   private async performTerminate(): Promise<void> {
-    const child = this.child;
-    const pid = child.pid;
-    if (!pid) throw new Error("Pi worker process identity is unavailable during termination");
-    if (process.platform === "win32") {
-      await terminateWindowsProcessTree(pid, child, this.timeouts.termMs);
-      return;
-    }
-    if (child.connected) {
-      try { child.disconnect(); } catch { /* Continue to process-group termination. */ }
-    }
-
-    // The direct Worker may already have exited while extension descendants
-    // remain in its detached process group. Always signal and verify the group.
-    signalGroup(pid, child, "SIGTERM");
-    const [termExited, termGroupGone] = await Promise.all([
-      waitForExit(child, this.timeouts.termMs).then(() => true, () => false),
-      waitForGroupGone(pid, this.timeouts.termMs).then(() => true, () => false),
-    ]);
-    if (termExited && termGroupGone) return;
-
-    signalGroup(pid, child, "SIGKILL");
-    await Promise.all([
-      waitForExit(child, this.timeouts.termMs),
-      waitForGroupGone(pid, this.timeouts.termMs),
-    ]);
+    if (!this.child.pid) throw new Error("Pi worker process identity is unavailable during termination");
+    await terminateDetachedProcessTree(this.child, this.timeouts.termMs);
   }
+}
+
+/** End a detached Pi process and every extension descendant left in its process group. */
+export async function terminateDetachedProcessTree(child: ChildProcess, termMs: number): Promise<void> {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === "win32") {
+    await terminateWindowsProcessTree(pid, child, termMs);
+    return;
+  }
+  if (child.connected) {
+    try { child.disconnect(); } catch { /* Continue to process-group termination. */ }
+  }
+
+  // The direct process may already have exited while extension descendants
+  // remain in its detached process group. Always signal and verify the group.
+  signalGroup(pid, child, "SIGTERM");
+  const [termExited, termGroupGone] = await Promise.all([
+    waitForExit(child, termMs).then(() => true, () => false),
+    waitForGroupGone(pid, termMs).then(() => true, () => false),
+  ]);
+  if (termExited && termGroupGone) return;
+
+  signalGroup(pid, child, "SIGKILL");
+  await Promise.all([
+    waitForExit(child, termMs),
+    waitForGroupGone(pid, termMs),
+  ]);
 }
 
 async function terminateWindowsProcessTree(pid: number, child: ChildProcess, timeoutMs: number): Promise<void> {
@@ -179,7 +184,7 @@ async function terminateWindowsProcessTree(pid: number, child: ChildProcess, tim
   await waitForExit(child, timeoutMs);
 }
 
-function definedEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+export function definedEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
   return Object.fromEntries(
     Object.entries(environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );

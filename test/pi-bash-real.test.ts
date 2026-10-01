@@ -75,7 +75,10 @@ test("user runs shell commands from a client: output streams, abort stops them, 
     assert.ok(output.includes("first line\nsecond line"), `output was: ${JSON.stringify(output)}`);
     assert.ok(output.split("\n")[0]?.endsWith("cwd"), `command must run in the Work directory, saw ${JSON.stringify(output)}`);
 
-    // The record lands in the session on Pi's own terms and is readable by any client.
+    // Completion and the Host's updated history arrive separately (#336/#339).
+    // Wait for this command's record, not an unrelated earlier shell command.
+    const isQuietRecord = (entry: { kind: string; command?: string }) => entry.kind === "bash_execution" && entry.command === "pwd && printf 'first line\\nsecond line\\n'";
+    await waitForAsync(async () => (await client.history(created.id)).entries.some(isQuietRecord), "Host history must receive this command's record");
     const quietRecord = (await client.history(created.id)).entries.find((entry) => entry.kind === "bash_execution");
     assert.ok(quietRecord, "session history must show the run record");
     assert.equal(quietRecord.command, "pwd && printf 'first line\\nsecond line\\n'");
@@ -111,8 +114,11 @@ test("user runs shell commands from a client: output streams, abort stops them, 
       assert.equal(cancelled.data.cancelled, true);
       assert.equal(cancelled.data.exitCode, undefined);
     }
+    await waitForAsync(async () => (await client.history(created.id)).entries.some((entry) => entry.kind === "bash_execution" && entry.command === "echo waiting && sleep 20"),
+      "Host history must receive the cancelled command's record");
     const afterAbort = await client.read(created.id, undefined, "conversation_bootstrap");
-    assert.equal(afterAbort.page.events.some((event) => event.type === "bash.started"), false, "the finished command left the live view once its record was written");
+    assert.equal(afterAbort.page.events.some((event) => event.type === "bash.started" && event.data.operationId === "bash-long"), false,
+      "the cancelled command leaves the live rows after Host receives its history");
     const records = (await client.history(created.id)).entries.filter((entry) => entry.kind === "bash_execution");
     assert.deepEqual(records.map((entry) => [entry.command, entry.excludeFromContext, entry.cancelled]), [
       ["pwd && printf 'first line\\nsecond line\\n'", true, false],

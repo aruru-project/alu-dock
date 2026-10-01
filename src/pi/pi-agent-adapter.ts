@@ -127,6 +127,7 @@ import {
 import { parseOptionalAgentErrorText, parseSessionTreeResult, type SessionTreeResult } from "../control/protocol.js";
 import { AgentModelNotFoundError, AgentSettingsWriteError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
+import { projectPiModelList } from "./pi-model-list.js";
 import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
@@ -541,18 +542,9 @@ export class PiAgentAdapter {
 
   async listModels(): Promise<AgentModelListBody> {
     const binding = this.requireActive();
-    const models = (await binding.services.modelRuntime.getAvailable()).map((model) => ({
-      provider: boundedString(model.provider, 256, "unknown"),
-      id: boundedString(model.id, 512, "unknown"),
-      name: boundedString(model.name, 256, "unknown"),
-      reasoning: model.reasoning,
-    })).sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
-    const projected = capJsonItems(models, 600_000);
     return {
-      models: projected,
+      ...projectPiModelList(await binding.services.modelRuntime.getAvailable()),
       availableThinkingLevels: [...binding.session.getAvailableThinkingLevels()],
-      total: models.length,
-      truncated: projected.length < models.length,
     };
   }
 

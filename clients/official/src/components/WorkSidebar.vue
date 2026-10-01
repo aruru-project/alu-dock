@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Settings, X } from '@lucide/vue'
+import { Server, Settings, X } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
 import { workPresence } from '../lib/uiBoundaries'
 import OperationResults from './OperationResults.vue'
@@ -18,7 +18,7 @@ const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const workActions = useWorkActionsStore()
 const { machineListError, groupedWorks, workMutating, globalOutcomeUnknown, globalReconciling, globalReconcileMessage } = storeToRefs(workActions)
-const { workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, reconcileGlobalOutcome } = workActions
+const { workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, reconcileGlobalOutcome } = workActions
 const { directoryOpen } = storeToRefs(useSurfacesStore())
 const host = useHostStore()
 const { pairingInProgress } = storeToRefs(host)
@@ -70,7 +70,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
         <div v-else-if="app.error" class="alu-sidebar-offline" role="alert">
           <strong>无法读取工作列表</strong>
           <span>{{ app.error }}</span>
-          <div><button @click="refreshWorkDrawer">重新连接</button><button @click="openHostSettings">Host 设置</button></div>
+          <div><button @click="refreshWorkDrawer">重新连接</button><button @click="openHostSettings">连接与配对</button></div>
         </div>
         <div v-else class="alu-sidebar-empty">暂无工作</div>
       </template>
@@ -80,7 +80,12 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <span><strong>App 设置</strong><small>{{ windowsAwayLabel }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
-    <button class="alu-sidebar-settings-entry" aria-label="Host 与配对设置" @click="openHostSettings">
+    <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings(selected?.hostId)">
+      <span class="alu-sidebar-settings-icon"><Server :size="17" /></span>
+      <span><strong>Host 设置</strong><small>隐藏不常用的模型</small></span>
+      <span aria-hidden="true">›</span>
+    </button>
+    <button class="alu-sidebar-settings-entry" aria-label="连接与配对" @click="openHostSettings">
       <img :src="dockIconUrl" alt="" />
       <span><strong>{{ app.localSelected ? '本机 AluDock' : app.activeHost?.displayName || '连接 AluDock' }}</strong><small>{{ connectionLabel }}</small></span>
       <span aria-hidden="true">⚙</span>

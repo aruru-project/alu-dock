@@ -484,6 +484,19 @@ export interface ModelsResult {
   truncated: boolean
 }
 
+/** One exact model on one machine: provider plus model id. */
+export interface ModelRef { provider: string; id: string }
+/** A machine's selectable models and the ones its Host leaves out of every model list. */
+export interface ModelVisibilityResult {
+  models: ModelInfo[]
+  total: number
+  truncated: boolean
+  hidden: ModelRef[]
+  /** A hand-edited list could not be used; that machine hides nothing until it is saved. */
+  fileProblem?: string
+}
+export interface ModelVisibilitySetResult { hidden: ModelRef[] }
+
 export type SourceKind = 'built-in' | 'extension' | 'skill' | 'prompt'
 export interface SafeSource { kind: SourceKind; package?: string }
 export interface CommandInfo {

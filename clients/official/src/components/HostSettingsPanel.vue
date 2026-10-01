@@ -20,7 +20,7 @@ onBeforeUnmount(() => { void stopPairing() })
 
 <template>
         <header class="host-settings-header">
-          <div class="host-settings-heading"><img :src="dockIconUrl" alt="" /><div><h2 id="host-settings-title">连接设置</h2><p>本机或 Host · 版本 {{ appBuildIdentity }}</p></div></div>
+          <div class="host-settings-heading"><img :src="dockIconUrl" alt="" /><div><h2 id="host-settings-title">连接与配对</h2><p>本机或 Host · 版本 {{ appBuildIdentity }}</p></div></div>
           <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
         </header>
         <div class="host-settings-panel">

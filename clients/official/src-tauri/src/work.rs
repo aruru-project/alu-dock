@@ -6,11 +6,12 @@ use crate::errors::CommandError;
 use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
-    AttachmentState, BashRunResult, ExtensionControlState, InstanceSnapshot, Machine,
-    ResourceContentResult, RestoredImageState, SafeQueueDequeueResult, SessionTokenState,
-    StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
-    WorkspaceCursor, WorkspacePage, operation_association, project_queue_dequeue,
-    resolve_machine_session_token, restored_image_scope,
+    AttachmentState, BashRunResult, ExtensionControlState, InstanceSnapshot, Machine, ModelRef,
+    ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult, RestoredImageState,
+    SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor,
+    SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor, WorkspacePage,
+    operation_association, project_queue_dequeue, resolve_machine_session_token,
+    restored_image_scope,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -477,6 +478,37 @@ pub(crate) async fn list_machines(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .list_machines()
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn model_visibility(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    target_host_id: Option<String>,
+) -> Result<ModelVisibilityResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .model_visibility(target_host_id.as_deref())
+        .await
+        .map_err(CommandError::from)
+}
+
+/// A whole-list replace: an unknown outcome is settled by reading the list again, not by
+/// an operation record, so it does not join the Work operation results.
+#[tauri::command]
+pub(crate) async fn set_model_visibility(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    target_host_id: Option<String>,
+    hidden: Vec<ModelRef>,
+) -> Result<ModelVisibilitySetResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_model_visibility(&hidden, target_host_id.as_deref(), None)
         .await
         .map_err(CommandError::from)
 }

@@ -49,6 +49,25 @@ aludock pi:install <npm、git 或本地 source>
 
 命令使用随包 Pi 的 package manager 和 package conventions，写入 Pi global settings，不依赖 `$PATH` 中的 Pi。已经运行的 Work 使用 `/reload` 采用 extension/config 变化。
 
+## 隐藏的模型
+
+每台机器（Main 和每台 SubHost）各有一份模型隐藏列表。列在里面的模型不会出现在这台机器上任何 Work 的模型选择列表和搜索结果里，但模型本身仍可用：Work TUI 输入完整的 `/model provider/模型id` 照样能切换。通常在官方客户端的 **Host 设置** 里管理；也可以直接编辑 Host 私有状态目录中的 `model-visibility.json`：
+
+```text
+Linux:   ~/.local/state/alu-dock/model-visibility.json（managed service 为 STATE_DIRECTORY 下同名文件）
+Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
+```
+
+```json
+{
+  "hiddenModels": [
+    { "provider": "azure-openai-responses", "id": "gpt-5.6" }
+  ]
+}
+```
+
+`provider` 与 `id` 和 Pi 的写法完全一致（Work TUI 的 `/model` 列表里 `provider/id` 两段）。文件不存在等于什么都不隐藏。Host 每次返回模型列表时现读这个文件，改完不用重启，下次打开模型选择就生效。文件格式写错时，这台机器暂时不隐藏任何模型，Host 设置页会指出问题；在页面上保存一次会写回正确的内容。
+
 ## Service 命令
 
 ```bash

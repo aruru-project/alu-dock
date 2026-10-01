@@ -1,0 +1,284 @@
+<script setup lang="ts">
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { Eye, EyeOff, Server, X } from '@lucide/vue'
+import { getModelVisibility } from '../lib/bridge'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
+import { defaultMachineHostId, machineDisplayLabel, machineSelectorVisible } from '../lib/machines'
+import { hideModels, modelRowMatches, modelVisibilityChanges, modelVisibilityColumns, showModels, type ModelVisibilityRow } from '../lib/modelVisibility'
+import type { MachineDto, ModelRef, ModelVisibilityResult } from '../lib/types'
+import { userErrorMessage } from '../lib/userError'
+import { useAppStore } from '../stores/app'
+import { useSurfacesStore } from '../stores/surfaces'
+import { useModelVisibilityStore } from '../stores/model-visibility'
+import AluSelect from './AluSelect.vue'
+import MachineSettingsResults from './MachineSettingsResults.vue'
+
+const props = defineProps<{
+  machines: readonly MachineDto[]
+  machinesLoading: boolean
+  machineError?: string
+  /** Opened from a Work: start on that Work's machine. */
+  initialHostId?: string
+}>()
+const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
+const app = useAppStore()
+const surfaces = useSurfacesStore()
+const submissions = useModelVisibilityStore()
+
+/** Empty when the Dock has no machine list: the connected Host itself. */
+const hostId = ref('')
+const result = ref<ModelVisibilityResult | null>(null)
+const saved = ref<ModelRef[]>([])
+const draft = ref<ModelRef[]>([])
+const loading = ref(false)
+const loadError = ref('')
+const currentNotice = ref('')
+const targetHostId = computed(() => machine.value?.kind === 'main' ? undefined : hostId.value || undefined)
+const submission = computed(() => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value))
+const saving = computed(() => submission.value?.state === 'pending')
+const shownQuery = ref('')
+const hiddenQuery = ref('')
+let loadEpoch = 0
+
+const machine = computed(() => props.machines.find((candidate) => candidate.hostId === hostId.value))
+const showMachineSelector = computed(() => machineSelectorVisible(props.machines))
+const machineOptions = computed(() => props.machines.map((candidate) => ({
+  value: candidate.hostId,
+  label: machineDisplayLabel(candidate),
+  description: candidate.available ? undefined : '暂时连不上',
+  disabled: !candidate.available,
+})))
+const columns = computed(() => modelVisibilityColumns(result.value?.models ?? [], draft.value))
+const shownRows = computed(() => columns.value.shown.filter((row) => modelRowMatches(row, shownQuery.value)))
+const hiddenRows = computed(() => columns.value.hidden.filter((row) => modelRowMatches(row, hiddenQuery.value)))
+const changes = computed(() => modelVisibilityChanges(saved.value, draft.value))
+const retained = computed(() => !!submission.value && submission.value.state !== 'succeeded'
+  && modelVisibilityChanges(submission.value.hidden, draft.value) === 0)
+const dirty = computed(() => !!result.value && !retained.value && (changes.value > 0 || submission.value?.state === 'unknown'))
+const canSave = computed(() => !!result.value && !saving.value && (changes.value > 0 || !!result.value.fileProblem || submission.value?.state === 'unknown'))
+const status = computed(() => {
+  const entry = submission.value
+  if (saving.value) return entry?.message
+  if (dirty.value) return changes.value ? `已改动 ${changes.value} 项，尚未保存` : '已改回上次读取的列表，点保存确认这份设置。'
+  if (result.value && (entry?.state === 'failed' || entry?.state === 'unknown')) return `${entry.message} 改动已保留，可以再点保存。`
+  return entry?.message ?? currentNotice.value
+})
+
+watch(dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
+watch(() => submission.value?.state, (state) => {
+  if (state !== 'succeeded' || !result.value || !submission.value) return
+  saved.value = submission.value.hidden
+  draft.value = [...saved.value]
+  result.value = { ...result.value, hidden: saved.value, fileProblem: undefined }
+})
+// A success rendered in its own editor needs no second acknowledgement outside.
+// Keep its receipt while the editor reads, so an older read cannot undo it.
+watch([submission, () => submission.value?.state, loading, result], () => {
+  if (surfaces.machineSettingsOpen && !loading.value && result.value && submission.value?.state === 'succeeded') {
+    submissions.markSuccessSeen(submission.value.key)
+  }
+}, { flush: 'post' })
+onUnmounted(() => { loadEpoch++ })
+
+watch(() => props.machines, (machines) => {
+  // Without a machine list, stay on the machine the page was opened for rather than
+  // quietly editing the connected Host instead.
+  if (hostId.value) return // A disconnected machine must not silently switch the editor to another machine.
+  hostId.value = props.initialHostId ?? defaultMachineHostId(machines) ?? ''
+}, { immediate: true })
+
+watch([
+  () => app.connectionContext?.connectionId,
+  () => app.connectionContext?.selectionGeneration,
+  hostId,
+  () => props.machinesLoading,
+], () => { if (!props.machinesLoading) void load() }, { immediate: true })
+
+async function load() {
+  const epoch = ++loadEpoch
+  const target = targetHostId.value
+  const pendingAtStart = saving.value ? submission.value : undefined
+  const unknownAtStart = submission.value?.state === 'unknown' ? submission.value : undefined
+  loading.value = true
+  loadError.value = ''
+  currentNotice.value = ''
+  result.value = null
+  saved.value = []
+  draft.value = []
+  try {
+    const value = await currentConnectionCall(app, (context) => getModelVisibility(context, target))
+    if (epoch !== loadEpoch) return
+    // A save can finish while the read is in flight. Its confirmed response wins
+    // over that older read; reopening later still reads current Host settings.
+    const completedDuringRead = pendingAtStart && pendingAtStart === submission.value && pendingAtStart.state === 'succeeded'
+    const hidden = completedDuringRead ? pendingAtStart.hidden : value.hidden
+    result.value = completedDuringRead ? { ...value, hidden, fileProblem: undefined } : value
+    saved.value = hidden
+    if (unknownAtStart && unknownAtStart === submission.value && !value.fileProblem
+      && modelVisibilityChanges(value.hidden, unknownAtStart.hidden) === 0) {
+      // This fresh read confirms the desired settings, not the old request's outcome.
+      // Retire only that submission's reminder; do not manufacture a success receipt.
+      submissions.discard(unknownAtStart.key)
+      currentNotice.value = '当前设置已与你提交的列表一致。'
+    }
+    draft.value = [...(submission.value && submission.value.state !== 'succeeded' ? submission.value.hidden : hidden)]
+  } catch (cause) {
+    if (epoch === loadEpoch) loadError.value = userErrorMessage(cause, '暂时读不到这台机器上的模型。请稍后重试。')
+  } finally {
+    if (epoch === loadEpoch) loading.value = false
+  }
+}
+
+async function chooseMachine(value: string) {
+  if (value === hostId.value) return
+  if (dirty.value && !await surfaces.askConfirm('切换机器？', '这台机器的改动还没有保存，切换后会丢失。')) return
+  hostId.value = value
+}
+
+function save() {
+  if (!canSave.value) return
+  const connection = requireConnectionContext(app)
+  const hostName = app.activeHost?.displayName ?? '本机'
+  const machineName = machine.value?.name ?? 'Host'
+  const label = machineName === hostName ? hostName : `${hostName} · ${machineName}`
+  void submissions.save(connection, targetHostId.value, label, draft.value)
+}
+
+function edit(next: ModelRef[]) {
+  currentNotice.value = ''
+  draft.value = next
+  // Explicitly undoing a failed submission retires its retained draft. An unknown
+  // save is different: the user can still save this desired list to confirm it.
+  if (submission.value?.state === 'failed' && modelVisibilityChanges(saved.value, next) === 0) {
+    submissions.discard(submission.value.key)
+  }
+}
+function hide(rows: readonly ModelVisibilityRow[]) { edit(hideModels(draft.value, rows)) }
+function show(rows: readonly ModelVisibilityRow[]) { edit(showModels(draft.value, rows)) }
+function discard() {
+  if (submission.value) submissions.discard(submission.value.key)
+  edit([...saved.value])
+}
+</script>
+
+<template>
+  <header class="machine-settings-header">
+    <div class="machine-settings-heading">
+      <span class="machine-settings-mark"><Server :size="20" /></span>
+      <div>
+        <h2 id="machine-settings-title">Host 设置</h2>
+        <p>{{ machine ? machineDisplayLabel(machine) : hostId ? '当前 Work 所在的机器' : '当前连接的 AluDock' }}</p>
+      </div>
+    </div>
+    <button class="machine-settings-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
+  </header>
+
+  <div class="machine-settings-layout">
+    <aside class="machine-settings-nav" aria-label="设置分类">
+      <span class="machine-settings-nav-label">Host</span>
+      <div class="machine-settings-nav-item is-active"><EyeOff :size="16" /><span>模型显示</span></div>
+    </aside>
+
+    <main class="machine-settings-content">
+      <div class="machine-settings-intro">
+        <h3>模型显示</h3>
+        <p>移到右边的模型不会出现在这台机器上任何 Work 的模型选择和搜索里，模型本身照常可用。每台机器分别设置。</p>
+      </div>
+
+      <label v-if="showMachineSelector" class="machine-settings-machine">
+        <span>机器</span>
+        <AluSelect :value="hostId" :options="machineOptions" label="选择机器" :disabled="loading || machinesLoading" @select="chooseMachine" />
+      </label>
+      <p v-if="machineError" class="machine-settings-note is-warning" role="status">{{ machineError }}</p>
+      <MachineSettingsResults embedded :exclude-key="submission?.key" />
+
+      <div v-if="machinesLoading || loading" class="machine-settings-status" role="status">正在读取这台机器上的模型…</div>
+      <div v-else-if="loadError" class="machine-settings-error" role="alert"><span>{{ loadError }}</span><button type="button" class="button secondary" @click="load">重试</button></div>
+      <template v-else-if="result">
+        <p v-if="result.fileProblem" class="machine-settings-note is-warning" role="status">隐藏列表文件有问题：{{ result.fileProblem }}。现在这台机器没有隐藏任何模型。点保存会用这里的列表覆盖那个文件，文件里原来的内容不会保留。</p>
+        <p v-if="result.truncated" class="machine-settings-note">这台机器的模型太多，这里只列出了 {{ result.models.length }}/{{ result.total }} 个。</p>
+        <div class="model-columns">
+          <section class="model-column" aria-label="显示中的模型">
+            <header><strong>显示中</strong><span>{{ columns.shown.length }}</span></header>
+            <input v-model="shownQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤显示中的模型" spellcheck="false" />
+            <button v-if="shownQuery.trim() && shownRows.length" type="button" class="model-column-bulk" :disabled="saving" @click="hide(shownRows)">隐藏筛选出的 {{ shownRows.length }} 个</button>
+            <div class="model-list">
+              <button v-for="row in shownRows" :key="row.key" type="button" class="model-row" :title="`隐藏 ${row.provider}/${row.id}`" :disabled="saving" @click="hide([row])">
+                <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
+                <EyeOff :size="15" aria-hidden="true" />
+              </button>
+              <p v-if="!shownRows.length" class="model-list-empty">{{ columns.shown.length ? '没有匹配的模型' : '所有模型都已隐藏' }}</p>
+            </div>
+          </section>
+          <section class="model-column is-hidden" aria-label="已隐藏的模型">
+            <header><strong>已隐藏</strong><span>{{ columns.hidden.length }}</span></header>
+            <input v-model="hiddenQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤已隐藏的模型" spellcheck="false" />
+            <button v-if="hiddenQuery.trim() && hiddenRows.length" type="button" class="model-column-bulk" :disabled="saving" @click="show(hiddenRows)">恢复显示筛选出的 {{ hiddenRows.length }} 个</button>
+            <div class="model-list">
+              <button v-for="row in hiddenRows" :key="row.key" type="button" class="model-row" :title="`恢复显示 ${row.provider}/${row.id}`" :disabled="saving" @click="show([row])">
+                <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
+                <span v-if="row.unavailable" class="model-row-badge">当前不可用</span>
+                <Eye :size="15" aria-hidden="true" />
+              </button>
+              <p v-if="!hiddenRows.length" class="model-list-empty">{{ columns.hidden.length ? '没有匹配的模型' : '点左边的模型把它移到这里' }}</p>
+            </div>
+          </section>
+        </div>
+      </template>
+    </main>
+  </div>
+
+  <footer class="machine-settings-footer">
+    <span class="machine-settings-footer-status" :class="{ 'machine-settings-error': submission?.state === 'failed' && !dirty }" :role="submission?.state === 'failed' && !dirty ? 'alert' : 'status'">{{ status }}</span>
+    <button type="button" class="button secondary" :disabled="saving || (!changes && submission?.state !== 'failed' && submission?.state !== 'unknown')" @click="discard">放弃改动</button>
+    <button type="button" class="button primary" :disabled="!canSave" @click="save">{{ saving ? '正在保存…' : '保存' }}</button>
+  </footer>
+</template>
+
+<style scoped>
+.machine-settings-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: #101725; }
+.machine-settings-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
+.machine-settings-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-pink-border); border-radius: 10px; background: var(--alu-pink-bg); color: var(--alu-pink); place-items: center; }
+.machine-settings-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
+.machine-settings-heading p { margin: 3px 0 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.machine-settings-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
+.machine-settings-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
+.machine-settings-layout { display: grid; min-height: 0; grid-template-columns: 170px minmax(0, 1fr); }
+.machine-settings-nav { padding: 20px 12px; border-right: 1px solid var(--alu-border); background: #080d17; }
+.machine-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
+.machine-settings-nav-item { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid var(--alu-pink-border); border-radius: 9px; background: var(--alu-pink-bg); color: var(--alu-pink); font-size: var(--alu-meta-size); }
+.machine-settings-content { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 14px; padding: 22px 24px; overflow: hidden; }
+.machine-settings-intro h3 { margin: 0 0 6px; color: var(--alu-text); font-size: 18px; font-weight: 650; }
+.machine-settings-intro p { max-width: 620px; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
+.machine-settings-machine { display: grid; max-width: 360px; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.machine-settings-status { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.machine-settings-note { margin: 0; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); line-height: 1.6; }
+.machine-settings-note.is-warning { border-color: rgb(251 191 36 / .35); color: var(--alu-amber); }
+.machine-settings-error { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0; padding: 9px 10px; border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); color: var(--alu-rose); font-size: var(--alu-meta-size); }
+.model-columns { display: grid; min-height: 0; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.model-column { display: flex; min-height: 0; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.model-column.is-hidden { border-color: var(--alu-pink-border); }
+.model-column > header { display: flex; align-items: baseline; justify-content: space-between; color: var(--alu-text); font-size: var(--alu-ui-size); }
+.model-column > header span { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.model-column-bulk { align-self: flex-start; padding: 4px 8px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 7px; color: var(--alu-blue); font-size: var(--alu-micro-size); }
+.model-column-bulk:hover { background: var(--alu-hover); }
+.model-list { display: grid; min-height: 0; flex: 1 1 auto; align-content: start; gap: 4px; overflow-y: auto; }
+.model-row { display: flex; min-width: 0; align-items: center; gap: 8px; width: 100%; padding: 7px 9px; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); text-align: left; }
+.model-row:disabled, .model-column-bulk:disabled { cursor: wait; opacity: .6; }
+.model-row:hover:not(:disabled) { border-color: var(--alu-border-light); background: var(--alu-hover); color: var(--alu-text); }
+.model-row-copy { display: grid; min-width: 0; flex: 1 1 auto; gap: 2px; }
+.model-row-copy strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.model-row-copy small { overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
+.model-row-badge { flex: 0 0 auto; padding: 2px 6px; border-radius: 999px; background: rgb(251 191 36 / .12); color: var(--alu-amber); font-size: var(--alu-micro-size); }
+.model-list-empty { margin: 8px 4px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
+.machine-settings-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--alu-border); background: #0d1322; }
+.machine-settings-footer > .machine-settings-error, .machine-settings-footer-status { flex: 1 1 auto; min-width: 0; }
+.machine-settings-footer-status { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+@media (max-width: 640px) {
+  .machine-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .machine-settings-nav { display: none; }
+  .machine-settings-content { padding: 16px 14px; overflow-y: auto; }
+  .model-columns { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 1fr) minmax(220px, 1fr); }
+  .machine-settings-footer { flex-wrap: wrap; padding: 10px 14px; }
+}
+</style>

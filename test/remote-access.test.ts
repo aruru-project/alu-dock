@@ -30,16 +30,24 @@ import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js"
 import { ptyUserEnvironment } from "./support/pty-user-environment.js";
 
 class BarrierRemoteAccessState extends RemoteAccessState {
-  private barrier: { started: () => void; wait: Promise<void>; release: () => void } | undefined;
+  private barrier: { started: () => void; wait: Promise<void>; release: () => void; fail: boolean } | undefined;
   private trustStarted: Promise<void> | undefined;
   trustWriteAttempts = 0;
+  windowReadsWhileTrustBlocked = 0;
 
-  armTrustBarrier(): () => void {
+  override async readPairingWindow() {
+    const window = await super.readPairingWindow();
+    if (this.barrier && !window) this.windowReadsWhileTrustBlocked += 1;
+    return window;
+  }
+
+  armTrustBarrier(fail = false): () => void {
+    this.windowReadsWhileTrustBlocked = 0;
     let release!: () => void;
     let started!: () => void;
     this.trustStarted = new Promise<void>((resolveStarted) => { started = resolveStarted; });
     const wait = new Promise<void>((resolveRelease) => { release = resolveRelease; });
-    this.barrier = { started, wait, release };
+    this.barrier = { started, wait, release, fail };
     return release;
   }
 
@@ -60,6 +68,7 @@ class BarrierRemoteAccessState extends RemoteAccessState {
       barrier.started();
       await barrier.wait;
       if (this.barrier === barrier) this.barrier = undefined;
+      if (barrier.fail) throw new Error("fixture trust write failed");
     }
     await super.trustClient(client);
   }
@@ -399,6 +408,9 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   const releaseTrust = state.armTrustBarrier();
   const committing = pairingRequest("::1", port, raceIdentity, raceAttempt.identityRequest, hostCertificateRaw);
   await state.waitForBlockedTrust();
+  // #341: a slow disk exposed the poll mistaking the claimed window for a local close.
+  // Two reads guarantee one serialized Host poll has finished while trust is still blocked.
+  await waitFor(() => Promise.resolve(state.windowReadsWhileTrustBlocked >= 2));
   const concurrent = await pairingRequest("::1", port, raceIdentity, raceAttempt.identityRequest, hostCertificateRaw);
   assert.equal(concurrent.response.type, "pairing.error.v1");
   assert.equal(concurrent.response.code, "busy", "only one final trust commit may run");
@@ -410,6 +422,20 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   assert.equal(state.trustWriteAttempts, trustAttemptsBeforeRace + 1, "concurrent final records must not start another trust write");
   assert.equal(await state.revokeClient(raceIdentity.fingerprint), true);
   raceAttempt.sessionKey.fill(0);
+
+  // A failed save owns its cleanup too: it must report failure, not leave a saved device.
+  const failedAttempt = await preparePairingIdentity(state, port, raceIdentity, "6153", hostCertificateRaw, "Failed save tablet");
+  const releaseFailedTrust = state.armTrustBarrier(true);
+  const failing = pairingRequest("::1", port, raceIdentity, failedAttempt.identityRequest, hostCertificateRaw);
+  await state.waitForBlockedTrust();
+  await waitFor(() => Promise.resolve(state.windowReadsWhileTrustBlocked >= 2));
+  releaseFailedTrust();
+  assert.equal((await failing).response.code, "internal_error");
+  assert.equal((await state.readPairingProgress())?.status, "failed");
+  assert.equal(await state.trustedClient(raceIdentity.fingerprint), undefined);
+  assert.equal(await state.readPairingWindow(), undefined);
+  assert.equal((await state.listPending()).length, 0);
+  failedAttempt.sessionKey.fill(0);
 
   // If local close wins the atomic window claim, an immediate final request cannot persist trust even before the Host poll runs.
   const cancelledAttempt = await preparePairingIdentity(state, port, raceIdentity, "2604", hostCertificateRaw, "Cancelled tablet");

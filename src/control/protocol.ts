@@ -129,6 +129,10 @@ export const MAX_CONTROL_CWD_CHARS = 16_384;
 export const MAX_PROMPT_CHARS = 256_000;
 export const MAX_MODEL_PROVIDER_CHARS = 256;
 export const MAX_MODEL_ID_CHARS = 512;
+export const MAX_MODEL_NAME_CHARS = 256;
+export const MAX_MODEL_LIST_ITEMS = 2_000;
+/** An Agent adapter caps one model list (a Work's picker or a machine's catalog) at this many JSON bytes. */
+export const MAX_MODEL_LIST_BYTES = 600_000;
 export const MAX_CAPABILITIES = 128;
 export const MAX_CAPABILITY_CHARS = 128;
 export const MAX_REPLAY_EVENTS = 1_000;
@@ -183,6 +187,10 @@ export const ABORT_RESTORE_QUEUE_CAPABILITY = "run.abort-restore-queue.v1" as co
 export const BASH_CAPABILITY = "bash.v1" as const;
 /** After this hello the connection is a link: many Protocol V2 streams on one authenticated connection. */
 export const MULTIPLEX_CAPABILITY = "transport.multiplex.v1" as const;
+/** Read and replace one machine's hidden-model list; that Host omits listed models from `model.list`. */
+export const MODEL_VISIBILITY_CAPABILITY = "model.visibility.v1" as const;
+/** Serialized hidden-list bound: the room a full model list leaves in one visibility response line, less envelope headroom. */
+export const MAX_HIDDEN_MODELS_BYTES = MAX_CONTROL_LINE_BYTES - MAX_MODEL_LIST_BYTES - 64 * 1024;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -241,6 +249,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   WORKSPACE_LIST_CAPABILITY,
   WORKSPACE_FILES_CAPABILITY,
   MULTIPLEX_CAPABILITY,
+  MODEL_VISIBILITY_CAPABILITY,
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -315,6 +324,8 @@ export type ControlRequest =
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
   | Request<"thinking.set", { operationId: string; instanceId: string; level: ThinkingLevel }>
+  | Request<"model.visibility.get", { hostId?: string }>
+  | Request<"model.visibility.set", { operationId: string; hostId?: string; hidden: ModelRef[] }>
   | Request<"tool.list", { instanceId: string }>
   | Request<"tool.set_active", { operationId: string; instanceId: string; names: string[] }>
   | Request<"settings.get", { instanceId: string }>
@@ -396,6 +407,8 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "model.list": { target: "instance", effect: "query", transport: "unary" },
   "model.set": { target: "instance", effect: "command", transport: "unary" },
   "thinking.set": { target: "instance", effect: "command", transport: "unary" },
+  "model.visibility.get": { target: "directory", effect: "query", transport: "unary" },
+  "model.visibility.set": { target: "directory", effect: "command", transport: "unary" },
   "tool.list": { target: "instance", effect: "query", transport: "unary" },
   "tool.set_active": { target: "instance", effect: "command", transport: "unary" },
   "settings.get": { target: "instance", effect: "query", transport: "unary" },
@@ -681,6 +694,14 @@ export interface PruneResult { receipt: { operationId: string; selector: "stoppe
 export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
 export interface ModelsResult { models: AgentModelInfo[]; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; total: number; truncated: boolean }
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
+/** One exact model on one machine, as Pi names it: provider plus model id. */
+export interface ModelRef { provider: string; id: string }
+/**
+ * The machine's selectable models plus its hidden list. `fileProblem` explains a hand-edited list
+ * that could not be read; until it is saved again that Host hides nothing.
+ */
+export interface ModelVisibilityResult { models: AgentModelInfo[]; total: number; truncated: boolean; hidden: ModelRef[]; fileProblem?: string }
+export interface ModelVisibilitySetResult { hidden: ModelRef[] }
 export interface ThinkingConfigurationResult { actualLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[]; total: number; truncated: boolean }
 export interface SessionInventoryResult {
@@ -803,6 +824,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "system.catalog" || type === "system.content" || type === "system.default.set") return SYSTEM_TEMPLATES_CAPABILITY;
   if (type === "resource.content") return RESOURCE_CONTENT_CAPABILITY;
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
+  if (type === "model.visibility.get" || type === "model.visibility.set") return MODEL_VISIBILITY_CAPABILITY;
   return "models.v1";
 }
 export function requiredCapabilities(capability: Capability): string[] {
@@ -1114,6 +1136,8 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
+    case "model.visibility.get": exact(params, ["hostId"], "invalid_request"); return { ...base, type, params: { hostId: hostId() } };
+    case "model.visibility.set": exact(params, ["operationId", "hostId", "hidden"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), hostId: hostId(), hidden: parseModelRefs(params.hidden, "params.hidden", "invalid_request") } };
     case "tool.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "tool.set_active": { exact(params, ["operationId", "instanceId", "names"], "invalid_request"); const names = strings(params.names, "params.names", MAX_COLLECTION, 256, "invalid_request"); if (new Set(names).size !== names.length) throw validation("invalid_request", "params.names must be unique"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), names } }; }
     case "settings.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
@@ -1818,10 +1842,34 @@ export function parsePruneResult(input: unknown): PruneResult {
     piSessionFilesDeleted: 0,
   } };
 }
+function modelInfoList(value: Record<string, unknown>): Pick<ModelsResult, "models" | "total" | "truncated"> {
+  const models = array(value.models, "models", MAX_MODEL_LIST_ITEMS).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", MAX_MODEL_NAME_CHARS), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
+  return { models, ...parseCollectionCompleteness(value, models.length) };
+}
 function modelListFields(value: Record<string, unknown>): Omit<ModelsResult, "instance"> {
-  const models = array(value.models, "models", MAX_COLLECTION).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", 256), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
-  const completeness = parseCollectionCompleteness(value, models.length);
-  return { models, availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), ...completeness };
+  return { ...modelInfoList(value), availableThinkingLevels: thinkingLevels(value.availableThinkingLevels) };
+}
+/** The machine's selectable model list, produced by the Agent adapter without a running Work. */
+export function parseModelCatalogBody(input: unknown): Pick<ModelsResult, "models" | "total" | "truncated"> {
+  const value = object(input, "model catalog"); exact(value, ["models", "total", "truncated"]);
+  return modelInfoList(value);
+}
+/** Hidden-model entries from a request, a Host response, or the Host's own list file share this shape and bound. */
+export function parseModelRefs(input: unknown, field: string, code = "invalid_response"): ModelRef[] {
+  const refs = array(input, field, MAX_COLLECTION, code).map((item, index) => {
+    const ref = object(item, `${field}[${index}]`, code); exact(ref, ["provider", "id"], code);
+    return { provider: string(ref.provider, `${field}[${index}].provider`, MAX_MODEL_PROVIDER_CHARS, code), id: string(ref.id, `${field}[${index}].id`, MAX_MODEL_ID_CHARS, code) };
+  });
+  if (Buffer.byteLength(JSON.stringify(refs), "utf8") > MAX_HIDDEN_MODELS_BYTES) throw validation(code, `${field} is too large`);
+  return refs;
+}
+export function parseModelVisibilityResult(input: unknown): ModelVisibilityResult {
+  const value = object(input, "model visibility result"); exact(value, ["models", "total", "truncated", "hidden", "fileProblem"]);
+  return { ...modelInfoList(value), hidden: parseModelRefs(value.hidden, "hidden"), ...(value.fileProblem === undefined ? {} : { fileProblem: string(value.fileProblem, "fileProblem", MAX_MESSAGE) }) };
+}
+export function parseModelVisibilitySetResult(input: unknown): ModelVisibilitySetResult {
+  const value = object(input, "model visibility set result"); exact(value, ["hidden"]);
+  return { hidden: parseModelRefs(value.hidden, "hidden") };
 }
 /** Worker-produced model.list body; the Host adds only its own instance snapshot. */
 export function parseModelListBody(input: unknown): Omit<ModelsResult, "instance"> {

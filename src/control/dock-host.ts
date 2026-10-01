@@ -11,6 +11,8 @@ import { ClientLink, MAX_LINK_LINE_BYTES, VirtualProtocolSocket } from "./stream
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
+import { MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
+import { ModelVisibilityError, type ModelVisibilityService } from "./model-visibility.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -156,6 +158,8 @@ export interface DockHostOptions {
   remoteAccessState?: RemoteAccessState;
   attachmentService?: AttachmentService;
   remoteInstances?: RemoteInstanceDirectory;
+  /** This machine's hidden-model list; without it model lists are returned unchanged. */
+  modelVisibility?: ModelVisibilityService;
   listen?: boolean;
 }
 
@@ -186,6 +190,7 @@ export class DockHost {
   private readonly workspaceBrowser: WorkspaceBrowser;
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
+  private readonly modelVisibility: ModelVisibilityService | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -243,10 +248,13 @@ export class DockHost {
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.attachmentService = options.attachmentService;
+    this.modelVisibility = options.modelVisibility;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
+    // A Main that routes to SubHosts keeps its own list too (the CLI always gives it a state directory).
+    if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
@@ -943,7 +951,23 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.abortBash(request.params.operationId);return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{...result,instance:instance.snapshot()}); return; }
+      case "model.list": {
+        const instance = this.registry.get(request.params.instanceId);
+        const listed = await instance.listModels();
+        const result = this.modelVisibility ? await this.modelVisibility.filterModelList(listed) : listed;
+        this.sendSuccessAndEnd(socket, request.requestId, { ...result, instance: instance.snapshot() });
+        return;
+      }
+      case "model.visibility.get":
+      case "model.visibility.set": {
+        if (!this.modelVisibility) throw new ProtocolValidationError("capability_missing", "这台机器暂时不能管理隐藏的模型。请更新这台机器上的 Alu Dock 后再试。");
+        const visibility = this.modelVisibility;
+        const result = request.type === "model.visibility.get"
+          ? await visibility.get()
+          : await this.operationLedger.run(request.params.operationId, request.type, request.params, () => visibility.set(request.params.hidden));
+        this.sendSuccessAndEnd(socket, request.requestId, result);
+        return;
+      }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -1638,6 +1662,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof AttachmentNotFoundError) return { code: error.code, message: error.message };
   if (error instanceof AttachmentIntegrityError) return { code: error.code, message: error.message };
   if (error instanceof AttachmentUnavailableError) return { code: error.code, message: error.message };
+  if (error instanceof ModelVisibilityError) return { code: error.code, message: error.message, retryable: error.retryable };
   if (error instanceof RoutedControlError) return { code: error.code, message: error.message, retryable: error.retryable, ...(error.details === undefined ? {} : { details: error.details }) };
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };

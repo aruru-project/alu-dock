@@ -230,6 +230,8 @@ pub fn run() {
             workspace_files::workspace_cached_image,
             workspace_files::save_workspace_cached_file,
             work::list_machines,
+            work::model_visibility,
+            work::set_model_visibility,
             work::list_workspace,
             work::system_catalog,
             work::system_content,

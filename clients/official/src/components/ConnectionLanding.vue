@@ -94,7 +94,7 @@ async function copyDiagnostic(text: string) {
         <button class="button primary" @click="pairingError = ''; app.load()"><RefreshCw :size="16" />重新连接</button>
         <button class="button secondary" @click="openHostSettings"><Waypoints :size="16" />切换 Host</button>
         <button class="button secondary" @click="openHostSettings(); showHostPairingForm()"><Plus :size="16" />连接新的 AluDock</button>
-        <button class="button secondary" @click="openHostSettings"><Settings :size="16" />Host 设置</button>
+        <button class="button secondary" @click="openHostSettings"><Settings :size="16" />连接与配对</button>
       </div>
     </div>
 
