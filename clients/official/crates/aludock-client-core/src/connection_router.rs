@@ -1,6 +1,11 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    task::Poll,
+};
 
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 
 use crate::{
     ClientError, ClientIdentity, ConnectionPolicy, Endpoint, HostConnectionProfile, IdentityStore,
@@ -8,7 +13,7 @@ use crate::{
     client::{HelloAck, negotiate_local_endpoint, negotiate_pinned_endpoint},
     link::{Link, LinkTiming, MULTIPLEX_CAPABILITY},
     local_transport::LocalDockEndpoint,
-    timing::CONNECTION_ACQUISITION_TIMEOUT,
+    timing::{CONNECTION_ACQUISITION_TIMEOUT, ROUTE_RACE_STAGGER},
     tls::{ConnectedTransport, PinnedTlsConnector},
 };
 
@@ -54,7 +59,8 @@ struct RouterState {
     resolution_generation: u64,
     last_resolution_error: Option<String>,
     last_resolution_capabilities: Option<Vec<String>>,
-    recently_failed_endpoint_id: Option<String>,
+    /// Addresses that failed in the last choice or as the active route; the next choice starts them last.
+    recently_failed_endpoint_ids: Vec<String>,
     candidates: Vec<Candidate>,
     active_endpoint_id: Option<String>,
     /// The persistent connection to the active address; every request is a stream on it.
@@ -72,6 +78,39 @@ impl RouterState {
     fn take_link(&mut self) -> Option<Link> {
         self.link.take()
     }
+
+    fn mark_failed(&mut self, endpoint_id: &str) {
+        if !self
+            .recently_failed_endpoint_ids
+            .iter()
+            .any(|failed| failed == endpoint_id)
+        {
+            self.recently_failed_endpoint_ids
+                .push(endpoint_id.to_owned());
+        }
+    }
+}
+
+type Attempt<'a> = (
+    usize,
+    Pin<Box<dyn Future<Output = Result<Negotiated>> + Send + 'a>>,
+);
+
+/// How one choice among the saved addresses ended; indexes refer to its ordered list.
+enum RaceOutcome {
+    Won {
+        index: usize,
+        negotiated: Negotiated,
+        failures: Vec<(usize, ClientError)>,
+    },
+    /// The Host answered and refused; every address reaches that same Host, so the choice ends.
+    Rejected {
+        index: usize,
+        error: ClientError,
+    },
+    Exhausted {
+        failures: Vec<(usize, ClientError)>,
+    },
 }
 
 /// A negotiated connection; a multiplexed one becomes the route's link when the route commits to it.
@@ -97,7 +136,6 @@ impl ConnectionRouter {
             Some(&paired.host_certificate),
         )?);
         let client_id = paired.metadata.client_id;
-        let active_endpoint_id = candidates.first().map(|candidate| candidate.id.clone());
         let (route_generation, _) = tokio::sync::watch::channel(1);
         Ok(Self {
             inner: Arc::new(RouterInner {
@@ -112,9 +150,10 @@ impl ConnectionRouter {
                     resolution_generation: 0,
                     last_resolution_error: None,
                     last_resolution_capabilities: None,
-                    recently_failed_endpoint_id: None,
+                    recently_failed_endpoint_ids: Vec::new(),
                     candidates,
-                    active_endpoint_id,
+                    // Nothing is known to be reachable yet: the first request chooses.
+                    active_endpoint_id: None,
                     link: None,
                     multiplex: None,
                     closed: false,
@@ -146,7 +185,7 @@ impl ConnectionRouter {
                     resolution_generation: 0,
                     last_resolution_error: None,
                     last_resolution_capabilities: None,
-                    recently_failed_endpoint_id: None,
+                    recently_failed_endpoint_ids: Vec::new(),
                     candidates: vec![Candidate {
                         id: "explicit-endpoint".into(),
                         target: CandidateTarget::Pinned(endpoint),
@@ -181,7 +220,7 @@ impl ConnectionRouter {
                     resolution_generation: 0,
                     last_resolution_error: None,
                     last_resolution_capabilities: None,
-                    recently_failed_endpoint_id: None,
+                    recently_failed_endpoint_ids: Vec::new(),
                     candidates: vec![Candidate {
                         id: "local-ipc".into(),
                         target: CandidateTarget::Local(endpoint),
@@ -210,7 +249,7 @@ impl ConnectionRouter {
                 resolution_generation: state.resolution_generation,
                 last_resolution_error: None,
                 last_resolution_capabilities: None,
-                recently_failed_endpoint_id: None,
+                recently_failed_endpoint_ids: Vec::new(),
                 candidates: state.candidates.clone(),
                 active_endpoint_id: state.active_endpoint_id.clone(),
                 link: None,
@@ -253,20 +292,14 @@ impl ConnectionRouter {
         let mut dropped_link = None;
         if state.active_endpoint_id.as_deref() != preferred_endpoint_id {
             state.active_endpoint_id = None;
-            state.recently_failed_endpoint_id = None;
+            state.recently_failed_endpoint_ids.clear();
             dropped_link = state.take_link();
         }
-        if state
-            .recently_failed_endpoint_id
-            .as_ref()
-            .is_some_and(|failed| {
-                !next_candidates
-                    .iter()
-                    .any(|candidate| &candidate.id == failed)
-            })
-        {
-            state.recently_failed_endpoint_id = None;
-        }
+        state.recently_failed_endpoint_ids.retain(|failed| {
+            next_candidates
+                .iter()
+                .any(|candidate| &candidate.id == failed)
+        });
         state.candidates = next_candidates;
         self.inner
             .route_generation
@@ -278,6 +311,8 @@ impl ConnectionRouter {
         Ok(())
     }
 
+    /// The device changed networks: failures seen on the previous network say
+    /// nothing about this one, so the next request chooses again from scratch.
     pub fn reselect_preferred_route(&self) -> Result<bool> {
         let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
         if state.closed {
@@ -291,7 +326,7 @@ impl ConnectionRouter {
             return Ok(false);
         }
         state.active_endpoint_id = None;
-        state.recently_failed_endpoint_id = None;
+        state.recently_failed_endpoint_ids.clear();
         state.last_resolution_error = None;
         state.last_resolution_capabilities = None;
         state.route_generation = state.route_generation.saturating_add(1);
@@ -360,7 +395,7 @@ impl ConnectionRouter {
             state.route_generation = state.route_generation.saturating_add(1);
             state.last_resolution_error = None;
             state.last_resolution_capabilities = None;
-            state.recently_failed_endpoint_id = Some(endpoint_id.to_owned());
+            state.mark_failed(endpoint_id);
             self.inner
                 .route_generation
                 .send_replace(state.route_generation);
@@ -406,7 +441,7 @@ impl ConnectionRouter {
             state.route_generation = state.route_generation.saturating_add(1);
             state.last_resolution_error = None;
             state.last_resolution_capabilities = None;
-            state.recently_failed_endpoint_id = Some(endpoint_id.to_owned());
+            state.mark_failed(endpoint_id);
             self.inner
                 .route_generation
                 .send_replace(state.route_generation);
@@ -580,7 +615,7 @@ impl ConnectionRouter {
                             .send_replace(state.route_generation);
                         state.last_resolution_error = None;
                         state.last_resolution_capabilities = None;
-                        state.recently_failed_endpoint_id = Some(candidate.id.clone());
+                        state.mark_failed(&candidate.id);
                         failed_active =
                             Some((state.route_generation, candidate.id, error.to_string()));
                     }
@@ -597,7 +632,7 @@ impl ConnectionRouter {
             };
 
             let mut resolution_route_changes = self.inner.route_generation.subscribe();
-            let (resolution_generation, ordered, mut failures) = {
+            let (resolution_generation, ordered, exclusive_first, mut failed) = {
                 let state = self.inner.state.lock().map_err(|_| router_state_error())?;
                 if state.closed {
                     return Err(router_closed_error());
@@ -625,114 +660,187 @@ impl ConnectionRouter {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if let Some(failed) = state.recently_failed_endpoint_id.as_deref()
-                    && let Some(index) = ordered.iter().position(|candidate| candidate.id == failed)
-                {
-                    let candidate = ordered.remove(index);
-                    ordered.push(candidate);
-                }
-                let failures = skipped
-                    .map(|(_, id, error)| vec![format!("{id}: {error}")])
+                // Recently failed addresses start last; the stable sort keeps preference order.
+                ordered.sort_by_key(|candidate| {
+                    state
+                        .recently_failed_endpoint_ids
+                        .iter()
+                        .any(|failed| failed == &candidate.id)
+                });
+                // A fixed preferred address that has not just failed is tried on its own first.
+                let exclusive_first = matches!(
+                    &state.policy,
+                    ConnectionPolicy::Fixed { endpoint_id }
+                        if ordered.first().is_some_and(|candidate| &candidate.id == endpoint_id)
+                );
+                let failed = skipped
+                    .map(|(_, id, error)| vec![(id.clone(), error.clone())])
                     .unwrap_or_default();
-                (state.route_generation, ordered, failures)
+                (state.route_generation, ordered, exclusive_first, failed)
             };
 
-            let mut stale = false;
-            for candidate in ordered {
-                let result = tokio::select! {
-                    changed = resolution_route_changes.changed() => {
-                        changed.map_err(|_| router_closed_error())?;
-                        stale = true;
-                        break;
-                    }
-                    result = self.negotiate(&candidate, required_capabilities) => result,
-                };
-                match result {
-                    Ok(negotiated) => {
-                        let mut state =
-                            self.inner.state.lock().map_err(|_| router_state_error())?;
-                        if state.closed {
-                            return Err(router_closed_error());
-                        }
-                        if state.route_generation != resolution_generation
-                            || !state.candidates.iter().any(|current| current == &candidate)
-                        {
-                            drop(state);
-                            drop(negotiated);
-                            stale = true;
-                            break;
-                        }
-                        state.active_endpoint_id = Some(candidate.id.clone());
-                        state.route_generation = state.route_generation.saturating_add(1);
-                        self.inner
-                            .route_generation
-                            .send_replace(state.route_generation);
-                        state.resolution_generation = state.resolution_generation.saturating_add(1);
-                        state.last_resolution_error = None;
-                        state.last_resolution_capabilities = None;
-                        state.recently_failed_endpoint_id = None;
-                        let route_generation = state.route_generation;
-                        if negotiated.multiplexed {
-                            let link = Self::adopt_link(
-                                &mut state,
-                                &self.inner,
-                                negotiated,
-                                &candidate.id,
-                            )?;
-                            drop(state);
-                            return self.stream_on(
-                                &link,
-                                required_capabilities,
-                                candidate.id,
-                                route_generation,
-                            );
-                        }
-                        return Ok(RoutedConnection {
-                            connection: negotiated.connection,
-                            hello: negotiated.hello,
-                            endpoint_id: candidate.id,
-                            route_generation,
-                        });
-                    }
-                    Err(error @ ClientError::Host { .. }) => {
-                        let state = self.inner.state.lock().map_err(|_| router_state_error())?;
-                        if state.closed {
-                            return Err(router_closed_error());
-                        }
-                        if state.route_generation != resolution_generation
-                            || !state.candidates.iter().any(|current| current == &candidate)
-                        {
-                            stale = true;
-                            break;
-                        }
-                        return Err(error);
-                    }
-                    Err(error) => failures.push(format!("{}: {error}", candidate.id)),
+            let outcome = tokio::select! {
+                changed = resolution_route_changes.changed() => {
+                    changed.map_err(|_| router_closed_error())?;
+                    None
                 }
-            }
-            if stale {
+                outcome = self.race(&ordered, exclusive_first, required_capabilities) => Some(outcome),
+            };
+            let Some(outcome) = outcome else {
                 drop(permit);
                 continue;
-            }
-
-            let error = format!(
-                "none of the saved addresses reached the paired Host ({})",
-                failures.join("; ")
-            );
+            };
             let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
             if state.closed {
                 return Err(router_closed_error());
             }
-            if state.route_generation != resolution_generation || state.active_endpoint_id.is_some()
-            {
-                drop(state);
-                drop(permit);
+            match outcome {
+                RaceOutcome::Won {
+                    index,
+                    negotiated,
+                    failures,
+                } => {
+                    let candidate = ordered[index].clone();
+                    if state.route_generation != resolution_generation
+                        || !state.candidates.iter().any(|current| current == &candidate)
+                    {
+                        drop(state);
+                        drop(negotiated);
+                        drop(permit);
+                        continue;
+                    }
+                    failed.extend(
+                        failures
+                            .into_iter()
+                            .map(|(index, error)| (ordered[index].id.clone(), error.to_string())),
+                    );
+                    state.active_endpoint_id = Some(candidate.id.clone());
+                    state.route_generation = state.route_generation.saturating_add(1);
+                    self.inner
+                        .route_generation
+                        .send_replace(state.route_generation);
+                    state.resolution_generation = state.resolution_generation.saturating_add(1);
+                    state.last_resolution_error = None;
+                    state.last_resolution_capabilities = None;
+                    state.recently_failed_endpoint_ids =
+                        failed.into_iter().map(|(id, _)| id).collect();
+                    let route_generation = state.route_generation;
+                    if negotiated.multiplexed {
+                        let link =
+                            Self::adopt_link(&mut state, &self.inner, negotiated, &candidate.id)?;
+                        drop(state);
+                        return self.stream_on(
+                            &link,
+                            required_capabilities,
+                            candidate.id,
+                            route_generation,
+                        );
+                    }
+                    return Ok(RoutedConnection {
+                        connection: negotiated.connection,
+                        hello: negotiated.hello,
+                        endpoint_id: candidate.id,
+                        route_generation,
+                    });
+                }
+                RaceOutcome::Rejected { index, error } => {
+                    if state.route_generation != resolution_generation
+                        || !state
+                            .candidates
+                            .iter()
+                            .any(|current| current == &ordered[index])
+                    {
+                        drop(state);
+                        drop(permit);
+                        continue;
+                    }
+                    return Err(error);
+                }
+                RaceOutcome::Exhausted { failures } => {
+                    if state.route_generation != resolution_generation
+                        || state.active_endpoint_id.is_some()
+                    {
+                        drop(state);
+                        drop(permit);
+                        continue;
+                    }
+                    failed.extend(
+                        failures
+                            .into_iter()
+                            .map(|(index, error)| (ordered[index].id.clone(), error.to_string())),
+                    );
+                    let error = format!(
+                        "none of the saved addresses reached the paired Host ({})",
+                        failed
+                            .iter()
+                            .map(|(id, error)| format!("{id}: {error}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
+                    state.resolution_generation = state.resolution_generation.saturating_add(1);
+                    state.last_resolution_error = Some(error.clone());
+                    state.last_resolution_capabilities = Some(capability_key.clone());
+                    state.recently_failed_endpoint_ids =
+                        failed.into_iter().map(|(id, _)| id).collect();
+                    return Err(ClientError::Protocol(error));
+                }
+            }
+        }
+    }
+
+    /// Start the ordered addresses one after another: each gets a short head
+    /// start, and a failure starts the next at once. The first hello wins;
+    /// returning drops the other attempts, which closes their connections.
+    /// With `exclusive_first`, nothing else starts while the first is trying.
+    async fn race<'a>(
+        &'a self,
+        ordered: &'a [Candidate],
+        exclusive_first: bool,
+        required_capabilities: &'a [&'a str],
+    ) -> RaceOutcome {
+        let mut attempts: Vec<Attempt<'a>> = Vec::new();
+        let mut failures = Vec::new();
+        let mut next = 0;
+        let mut next_start = Instant::now();
+        loop {
+            let first_alone = exclusive_first && next == 1 && !attempts.is_empty();
+            let may_start = next < ordered.len() && !first_alone;
+            if may_start && (attempts.is_empty() || Instant::now() >= next_start) {
+                attempts.push((
+                    next,
+                    Box::pin(self.negotiate(&ordered[next], required_capabilities)),
+                ));
+                next += 1;
+                next_start = Instant::now() + ROUTE_RACE_STAGGER;
                 continue;
             }
-            state.resolution_generation = state.resolution_generation.saturating_add(1);
-            state.last_resolution_error = Some(error.clone());
-            state.last_resolution_capabilities = Some(capability_key.clone());
-            return Err(ClientError::Protocol(error));
+            if attempts.is_empty() {
+                return RaceOutcome::Exhausted { failures };
+            }
+            let finished = std::future::poll_fn(|cx| {
+                for position in 0..attempts.len() {
+                    if let Poll::Ready(result) = attempts[position].1.as_mut().poll(cx) {
+                        let (index, _) = attempts.swap_remove(position);
+                        return Poll::Ready((index, result));
+                    }
+                }
+                Poll::Pending
+            });
+            tokio::select! {
+                (index, result) = finished => match result {
+                    Ok(negotiated) => {
+                        return RaceOutcome::Won { index, negotiated, failures };
+                    }
+                    Err(error @ ClientError::Host { .. }) => {
+                        return RaceOutcome::Rejected { index, error };
+                    }
+                    Err(error) => {
+                        failures.push((index, error));
+                        next_start = Instant::now();
+                    }
+                },
+                () = tokio::time::sleep_until(next_start), if may_start => {}
+            }
         }
     }
 
@@ -901,6 +1009,11 @@ mod tests {
             arrived: Arc<Notify>,
             release: Arc<Notify>,
         },
+        /// Accepts TCP and never answers, like a home address seen from a mobile
+        /// network; `closed` fires when the client gives the connection up.
+        Silent {
+            closed: Arc<Notify>,
+        },
     }
 
     struct TestHost {
@@ -942,6 +1055,14 @@ mod tests {
                 let mode = mode.clone();
                 let requests = task_requests.clone();
                 tokio::spawn(async move {
+                    if let ServerMode::Silent { closed } = &mode {
+                        use tokio::io::AsyncReadExt as _;
+                        let mut tcp = tcp;
+                        let mut ignored = [0_u8; 1024];
+                        while matches!(tcp.read(&mut ignored).await, Ok(read) if read > 0) {}
+                        closed.notify_one();
+                        return;
+                    }
                     let Ok(stream) = acceptor.accept(tcp).await else {
                         return;
                     };
@@ -1116,7 +1237,7 @@ mod tests {
                     resolution_generation: 0,
                     last_resolution_error: None,
                     last_resolution_capabilities: None,
-                    recently_failed_endpoint_id: None,
+                    recently_failed_endpoint_ids: Vec::new(),
                     candidates: candidates
                         .into_iter()
                         .map(|(id, endpoint)| Candidate {
@@ -1284,6 +1405,123 @@ mod tests {
         assert_eq!(remote.connections.load(Ordering::SeqCst), 0);
         local.stop();
         remote.stop();
+    }
+
+    // #328: on a mobile network the home address swallowed the 6-second connect
+    // timeout before the remote address was tried, on every first request.
+    #[tokio::test]
+    async fn after_a_network_change_a_silent_home_address_does_not_delay_the_remote_one() {
+        let client = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        let closed = Arc::new(Notify::new());
+        let home = spawn_test_host(
+            &host,
+            ServerMode::Silent {
+                closed: closed.clone(),
+            },
+        )
+        .await;
+        let remote = spawn_test_host(&host, ServerMode::HelloThenClose).await;
+        let router = test_router(
+            &client,
+            &host,
+            vec![
+                ("home", home.endpoint.clone()),
+                ("remote", remote.endpoint.clone()),
+            ],
+            "home",
+        );
+
+        assert!(router.reselect_preferred_route().unwrap());
+        let started = std::time::Instant::now();
+        drop(router.acquire(&[]).await.unwrap());
+
+        // Far below the 6-second connect timeout the home address used to cost.
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            router.snapshot().active_endpoint_id.as_deref(),
+            Some("remote")
+        );
+        timeout(Duration::from_secs(1), closed.notified())
+            .await
+            .expect("the losing attempt is closed, not left open");
+        home.stop();
+        remote.stop();
+    }
+
+    #[tokio::test]
+    async fn when_no_saved_address_answers_the_error_names_every_address() {
+        let client = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        let home = spawn_test_host(&host, ServerMode::CloseBeforeHello).await;
+        let remote = spawn_test_host(&host, ServerMode::CloseBeforeHello).await;
+        let router = test_router(
+            &client,
+            &host,
+            vec![
+                ("home", home.endpoint.clone()),
+                ("remote", remote.endpoint.clone()),
+            ],
+            "home",
+        );
+        router.inner.state.lock().unwrap().active_endpoint_id = None;
+
+        let Err(ClientError::Protocol(message)) = router.acquire(&[]).await else {
+            panic!("no reachable address must fail the request");
+        };
+
+        assert!(message.contains("home") && message.contains("remote"));
+        home.stop();
+        remote.stop();
+    }
+
+    #[tokio::test]
+    async fn a_reachable_fixed_preferred_address_is_used_even_if_another_would_answer_sooner() {
+        let client = ClientIdentity::generate().unwrap();
+        let host = ClientIdentity::generate().unwrap();
+        let arrived = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let preferred = spawn_test_host(
+            &host,
+            ServerMode::HoldHello {
+                arrived: arrived.clone(),
+                release: release.clone(),
+            },
+        )
+        .await;
+        let other = spawn_test_host(&host, ServerMode::HelloThenClose).await;
+        let router = test_router(
+            &client,
+            &host,
+            vec![
+                ("preferred", preferred.endpoint.clone()),
+                ("other", other.endpoint.clone()),
+            ],
+            "preferred",
+        );
+        {
+            let mut state = router.inner.state.lock().unwrap();
+            state.policy = ConnectionPolicy::Fixed {
+                endpoint_id: "preferred".into(),
+            };
+            state.active_endpoint_id = None;
+        }
+        let task_router = router.clone();
+        let acquisition = tokio::spawn(async move { task_router.acquire(&[]).await });
+
+        arrived.notified().await;
+        // Longer than the head start an automatic choice gives the first address.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(other.connections.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        drop(acquisition.await.unwrap().unwrap());
+
+        assert_eq!(
+            router.snapshot().active_endpoint_id.as_deref(),
+            Some("preferred")
+        );
+        preferred.stop();
+        other.stop();
     }
 
     #[tokio::test]
