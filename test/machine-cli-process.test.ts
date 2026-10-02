@@ -128,7 +128,9 @@ async function waitMachine(client: DockClient, available: boolean): Promise<stri
 async function waitInstance(client: DockClient, operationId: string, id?: string): Promise<Awaited<ReturnType<DockClient["list"]>>[number]> { const deadline = Date.now() + 10_000; while (Date.now() < deadline) { try { const found = (await client.list("all")).find((item) => item.creationOperationId === operationId && (id === undefined || item.id === id)); if (found && found.lifecycle === "active") return found; } catch {} await new Promise((resolve) => setTimeout(resolve, 30)); } throw new Error(`instance ${operationId} did not appear`); }
 async function containsBytes(root: string, expected: Buffer): Promise<boolean> { try { for (const entry of await readdir(root, { withFileTypes: true })) { const path = join(root, entry.name); if (entry.isDirectory()) { if (await containsBytes(path, expected)) return true; } else if (entry.isFile()) { const bytes = await readFile(path); if (bytes.equals(expected)) return true; } } } catch {} return false; }
 
-test("Main toggles SubHost connections live while native Pi work stays alive offline", async (context) => {
+// Paused until card #351: this Host's Pi Worker uses the real ~/.pi/agent (settings, credentials,
+// extensions) and leaves a session folder there on every run.
+test("Main toggles SubHost connections live while native Pi work stays alive offline", { skip: "paused until #351 isolates its Pi Worker from the real Pi directory" }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-cli-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const mainCatalog = join(root, "main-state", "alu-dock", "catalog.json"), subCatalog = join(root, "sub", "catalog.json"), joinFile = join(root, "join.json"), socketPath = join(root, "main.sock");
