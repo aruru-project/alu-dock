@@ -6,13 +6,12 @@ use crate::errors::{CommandError, lifecycle_error};
 use crate::extension::ControllerStatusEmission;
 use crate::observation::{FollowState, follow_state_error};
 use aludock_client_core::{
-    AttachmentState, ClientError, ConnectionKind, ConnectionPolicy, ConnectionRouter, DockClient,
-    Endpoint, EndpointState, EndpointTestResult, ExtensionControlState, HostConnectionProfile,
-    HostRegistrySnapshot, InstanceCatalog, InstanceSelector, InstanceSnapshot, LocalDockEndpoint,
-    MAX_ATTACHMENTS_PER_MESSAGE, PairingProgress, RestoredImageState, SessionTokenState,
-    delete_endpoint, probe_host_endpoint, record_endpoint_test, reorder_endpoints,
-    save_unverified_endpoint, save_verified_endpoint, saved_endpoint_for_test,
-    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_device_name,
+    AttachmentState, ClientError, ConnectionRouter, DockClient, Endpoint, EndpointTestResult,
+    ExtensionControlState, HostConnectionProfile, HostRegistrySnapshot, InstanceCatalog,
+    InstanceSelector, InstanceSnapshot, LocalDockEndpoint, MAX_ATTACHMENTS_PER_MESSAGE,
+    PairingProgress, RestoredImageState, SessionTokenState, delete_endpoint, probe_host_endpoint,
+    record_endpoint_test, save_unverified_endpoint, save_verified_endpoint,
+    saved_endpoint_for_test, set_endpoint_enabled, validate_device_name,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -134,22 +133,8 @@ pub(crate) fn catalog_from_snapshot(
             .map_err(CommandError::from)?;
         let profile = connection_profile(&store, &record.host_id)?;
         let endpoint_summary = profile
-            .endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.state == EndpointState::Verified
-                    && endpoint.id
-                        == profile
-                            .last_successful_endpoint_id
-                            .as_deref()
-                            .unwrap_or_default()
-            })
-            .or_else(|| {
-                profile
-                    .endpoints
-                    .iter()
-                    .find(|endpoint| endpoint.state == EndpointState::Verified)
-            })
+            .ordered_verified_endpoints()
+            .first()
             .map(|endpoint| format!("{}:{}", endpoint.endpoint.host(), endpoint.endpoint.port()))
             .unwrap_or_else(|| "没有可用的 TLS 地址".into());
         let device_name = store
@@ -791,6 +776,49 @@ pub(crate) async fn reselect_host_route(
     Ok(changed)
 }
 
+/// One settings-page look at which saved address the selected Host is using.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostRoutePayload {
+    pub(crate) connection_id: String,
+    pub(crate) selection_generation: u64,
+    pub(crate) route_generation: u64,
+    pub(crate) active_endpoint_id: Option<String>,
+}
+
+/// An unchanged route is answered after this long, so a watch left behind by a
+/// closed settings page ends on its own.
+const HOST_ROUTE_WATCH_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Answers at once without `seen_route_generation`; otherwise when the route
+/// differs from it, or unchanged after `HOST_ROUTE_WATCH_WAIT`.
+#[tauri::command]
+pub(crate) async fn watch_host_route(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    seen_route_generation: Option<u64>,
+) -> Result<HostRoutePayload, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let router = client.router();
+    let route = match seen_route_generation {
+        None => router.snapshot(),
+        Some(seen) => {
+            match tokio::time::timeout(HOST_ROUTE_WATCH_WAIT, router.route_change(seen)).await {
+                Ok(route) => route.map_err(CommandError::from)?,
+                Err(_) => router.snapshot(),
+            }
+        }
+    };
+    Ok(HostRoutePayload {
+        connection_id,
+        selection_generation,
+        route_generation: route.route_generation,
+        active_endpoint_id: route.active_endpoint_id,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn bootstrap(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
@@ -869,26 +897,9 @@ pub(crate) async fn work_catalog(
     })
 }
 
-pub(crate) fn parse_connection_kind(kind: &str) -> Result<ConnectionKind, CommandError> {
-    match kind {
-        "local" => Ok(ConnectionKind::Local),
-        "remote" => Ok(ConnectionKind::Remote),
-        "vpn" => Ok(ConnectionKind::Vpn),
-        "manual" => Ok(ConnectionKind::Manual),
-        _ => Err(CommandError {
-            code: "invalid_endpoint_kind".into(),
-            message: "未知的连接地址类型".into(),
-            details: None,
-            outcome_unknown: false,
-            operation_id: None,
-        }),
-    }
-}
-
 pub(crate) struct VerifiedEndpointMutation {
     pub(crate) endpoint: Endpoint,
     pub(crate) label: String,
-    pub(crate) kind: ConnectionKind,
     pub(crate) expected_revision: u64,
 }
 
@@ -903,7 +914,6 @@ pub(crate) fn persist_verified_host_endpoint(
             store,
             mutation.endpoint,
             &mutation.label,
-            mutation.kind,
             mutation.expected_revision,
         )
     })?;
@@ -941,11 +951,9 @@ pub(crate) async fn verify_host_endpoint(
     host: String,
     port: u16,
     label: String,
-    kind: String,
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let endpoint = Endpoint::new(host, port).map_err(CommandError::from)?;
-    let kind = parse_connection_kind(&kind)?;
     probe_host_endpoint(&store, &endpoint)
         .await
         .map_err(CommandError::from)?;
@@ -956,7 +964,6 @@ pub(crate) async fn verify_host_endpoint(
         VerifiedEndpointMutation {
             endpoint,
             label,
-            kind,
             expected_revision,
         },
     )
@@ -972,18 +979,11 @@ pub(crate) fn save_unverified_host_endpoint(
     host: String,
     port: u16,
     label: String,
-    kind: String,
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let endpoint = Endpoint::new(host, port).map_err(CommandError::from)?;
-    let profile = save_unverified_endpoint(
-        &store,
-        endpoint,
-        &label,
-        parse_connection_kind(&kind)?,
-        expected_revision,
-    )
-    .map_err(CommandError::from)?;
+    let profile = save_unverified_endpoint(&store, endpoint, &label, expected_revision)
+        .map_err(CommandError::from)?;
     reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
@@ -1030,29 +1030,6 @@ pub(crate) fn rename_host_profile(
 }
 
 #[tauri::command]
-pub(crate) fn set_connection_policy(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    connection_id: String,
-    selection_generation: u64,
-    expected_revision: u64,
-    mode: String,
-    endpoint_id: Option<String>,
-) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let policy = match (mode.as_str(), endpoint_id) {
-        ("automatic", _) => ConnectionPolicy::Automatic,
-        ("fixed", Some(endpoint_id)) => ConnectionPolicy::Fixed { endpoint_id },
-        _ => {
-            return Err(ClientError::InvalidEndpoint("connection policy is invalid".into()).into());
-        }
-    };
-    let profile =
-        update_connection_policy(&store, policy, expected_revision).map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
-    Ok(profile)
-}
-
-#[tauri::command]
 pub(crate) fn set_host_endpoint_enabled(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
@@ -1064,21 +1041,6 @@ pub(crate) fn set_host_endpoint_enabled(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let profile = set_endpoint_enabled(&store, &endpoint_id, enabled, expected_revision)
         .map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
-    Ok(profile)
-}
-
-#[tauri::command]
-pub(crate) fn reorder_host_endpoints(
-    runtime: tauri::State<'_, ConnectionRuntimeState>,
-    connection_id: String,
-    selection_generation: u64,
-    expected_revision: u64,
-    endpoint_ids: Vec<String>,
-) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
-    let profile =
-        reorder_endpoints(&store, &endpoint_ids, expected_revision).map_err(CommandError::from)?;
     reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }

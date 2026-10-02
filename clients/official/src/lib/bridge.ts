@@ -7,7 +7,7 @@ import type {
   CommandContentResult,
   CommandsResult,
   ClientPreferences,
-  ConnectionKind,
+  HostRoute,
   DeliverableDto,
   DeliverableSaveResult,
   DesktopShellStatus,
@@ -145,20 +145,18 @@ export async function verifyHostEndpoint(
   host: string,
   port: number,
   label: string,
-  kind: ConnectionKind,
   expectedRevision: number,
   context: ConnectionContext): Promise<HostConnectionProfile> {
-  return native<HostConnectionProfile>('verify_host_endpoint', { ...context, expectedRevision, host, port, label, kind })
+  return native<HostConnectionProfile>('verify_host_endpoint', { ...context, expectedRevision, host, port, label })
 }
 
 export async function saveUnverifiedHostEndpoint(
   host: string,
   port: number,
   label: string,
-  kind: ConnectionKind,
   expectedRevision: number,
   context: ConnectionContext): Promise<HostConnectionProfile> {
-  return native<HostConnectionProfile>('save_unverified_host_endpoint', { ...context, expectedRevision, host, port, label, kind })
+  return native<HostConnectionProfile>('save_unverified_host_endpoint', { ...context, expectedRevision, host, port, label })
 }
 
 export async function testHostEndpoint(endpointId: string, expectedRevision: number, context: ConnectionContext): Promise<EndpointTestResult> {
@@ -169,16 +167,8 @@ export async function renameHostProfile(displayName: string, expectedRevision: n
   return native<HostConnectionProfile>('rename_host_profile', { ...context, displayName, expectedRevision })
 }
 
-export async function setConnectionPolicy(mode: 'automatic' | 'fixed', expectedRevision: number, context: ConnectionContext, endpointId?: string): Promise<HostConnectionProfile> {
-  return native<HostConnectionProfile>('set_connection_policy', { ...context, mode, endpointId: endpointId ?? null, expectedRevision })
-}
-
 export async function setHostEndpointEnabled(endpointId: string, enabled: boolean, expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
   return native<HostConnectionProfile>('set_host_endpoint_enabled', { ...context, endpointId, enabled, expectedRevision })
-}
-
-export async function reorderHostEndpoints(endpointIds: string[], expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
-  return native<HostConnectionProfile>('reorder_host_endpoints', { ...context, endpointIds, expectedRevision })
 }
 
 export async function deleteHostEndpoint(endpointId: string, expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
@@ -187,6 +177,11 @@ export async function deleteHostEndpoint(endpointId: string, expectedRevision: n
 
 export async function reselectHostRoute(context: ConnectionContext): Promise<boolean> {
   return native<boolean>('reselect_host_route', { ...context })
+}
+
+/** Answers at once without `seenRouteGeneration`; otherwise once the route changes, or unchanged after a while. */
+export async function watchHostRoute(seenRouteGeneration: number | null, context: ConnectionContext): Promise<HostRoute> {
+  return native<HostRoute>('watch_host_route', { ...context, seenRouteGeneration })
 }
 
 export async function bootstrap(context: ConnectionContext): Promise<BootstrapPayload> {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount } from 'vue'
+import { onBeforeUnmount, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Globe2, Link, Monitor, Plus, RotateCcw, ShieldCheck, Trash2, X } from '@lucide/vue'
+import { Link, Monitor, Plus, RotateCcw, ShieldCheck, Trash2, X } from '@lucide/vue'
 import LocalConnectionCard from './LocalConnectionCard.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
@@ -10,12 +10,13 @@ import { useSurfacesStore } from '../stores/surfaces'
 
 const app = useAppStore()
 const hostStore = useHostStore()
-const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost } = storeToRefs(hostStore)
-const { rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel } = hostStore
+const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, currentEndpoint, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost } = storeToRefs(hostStore)
+const { rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, testEndpoint, toggleEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, watchRoute, stopRouteWatch } = hostStore
 const { pairingInProgress: busy } = storeToRefs(hostStore)
 const { closeModal } = useSurfacesStore()
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
-onBeforeUnmount(() => { void stopPairing() })
+watch(() => `${app.connectionContext?.connectionId}:${app.connectionContext?.selectionGeneration}`, () => { void watchRoute() }, { immediate: true })
+onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
 </script>
 
 <template>
@@ -65,44 +66,36 @@ onBeforeUnmount(() => { void stopPairing() })
             <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="busy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
           </form>
           <template v-if="app.activeHost && !app.localSelected && !addingHost">
-          <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost.displayName }}</h3></div><p>{{ app.activeHost.profile.endpoints.length }} 个 TLS 地址 · {{ app.activeHost.profile.policy.mode === 'automatic' ? '自动选择' : '固定首选' }}</p></div>
+          <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost.displayName }}</h3></div><p>{{ app.activeHost.profile.endpoints.length }} 个地址 · {{ currentEndpoint ? `正在使用「${currentEndpoint.label}」` : '下次连接时自动选择' }}</p></div>
           <form class="host-profile-form" @submit.prevent="saveHostDisplayName">
             <div><strong>Host 名称</strong><small>仅修改此设备上显示的名称；地址和配对关系保持原样。</small></div>
             <div class="host-name-field"><input v-model="hostDisplayName" maxlength="128" autocomplete="off" placeholder="例如 家里的工作站" :disabled="hostNameSaving" /><button class="button secondary" :disabled="hostNameSaving || hostDisplayName.trim() === app.activeHost?.displayName">{{ hostNameSaving ? '保存中…' : '保存名称' }}</button></div>
             <p v-if="hostNameError" class="host-name-error">{{ hostNameError }}</p>
             <p v-else-if="hostNameSaved" class="host-name-success">Host 名称已保存。</p>
           </form>
-          <div class="connection-policy">
-            <div><Globe2 :size="18" /><span><strong>自动选择 TLS 地址</strong><small>优先局域网，不可达时尝试外网 / VPN 地址</small></span></div>
-            <button :class="{ selected: app.activeHost?.profile.policy.mode === 'automatic' }" @click="chooseConnectionPolicy('automatic')">{{ app.activeHost?.profile.policy.mode === 'automatic' ? '已启用' : '启用' }}</button>
-          </div>
           <section class="endpoint-section">
-            <div class="host-section-heading"><div><h3>连接地址</h3><p class="endpoint-order-note">按局域网、VPN、广域网和手动地址的顺序自动尝试。</p></div><button class="host-add-endpoint" @click="toggleEndpointForm"><Plus :size="14" />{{ endpointFormOpen ? '收起' : '添加地址' }}</button></div>
+            <div class="host-section-heading"><div><h3>连接地址</h3><p class="endpoint-order-note">按局域网、VPN、广域网的顺序依次尝试，先连通的地址会被使用。类型按地址自动判断。</p></div><button class="host-add-endpoint" @click="toggleEndpointForm"><Plus :size="14" />{{ endpointFormOpen ? '收起' : '添加地址' }}</button></div>
             <div class="endpoint-list">
-              <article v-for="(endpoint, index) in app.activeHost?.profile.endpoints" :key="endpoint.id" class="endpoint-row" :class="[`state-${endpoint.state}`]">
+              <article v-for="endpoint in app.activeHost?.profile.endpoints" :key="endpoint.id" class="endpoint-row" :class="[`state-${endpoint.state}`, { current: endpoint.id === currentEndpoint?.id }]">
                 <span class="endpoint-icon"><ShieldCheck :size="17" /></span>
                 <div class="endpoint-detail">
                   <strong>{{ endpoint.label }}</strong>
                   <code>{{ endpoint.endpoint.host }}:{{ endpoint.endpoint.port }}</code>
-                  <small>{{ endpointKindLabel(endpoint.kind) }} · {{ endpointStateLabel(endpoint) }}</small>
+                  <small class="endpoint-meta">{{ endpointKindLabel(endpoint.kind) }} · {{ endpointStateLabel(endpoint) }}</small>
                   <small v-if="endpoint.lastManualTest" :class="endpoint.lastManualTest.succeeded ? 'test-success' : 'test-failure'">{{ testStatusLabel(endpoint) }}</small>
                 </div>
                 <div class="endpoint-actions">
-                  <button :disabled="index === 0 || !!endpointMutatingId" :aria-label="`上移 ${endpoint.label}`" @click="moveEndpoint(endpoint.id, -1)">↑</button>
-                  <button :disabled="index === (app.activeHost?.profile.endpoints.length ?? 0) - 1 || !!endpointMutatingId" :aria-label="`下移 ${endpoint.label}`" @click="moveEndpoint(endpoint.id, 1)">↓</button>
                   <button :disabled="!!endpointMutatingId" @click="testEndpoint(endpoint)">{{ endpointMutatingId === endpoint.id ? '测试中…' : endpoint.state === 'draft_unverified' ? '验证' : '测试' }}</button>
                   <button :disabled="!!endpointMutatingId" @click="toggleEndpoint(endpoint)">{{ endpoint.state === 'disabled' ? '重新启用' : '停用' }}</button>
-                  <button v-if="endpoint.state === 'verified'" class="endpoint-use" :class="{ selected: app.activeHost?.profile.policy.mode === 'fixed' && app.activeHost!.profile.policy.endpointId === endpoint.id }" :disabled="!!endpointMutatingId" @click="chooseConnectionPolicy('fixed', endpoint.id)">{{ app.activeHost?.profile.policy.mode === 'fixed' && app.activeHost.profile.policy.endpointId === endpoint.id ? '已设为首选' : '设为首选' }}</button>
                   <button class="endpoint-delete" :aria-label="`删除地址 ${endpoint.label}`" :disabled="!!endpointMutatingId" @click="removeEndpoint(endpoint.id, endpoint.label)"><Trash2 :size="15" /></button>
                 </div>
               </article>
             </div>
           </section>
           <form v-if="endpointFormOpen" class="endpoint-form" @submit.prevent="addHostEndpoint">
-            <div><h3>添加连接地址</h3><p>例如外网 DDNS 域名。验证为同一台 AluDock 后才会保存并参与自动连接。</p></div>
+            <div><h3>添加连接地址</h3><p>局域网 IP、VPN 地址或外网域名都可以，类型会自动判断。验证为同一台 AluDock 后才会保存并参与自动连接。</p></div>
             <div class="endpoint-fields">
-              <label><span>备注</span><input v-model="endpointLabel" maxlength="128" placeholder="外网域名" /></label>
-              <label><span>类型</span><select v-model="endpointKind"><option value="remote">广域网</option><option value="local">局域网</option><option value="vpn">VPN</option><option value="manual">其他</option></select></label>
+              <label class="endpoint-label"><span>备注</span><input v-model="endpointLabel" maxlength="128" placeholder="例如 家里的外网域名" /></label>
               <label class="endpoint-host"><span>IP 地址或域名</span><input v-model="endpointHost" spellcheck="false" placeholder="dock.example.com" /></label>
               <label><span>端口</span><input v-model.number="endpointPort" type="number" inputmode="numeric" min="1" max="65535" placeholder="端口" /></label>
             </div>
@@ -128,14 +121,6 @@ onBeforeUnmount(() => { void stopPairing() })
 .host-name-error, .host-name-success { margin: 0; font: var(--alu-micro-size)/1.45 var(--font-reading); }
 .host-name-error { color: var(--c-danger); }
 .host-name-success { color: var(--c-success); }
-.connection-policy { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 14px; background: rgb(126 200 224 / .05); border: 1px solid rgb(126 200 224 / .16); border-radius: 11px; }
-.connection-policy > div { display: flex; align-items: center; gap: 10px; }
-.connection-policy svg { flex: 0 0 auto; color: var(--c-ice); }
-.connection-policy span { display: grid; gap: 4px; }
-.connection-policy strong { font-size: var(--alu-meta-size); }
-.connection-policy small { color: var(--c-text-3); font: var(--alu-meta-size)/1.45 var(--font-reading); }
-.connection-policy button, .endpoint-use { padding: 6px 9px; color: var(--c-text-2); font: 600 var(--alu-micro-size) var(--font-ui); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 7px; }
-.connection-policy button.selected, .endpoint-use.selected { color: var(--c-pink); background: rgb(244 114 182 / .08); border-color: rgb(244 114 182 / .28); }
 .endpoint-section { margin-top: 17px; }
 .endpoint-section h3, .endpoint-form h3 { margin: 0 0 8px; font-size: var(--alu-meta-size); }
 .endpoint-order-note { margin: -2px 0 10px; color: var(--c-text-3); font: var(--alu-micro-size)/1.45 var(--font-reading); }
@@ -152,6 +137,7 @@ onBeforeUnmount(() => { void stopPairing() })
 .endpoint-row small { color: var(--c-text-3); font: var(--alu-micro-size)/1.35 var(--font-reading); }
 .endpoint-row small.test-success { color: var(--c-success); }
 .endpoint-row small.test-failure { color: var(--c-danger); }
+.endpoint-row.current .endpoint-meta { color: var(--alu-mint); }
 .endpoint-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .endpoint-actions button { min-height: 29px; padding: 5px 8px; color: var(--c-text-2); font: 600 var(--alu-micro-size) var(--font-ui); cursor: pointer; background: transparent; border: 1px solid var(--c-line); border-radius: 7px; }
 .endpoint-actions button:hover:not(:disabled) { color: var(--c-ice); border-color: rgb(126 200 224 / .35); }
@@ -162,8 +148,8 @@ onBeforeUnmount(() => { void stopPairing() })
 .endpoint-form > div:first-child p { margin: -2px 0 12px; color: var(--c-text-3); font: var(--alu-meta-size)/1.5 var(--font-reading); }
 .endpoint-fields { display: grid; grid-template-columns: 1fr 120px; gap: 9px; }
 .endpoint-fields label { display: grid; gap: 5px; color: var(--c-text-3); font-size: var(--alu-micro-size); }
-.endpoint-fields input, .endpoint-fields select { width: 100%; height: 35px; padding: 0 9px; color: var(--c-text-1); font: var(--alu-meta-size) var(--font-mono); background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 7px; outline: none; }
-.endpoint-fields select { font-family: var(--font-ui); }
+.endpoint-fields input { width: 100%; height: 35px; padding: 0 9px; color: var(--c-text-1); font: var(--alu-meta-size) var(--font-mono); background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 7px; outline: none; }
+.endpoint-fields .endpoint-label { grid-column: 1 / -1; }
 .endpoint-form footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .endpoint-form footer > span { display: flex; align-items: center; gap: 6px; color: var(--c-text-3); font: var(--alu-micro-size)/1.4 var(--font-reading); }
 .endpoint-form footer svg { color: var(--c-mint); }
@@ -172,7 +158,6 @@ onBeforeUnmount(() => { void stopPairing() })
 @media (max-width: 640px) {
   .host-name-field { align-items: stretch; flex-direction: column; }
   .host-name-field .button { width: 100%; }
-  .connection-policy { align-items: flex-start; }
   .endpoint-row { grid-template-columns: auto minmax(0, 1fr); align-items: start; }
   .endpoint-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .endpoint-actions button { min-height: 40px; }
@@ -313,8 +298,7 @@ onBeforeUnmount(() => { void stopPairing() })
 .host-detail-intro span { color: var(--alu-pink); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
 .host-detail-intro h3 { margin: 4px 0 0; color: var(--alu-text); font-size: 18px; font-weight: 650; }
 .host-detail-intro p { margin: 0 0 2px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); white-space: nowrap; }
-.host-detail-column .host-profile-form,
-.host-detail-column .connection-policy {
+.host-detail-column .host-profile-form {
   margin: 0 0 12px;
   border-color: var(--alu-border);
   border-radius: 10px;
@@ -325,25 +309,16 @@ onBeforeUnmount(() => { void stopPairing() })
 .host-detail-column .host-profile-form strong { color: var(--alu-text); font-size: var(--alu-meta-size); }
 .host-detail-column .host-profile-form small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .host-detail-column .host-name-field input,
-.host-detail-column .endpoint-fields input,
-.host-detail-column .endpoint-fields select {
+.host-detail-column .endpoint-fields input {
   border-color: var(--alu-border);
   background: var(--alu-bg);
   color: var(--alu-text);
 }
-.host-detail-column .connection-policy { padding: 14px 15px; }
 .local-connection-summary { display: flex; align-items: center; gap: 11px; margin-bottom: 12px; padding: 15px; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
 .local-connection-summary-icon { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 9px; color: var(--alu-mint); background: color-mix(in srgb, var(--alu-mint) 9%, transparent); }
 .local-connection-summary > div { display: grid; min-width: 0; flex: 1; gap: 4px; }
 .local-connection-summary strong { color: var(--alu-text); font-size: var(--alu-meta-size); }
 .local-connection-summary p { min-width: 0; margin: 0; overflow: hidden; color: var(--alu-text-muted); font: var(--alu-micro-size)/1.45 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.host-detail-column .connection-policy strong { color: var(--alu-text); }
-.host-detail-column .connection-policy small { color: var(--alu-text-muted); }
-.host-detail-column .connection-policy button,
-.host-detail-column .endpoint-use {
-  border-color: var(--alu-border);
-  background: var(--alu-bg);
-}
 .host-section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
 .host-section-heading h3 { margin: 0 0 4px; color: var(--alu-text); font-size: var(--alu-ui-size); }
 .host-section-heading .endpoint-order-note { margin: 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
@@ -375,7 +350,6 @@ onBeforeUnmount(() => { void stopPairing() })
   .host-detail-column .endpoint-actions { grid-column: 1 / -1; justify-content: flex-start; padding-left: 39px; }
   .host-section-heading { align-items: flex-start; }
   .host-detail-column .host-name-field,
-  .host-detail-column .connection-policy,
   .host-detail-column .endpoint-form footer,
   .host-detail-column .endpoint-draft-offer {
     align-items: stretch;

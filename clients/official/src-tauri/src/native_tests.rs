@@ -414,9 +414,9 @@ fn endpoint_runtime(name: &str) -> (PathBuf, ConnectionRuntimeState, String) {
     (path, runtime, host_id)
 }
 
-// Android staging regression: both network notifications and manual LAN/WAN
-// selection invoke this command from a thread without an entered Tokio runtime.
-// Do not use #[tokio::test], which would hide the crashing IPC boundary.
+// Android staging regression: network notifications invoke this command from a
+// thread without an entered Tokio runtime. Do not use #[tokio::test], which
+// would hide the crashing IPC boundary.
 #[test]
 fn switching_host_addresses_through_ipc_rebinds_without_crashing() {
     assert!(tokio::runtime::Handle::try_current().is_err());
@@ -425,12 +425,11 @@ fn switching_host_addresses_through_ipc_rebinds_without_crashing() {
     let wan = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let store = runtime.registry.resolve_store(Some(&host_id)).unwrap();
     let original = store.load_connection_profile().unwrap().unwrap();
-    let mut profile = store
+    store
         .update_connection_profile_at(original.revision, |profile| {
             profile.endpoints[0].endpoint = lan.local_addr().unwrap().to_string().parse().unwrap();
             let mut remote = profile.endpoints[0].clone();
             remote.id = uuid::Uuid::new_v4().to_string();
-            remote.kind = ConnectionKind::Remote;
             remote.endpoint = wan.local_addr().unwrap().to_string().parse().unwrap();
             profile.endpoints.push(remote);
             Ok(())
@@ -457,7 +456,6 @@ fn switching_host_addresses_through_ipc_rebinds_without_crashing() {
         .manage(runtime)
         .manage(follow.clone())
         .invoke_handler(tauri::generate_handler![
-            crate::connection::set_connection_policy,
             crate::connection::reselect_host_route
         ])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -486,19 +484,9 @@ fn switching_host_addresses_through_ipc_rebinds_without_crashing() {
         )
         .unwrap()
     };
-    // Automatic network change, then manual WAN and LAN selection. Only
-    // loopback listeners owned by this test can receive connection attempts.
-    for endpoint in [
-        None,
-        Some(profile.endpoints[1].id.clone()),
-        Some(profile.endpoints[0].id.clone()),
-    ] {
-        if let Some(endpoint_id) = endpoint {
-            profile = invoke("set_connection_policy", serde_json::json!({
-                    "connectionId": host_id, "selectionGeneration": 1,
-                    "expectedRevision": profile.revision, "mode": "fixed", "endpointId": endpoint_id,
-                })).deserialize().unwrap();
-        }
+    // Repeated network changes. Only loopback listeners owned by this test can
+    // receive connection attempts.
+    for _ in 0..3 {
         let _: bool = invoke(
             "reselect_host_route",
             serde_json::json!({
@@ -672,7 +660,6 @@ fn verified_endpoint_probe_cannot_persist_after_selection_generation_changes() {
         VerifiedEndpointMutation {
             endpoint: "dock.example:443".parse().unwrap(),
             label: "WAN".into(),
-            kind: ConnectionKind::Remote,
             expected_revision: before.revision,
         },
     );
@@ -746,7 +733,6 @@ fn verified_endpoint_probe_revalidates_profile_revision_before_cas() {
         VerifiedEndpointMutation {
             endpoint: "dock.example:443".parse().unwrap(),
             label: "WAN".into(),
-            kind: ConnectionKind::Remote,
             expected_revision: before.revision,
         },
     );

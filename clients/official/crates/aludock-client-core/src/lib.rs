@@ -71,8 +71,8 @@ pub use connection_router::{ConnectionRouter, RouteSnapshot};
 pub use connections::{
     ConnectionKind, ConnectionPolicy, EndpointState, EndpointTestResult, EndpointTestStatus,
     HostConnectionProfile, HostEndpoint, delete_endpoint, host_id, probe_host_endpoint,
-    record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
-    saved_endpoint_for_test, set_connection_policy, set_endpoint_enabled,
+    record_endpoint_test, save_unverified_endpoint, save_verified_endpoint,
+    saved_endpoint_for_test, set_endpoint_enabled,
 };
 pub use conversation::{
     ContentBlock, DockEvent, EventPage, FollowStream, HistoryRecord, ImagePath, InstanceReadResult,

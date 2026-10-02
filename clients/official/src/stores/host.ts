@@ -2,9 +2,8 @@ import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
-  cancelPairing, getSystemDeviceName, isTauri, renameHostProfile, reorderHostEndpoints,
-  reselectHostRoute, startPairing, deleteHostEndpoint, saveUnverifiedHostEndpoint, setConnectionPolicy,
-  setHostEndpointEnabled, testHostEndpoint, verifyHostEndpoint
+  cancelPairing, getSystemDeviceName, isTauri, renameHostProfile, startPairing, deleteHostEndpoint,
+  saveUnverifiedHostEndpoint, setHostEndpointEnabled, testHostEndpoint, verifyHostEndpoint, watchHostRoute
 } from '../lib/bridge'
 import {
   DEVICE_NAME_FALLBACK, browserDeviceNameStorage, normalizeDeviceName, persistDeviceNamePreference,
@@ -35,8 +34,9 @@ export const useHostStore = defineStore('host', () => {
   const pairingError = ref('')
   const endpointHost = ref('')
   const endpointPort = ref<number | null>(null)
-  const endpointLabel = ref('外网域名')
-  const endpointKind = ref<ConnectionKind>('remote')
+  const endpointLabel = ref('')
+  /** The saved address the current Host connection uses; null until one is chosen. */
+  const currentEndpointId = ref<string | null>(null)
   const endpointSaving = ref(false)
   const endpointFormOpen = ref(false)
   const endpointError = ref('')
@@ -246,7 +246,6 @@ export const useHostStore = defineStore('host', () => {
         endpointHost.value.trim(),
         endpointPort.value!,
         endpointLabel.value.trim() || '连接地址',
-        endpointKind.value,
         revision,
         context,
       ))
@@ -273,7 +272,6 @@ export const useHostStore = defineStore('host', () => {
         endpointHost.value.trim(),
         endpointPort.value!,
         endpointLabel.value.trim() || '连接地址',
-        endpointKind.value,
         revision,
         context,
       ))
@@ -283,18 +281,6 @@ export const useHostStore = defineStore('host', () => {
       endpointError.value = errorMessage(cause)
     } finally {
       endpointSaving.value = false
-    }
-  }
-
-  async function chooseConnectionPolicy(mode: 'automatic' | 'fixed', endpointId?: string) {
-    endpointError.value = ''
-    try {
-      const context = requireConnectionContext(app)
-      const revision = activeProfile().revision
-      applyProfile(await currentConnectionCall(app, (current) => setConnectionPolicy(mode, revision, current, endpointId)))
-      if (app.contextMatches(context)) await reselectHostRoute(context)
-    } catch (cause) {
-      endpointError.value = errorMessage(cause)
     }
   }
 
@@ -327,25 +313,6 @@ export const useHostStore = defineStore('host', () => {
     }
   }
 
-  async function moveEndpoint(endpointId: string, offset: -1 | 1) {
-    if (endpointMutatingId.value) return
-    const profile = activeProfile()
-    const ids = profile.endpoints.map((endpoint) => endpoint.id)
-    const index = ids.indexOf(endpointId)
-    const target = index + offset
-    if (index < 0 || target < 0 || target >= ids.length) return
-      ;[ids[index], ids[target]] = [ids[target]!, ids[index]!]
-    endpointMutatingId.value = endpointId
-    endpointError.value = ''
-    try {
-      applyProfile(await currentConnectionCall(app, (context) => reorderHostEndpoints(ids, profile.revision, context)))
-    } catch (cause) {
-      endpointError.value = errorMessage(cause)
-    } finally {
-      endpointMutatingId.value = ''
-    }
-  }
-
   async function removeEndpoint(endpointId: string, label: string) {
     if (!await page.askConfirm(`删除连接地址“${label}”？`, '操作后仍须保留至少一个已启用、已验证的地址。')) return
     endpointError.value = ''
@@ -358,13 +325,40 @@ export const useHostStore = defineStore('host', () => {
   }
 
   function endpointKindLabel(kind: ConnectionKind) {
-    return kind === 'local' ? '局域网' : kind === 'remote' ? '广域网' : kind === 'vpn' ? 'VPN' : '手动地址'
+    return kind === 'local' ? '局域网' : kind === 'vpn' ? 'VPN' : '广域网'
   }
 
   function endpointStateLabel(endpoint: HostEndpoint) {
     if (endpoint.state === 'draft_unverified') return '待验证草稿'
     if (endpoint.state === 'disabled') return '已停用'
-    return endpoint.id === app.payload?.host.activeEndpointId ? '启动时通过此地址连接' : '身份已验证'
+    return endpoint.id === currentEndpointId.value ? '正在使用' : '身份已验证'
+  }
+
+  const currentEndpoint = computed(() => app.activeHost?.profile.endpoints.find((endpoint) => endpoint.id === currentEndpointId.value))
+
+  let routeWatch = 0
+  /** Follows which address the selected Host uses while Host settings is open. */
+  async function watchRoute() {
+    const watch = ++routeWatch
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    currentEndpointId.value = null
+    if (!context || app.localSelected || !app.activeHost) return
+    let seen: number | null = null
+    while (watch === routeWatch) {
+      let route
+      try {
+        route = await watchHostRoute(seen, context)
+      } catch {
+        return // The selection changed or its connection closed; settings shows the new one.
+      }
+      if (watch !== routeWatch || !app.contextMatches(context) || typeof route?.routeGeneration !== 'number') return
+      currentEndpointId.value = route.activeEndpointId
+      seen = route.routeGeneration
+    }
+  }
+
+  function stopRouteWatch() {
+    routeWatch++
   }
 
   function testStatusLabel(endpoint: HostEndpoint) {
@@ -397,5 +391,5 @@ export const useHostStore = defineStore('host', () => {
     if (disposed) release(); else unlisten = release
   }
   onScopeDispose(() => { disposed = true; unlisten?.(); const id = pairingRequestId.value; pairingRequestId.value = ''; if (id) void (startingPairing ?? Promise.resolve()).catch(() => {}).then(() => cancelPairing(id)).catch(() => {}) })
-  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, endpointKind, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, chooseConnectionPolicy, testEndpoint, toggleEndpoint, moveEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, listenNative }
+  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, currentEndpointId, currentEndpoint, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, testEndpoint, toggleEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, watchRoute, stopRouteWatch, listenNative }
 })

@@ -44,7 +44,11 @@ let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = f
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative
 const hostCatalog = () => ({ revision: hostCatalogRevision, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: context.connectionId },
-  hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: [], policy: { mode: 'automatic' } } })) })
+  hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: hostId === 'host' ? hostEndpoints : [] } })) })
+const hostEndpoints = [
+  { id: 'home', label: '家里', kind: 'local', endpoint: { host: '192.168.1.8', port: 33781 }, state: 'verified' },
+  { id: 'wan', label: '外网域名', kind: 'remote', endpoint: { host: 'dock.example.com', port: 443 }, state: 'verified' },
+]
 const emit = (name, payload) => listeners.get(name)?.({ payload })
 const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
 const contentChange = change => observation({ kind: 'content', token: 'native-content', change })
@@ -96,6 +100,8 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'acknowledge_conversation_follow' && failAck) throw { code: 'connection_failed', message: '更新确认没有送达，请重试。' }
   if (command === 'acknowledge_conversation_follow') { assert.equal(args.update, undefined, 'ACK does not echo the content batch'); if (immediateAck) assert.equal(frames, beforeBatchFrame, 'cached data does not wait for a visible frame'); else assert.ok(frames > beforeBatchFrame, 'ACK follows a projector/display frame'); return }
+  // A known route is only answered when it changes; this fixture's never does.
+  if (command === 'watch_host_route') return args.seenRouteGeneration == null ? { ...context, routeGeneration: 1, activeEndpointId: 'wan' } : new Promise(() => {})
   if (command === 'start_conversation_follow') { if (failFollowStart) throw { code: 'connection_failed', message: '暂时连不上这项工作，请重试。' }; binding = { ...args }; return }
   if (command === 'list_deliverables') return deliveryListNative ? deliveryListNative(args) : args.instanceId === 'work' ? [{ deliveryRef: 'report', name: 'report.pdf', sizeBytes: 10 }] : []
   if (command === 'download_deliverable') return downloadNative(args)
@@ -1127,6 +1133,9 @@ try {
   connectionStatus.open = true
   await find(connectionStatus, item => item.type === 'button' && text(item) === '连接与配对').props.onClick(); await settle()
   const hostDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-labelledby'] === 'host-settings-title')
+  // #328: settings names the saved address the connection is using; kinds come from the addresses.
+  assert.ok(text(hostDialog).includes('正在使用「外网域名」'), 'the header names the address in use')
+  assert.ok(text(hostDialog).includes('广域网 · 正在使用') && text(hostDialog).includes('局域网 · 身份已验证'), 'only the address in use is marked')
   const removeHost = find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Host')
   removeHost.focus()
   const removal = removeHost.props.onClick(); await settle()
