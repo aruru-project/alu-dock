@@ -3,14 +3,16 @@ import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_proces
 import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { MachineSettingsState, machineSettingsStateRoot } from "../src/control/machine-settings-state.js";
 import { MainMachineState, machineStateRoot, readMachineJoinFile, SubHostMachineState } from "../src/control/machine-state.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 const cli = new URL("../src/cli.js", import.meta.url).pathname;
+const subHostFixture = new URL("./fixtures/subhost-machine.js", import.meta.url).pathname;
 
 async function freePort(): Promise<number> { const server = createServer(); await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "::1", resolve); }); const address = server.address(); if (!address || typeof address === "string") throw new Error("port unavailable"); await new Promise<void>((resolve) => server.close(() => resolve())); return address.port; }
 function exited(child: ChildProcess): Promise<void> { if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(); return new Promise((resolve) => child.once("exit", () => resolve())); }
@@ -46,8 +48,8 @@ test("the human flow carries Main facts in one join file and does not ask for th
   const sourceStateHome = join(root, "source-state"), targetStateHome = join(root, "target-state");
   const sourceCatalog = join(sourceStateHome, "alu-dock", "catalog.json"), targetCatalog = join(targetStateHome, "alu-dock", "catalog.json");
   const sourceSocket = join(root, "source.sock"), targetSocket = join(root, "target.sock"), joinFilePath = join(root, "subhost.join");
-  const sourceEnv = { ...process.env, HOME: join(root, "source-home"), XDG_STATE_HOME: sourceStateHome, XDG_DATA_HOME: join(root, "source-data") };
-  const targetEnv = { ...process.env, HOME: join(root, "target-home"), XDG_STATE_HOME: targetStateHome, XDG_DATA_HOME: join(root, "target-data") };
+  const sourceEnv = isolatedProcessEnvironment(join(root, "source-home"), { XDG_STATE_HOME: sourceStateHome, XDG_DATA_HOME: join(root, "source-data") });
+  const targetEnv = isolatedProcessEnvironment(join(root, "target-home"), { XDG_STATE_HOME: targetStateHome, XDG_DATA_HOME: join(root, "target-data") });
   await Promise.all([mkdir(sourceEnv.HOME as string, { recursive: true }), mkdir(targetEnv.HOME as string, { recursive: true })]);
   const machinePort = await freePort();
   await new MachineSettingsState(machineSettingsStateRoot(sourceCatalog)).writeMainConnections({ enabled: false, port: machinePort });
@@ -75,7 +77,7 @@ test("the human flow carries Main facts in one join file and does not ask for th
 test("an expired unfinished enrollment can be cancelled back to Main without another join file", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-subhost-expired-"));
   const stateHome = join(root, "state-home"), catalog = join(stateHome, "alu-dock", "catalog.json"), socketPath = join(root, "main.sock");
-  const env = { ...process.env, HOME: join(root, "home"), XDG_STATE_HOME: stateHome, XDG_DATA_HOME: join(root, "data-home") };
+  const env = isolatedProcessEnvironment(join(root, "home"), { XDG_STATE_HOME: stateHome, XDG_DATA_HOME: join(root, "data-home") });
   await mkdir(env.HOME as string, { recursive: true });
   const host = spawn(process.execPath, [cli, "--socket", socketPath, "serve", "--dev", "--state", catalog], { env, stdio: ["ignore", "pipe", "pipe"] });
   context.after(async () => { await stop(host); await rm(root, { recursive: true, force: true }); });
@@ -128,26 +130,60 @@ async function waitMachine(client: DockClient, available: boolean): Promise<stri
 async function waitInstance(client: DockClient, operationId: string, id?: string): Promise<Awaited<ReturnType<DockClient["list"]>>[number]> { const deadline = Date.now() + 10_000; while (Date.now() < deadline) { try { const found = (await client.list("all")).find((item) => item.creationOperationId === operationId && (id === undefined || item.id === id)); if (found && found.lifecycle === "active") return found; } catch {} await new Promise((resolve) => setTimeout(resolve, 30)); } throw new Error(`instance ${operationId} did not appear`); }
 async function containsBytes(root: string, expected: Buffer): Promise<boolean> { try { for (const entry of await readdir(root, { withFileTypes: true })) { const path = join(root, entry.name); if (entry.isDirectory()) { if (await containsBytes(path, expected)) return true; } else if (entry.isFile()) { const bytes = await readFile(path); if (bytes.equals(expected)) return true; } } } catch {} return false; }
 
-// Paused until card #351: this Host's Pi Worker uses the real ~/.pi/agent (settings, credentials,
-// extensions) and leaves a session folder there on every run.
-test("Main toggles SubHost connections live while native Pi work stays alive offline", { skip: "paused until #351 isolates its Pi Worker from the real Pi directory" }, async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "alu-machine-cli-"));
-  const workspace = join(root, "workspace"); await mkdir(workspace);
+function waitFixtureReady(child: ChildProcess, label: string): { ready: Promise<void>; stderr: () => string } {
+  let output = "", error = "";
+  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+  child.stderr?.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+  const ready = (async () => {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) { if (output.includes('"kind":"ready"')) return; if (child.exitCode !== null) throw new Error(`${label} exited: ${error}`); await new Promise((resolve) => setTimeout(resolve, 25)); }
+    throw new Error(`${label} did not become ready: ${error}`);
+  })();
+  return { ready, stderr: () => error };
+}
+
+test("a SubHost started from the command line waits for Main and keeps its identity after an ordinary restart", async (context) => {
+  // Card #351: no Work is created here. A Worker started by a CLI Host takes the developer's login-shell environment.
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-cli-restart-"));
   const mainCatalog = join(root, "main-state", "alu-dock", "catalog.json"), subCatalog = join(root, "sub", "catalog.json"), joinFile = join(root, "join.json"), socketPath = join(root, "main.sock");
-  const mainPort = await freePort(), proxyPort = await freePort();
-  const mainEnv = { ...process.env, HOME: join(root, "main-home"), XDG_STATE_HOME: join(root, "main-state"), XDG_DATA_HOME: join(root, "main-data") };
-  const subEnv = { ...process.env, HOME: join(root, "sub-home"), XDG_STATE_HOME: join(root, "sub-state"), XDG_DATA_HOME: join(root, "sub-data") };
-  const machineSettings = new MachineSettingsState(machineSettingsStateRoot(mainCatalog));
-  const subHostSettings = new MachineSettingsState(machineSettingsStateRoot(subCatalog));
-  await subHostSettings.switchToSubHost({ mainAddress: "::1", port: proxyPort, name: "Fixture SubHost" });
+  const mainPort = await freePort();
+  const mainEnv = isolatedProcessEnvironment(join(root, "main-home"), { XDG_STATE_HOME: join(root, "main-state"), XDG_DATA_HOME: join(root, "main-data") });
+  const subEnv = isolatedProcessEnvironment(join(root, "sub-home"), { XDG_STATE_HOME: join(root, "sub-state"), XDG_DATA_HOME: join(root, "sub-data") });
+  await new MachineSettingsState(machineSettingsStateRoot(subCatalog)).switchToSubHost({ mainAddress: "::1", port: mainPort, name: "Fixture SubHost" });
   await run(["machine", "join-file", "--state", mainCatalog, "--out", joinFile], mainEnv);
-  const proxy = new TcpProxy(proxyPort, mainPort); await proxy.start();
   const children: ChildProcess[] = [];
-  context.after(async () => { await proxy.stop(); for (const child of children.reverse()) await stop(child); await rm(root, { recursive: true, force: true }); });
+  context.after(async () => { for (const child of children.reverse()) await stop(child); await rm(root, { recursive: true, force: true }); });
 
   let sub = spawn(process.execPath, [cli, "serve", "--dev", "--state", subCatalog, "--join-file", joinFile], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(sub);
   await waitReady(sub, "SubHost");
   assert.equal(sub.exitCode, null, "SubHost stays alive before Main exists");
+
+  const main = spawn(process.execPath, [cli, "--socket", socketPath, "serve", "--dev", "--state", mainCatalog, "--machine-port", String(mainPort)], { env: mainEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(main);
+  await waitReady(main, "Main");
+  const client = new DockClient({ socketPath, timeoutMs: 5_000 });
+  const hostId = await waitMachine(client, true);
+  await stop(sub);
+  await waitMachine(client, false);
+  sub = spawn(process.execPath, [cli, "serve", "--dev", "--state", subCatalog], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(sub);
+  await waitReady(sub, "saved-role SubHost restart");
+  assert.equal(await waitMachine(client, true), hostId, "ordinary restart must retain the enrolled SubHost identity");
+});
+
+test("Main toggles SubHost connections live while SubHost Pi work stays alive offline", async (context) => {
+  // Card #351: Main runs from the CLI. The Pi Work lives on the test SubHost process, whose Worker
+  // receives an explicit temporary environment instead of the developer's login shell.
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-cli-"));
+  const workspace = join(root, "workspace"), subHome = join(root, "sub-home"), subAgentDir = join(root, "sub-pi"), subSessions = join(root, "sub-sessions");
+  await Promise.all([mkdir(workspace), mkdir(subHome), mkdir(subAgentDir), mkdir(subSessions)]);
+  const mainCatalog = join(root, "main-state", "alu-dock", "catalog.json"), subCatalog = join(root, "sub", "catalog.json"), joinFile = join(root, "join.json"), socketPath = join(root, "main.sock");
+  const mainPort = await freePort(), proxyPort = await freePort();
+  const mainEnv = isolatedProcessEnvironment(join(root, "main-home"), { XDG_STATE_HOME: join(root, "main-state"), XDG_DATA_HOME: join(root, "main-data") });
+  const subEnv = isolatedProcessEnvironment(subHome, { PI_CODING_AGENT_DIR: subAgentDir });
+  const machineSettings = new MachineSettingsState(machineSettingsStateRoot(mainCatalog));
+  await run(["machine", "join-file", "--state", mainCatalog, "--out", joinFile], mainEnv);
+  const proxy = new TcpProxy(proxyPort, mainPort); await proxy.start();
+  const children: ChildProcess[] = [];
+  context.after(async () => { await proxy.stop(); for (const child of children.reverse()) await stop(child); await rm(root, { recursive: true, force: true }); });
 
   const startMain = async (withPort = false): Promise<ChildProcess> => {
     const args = [cli, "--socket", socketPath, "serve", "--dev", "--state", mainCatalog];
@@ -163,20 +199,20 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   assert.match(machinesOutput, /Machines/u);
   assert.match(machinesOutput, /SubHost Connections · On/u);
   assert.equal((await machineSettings.read()).main.port, mainPort, machinesOutput.slice(-2_000));
-  const hostId = await waitMachine(client, true);
-  await stop(sub);
-  await waitMachine(client, false);
-  sub = spawn(process.execPath, [cli, "serve", "--dev", "--state", subCatalog], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(sub);
-  await waitReady(sub, "saved-role SubHost restart");
-  assert.equal(await waitMachine(client, true), hostId, "ordinary restart must retain the enrolled SubHost identity");
-  const created = await client.create(workspace, "CLI remote Pi", "cli-remote-create", undefined, hostId);
-  assert.notEqual(created.id, "cli-remote-create");
+
+  const sub = spawn(process.execPath, [subHostFixture, subCatalog, workspace, "::1", String(proxyPort), joinFile, "real-pi-dock-tools", subAgentDir, subSessions, subHome], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] });
+  children.push(sub);
+  const subReady = waitFixtureReady(sub, "SubHost");
+  await subReady.ready;
+  await waitMachine(client, true);
+  const created = await waitInstance(client, "native-create").catch((error) => { throw new Error(`${String(error)}; SubHost stderr: ${subReady.stderr()}`); });
   assert.equal(created.executor.kind, "pi-sdk");
 
   const attachment = Buffer.from("stored only by SubHost");
   await client.uploadAttachment({ name: "subhost.bin", sizeBytes: attachment.length, sha256: (await import("node:crypto")).createHash("sha256").update(attachment).digest("hex"), async *open() { yield attachment; } }, "cli-upload", created.id);
-  assert.equal(await containsBytes(join(root, "sub-data"), attachment), true);
+  assert.equal(await containsBytes(dirname(subCatalog), attachment), true);
   assert.equal(await containsBytes(join(root, "main-data"), attachment), false);
+  assert.equal(await containsBytes(join(root, "main-state"), attachment), false);
 
   const beforeOffline = await client.status(created.id);
   await machineSettings.writeMainConnections({ enabled: false, port: mainPort });
@@ -193,7 +229,7 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   assert.equal(sub.exitCode, null);
   await new Promise((resolve) => setTimeout(resolve, 300));
   const secondMain = await startMain(true); client = new DockClient({ socketPath, timeoutMs: 5_000 });
-  const stable = await waitInstance(client, "cli-remote-create", created.id);
+  const stable = await waitInstance(client, "native-create", created.id);
   assert.equal(stable.id, created.id);
   const listenerStatus = await machineSettings.readMainListenerStatus();
   assert.equal(listenerStatus?.state, "listening", "an explicit development port stays visible in Machines");
@@ -205,7 +241,7 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   await client.stop(created.id, "offline-main-stop");
   await proxy.start();
   await waitMachine(client, true);
-  const remapped = await waitInstance(client, "cli-remote-create");
+  const remapped = await waitInstance(client, "native-create");
   assert.notEqual(remapped.id, created.id);
   assert.equal(sub.exitCode, null);
 
