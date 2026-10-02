@@ -37,8 +37,8 @@
     "install:local": "npm run build && node dist/scripts/install-local.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "https://github.com/aruru-project/pi/releases/download/dock-v0.85.1-dock.3/earendil-works-pi-coding-agent-0.85.1-dock.3.tgz",
-    "@earendil-works/pi-tui": "https://github.com/aruru-project/pi/releases/download/dock-v0.85.1-dock.3/earendil-works-pi-tui-0.85.1-dock.3.tgz",
+    "@earendil-works/pi-coding-agent": "https://github.com/aruru-project/pi/releases/download/dock-v0.99.2-dock.1/earendil-works-pi-coding-agent-0.99.2-dock.1.tgz",
+    "@earendil-works/pi-tui": "https://github.com/aruru-project/pi/releases/download/dock-v0.99.2-dock.1/earendil-works-pi-tui-0.99.2-dock.1.tgz",
     "@peculiar/x509": "2.0.0",
     "fast-srp-hap": "2.0.4",
     "reflect-metadata": "0.2.2",

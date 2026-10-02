@@ -93,6 +93,8 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
         // Any earlier message may be summarized once a reply reports a nearly full context.
         compaction: { enabled: true, keepRecentTokens: 1 },
       }), "utf8"),
+      // An installed extension may be stale for the new Pi; it must not stop the Worker.
+      writeFile(join(agentDir, "extensions", "sdk-compat-broken.ts"), "throw new Error(\"SDK_COMPAT_BROKEN: this extension fails to load\");\nexport default function () {}\n", "utf8"),
       writeFile(join(agentDir, "extensions", "sdk-compat-hooks.ts"), `
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 export default function (pi) {
@@ -162,6 +164,9 @@ export default function (pi) {
     assert.equal(workerPids.length, 1);
     assert.notEqual(workerPids[0], process.pid, "Pi must run in an independent OS process");
     assert.deepEqual(created.executor.model, { provider: PROVIDER, id: MODEL });
+    // The broken extension is reported; the Worker and the other extension carry on (the rest of this gate).
+    const loadedResources = await client.resources(created.id);
+    assert.ok(loadedResources.diagnostics.some((diagnostic) => diagnostic.message.includes("SDK_COMPAT_BROKEN")), "an extension that fails to load is reported");
     const models = await client.models(created.id);
     assert.ok(models.models.some((model) => model.provider === PROVIDER && model.id === MODEL));
     assert.deepEqual(models.instance.executor.model, { provider: PROVIDER, id: MODEL });
