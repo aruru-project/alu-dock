@@ -3,7 +3,7 @@ import { computed, onUnmounted, reactive, watch, type Directive } from 'vue'
 import { RefreshCw } from '@lucide/vue'
 import ConversationRow from './ConversationRow.vue'
 import ConversationTurnSummary from './ConversationTurnSummary.vue'
-import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnHidingAnchor, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
+import { conversationRows, conversationSections, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnHidingAnchor, type ConversationRow as RowItem, type ConversationSection, type ConversationTurnSection } from '../lib/conversationPresentation'
 import type { ConversationImageResource, ConversationItem, ConversationProcessItem, ShellRunItem } from '../lib/types'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
@@ -24,10 +24,13 @@ const props = defineProps<{
   holdReadingPosition: (change: () => void) => void
   /** The saved reading entry the viewport is still waiting to find after a rebuild. */
   restoringAnchorId: () => string | undefined
+  /** Whether a record read on open is still being read, or could not be read. */
+  recordState: (entryId: string) => { loading: boolean; error?: string }
 }>()
 
 const emit = defineEmits<{
   readInterest: [entryIds: string[]]
+  retryRecord: [entryId: string]
   loadEarlier: []
   retryHistory: []
   toolToggle: [id: string, event: Event]
@@ -66,6 +69,18 @@ const vReadInterest: Directive<HTMLElement, string[] | undefined> = {
   unmounted(element) { observer?.unobserve(element); sources.delete(element); visible.delete(element); publishInterest() },
 }
 onUnmounted(() => observer?.disconnect())
+
+// A record whose text is read on open (a whole system prompt, a model-context
+// replacement) is wanted only once the reader opens its panel; folded, it is
+// never read, however close to the viewport it sits.
+const openedRecords = reactive(new Set<string>())
+function recordToggled(id: string, open: boolean) {
+  if (open) openedRecords.add(id)
+  else openedRecords.delete(id)
+}
+function interestOf(row: RowItem): string[] | undefined {
+  return row.kind === 'record' && row.readOnOpen && !openedRecords.has(row.id) ? [] : row.sourceEntryIds
+}
 
 const rows = computed((previous?: ReturnType<typeof conversationRows>) => {
   const prior = new Map(previous?.map((row) => [row.id, row]))
@@ -116,16 +131,19 @@ function bodyRows(section: ConversationTurnSection) {
     </div>
     <template v-for="section in sections" :key="section.id">
       <template v-if="section.kind === 'turn'">
-        <ConversationRow v-for="row in section.openers" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+        <ConversationRow v-for="row in section.openers" :key="row.id" v-read-interest="interestOf(row)" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource" :record-state="recordState"
+          @record-toggle="recordToggled" @retry-record="emit('retryRecord', $event)"
           @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
           @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" @shell-quote="emit('shellQuote', $event)" />
         <ConversationTurnSummary :section="section" :open="turnOpen(section)" @toggle="toggleTurn(section)" />
-        <ConversationRow v-for="row in bodyRows(section)" :key="row.id" v-read-interest="row.sourceEntryIds" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+        <ConversationRow v-for="row in bodyRows(section)" :key="row.id" v-read-interest="interestOf(row)" :row="row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource" :record-state="recordState"
           :collapsed="!turnOpen(section)" :final-row="row.id === section.finalRowId"
+          @record-toggle="recordToggled" @retry-record="emit('retryRecord', $event)"
           @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
           @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" @shell-quote="emit('shellQuote', $event)" />
       </template>
-      <ConversationRow v-else v-read-interest="section.row.sourceEntryIds" :row="section.row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource"
+      <ConversationRow v-else v-read-interest="interestOf(section.row)" :row="section.row" :streaming-parts="streamingParts" :attachment-previews="attachmentPreviews" :tool-open="toolOpen" :image-resource="imageResource" :record-state="recordState"
+        @record-toggle="recordToggled" @retry-record="emit('retryRecord', $event)"
         @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)"
         @attachment-preview="(id, name) => emit('attachmentPreview', id, name)" @open-text="(title, text, markdown) => emit('openText', title, text, markdown)" @shell-quote="emit('shellQuote', $event)" />
     </template>

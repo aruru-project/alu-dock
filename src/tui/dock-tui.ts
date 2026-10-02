@@ -1,4 +1,4 @@
-import type { InstanceDeliveryContext } from "../control/dock-client.js";
+import type { ConversationReadContext, InstanceDeliveryContext } from "../control/dock-client.js";
 import { DocumentReader } from "./document-reader.js";
 import { randomUUID } from "node:crypto";
 
@@ -20,18 +20,20 @@ import { humanInstanceStatus } from "../core/instance-display-name.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, DiagnosticDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, EventCursor, HistoryEntryDto, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
+import type { ConversationHistoryEntryDto } from "../core/instance-dto.js";
+import { systemPromptBlockLabel, systemPromptChangeDetail, systemPromptChangeText } from "../core/runtime-record-text.js";
 import {
   THINKING_LEVELS,
   type AgentModelInfo,
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
-import { ABORT_RESTORE_QUEUE_CAPABILITY, type AbortRestoreQueueResult } from "../control/protocol.js";
+import { ABORT_RESTORE_QUEUE_CAPABILITY, MAX_CONVERSATION_HISTORY_ITEMS, type AbortRestoreQueueResult } from "../control/protocol.js";
 import { humanControlErrorText, humanErrorText } from "../human-control-error.js";
 import { humanRelativeTime } from "../human-time.js";
 import { sessionDisplayName } from "../session-display.js";
 import { ActivityPulseController } from "./activity-pulse.js";
-import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "./conversation.js";
+import { contextEditTarget, DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { ExtensionWidgetSurface } from "./extension-widget-surface.js";
 import { drainFullHistory, HISTORY_PAGE_SIZE, reconcileFlowingEvents } from "./history-pagination.js";
@@ -592,6 +594,10 @@ export async function runDockTui(
     }
     if (text === "/resources") {
       await showResources();
+      return;
+    }
+    if (text === "/context-changes") {
+      await showContextChanges();
       return;
     }
     if (["/install", "/config", "/login"].some((command) => text === command || text.startsWith(`${command} `))) {
@@ -1682,6 +1688,93 @@ export async function runDockTui(
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
+  /** System prompt and model-context changes are recorded outside the chat; read one in full. */
+  async function showContextChanges(): Promise<void> {
+    blockEditorSubmit();
+    showStatus("reading context changes");
+    tui.requestRender();
+    try {
+      // One read view for the whole scan and the records opened from it.
+      const view: ConversationReadContext = {};
+      const changes: ConversationHistoryEntryDto[] = [];
+      // Only what names an edited record is kept for the whole conversation, not its text.
+      const records = new Map<string, HistoryEntryDto>();
+      let cursor: string | undefined;
+      let read = 0;
+      do {
+        const page = await client.conversationHistory(instance.id, cursor, MAX_CONVERSATION_HISTORY_ITEMS, view);
+        for (const item of [...page.entries].reverse()) {
+          records.set(item.entry.entryId, { ...item.entry, content: [] });
+          if (item.entry.systemPrompt !== undefined || item.entry.contextEdit === "replace") changes.push(item);
+        }
+        read += page.entries.length;
+        cursor = page.hasEarlier ? page.nextCursor : undefined;
+        if (cursor !== undefined) { showStatus(`reading context changes · ${read.toLocaleString()} records read`); tui.requestRender(); }
+      } while (cursor !== undefined);
+      if (changes.length === 0) {
+        conversation.addNotice("This conversation has no system prompt or model context changes yet.");
+        showStatus("no context changes");
+        return;
+      }
+      showStatus(`${changes.length} context ${changes.length === 1 ? "change" : "changes"}`);
+      const items = changes.map((item, index) => ({
+        value: String(index),
+        label: item.entry.systemPrompt
+          ? systemPromptChangeText(item.entry.systemPrompt)
+          : `Model context: ${contextEditTarget(item.entry.targetEntryId === undefined ? undefined : records.get(item.entry.targetEntryId))} was replaced`,
+        description: item.entry.timestamp ? humanRelativeTime(item.entry.timestamp) : undefined,
+      }));
+      let selected: string | undefined;
+      while (true) {
+        selected = await showChoicePicker("Context changes · newest first", items, selected);
+        const change = selected === undefined ? undefined : changes[Number(selected)];
+        if (!change) break;
+        const reader = new DocumentReader(
+          change.entry.systemPrompt ? "System prompt change" : "Model context replacement",
+          true,
+          () => Math.max(4, Math.floor(terminal.rows * 0.9) - 2),
+          () => tui.requestRender(),
+          { origin: "as recorded in this conversation", failure: "Couldn't read this change. The conversation may have moved on; run /context-changes again." },
+        );
+        let close!: () => void;
+        const closed = new Promise<void>((resolve) => { close = resolve; });
+        reader.onClose = close;
+        const frame = new WorkModalFrame(reader);
+        const overlay = tui.showOverlay(frame, { width: "96%", maxHeight: "94%", anchor: "center", margin: 0 });
+        tui.setFocus(frame);
+        void reader.load((signal) => readRecordText(change, view, signal));
+        try { await closed; }
+        finally { reader.dispose(); overlay.hide(); }
+      }
+    } catch (error) { showError(error); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  /**
+   * A history preview can be shortened; the rest of the record is read through its content
+   * reference. A system prompt change lists everything it changes first, then each recorded
+   * text under what it is.
+   */
+  async function readRecordText(item: ConversationHistoryEntryDto, view: ConversationReadContext, signal: AbortSignal): Promise<{ text: string }> {
+    const blocks = item.entry.content.map((block) => block.type === "text" || block.type === "thinking" ? block.text : "");
+    if (!item.contentComplete) {
+      blocks.length = 0;
+      let cursor: string | undefined;
+      do {
+        signal.throwIfAborted();
+        const page = await client.conversationContent(instance.id, item.contentRef, cursor, view);
+        for (const chunk of page.chunks) {
+          if (chunk.type === "text" || chunk.type === "thinking") blocks[chunk.blockIndex] = `${blocks[chunk.blockIndex] ?? ""}${chunk.text}`;
+        }
+        cursor = page.complete ? undefined : page.nextCursor;
+      } while (cursor !== undefined);
+    }
+    const change = item.entry.systemPrompt;
+    if (change === undefined) return { text: blocks.filter((block) => block.length > 0).join("\n\n") };
+    const texts = blocks.flatMap((block, index) => block.length > 0 ? [`${systemPromptBlockLabel(change.blocks[index])}\n${"─".repeat(24)}\n${block}`] : []);
+    return { text: [systemPromptChangeDetail(change), ...texts].join("\n\n") };
+  }
+
   async function switchModel(provider: string, modelId: string): Promise<void> {
     blockEditorSubmit();
     showStatus(`switching to ${provider}/${modelId}`);
@@ -2425,6 +2518,7 @@ export function workHelpText(): string {
     "  /settings [KEY VALUE]     inspect or update settings",
     "  /reload                   reload Pi files and commands",
     "  /resources                inspect loaded Pi files and warnings",
+    "  /context-changes          read system prompt and model context changes",
     "WORK",
     "  /steer MESSAGE            redirect the current response",
     "  /follow MESSAGE           send after the current response",
@@ -2468,6 +2562,7 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     { name: "clone", description: "clone the current conversation point into a new Pi session" },
     { name: "compact", description: "shorten conversation context", argumentHint: "INSTRUCTIONS" },
     { name: "config", description: "show the separate Pi CLI command" },
+    { name: "context-changes", description: "read system prompt and model context changes" },
     { name: "detach", description: "leave Work while the work keeps running" },
     { name: "follow", description: "send a message after the current response", argumentHint: "MESSAGE" },
     { name: "fork", description: "choose an earlier prompt and return it to the editor" },

@@ -224,7 +224,8 @@ export const useConversationStore = defineStore('conversation', () => {
   }
 
   const retryHistoryEntry = conversationSession.retry
-  const retryConversationHydration = () => conversationSession.retry()
+  /** Retry every failed read, or one record's when the reader retries from its panel. */
+  const retryConversationHydration = (entryId?: string) => conversationSession.retry(entryId)
   const loadEarlierHistory = conversationSession.loadEarlier
   const requestFullRecords = conversationSession.requestFull
 

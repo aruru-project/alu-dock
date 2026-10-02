@@ -38,7 +38,12 @@ import {
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
   MAX_STOP_CLEANUP_ERROR_CHARS,
   MAX_STOP_CLEANUP_ERRORS,
+  MAX_RECORD_USAGE_TEXT_CHARS,
+  MAX_SYSTEM_PROMPT_NAME_CHARS,
   type ConversationImageBody,
+  type RecordUsageDto,
+  type SystemPromptBlockDto,
+  type SystemPromptChangeDto,
 } from "../core/instance-dto.js";
 import {
   MAX_DOCK_TRANSFER_BYTES,
@@ -2768,7 +2773,7 @@ export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDt
     "stopReason", "error", "toolCallId", "toolName", "isError", "customType", "display", "metadata",
     "metadataOmittedFields", "command", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext",
     "firstKeptEntryId", "tokensBefore", "fromEntryId", "targetEntryId", "label", "provider", "modelId",
-    "thinkingLevel", "name",
+    "thinkingLevel", "name", "systemPrompt", "usage", "contextEdit",
   ]);
   const exitCode = entry.exitCode === undefined
     ? undefined
@@ -2809,6 +2814,46 @@ export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDt
     modelId: optionalString(entry.modelId, `${field}.modelId`, 512),
     thinkingLevel: optionalString(entry.thinkingLevel, `${field}.thinkingLevel`, 64),
     name: optionalString(entry.name, `${field}.name`, 256),
+    ...(entry.systemPrompt === undefined ? {} : { systemPrompt: parseSystemPromptChange(entry.systemPrompt, `${field}.systemPrompt`) }),
+    ...(entry.usage === undefined ? {} : { usage: parseRecordUsage(entry.usage, `${field}.usage`) }),
+    ...(entry.contextEdit === undefined ? {} : { contextEdit: enumeration(entry.contextEdit, `${field}.contextEdit`, ["omit", "replace"] as const) }),
+  };
+}
+
+function parseSystemPromptChange(input: unknown, field: string): SystemPromptChangeDto {
+  const value = object(input, field);
+  exact(value, ["sections", "removedSections", "toolsAdded", "toolsRemoved", "blocks"]);
+  const names = (key: "sections" | "removedSections" | "toolsAdded" | "toolsRemoved") => array(value[key], `${field}.${key}`, MAX_CONVERSATION_CONTENT_BLOCKS)
+    .map((name, index) => string(name, `${field}.${key}[${index}]`, MAX_SYSTEM_PROMPT_NAME_CHARS));
+  const blocks = array(value.blocks, `${field}.blocks`, MAX_CONVERSATION_CONTENT_BLOCKS).map((item, index): SystemPromptBlockDto => {
+    const block = object(item, `${field}.blocks[${index}]`);
+    const kind = enumeration(block.kind, `${field}.blocks[${index}].kind`, ["instructions", "section", "tool"] as const);
+    if (kind === "instructions") { exact(block, ["kind"]); return { kind }; }
+    exact(block, ["kind", "name"]);
+    return { kind, name: string(block.name, `${field}.blocks[${index}].name`, MAX_SYSTEM_PROMPT_NAME_CHARS) };
+  });
+  return { sections: names("sections"), removedSections: names("removedSections"), toolsAdded: names("toolsAdded"), toolsRemoved: names("toolsRemoved"), blocks };
+}
+
+function parseRecordUsage(input: unknown, field: string): RecordUsageDto {
+  const value = object(input, field);
+  exact(value, ["kind", "tokens", "cost", "note"]);
+  const tokens = object(value.tokens, `${field}.tokens`);
+  exact(tokens, ["input", "output", "cacheRead", "cacheWrite", "total"]);
+  const cost = finiteNumber(value.cost, `${field}.cost`);
+  if (cost < 0) throw validation("invalid_response", `${field}.cost must be non-negative`);
+  const note = optionalString(value.note, `${field}.note`, MAX_RECORD_USAGE_TEXT_CHARS);
+  return {
+    kind: string(value.kind, `${field}.kind`, MAX_RECORD_USAGE_TEXT_CHARS),
+    tokens: {
+      input: unsigned(tokens.input, `${field}.tokens.input`),
+      output: unsigned(tokens.output, `${field}.tokens.output`),
+      cacheRead: unsigned(tokens.cacheRead, `${field}.tokens.cacheRead`),
+      cacheWrite: unsigned(tokens.cacheWrite, `${field}.tokens.cacheWrite`),
+      total: unsigned(tokens.total, `${field}.tokens.total`),
+    },
+    cost,
+    ...(note === undefined ? {} : { note }),
   };
 }
 

@@ -14,7 +14,8 @@ import { useSurfacesStore } from '../stores/surfaces'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const conversationStore = useConversationStore()
-const { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyError } = storeToRefs(conversationStore)
+const { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyHydrationActiveEntries, historyHydrationErrors, historyError } = storeToRefs(conversationStore)
+const recordState = (entryId: string) => ({ loading: historyHydrationActiveEntries.value.has(entryId), error: historyHydrationErrors.value[entryId] })
 const { setReadInterest, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration } = conversationStore
 const observation = useObservationStore()
 const { loading: conversationLoading, error: conversationError, status: observationStatus } = storeToRefs(observation)
@@ -66,9 +67,11 @@ const { appendShellQuote } = useInputStore()
       :image-resource="imageResource"
       :hold-reading-position="holdReadingPosition"
       :restoring-anchor-id="restoringAnchorId"
+      :record-state="recordState"
       @read-interest="setReadInterest"
+      @retry-record="retryConversationHydration"
       @load-earlier="loadEarlierHistory"
-      @retry-history="retryConversationHydration"
+      @retry-history="retryConversationHydration()"
       @tool-toggle="rememberToolDetail"
       @image-request="requestConversationImage"
       @image-preview="openImagePreview"

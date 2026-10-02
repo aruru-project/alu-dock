@@ -231,6 +231,15 @@ pub struct HistoryRecord {
     pub model_id: Option<String>,
     pub thinking_level: Option<String>,
     pub name: Option<String>,
+    /// System prompt record: the sections and tools it changes. Passed to the view as the Host sent it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<Value>,
+    /// Usage record: the cost of a request made outside the conversation, such as cache warming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+    /// Context edit record: whether `target_entry_id` left (`omit`) or was replaced in what the model sees.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_edit: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -634,6 +643,22 @@ mod tests {
             "content": [],
             "attachments": attachments
         })
+    }
+
+    #[test]
+    fn system_prompt_cost_and_context_edit_facts_reach_the_view() {
+        // Card #347: the view describes these records from these fields; dropping one hides the record.
+        let mut value = history_with(serde_json::json!(null));
+        value.as_object_mut().unwrap().remove("attachments");
+        value["systemPrompt"] = serde_json::json!({"sections": ["preamble"], "removedSections": [], "toolsAdded": ["read"], "toolsRemoved": [], "blocks": [{"kind": "section", "name": "preamble"}, {"kind": "tool", "name": "read"}]});
+        value["usage"] = serde_json::json!({"kind": "cache_warm", "tokens": {"input": 0, "output": 1, "cacheRead": 9, "cacheWrite": 0, "total": 10}, "cost": 0.0042});
+        value["contextEdit"] = serde_json::json!("omit");
+        value["targetEntryId"] = serde_json::json!("entry-0");
+        let record: HistoryRecord = serde_json::from_value(value.clone()).unwrap();
+        let view = serde_json::to_value(&record).unwrap();
+        for field in ["systemPrompt", "usage", "contextEdit", "targetEntryId"] {
+            assert_eq!(view[field], value[field], "{field}");
+        }
     }
 
     #[test]

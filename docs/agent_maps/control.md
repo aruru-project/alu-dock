@@ -252,7 +252,7 @@ TS 默认 read/follow 不变；传入并复用 `InstanceDeliveryContext`（或 s
 - `recentHistory`：Worker 产生的当前分支权威持久 record；
 - `page.events`：尚未被 Worker persistence checkpoint 接住的 active conversation frame，以及仍在等待的 interaction。
 
-持久 record 使用通用的 `recordId / kind / source / visibility / content / metadata` shape。Worker adapter 保留 Agent 的 message、tool、custom message、bash、compaction/branch summary 和 session metadata 语义；Host 不把它们压成 role，也不按文本或 tool 内容猜测 live frame 是否已经持久化。
+持久 record 使用通用的 `recordId / kind / source / visibility / content / metadata` shape。Worker adapter 保留 Agent 的 message、tool、custom message、bash、compaction/branch summary 和 session metadata 语义；Host 不把它们压成 role，也不按文本或 tool 内容猜测 live frame 是否已经持久化。系统提示变化、对话之外的费用和模型上下文改动沿用已有 kind（`message`/`system` 与 runtime `custom`），只增加可选字段 `systemPrompt`、`usage`、`contextEdit`（见 [runtime.md](runtime.md#pi-adapter)），因此不认识它们的客户端照旧跳过这些 metadata record；会话树也不为它们增加节点类型。
 
 `instance.follow` 从 read boundary 开始补齐后续事件并持续跟随。保有本地画面且 cursor 连续时，客户端只消费 `event_log` replay 和 follow；不重新拉取历史。event ring 截断、Host epoch 改变、runtime generation 改变或本地状态丢失时，客户端丢弃旧 conversation，重新读取完整 bootstrap。不得把两次 history 读取边界拼成一个会话。普通 `session.history` page 与 bootstrap seed 都携带 Host `historyRevision`；分页中 revision 改变时客户端必须放弃该次 scan 并重新 bootstrap。History 只在完整语义单元之间分页：包含 tool call 的 Assistant record 与已经持久化的对应 tool-result records 不得被 record limit 或 Host 传输裁剪拆到两页。请求的 limit 是目标 record 数，单个完整语义单元可以使响应超过该数。
 

@@ -79,6 +79,36 @@ export type ConversationRecordKind =
 export type ConversationRecordSource = "user" | "assistant" | "tool" | "system" | "extension" | "runtime";
 export type ConversationRecordVisibility = "conversation" | "metadata" | "hidden";
 
+/** Longest section or tool name a system prompt record lists. */
+export const MAX_SYSTEM_PROMPT_NAME_CHARS = 256;
+/** What one text block of a system prompt record is: the instruction text, a section's new text, or an added tool's definition as JSON. */
+export type SystemPromptBlockDto = { kind: "instructions" } | { kind: "section" | "tool"; name: string };
+/**
+ * What one system prompt record changes, by name, and what each of its text
+ * blocks is. The texts are read on demand; `blocks[i]` names content block i.
+ * A section set to an empty text is listed in `sections` but has no block.
+ * Lists hold at most MAX_CONVERSATION_CONTENT_BLOCKS entries.
+ */
+export interface SystemPromptChangeDto {
+  sections: string[];
+  removedSections: string[];
+  toolsAdded: string[];
+  toolsRemoved: string[];
+  blocks: SystemPromptBlockDto[];
+}
+
+/** Longest usage kind or note a usage record carries. */
+export const MAX_RECORD_USAGE_TEXT_CHARS = 256;
+/** A paid request recorded outside the conversation, such as cache warming. */
+export interface RecordUsageDto {
+  /** The Agent's own category, for example "cache_warm". */
+  kind: string;
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  /** Total cost in dollars. */
+  cost: number;
+  note?: string;
+}
+
 /** One authoritative persisted conversation/session record produced by the Worker adapter. */
 export interface ConversationRecordDto {
   recordId: string;
@@ -115,6 +145,16 @@ export interface ConversationRecordDto {
   modelId?: string;
   thinkingLevel?: string;
   name?: string;
+  /** On a system message record: the prompt sections and tools it changes. */
+  systemPrompt?: SystemPromptChangeDto;
+  /** On a runtime usage record; provider and modelId name the model that was paid for. */
+  usage?: RecordUsageDto;
+  /**
+   * On a runtime context edit record: targetEntryId leaves ("omit") or is
+   * replaced by this record's content ("replace") in what the model sees.
+   * The conversation keeps the original record.
+   */
+  contextEdit?: "omit" | "replace";
 }
 
 /** Paginated session history and conversation history expose the same canonical record. */
