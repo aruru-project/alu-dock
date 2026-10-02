@@ -1422,22 +1422,29 @@ export class ManagedInstance {
       }
       if (result.inputKind === "prompt" && result.custody === "runtime" && result.handled === true) {
         // An extension input hook took it over: no message, queue item or run follows.
-        // A Protocol V2 receipt can only be immediate for the running command, so during
-        // another run it reads like queued input; command.handled then closes it.
+        // A Protocol V2 receipt can only be immediate for the running command, so while
+        // another command runs (or still finishes) it reads like queued input;
+        // command.handled then closes it. The Host's own command decides that, not
+        // Pi's state when the hook returned.
         handledByExtension = true;
         actuallyQueued = false;
-        const receiptQueued = actualDelivery !== "prompt";
+        let receiptQueued = actualDelivery !== "prompt";
+        let receiptDelivery = actualDelivery;
         const handledAt = this.timestamp();
         this.catalogAdmissionOperationId = undefined;
         const precedingAgentEvents = this.flushAdmissionAgentEvents();
         const handledTransition = this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
           () => {
+            if (!receiptQueued && this.state.activeCommandId !== undefined && this.state.activeCommandId !== commandId) {
+              receiptQueued = true;
+              receiptDelivery = delivery === "followUp" ? "followUp" : "steer";
+            }
             this.state.lastError = undefined;
             this.touch(handledAt);
           },
           () => {
-            this.appendEvent("command.accepted", { operationId: commandId, delivery: actualDelivery, queued: receiptQueued, acceptedAt: handledAt }, handledAt);
+            this.appendEvent("command.accepted", { operationId: commandId, delivery: receiptDelivery, queued: receiptQueued, acceptedAt: handledAt }, handledAt);
             this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
             this.appendStateEvent("command_handled_without_run", handledAt);
           },
@@ -1450,7 +1457,7 @@ export class ManagedInstance {
               instanceId: this.id,
               operationId: commandId,
               kind: "prompt",
-              delivery: actualDelivery,
+              delivery: receiptDelivery,
               queued: receiptQueued,
               acceptedAt: handledAt,
             });
@@ -1916,7 +1923,7 @@ export class ManagedInstance {
       }
     }
     const agentStartsBefore = this.agentStartCount;
-    let preflightStatus: "pending" | "accepted" | "rejected" = "pending";
+    let preflightStatus: "pending" | "accepted" | "rejected" | "returned" = "pending";
     let freshDispatch = false;
     let dispatchMayContinue = true;
     let resolvePreflight!: (accepted: boolean) => void;
@@ -1929,6 +1936,15 @@ export class ManagedInstance {
       if (!result.success || this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") {
         preflightStatus = "rejected";
         if (item.phase === "dispatching") item.phase = "host_deferred";
+        resolvePreflight(false);
+        return;
+      }
+      if (result.custody === "host") {
+        // The Agent is finishing a run. The message stays in the Host Queue, where
+        // it can be taken back, and goes over again once agent_settled arrives.
+        preflightStatus = "returned";
+        item.phase = "host_deferred";
+        this.hostQueueAwaitsSettleGeneration = generation;
         resolvePreflight(false);
         return;
       }
@@ -1985,6 +2001,8 @@ export class ManagedInstance {
         await this.dropHandledQueueItem(item);
       }
     }).catch(async (error: unknown) => {
+      // A message the Agent handed back never left the Host Queue.
+      if (preflightStatus === "returned") return;
       if (preflightStatus === "pending") {
         onPreflight({ success: false });
         await this.reportDeferredDispatchFailure(item, error, generation);
@@ -3247,16 +3265,17 @@ export class ManagedInstance {
           operationId,
           mutate: () => {
             this.agentSettledCount += 1;
-            if (outcome?.stopReason === "error") {
+            if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning || this.abortRequestedWhileRunning) {
+              // An abort during automatic compaction ends the run after the last reply,
+              // which may be completed or, while Pi recovers from an overflow, an error.
+              result = "aborted";
+              this.state.execution = "idle";
+              this.state.lastError = undefined;
+            } else if (outcome?.stopReason === "error") {
               result = "failed";
               this.state.execution = "failed";
               // Catalog status is a preview; events and history retain the full Agent error.
               this.state.lastError = truncate(outcome.errorMessage || "Pi run failed", MAX_CATALOG_LAST_ERROR_CHARS);
-            } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning || this.abortRequestedWhileRunning) {
-              // Aborting during automatic compaction ends the run after a completed reply.
-              result = "aborted";
-              this.state.execution = "idle";
-              this.state.lastError = undefined;
             } else if (!outcome) {
               result = "failed";
               this.state.execution = "failed";
@@ -3289,7 +3308,8 @@ export class ManagedInstance {
           settle: () => {
             if (this.hostQueueAwaitsSettleGeneration === undefined) return;
             this.hostQueueAwaitsSettleGeneration = undefined;
-            this.scheduleCompactionQueueDrain(false);
+            // The hand-off the Agent just returned may still be finishing; resume after it.
+            void Promise.resolve(this.compactionQueueDrainTask).then(() => this.scheduleCompactionQueueDrain(false));
           },
         };
       }

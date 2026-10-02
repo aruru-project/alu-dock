@@ -162,3 +162,24 @@ Managed Host、Worker，以及 Agent 从 Worker 中启动并继续运行的开�
 - 需要把后台子进程的归属和 instance stop/Host loss 行为定义为产品契约。
 
 未来做隔离时，先定义 Agent 启动的后台进程由谁拥有、何时继续、何时终止。调整 cgroup 归属的方案必须保持 Worker fencing、Host-loss shutdown 和用户正在运行的工作。
+
+## 插件接管或慢速处理输入时的两处偏差
+
+**保持现状；Dock 自带插件和当前安装的插件都没有 `input` 或 `agent_settled` 处理，不会触发。**
+
+### 已知边界
+
+2026-10-02 #346（Pi 0.99.2）评审时，用隔离的真实 Pi 和本机假模型确认了两处偏差：
+
+- 插件的 `input` 处理在另一轮回复进行中（含收尾期间）接管一条消息时，Protocol V2 回执只能用“已排队”的形式，随后才以 `command.handled` 结束。官方客户端命令区会显示“已加入 Queue”，`dock_send` 也会告诉发送方 Agent 消息在对方 Queue 里等待。0.85.1 起就是这样。
+- 插件的 `input` 处理较慢并最终放行一条消息，而原回复在这期间结束、另一个插件的 `agent_settled` 处理还没完成时，Pi 会在上一轮收尾结束前开始新一轮。Host 把上一轮的结束记到新消息上，上一轮收不到自己的结束；新一轮比收尾更长时，Dock 会在回复进行中显示空闲。原因在 Pi：`prompt()` 只在入口检查是否正在收尾，而它的结束事件不标明属于哪一轮，Dock 侧无法可靠纠正。
+
+代码入口：Dock `src/core/managed-instance.ts` 的 `submit`（handled 分支）与 `agent_settled` 处理；Pi `agent-session.ts` 的 `prompt()`、`_emitAgentSettled()`。
+
+### 为什么现在接受
+
+Dock 不需要兼容 Pi 插件的全部用法。这两处只影响带这类处理的插件，Dock 自己用到的部分不受影响；按主人确定的原则保持 Dock 现状，不为此改 Protocol V2 回执或 Pi fork。
+
+### 何时重访
+
+Dock 或实际使用的插件开始依赖 `input` 接管消息，或依赖较慢的 `input` 与 `agent_settled` 处理时。届时可考虑：回执表达“已被插件接管”；在 Pi fork 里让 `prompt()` 等上一轮收尾结束再开始新一轮。

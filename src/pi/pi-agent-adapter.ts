@@ -426,12 +426,11 @@ export class PiAgentAdapter {
         // agent_settled and reports nothing about it until much later. Decide only
         // now, after every read above, and hand the input to Pi without waiting
         // in between: a reply can finish while attachments are being read.
-        if (context?.type === "host_queue") {
-          // A Host Queue hand-off holds no client admission, so it may simply wait.
-          await this.waitForSettledBoundary(binding);
-        } else if (context?.type === "command" && piIsSettling(binding)) {
+        if ((context?.type === "command" || context?.type === "host_queue") && piIsSettling(binding)) {
           // Like input during compaction, the Host keeps it in its Queue, where it
           // can be taken back, and hands it over once Pi publishes agent_settled.
+          // A Host Queue hand-off goes back the same way: waiting here would make
+          // Escape wait for the extension too.
           if (!queueAvailable) {
             preflightResult?.({ success: false });
             throw new AgentQueueRejectedBeforeEffectError();
@@ -564,7 +563,8 @@ export class PiAgentAdapter {
   /**
    * Pi 0.99 defers input that arrives while extensions still handle agent_settled:
    * prompt() then returns before reporting a disposition and runs the input later.
-   * Only paths that hold no client admission wait here for Pi to publish agent_settled.
+   * Only a registered extension command, whose custody is already reported, waits
+   * here for Pi to publish agent_settled.
    */
   private async waitForSettledBoundary(binding: Binding): Promise<void> {
     while (piIsSettling(binding)) {

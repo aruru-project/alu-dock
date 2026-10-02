@@ -28,6 +28,8 @@ const HANDLED_PROMPT = "SDK_COMPAT_HANDLED: an input hook takes this over";
 const SETTLE_FIRST_PROMPT = "SDK_COMPAT_SETTLE_FIRST: finish while an extension holds settlement";
 const SETTLE_SECOND_PROMPT = "SDK_COMPAT_SETTLE_SECOND: sent before settlement finished";
 const SETTLE_TAKEBACK_PROMPT = "SDK_COMPAT_SETTLE_TAKEBACK: taken back before settlement finished";
+const HANDOFF_PROMPT = "SDK_COMPAT_HANDOFF: held during compaction, handed over after settlement";
+const HANDOFF_TAKEBACK_PROMPT = "SDK_COMPAT_HANDOFF_TAKEBACK: held during compaction, taken back before settlement";
 const OVERFLOW_PROMPT = "SDK_COMPAT_OVERFLOW: exceed the context window";
 const AFTER_COMPACTION_PROMPT = "SDK_COMPAT_AFTER_COMPACTION: steer the retried turn";
 const SUMMARY_TEXT = "SDK_COMPAT_SUMMARY: the earlier conversation";
@@ -48,6 +50,8 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
   const priorSessionFile = join(sessionDir, "pi-0.81.1-session.jsonl");
   const holdSettle = join(root, "hold-settle");
   const settleEntered = join(root, "settle-entered");
+  const holdInput = join(root, "hold-input");
+  const inputEntered = join(root, "input-entered");
   const continueAfterCompaction = join(root, "continue-after-compaction");
   const fixture = new LoopbackChatFixture();
   const workerPids: number[] = [];
@@ -92,7 +96,12 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
       writeFile(join(agentDir, "extensions", "sdk-compat-hooks.ts"), `
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 export default function (pi) {
-  pi.on("input", async (event) => event.text.startsWith(${JSON.stringify(HANDLED_PROMPT)}) ? { action: "handled" } : { action: "continue" });
+  pi.on("input", async (event) => {
+    if (!event.text.startsWith(${JSON.stringify(HANDLED_PROMPT)})) return { action: "continue" };
+    if (existsSync(${JSON.stringify(holdInput)})) writeFileSync(${JSON.stringify(inputEntered)}, "");
+    for (let attempt = 0; attempt < 500 && existsSync(${JSON.stringify(holdInput)}); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    return { action: "handled" };
+  });
   pi.on("agent_settled", async () => {
     if (!existsSync(${JSON.stringify(holdSettle)})) return;
     writeFileSync(${JSON.stringify(settleEntered)}, "");
@@ -293,6 +302,27 @@ export default function (pi) {
     assert.equal(fixture.requests.filter((body) => lastUserText(body).includes(SETTLE_SECOND_PROMPT)).length, 1);
     assert.equal((await client.status(created.id)).pending.total, 0);
 
+    // An input hook may still be working on a message when the reply ends. If it takes the
+    // message over while an extension finishes the run, the sender gets a receipt, not an
+    // error inviting a resend, and no Queue item is left behind.
+    await Promise.all([writeFile(holdSettle, ""), writeFile(holdInput, "")]);
+    const lateHandledEvent = events.length;
+    await client.prompt(created.id, HOLD_PROMPT, "prompt", "sdk-late-handled-run");
+    await waitForEvent(events, lateHandledEvent, (event) => event.type === "message.delta" && event.data.delta.includes("holding"));
+    const lateHandled = client.prompt(created.id, `${HANDLED_PROMPT} as the reply ends`, "steer", "sdk-late-handled")
+      .then((value) => value, (error: unknown) => error);
+    await waitForFile(inputEntered);
+    fixture.releaseHold();
+    await waitForFile(settleEntered);
+    await rm(holdInput);
+    const lateReceipt = await lateHandled;
+    assert.ok(!(lateReceipt instanceof Error), `input an extension took over must not be reported as failed: ${String(lateReceipt)}`);
+    await waitForEvent(events, lateHandledEvent, (event) => event.type === "command.handled" && event.data.operationId === "sdk-late-handled");
+    assert.equal(events.slice(lateHandledEvent).some((event) => event.type === "message.queued" && event.data.operationId === "sdk-late-handled"), false);
+    await Promise.all([rm(holdSettle), rm(settleEntered), rm(inputEntered)]);
+    await waitForEvent(events, lateHandledEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-late-handled-run");
+    assert.equal((await client.status(created.id)).pending.total, 0);
+
     // After overflow compaction Pi retries the turn, and Dock hands it the messages it held meanwhile.
     // One an extension takes over leaves the Queue and does not claim a later run.
     const overflowEvent = events.length;
@@ -316,6 +346,66 @@ export default function (pi) {
     await client.prompt(created.id, RECOVERY_PROMPT, "prompt", "sdk-after-handled");
     await waitForEvent(events, afterHandledEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-after-handled");
     assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(HANDLED_PROMPT)), false, "handled input never reaches the model");
+
+    // Aborting while Pi compacts to recover from an overflow ends the run as aborted, not failed.
+    fixture.rejectNextOverflow();
+    const overflowAbortEvent = events.length;
+    await client.prompt(created.id, OVERFLOW_PROMPT, "prompt", "sdk-overflow-abort-run");
+    await fixture.waitForHeldSummarization();
+    await waitForEvent(events, overflowAbortEvent, (event) => event.type === "compaction.started");
+    await client.abort(created.id, "sdk-overflow-abort");
+    const overflowAborted = await waitForEvent(events, overflowAbortEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-overflow-abort-run");
+    assert.equal(overflowAborted.type, "run.settled");
+    assert.equal(overflowAborted.data.result, "aborted");
+    assert.equal((await client.status(created.id)).lastRun, "aborted");
+    // Pi compacts that overflow before the next prompt, which then runs normally.
+    fixture.answerSummarization();
+    const afterOverflowAbortEvent = events.length;
+    await client.prompt(created.id, RECOVERY_PROMPT, "prompt", "sdk-after-overflow-abort");
+    const afterOverflowAbort = await waitForEvent(events, afterOverflowAbortEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-after-overflow-abort");
+    assert.equal(afterOverflowAbort.type, "run.settled");
+    assert.equal(afterOverflowAbort.data.result, "succeeded");
+    fixture.holdSummarization();
+
+    // Dock hands over input it held during automatic compaction once that ends. If an
+    // extension is still finishing the run then, the input stays in Dock's Queue until
+    // agent_settled: it runs exactly once afterwards, and Escape returns it at once.
+    await writeFile(holdSettle, "");
+    const handoffEvent = events.length;
+    await client.prompt(created.id, COMPACT_PROMPT, "prompt", "sdk-handoff-run");
+    await fixture.waitForHeldSummarization();
+    await waitForEvent(events, handoffEvent, (event) => event.type === "compaction.started");
+    const handoff = await client.prompt(created.id, HANDOFF_PROMPT, "auto", "sdk-handoff");
+    assert.equal(handoff.receipt.queued, true);
+    fixture.answerSummarization();
+    await waitForFile(settleEntered);
+    await Promise.all([rm(holdSettle), rm(settleEntered)]);
+    const handedOver = await waitForEvent(events, handoffEvent, (event) => event.type === "message.submitted" && event.data.operationId === "sdk-handoff");
+    await waitForEvent(events, events.indexOf(handedOver), (event) => event.type === "run.settled");
+    fixture.holdSummarization();
+    assert.equal(fixture.requests.filter((body) => lastUserText(body).includes(HANDOFF_PROMPT)).length, 1);
+    assert.equal((await client.status(created.id)).pending.total, 0);
+
+    await writeFile(holdSettle, "");
+    const handoffEscapeEvent = events.length;
+    await client.prompt(created.id, COMPACT_PROMPT, "prompt", "sdk-handoff-escape-run");
+    await fixture.waitForHeldSummarization();
+    await waitForEvent(events, handoffEscapeEvent, (event) => event.type === "compaction.started");
+    await client.prompt(created.id, HANDOFF_TAKEBACK_PROMPT, "auto", "sdk-handoff-takeback");
+    fixture.answerSummarization();
+    await waitForFile(settleEntered);
+    const escaped = await Promise.race([
+      client.abortRestoreQueue(created.id, "sdk-handoff-escape"),
+      new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 2_000)),
+    ]);
+    assert.notEqual(escaped, "blocked", "Escape must not wait for the extension to finish the run");
+    if (escaped !== "blocked") assert.deepEqual(escaped.receipt.restored.map((item) => item.operationId), ["sdk-handoff-takeback"]);
+    fixture.holdSummarization();
+    await Promise.all([rm(holdSettle), rm(settleEntered)]);
+    await waitForEvent(events, handoffEscapeEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-handoff-escape-run");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(HANDOFF_TAKEBACK_PROMPT)), false, "returned input never starts");
+    assert.equal((await client.status(created.id)).pending.total, 0);
 
     // Pi 0.99 compacts inside the run, and an extension may ask to continue it afterwards.
     // Abort during automatic compaction must end the run, so the model is not called again.
@@ -464,6 +554,21 @@ class LoopbackChatFixture {
     for (const response of this.heldSummaries.splice(0)) answerSummary(response);
   }
 
+  /** Answer summaries, held or still to come, until holdSummarization(); no reply is held. */
+  answerSummarization(): void {
+    this.answerSummaries = true;
+    this.holdNextReply = false;
+    for (const response of this.heldSummaries.splice(0)) answerSummary(response);
+  }
+
+  holdSummarization(): void {
+    this.answerSummaries = false;
+  }
+
+  rejectNextOverflow(): void {
+    this.overflowRejected = false;
+  }
+
   async waitForHeldReply(): Promise<void> {
     for (let attempt = 0; attempt < 400; attempt += 1) {
       if (this.pendingHoldResponse) return;
@@ -502,7 +607,14 @@ class LoopbackChatFixture {
     if (JSON.stringify(body).includes(SUMMARIZATION_MARKER)) {
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       if (this.answerSummaries) answerSummary(response);
-      else this.heldSummaries.push(response);
+      else {
+        this.heldSummaries.push(response);
+        // An aborted compaction closes its request; a later one must not find it.
+        response.once("close", () => {
+          const index = this.heldSummaries.indexOf(response);
+          if (index >= 0) this.heldSummaries.splice(index, 1);
+        });
+      }
       return;
     }
     if (this.holdNextReply) {
