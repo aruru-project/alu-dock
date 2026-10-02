@@ -9,6 +9,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 const EXTENSION_SOURCE = `
 export default function commandDiscoveryFixture(pi) {
@@ -54,19 +55,12 @@ test("a client can understand and inspect unfamiliar commands before using them"
   const promptBody = `Explain the deployment idea before changing anything.\n${"Keep the owner informed.\n".repeat(3_000)}`.trim();
   await writeFile(join(promptsDir, "review-deployment.md"), `---\ndescription: Review a deployment idea\nargument-hint: "<idea>"\n---\n${promptBody}\n`);
 
-  const previousPiOffline = process.env.PI_OFFLINE;
-  process.env.PI_OFFLINE = "1";
   const registry = new DockRegistry(
     (input) => createPiInstance({
       ...input,
       agentDir,
       sessionDir,
-      workerEnvironment: {
-        ...process.env,
-        HOME: root,
-        XDG_STATE_HOME: stateHome,
-        XDG_DATA_HOME: dataHome,
-      },
+      workerEnvironment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir, XDG_STATE_HOME: stateHome, XDG_DATA_HOME: dataHome }),
       workerTimeouts: { mutationMs: 5_000, termMs: 300 },
     }),
     () => "command-discovery-instance",
@@ -117,8 +111,6 @@ test("a client can understand and inspect unfamiliar commands before using them"
       { value: "off", label: "off" },
     ]);
   } finally {
-    if (previousPiOffline === undefined) delete process.env.PI_OFFLINE;
-    else process.env.PI_OFFLINE = previousPiOffline;
     client.closeActiveConnections();
     await host.stop().catch(() => {});
     await rm(root, { recursive: true, force: true });

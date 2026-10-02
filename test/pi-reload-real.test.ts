@@ -10,6 +10,7 @@ import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
 import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 test("package-managed Pi extensions remain loaded across new and reload", { timeout: 15_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-package-lifecycle-"));
@@ -80,13 +81,7 @@ export default function (pi) {
 }
 `, "utf8");
 
-  const workerEnvironment = {
-    ...process.env,
-    PI_OFFLINE: "1",
-    HOME: home,
-    XDG_STATE_HOME: stateHome,
-    XDG_DATA_HOME: dataHome,
-  };
+  const workerEnvironment = isolatedProcessEnvironment(home, { PI_CODING_AGENT_DIR: agentDir, XDG_STATE_HOME: stateHome, XDG_DATA_HOME: dataHome });
   const registry = new DockRegistry(
     (input) => createPiInstance({
       ...input,

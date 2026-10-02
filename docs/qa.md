@@ -60,6 +60,8 @@ Fixture 扮演协议对端，使用满足契约的最少行为。
 
 生产 Worker 的 login-shell bootstrap 按系统账户重新设定 HOME，因此仅修改测试进程的 HOME，或指定 fixture `workerEntry`，不足以隔离它。普通 Pi runtime 测试通过既有 `workerEnvironment` 入口（可复用 `test/fixtures/isolated-pi-instance.ts`）传入明确的临时环境；外层测试进程仍需隔离 HOME/XDG/Pi/npm 路径与凭据。不要在个人开发环境直接以 CLI `serve --dev` 启动后创建 Worker 来代替这个入口。CLI 专属的此类场景须在账户本身也是一次性环境时验证，未运行时明确列出，不记为全套通过。出处：card #271 隔离联调实际发现登录 Shell 恢复真实账户 HOME。
 
+测试启动的 Host 进程、TUI 客户端和 Pi Worker（`workerEnvironment`）的环境用 `test/support/isolated-process-environment.ts` 构造，不从 `...process.env` 展开：在 Dock 管理的 Pi 里跑测试时，当前进程带着真实的 `PI_CODING_AGENT_DIR` 和导出的凭据。需要真实 Worker 的机器间场景，CLI Host 只承担不创建 Worker 的部分，Work 放在测试进程内的 Host 或 `test/fixtures/subhost-machine.ts` 上。出处：card #351，CLI 启动的 SubHost 每跑一次在真实 `~/.pi/agent/sessions` 留下一个空目录。
+
 ## 用户能看到的东西
 
 界面上的文字是产品的一部分，和功能同等重要。

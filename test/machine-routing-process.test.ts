@@ -16,6 +16,7 @@ import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { machineStateRoot, MainMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MainMachineController } from "../src/control/machine-transport.js";
 import { MainMachineDockToolsAuthority } from "../src/control/main-machine-dock-tools.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 function nativeRoot(path: string): string {
   const root = parse(path).root;
@@ -125,7 +126,7 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   const firstMain = await createMain();
   const child = spawn(process.execPath, [new URL("./fixtures/subhost-machine.js", import.meta.url).pathname, subCatalog, workspace, "::1", String(port), joinPath], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data") },
+    env: isolatedProcessEnvironment(root, { XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data") }),
   });
   children.add(child);
   let stderr = "";

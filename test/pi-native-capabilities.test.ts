@@ -6,8 +6,12 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import test from "node:test";
 
 import { DockClient } from "../src/control/dock-client.js";
+import { DockHost } from "../src/control/dock-host.js";
+import { DockRegistry } from "../src/control/dock-registry.js";
+import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { ALU_DOCK_PI_WORKER_GUIDANCE, createPiAgentAdapter } from "../src/pi/pi-agent-adapter.js";
 import { inspectPiEnvironment, loginPiProvider, logoutPiProvider } from "../src/pi/pi-environment.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 const cli = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -100,15 +104,12 @@ export default async function (pi) {
 }
 `),
   ]);
-  const env = {
-    ...process.env,
-    HOME: root,
-    PI_CODING_AGENT_DIR: agentDir,
-    PI_OFFLINE: "1",
-  };
+  const env = isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir });
   let host: ChildProcess | undefined;
+  let workerHost: DockHost | undefined;
   context.after(async () => {
     if (host) await stopProcess(host);
+    await workerHost?.stop().catch(() => {});
     await rm(root, { recursive: true, force: true });
   });
 
@@ -135,8 +136,19 @@ export default async function (pi) {
 
   const inventory = await client.sessionInventory(cwd, "all");
   assert.ok(inventory.sessions.some((session) => session.sessionFile === oldSessionFile));
+  client.closeActiveConnections();
+  await stopProcess(host);
+  host = undefined;
 
-  const created = await client.create(
+  // Card #351: a Worker created by the CLI-started Host above would take the developer's login-shell
+  // environment. The Work runs behind a Host that gives its Worker this test's environment instead.
+  workerHost = new DockHost({
+    socketPath,
+    registry: new DockRegistry((input) => createPiInstance({ ...input, agentDir, workerEnvironment: env })),
+  });
+  await workerHost.start();
+  const workerClient = new DockClient({ socketPath, timeoutMs: 5_000, longMutationTimeoutMs: 15_000 });
+  const created = await workerClient.create(
     cwd,
     "bundled Pi",
     "bundled-pi-create",
@@ -145,16 +157,16 @@ export default async function (pi) {
     { excludeTools: ["bash"] },
   );
   assert.equal(inside(join(agentDir, "sessions"), created.executor.sessionFile as string), true);
-  const tools = await client.tools(created.id);
+  const tools = await workerClient.tools(created.id);
   assert.equal(tools.tools.some((tool) => tool.name === "bash"), false);
   assert.equal(tools.tools.some((tool) => tool.name === "read"), true);
-  const commands = await client.commands(created.id);
+  const commands = await workerClient.commands(created.id);
   assert.equal(commands.commands.some((command) => command.name === "bundled-install-fixture"), true);
   assert.match(await readFile(probe, "utf8"), /aludock pi:install — install a package for Pi/u);
 
-  client.closeActiveConnections();
-  await stopProcess(host);
-  host = undefined;
+  workerClient.closeActiveConnections();
+  await workerHost.stop();
+  workerHost = undefined;
 });
 
 async function openHubPiSettings(socketPath: string, env: NodeJS.ProcessEnv): Promise<string> {

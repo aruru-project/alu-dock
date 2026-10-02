@@ -9,6 +9,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { parseCommandsResult } from "../src/control/protocol.js";
 import { AgentCompactionKnownFailureError } from "../src/core/agent-worker.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 const EXTENSION_SOURCE = (logPath: string): string => `
 import { appendFileSync } from "node:fs";
@@ -93,24 +94,15 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
   const targetFile = target.getSessionFile();
   assert.ok(targetFile);
 
-  const previousPiOffline = process.env.PI_OFFLINE;
-  process.env.PI_OFFLINE = "1";
-  const instance = await (async () => {
-    try {
-      return await createPiInstance({
-        cwd,
-        agentDir,
-        sessionDir,
-        projectTrusted: true,
-        name: "stage3-real",
-        workerEnvironment: { ...process.env },
-        workerTimeouts: { mutationMs: 10_000 },
-      });
-    } finally {
-      if (previousPiOffline === undefined) delete process.env.PI_OFFLINE;
-      else process.env.PI_OFFLINE = previousPiOffline;
-    }
-  })();
+  const instance = await createPiInstance({
+    cwd,
+    agentDir,
+    sessionDir,
+    projectTrusted: true,
+    name: "stage3-real",
+    workerEnvironment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir }),
+    workerTimeouts: { mutationMs: 10_000 },
+  });
   try {
     assert.equal(instance.snapshot().metrics?.context?.contextWindow, 111_111);
     const updated = await instance.updateSetting({ key: "autoRetry", value: false }, "real-setting");

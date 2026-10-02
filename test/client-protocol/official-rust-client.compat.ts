@@ -6,6 +6,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import test from "node:test";
 
+import { isolatedProcessEnvironment } from "../support/isolated-process-environment.js";
+
 const SESSION_ID = "00000000-0000-4000-8000-000000002609";
 
 /** Cross-runtime gate. Intentionally not named *.test.ts; ordinary npm test stays Node-only. */
@@ -63,21 +65,14 @@ test("official Rust client pages through saved sessions, newest conversation fir
 });
 
 function isolatedEnvironment(root: string, home: string, agentDir: string): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("ALU_DOCK_") || key === "STATE_DIRECTORY") delete env[key];
-  }
-  return {
-    ...env,
-    HOME: home,
-    USERPROFILE: home,
+  return isolatedProcessEnvironment(home, {
     XDG_CONFIG_HOME: join(root, "xdg-config"),
     XDG_CACHE_HOME: join(root, "xdg-cache"),
     XDG_DATA_HOME: join(root, "xdg-data"),
     XDG_STATE_HOME: join(root, "xdg-state"),
     XDG_RUNTIME_DIR: join(root, "xdg-runtime"),
     PI_CODING_AGENT_DIR: agentDir,
-  };
+  });
 }
 
 async function waitForReady(child: ChildProcess, stderr: string[]): Promise<void> {
