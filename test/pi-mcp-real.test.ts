@@ -33,7 +33,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-test("a Work reaches a configured MCP server through codemode and reports the server with /mcp", { timeout: 30_000 }, async () => {
+test("a Work reaches a configured MCP server through codemode, shows inside the codemode call which tools it called, and reports the server with /mcp", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-mcp-"));
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
@@ -75,6 +75,27 @@ test("a Work reaches a configured MCP server through codemode and reports the se
     assert.equal(settled.type === "run.settled" && settled.data.result, "succeeded");
     assert.ok(model.requests.some((body) => JSON.stringify(body).includes("harbor echoed lantern")), "the script's MCP result reaches the model");
     assert.ok((await client.tools(work.id)).tools.some((tool) => tool.name === "mcp__harbor__echo"), "the server's tool is listed");
+
+    // Like Pi's terminal: the script's calls are listed inside the codemode call, never as calls of their own.
+    const started = events.filter((event) => event.type === "tool.started").map((event) => event.type === "tool.started" ? event.data.toolName : "");
+    assert.deepEqual(started, ["codemode"]);
+    assert.ok(events.some((event) => event.type === "tool.output_updated" && event.data.nestedCalls?.calls[0]?.status === "running"), "a running call is shown while the script waits for it");
+    const completed = events.find((event) => event.type === "tool.completed");
+    assert.ok(completed?.type === "tool.completed" && completed.data.toolName === "codemode");
+    const live = completed.data.nestedCalls;
+    assert.ok(live !== undefined && typeof live.calls[0]?.durationMs === "number");
+    assert.deepEqual({ ...live, calls: live.calls.map(({ durationMs: _durationMs, ...call }) => call) }, {
+      calls: [{ toolName: "mcp__harbor__echo", args: { text: "lantern" }, status: "ok" }],
+      complete: true,
+    });
+    // A client opening the Work later sees the same list from the saved conversation.
+    const saved = (await client.history(work.id)).entries.find((entry) => entry.source === "tool" && entry.toolName === "codemode");
+    const savedResult = saved?.content.find((block) => block.type === "tool_result");
+    assert.ok(savedResult?.type === "tool_result" && savedResult.nestedCalls !== undefined);
+    assert.deepEqual({ ...savedResult.nestedCalls, calls: savedResult.nestedCalls.calls.map(({ durationMs: _durationMs, ...call }) => call) }, {
+      calls: [{ toolName: "mcp__harbor__echo", args: { text: "lantern" }, status: "ok" }],
+      complete: true,
+    });
 
     const statusStart = events.length;
     await client.prompt(work.id, "/mcp", "prompt", "mcp-status");

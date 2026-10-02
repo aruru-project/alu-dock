@@ -245,6 +245,8 @@ Live `messageId` / `toolCallId` 属于当前 event lifecycle，与 persisted `re
 
 Data URI、base64 和长文本都是普通内容。客户端根据结构处理 image block，不从普通文本猜测内容类型。
 
+一个工具在运行中自己调用的其他工具（例如 codemode 脚本里调用的 MCP 工具）不会成为模型的 tool call，也没有自己的 `tool.started`/`tool.completed`。它们以可选的 `nestedCalls {calls, complete}` 出现在调用它们的那个工具上：`tool.output_updated` 携带当前完整清单（运行中实时增加），`tool.completed` 携带最终清单，history preview 的 `tool_result` block 携带会话记录里的同一份清单。每项是 `toolName`、可选 `args`、`status`（`running` 只在实时出现；`ok`、`error`，以及调用方结束时仍未完成的 `unfinished`）、可选 `durationMs` 和失败时截短的 `error`；`complete: false` 表示有调用或参数因超出上限没有保留。清单不含结果正文，也不提供 `conversation.content` 续读；history 页预算不足时，它和 `presentation` 一样从 block 中移除并在 `omittedFields` 记录 `/nestedCalls`。不渲染此字段的客户端直接忽略它。
+
 ## 图片
 
 图片 prompt 可以来自 Host/Worker 同一 UID 可读的本机绝对路径 descriptor，也可以来自聊天消息中已经上传的 `image/*` attachment。远程客户端不提交自己的本机路径：它只上传附件并在 `command.submit.attachments` 中引用 fileId，Dock 在 Agent 私有边界 resolve 后自动加入同一条原生图片输入。

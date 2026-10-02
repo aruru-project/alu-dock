@@ -134,6 +134,7 @@ import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js"
 import { retryExtension } from "./retry-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
 import { piBuiltinExtensions } from "./pi-builtin-extensions.js";
+import { LiveNestedToolCalls, projectPiNestedToolCalls } from "./pi-nested-tool-calls.js";
 import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension, SHOW_IMAGE_UNAVAILABLE_MESSAGE } from "./show-image-extension.js";
 import {
   applyPiSetting,
@@ -1889,12 +1890,15 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
   if (type === "message_update" && isRecord(source.assistantMessageEvent)) {
     return { type, assistantMessageEvent: projectAssistantMessageEvent(source.assistantMessageEvent) };
   }
+  // Calls a tool made itself (for example from a codemode script) name the call that made them.
+  const parent = typeof source.parentToolCallId === "string" ? { parentToolCallId: safeRequiredText(source.parentToolCallId, 128, "unknown") } : {};
   if (type === "tool_execution_start") {
     return {
       type,
       toolCallId: safeRequiredText(source.toolCallId, 128, "unknown"),
       toolName: safeRequiredText(source.toolName, 256, "tool"),
       args: projectJsonObject(source.args).value,
+      ...parent,
     };
   }
   if (type === "tool_execution_end" || type === "tool_execution_update") {
@@ -1913,6 +1917,7 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
       toolName: safeRequiredText(source.toolName, 256, "tool"),
       [resultKey]: { content, ...(publishedFile === undefined ? {} : { publishedFile }), ...(showImageError === undefined ? {} : { showImageError }), ...(presentation === undefined ? {} : { presentation }) },
       ...(type === "tool_execution_end" ? { isError } : {}),
+      ...parent,
     };
   }
   if (type === "compaction_end") {
@@ -2040,6 +2045,9 @@ export class PiConversationProjector {
   constructor(private readonly attachmentContextKey: Uint8Array) {}
   private readonly announcedToolCalls = new Set<string>();
   private readonly completedToolCalls = new Set<string>();
+  private readonly nestedCalls = new LiveNestedToolCalls();
+  /** Latest output of each running tool, repeated when only its nested calls change. */
+  private readonly toolOutputs = new Map<string, Extract<ConversationFrame, { type: "tool.output_updated" }>["data"]>();
   private messageSequence = 0;
   private currentUserMessageId: string | undefined;
   private currentUserAttachments: AttachmentDto[] | undefined;
@@ -2100,6 +2108,8 @@ export class PiConversationProjector {
       this.currentAssistantMessageId = undefined;
       this.announcedToolCalls.clear();
       this.completedToolCalls.clear();
+      this.nestedCalls.clear();
+      this.toolOutputs.clear();
       this.lastAssistantOutcome = undefined;
       return [event];
     }
@@ -2245,6 +2255,10 @@ export class PiConversationProjector {
   private projectToolStart(event: AgentEvent): AgentEvent[] {
     const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
     const toolName = safeRequiredText(event.toolName, 256, "tool");
+    // Nested calls never reach the model as tool calls; they are listed inside their caller, as in Pi.
+    if (typeof event.parentToolCallId === "string") {
+      return this.nestedCallsChanged(this.nestedCalls.start(toolCallId, event.parentToolCallId, toolName, event.args));
+    }
     const args = projectJsonObject(event.args ?? {});
     if (this.announcedToolCalls.has(toolCallId)) {
       return [this.frame({ type: "tool.args_updated", data: {
@@ -2263,6 +2277,7 @@ export class PiConversationProjector {
   }
 
   private projectToolUpdate(event: AgentEvent): AgentEvent[] {
+    if (typeof event.parentToolCallId === "string") return [];
     const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.partialResult) ? event.partialResult : undefined;
@@ -2274,13 +2289,16 @@ export class PiConversationProjector {
       this.announcedToolCalls.add(toolCallId);
       frames.push(this.frame({ type: "tool.started", data: { toolCallId, toolName, args: {} } }));
     }
-    frames.push(this.frame({ type: "tool.output_updated", data: {
+    const data = {
       toolCallId,
       text,
       ...(Array.isArray(result?.content) ? { content: projectPublicToolContent(toolName, result.content, text) } : {}),
       ...(publishedFile === undefined ? {} : { publishedFile }),
       ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
-    } }));
+    };
+    this.toolOutputs.set(toolCallId, data);
+    const nestedCalls = this.nestedCalls.snapshot(toolCallId);
+    frames.push(this.frame({ type: "tool.output_updated", data: { ...data, ...(nestedCalls === undefined ? {} : { nestedCalls }) } }));
     return frames;
   }
 
@@ -2289,6 +2307,12 @@ export class PiConversationProjector {
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.result) ? event.result : undefined;
     const isError = event.isError === true;
+    if (typeof event.parentToolCallId === "string") {
+      const root = this.nestedCalls.end(toolCallId, isError, toolResultText(result?.content) ?? "");
+      return root === undefined ? [] : this.nestedCallsChanged(root);
+    }
+    const nestedCalls = this.nestedCalls.finish(toolCallId);
+    this.toolOutputs.delete(toolCallId);
     const publishedFile = result?.publishedFile as never;
     const showImageError = typeof result?.showImageError === "string" ? result.showImageError : undefined;
     const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), publishedFile, showImageError), 256_000);
@@ -2303,8 +2327,17 @@ export class PiConversationProjector {
       ...(Array.isArray(result?.content) ? { content: projectPublicToolContent(toolName, result.content, text) } : {}),
       ...(publishedFile === undefined ? {} : { publishedFile }),
       ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
+      ...(nestedCalls === undefined ? {} : { nestedCalls }),
       ...(projected.omittedFields.length === 0 ? {} : { omittedFields: projected.omittedFields }),
     } })];
+  }
+
+  /** Repeat the calling tool's latest output with its current list of nested calls. */
+  private nestedCallsChanged(toolCallId: string): AgentEvent[] {
+    const nestedCalls = this.nestedCalls.snapshot(toolCallId);
+    if (nestedCalls === undefined || !this.announcedToolCalls.has(toolCallId)) return [];
+    const output = this.toolOutputs.get(toolCallId) ?? { toolCallId, text: "" };
+    return [this.frame({ type: "tool.output_updated", data: { ...output, nestedCalls } })];
   }
 
   private ensureAssistantMessageId(): string {
@@ -2344,6 +2377,7 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       const showImageError = publishedFiles === undefined ? undefined : publishedFileFailureFromDetails(message.details, publishedFiles);
       const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(message.content) ?? ""), publishedFile, showImageError), 256_000);
       const presentation = projectBuiltInToolPresentation(toolName, text, message.details, isError);
+      const nestedCalls = projectPiNestedToolCalls(message.nestedCalls);
       let firstText = true;
       return {
         ...base,
@@ -2359,6 +2393,7 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
             text: boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, part.text as string), publishedFile, showImageError), 256_000),
             ...(attachMetadata && publishedFile !== undefined ? { publishedFile } : {}),
             ...(attachMetadata && presentation !== undefined ? { presentation } : {}),
+            ...(attachMetadata && nestedCalls !== undefined ? { nestedCalls } : {}),
           }];
         })),
         toolCallId,

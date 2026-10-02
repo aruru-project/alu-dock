@@ -58,6 +58,13 @@ import {
   type BuiltInToolPresentation,
 } from "../core/tool-result-presentation.js";
 import {
+  MAX_NESTED_TOOL_CALL_ARGS_BYTES,
+  MAX_NESTED_TOOL_CALL_ERROR_CHARS,
+  MAX_NESTED_TOOL_CALLS,
+  MAX_NESTED_TOOL_CALLS_ARGS_BYTES,
+  type NestedToolCallsDto,
+} from "../core/nested-tool-calls.js";
+import {
   MAX_CONVERSATION_IMAGE_CHUNK_BYTES,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_MIME_TYPE_CHARS,
@@ -2607,22 +2614,24 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "tool.started": exact(data, ["toolCallId", "toolName", "args", "omittedFields"]); return toolArgs(data, field, true);
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
     case "tool.output_updated": {
-      exact(data, ["toolCallId", "text", "content", "publishedFile", "presentation"]);
+      exact(data, ["toolCallId", "text", "content", "publishedFile", "presentation", "nestedCalls"]);
       const resultText = boundedString(data.text, `${field}.text`, MAX_TOOL_RESULT_TEXT);
       const content = data.content === undefined ? undefined : parseContent(data.content, `${field}.content`);
       const publishedFile = data.publishedFile === undefined ? undefined : parsePublishedFileDto(data.publishedFile, `${field}.publishedFile`);
       const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, undefined, false);
-      return { toolCallId: text("toolCallId", 128), text: resultText, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }) };
+      const nestedCalls = data.nestedCalls === undefined ? undefined : parseNestedToolCalls(data.nestedCalls, `${field}.nestedCalls`);
+      return { toolCallId: text("toolCallId", 128), text: resultText, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), ...(nestedCalls === undefined ? {} : { nestedCalls }) };
     }
     case "tool.completed": {
-      exact(data, ["toolCallId", "toolName", "text", "isError", "content", "publishedFile", "presentation", "omittedFields"]);
+      exact(data, ["toolCallId", "toolName", "text", "isError", "content", "publishedFile", "presentation", "nestedCalls", "omittedFields"]);
       const toolName = text("toolName", 256);
       const isError = boolean(data.isError, "isError");
       const resultText = boundedString(data.text, `${field}.text`, MAX_TOOL_RESULT_TEXT);
       const content = data.content === undefined ? undefined : parseContent(data.content, `${field}.content`);
       const publishedFile = data.publishedFile === undefined ? undefined : parsePublishedFileDto(data.publishedFile, `${field}.publishedFile`);
       const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, toolName, isError);
-      return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(data.omittedFields, "omittedFields") };
+      const nestedCalls = data.nestedCalls === undefined ? undefined : parseNestedToolCalls(data.nestedCalls, `${field}.nestedCalls`);
+      return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), ...(nestedCalls === undefined ? {} : { nestedCalls }), omittedFields: omitted(data.omittedFields, "omittedFields") };
     }
     case "bash.started": exact(data, ["operationId", "command", "excludeFromContext"]); return { operationId: text("operationId", 128), command: boundedString(data.command, `${field}.command`, MAX_BASH_COMMAND_CHARS), excludeFromContext: boolean(data.excludeFromContext, "excludeFromContext") };
     case "bash.output": exact(data, ["operationId", "delta"]); return { operationId: text("operationId", 128), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
@@ -2695,6 +2704,32 @@ function parseToolPresentation(
   return projected;
 }
 
+function parseNestedToolCalls(input: unknown, field: string): NestedToolCallsDto {
+  const value = object(input, field);
+  exact(value, ["calls", "complete"]);
+  let argsBytes = 0;
+  const calls = array(value.calls, `${field}.calls`, MAX_NESTED_TOOL_CALLS).map((item, index) => {
+    const call = object(item, `${field}.calls[${index}]`);
+    exact(call, ["toolName", "args", "status", "durationMs", "error"]);
+    const args = call.args === undefined ? undefined : parseJsonObject(call.args, `${field}.calls[${index}].args`);
+    if (args !== undefined) {
+      const bytes = Buffer.byteLength(JSON.stringify(args), "utf8");
+      argsBytes += bytes;
+      if (bytes > MAX_NESTED_TOOL_CALL_ARGS_BYTES || argsBytes > MAX_NESTED_TOOL_CALLS_ARGS_BYTES) throw validation("invalid_response", `${field}.calls[${index}].args exceeds the nested call bounds`);
+    }
+    const durationMs = call.durationMs === undefined ? undefined : unsigned(call.durationMs, `${field}.calls[${index}].durationMs`);
+    const error = call.error === undefined ? undefined : boundedString(call.error, `${field}.calls[${index}].error`, MAX_NESTED_TOOL_CALL_ERROR_CHARS);
+    return {
+      toolName: string(call.toolName, `${field}.calls[${index}].toolName`, 256),
+      ...(args === undefined ? {} : { args }),
+      status: enumeration(call.status, `${field}.calls[${index}].status`, ["running", "ok", "error", "unfinished"] as const),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(error === undefined ? {} : { error }),
+    };
+  });
+  return { calls, complete: boolean(value.complete, `${field}.complete`) };
+}
+
 function parseContent(input: unknown, field: string): ContentBlockDto[] {
   return array(input, field, MAX_CONVERSATION_CONTENT_BLOCKS).map((item, index) => {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
@@ -2711,13 +2746,14 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
     }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }
     if (type === "tool_result") {
-      exact(block, ["type", "toolCallId", "toolName", "text", "isError", "publishedFile", "presentation", "omittedFields"]);
+      exact(block, ["type", "toolCallId", "toolName", "text", "isError", "publishedFile", "presentation", "nestedCalls", "omittedFields"]);
       const toolName = string(block.toolName, "toolName", 256);
       const isError = boolean(block.isError, "isError");
       const resultText = boundedString(block.text, "text", MAX_TOOL_RESULT_TEXT);
       const publishedFile = block.publishedFile === undefined ? undefined : parsePublishedFileDto(block.publishedFile, `${field}[${index}].publishedFile`);
       const presentation = block.presentation === undefined ? undefined : parseToolPresentation(block.presentation, `${field}[${index}].presentation`, toolName, isError);
-      return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName, text: resultText, isError, ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(block.omittedFields, "omittedFields") };
+      const nestedCalls = block.nestedCalls === undefined ? undefined : parseNestedToolCalls(block.nestedCalls, `${field}[${index}].nestedCalls`);
+      return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName, text: resultText, isError, ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), ...(nestedCalls === undefined ? {} : { nestedCalls }), omittedFields: omitted(block.omittedFields, "omittedFields") };
     }
     exact(block, ["type", "kind", "description"]); return { type, kind: enumeration(block.kind, "kind", ["image", "binary"]), description: string(block.description, "description", MAX_MESSAGE) };
   });

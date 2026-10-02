@@ -756,6 +756,35 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
   assert.doesNotMatch(structuredCollapsed, /privatePayload|must-not-render/u);
 });
 
+test("a codemode call lists the tools its script called while it runs and after the Work is reopened (card #350)", () => {
+  const running = { toolName: "mcp__harbor__echo", args: { text: "lantern" }, status: "running" } as const;
+  const failed = { toolName: "mcp__harbor__fail", args: {}, status: "error", durationMs: 1_500, error: "harbor is closed" } as const;
+  const live = new DockConversation();
+  const code = "const echoed = await tools.mcp__harbor__echo({ text: 'lantern' });\nreturn echoed;";
+  live.apply(event(1, "tool.started", { toolCallId: "script", toolName: "codemode", args: { code } }));
+  live.apply(event(2, "tool.output_updated", { toolCallId: "script", text: "", nestedCalls: { calls: [running], complete: true } }));
+  assert.match(live.render(120).join("\n"), /\u2026 mcp__harbor__echo \{"text":"lantern"\}/u);
+  const nestedCalls = { calls: [{ ...running, status: "ok" as const, durationMs: 12 }, failed], complete: true };
+  live.apply(event(3, "tool.completed", { toolCallId: "script", toolName: "codemode", isError: false, text: "Script completed\nOutput:\nharbor echoed lantern", nestedCalls }));
+
+  const reopened = new DockConversation();
+  reopened.applyHistory([
+    historyRecord("a", "assistant", [{ type: "tool_call", toolCallId: "script", toolName: "codemode", args: { code } }]),
+    historyRecord("t", "tool", [{ type: "tool_result", toolCallId: "script", toolName: "codemode", isError: false, text: "Script completed\nOutput:\nharbor echoed lantern", nestedCalls }]),
+  ], false);
+  for (const conversation of [live, reopened]) {
+    const collapsed = conversation.render(120).join("\n");
+    assert.match(collapsed, /\u2713 mcp__harbor__echo \{"text":"lantern"\} 12ms/u);
+    assert.match(collapsed, /\u00d7 mcp__harbor__fail \{\} 1\.5s/u);
+    assert.match(collapsed, /harbor echoed lantern/u);
+    assert.doesNotMatch(collapsed, /harbor is closed/u, "errors wait for the expanded view");
+    conversation.toggleLatestToolExpanded();
+    const expanded = conversation.render(120).join("\n");
+    assert.match(expanded, /script\s*\n\s*const echoed[^\n]*\n\s*return echoed;/u, "the script keeps its lines");
+    assert.match(expanded, /mcp__harbor__fail[\s\S]*harbor is closed/u);
+  }
+});
+
 test("interrupted active tools retain the settlement reason in preview and full detail", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", {

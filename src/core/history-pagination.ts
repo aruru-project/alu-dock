@@ -105,12 +105,17 @@ export function dropOldestSemanticHistoryRange<T extends HistoryEntryDto>(entrie
 /** Content that remains useful after its readable payload is removed. */
 export function slimSemanticHistoryBlock(block: ContentBlockDto): ContentBlockDto | undefined {
   if (block.type === "tool_result") {
-    const { presentation, ...identity } = block;
-    if (block.text.length === 0 && presentation === undefined) return block;
+    const { presentation, nestedCalls, ...identity } = block;
+    if (block.text.length === 0 && presentation === undefined && nestedCalls === undefined) return block;
     return {
       ...identity,
       text: "",
-      omittedFields: [...new Set([...(block.omittedFields ?? []), ...(block.text.length === 0 ? [] : ["/content"]), ...(presentation === undefined ? [] : ["/presentation"])])],
+      omittedFields: [...new Set([
+        ...(block.omittedFields ?? []),
+        ...(block.text.length === 0 ? [] : ["/content"]),
+        ...(presentation === undefined ? [] : ["/presentation"]),
+        ...(nestedCalls === undefined ? [] : ["/nestedCalls"]),
+      ])],
     };
   }
   if (block.type === "tool_call") {

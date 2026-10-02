@@ -4,6 +4,7 @@ import type { AttachmentDto } from "./instance-attachments.js";
 export type { AttachmentDto } from "./instance-attachments.js";
 import type { AgentSessionMetrics, ThinkingLevel } from "./agent-worker.js";
 import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
+import type { NestedToolCallsDto } from "./nested-tool-calls.js";
 import type { PublishedFileDto } from "./published-file.js";
 export type { PublishedFileDto } from "./published-file.js";
 
@@ -30,7 +31,7 @@ export type ContentBlockDto =
   | { type: "thinking"; text: string }
   | { type: "image"; mimeType: string; contentRef?: string; fileId?: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
-  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; nestedCalls?: NestedToolCallsDto; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
 export const MAX_SEMANTIC_HISTORY_PAGE_ITEMS = 100_000;
@@ -238,8 +239,9 @@ export interface EventDataMap {
   "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; attachments?: AttachmentDto[]; stopReason?: string; error?: string };
   "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
   "tool.args_updated": { toolCallId: string; args: JsonObject; omittedFields?: string[] };
-  "tool.output_updated": { toolCallId: string; text: string; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation };
-  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] };
+  /** `nestedCalls`, when present, is the whole current list of calls this tool has made. */
+  "tool.output_updated": { toolCallId: string; text: string; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; nestedCalls?: NestedToolCallsDto };
+  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; nestedCalls?: NestedToolCallsDto; omittedFields?: string[] };
   /** A user shell command (Pi `!` / `!!`) started in the Work's directory; operationId is the execution identity. */
   "bash.started": { operationId: string; command: string; excludeFromContext: boolean };
   "bash.output": { operationId: string; delta: string };
