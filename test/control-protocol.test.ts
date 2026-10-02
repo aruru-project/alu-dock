@@ -23,6 +23,7 @@ import {
   parseFileReadResult,
   parseKeyLookupResult,
   parseMachinesResult,
+  parseSettingsResult,
   parseStatusResult,
   parseWorkspaceFileReadFrame,
   ProtocolValidationError,
@@ -119,6 +120,15 @@ test("Protocol V2 clients accept additive Host response and event fields", () =>
     }],
   });
   assert.deepEqual(machines.machines[0]?.workspaceRoots, ["C:\\", "D:\\"]);
+
+  // #356: a newer Host lists a setting this build has never heard of; the known one stays usable.
+  const settings = parseSettingsResult({
+    settings: [
+      { key: "somethingFromAFutureHost", value: true, source: "global", writable: true, valueType: "boolean", reloadRequired: false, hostRestartRequired: false },
+      { key: "autoRetry", value: false, source: "global", writable: true, valueType: "boolean", reloadRequired: false, hostRestartRequired: false },
+    ],
+  });
+  assert.deepEqual(settings.settings.map((setting) => [setting.key, setting.value]), [["autoRetry", false]]);
 
   const workspaceFrame = parseWorkspaceFileReadFrame({
     kind: "workspace_file_read_error", version: 2, requestId: "workspace-1", hostEpoch: "epoch-1",

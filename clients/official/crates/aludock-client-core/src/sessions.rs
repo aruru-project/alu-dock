@@ -347,6 +347,9 @@ pub enum TreeNodeKind {
     CustomMessage,
     Label,
     SessionInfo,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -356,6 +359,9 @@ pub enum TreeNodeRole {
     Assistant,
     Tool,
     System,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -365,6 +371,9 @@ pub enum TreeDisplayClass {
     Tool,
     Metadata,
     Structural,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -372,6 +381,9 @@ pub enum TreeDisplayClass {
 pub enum TreeNodeState {
     Error,
     Aborted,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

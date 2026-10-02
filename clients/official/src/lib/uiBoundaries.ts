@@ -73,6 +73,7 @@ export type WorkPresenceTone =
 export function workPresence(
   work: Pick<Work, 'lifecycle' | 'execution' | 'compacting' | 'activeInteraction'>,
 ): { tone: WorkPresenceTone; label: string } {
+  if (work.lifecycle === 'unrecognized' || work.execution === 'unrecognized') return { tone: 'idle', label: '状态未知，请更新客户端' }
   if (work.lifecycle === 'stopped') return { tone: 'stopped', label: '已停止' }
   if (work.lifecycle === 'host_lost') return { tone: 'lost', label: '连接已中断' }
   if (work.lifecycle === 'runtime_error') return { tone: 'error', label: '运行故障' }

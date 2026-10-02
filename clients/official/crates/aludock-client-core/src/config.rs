@@ -30,6 +30,9 @@ pub enum ThinkingLevel {
     High,
     Xhigh,
     Max,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -71,6 +74,9 @@ pub enum SourceKind {
     Extension,
     Skill,
     Prompt,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -195,6 +201,9 @@ pub enum SettingKey {
     OutputPad,
     AutocompleteMaxVisible,
     Warnings,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -212,6 +221,9 @@ pub enum SettingSource {
     Global,
     Project,
     Effective,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -221,6 +233,9 @@ pub enum SettingValueType {
     Enum,
     Integer,
     Object,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -265,6 +280,9 @@ pub enum ResourceKind {
     Skill,
     Prompt,
     Context,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -307,6 +325,9 @@ pub enum DiagnosticSeverity {
     Info,
     Warning,
     Error,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -607,7 +628,7 @@ impl DockClient {
     }
 
     pub async fn settings(&self, instance_id: &str) -> Result<SettingsResult> {
-        let result: SettingsResult = self
+        let mut result: SettingsResult = self
             .request(
                 "settings.get",
                 &InstanceParams { instance_id },
@@ -615,6 +636,11 @@ impl DockClient {
                 None,
             )
             .await?;
+        // A newer Host may list settings this build cannot name or edit; the rest stay usable.
+        result.settings.retain(|setting| {
+            setting.key != SettingKey::Unrecognized
+                && setting.value_type != SettingValueType::Unrecognized
+        });
         Ok(result)
     }
 

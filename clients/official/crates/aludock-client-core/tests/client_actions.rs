@@ -40,9 +40,15 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
         newer_branch["eventCursor"]["sequence"] = json!(32);
         let mut receipt_first = instance.clone();
         receipt_first["eventCursor"]["sequence"] = json!(42);
+        // #356: a newer Host lists a setting this build has never heard of; the page must still open.
+        let newer_setting = json!({"key":"somethingFromAFutureHost","value":true,"source":"global","writable":true,
+            "valueType":"boolean","allowedValues":null,"reloadRequired":false,"hostRestartRequired":false});
         let replies = [
             ("attachment.upload", json!({})),
-            ("settings.get", json!({"settings":[setting.clone()]})),
+            (
+                "settings.get",
+                json!({"settings":[newer_setting, setting.clone()]}),
+            ),
             (
                 "settings.update",
                 json!({"setting":setting,"instance":instance,"reloadRequired":true,"hostRestartRequired":false}),
@@ -257,6 +263,8 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
         assert_ne!(update.state, "unknown");
     }
     let settings = client.settings("work").await.unwrap();
+    assert_eq!(settings.settings.len(), 1);
+    assert_eq!(settings.settings[0].key, SettingKey::Transport);
     assert_eq!(
         settings.settings[0].allowed_values,
         Some(vec![json!("auto"), json!("sse")])

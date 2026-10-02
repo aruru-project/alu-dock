@@ -80,6 +80,9 @@ impl<'de> Deserialize<'de> for AttachmentDto {
 pub enum AttachmentUploadStatus {
     Stored,
     Reused,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

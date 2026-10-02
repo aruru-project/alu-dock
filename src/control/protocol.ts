@@ -2306,8 +2306,18 @@ export function parseToolsResult(input: unknown): ToolsResult {
 }
 /** The canonical full setting list; Worker settings.get bodies and wire results share it. */
 export function parseSettingDtos(input: unknown): SettingDto[] {
-  const settings = array(input, "settings", SETTING_KEYS.length).map((item, index) => parseSettingDto(item, `settings[${index}]`));
-  if (settings.length !== SETTING_KEYS.length || settings.some((setting, index) => setting.key !== SETTING_KEYS[index])) throw validation("invalid_response", `settings must contain all ${SETTING_KEYS.length} keys in canonical order`);
+  // A newer producer may list settings this build does not know (#356); those are skipped
+  // and the known ones stay usable. A known key may still appear only once.
+  const seen = new Set<SettingKey>();
+  const settings: SettingDto[] = [];
+  array(input, "settings", MAX_COLLECTION).forEach((item, index) => {
+    const field = `settings[${index}]`;
+    const key = string(object(item, field).key, `${field}.key`, 128);
+    if (!SETTING_KEYS.includes(key as SettingKey)) return;
+    if (seen.has(key as SettingKey)) throw validation("invalid_response", `${field} repeats setting ${key}`);
+    seen.add(key as SettingKey);
+    settings.push(parseSettingDto(item, field));
+  });
   return settings;
 }
 export function parseSettingsResult(input: unknown): SettingsResult {

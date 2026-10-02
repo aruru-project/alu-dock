@@ -21,6 +21,9 @@ pub enum InteractionMethod {
     Confirm,
     Input,
     Editor,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -224,6 +227,9 @@ pub enum InteractionCancellationReason {
     Replacement,
     HostDraining,
     Overflow,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -231,6 +237,9 @@ pub enum InteractionCancellationReason {
 pub enum WidgetPlacement {
     AboveEditor,
     BelowEditor,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -239,6 +248,9 @@ pub enum NotificationLevel {
     Info,
     Warning,
     Error,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -494,6 +506,9 @@ struct RespondParams<'a> {
 pub enum InteractionResolutionState {
     Resolved,
     AlreadyResolved,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -822,12 +837,13 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(additive.interaction_id, "expected");
-        assert!(
-            serde_json::from_value::<InteractionRespondResult>(serde_json::json!({
-                "interactionId":"expected", "state":"future"
-            }))
-            .is_err()
-        );
+        // #356: a state this build does not know still correlates; it is not a lost answer.
+        let future = serde_json::from_value::<InteractionRespondResult>(serde_json::json!({
+            "interactionId":"expected", "state":"future"
+        }))
+        .unwrap();
+        assert_eq!(future.state, InteractionResolutionState::Unrecognized);
+        assert!(validate_interaction_result(future, "expected", "operation-2").is_ok());
     }
 }
 
@@ -1020,6 +1036,12 @@ impl ExtensionControlState {
             InteractionMethod::Editor => InteractionResponse::Editor {
                 value: value.unwrap_or_default(),
             },
+            InteractionMethod::Unrecognized => {
+                return Err(ClientError::Action {
+                    code: "unsupported_interaction",
+                    message: "当前客户端还不支持这种问题的回答方式，请更新客户端。",
+                });
+            }
         };
         let result = client
             .respond_interaction(&binding.lease, interaction_id, &response, cancelled, None)

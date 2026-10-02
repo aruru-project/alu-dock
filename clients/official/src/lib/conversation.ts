@@ -886,6 +886,8 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
     renderToolDetail(tool)
   } else if (block.type === 'omitted') {
     output.push({ id, kind: 'notice', groupId, tone: 'info', text: block.description || '这部分内容暂时没有载入。请刷新对话后重试。' })
+  } else if (block.type === 'unrecognized') {
+    output.push({ id, kind: 'notice', groupId, tone: 'info', text: '这部分内容需要更新客户端才能显示。' })
   }
 }
 
