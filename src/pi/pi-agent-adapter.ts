@@ -133,6 +133,7 @@ import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import { retryExtension } from "./retry-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
+import { piBuiltinExtensions } from "./pi-builtin-extensions.js";
 import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension, SHOW_IMAGE_UNAVAILABLE_MESSAGE } from "./show-image-extension.js";
 import {
   applyPiSetting,
@@ -3288,6 +3289,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
+          ...piBuiltinExtensions(),
         ],
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],
