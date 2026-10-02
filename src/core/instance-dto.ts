@@ -81,18 +81,20 @@ export type ConversationRecordVisibility = "conversation" | "metadata" | "hidden
 
 /** Longest section or tool name a system prompt record lists. */
 export const MAX_SYSTEM_PROMPT_NAME_CHARS = 256;
+/** What one text block of a system prompt record is: the instruction text, a section's new text, or an added tool's definition as JSON. */
+export type SystemPromptBlockDto = { kind: "instructions" } | { kind: "section" | "tool"; name: string };
 /**
- * What one system prompt record changes, by name. The record's content is read
- * on demand and holds the new texts in record order: instruction text, each
- * non-empty set section, then each added tool's definition as JSON; it cannot
- * be matched to these names by position. Lists hold at most
- * MAX_CONVERSATION_CONTENT_BLOCKS names.
+ * What one system prompt record changes, by name, and what each of its text
+ * blocks is. The texts are read on demand; `blocks[i]` names content block i.
+ * A section set to an empty text is listed in `sections` but has no block.
+ * Lists hold at most MAX_CONVERSATION_CONTENT_BLOCKS entries.
  */
 export interface SystemPromptChangeDto {
   sections: string[];
   removedSections: string[];
   toolsAdded: string[];
   toolsRemoved: string[];
+  blocks: SystemPromptBlockDto[];
 }
 
 /** Longest usage kind or note a usage record carries. */

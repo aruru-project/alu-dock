@@ -650,7 +650,7 @@ mod tests {
         // Card #347: the view describes these records from these fields; dropping one hides the record.
         let mut value = history_with(serde_json::json!(null));
         value.as_object_mut().unwrap().remove("attachments");
-        value["systemPrompt"] = serde_json::json!({"sections": ["preamble"], "removedSections": [], "toolsAdded": ["read"], "toolsRemoved": []});
+        value["systemPrompt"] = serde_json::json!({"sections": ["preamble"], "removedSections": [], "toolsAdded": ["read"], "toolsRemoved": [], "blocks": [{"kind": "section", "name": "preamble"}, {"kind": "tool", "name": "read"}]});
         value["usage"] = serde_json::json!({"kind": "cache_warm", "tokens": {"input": 0, "output": 1, "cacheRead": 9, "cacheWrite": 0, "total": 10}, "cost": 0.0042});
         value["contextEdit"] = serde_json::json!("omit");
         value["targetEntryId"] = serde_json::json!("entry-0");

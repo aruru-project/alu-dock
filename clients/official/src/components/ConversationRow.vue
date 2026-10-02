@@ -16,8 +16,12 @@ defineProps<{
   collapsed?: boolean
   /** This row is the turn's final Agent message: its text stays when collapsed. */
   finalRow?: boolean
+  /** Whether a record read on open is still being read, or could not be read. */
+  recordState?: (entryId: string) => { loading: boolean; error?: string }
 }>()
 const emit = defineEmits<{
+  recordToggle: [id: string, open: boolean]
+  retryRecord: [entryId: string]
   toolToggle: [id: string, event: Event]
   imageRequest: [part: ImagePart]
   imagePreview: [part: ImagePart]
@@ -30,6 +34,7 @@ const hasAssistant = (parts: ConversationProcessItem[]) => parts.some((part) => 
 /** The final reply's row stays while its text is still being read, or when the run
  * ended before any text; say so instead of leaving an empty bubble. */
 const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((part) => partVisibleWhenCollapsed(part, true))
+const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null)?.open === true
 </script>
 
 <template>
@@ -50,7 +55,7 @@ const finalReplyMissing = (parts: ConversationProcessItem[]) => !parts.some((par
         </div>
       </article>
 
-      <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></details>
+      <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id" @toggle="emit('recordToggle', row.id, detailsOpen($event))"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /><template v-if="row.readOnOpen && row.entryId && recordState"><div v-if="recordState(row.entryId).loading" class="msg-notice alu-record-reading">正在读取这条记录的全文…</div><div v-else-if="recordState(row.entryId).error" class="msg-error alu-record-reading">{{ recordState(row.entryId).error }} <button type="button" class="message-text-action" @click="emit('retryRecord', row.entryId)">重试</button></div></template></div></details>
 
       <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
 

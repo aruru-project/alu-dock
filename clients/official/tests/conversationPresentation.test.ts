@@ -112,7 +112,7 @@ assert.equal(firstSection.finalRowId, 'record:a2', '最终回复是这一轮最�
 const runtimeItems = projectRecordGroups([
   record('s5', 'system', [{ type: 'text', text: 'Fixture prompt.' }, { type: 'text', text: '{\n  "name": "read"\n}' }], {
     visibility: 'metadata', timestamp: '2026-01-01T02:00:00Z',
-    systemPrompt: { sections: ['preamble'], removedSections: [], toolsAdded: ['read', 'bash'], toolsRemoved: ['bash'] },
+    systemPrompt: { sections: ['preamble'], removedSections: [], toolsAdded: ['read', 'bash'], toolsRemoved: ['bash'], blocks: [{ kind: 'section', name: 'preamble' }, { kind: 'tool', name: 'read' }] },
   }),
   record('u5', 'user', [{ type: 'text', text: '试试' }], { timestamp: '2026-01-01T02:00:00Z' }),
   record('a5', 'assistant', [], { timestamp: '2026-01-01T02:00:02Z', stopReason: 'error', error: 'overloaded' }),
@@ -123,20 +123,29 @@ const runtimeItems = projectRecordGroups([
     kind: 'custom', visibility: 'metadata', provider: 'anthropic', modelId: 'claude',
     usage: { kind: 'cache_warm', tokens: { input: 0, output: 1, cacheRead: 9000, cacheWrite: 0, total: 9001 }, cost: 0.0042 },
   }),
-  record('s6', 'system', [], { visibility: 'metadata', timestamp: '2026-01-01T02:10:00Z', systemPrompt: { sections: [], removedSections: ['skills'], toolsAdded: [], toolsRemoved: [] } }),
+  // Removal only: seven tools and one section go, nothing is added, so the record has no text of its own.
+  record('s6', 'system', [], { visibility: 'metadata', timestamp: '2026-01-01T02:10:00Z', systemPrompt: { sections: [], removedSections: ['skills'], toolsAdded: [], toolsRemoved: ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'], blocks: [] } }),
   record('u6', 'user', [{ type: 'text', text: '再来' }], { timestamp: '2026-01-01T02:10:00Z' }),
 ])
 const runtimeItem = (id: string) => runtimeItems.find((item) => item.id === `record:${id}`)
 const systemPanel = runtimeItem('s5')
 assert.ok(systemPanel?.kind === 'record' && systemPanel.folded)
 assert.equal(systemPanel.title, '系统提示：更新段落 preamble；新增工具 read；更新工具 bash')
-assert.deepEqual(systemPanel.parts.map((part) => [part.kind, part.kind === 'plain' ? part.text : '']), [['plain', 'Fixture prompt.'], ['plain', '{\n  "name": "read"\n}']], '展开后按原文显示记录下来的段落和工具定义')
+assert.deepEqual([systemPanel.readOnOpen, systemPanel.entryId], [true, 's5'], '整份提示和工具定义展开时才读')
+assert.deepEqual(systemPanel.parts.map((part) => part.kind === 'plain' ? [part.label, part.text] : [part.kind]), [
+  ['这条记录改了什么', '更新段落（1）：preamble\n新增工具（1）：read\n更新工具（1）：bash'],
+  ['段落 preamble', 'Fixture prompt.'],
+  ['工具 read', '{\n  "name": "read"\n}'],
+], '展开后先列全部改动，再按原文显示每段并标明它是什么')
 assert.deepEqual([runtimeItem('e5')?.kind === 'notice' && runtimeItem('e5')?.text, runtimeItem('e5')?.turnId], ['模型上下文：移除了一条失败的回复，对话里仍保留原文。', 'turn:u5'])
 assert.equal(runtimeItem('w5')?.kind === 'notice' && runtimeItem('w5')?.text, '缓存保温费用 $0.0042 · anthropic/claude')
 const replacement = runtimeItem('e6')
 assert.ok(replacement?.kind === 'record' && replacement.folded)
-assert.deepEqual([replacement.title, replacement.parts.map((part) => part.kind === 'plain' ? part.text : part.kind)], ['模型上下文：替换了你的一条消息，对话里仍保留原文。展开查看替换后的内容', ['缩短后的提问']], '展开后按原文显示替换后的内容')
-assert.equal(runtimeItem('s6')?.kind === 'record' && runtimeItem('s6')?.title, '系统提示：移除段落 skills')
+assert.deepEqual([replacement.title, replacement.readOnOpen, replacement.parts.map((part) => part.kind === 'plain' ? part.text : part.kind)], ['模型上下文：替换了你的一条消息，对话里仍保留原文。展开查看替换后的内容', true, ['缩短后的提问']], '展开后按原文显示替换后的内容')
+const removalOnly = runtimeItem('s6')
+assert.ok(removalOnly?.kind === 'record')
+assert.equal(removalOnly.title, '系统提示：移除段落 skills；移除工具 read、bash、edit、write、grep、find 等 7 项', '摘要可以省略')
+assert.deepEqual(removalOnly.parts.map((part) => part.kind === 'plain' ? part.text : part.kind), ['移除段落（1）：skills\n移除工具（7）：read、bash、edit、write、grep、find、ls'], '详情不能丢：纯移除记录展开后列全七个工具')
 const runtimeTurn = runtimeItems.find((item) => item.kind === 'turn' && item.turnId === 'turn:u5')
 assert.equal(runtimeTurn?.kind === 'turn' && runtimeTurn.endedAt, '2026-01-01T02:00:09Z', '下一次提问前的系统提示记录不算进上一轮')
 assert.deepEqual(conversationSections(conversationRows(runtimeItems)).map((section) => section.kind === 'turn' ? `turn:${section.id}` : `row:${section.id}`),

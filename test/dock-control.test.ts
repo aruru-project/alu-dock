@@ -1361,7 +1361,10 @@ test("SSH TUI shows what a system prompt record changed and reads it in full fro
     runtime.history = [
       agentRecord("system-1", "system", [], {
         visibility: "metadata",
-        systemPrompt: { sections: ["preamble", "skills"], removedSections: [], toolsAdded: ["read"], toolsRemoved: [] },
+        systemPrompt: {
+          sections: ["preamble", "skills"], removedSections: [], toolsAdded: ["read"], toolsRemoved: ["ls", "find", "grep", "edit", "write", "bash", "fetch"],
+          blocks: [{ kind: "section", name: "preamble" }, { kind: "section", name: "skills" }, { kind: "tool", name: "read" }],
+        },
       }),
       agentRecord("user-1", "user", [{ type: "text", text: "hello" }]),
     ];
@@ -1369,6 +1372,7 @@ test("SSH TUI shows what a system prompt record changed and reads it in full fro
     runtime.conversationContent.set("fixture-system-1", [
       { blockIndex: 0, type: "text", text: "Recorded preamble text", offset: 0, blockComplete: true },
       { blockIndex: 1, type: "text", text: "<skills>recorded skill list</skills>", offset: 0, blockComplete: true },
+      { blockIndex: 2, type: "text", text: "{ \"name\": \"read\" }", offset: 0, blockComplete: true },
     ]);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime, initialHistory: runtime.getHistory() });
   }, () => "pty-context-instance");
@@ -1386,9 +1390,16 @@ test("SSH TUI shows what a system prompt record changed and reads it in full fro
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  assert.match(output, /System prompt: sections preamble, skills \u00b7 tools \+read/u);
+  // The chat line cuts the seven removed tools short; the reader lists every one and heads each text with what it is.
+  assert.match(output, /System prompt: sections preamble, skills \u00b7 tools \+read \u00b7 tools \u2212ls, find, grep, edit, write, bash \+1 more/u);
+  assert.match(output, /Sections set \(2\): preamble, skills/u);
+  assert.match(output, /Tools added \(1\): read/u);
+  assert.match(output, /Tools removed \(7\): ls, find, grep, edit, write, bash, fetch/u);
+  assert.match(output, /Section preamble/u);
   assert.match(output, /Recorded preamble text/u);
+  assert.match(output, /Section skills/u);
   assert.match(output, /recorded skill list/u);
+  assert.match(output, /Tool read/u);
 });
 
 test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async (context) => {

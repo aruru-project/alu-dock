@@ -350,11 +350,15 @@ export interface ConversationRecord {
   targetEntryId?: string
 }
 
+/** What one text block of a system prompt record is; `blocks[i]` names content block i. */
+export type SystemPromptBlock = { kind: 'instructions' } | { kind: 'section' | 'tool'; name: string }
+
 export interface SystemPromptChange {
   sections: string[]
   removedSections: string[]
   toolsAdded: string[]
   toolsRemoved: string[]
+  blocks: SystemPromptBlock[]
 }
 
 export interface RecordUsage {
@@ -630,8 +634,8 @@ export type ConversationProcessItem = (
   | { id: string; kind: 'tool'; groupId: string; toolCallId?: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; preview?: ToolCallPreview; nestedCalls?: NestedToolCalls; detailArgs?: unknown; detailOutputText?: string; detailOmittedFields?: string[]; groupTime?: string }
   | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; historyEntryId?: string; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
-  /** Recorded text shown as written, such as a system prompt section or a tool definition. */
-  | { id: string; kind: 'plain'; groupId: string; text: string; groupTime?: string }
+  /** Recorded text shown as written, such as a system prompt section or a tool definition, under what it is. */
+  | { id: string; kind: 'plain'; groupId: string; text: string; label?: string; groupTime?: string }
 
 ) & { sourceEntryIds?: string[]; turnId?: string }
 
@@ -675,7 +679,8 @@ export type ConversationItem = (
   | { id: string; kind: 'user'; text: string; time: string; attachments?: AttachmentDto[]; images?: Array<Extract<ConversationProcessItem, { kind: 'image' }>> }
   | ConversationTurnItem
   | ConversationProcessItem
-  | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[] }
+  /** `readOnOpen`: the record's text is long and read only once the reader opens the panel; `entryId` names the record to read. */
+  | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[]; readOnOpen?: boolean; entryId?: string }
   | ShellRunItem
 
 ) & { sourceEntryIds?: string[]; turnId?: string }

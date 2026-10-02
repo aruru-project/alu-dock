@@ -197,7 +197,7 @@ test("a reopened conversation says what its system prompt, cost and model-contex
   conversation.applyHistory([
     historyRecord("s1", "system", [{ type: "text", text: "Fixture prompt." }], {
       visibility: "metadata",
-      systemPrompt: { sections: ["preamble", "skills"], removedSections: [], toolsAdded: ["read", "bash"], toolsRemoved: ["bash"] },
+      systemPrompt: { sections: ["preamble", "skills"], removedSections: [], toolsAdded: ["read", "bash"], toolsRemoved: ["bash"], blocks: [{ kind: "section", name: "preamble" }] },
     }),
     historyRecord("u1", "user", [{ type: "text", text: "hello" }]),
     historyRecord("a1", "assistant", [], { error: "provider overloaded", stopReason: "error" }),

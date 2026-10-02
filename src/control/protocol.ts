@@ -42,6 +42,7 @@ import {
   MAX_SYSTEM_PROMPT_NAME_CHARS,
   type ConversationImageBody,
   type RecordUsageDto,
+  type SystemPromptBlockDto,
   type SystemPromptChangeDto,
 } from "../core/instance-dto.js";
 import {
@@ -2821,10 +2822,17 @@ export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDt
 
 function parseSystemPromptChange(input: unknown, field: string): SystemPromptChangeDto {
   const value = object(input, field);
-  exact(value, ["sections", "removedSections", "toolsAdded", "toolsRemoved"]);
-  const names = (key: keyof SystemPromptChangeDto) => array(value[key], `${field}.${key}`, MAX_CONVERSATION_CONTENT_BLOCKS)
+  exact(value, ["sections", "removedSections", "toolsAdded", "toolsRemoved", "blocks"]);
+  const names = (key: "sections" | "removedSections" | "toolsAdded" | "toolsRemoved") => array(value[key], `${field}.${key}`, MAX_CONVERSATION_CONTENT_BLOCKS)
     .map((name, index) => string(name, `${field}.${key}[${index}]`, MAX_SYSTEM_PROMPT_NAME_CHARS));
-  return { sections: names("sections"), removedSections: names("removedSections"), toolsAdded: names("toolsAdded"), toolsRemoved: names("toolsRemoved") };
+  const blocks = array(value.blocks, `${field}.blocks`, MAX_CONVERSATION_CONTENT_BLOCKS).map((item, index): SystemPromptBlockDto => {
+    const block = object(item, `${field}.blocks[${index}]`);
+    const kind = enumeration(block.kind, `${field}.blocks[${index}].kind`, ["instructions", "section", "tool"] as const);
+    if (kind === "instructions") { exact(block, ["kind"]); return { kind }; }
+    exact(block, ["kind", "name"]);
+    return { kind, name: string(block.name, `${field}.blocks[${index}].name`, MAX_SYSTEM_PROMPT_NAME_CHARS) };
+  });
+  return { sections: names("sections"), removedSections: names("removedSections"), toolsAdded: names("toolsAdded"), toolsRemoved: names("toolsRemoved"), blocks };
 }
 
 function parseRecordUsage(input: unknown, field: string): RecordUsageDto {

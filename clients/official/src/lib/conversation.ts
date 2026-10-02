@@ -13,6 +13,7 @@ import type {
   PublishedFileDto,
   RecordUsage,
   ShellRunItem,
+  SystemPromptBlock,
   SystemPromptChange,
   ToolCallPreview,
 } from './types'
@@ -777,35 +778,56 @@ function isShownRuntimeRecord(record: ConversationRecord) {
 
 function projectRuntimeRecord(record: ConversationRecord, group: RecordGroup, byEntryId: ReadonlyMap<string, ConversationRecord>): ConversationItem {
   if (record.systemPrompt) {
-    return { id: group.key, kind: 'record', title: systemPromptTitle(record.systemPrompt), panelClass: 'alu-record-system', folded: true, parts: plainParts(record, group.key) }
+    // The whole prompt and every tool definition are long: they are read once the reader opens the panel.
+    const change = record.systemPrompt
+    const detail: ConversationProcessItem = { id: `${record.recordId}-changes`, kind: 'plain', groupId: group.key, label: '这条记录改了什么', text: systemPromptDetail(change) }
+    const texts = plainParts(record, group.key, (index) => systemPromptBlockLabel(change.blocks[index]))
+    return { id: group.key, kind: 'record', title: systemPromptTitle(change), panelClass: 'alu-record-system', folded: true, parts: [detail, ...texts], readOnOpen: true, entryId: record.entryId }
   }
   if (record.usage) return { id: group.key, kind: 'notice', tone: 'info', text: usageText(record.usage, record.provider, record.modelId) }
   const target = contextEditTarget(record.targetEntryId ? byEntryId.get(record.targetEntryId) : undefined)
   if (record.contextEdit === 'replace') {
-    return { id: group.key, kind: 'record', title: `模型上下文：替换了${target}，对话里仍保留原文。展开查看替换后的内容`, panelClass: 'alu-record-system', folded: true, parts: plainParts(record, group.key) }
+    return { id: group.key, kind: 'record', title: `模型上下文：替换了${target}，对话里仍保留原文。展开查看替换后的内容`, panelClass: 'alu-record-system', folded: true, parts: plainParts(record, group.key), readOnOpen: true, entryId: record.entryId }
   }
   return { id: group.key, kind: 'notice', tone: 'info', text: `模型上下文：移除了${target}，对话里仍保留原文。` }
 }
 
 /** Recorded text as written: prompt sections, tool definitions or replacement text (the Host sends tool content as text here). */
-function plainParts(record: ConversationRecord, groupId: string): ConversationProcessItem[] {
+function plainParts(record: ConversationRecord, groupId: string, label?: (index: number) => string): ConversationProcessItem[] {
   return record.content.flatMap((block, index): ConversationProcessItem[] =>
-    (block.type === 'text' || block.type === 'thinking') && block.text ? [{ id: `${record.recordId}-${index}`, kind: 'plain', groupId, text: block.text }] : [])
+    (block.type === 'text' || block.type === 'thinking') && block.text ? [{ id: `${record.recordId}-${index}`, kind: 'plain', groupId, text: block.text, ...(label ? { label: label(index) } : {}) }] : [])
 }
 
-function systemPromptTitle(change: SystemPromptChange) {
-  const list = (names: string[]) => names.length <= 6 ? names.join('、') : `${names.slice(0, 6).join('、')} 等 ${names.length} 项`
-  const named = (label: string, names: string[]) => names.length ? `${label} ${list(names)}` : ''
+/** The sections and tools a system prompt record changes, grouped the way Pi records them. */
+function systemPromptGroups(change: SystemPromptChange) {
   // Pi declares a tool whose definition changed as removed and added again.
   const changedTools = change.toolsAdded.filter((name) => change.toolsRemoved.includes(name))
-  const parts = [
-    named('更新段落', change.sections),
-    named('移除段落', change.removedSections),
-    named('新增工具', change.toolsAdded.filter((name) => !changedTools.includes(name))),
-    named('移除工具', change.toolsRemoved.filter((name) => !changedTools.includes(name))),
-    named('更新工具', changedTools),
-  ].filter(Boolean)
+  return [
+    { label: '更新段落', names: change.sections },
+    { label: '移除段落', names: change.removedSections },
+    { label: '新增工具', names: change.toolsAdded.filter((name) => !changedTools.includes(name)) },
+    { label: '移除工具', names: change.toolsRemoved.filter((name) => !changedTools.includes(name)) },
+    { label: '更新工具', names: changedTools },
+  ].filter((group) => group.names.length)
+}
+
+/** One line; long lists are cut short. */
+function systemPromptTitle(change: SystemPromptChange) {
+  const list = (names: string[]) => names.length <= 6 ? names.join('、') : `${names.slice(0, 6).join('、')} 等 ${names.length} 项`
+  const parts = systemPromptGroups(change).map((group) => `${group.label} ${list(group.names)}`)
   return parts.length ? `系统提示：${parts.join('；')}` : '系统提示更新'
+}
+
+/** Every section and tool the record changes, one group per line, nothing cut short. */
+function systemPromptDetail(change: SystemPromptChange) {
+  const groups = systemPromptGroups(change)
+  return groups.length ? groups.map((group) => `${group.label}（${group.names.length}）：${group.names.join('、')}`).join('\n') : '这条记录没有点名任何段落或工具。'
+}
+
+function systemPromptBlockLabel(block: SystemPromptBlock | undefined) {
+  if (!block) return '记录文本'
+  if (block.kind === 'instructions') return '说明文字'
+  return block.kind === 'section' ? `段落 ${block.name}` : `工具 ${block.name}`
 }
 
 function usageText(usage: RecordUsage, provider?: string | null, modelId?: string | null) {

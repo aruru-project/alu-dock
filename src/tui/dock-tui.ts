@@ -21,7 +21,7 @@ import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, DiagnosticDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, EventCursor, HistoryEntryDto, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
 import type { ConversationHistoryEntryDto } from "../core/instance-dto.js";
-import { systemPromptChangeText } from "../core/runtime-record-text.js";
+import { systemPromptBlockLabel, systemPromptChangeDetail, systemPromptChangeText } from "../core/runtime-record-text.js";
 import {
   THINKING_LEVELS,
   type AgentModelInfo,
@@ -1750,7 +1750,11 @@ export async function runDockTui(
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
-  /** A history preview can be shortened; the rest of the record is read through its content reference. */
+  /**
+   * A history preview can be shortened; the rest of the record is read through its content
+   * reference. A system prompt change lists everything it changes first, then each recorded
+   * text under what it is.
+   */
   async function readRecordText(item: ConversationHistoryEntryDto, view: ConversationReadContext, signal: AbortSignal): Promise<{ text: string }> {
     const blocks = item.entry.content.map((block) => block.type === "text" || block.type === "thinking" ? block.text : "");
     if (!item.contentComplete) {
@@ -1765,7 +1769,10 @@ export async function runDockTui(
         cursor = page.complete ? undefined : page.nextCursor;
       } while (cursor !== undefined);
     }
-    return { text: blocks.filter((block) => block.length > 0).join("\n\n") };
+    const change = item.entry.systemPrompt;
+    if (change === undefined) return { text: blocks.filter((block) => block.length > 0).join("\n\n") };
+    const texts = blocks.flatMap((block, index) => block.length > 0 ? [`${systemPromptBlockLabel(change.blocks[index])}\n${"─".repeat(24)}\n${block}`] : []);
+    return { text: [systemPromptChangeDetail(change), ...texts].join("\n\n") };
   }
 
   async function switchModel(provider: string, modelId: string): Promise<void> {

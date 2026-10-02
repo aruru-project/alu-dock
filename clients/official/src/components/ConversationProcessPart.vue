@@ -71,12 +71,21 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
       </details>
     </div>
     <ConversationImage v-else-if="part.kind === 'image'" :part="part" :resource="imageResource(part)" @request="emit('imageRequest', $event)" @preview="emit('imagePreview', $event)" @failed="emit('imageFailed', $event)" />
-    <pre v-else-if="part.kind === 'plain'" class="msg-plain" :data-conversation-id="part.id">{{ part.text }}</pre>
+    <div v-else-if="part.kind === 'plain'" class="msg-plain-block" :data-conversation-id="part.id"><div v-if="part.label" class="msg-plain-label">{{ part.label }}</div><pre class="msg-plain">{{ part.text }}</pre></div>
     <div v-else :class="part.tone === 'error' ? 'msg-error' : part.tone === 'warning' ? 'msg-warning' : 'msg-notice'" :data-conversation-id="part.id">{{ part.text }}</div>
 </template>
 
 <style scoped>
 /* Recorded text as written, such as a system prompt section or a tool definition; long text scrolls like tool output. */
+.msg-plain-block { margin: 6px 0; }
+.msg-plain-label {
+  margin: 0 2px 2px;
+  color: var(--alu-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 .msg-plain {
   max-height: min(54vh, 520px);
   padding: 8px 10px;

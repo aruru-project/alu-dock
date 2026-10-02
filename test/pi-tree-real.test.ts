@@ -200,6 +200,9 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
   // Longer than one history preview block, so reading it whole needs the content path.
   const projectContext = `<project_context>\n${"Project rule. ".repeat(1_000)}\n</project_context>`;
   const readTool = { name: "read", description: "Read a file.", parameters: { type: "object", properties: { path: { type: "string" } } } };
+  const removedTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+  // Longer than a text preview block (8,000): the history must still load and the whole text must still read back.
+  const longReplacement = "Replacement line. ".repeat(500);
   // Pi 0.99 opens a session with its system prompt as a message, records cache warming
   // between runs, records later prompt and tool changes as further system messages,
   // and removes a failed attempt from model context before retrying.
@@ -209,7 +212,8 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
     { type: "message", id: "u1", parentId: "s1", timestamp: at(2), message: { role: "user", content: "first prompt", timestamp: 2 } },
     { type: "message", id: "a1", parentId: "u1", timestamp: at(3), message: { ...assistant("first answer", 3), usage: paid(0.5) } },
     { type: "usage", id: "w1", parentId: "a1", timestamp: at(4), kind: "cache_warm", provider: "fixture", model: "fixture-model", usage: { ...paid(0.125), cacheRead: 1_000, output: 1, totalTokens: 1_001 }, note: "extension override" },
-    { type: "message", id: "s2", parentId: "w1", timestamp: at(5), message: { role: "system", content: "", sections: { project_context: null }, toolsRemoved: [{ name: "read" }], timestamp: 5 } },
+    // Removal only: nothing is added, so this record has no text of its own.
+    { type: "message", id: "s2", parentId: "w1", timestamp: at(5), message: { role: "system", content: "", sections: { project_context: null }, toolsRemoved: removedTools.map((name) => ({ name })), timestamp: 5 } },
     { type: "message", id: "u2", parentId: "s2", timestamp: at(5), message: { role: "user", content: "second prompt", timestamp: 5 } },
     { type: "message", id: "a2", parentId: "u2", timestamp: at(6), message: { ...assistant("", 6), content: [], stopReason: "error", errorMessage: "provider overloaded" } },
     { type: "context_edit", id: "e1", parentId: "a2", timestamp: at(7), targetId: "a2", replacement: null },
@@ -221,6 +225,12 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
     { type: "message", id: "t4", parentId: "a4", timestamp: at(9), message: { role: "toolResult", toolCallId: "call-r", toolName: "dock_attachment_resolve", content: [{ type: "text", text: "/home/private/report.pdf" }], isError: false, timestamp: 9 } },
     { type: "context_edit", id: "e3", parentId: "t4", timestamp: at(9), targetId: "t4", replacement: { content: [{ type: "text", text: "Shortened: /home/private/report.pdf" }] } },
     { type: "message", id: "a5", parentId: "e3", timestamp: at(9), message: assistant("third answer", 9) },
+    // A long tool result replacement: the conversation keeps the tool's own text.
+    { type: "message", id: "u4", parentId: "a5", timestamp: at(9), message: { role: "user", content: "fourth prompt", timestamp: 9 } },
+    { type: "message", id: "a6", parentId: "u4", timestamp: at(9), message: { ...assistant("", 9), content: [{ type: "toolCall", id: "call-b", name: "read", arguments: { path: "big.txt" } }], stopReason: "toolUse" } },
+    { type: "message", id: "t6", parentId: "a6", timestamp: at(9), message: { role: "toolResult", toolCallId: "call-b", toolName: "read", content: [{ type: "text", text: "original big output" }], isError: false, timestamp: 9 } },
+    { type: "context_edit", id: "e4", parentId: "t6", timestamp: at(9), targetId: "t6", replacement: { content: [{ type: "text", text: longReplacement }] } },
+    { type: "message", id: "a7", parentId: "e4", timestamp: at(9), message: assistant("fourth answer", 9) },
   ].map((entry) => `${JSON.stringify(entry)}\n`).join(""), { mode: 0o600 });
 
   const instance = await createPiInstance({
@@ -235,7 +245,8 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
     tools: [],
   });
   try {
-    const conversation = ["u1", "a1", "u2", "a2", "a3", "u3", "a4", "t4", "a5"];
+    const conversation = ["u1", "a1", "u2", "a2", "a3", "u3", "a4", "t4", "a5", "u4", "a6", "t6", "a7"];
+    // The history crosses the real Worker boundary; a record that breaks its limits would lose the Worker here.
     const history = (await instance.getHistoryPage(undefined, 200)).entries;
     assert.deepEqual(history.filter((entry) => entry.visibility === "conversation").map((entry) => entry.entryId), conversation);
     assert.equal(history.some((entry) => entry.kind === "label"), false, "runtime records must not read as label changes");
@@ -244,8 +255,12 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
 
     // Each runtime record says what it changed, so a client can show it without Pi's file.
     const record = (id: string) => history.find((entry) => entry.entryId === id);
-    assert.deepEqual(record("s1")?.systemPrompt, { sections: ["preamble", "project_context"], removedSections: [], toolsAdded: ["read"], toolsRemoved: [] });
-    assert.deepEqual(record("s2")?.systemPrompt, { sections: [], removedSections: ["project_context"], toolsAdded: [], toolsRemoved: ["read"] });
+    assert.deepEqual(record("s1")?.systemPrompt, {
+      sections: ["preamble", "project_context"], removedSections: [], toolsAdded: ["read"], toolsRemoved: [],
+      blocks: [{ kind: "section", name: "preamble" }, { kind: "section", name: "project_context" }, { kind: "tool", name: "read" }],
+    });
+    // Every removed tool is named, not only the six a one-line summary shows.
+    assert.deepEqual(record("s2")?.systemPrompt, { sections: [], removedSections: ["project_context"], toolsAdded: [], toolsRemoved: removedTools, blocks: [] });
     assert.deepEqual(record("w1")?.usage, {
       kind: "cache_warm", tokens: { input: 0, output: 1, cacheRead: 1_000, cacheWrite: 0, total: 1_001 }, cost: 0.125, note: "extension override",
     });
@@ -254,21 +269,32 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
     assert.deepEqual([record("e2")?.contextEdit, record("e2")?.targetEntryId, record("e2")?.content], ["replace", "u2", [{ type: "text", text: "second prompt, shortened" }]]);
     assert.deepEqual(record("e3")?.content, [{ type: "text",
       text: "Dock attachment resolved. The Host-local path was disclosed privately to the Agent and is omitted from external conversation projections." }]);
+    // The long replacement keeps the text preview bound in history and reads back whole; the tool result itself is untouched.
+    assert.deepEqual(record("e4")?.content, [{ type: "text", text: longReplacement.slice(0, 8_000) }]);
+    assert.deepEqual(record("t6")?.content.map((block) => [block.type, block.type === "tool_result" ? block.text : ""]), [["tool_result", "original big output"]]);
+    const readWhole = async (contentRef: string): Promise<string[]> => {
+      const text: string[] = [];
+      for (let cursor: string | undefined, done = false; !done;) {
+        const content = await instance.getConversationContent(contentRef, cursor);
+        for (const chunk of content.chunks) {
+          assert.equal(chunk.type, "text");
+          if (chunk.type === "text") text[chunk.blockIndex] = (text[chunk.blockIndex] ?? "") + chunk.text;
+        }
+        cursor = content.nextCursor;
+        done = content.complete;
+      }
+      return text;
+    };
+    const longEdit = page.entries.find((item) => item.entry.entryId === "e4");
+    assert.equal(longEdit?.contentComplete, false);
+    assert.deepEqual(await readWhole(longEdit!.contentRef), [longReplacement]);
 
     // The whole system prompt record (sections, then added tool definitions) reads back in full.
     const system = page.entries.find((item) => item.entry.entryId === "s1");
     assert.deepEqual([system?.entry.content, system?.contentComplete], [[], false], "the prompt texts are read on demand");
-    const text: string[] = [];
-    for (let cursor: string | undefined, done = false; !done;) {
-      const content = await instance.getConversationContent(system!.contentRef, cursor);
-      for (const chunk of content.chunks) {
-        assert.equal(chunk.type, "text");
-        if (chunk.type === "text") text[chunk.blockIndex] = (text[chunk.blockIndex] ?? "") + chunk.text;
-      }
-      cursor = content.nextCursor;
-      done = content.complete;
-    }
-    assert.deepEqual(text, ["Fixture system prompt.", projectContext, JSON.stringify(readTool, null, 2)]);
+    assert.deepEqual(await readWhole(system!.contentRef), ["Fixture system prompt.", projectContext, JSON.stringify(readTool, null, 2)]);
+    const removalOnly = page.entries.find((item) => item.entry.entryId === "s2");
+    assert.deepEqual([removalOnly?.entry.content, removalOnly?.contentComplete, removalOnly?.totalBlocks], [[], true, 0], "a removal-only record has nothing more to read");
 
     const tree = await instance.getTree();
     assert.deepEqual(tree.nodes.filter((node) => node.displayClass !== "metadata").map((node) => node.entryId), conversation);
@@ -276,7 +302,7 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and s
     assert.deepEqual(["s1", "w1", "s2", "e1", "e2"].map((id) => [byId.get(id)?.displayClass, byId.get(id)?.summary]), [
       ["metadata", "System prompt: sections preamble, project_context \u00b7 tools +read"],
       ["metadata", "Cache warmed (extension override) \u00b7 $0.125 \u00b7 fixture/fixture-model"],
-      ["metadata", "System prompt: removed sections project_context \u00b7 tools \u2212read"],
+      ["metadata", "System prompt: removed sections project_context \u00b7 tools \u2212read, bash, edit, write, grep, find +1 more"],
       ["metadata", "Removed from model context: provider overloaded"],
       ["metadata", "Replaced in model context: second prompt"],
     ]);

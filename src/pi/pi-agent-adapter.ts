@@ -57,6 +57,7 @@ import {
   type ImagePathDto,
   type PublishedFileDto,
   type RecordUsageDto,
+  type SystemPromptBlockDto,
   type SystemPromptChangeDto,
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
@@ -2626,33 +2627,47 @@ function contextEditReplacement(entry: Extract<SessionEntry, { type: "context_ed
 
 /**
  * Replacement content is text about a tool, not the tool call or result itself: an edit made
- * long after its target must not join the tool's history page unit.
+ * long after its target must not join the tool's history page unit. A tool result preview may
+ * be far longer than a text preview; as text it keeps the text preview bound and the rest is
+ * read through the record's content reference.
  */
 function recordedToolText(block: ContentBlockDto): ContentBlockDto {
-  if (block.type === "tool_result") return { type: "text", text: block.text };
-  if (block.type === "tool_call") return { type: "text", text: `${block.toolName} ${JSON.stringify(block.args)}` };
+  if (block.type === "tool_result") return { type: "text", text: boundedContentString(block.text, 8_000) };
+  if (block.type === "tool_call") return { type: "text", text: boundedContentString(`${block.toolName} ${JSON.stringify(block.args)}`, 8_000) };
   return block;
 }
 
-/** Instruction text, each section a record sets and each added tool's definition, in record order. */
-function systemPromptTexts(message: Record<string, unknown>): string[] {
-  const texts: string[] = [];
+/**
+ * The texts a system prompt record carries, each with what it is: the instruction text, each
+ * section the record sets to a non-empty text, then each added tool's definition, in record order.
+ */
+function systemPromptBlocks(message: Record<string, unknown>): Array<{ block: SystemPromptBlockDto; text: string }> {
+  const blocks: Array<{ block: SystemPromptBlockDto; text: string }> = [];
+  const name = (value: unknown): string => safeRequiredText(value, MAX_SYSTEM_PROMPT_NAME_CHARS, "unnamed");
   const instructions = typeof message.content === "string" ? message.content
     : Array.isArray(message.content) ? message.content.flatMap((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : []).join("\n")
       : "";
-  if (instructions.length > 0) texts.push(instructions);
+  if (instructions.length > 0) blocks.push({ block: { kind: "instructions" }, text: instructions });
   if (isRecord(message.sections)) {
-    for (const text of Object.values(message.sections)) if (typeof text === "string" && text.length > 0) texts.push(text);
+    for (const [section, text] of Object.entries(message.sections)) {
+      if (typeof text === "string" && text.length > 0) blocks.push({ block: { kind: "section", name: name(section) }, text });
+    }
   }
   for (const tool of Array.isArray(message.toolsAdded) ? message.toolsAdded : []) {
     if (!isRecord(tool)) continue;
+    let text: string;
     try {
-      texts.push(JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2));
+      text = JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2);
     } catch {
-      texts.push(JSON.stringify({ name: tool.name }));
+      text = JSON.stringify({ name: tool.name });
     }
+    blocks.push({ block: { kind: "tool", name: name(tool.name) }, text });
   }
-  return texts;
+  return blocks.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS);
+}
+
+function systemPromptTexts(message: Record<string, unknown>): string[] {
+  return systemPromptBlocks(message).map((item) => item.text);
 }
 
 function projectSystemPromptChange(message: Record<string, unknown>): SystemPromptChangeDto {
@@ -2665,6 +2680,7 @@ function projectSystemPromptChange(message: Record<string, unknown>): SystemProm
     removedSections: names(sections.filter(([, text]) => text === null).map(([name]) => name)),
     toolsAdded: toolNames(message.toolsAdded),
     toolsRemoved: toolNames(message.toolsRemoved),
+    blocks: systemPromptBlocks(message).map((item) => item.block),
   };
 }
 
