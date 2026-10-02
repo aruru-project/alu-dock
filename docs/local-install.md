@@ -25,7 +25,7 @@ npm run install:local
 aludock service status
 ```
 
-安装器构建当前 checkout，在临时目录复制完整根 `package.json` / `package-lock.json` 并运行 `npm ci --omit=dev --ignore-scripts`，再加入 Dock 编译产物和资源。Linux 与 Windows 共用这份物料准备逻辑；只装配已发布的 Pi 资产，不编译或重新打包 Pi。
+安装器先核对 checkout 里装的依赖：与 `package-lock.json` 不一致时（例如拉取了新的 Pi 发布）先运行 `npm ci`，一致时不做额外操作。随后构建当前 checkout，在临时目录复制完整根 `package.json` / `package-lock.json` 并运行 `npm ci --omit=dev --ignore-scripts`，再加入 Dock 编译产物和资源。Linux 与 Windows 共用这份物料准备逻辑；只装配已发布的 Pi 资产，不编译或重新打包 Pi。
 
 Linux 将准备好的应用更新到私有安装根的 `dock/`，launcher 直接指向可执行的 `dock/dist/src/cli.js`；更新 user service 后等待 Host ready。旧的外层 npm 依赖目录和锁会移除，旁边的附件及用户资料不动。安装器不运行测试，也不自动回滚。
 
