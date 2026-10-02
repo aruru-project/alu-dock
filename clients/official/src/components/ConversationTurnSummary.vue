@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { formatTurnDuration, turnDurationMs, turnStatusLabel, turnToolCallsLabel, type ConversationTurnSection } from '../lib/conversationPresentation'
+import { formatTurnSpeed } from '../lib/turnSpeed'
+import { useTurnSpeedStore } from '../stores/turn-speed'
 
 const props = defineProps<{
   section: ConversationTurnSection
@@ -27,7 +29,12 @@ const duration = computed(() => {
   const text = formatTurnDuration(elapsed, running.value)
   return running.value ? text : `用时 ${text}`
 })
-const segments = computed(() => [turnStatusLabel(props.section.status), duration.value, turnToolCallsLabel(props.section)].filter(Boolean))
+const turnSpeed = useTurnSpeedStore()
+const speed = computed(() => {
+  const value = turnSpeed.speedOf(props.section.id)
+  return value === undefined ? '' : formatTurnSpeed(value)
+})
+const segments = computed(() => [turnStatusLabel(props.section.status), duration.value, speed.value, turnToolCallsLabel(props.section)].filter(Boolean))
 const label = computed(() => `${segments.value.join('，')}${props.section.error ? `，${props.section.error}` : ''}。${props.open ? '收起过程' : '展开过程'}`)
 </script>
 

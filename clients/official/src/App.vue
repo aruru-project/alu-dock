@@ -26,6 +26,7 @@ import { useObservationStore } from './stores/observation'
 import { useOperationsStore } from './stores/operations'
 import { usePlatformStore } from './stores/platform'
 import { useSurfacesStore } from './stores/surfaces'
+import { useTurnSpeedStore } from './stores/turn-speed'
 import { useWorkActionsStore } from './stores/work-actions'
 
 // App lays out the page regions and starts the page-wide listeners once.
@@ -43,6 +44,8 @@ const workActions = useWorkActionsStore()
 const controlPanel = useControlPanelStore()
 const conversation = useConversationStore()
 const modelVisibility = useModelVisibilityStore()
+// Created with the page so it sees a run from its first event.
+const turnSpeed = useTurnSpeedStore()
 const selected = computed(() => app.selectedWork)
 const pinia = getActivePinia()
 
@@ -67,7 +70,7 @@ onMounted(async () => {
 })
 // The page's stores stop their listeners and timers with the page; a later page starts from fresh state.
 onUnmounted(() => {
-  for (const store of [input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelVisibility]) {
+  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelVisibility]) {
     store.$dispose()
     if (pinia) delete pinia.state.value[store.$id]
   }

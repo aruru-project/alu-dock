@@ -198,7 +198,12 @@ export function projectConversation(bootstrap: ConversationBootstrap): Conversat
   return [...projectRecordGroups(bootstrap.records), ...live.snapshot()]
 }
 
-const CONTINUATION_TURN_ID = 'live-turn-continuation'
+const LIVE_TURN_PREFIX = 'live-turn-'
+const CONTINUATION_TURN_ID = `${LIVE_TURN_PREFIX}continuation`
+/** The turn the live projector opens for the run that starts at this event. */
+export const liveTurnId = (sequence: number) => `${LIVE_TURN_PREFIX}${sequence}`
+/** A turn still shown from live events; history replaces it with its own id at the same position. */
+export const isLiveTurnId = (id: string) => id.startsWith(LIVE_TURN_PREFIX)
 
 /** One canonical live algorithm, used both by bootstrap replay and incremental Follow.
  * Maps retain message/tool ownership; settled history is never revisited by apply. */
@@ -226,7 +231,7 @@ export function createLiveConversationProjector(
   /** A running segment seen without run.started turns out to be a new run after all. */
   function adoptTurn(sequence: number, startedAt: string) {
     if (!turn) return
-    turn.id = turn.turnId = `live-turn-${sequence}`
+    turn.id = turn.turnId = liveTurnId(sequence)
     turn.startedAt = startedAt
     turn.continuation = false
   }
@@ -265,7 +270,7 @@ export function createLiveConversationProjector(
         if (turn?.continuation && !turnHasItems) adoptTurn(event.sequence, event.occurredAt)
         else {
           settleTurn('completed')
-          openTurn(`live-turn-${event.sequence}`, event.occurredAt, false)
+          openTurn(liveTurnId(event.sequence), event.occurredAt, false)
         }
         break
       case 'message.submitted': {

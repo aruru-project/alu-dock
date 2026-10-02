@@ -318,6 +318,13 @@ try {
   assert.equal(runningTurns().length, 1, 'running facts do not add a second turn to the one already running')
   observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 1, sequence: 43, occurredAt: 'now', eventType: 'run.settled', data: { result: 'succeeded' } } }); await settle()
   assert.equal(activityVisible(), false, 'run.settled closes the running turn')
+  // #353: a run watched from its start shows its output speed on the turn summary.
+  const speedEvent = (sequence, second, eventType, data = {}) => observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 1, sequence, occurredAt: `2026-09-18T12:00:0${second}.000Z`, eventType, data } })
+  speedEvent(44, 0, 'run.started'); speedEvent(45, 1, 'message.delta', { messageId: 'speed-answer', block: 'text', delta: 'Speed answer' })
+  speedEvent(46, 3, 'message.completed', { messageId: 'speed-answer', role: 'assistant', content: [{ type: 'text', text: 'Speed answer' }] })
+  speedEvent(47, 3, 'session.metrics_changed', { metrics: { ...work.metrics, tokens: { ...work.metrics.tokens, output: 250 } } }); await settle()
+  assert.ok(runningTurns().some(turn => text(turn).includes('100 tok/s')), 'the running turn shows 200 new output tokens over 2 seconds of output')
+  speedEvent(48, 4, 'run.settled', { result: 'succeeded' }); await settle()
   contentSnapshot(); await settle()
   assert.ok(text(container).includes('OLD SESSION MESSAGE'), 'actual ConversationView displays the original Session')
   assert.ok(find(container, item => item.type === 'img' && item.props.src === 'http://aludock-media.localhost/verified-local-handle'), 'descriptor image displays through a native opaque handle while unrelated history/body loading is held')

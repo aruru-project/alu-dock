@@ -22,6 +22,8 @@ export type ObservationUpdate = {
   bootstrap?: ConversationBootstrap; events?: ProjectedEvent[]; event?: ProjectedEvent; target?: Work; state?: string; message?: string
   updates?: { revision: number; update: ObservationUpdate }[]
 }
+/** One followed event the selected Work accepted, with the Work's event position before it. */
+export interface AppliedEvent { connectionId: string; hostEpoch: string; instance: Work; previousSequence: number; event: ProjectedEvent }
 export type ObservationEmission = ConnectionContext & { instanceId: string; subscriptionId: string; revision: number; deliveryId?: number; update: ObservationUpdate }
 /** The conversation display attached by the conversation store. Neither input nor control panels subscribe to the native stream. */
 export interface ConversationSink {
@@ -59,6 +61,7 @@ export const useObservationStore = defineStore('observation', () => {
   const configChanged = createSignal<[event: ProjectedEvent]>()
   const compactionSettled = createSignal<[connectionId: string, instanceId: string]>()
   const replaced = createSignal<[]>()
+  const eventApplied = createSignal<[applied: AppliedEvent]>()
   const facts = ref<Pick<ConversationBootstrap, 'instance' | 'cursor' | 'queue'> | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -89,9 +92,11 @@ export const useObservationStore = defineStore('observation', () => {
     }, payload)
     if (reduced.kind !== 'applied') return
     if (reduced.state.instance !== current.instance) acceptWork(reduced.state.instance, payload, false)
+    const previousSequence = current.cursor.sequence
     current.instance = reduced.state.instance
     current.queue = reduced.state.queue
     current.cursor.sequence = reduced.state.sequence
+    eventApplied.emit({ connectionId: payload.connectionId, hostEpoch: current.cursor.hostEpoch, instance: current.instance, previousSequence, event: payload.event })
     if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') compactionSettled.emit(payload.connectionId, payload.instanceId)
     if (payload.event.eventType === 'resources.reloaded') commandCatalog.invalidate()
     if (reduced.configChanged) configChanged.emit(payload.event)
@@ -432,6 +437,6 @@ export const useObservationStore = defineStore('observation', () => {
   return {
     label: connectionLabel, refreshCurrent, refreshing, loading, error, status, connected, active, windowFocused,
     queue: computed(() => facts.value?.queue ?? []), listenNative, listenFocus, afterLoad, load, detach, canContinue, reportRouteError, acceptWork, queueRetrieved,
-    attachDisplay, onConfigChanged: configChanged.on, onCompactionSettled: compactionSettled.on, onReplaced: replaced.on,
+    attachDisplay, onConfigChanged: configChanged.on, onEventApplied: eventApplied.on, onCompactionSettled: compactionSettled.on, onReplaced: replaced.on,
   }
 })

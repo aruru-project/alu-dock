@@ -148,14 +148,7 @@ export function reconcileTurnOverrides(
   settled: Iterable<string>,
   awayFromBottom: boolean,
 ) {
-  const known = new Set(before)
-  // Where a turn known before now lives: itself, or the new id at its position.
-  const landed = (id: string) => {
-    if (after.includes(id)) return id
-    const position = before.indexOf(id)
-    const successor = position >= 0 ? after[position] : undefined
-    return successor && !known.has(successor) ? successor : undefined
-  }
+  const landed = (id: string) => turnLanded(id, before, after)
   for (const [id, open] of [...overrides]) {
     if (after.includes(id) || !before.includes(id)) continue
     overrides.delete(id)
@@ -168,6 +161,14 @@ export function reconcileTurnOverrides(
     if (!target || overrides.has(target)) continue
     if (awayFromBottom) overrides.set(target, true)
   }
+}
+
+/** Where a turn known before now lives: itself, or the new id at its position. */
+export function turnLanded(id: string, before: readonly string[], after: readonly string[]): string | undefined {
+  if (after.includes(id)) return id
+  const position = before.indexOf(id)
+  const successor = position >= 0 ? after[position] : undefined
+  return successor && !before.includes(successor) ? successor : undefined
 }
 
 /** The turn whose collapsed body hides the row or part a saved reading position
