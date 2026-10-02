@@ -1425,6 +1425,7 @@ impl ContentAssembler {
                     is_error,
                     published_file,
                     presentation: None,
+                    nested_calls: None,
                     omitted_fields: omitted,
                 },
                 PartialBlock::Omitted { kind, description } => {

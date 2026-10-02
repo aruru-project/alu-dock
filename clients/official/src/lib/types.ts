@@ -292,7 +292,7 @@ export type ContentBlock =
   | { type: 'text' | 'thinking'; text: string }
   | { type: 'image'; mimeType: string; contentRef?: string; data?: string; fileId?: string; nativeMedia?: NativeMedia }
   | { type: 'tool_call'; toolCallId: string; toolName: string; args: unknown; omittedFields?: string[] }
-  | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
+  | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; nestedCalls?: unknown; omittedFields?: string[] }
   | { type: 'omitted'; kind: string; description: string }
 
 export interface LocalAttachmentUpload {
@@ -585,10 +585,25 @@ export interface ToolCallPreview {
   truncated: boolean
 }
 
+/** Calls a tool made to other tools while it ran (for example from a codemode script). */
+export interface NestedToolCall {
+  toolName: string
+  args?: Record<string, unknown>
+  /** `running` only while watching live; `unfinished` was still running when the tool ended. */
+  status: 'running' | 'ok' | 'error' | 'unfinished'
+  durationMs?: number
+  error?: string
+}
+export interface NestedToolCalls {
+  calls: NestedToolCall[]
+  /** False when some calls or arguments were too large to keep. */
+  complete: boolean
+}
+
 export type ConversationProcessItem = (
   | { id: string; kind: 'assistant'; groupId: string; text: string; time: string; groupTime?: string }
   | { id: string; kind: 'thinking'; groupId: string; title: string; text: string; open?: boolean; groupTime?: string }
-  | { id: string; kind: 'tool'; groupId: string; toolCallId?: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; preview?: ToolCallPreview; detailArgs?: unknown; detailOutputText?: string; detailOmittedFields?: string[]; groupTime?: string }
+  | { id: string; kind: 'tool'; groupId: string; toolCallId?: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; preview?: ToolCallPreview; nestedCalls?: NestedToolCalls; detailArgs?: unknown; detailOutputText?: string; detailOmittedFields?: string[]; groupTime?: string }
   | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; historyEntryId?: string; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 

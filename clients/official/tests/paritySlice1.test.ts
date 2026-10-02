@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import { projectConversation, toolDetailText } from '../src/lib/conversation.ts'
+import { nestedCallRows, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { conversationRows, conversationSections, partVisibleWhenCollapsed, rowVisibleWhenCollapsed } from '../src/lib/conversationPresentation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
 import { conversationBoundaryKey, conversationReadMatches, draftAfterSubmit, formatCacheHitRate, formatContextUsage, formatTokenCount, initialWindowFocused, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
@@ -154,6 +154,40 @@ assert.equal(callText.groupId, callTool.groupId, 'a tool result stays inside the
 assert.notEqual(callText.groupId, afterText.groupId, 'a later assistant record keeps its own WebConsole message row')
 assert.match(toolDetailText(callTool), /参数[\s\S]*结果/)
 assert.deepEqual(callTool.preview, { title: 'README.md', body: undefined, variant: 'path', truncated: false }, '标准工具主要参数进入收起态投影')
+
+// Card #350: a codemode card shows its script and the tools the script called, live and after reopening.
+const harborCode = "const echoed = await tools.mcp__harbor__echo({ text: 'lantern' });\nreturn echoed;"
+const harborCalls = { calls: [
+  { toolName: 'mcp__harbor__echo', args: { text: 'lantern' }, status: 'ok', durationMs: 12 },
+  { toolName: 'mcp__harbor__fail', args: {}, status: 'error', durationMs: 1500, error: 'harbor is closed' },
+], complete: true }
+const runningCodemode = projectConversation(bootstrap(state, [
+  event(1, 'run.started', {}),
+  event(2, 'tool.started', { toolCallId: 'script', toolName: 'codemode', args: { code: harborCode } }),
+  event(3, 'tool.output_updated', { toolCallId: 'script', text: '', nestedCalls: { calls: [{ toolName: 'mcp__harbor__echo', args: { text: 'lantern' }, status: 'running' }], complete: true } }),
+])).find((item) => item.kind === 'tool')
+assert.ok(runningCodemode?.kind === 'tool' && runningCodemode.nestedCalls)
+assert.deepEqual(nestedCallRows(runningCodemode.nestedCalls).rows.map((row) => [row.icon, row.name]), [['…', 'mcp__harbor__echo']], 'a call the script waits for shows as running')
+const finishedCodemode = projectConversation(bootstrap(state, [
+  event(1, 'run.started', {}),
+  event(2, 'tool.started', { toolCallId: 'script', toolName: 'codemode', args: { code: harborCode } }),
+  event(3, 'tool.completed', { toolCallId: 'script', toolName: 'codemode', isError: false, text: 'Script completed\nOutput:\nharbor echoed lantern', nestedCalls: harborCalls }),
+])).find((item) => item.kind === 'tool')
+const reopenedCodemodeBootstrap = bootstrap(state, [])
+reopenedCodemodeBootstrap.records = [
+  { recordId: 'codemode-call', entryId: 'entry-codemode-call', kind: 'message', source: 'assistant', visibility: 'conversation', content: [{ type: 'tool_call', toolCallId: 'script', toolName: 'codemode', args: { code: harborCode } }] },
+  { recordId: 'codemode-result', entryId: 'entry-codemode-result', kind: 'message', source: 'tool', visibility: 'conversation', toolCallId: 'script', content: [{ type: 'tool_result', toolCallId: 'script', toolName: 'codemode', text: 'Script completed\nOutput:\nharbor echoed lantern', isError: false, nestedCalls: harborCalls }] },
+]
+const reopenedCodemode = projectConversation(reopenedCodemodeBootstrap).find((item) => item.kind === 'tool')
+for (const tool of [finishedCodemode, reopenedCodemode]) {
+  assert.ok(tool?.kind === 'tool' && tool.nestedCalls)
+  assert.deepEqual(tool.preview, { title: '脚本', body: harborCode, variant: 'command', truncated: false })
+  assert.deepEqual(nestedCallRows(tool.nestedCalls).rows.map(({ icon, name, args, duration }) => [icon, name, args, duration]), [
+    ['✓', 'mcp__harbor__echo', '{"text":"lantern"}', '12ms'],
+    ['✗', 'mcp__harbor__fail', '{}', '1.5s'],
+  ])
+  assert.match(toolDetailText(tool), /调用\n[^\n]*mcp__harbor__echo[\s\S]*harbor is closed[\s\S]*结果\nScript completed/)
+}
 
 const publishedFile = { presentation: 'image' as const, fileRef: 'file-1', name: 'result.png', sizeBytes: 5, mediaType: 'image/png' }
 const linkedImageAttachment = { fileId: 'attachment-image-1', name: '课堂截图.png', sizeBytes: 2048, mediaType: 'image/png', sha256: 'a'.repeat(64), storedAt: '2026-08-19T04:55:43Z' }
