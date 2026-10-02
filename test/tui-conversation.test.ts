@@ -757,8 +757,8 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
 });
 
 test("a codemode call lists the tools its script called while it runs and after the Work is reopened (card #350)", () => {
-  const running = { toolName: "mcp__harbor__echo", args: { text: "lantern" }, status: "running" } as const;
-  const failed = { toolName: "mcp__harbor__fail", args: {}, status: "error", durationMs: 1_500, error: "harbor is closed" } as const;
+  const running = { toolName: "mcp__harbor__echo", argumentsJson: "{\"text\":\"lantern\"}", status: "running" } as const;
+  const failed = { toolName: "mcp__harbor__fail", argumentsJson: "{}", status: "error", durationMs: 1_500, error: "harbor is closed" } as const;
   const live = new DockConversation();
   const code = "const echoed = await tools.mcp__harbor__echo({ text: 'lantern' });\nreturn echoed;";
   live.apply(event(1, "tool.started", { toolCallId: "script", toolName: "codemode", args: { code } }));
@@ -783,6 +783,15 @@ test("a codemode call lists the tools its script called while it runs and after 
     assert.match(expanded, /script\s*\n\s*const echoed[^\n]*\n\s*return echoed;/u, "the script keeps its lines");
     assert.match(expanded, /mcp__harbor__fail[\s\S]*harbor is closed/u);
   }
+
+  // Review of card #350: stopping the run while the script waits must not leave its call running.
+  const stopped = new DockConversation();
+  stopped.apply(event(1, "tool.started", { toolCallId: "script", toolName: "codemode", args: { code } }));
+  stopped.apply(event(2, "tool.output_updated", { toolCallId: "script", text: "", nestedCalls: { calls: [running], complete: true } }));
+  stopped.apply(event(3, "run.settled", { result: "aborted" }));
+  const afterStop = stopped.render(120).join("\n");
+  assert.match(afterStop, /\u2298 mcp__harbor__echo \{"text":"lantern"\} not finished/u);
+  assert.doesNotMatch(afterStop, /\u2026 mcp__harbor__echo|too many/u);
 });
 
 test("interrupted active tools retain the settlement reason in preview and full detail", () => {

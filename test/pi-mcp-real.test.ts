@@ -16,7 +16,22 @@ import { isolatedProcessEnvironment } from "./support/isolated-process-environme
 const PROVIDER = "mcp-loopback";
 const MODEL = "mcp-loopback-model";
 const PROMPT = "Ask the harbor server to echo a word";
-const SCRIPT = "const echoed = await tools.mcp__harbor__echo({ text: \"lantern\" });\nreturn echoed;";
+// The two long calls sit on either side of Pi's 8 KiB bound for one call's arguments.
+const SCRIPT = [
+  "const echoed = await tools.mcp__harbor__echo({ text: \"lantern\" });",
+  "await tools.mcp__harbor__echo({ text: \"k\".repeat(8100) });",
+  "await tools.mcp__harbor__echo({ text: \"o\".repeat(9000) });",
+  "return echoed;",
+].join("\n");
+/** What Pi keeps of the script's calls: arguments whole, or left out when over its bound, never shortened. */
+const HARBOR_CALLS = {
+  calls: [
+    { toolName: "mcp__harbor__echo", argumentsJson: "{\"text\":\"lantern\"}", status: "ok" },
+    { toolName: "mcp__harbor__echo", argumentsJson: `{"text":"${"k".repeat(8_100)}"}`, status: "ok" },
+    { toolName: "mcp__harbor__echo", status: "ok" },
+  ],
+  complete: false,
+};
 
 /** The smallest stdio MCP server: one `echo` tool. */
 const MCP_SERVER = `
@@ -84,18 +99,12 @@ test("a Work reaches a configured MCP server through codemode, shows inside the 
     assert.ok(completed?.type === "tool.completed" && completed.data.toolName === "codemode");
     const live = completed.data.nestedCalls;
     assert.ok(live !== undefined && typeof live.calls[0]?.durationMs === "number");
-    assert.deepEqual({ ...live, calls: live.calls.map(({ durationMs: _durationMs, ...call }) => call) }, {
-      calls: [{ toolName: "mcp__harbor__echo", args: { text: "lantern" }, status: "ok" }],
-      complete: true,
-    });
+    assert.deepEqual({ ...live, calls: live.calls.map(({ durationMs: _durationMs, ...call }) => call) }, HARBOR_CALLS);
     // A client opening the Work later sees the same list from the saved conversation.
     const saved = (await client.history(work.id)).entries.find((entry) => entry.source === "tool" && entry.toolName === "codemode");
     const savedResult = saved?.content.find((block) => block.type === "tool_result");
     assert.ok(savedResult?.type === "tool_result" && savedResult.nestedCalls !== undefined);
-    assert.deepEqual({ ...savedResult.nestedCalls, calls: savedResult.nestedCalls.calls.map(({ durationMs: _durationMs, ...call }) => call) }, {
-      calls: [{ toolName: "mcp__harbor__echo", args: { text: "lantern" }, status: "ok" }],
-      complete: true,
-    });
+    assert.deepEqual({ ...savedResult.nestedCalls, calls: savedResult.nestedCalls.calls.map(({ durationMs: _durationMs, ...call }) => call) }, HARBOR_CALLS);
 
     const statusStart = events.length;
     await client.prompt(work.id, "/mcp", "prompt", "mcp-status");

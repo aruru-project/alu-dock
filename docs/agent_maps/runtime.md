@@ -135,7 +135,7 @@ Pi CLI 以内置 extension 加载 `codemode`、`tool-search` 和 `mcp`，SDK 会
 
 Dock 中 Pi 以 RPC 模式运行：`/mcp` 输出 Pi 的文字状态，`/mcp login|logout|reconnect` 经现有 Extension UI 对话框完成。Pi 终端里的 `/mcp` 管理菜单（启用/停用、暴露方式、浏览工具）只接在 Pi 自己的 TUI 上，Dock 暂不接入，改 `mcp.json` 后 `/reload` 生效。Worker 运行在常无人值守的 Host 机器上，所以 MCP 登录不在 Host 上打开浏览器：授权链接只以通知发给客户端，浏览器不在 Host 机器上时由用户把跳转地址粘贴回输入框。
 
-工具在运行中通过 `ctx.executeTool()` 调用的其他工具（codemode 脚本最常见）只属于调用方：Pi 发出带 `parentToolCallId` 的 nested `tool_execution_*` 事件，并在调用方的 tool result message 上保存有界的 `nestedCalls` 记录。Adapter 不把 nested 事件投影成独立工具；它按 Pi 记录的同一规则（嵌套调用的调用归入同一个模型发起的调用，与 Pi 相同的条数/参数/错误上限，见 `src/core/nested-tool-calls.ts`）在 Worker 内维护实时清单，随调用方的 `tool.output_updated` 重发其最新输出与当前清单，`tool.completed` 携带最终清单；history 直接投影 Pi 保存的记录。Dock 不读取 codemode 结果 `details` 里的私有格式。
+工具在运行中通过 `ctx.executeTool()` 调用的其他工具（codemode 脚本最常见）只属于调用方：Pi 发出带 `parentToolCallId` 的 nested `tool_execution_*` 事件，并在调用方的 tool result message 上保存有界的 `nestedCalls` 记录。Adapter 不把 nested 事件投影成独立工具；它按 Pi 记录的同一规则（嵌套调用的调用归入同一个模型发起的调用，与 Pi 相同的条数/参数/错误上限，见 `src/core/nested-tool-calls.ts`）在 Worker 内维护实时清单，随调用方的 `tool.output_updated` 重发其最新输出与当前清单，`tool.completed` 携带最终清单；history 直接投影 Pi 保存的记录，`conversation.content` 在完成 tool result block 的 chunk 上再带一次，供 history 页裁掉清单时续读。参数取自 Pi 事件里的原始值、按 Pi 的字节上限整份保留或省略，不经过 Dock 面向模型调用参数的 JSON 投影上限，所以实时与重开逐字一致。Dock 不读取 codemode 结果 `details` 里的私有格式。
 
 项目状态的资源正文通过 `resource.content.v1` 读取。Pi adapter 为已加载的 Skill、Prompt、Project Context 及文件来源的 SYSTEM.md / APPEND_SYSTEM.md 生成 opaque `contentRef`；只有这些当前登记的资源可以读取，不接收客户端任意路径。Worker 经私有 `resolve_file_source` 将已登记资源的路径交给 Host，不读取或传输正文。Host 从磁盘当前 UTF-8 文件按字节续读，复用 source-file 检查，文件变化时要求重新打开，不保存正文快照、不执行资源或触发 Reload。全局文件不受 workspace 根目录限制；Project Context 中的 system 文件项只对应实际磁盘文件，Pi 内置生成提示不作为文件资源列出。
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive } from 'vue'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
-import { nestedCallRows, toolDetailText } from '../lib/conversation'
+import { LATER_NESTED_CALLS_LEFT_OUT, nestedCallRows, toolDetailText } from '../lib/conversation'
 import ConversationImage from './ConversationImage.vue'
 import MarkdownContent from './MarkdownContent.vue'
 
@@ -63,7 +63,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
           <span v-if="row.args" class="tool-nested-args">{{ row.args }}</span>
           <span v-if="row.duration" class="tool-nested-duration">{{ row.duration }}</span>
         </li>
-        <li v-if="!part.nestedCalls.complete" class="tool-nested-more">有些调用或参数太大，没有保留。</li>
+        <li v-if="nestedCallRows(part.nestedCalls).laterLeftOut" class="tool-nested-more">{{ LATER_NESTED_CALLS_LEFT_OUT }}</li>
       </ol>
       <details :open="toolOpen(part.id)" @toggle="emit('toolToggle', part.id, $event)">
         <summary><span>参数与结果</span><span class="tool-disclosure" aria-hidden="true">›</span></summary>

@@ -14,7 +14,7 @@ import {
   type BuiltInToolPresentation,
   type ToolResultNotice,
 } from "../core/tool-result-presentation.js";
-import type { NestedToolCallsDto } from "../core/nested-tool-calls.js";
+import { settledNestedToolCalls, type NestedToolCallsDto } from "../core/nested-tool-calls.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import type { AttachmentDto } from "../core/instance-attachments.js";
@@ -370,6 +370,7 @@ export class DockConversation implements Component {
           // A user shell command is not part of the reply; it reports its own completion.
           if (callId.startsWith("shell:")) continue;
           tool.entry.complete = true;
+          if (tool.nestedCalls) tool.nestedCalls = settledNestedToolCalls(tool.nestedCalls);
           const interruption = result === "succeeded" ? undefined : `interrupted by ${result ?? "settlement"}`;
           if (interruption) tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, result === "succeeded" ? "done" : "failed");
@@ -386,6 +387,7 @@ export class DockConversation implements Component {
         if (this.currentThinking) this.currentThinking.complete = true;
         for (const tool of this.tools.values()) {
           tool.entry.complete = true;
+          if (tool.nestedCalls) tool.nestedCalls = settledNestedToolCalls(tool.nestedCalls);
           const interruption = "interrupted by session replacement";
           tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, "failed");
@@ -1047,7 +1049,8 @@ function nestedCallLines(nested: NestedToolCallsDto, expanded: boolean): NestedC
   const lines: NestedCallLine[] = [];
   if (shown.length < nested.calls.length) lines.push({ text: `${nested.calls.length - shown.length} earlier calls · Ctrl+O details`, tone: "muted" });
   for (const call of shown) {
-    let args = call.args === undefined ? "" : JSON.stringify(call.args);
+    // Pi keeps every call's arguments unless they are over its size bounds.
+    let args = call.argumentsJson ?? "(arguments too large to keep)";
     if (!expanded && args.length > COLLAPSED_NESTED_CALL_ARGS) args = `${args.slice(0, COLLAPSED_NESTED_CALL_ARGS - 1)}…`;
     const duration = call.durationMs === undefined ? "" : call.durationMs < 1_000 ? `${call.durationMs}ms` : `${(call.durationMs / 1_000).toFixed(1)}s`;
     const [icon, tone, status] = call.status === "ok" ? ["✓", "success", ""] as const
@@ -1057,7 +1060,10 @@ function nestedCallLines(nested: NestedToolCallsDto, expanded: boolean): NestedC
     lines.push({ text: safeTerminalLine([`${icon} ${call.toolName}`, args, duration, status].filter(Boolean).join(" ")), tone });
     if (expanded && call.error) lines.push(...safeTerminalText(call.error).split("\n").map((line) => ({ text: `    ${line}`, tone: "error" as const })));
   }
-  if (!nested.complete) lines.push({ text: "some calls or arguments were too large to keep", tone: "muted" });
+  // Unfinished calls and left-out arguments show on their own rows; anything else missing is later calls.
+  if (!nested.complete && nested.calls.every((call) => call.status !== "unfinished" && call.argumentsJson !== undefined)) {
+    lines.push({ text: "later calls were too many to keep", tone: "muted" });
+  }
   return lines;
 }
 

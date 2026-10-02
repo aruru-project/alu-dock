@@ -588,7 +588,8 @@ export interface ToolCallPreview {
 /** Calls a tool made to other tools while it ran (for example from a codemode script). */
 export interface NestedToolCall {
   toolName: string
-  args?: Record<string, unknown>
+  /** The call's arguments as JSON text; absent when they were too large to keep. */
+  argumentsJson?: string
   /** `running` only while watching live; `unfinished` was still running when the tool ended. */
   status: 'running' | 'ok' | 'error' | 'unfinished'
   durationMs?: number

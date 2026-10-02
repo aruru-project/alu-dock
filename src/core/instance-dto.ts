@@ -41,6 +41,8 @@ export const MAX_CONVERSATION_CHUNK_CHARS = 32_000;
 export const MAX_CONVERSATION_IMAGE_CHUNK_BYTES = 512 * 1_024;
 /** Leaves room for the Protocol V2 response envelope under its 1 MiB line cap. */
 export const MAX_SEMANTIC_HISTORY_PAGE_BYTES = 512 * 1_024;
+/** One conversation.content page as the Worker returns it; same envelope reasoning. */
+export const MAX_CONVERSATION_CONTENT_PAGE_BYTES = 512 * 1_024;
 export const MAX_PENDING_QUEUE_ITEMS = 64;
 export const MAX_PENDING_QUEUE_TEXT_CHARS = 256_000;
 export const MAX_INPUT_IMAGES = 10;
@@ -129,7 +131,8 @@ export type ConversationContentChunkDto =
   | { blockIndex: number; type: "image_ref"; mimeType: string; contentRef?: string; fileId?: string }
   | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
+  /** `nestedCalls` arrives once, on the chunk that completes the result block. */
+  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; nestedCalls?: NestedToolCallsDto; omittedFields?: string[] }
   | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
 
 export interface ConversationHistoryEntryDto {

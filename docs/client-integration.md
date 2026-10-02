@@ -245,7 +245,7 @@ Live `messageId` / `toolCallId` 属于当前 event lifecycle，与 persisted `re
 
 Data URI、base64 和长文本都是普通内容。客户端根据结构处理 image block，不从普通文本猜测内容类型。
 
-一个工具在运行中自己调用的其他工具（例如 codemode 脚本里调用的 MCP 工具）不会成为模型的 tool call，也没有自己的 `tool.started`/`tool.completed`。它们以可选的 `nestedCalls {calls, complete}` 出现在调用它们的那个工具上：`tool.output_updated` 携带当前完整清单（运行中实时增加），`tool.completed` 携带最终清单，history preview 的 `tool_result` block 携带会话记录里的同一份清单。每项是 `toolName`、可选 `args`、`status`（`running` 只在实时出现；`ok`、`error`，以及调用方结束时仍未完成的 `unfinished`）、可选 `durationMs` 和失败时截短的 `error`；`complete: false` 表示有调用或参数因超出上限没有保留。清单不含结果正文，也不提供 `conversation.content` 续读；history 页预算不足时，它和 `presentation` 一样从 block 中移除并在 `omittedFields` 记录 `/nestedCalls`。不渲染此字段的客户端直接忽略它。
+一个工具在运行中自己调用的其他工具（例如 codemode 脚本里调用的 MCP 工具）不会成为模型的 tool call，也没有自己的 `tool.started`/`tool.completed`。它们以可选的 `nestedCalls {calls, complete}` 出现在调用它们的那个工具上：`tool.output_updated` 携带当前完整清单（运行中实时增加），`tool.completed` 携带最终清单，history preview 的 `tool_result` block 携带会话记录里的同一份清单。每项是 `toolName`、可选 `argumentsJson`（调用参数的 JSON 文本，与 Pi 会话记录逐字一致）、`status`（`running` 只在实时出现；`ok`、`error`，以及调用方结束时仍未完成的 `unfinished`）、可选 `durationMs` 和失败时截短的 `error`。上限只有 Pi 会话记录自己的那一套（最多 256 项；单项参数 8 KiB、全部参数 32 KiB；错误 500 字符）：参数要么完整，要么整份省略，不会截短；`complete: false` 表示有调用未完成、有参数被省略，或之后的调用超出条数没有保留。调用方工具因运行停止而没有 `tool.completed` 时，客户端把清单里仍为 `running` 的项显示为未完成。history 页预算不足时，清单和 `presentation` 一样从 preview block 中移除并在 `omittedFields` 记录 `/nestedCalls`（`contentComplete` 随之为 false）；`conversation.content` 在完成该 `tool_result` block 的那一个 chunk 上带回完整清单。不渲染此字段的客户端直接忽略它。
 
 ## 图片
 

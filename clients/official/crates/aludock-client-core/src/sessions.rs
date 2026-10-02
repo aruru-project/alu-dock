@@ -187,6 +187,9 @@ pub enum ConversationContentChunk {
         block_complete: bool,
         is_error: bool,
         published_file: Option<PublishedFileDto>,
+        /// Sent once, on the chunk that completes the result block.
+        #[serde(default)]
+        nested_calls: Option<serde_json::Value>,
         omitted_fields: Option<Vec<String>>,
     },
     Omitted {
@@ -1080,6 +1083,7 @@ enum PartialBlock {
         is_error: bool,
         published_file: Option<PublishedFileDto>,
         omitted: Vec<String>,
+        nested_calls: Option<serde_json::Value>,
     },
     Omitted {
         kind: String,
@@ -1160,6 +1164,7 @@ impl ContentAssembler {
                 block_complete,
                 is_error,
                 published_file,
+                nested_calls,
                 omitted_fields,
                 ..
             } => self.push_tool_result(
@@ -1171,6 +1176,7 @@ impl ContentAssembler {
                 block_complete,
                 is_error,
                 published_file,
+                nested_calls,
                 omitted_fields.unwrap_or_default(),
             )?,
             ConversationContentChunk::Omitted {
@@ -1306,6 +1312,7 @@ impl ContentAssembler {
         done: bool,
         is_error: bool,
         published_file: Option<PublishedFileDto>,
+        nested_calls: Option<serde_json::Value>,
         omitted: Vec<String>,
     ) -> Result<()> {
         let block = self
@@ -1319,6 +1326,7 @@ impl ContentAssembler {
                 is_error,
                 published_file: published_file.clone(),
                 omitted: omitted.clone(),
+                nested_calls: None,
             });
         match block {
             PartialBlock::ToolResult {
@@ -1329,6 +1337,7 @@ impl ContentAssembler {
                 is_error: expected_error,
                 published_file: expected_published_file,
                 omitted: expected_omitted,
+                nested_calls: received_calls,
             } if *expected_id == id
                 && *expected_name == name
                 && *expected_error == is_error
@@ -1339,6 +1348,9 @@ impl ContentAssembler {
             {
                 data.push_str(&text);
                 *complete = done;
+                if nested_calls.is_some() {
+                    *received_calls = nested_calls;
+                }
                 if done {
                     self.next_block += 1;
                 }
@@ -1418,6 +1430,7 @@ impl ContentAssembler {
                     is_error,
                     published_file,
                     omitted,
+                    nested_calls,
                 } => crate::ContentBlock::ToolResult {
                     tool_call_id: id,
                     tool_name: name,
@@ -1425,7 +1438,7 @@ impl ContentAssembler {
                     is_error,
                     published_file,
                     presentation: None,
-                    nested_calls: None,
+                    nested_calls,
                     omitted_fields: omitted,
                 },
                 PartialBlock::Omitted { kind, description } => {
@@ -1555,6 +1568,37 @@ mod tests {
         assert!(
             matches!(&assembler.finish(1).unwrap()[0], crate::ContentBlock::Text { text } if text == "阿😀露")
         );
+    }
+
+    // Card #350 review: a codemode result's calls come with the last piece of its full content.
+    #[test]
+    fn a_tool_result_read_in_pieces_keeps_the_calls_sent_with_its_last_piece() {
+        let calls = serde_json::json!({
+            "calls": [{"toolName": "mcp__harbor__echo", "argumentsJson": "{\"text\":\"lantern\"}", "status": "ok", "durationMs": 12}],
+            "complete": true
+        });
+        let piece = |text: &str, offset: usize, last: bool| {
+            let mut value = serde_json::json!({
+                "type": "tool_result", "blockIndex": 0, "toolCallId": "script", "toolName": "codemode",
+                "text": text, "offset": offset, "blockComplete": last, "isError": false
+            });
+            if last {
+                value["nestedCalls"] = calls.clone();
+            }
+            serde_json::from_value::<ConversationContentChunk>(value).unwrap()
+        };
+        let mut assembler = ContentAssembler::default();
+        assembler
+            .push(piece("Script completed\n", 0, false))
+            .unwrap();
+        assembler
+            .push(piece("Output:\nharbor echoed lantern", 17, true))
+            .unwrap();
+        assert!(matches!(
+            &assembler.finish(1).unwrap()[0],
+            crate::ContentBlock::ToolResult { text, nested_calls: Some(received), .. }
+                if text == "Script completed\nOutput:\nharbor echoed lantern" && *received == calls
+        ));
     }
 
     #[test]

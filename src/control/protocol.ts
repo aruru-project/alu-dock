@@ -2119,8 +2119,9 @@ export function parseConversationContentChunk(input: unknown, field = "chunk"): 
     };
   }
   if (type === "tool_result") {
-    exact(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "publishedFile", "omittedFields"]);
+    exact(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "publishedFile", "nestedCalls", "omittedFields"]);
     const publishedFile = chunk.publishedFile === undefined ? undefined : parsePublishedFileDto(chunk.publishedFile, `${field}.publishedFile`);
+    const nestedCalls = chunk.nestedCalls === undefined ? undefined : parseNestedToolCalls(chunk.nestedCalls, `${field}.nestedCalls`);
     return {
       blockIndex,
       type,
@@ -2131,6 +2132,7 @@ export function parseConversationContentChunk(input: unknown, field = "chunk"): 
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
       isError: boolean(chunk.isError, `${field}.isError`),
       ...(publishedFile === undefined ? {} : { publishedFile }),
+      ...(nestedCalls === undefined ? {} : { nestedCalls }),
       omittedFields: omitted(chunk.omittedFields, `${field}.omittedFields`),
     };
   }
@@ -2710,18 +2712,18 @@ function parseNestedToolCalls(input: unknown, field: string): NestedToolCallsDto
   let argsBytes = 0;
   const calls = array(value.calls, `${field}.calls`, MAX_NESTED_TOOL_CALLS).map((item, index) => {
     const call = object(item, `${field}.calls[${index}]`);
-    exact(call, ["toolName", "args", "status", "durationMs", "error"]);
-    const args = call.args === undefined ? undefined : parseJsonObject(call.args, `${field}.calls[${index}].args`);
-    if (args !== undefined) {
-      const bytes = Buffer.byteLength(JSON.stringify(args), "utf8");
+    exact(call, ["toolName", "argumentsJson", "status", "durationMs", "error"]);
+    const argumentsJson = call.argumentsJson === undefined ? undefined : string(call.argumentsJson, `${field}.calls[${index}].argumentsJson`, MAX_NESTED_TOOL_CALL_ARGS_BYTES);
+    if (argumentsJson !== undefined) {
+      const bytes = Buffer.byteLength(argumentsJson, "utf8");
       argsBytes += bytes;
-      if (bytes > MAX_NESTED_TOOL_CALL_ARGS_BYTES || argsBytes > MAX_NESTED_TOOL_CALLS_ARGS_BYTES) throw validation("invalid_response", `${field}.calls[${index}].args exceeds the nested call bounds`);
+      if (bytes > MAX_NESTED_TOOL_CALL_ARGS_BYTES || argsBytes > MAX_NESTED_TOOL_CALLS_ARGS_BYTES) throw validation("invalid_response", `${field}.calls[${index}].argumentsJson exceeds the nested call bounds`);
     }
     const durationMs = call.durationMs === undefined ? undefined : unsigned(call.durationMs, `${field}.calls[${index}].durationMs`);
     const error = call.error === undefined ? undefined : boundedString(call.error, `${field}.calls[${index}].error`, MAX_NESTED_TOOL_CALL_ERROR_CHARS);
     return {
       toolName: string(call.toolName, `${field}.calls[${index}].toolName`, 256),
-      ...(args === undefined ? {} : { args }),
+      ...(argumentsJson === undefined ? {} : { argumentsJson }),
       status: enumeration(call.status, `${field}.calls[${index}].status`, ["running", "ok", "error", "unfinished"] as const),
       ...(durationMs === undefined ? {} : { durationMs }),
       ...(error === undefined ? {} : { error }),

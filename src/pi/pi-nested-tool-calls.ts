@@ -1,14 +1,24 @@
 import { performance } from "node:perf_hooks";
 
-import { projectJsonObject, type JsonObject } from "../core/json-value.js";
 import {
   MAX_NESTED_TOOL_CALL_ARGS_BYTES,
   MAX_NESTED_TOOL_CALL_ERROR_CHARS,
   MAX_NESTED_TOOL_CALLS,
   MAX_NESTED_TOOL_CALLS_ARGS_BYTES,
+  settledNestedToolCalls,
   type NestedToolCallDto,
   type NestedToolCallsDto,
 } from "../core/nested-tool-calls.js";
+
+/**
+ * A nested call's arguments as Pi keeps them in its record: the JSON text when it fits Pi's
+ * per-call bound, otherwise nothing. Read from Pi's own event, before any other Dock projection.
+ */
+export function nestedCallArgumentsJson(args: unknown): string | undefined {
+  let json: string;
+  try { json = JSON.stringify(args ?? {}); } catch { return undefined; }
+  return Buffer.byteLength(json, "utf8") <= MAX_NESTED_TOOL_CALL_ARGS_BYTES ? json : undefined;
+}
 
 /** Pi's saved `nestedCalls` record of a tool result, as Dock's list. */
 export function projectPiNestedToolCalls(record: unknown): NestedToolCallsDto | undefined {
@@ -20,12 +30,12 @@ export function projectPiNestedToolCalls(record: unknown): NestedToolCallsDto | 
     const status = item.status === "ok" || item.status === "error" || item.status === "unfinished" ? item.status : undefined;
     if (status === undefined) { complete = false; return []; }
     // Pi leaves out arguments over its bounds and then marks the record incomplete itself.
-    const args = item.arguments === undefined ? undefined : boundedArgs(item.arguments, argsBytes);
+    const args = item.arguments === undefined ? undefined : withinTotal(nestedCallArgumentsJson(item.arguments), argsBytes);
     if (args !== undefined) argsBytes += args.bytes;
-    else if (item.arguments !== undefined) complete = false;
+    else complete = false;
     return [{
       toolName: item.name.slice(0, 256),
-      ...(args === undefined ? {} : { args: args.value }),
+      ...(args === undefined ? {} : { argumentsJson: args.json }),
       status,
       ...(Number.isSafeInteger(item.durationMs) && (item.durationMs as number) >= 0 ? { durationMs: item.durationMs as number } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, MAX_NESTED_TOOL_CALL_ERROR_CHARS) } : {}),
@@ -46,8 +56,8 @@ export class LiveNestedToolCalls {
   /** Nested call id -> the model-issued call it belongs to, including calls left out of the list. */
   private readonly roots = new Map<string, string>();
 
-  /** Returns the model-issued call whose list changed. */
-  start(toolCallId: string, parentToolCallId: string, toolName: string, args: unknown): string {
+  /** Returns the model-issued call whose list changed. `argumentsJson` is from {@link nestedCallArgumentsJson}. */
+  start(toolCallId: string, parentToolCallId: string, toolName: string, argumentsJson: string | undefined): string {
     const root = this.roots.get(parentToolCallId) ?? parentToolCallId;
     this.roots.set(toolCallId, root);
     let scope = this.scopes.get(root);
@@ -59,10 +69,10 @@ export class LiveNestedToolCalls {
       scope.complete = false;
       return root;
     }
-    const bounded = boundedArgs(args, scope.argsBytes);
+    const bounded = withinTotal(argumentsJson, scope.argsBytes);
     if (bounded === undefined) scope.complete = false; else scope.argsBytes += bounded.bytes;
     const live: LiveCall = {
-      call: { toolName: toolName.slice(0, 256), ...(bounded === undefined ? {} : { args: bounded.value }), status: "running" },
+      call: { toolName: toolName.slice(0, 256), ...(bounded === undefined ? {} : { argumentsJson: bounded.json }), status: "running" },
       startedAt: performance.now(),
     };
     scope.calls.push(live);
@@ -93,13 +103,7 @@ export class LiveNestedToolCalls {
     if (scope === undefined) return undefined;
     this.scopes.delete(root);
     for (const [id, owner] of this.roots) if (owner === root) this.roots.delete(id);
-    let complete = scope.complete;
-    const calls = scope.calls.map(({ call }) => {
-      if (call.status !== "running") return call;
-      complete = false;
-      return { ...call, status: "unfinished" as const };
-    });
-    return { calls, complete };
+    return settledNestedToolCalls({ calls: scope.calls.map(({ call }) => call), complete: scope.complete });
   }
 
   clear(): void {
@@ -108,12 +112,11 @@ export class LiveNestedToolCalls {
   }
 }
 
-function boundedArgs(input: unknown, usedBytes: number): { value: JsonObject; bytes: number } | undefined {
-  const projected = projectJsonObject(input ?? {});
-  if (projected.omittedFields.length > 0) return undefined;
-  const bytes = Buffer.byteLength(JSON.stringify(projected.value), "utf8");
-  if (bytes > MAX_NESTED_TOOL_CALL_ARGS_BYTES || usedBytes + bytes > MAX_NESTED_TOOL_CALLS_ARGS_BYTES) return undefined;
-  return { value: projected.value, bytes };
+/** Pi's bound on the arguments of all calls in one list, counted in the order the calls started. */
+function withinTotal(json: string | undefined, usedBytes: number): { json: string; bytes: number } | undefined {
+  if (json === undefined) return undefined;
+  const bytes = Buffer.byteLength(json, "utf8");
+  return usedBytes + bytes > MAX_NESTED_TOOL_CALLS_ARGS_BYTES ? undefined : { json, bytes };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

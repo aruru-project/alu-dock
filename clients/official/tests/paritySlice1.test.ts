@@ -158,16 +158,25 @@ assert.deepEqual(callTool.preview, { title: 'README.md', body: undefined, varian
 // Card #350: a codemode card shows its script and the tools the script called, live and after reopening.
 const harborCode = "const echoed = await tools.mcp__harbor__echo({ text: 'lantern' });\nreturn echoed;"
 const harborCalls = { calls: [
-  { toolName: 'mcp__harbor__echo', args: { text: 'lantern' }, status: 'ok', durationMs: 12 },
-  { toolName: 'mcp__harbor__fail', args: {}, status: 'error', durationMs: 1500, error: 'harbor is closed' },
+  { toolName: 'mcp__harbor__echo', argumentsJson: '{"text":"lantern"}', status: 'ok', durationMs: 12 },
+  { toolName: 'mcp__harbor__fail', argumentsJson: '{}', status: 'error', durationMs: 1500, error: 'harbor is closed' },
 ], complete: true }
-const runningCodemode = projectConversation(bootstrap(state, [
+const waitingHarbor = [
   event(1, 'run.started', {}),
   event(2, 'tool.started', { toolCallId: 'script', toolName: 'codemode', args: { code: harborCode } }),
-  event(3, 'tool.output_updated', { toolCallId: 'script', text: '', nestedCalls: { calls: [{ toolName: 'mcp__harbor__echo', args: { text: 'lantern' }, status: 'running' }], complete: true } }),
-])).find((item) => item.kind === 'tool')
+  event(3, 'tool.output_updated', { toolCallId: 'script', text: '', nestedCalls: { calls: [{ toolName: 'mcp__harbor__echo', argumentsJson: '{"text":"lantern"}', status: 'running' }], complete: true } }),
+]
+const runningCodemode = projectConversation(bootstrap(state, waitingHarbor)).find((item) => item.kind === 'tool')
 assert.ok(runningCodemode?.kind === 'tool' && runningCodemode.nestedCalls)
 assert.deepEqual(nestedCallRows(runningCodemode.nestedCalls).rows.map((row) => [row.icon, row.name]), [['…', 'mcp__harbor__echo']], 'a call the script waits for shows as running')
+// Review of card #350: stopping the run while the script waits must not leave its call running.
+const stoppedCodemode = projectConversation(bootstrap(state, [...waitingHarbor, event(4, 'run.settled', { result: 'aborted' })])).find((item) => item.kind === 'tool')
+assert.ok(stoppedCodemode?.kind === 'tool' && stoppedCodemode.nestedCalls)
+assert.equal(stoppedCodemode.summary, '工具调用已中止')
+assert.deepEqual(nestedCallRows(stoppedCodemode.nestedCalls), {
+  earlier: 0, laterLeftOut: false,
+  rows: [{ key: '0', status: 'unfinished', icon: '⊘', label: '未完成', name: 'mcp__harbor__echo', args: '{"text":"lantern"}', duration: '' }],
+})
 const finishedCodemode = projectConversation(bootstrap(state, [
   event(1, 'run.started', {}),
   event(2, 'tool.started', { toolCallId: 'script', toolName: 'codemode', args: { code: harborCode } }),
