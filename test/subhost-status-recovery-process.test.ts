@@ -14,6 +14,7 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { MachineSettingsState, machineSettingsStateRoot } from "../src/control/machine-settings-state.js";
 import { machineStateRoot, MainMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MainMachineController } from "../src/control/machine-transport.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -164,21 +165,7 @@ test("temporary SubHost status contention does not interrupt Work recovery or ne
   const childHome = join(root, "sub-home");
   const childTemp = join(root, "sub-temp");
   await Promise.all([mkdir(childHome, { recursive: true }), mkdir(childTemp, { recursive: true })]);
-  const childEnv: NodeJS.ProcessEnv = {
-    ...process.env,
-    HOME: childHome,
-    USERPROFILE: childHome,
-    APPDATA: join(childHome, "AppData", "Roaming"),
-    LOCALAPPDATA: join(childHome, "AppData", "Local"),
-    TEMP: childTemp,
-    TMP: childTemp,
-    TMPDIR: childTemp,
-    XDG_CONFIG_HOME: join(childHome, ".config"),
-    XDG_CACHE_HOME: join(childHome, ".cache"),
-    XDG_STATE_HOME: join(childHome, ".local", "state"),
-    XDG_DATA_HOME: join(childHome, ".local", "share"),
-    PI_CODING_AGENT_DIR: join(childHome, ".pi", "agent"),
-  };
+  const childEnv = isolatedProcessEnvironment(childHome, { TEMP: childTemp, TMP: childTemp, TMPDIR: childTemp });
   child = spawn(process.execPath, [
     fileURLToPath(new URL("./fixtures/subhost-machine.js", import.meta.url)),
     subCatalog,

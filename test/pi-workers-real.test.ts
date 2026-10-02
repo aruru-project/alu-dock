@@ -13,6 +13,7 @@ import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import { WorkerIncidentStore } from "../src/control/worker-incident-store.js";
 import { resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
 import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolated-pi-instance.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { RuntimeEffectUnknownError, type InstanceSnapshot } from "../src/core/managed-instance.js";
 import { PiWorkerProcess } from "../src/pi/worker-process.js";
@@ -360,11 +361,7 @@ test("dock_inspect reads and pages through user messages from before compaction 
     ...input, cwd, agentDir, sessionDir,
     ...(input.key === "target" ? { sessionFile: manager.getSessionFile()! } : {}),
     projectTrusted: false, tools: [],
-    workerEnvironment: {
-      ...process.env, PI_OFFLINE: "1", HOME: root,
-      XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"),
-      XDG_DATA_HOME: join(root, "data"), XDG_CACHE_HOME: join(root, "cache"), XDG_RUNTIME_DIR: join(root, "run"),
-    },
+    workerEnvironment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(root, "run") }),
   }));
   context.after(async () => {
     for (const snapshot of registry.list()) await registry.get(snapshot.id).disposeUnpublished();
@@ -619,7 +616,7 @@ export default function (pi) {
   const orphan = new PiWorkerProcess({
     identity: orphanIdentity,
     init: { cwd: process.cwd(), agentDir, sessionDir: join(root, "orphan-sessions"), projectTrusted: true, tools: [] },
-    environment: { ...process.env },
+    environment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir }),
   });
   const orphanReceiver = new WorkerFrameReceiver(() => true);
   const orphanSender = new OrderedWorkerSender(orphanIdentity, (message, callback) => orphan.child.send(message, callback));

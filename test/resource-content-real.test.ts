@@ -8,6 +8,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 test("project resources open their full current files, including global resources and system files, without Reload", { timeout: 25_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-resource-read-"));
@@ -35,11 +36,9 @@ test("project resources open their full current files, including global resource
     writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "openai", defaultModel: "gpt-4o-mini" })),
     writeFile(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "fixture-no-model-call" } })),
   ]);
-  const previousOffline = process.env.PI_OFFLINE;
-  process.env.PI_OFFLINE = "1";
   const registry = new DockRegistry((input) => createPiInstance({
     ...input, agentDir, sessionDir,
-    workerEnvironment: { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data") },
+    workerEnvironment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir, XDG_STATE_HOME: join(root, "state"), XDG_DATA_HOME: join(root, "data") }),
     workerTimeouts: { mutationMs: 5_000, termMs: 300 },
   }));
   const socketPath = join(root, "dock.sock");
@@ -82,8 +81,6 @@ test("project resources open their full current files, including global resource
     assert.ok(otherContext?.contentRef);
     assert.equal(await readAll(other.id, otherContext.contentRef), "# Other project\nDifferent instructions.\n");
   } finally {
-    if (previousOffline === undefined) delete process.env.PI_OFFLINE;
-    else process.env.PI_OFFLINE = previousOffline;
     client.closeActiveConnections();
     await host.stop().catch(() => {});
     await rm(root, { recursive: true, force: true });

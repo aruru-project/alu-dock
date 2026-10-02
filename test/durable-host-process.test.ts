@@ -6,8 +6,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
-async function startFixture(socketPath: string, catalogPath: string, cwd: string, epoch: string, env: NodeJS.ProcessEnv = process.env): Promise<ChildProcess> {
+async function startFixture(socketPath: string, catalogPath: string, cwd: string, epoch: string, env: NodeJS.ProcessEnv = isolatedProcessEnvironment(join(cwd, "home"))): Promise<ChildProcess> {
   const child = spawn(process.execPath, [
     new URL("./fixtures/durable-host.js", import.meta.url).pathname,
     socketPath,
@@ -111,10 +112,9 @@ test("SIGTERM waits for an admitted create before durable host-loss drain", asyn
     }
   });
 
-  const first = await startFixture(socketPath, catalogPath, cwd, "create-race-one", {
-    ...process.env,
+  const first = await startFixture(socketPath, catalogPath, cwd, "create-race-one", isolatedProcessEnvironment(join(cwd, "home"), {
     ALU_DOCK_FIXTURE_CREATE_DELAY_MS: "200",
-  });
+  }));
   children.add(first);
   const creating = new DockClient({ socketPath }).create(cwd, "create race", "create-race-operation");
   void creating.catch(() => {});

@@ -19,6 +19,7 @@ import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
@@ -55,25 +56,16 @@ test("real Pi Worker toggles Dock tools and exposes its readable usage guide", a
     attachObservationSink: () => () => {},
   };
 
-  const previousPiOffline = process.env.PI_OFFLINE;
-  process.env.PI_OFFLINE = "1";
-  const instance = await (async () => {
-    try {
-      return await createPiInstance({
-        cwd,
-        agentDir,
-        sessionDir,
-        projectTrusted: true,
-        dockToolsHostPort,
-        dockToolsEnabled: false,
-        workerEnvironment: { ...process.env },
-        workerTimeouts: { mutationMs: 10_000 },
-      });
-    } finally {
-      if (previousPiOffline === undefined) delete process.env.PI_OFFLINE;
-      else process.env.PI_OFFLINE = previousPiOffline;
-    }
-  })();
+  const instance = await createPiInstance({
+    cwd,
+    agentDir,
+    sessionDir,
+    projectTrusted: true,
+    dockToolsHostPort,
+    dockToolsEnabled: false,
+    workerEnvironment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir }),
+    workerTimeouts: { mutationMs: 10_000 },
+  });
 
   try {
     const commands = await instance.getCommands();
@@ -220,7 +212,7 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
     workerHome,
   ], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data") },
+    env: isolatedProcessEnvironment(root, { XDG_STATE_HOME: join(root, "xdg-state"), XDG_DATA_HOME: join(root, "xdg-data") }),
   });
   let childStdout = "";
   let childStderr = "";

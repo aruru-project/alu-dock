@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 interface ChildMessage {
   type?: string;
@@ -22,6 +23,7 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   const child = fork(fixturePath, [socketPath, directory], {
+    env: isolatedProcessEnvironment(join(directory, "home")),
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
   let fixtureStderr = "";
