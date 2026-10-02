@@ -191,6 +191,29 @@ test("conversation reset replaces old session history", () => {
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
+test("a reopened conversation says what its system prompt, cost and model-context records changed (card #347)", () => {
+  const conversation = new DockConversation();
+  const runtime = { kind: "custom", source: "runtime", visibility: "metadata" } as const;
+  conversation.applyHistory([
+    historyRecord("s1", "system", [{ type: "text", text: "Fixture prompt." }], {
+      visibility: "metadata",
+      systemPrompt: { sections: ["preamble", "skills"], removedSections: [], toolsAdded: ["read", "bash"], toolsRemoved: ["bash"] },
+    }),
+    historyRecord("u1", "user", [{ type: "text", text: "hello" }]),
+    historyRecord("a1", "assistant", [], { error: "provider overloaded", stopReason: "error" }),
+    historyRecord("e1", "runtime", [], { ...runtime, customType: "context_edit", targetEntryId: "a1", contextEdit: "omit" }),
+    historyRecord("w1", "runtime", [], {
+      ...runtime, customType: "usage", provider: "anthropic", modelId: "claude",
+      usage: { kind: "cache_warm", tokens: { input: 0, output: 1, cacheRead: 9_000, cacheWrite: 0, total: 9_001 }, cost: 0.0042 },
+    }),
+  ], false);
+  assert.deepEqual(conversation.snapshot().filter((entry) => entry.kind === "system").map((entry) => entry.text), [
+    "System prompt: sections preamble, skills \u00b7 tools +read \u00b7 tools changed bash \u00b7 /context-changes shows it in full",
+    "Model context: a failed reply was removed; the conversation still shows it.",
+    "Cache warmed \u00b7 $0.0042 \u00b7 anthropic/claude",
+  ]);
+});
+
 test("fresh TUI recovery keeps extension command feedback visible", () => {
   const conversation = new DockConversation();
   conversation.applyBootstrapReplay([

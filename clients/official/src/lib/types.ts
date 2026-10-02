@@ -339,6 +339,29 @@ export interface ConversationRecord {
   excludeFromContext?: boolean
   label?: string
   stopReason?: string
+  provider?: string | null
+  modelId?: string | null
+  /** System prompt record: the sections and tools it changes; its content holds the new texts. */
+  systemPrompt?: SystemPromptChange
+  /** Usage record: a request paid for outside the conversation, such as cache warming. */
+  usage?: RecordUsage
+  /** Context edit record: whether targetEntryId left or was replaced in what the model sees. */
+  contextEdit?: 'omit' | 'replace'
+  targetEntryId?: string
+}
+
+export interface SystemPromptChange {
+  sections: string[]
+  removedSections: string[]
+  toolsAdded: string[]
+  toolsRemoved: string[]
+}
+
+export interface RecordUsage {
+  kind: string
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
+  cost: number
+  note?: string
 }
 
 export interface QueueItem {
@@ -607,6 +630,8 @@ export type ConversationProcessItem = (
   | { id: string; kind: 'tool'; groupId: string; toolCallId?: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; preview?: ToolCallPreview; nestedCalls?: NestedToolCalls; detailArgs?: unknown; detailOutputText?: string; detailOmittedFields?: string[]; groupTime?: string }
   | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; historyEntryId?: string; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
+  /** Recorded text shown as written, such as a system prompt section or a tool definition. */
+  | { id: string; kind: 'plain'; groupId: string; text: string; groupTime?: string }
 
 ) & { sourceEntryIds?: string[]; turnId?: string }
 

@@ -46,14 +46,18 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_RECORD_USAGE_TEXT_CHARS,
   MAX_SEMANTIC_HISTORY_PAGE_BYTES,
   MAX_STOP_CLEANUP_ERROR_CHARS,
+  MAX_SYSTEM_PROMPT_NAME_CHARS,
   type AttachmentDto,
   type ContentBlockDto,
   type ConversationFrame,
   type ConversationImageBody,
   type ImagePathDto,
   type PublishedFileDto,
+  type RecordUsageDto,
+  type SystemPromptChangeDto,
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
   MAX_CONVERSATION_CONTENT_BLOCKS,
@@ -63,6 +67,7 @@ import type { NestedToolCallsDto } from "../core/nested-tool-calls.js";
 import { projectJsonObject, type JsonObject, type JsonValue } from "../core/json-value.js";
 import { sliceSemanticHistory, slimSemanticHistoryBlock, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
+import { systemPromptChangeText, usageRecordText } from "../core/runtime-record-text.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
   AgentCompactionKnownFailureError,
@@ -265,6 +270,8 @@ interface ConversationReadState {
   leafId: string | null;
   entries: ConversationReadEntry[];
   byRef: Map<string, ConversationReadEntry>;
+  /** Earlier entries on the branch, so a context edit can be shown the way its target is. */
+  byEntryId: Map<string, SessionEntry>;
   imageSources: Map<string, object>;
   previews: Map<SessionEntry, { projected: AgentHistoryEntry; bytes: number }>;
   previewBytes: number;
@@ -835,7 +842,7 @@ export class PiAgentAdapter {
     let entries = selected.map((item) => {
       const projected = this.conversationProjection(state, item.source);
       const entry = previewConversationEntry(projected);
-      const blocks = conversationContentBlocks(item.source, projected, this.options.attachmentContextKey, this.options.publishedFiles);
+      const blocks = conversationContentBlocks(item.source, projected, this.options.attachmentContextKey, this.options.publishedFiles, state.byEntryId);
       return {
         entry, contentRef: item.contentRef,
         contentComplete: conversationPreviewIsComplete(blocks, entry, view),
@@ -853,7 +860,7 @@ export class PiAgentAdapter {
       entries = entries.map((item, index) => {
         const entry = slimSemanticHistoryEntry(item.entry);
         return { ...item, entry, contentComplete: item.contentComplete && conversationPreviewIsComplete(
-          conversationContentBlocks(selected[index]!.source, this.conversationProjection(state, selected[index]!.source), this.options.attachmentContextKey, this.options.publishedFiles), entry, view,
+          conversationContentBlocks(selected[index]!.source, this.conversationProjection(state, selected[index]!.source), this.options.attachmentContextKey, this.options.publishedFiles, state.byEntryId), entry, view,
         ) };
       });
     }
@@ -906,7 +913,7 @@ export class PiAgentAdapter {
     // previews are cached, but full joined text/argument JSON is not duplicated
     // for the whole session or for every continuation token.
     if (state.reading?.item !== selected) state.reading = {
-      item: selected, blocks: conversationContentBlocks(selected.source, this.conversationProjection(state, selected.source), this.options.attachmentContextKey, this.options.publishedFiles),
+      item: selected, blocks: conversationContentBlocks(selected.source, this.conversationProjection(state, selected.source), this.options.attachmentContextKey, this.options.publishedFiles, state.byEntryId),
     };
     const blocks = state.reading.blocks;
     const chunks: AgentConversationContentChunk[] = [];
@@ -987,7 +994,7 @@ export class PiAgentAdapter {
       state.previews.set(source, cached);
       return cached.projected;
     }
-    const projected = projectHistoryEntry(source, this.options.attachmentContextKey, this.options.publishedFiles);
+    const projected = projectHistoryEntry(source, this.options.attachmentContextKey, this.options.publishedFiles, state.byEntryId);
     const bytes = Buffer.byteLength(JSON.stringify(projected), "utf8");
     // One existing producer page budget for hot previews, not a second transcript.
     if (bytes <= MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
@@ -1017,7 +1024,7 @@ export class PiAgentAdapter {
       && previous.entries.every((item, index) => item.source === branch[index]);
     const state: ConversationReadState = appended ? previous : {
       revision: createHash("sha256").update(this.conversationScope).update(randomUUID()).digest("hex"),
-      sessionId, leafId, entries: [], byRef: new Map(), imageSources: new Map(), previews: new Map(), previewBytes: 0,
+      sessionId, leafId, entries: [], byRef: new Map(), byEntryId: new Map(), imageSources: new Map(), previews: new Map(), previewBytes: 0,
     };
     if (!appended) {
       this.conversationHistoryCursors.clear();
@@ -1047,6 +1054,7 @@ export class PiAgentAdapter {
       };
       state.entries.push(item);
       state.byRef.set(item.contentRef, item);
+      state.byEntryId.set(source.id, source);
     }
     state.leafId = leafId;
     binding.conversationReadState = state;
@@ -1062,7 +1070,7 @@ export class PiAgentAdapter {
     for (let index = roots.length - 1; index >= 0; index -= 1) stack.push({ node: roots[index] as SessionTreeNode, depth: 0 });
     while (stack.length > 0) {
       const current = stack.pop() as { node: SessionTreeNode; parentId?: string; depth: number };
-      projectTreeNode(current.node, current.parentId, current.depth, nodes, toolCalls, this.options.attachmentContextKey);
+      projectTreeNode(current.node, current.parentId, current.depth, nodes, toolCalls, this.options.attachmentContextKey, (id) => manager.getEntry(id));
       for (let index = current.node.children.length - 1; index >= 0; index -= 1) {
         stack.push({ node: current.node.children[index] as SessionTreeNode, parentId: current.node.entry.id, depth: current.depth + 1 });
       }
@@ -2382,7 +2390,12 @@ function piIsSettling(binding: Binding): boolean {
   return binding.token.active && binding.awaitingSettled && !binding.session.isStreaming;
 }
 
-function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): AgentHistoryEntry {
+function projectHistoryEntry(
+  entry: SessionEntry,
+  attachmentContextKey: Uint8Array,
+  publishedFiles?: TransientFileRegistry,
+  earlier: ReadonlyMap<string, SessionEntry> = new Map(),
+): AgentHistoryEntry {
   const base = {
     recordId: entry.id,
     entryId: entry.id,
@@ -2466,14 +2479,25 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
         ...(typeof message.tokensBefore === "number" && Number.isSafeInteger(message.tokensBefore) && message.tokensBefore >= 0 ? { tokensBefore: message.tokensBefore } : {}),
       };
     }
+    if (message.role === "system") {
+      // Pi 0.99 records system prompt and tool changes as system messages, not conversation.
+      return {
+        ...base,
+        kind: "message",
+        source: "system",
+        visibility: "metadata",
+        // The names say what changed; the texts (often the whole prompt and every tool) are read on demand.
+        content: [],
+        systemPrompt: projectSystemPromptChange(message),
+      };
+    }
     const custom = role === "custom";
     const userProjection = role === "user" ? projectDockUserContent(message.content, attachmentContextKey, publishedFiles) : undefined;
     return {
       ...base,
       kind: custom ? "custom_message" : "message",
       source: custom ? "extension" : role === "user" ? "user" : role === "assistant" ? "assistant" : "system",
-      // Pi 0.99 system messages carry system prompt and tool changes, not conversation.
-      visibility: custom && message.display === false ? "hidden" : message.role === "system" ? "metadata" : "conversation",
+      visibility: custom && message.display === false ? "hidden" : "conversation",
       content: userProjection?.content ?? projectDockContent(message.content, undefined, publishedFiles),
       ...(userProjection?.attachments === undefined ? {} : { attachments: userProjection.attachments }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
@@ -2564,9 +2588,98 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       ...(entry.label === undefined ? {} : { label: boundedString(entry.label, 256, "") }),
     };
   }
-  // Pi 0.99 usage and context-edit records have no Protocol V2 kind. They stay
-  // runtime metadata that conversation views skip.
-  return { ...base, kind: "custom", source: "runtime", visibility: "metadata", content: [], customType: boundedString(entry.type, 256, "runtime") };
+  // Pi 0.99 usage and context-edit records have no Protocol V2 kind of their own:
+  // they are runtime custom records that carry their facts in typed fields.
+  const runtime = { ...base, kind: "custom", source: "runtime", visibility: "metadata", customType: boundedString(entry.type, 256, "runtime") } as const;
+  if (entry.type === "usage") {
+    return {
+      ...runtime,
+      content: [],
+      provider: boundedString(entry.provider, 256, "unknown"),
+      modelId: boundedString(entry.model, 512, "unknown"),
+      usage: projectRecordUsage(entry),
+    };
+  }
+  if (entry.type === "context_edit") {
+    const replaced = contextEditReplacement(entry, earlier);
+    return {
+      ...runtime,
+      content: replaced === undefined ? [] : projectHistoryEntry(replaced, attachmentContextKey, publishedFiles).content.map(recordedToolText),
+      targetEntryId: boundedString(entry.targetId, 128, "unknown"),
+      contextEdit: entry.replacement === null ? "omit" : "replace",
+    };
+  }
+  return { ...runtime, content: [] };
+}
+
+/**
+ * The edited entry with the replacement as its content, so the replacement is shown (and
+ * attachment context or private paths removed) exactly as the original would be.
+ */
+function contextEditReplacement(entry: Extract<SessionEntry, { type: "context_edit" }>, earlier: ReadonlyMap<string, SessionEntry>): SessionEntry | undefined {
+  const target = earlier.get(entry.targetId);
+  if (entry.replacement === null || target === undefined) return undefined;
+  if (target.type === "message") return { ...target, message: { ...target.message, content: entry.replacement.content } as typeof target.message };
+  if (target.type === "custom_message") return { ...target, content: entry.replacement.content as typeof target.content };
+  return undefined;
+}
+
+/**
+ * Replacement content is text about a tool, not the tool call or result itself: an edit made
+ * long after its target must not join the tool's history page unit.
+ */
+function recordedToolText(block: ContentBlockDto): ContentBlockDto {
+  if (block.type === "tool_result") return { type: "text", text: block.text };
+  if (block.type === "tool_call") return { type: "text", text: `${block.toolName} ${JSON.stringify(block.args)}` };
+  return block;
+}
+
+/** Instruction text, each section a record sets and each added tool's definition, in record order. */
+function systemPromptTexts(message: Record<string, unknown>): string[] {
+  const texts: string[] = [];
+  const instructions = typeof message.content === "string" ? message.content
+    : Array.isArray(message.content) ? message.content.flatMap((item) => isRecord(item) && item.type === "text" && typeof item.text === "string" ? [item.text] : []).join("\n")
+      : "";
+  if (instructions.length > 0) texts.push(instructions);
+  if (isRecord(message.sections)) {
+    for (const text of Object.values(message.sections)) if (typeof text === "string" && text.length > 0) texts.push(text);
+  }
+  for (const tool of Array.isArray(message.toolsAdded) ? message.toolsAdded : []) {
+    if (!isRecord(tool)) continue;
+    try {
+      texts.push(JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }, null, 2));
+    } catch {
+      texts.push(JSON.stringify({ name: tool.name }));
+    }
+  }
+  return texts;
+}
+
+function projectSystemPromptChange(message: Record<string, unknown>): SystemPromptChangeDto {
+  const sections = isRecord(message.sections) ? Object.entries(message.sections) : [];
+  const names = (values: unknown[]): string[] => values.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS)
+    .map((value) => safeRequiredText(value, MAX_SYSTEM_PROMPT_NAME_CHARS, "unnamed"));
+  const toolNames = (value: unknown): string[] => names(Array.isArray(value) ? value.map((tool) => isRecord(tool) ? tool.name : undefined) : []);
+  return {
+    sections: names(sections.filter(([, text]) => typeof text === "string").map(([name]) => name)),
+    removedSections: names(sections.filter(([, text]) => text === null).map(([name]) => name)),
+    toolsAdded: toolNames(message.toolsAdded),
+    toolsRemoved: toolNames(message.toolsRemoved),
+  };
+}
+
+function projectRecordUsage(entry: Extract<SessionEntry, { type: "usage" }>): RecordUsageDto {
+  const usage = isRecord(entry.usage) ? entry.usage as unknown as Record<string, unknown> : {};
+  const cost = isRecord(usage.cost) ? usage.cost : {};
+  const count = (value: unknown): number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  const tokens = { input: count(usage.input), output: count(usage.output), cacheRead: count(usage.cacheRead), cacheWrite: count(usage.cacheWrite) };
+  const note = safeOptionalText(entry.note, MAX_RECORD_USAGE_TEXT_CHARS);
+  return {
+    kind: safeRequiredText(entry.kind, MAX_RECORD_USAGE_TEXT_CHARS, "usage"),
+    tokens: { ...tokens, total: count(usage.totalTokens) || tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite },
+    cost: typeof cost.total === "number" && Number.isFinite(cost.total) && cost.total >= 0 ? cost.total : 0,
+    ...(note === undefined ? {} : { note }),
+  };
 }
 
 function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): { content: ContentBlockDto[]; attachments?: AttachmentDto[] } {
@@ -2686,7 +2799,19 @@ function contentPageFits(revision: string, contentRef: string, chunks: readonly 
   return Buffer.byteLength(JSON.stringify(page), "utf8") <= MAX_CONVERSATION_CONTENT_PAGE_BYTES;
 }
 
-function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array, publishedFiles: TransientFileRegistry): ConversationSourceBlock[] {
+function conversationContentBlocks(
+  entry: SessionEntry,
+  projected: AgentHistoryEntry,
+  attachmentContextKey: Uint8Array,
+  publishedFiles: TransientFileRegistry,
+  earlier: ReadonlyMap<string, SessionEntry> = new Map(),
+): ConversationSourceBlock[] {
+  if (entry.type === "context_edit") {
+    const replaced = contextEditReplacement(entry, earlier);
+    return replaced === undefined ? [] : conversationContentBlocks(replaced, projectHistoryEntry(replaced, attachmentContextKey, publishedFiles), attachmentContextKey, publishedFiles)
+      .map((block): ConversationSourceBlock => block.type === "tool_result" ? { type: "text", text: block.text }
+        : block.type === "tool_call" ? { type: "text", text: `${block.toolName} ${block.argumentsJson}` } : block);
+  }
   // Reuse canonical image identities in source order, independently of text clipping.
   const images = projected.content.filter((block) => block.type === "image")[Symbol.iterator]();
   const imageSource = (item: Record<string, unknown>): Extract<ConversationSourceBlock, { type: "image" }> => {
@@ -2716,6 +2841,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
       : undefined;
   if (entry.type === "message") {
     const message = entry.message as unknown as Record<string, unknown>;
+    if (message.role === "system") return systemPromptTexts(message).flatMap((value) => textBlocks("text", value));
     const role = typeof message.role === "string" ? message.role : "system";
     if (role === "bashExecution") {
       const command = typeof message.command === "string" ? message.command : "";
@@ -2895,6 +3021,7 @@ function projectTreeNode(
   output: TreeNodeDto[],
   toolCalls: ReadonlyMap<string, TreeToolCall>,
   attachmentContextKey: Uint8Array,
+  entryById: (id: string) => SessionEntry | undefined,
 ): void {
   const entry = node.entry;
   // Pi 0.99 usage and context-edit records have no Protocol V2 tree kind; they are metadata nodes.
@@ -2913,12 +3040,17 @@ function projectTreeNode(
     ...(state === undefined ? {} : { state }),
     ...(node.label === undefined ? {} : { label: treeLine(node.label, 256, "Session label omitted") }),
     timestamp: entry.timestamp,
-    summary: projectTreeSummary(entry, toolCalls, attachmentContextKey),
+    summary: projectTreeSummary(entry, toolCalls, attachmentContextKey, entryById),
     hasChildren: node.children.length > 0,
   });
 }
 
-function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, TreeToolCall>, attachmentContextKey: Uint8Array): string {
+function projectTreeSummary(
+  entry: SessionEntry,
+  toolCalls: ReadonlyMap<string, TreeToolCall>,
+  attachmentContextKey: Uint8Array,
+  entryById: (id: string) => SessionEntry | undefined = () => undefined,
+): string {
   switch (entry.type) {
     case "message": {
       const message = entry.message as unknown as Record<string, unknown>;
@@ -2934,7 +3066,7 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
         return treeLine(message.errorMessage, 2_048, "Assistant error");
       }
       if (message.role === "assistant" && message.stopReason === "aborted") return "(aborted)";
-      if (message.role === "system") return "System prompt update";
+      if (message.role === "system") return treeLine(systemPromptChangeText(projectSystemPromptChange(message)), 2_048, "System prompt update");
       const summaryText = contentText(message.content);
       return treeLine(message.role === "user" && summaryText !== undefined ? extractDockAttachmentContext(summaryText, attachmentContextKey).text : summaryText, 2_048, `${treeMessageRole(message.role)} message`);
     }
@@ -2946,8 +3078,13 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
     case "custom_message": return treeLine(contentText(entry.content), 2_048, `Custom message: ${entry.customType}`);
     case "label": return treeLine(entry.label ? `Label ${entry.targetId}: ${entry.label}` : `Label cleared: ${entry.targetId}`, 2_048, "Label change");
     case "session_info": return treeLine(entry.name ? `Session name: ${entry.name}` : "Session name cleared", 2_048, "Session info");
-    case "usage": return treeLine(`Usage: ${entry.kind}`, 2_048, "Usage");
-    case "context_edit": return treeLine(`Context ${entry.replacement === null ? "omit" : "replace"}: ${entry.targetId}`, 2_048, "Context edit");
+    case "usage": return treeLine(usageRecordText(projectRecordUsage(entry), entry.provider, entry.model), 2_048, "Usage");
+    case "context_edit": {
+      // The edited record is an earlier entry on the same branch; describe it the way the tree does.
+      const target = entryById(entry.targetId);
+      const described = target === undefined ? "an earlier record" : projectTreeSummary(target, toolCalls, attachmentContextKey);
+      return treeLine(`${entry.replacement === null ? "Removed from" : "Replaced in"} model context: ${described}`, 2_048, "Model context edit");
+    }
   }
 }
 

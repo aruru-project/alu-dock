@@ -11,7 +11,9 @@ import type {
   NestedToolCalls,
   ProjectedEvent,
   PublishedFileDto,
+  RecordUsage,
   ShellRunItem,
+  SystemPromptChange,
   ToolCallPreview,
 } from './types'
 
@@ -628,11 +630,12 @@ export function projectRecordGroups(records: ConversationRecord[]): Conversation
   const output: ConversationItem[] = []
   const groups = groupRecords(records)
   const turns = historyTurns(groups)
+  const byEntryId = new Map(records.map((record) => [record.entryId, record]))
   groups.forEach((group, index) => {
     const turn = turns.get(index)
     if (turn?.opener === index) output.push(turn.item)
     const start = output.length
-    projectGroup(group, output)
+    projectGroup(group, output, byEntryId)
     // The turn summary already shows the error that ended the turn.
     if (turn?.errorRecordId) {
       const carried = output.findIndex((item, position) => position >= start && item.id === `${turn.errorRecordId}-error`)
@@ -661,7 +664,8 @@ function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
   openers.forEach((opener, position) => {
     const next = openers[position + 1] ?? groups.length
     let end = opener
-    for (let index = opener + 1; index < next; index++) if (groups[index]!.records[0]!.kind === 'message') end = index
+    // A system prompt record before the next prompt is a message too, but it does not belong to this run.
+    for (let index = opener + 1; index < next; index++) if (groups[index]!.records[0]!.kind === 'message' && groups[index]!.records[0]!.visibility === 'conversation') end = index
     const records = groups.slice(opener, end + 1).flatMap((group) => group.records)
     const user = groups[opener]!.records[0]!
     const lastAssistant = lastWhere(records, (record) => record.kind === 'message' && record.source === 'assistant')
@@ -699,7 +703,11 @@ function groupRecords(records: ConversationRecord[]) {
   const groups: RecordGroup[] = []
   const toolOwners = new Map<string, RecordGroup>()
   for (const record of records) {
-    if (record.visibility !== 'conversation') continue
+    if (record.visibility !== 'conversation') {
+      // A runtime record stands alone; content it carries never takes over a conversation tool call.
+      if (isShownRuntimeRecord(record)) groups.push({ key: `record:${record.recordId}`, records: [record] })
+      continue
+    }
     const resultOwner = record.content
       .filter((part): part is Extract<ContentBlock, { type: 'tool_result' }> => part.type === 'tool_result')
       .map((part) => toolOwners.get(part.toolCallId))
@@ -719,9 +727,13 @@ function groupRecords(records: ConversationRecord[]) {
   return groups
 }
 
-function projectGroup(group: RecordGroup, output: ConversationItem[]) {
+function projectGroup(group: RecordGroup, output: ConversationItem[], byEntryId: ReadonlyMap<string, ConversationRecord>) {
   const first = group.records[0]
   if (!first) return
+  if (first.visibility !== 'conversation') {
+    output.push(projectRuntimeRecord(first, group, byEntryId))
+    return
+  }
   if (isUserMessageGroup(group)) {
     output.push({ id: first.recordId, kind: 'user', ...projectUserMessage(first.content, first.attachments ?? [], first.recordId, shortTime(first.timestamp), first.entryId) })
     return
@@ -756,6 +768,58 @@ function projectGroup(group: RecordGroup, output: ConversationItem[]) {
     const title = first.source === 'extension' ? '扩展消息' : first.source === 'system' || first.source === 'runtime' ? '运行记录' : '对话记录'
     output.push(projectPanel(group, title, 'alu-record-system', false))
   }
+}
+
+/** Pi records system prompt changes, extra costs and model-context edits outside the chat; Dock shows what each one changed. */
+function isShownRuntimeRecord(record: ConversationRecord) {
+  return Boolean(record.systemPrompt || record.usage || record.contextEdit)
+}
+
+function projectRuntimeRecord(record: ConversationRecord, group: RecordGroup, byEntryId: ReadonlyMap<string, ConversationRecord>): ConversationItem {
+  if (record.systemPrompt) {
+    return { id: group.key, kind: 'record', title: systemPromptTitle(record.systemPrompt), panelClass: 'alu-record-system', folded: true, parts: plainParts(record, group.key) }
+  }
+  if (record.usage) return { id: group.key, kind: 'notice', tone: 'info', text: usageText(record.usage, record.provider, record.modelId) }
+  const target = contextEditTarget(record.targetEntryId ? byEntryId.get(record.targetEntryId) : undefined)
+  if (record.contextEdit === 'replace') {
+    return { id: group.key, kind: 'record', title: `模型上下文：替换了${target}，对话里仍保留原文。展开查看替换后的内容`, panelClass: 'alu-record-system', folded: true, parts: plainParts(record, group.key) }
+  }
+  return { id: group.key, kind: 'notice', tone: 'info', text: `模型上下文：移除了${target}，对话里仍保留原文。` }
+}
+
+/** Recorded text as written: prompt sections, tool definitions or replacement text (the Host sends tool content as text here). */
+function plainParts(record: ConversationRecord, groupId: string): ConversationProcessItem[] {
+  return record.content.flatMap((block, index): ConversationProcessItem[] =>
+    (block.type === 'text' || block.type === 'thinking') && block.text ? [{ id: `${record.recordId}-${index}`, kind: 'plain', groupId, text: block.text }] : [])
+}
+
+function systemPromptTitle(change: SystemPromptChange) {
+  const list = (names: string[]) => names.length <= 6 ? names.join('、') : `${names.slice(0, 6).join('、')} 等 ${names.length} 项`
+  const named = (label: string, names: string[]) => names.length ? `${label} ${list(names)}` : ''
+  // Pi declares a tool whose definition changed as removed and added again.
+  const changedTools = change.toolsAdded.filter((name) => change.toolsRemoved.includes(name))
+  const parts = [
+    named('更新段落', change.sections),
+    named('移除段落', change.removedSections),
+    named('新增工具', change.toolsAdded.filter((name) => !changedTools.includes(name))),
+    named('移除工具', change.toolsRemoved.filter((name) => !changedTools.includes(name))),
+    named('更新工具', changedTools),
+  ].filter(Boolean)
+  return parts.length ? `系统提示：${parts.join('；')}` : '系统提示更新'
+}
+
+function usageText(usage: RecordUsage, provider?: string | null, modelId?: string | null) {
+  const label = usage.kind === 'cache_warm' ? '缓存保温费用' : `额外费用（${usage.kind}）`
+  // Dollars as Pi shows them: at least three decimals, up to six.
+  const cost = `$${usage.cost.toFixed(6).replace(/(\.\d{3}\d*?)0+$/u, '$1')}`
+  return `${label}${usage.note ? `（${usage.note}）` : ''} ${cost} · ${provider || '未知'}/${modelId || '未知'}`
+}
+
+function contextEditTarget(target?: ConversationRecord) {
+  if (target?.kind === 'custom_message') return '一条扩展消息'
+  if (target?.kind !== 'message') return '一条较早的记录'
+  if (target.source === 'assistant') return target.error || target.stopReason === 'error' ? '一条失败的回复' : target.stopReason === 'aborted' ? '一条中止的回复' : '一条回复'
+  return target.source === 'tool' ? '一条工具结果' : target.source === 'user' ? '你的一条消息' : '一条较早的记录'
 }
 
 function projectPanel(group: RecordGroup, title: string, panelClass: string, folded: boolean): Extract<ConversationItem, { kind: 'record' }> {

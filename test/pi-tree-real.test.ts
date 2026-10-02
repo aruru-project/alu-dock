@@ -188,7 +188,7 @@ export default function (pi) {
   }
 });
 
-test("a saved Pi 0.99 session keeps its conversation, tree and total cost alongside system, cache-warming and retry records", async () => {
+test("a saved Pi 0.99 session keeps its conversation, tree and total cost, and shows what its system, cache-warming and retry records changed", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-real-tree-records-"));
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
@@ -197,18 +197,30 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost alongs
   const sessionFile = join(sessionDir, "pi-0.99-records.jsonl");
   const at = (second: number) => `2026-10-01T00:00:0${second}.000Z`;
   const paid = (total: number) => ({ ...ZERO_USAGE, cost: { ...ZERO_USAGE.cost, total } });
+  // Longer than one history preview block, so reading it whole needs the content path.
+  const projectContext = `<project_context>\n${"Project rule. ".repeat(1_000)}\n</project_context>`;
+  const readTool = { name: "read", description: "Read a file.", parameters: { type: "object", properties: { path: { type: "string" } } } };
   // Pi 0.99 opens a session with its system prompt as a message, records cache warming
-  // between runs, and removes a failed attempt from model context before retrying.
+  // between runs, records later prompt and tool changes as further system messages,
+  // and removes a failed attempt from model context before retrying.
   await writeFile(sessionFile, [
     { type: "session", version: 3, id: "pi-0.99-records", timestamp: at(0), cwd },
-    { type: "message", id: "s1", parentId: null, timestamp: at(1), message: { role: "system", content: "", sections: { preamble: "Fixture system prompt." }, timestamp: 1 } },
+    { type: "message", id: "s1", parentId: null, timestamp: at(1), message: { role: "system", content: "", sections: { preamble: "Fixture system prompt.", project_context: projectContext }, toolsAdded: [readTool], timestamp: 1 } },
     { type: "message", id: "u1", parentId: "s1", timestamp: at(2), message: { role: "user", content: "first prompt", timestamp: 2 } },
     { type: "message", id: "a1", parentId: "u1", timestamp: at(3), message: { ...assistant("first answer", 3), usage: paid(0.5) } },
-    { type: "usage", id: "w1", parentId: "a1", timestamp: at(4), kind: "cache_warm", provider: "fixture", model: "fixture", usage: paid(0.125) },
-    { type: "message", id: "u2", parentId: "w1", timestamp: at(5), message: { role: "user", content: "second prompt", timestamp: 5 } },
+    { type: "usage", id: "w1", parentId: "a1", timestamp: at(4), kind: "cache_warm", provider: "fixture", model: "fixture-model", usage: { ...paid(0.125), cacheRead: 1_000, output: 1, totalTokens: 1_001 }, note: "extension override" },
+    { type: "message", id: "s2", parentId: "w1", timestamp: at(5), message: { role: "system", content: "", sections: { project_context: null }, toolsRemoved: [{ name: "read" }], timestamp: 5 } },
+    { type: "message", id: "u2", parentId: "s2", timestamp: at(5), message: { role: "user", content: "second prompt", timestamp: 5 } },
     { type: "message", id: "a2", parentId: "u2", timestamp: at(6), message: { ...assistant("", 6), content: [], stopReason: "error", errorMessage: "provider overloaded" } },
     { type: "context_edit", id: "e1", parentId: "a2", timestamp: at(7), targetId: "a2", replacement: null },
-    { type: "message", id: "a3", parentId: "e1", timestamp: at(8), message: assistant("second answer", 8) },
+    { type: "context_edit", id: "e2", parentId: "e1", timestamp: at(7), targetId: "u2", replacement: { content: "second prompt, shortened" } },
+    { type: "message", id: "a3", parentId: "e2", timestamp: at(8), message: assistant("second answer", 8) },
+    // An extension shortening an attachment lookup keeps its private path out of every client.
+    { type: "message", id: "u3", parentId: "a3", timestamp: at(9), message: { role: "user", content: "third prompt", timestamp: 9 } },
+    { type: "message", id: "a4", parentId: "u3", timestamp: at(9), message: { ...assistant("", 9), content: [{ type: "toolCall", id: "call-r", name: "dock_attachment_resolve", arguments: { fileId: "file-1" } }], stopReason: "toolUse" } },
+    { type: "message", id: "t4", parentId: "a4", timestamp: at(9), message: { role: "toolResult", toolCallId: "call-r", toolName: "dock_attachment_resolve", content: [{ type: "text", text: "/home/private/report.pdf" }], isError: false, timestamp: 9 } },
+    { type: "context_edit", id: "e3", parentId: "t4", timestamp: at(9), targetId: "t4", replacement: { content: [{ type: "text", text: "Shortened: /home/private/report.pdf" }] } },
+    { type: "message", id: "a5", parentId: "e3", timestamp: at(9), message: assistant("third answer", 9) },
   ].map((entry) => `${JSON.stringify(entry)}\n`).join(""), { mode: 0o600 });
 
   const instance = await createPiInstance({
@@ -223,17 +235,51 @@ test("a saved Pi 0.99 session keeps its conversation, tree and total cost alongs
     tools: [],
   });
   try {
-    const conversation = ["u1", "a1", "u2", "a2", "a3"];
+    const conversation = ["u1", "a1", "u2", "a2", "a3", "u3", "a4", "t4", "a5"];
     const history = (await instance.getHistoryPage(undefined, 200)).entries;
     assert.deepEqual(history.filter((entry) => entry.visibility === "conversation").map((entry) => entry.entryId), conversation);
     assert.equal(history.some((entry) => entry.kind === "label"), false, "runtime records must not read as label changes");
     const page = await instance.getConversationHistory();
     assert.deepEqual(page.entries.filter((item) => item.entry.visibility === "conversation").map((item) => item.entry.entryId), conversation);
 
+    // Each runtime record says what it changed, so a client can show it without Pi's file.
+    const record = (id: string) => history.find((entry) => entry.entryId === id);
+    assert.deepEqual(record("s1")?.systemPrompt, { sections: ["preamble", "project_context"], removedSections: [], toolsAdded: ["read"], toolsRemoved: [] });
+    assert.deepEqual(record("s2")?.systemPrompt, { sections: [], removedSections: ["project_context"], toolsAdded: [], toolsRemoved: ["read"] });
+    assert.deepEqual(record("w1")?.usage, {
+      kind: "cache_warm", tokens: { input: 0, output: 1, cacheRead: 1_000, cacheWrite: 0, total: 1_001 }, cost: 0.125, note: "extension override",
+    });
+    assert.deepEqual([record("w1")?.provider, record("w1")?.modelId], ["fixture", "fixture-model"]);
+    assert.deepEqual([record("e1")?.contextEdit, record("e1")?.targetEntryId, record("e1")?.content], ["omit", "a2", []]);
+    assert.deepEqual([record("e2")?.contextEdit, record("e2")?.targetEntryId, record("e2")?.content], ["replace", "u2", [{ type: "text", text: "second prompt, shortened" }]]);
+    assert.deepEqual(record("e3")?.content, [{ type: "text",
+      text: "Dock attachment resolved. The Host-local path was disclosed privately to the Agent and is omitted from external conversation projections." }]);
+
+    // The whole system prompt record (sections, then added tool definitions) reads back in full.
+    const system = page.entries.find((item) => item.entry.entryId === "s1");
+    assert.deepEqual([system?.entry.content, system?.contentComplete], [[], false], "the prompt texts are read on demand");
+    const text: string[] = [];
+    for (let cursor: string | undefined, done = false; !done;) {
+      const content = await instance.getConversationContent(system!.contentRef, cursor);
+      for (const chunk of content.chunks) {
+        assert.equal(chunk.type, "text");
+        if (chunk.type === "text") text[chunk.blockIndex] = (text[chunk.blockIndex] ?? "") + chunk.text;
+      }
+      cursor = content.nextCursor;
+      done = content.complete;
+    }
+    assert.deepEqual(text, ["Fixture system prompt.", projectContext, JSON.stringify(readTool, null, 2)]);
+
     const tree = await instance.getTree();
     assert.deepEqual(tree.nodes.filter((node) => node.displayClass !== "metadata").map((node) => node.entryId), conversation);
     const byId = new Map(tree.nodes.map((node) => [node.entryId, node]));
-    assert.deepEqual(["s1", "w1", "e1"].map((id) => byId.get(id)?.displayClass), ["metadata", "metadata", "metadata"]);
+    assert.deepEqual(["s1", "w1", "s2", "e1", "e2"].map((id) => [byId.get(id)?.displayClass, byId.get(id)?.summary]), [
+      ["metadata", "System prompt: sections preamble, project_context \u00b7 tools +read"],
+      ["metadata", "Cache warmed (extension override) \u00b7 $0.125 \u00b7 fixture/fixture-model"],
+      ["metadata", "System prompt: removed sections project_context \u00b7 tools \u2212read"],
+      ["metadata", "Removed from model context: provider overloaded"],
+      ["metadata", "Replaced in model context: second prompt"],
+    ]);
 
     assert.equal(instance.snapshot().metrics?.cost, 0.625, "cache warming counts toward the session total");
   } finally {

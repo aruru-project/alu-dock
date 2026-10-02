@@ -15,6 +15,7 @@ import {
   type ToolResultNotice,
 } from "../core/tool-result-presentation.js";
 import { settledNestedToolCalls, type NestedToolCallsDto } from "../core/nested-tool-calls.js";
+import { systemPromptChangeText, usageRecordText } from "../core/runtime-record-text.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import type { AttachmentDto } from "../core/instance-attachments.js";
@@ -655,6 +656,7 @@ export class DockConversation implements Component {
       return entry;
     };
 
+    const records = new Map(entries.map((entry) => [entry.entryId, entry]));
     for (const source of entries) {
       if (source.visibility === "hidden") continue;
       const text = contentText(source.content, "text");
@@ -665,7 +667,7 @@ export class DockConversation implements Component {
             ? `Thinking level changed to ${source.thinkingLevel ?? "unknown"}`
             : source.kind === "session_info" && source.name
               ? `Session named ${source.name}`
-              : undefined;
+              : runtimeRecordText(source, records);
         if (metadataText) addProjected(source, "system", metadataText);
         continue;
       }
@@ -947,6 +949,27 @@ function renderUserSurface(text: string, width: number, outputPadding: number): 
     { preserveOrderedListMarkers: true, preserveBackslashEscapes: true },
   ));
   return box.render(boundedWidth);
+}
+
+/** System prompt, cost and model-context records say what changed; their full text is one /context-changes away. */
+function runtimeRecordText(source: HistoryEntryDto, records: ReadonlyMap<string, HistoryEntryDto>): string | undefined {
+  if (source.systemPrompt) return `${systemPromptChangeText(source.systemPrompt)} · /context-changes shows it in full`;
+  if (source.usage) return usageRecordText(source.usage, source.provider ?? "unknown", source.modelId ?? "unknown");
+  if (source.contextEdit === undefined) return undefined;
+  const target = contextEditTarget(source.targetEntryId === undefined ? undefined : records.get(source.targetEntryId));
+  return source.contextEdit === "omit"
+    ? `Model context: ${target} was removed; the conversation still shows it.`
+    : `Model context: ${target} was replaced; the conversation still shows the original · /context-changes shows the replacement`;
+}
+
+/** How a model-context edit names the record it changed. */
+export function contextEditTarget(target: HistoryEntryDto | undefined): string {
+  if (target?.kind === "custom_message") return "an extension message";
+  if (target?.kind !== "message") return "an earlier record";
+  if (target.source === "assistant") {
+    return target.error !== undefined || target.stopReason === "error" ? "a failed reply" : target.stopReason === "aborted" ? "a stopped reply" : "a reply";
+  }
+  return target.source === "tool" ? "a tool result" : target.source === "user" ? "your message" : "an earlier record";
 }
 
 function renderCompactionSummary(text: string, width: number, expanded: boolean): string[] {

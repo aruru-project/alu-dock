@@ -107,6 +107,41 @@ assert.ok(firstSection?.kind === 'turn')
 assert.equal(firstSection.toolCalls, 1)
 assert.equal(firstSection.finalRowId, 'record:a2', '最终回复是这一轮最后一条 Agent 消息')
 
+// Card #347: Pi records system prompt changes, extra costs and model-context edits outside the chat;
+// each one says what it changed, and a system prompt change opens to its recorded text.
+const runtimeItems = projectRecordGroups([
+  record('s5', 'system', [{ type: 'text', text: 'Fixture prompt.' }, { type: 'text', text: '{\n  "name": "read"\n}' }], {
+    visibility: 'metadata', timestamp: '2026-01-01T02:00:00Z',
+    systemPrompt: { sections: ['preamble'], removedSections: [], toolsAdded: ['read', 'bash'], toolsRemoved: ['bash'] },
+  }),
+  record('u5', 'user', [{ type: 'text', text: '试试' }], { timestamp: '2026-01-01T02:00:00Z' }),
+  record('a5', 'assistant', [], { timestamp: '2026-01-01T02:00:02Z', stopReason: 'error', error: 'overloaded' }),
+  record('e5', 'runtime', [], { kind: 'custom', visibility: 'metadata', contextEdit: 'omit', targetEntryId: 'a5' }),
+  record('e6', 'runtime', [{ type: 'text', text: '缩短后的提问' }], { kind: 'custom', visibility: 'metadata', contextEdit: 'replace', targetEntryId: 'u5' }),
+  record('a6', 'assistant', [{ type: 'text', text: '好了' }], { timestamp: '2026-01-01T02:00:09Z', stopReason: 'stop' }),
+  record('w5', 'runtime', [], {
+    kind: 'custom', visibility: 'metadata', provider: 'anthropic', modelId: 'claude',
+    usage: { kind: 'cache_warm', tokens: { input: 0, output: 1, cacheRead: 9000, cacheWrite: 0, total: 9001 }, cost: 0.0042 },
+  }),
+  record('s6', 'system', [], { visibility: 'metadata', timestamp: '2026-01-01T02:10:00Z', systemPrompt: { sections: [], removedSections: ['skills'], toolsAdded: [], toolsRemoved: [] } }),
+  record('u6', 'user', [{ type: 'text', text: '再来' }], { timestamp: '2026-01-01T02:10:00Z' }),
+])
+const runtimeItem = (id: string) => runtimeItems.find((item) => item.id === `record:${id}`)
+const systemPanel = runtimeItem('s5')
+assert.ok(systemPanel?.kind === 'record' && systemPanel.folded)
+assert.equal(systemPanel.title, '系统提示：更新段落 preamble；新增工具 read；更新工具 bash')
+assert.deepEqual(systemPanel.parts.map((part) => [part.kind, part.kind === 'plain' ? part.text : '']), [['plain', 'Fixture prompt.'], ['plain', '{\n  "name": "read"\n}']], '展开后按原文显示记录下来的段落和工具定义')
+assert.deepEqual([runtimeItem('e5')?.kind === 'notice' && runtimeItem('e5')?.text, runtimeItem('e5')?.turnId], ['模型上下文：移除了一条失败的回复，对话里仍保留原文。', 'turn:u5'])
+assert.equal(runtimeItem('w5')?.kind === 'notice' && runtimeItem('w5')?.text, '缓存保温费用 $0.0042 · anthropic/claude')
+const replacement = runtimeItem('e6')
+assert.ok(replacement?.kind === 'record' && replacement.folded)
+assert.deepEqual([replacement.title, replacement.parts.map((part) => part.kind === 'plain' ? part.text : part.kind)], ['模型上下文：替换了你的一条消息，对话里仍保留原文。展开查看替换后的内容', ['缩短后的提问']], '展开后按原文显示替换后的内容')
+assert.equal(runtimeItem('s6')?.kind === 'record' && runtimeItem('s6')?.title, '系统提示：移除段落 skills')
+const runtimeTurn = runtimeItems.find((item) => item.kind === 'turn' && item.turnId === 'turn:u5')
+assert.equal(runtimeTurn?.kind === 'turn' && runtimeTurn.endedAt, '2026-01-01T02:00:09Z', '下一次提问前的系统提示记录不算进上一轮')
+assert.deepEqual(conversationSections(conversationRows(runtimeItems)).map((section) => section.kind === 'turn' ? `turn:${section.id}` : `row:${section.id}`),
+  ['row:record:s5', 'turn:turn:u5', 'row:record:w5', 'row:record:s6', 'turn:turn:u6'])
+
 const failedHistoryItems = projectRecordGroups([
   record('u9', 'user', [{ type: 'text', text: '试试' }], { timestamp: '2026-01-01T01:00:00Z' }),
   record('a9', 'assistant', [], { timestamp: '2026-01-01T01:00:02Z', stopReason: 'error', error: 'model failed' }),

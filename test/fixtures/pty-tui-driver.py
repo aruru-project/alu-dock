@@ -712,6 +712,21 @@ def main() -> int:
                         break
             elif action == "history-flow":
                 pass  # Eager history already flowed into native terminal scrollback.
+            elif action == "context-changes":
+                os.write(fd, b"/context-changes\r")
+                picker_deadline = time.monotonic() + 5
+                while b"Context changes" not in output and time.monotonic() < picker_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Open the newest change.
+                reader_deadline = time.monotonic() + 5
+                while b"recorded skill list" not in output and time.monotonic() < reader_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                for _ in range(2):  # Back to the list, then close it.
+                    os.write(fd, b"\x1b")
+                    time.sleep(0.15)
+                    read_available(fd, output, 0.05)
             elif action == "history-live-flow":
                 live_deadline = time.monotonic() + 4
                 while b"new output" not in output and time.monotonic() < live_deadline:

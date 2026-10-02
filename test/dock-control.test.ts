@@ -1352,6 +1352,45 @@ test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the
   assert.equal((await client.status(created.id)).lastRun, "never");
 });
 
+test("SSH TUI shows what a system prompt record changed and reads it in full from /context-changes (card #347)", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-context-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    const runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
+    runtime.history = [
+      agentRecord("system-1", "system", [], {
+        visibility: "metadata",
+        systemPrompt: { sections: ["preamble", "skills"], removedSections: [], toolsAdded: ["read"], toolsRemoved: [] },
+      }),
+      agentRecord("user-1", "user", [{ type: "text", text: "hello" }]),
+    ];
+    // The history carries only the names; the recorded texts arrive through the content reference.
+    runtime.conversationContent.set("fixture-system-1", [
+      { blockIndex: 0, type: "text", text: "Recorded preamble text", offset: 0, blockComplete: true },
+      { blockIndex: 1, type: "text", text: "<skills>recorded skill list</skills>", offset: 0, blockComplete: true },
+    ]);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime, initialHistory: runtime.getHistory() });
+  }, () => "pty-context-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const created = await new DockClient({ socketPath }).create(directory, "pty-context");
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "context-changes");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /System prompt: sections preamble, skills \u00b7 tools \+read/u);
+  assert.match(output, /Recorded preamble text/u);
+  assert.match(output, /recorded skill list/u);
+});
+
 test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
@@ -3453,7 +3492,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "context-changes" = "detach",
   readyFile?: string,
   workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {
