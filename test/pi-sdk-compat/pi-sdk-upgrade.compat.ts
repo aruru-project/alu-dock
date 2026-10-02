@@ -24,6 +24,9 @@ const TEMPLATE_PROMPT = "SDK_COMPAT_TEMPLATE_EXPANDED: consume this queued templ
 const HANDLED_PROMPT = "SDK_COMPAT_HANDLED: an input hook takes this over";
 const SETTLE_FIRST_PROMPT = "SDK_COMPAT_SETTLE_FIRST: finish while an extension holds settlement";
 const SETTLE_SECOND_PROMPT = "SDK_COMPAT_SETTLE_SECOND: sent before settlement finished";
+const COMPACT_PROMPT = "SDK_COMPAT_COMPACT: report a context-filling answer";
+const CONTINUE_TEXT = "SDK_COMPAT_CONTINUE: an extension continues after automatic compaction";
+const SUMMARIZATION_MARKER = "You are a context summarization assistant";
 const FIXTURE_TEXT = "sdk-compat-read-sentinel";
 
 /** Pi SDK admission gate. Intentionally not named *.test.ts; ordinary npm test must not collect it. */
@@ -37,6 +40,7 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
   const priorSessionFile = join(sessionDir, "pi-0.81.1-session.jsonl");
   const holdSettle = join(root, "hold-settle");
   const settleEntered = join(root, "settle-entered");
+  const continueAfterCompaction = join(root, "continue-after-compaction");
   const fixture = new LoopbackChatFixture();
   const workerPids: number[] = [];
   const events: DockEvent[] = [];
@@ -74,15 +78,25 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
         defaultProvider: PROVIDER,
         defaultModel: MODEL,
         retry: { enabled: false },
+        // Any earlier message may be summarized once a reply reports a nearly full context.
+        compaction: { enabled: true, keepRecentTokens: 1 },
       }), "utf8"),
       writeFile(join(agentDir, "extensions", "sdk-compat-hooks.ts"), `
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 export default function (pi) {
   pi.on("input", async (event) => event.text.startsWith(${JSON.stringify(HANDLED_PROMPT)}) ? { action: "handled" } : { action: "continue" });
   pi.on("agent_settled", async () => {
     if (!existsSync(${JSON.stringify(holdSettle)})) return;
     writeFileSync(${JSON.stringify(settleEntered)}, "");
     for (let attempt = 0; attempt < 500 && existsSync(${JSON.stringify(holdSettle)}); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+  pi.on("agent_before_settle", async () => {
+    if (!existsSync(${JSON.stringify(continueAfterCompaction)})) return undefined;
+    rmSync(${JSON.stringify(continueAfterCompaction)});
+    return {
+      entries: [{ type: "custom_message", customType: "sdk-compat-continue", content: ${JSON.stringify(CONTINUE_TEXT)}, display: false }],
+      continue: true,
+    };
   });
 }
 `, "utf8"),
@@ -233,6 +247,21 @@ export default function (pi) {
     assert.ok(fixture.requests.some((body) => lastUserText(body).includes(SETTLE_SECOND_PROMPT)));
     assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(HANDLED_PROMPT)), false, "handled input never reaches the model");
 
+    // Pi 0.99 compacts inside the run, and an extension may ask to continue it afterwards.
+    // Abort during automatic compaction must end the run, so the model is not called again.
+    await writeFile(continueAfterCompaction, "");
+    const compactEvent = events.length;
+    await client.prompt(created.id, COMPACT_PROMPT, "prompt", "sdk-compact-run");
+    await fixture.waitForHeldSummarization();
+    await waitForEvent(events, compactEvent, (event) => event.type === "compaction.started");
+    await client.abort(created.id, "sdk-compact-abort");
+    await waitForEvent(events, compactEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-compact-run");
+    assert.ok(events.slice(compactEvent).some((event) => event.type === "compaction.completed" && event.data.aborted === true));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(CONTINUE_TEXT)), false, "no model request may follow an abort during automatic compaction");
+    assert.equal((await client.status(created.id)).execution === "running", false);
+    await rm(continueAfterCompaction, { force: true });
+
     await client.nameSession(created.id, "SDK compatibility persisted", "sdk-name");
     const beforeReloadHistory = (await client.history(created.id)).entries;
     const initialWorkerPid = workerPids[0]!;
@@ -323,6 +352,7 @@ class LoopbackChatFixture {
   private readonly sockets = new Set<Socket>();
   private readonly server = createServer((request, response) => { void this.respond(request, response); });
   private pendingHoldResponse: ServerResponse | undefined;
+  private heldSummarization: ServerResponse | undefined;
 
   async start(): Promise<void> {
     this.server.on("connection", (socket) => {
@@ -348,6 +378,14 @@ class LoopbackChatFixture {
     finish(response, "stop");
   }
 
+  async waitForHeldSummarization(): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (this.heldSummarization) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail("Pi never requested an automatic compaction summary");
+  }
+
   async stop(): Promise<void> {
     for (const socket of this.sockets) socket.destroy();
     if (!this.server.listening) return;
@@ -366,6 +404,12 @@ class LoopbackChatFixture {
     this.requestCount += 1;
     const latestUserText = lastUserText(body);
 
+    // A summarization request quotes the whole conversation, so recognise it before any prompt text.
+    if (JSON.stringify(body).includes(SUMMARIZATION_MARKER)) {
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      this.heldSummarization = response;
+      return;
+    }
     if (latestUserText.includes(ERROR_PROMPT)) {
       response.writeHead(400, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "deterministic provider failure", type: "invalid_request_error" } }));
@@ -399,6 +443,11 @@ class LoopbackChatFixture {
       finish(response, "stop");
       return;
     }
+    if (latestUserText.includes(COMPACT_PROMPT)) {
+      sendDelta(response, { role: "assistant", content: "context is nearly full" });
+      finish(response, "stop", { prompt_tokens: 19_990, completion_tokens: 10, total_tokens: 20_000 });
+      return;
+    }
     sendDelta(response, { role: "assistant", content: "fixture response" });
     finish(response, "stop");
   }
@@ -414,14 +463,18 @@ function sendDelta(response: ServerResponse, delta: Record<string, unknown>): vo
   })}\n\n`);
 }
 
-function finish(response: ServerResponse, finishReason: "stop" | "tool_calls"): void {
+function finish(
+  response: ServerResponse,
+  finishReason: "stop" | "tool_calls",
+  usage = { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+): void {
   response.write(`data: ${JSON.stringify({
     id: "chatcmpl-sdk-compat",
     object: "chat.completion.chunk",
     created: 1,
     model: MODEL,
     choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-    usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+    usage,
   })}\n\n`);
   response.end("data: [DONE]\n\n");
 }

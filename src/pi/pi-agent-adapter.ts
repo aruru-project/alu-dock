@@ -1117,22 +1117,11 @@ export class PiAgentAdapter {
       await navigation.then(() => {}, (error) => { throw error; });
       return;
     }
-    if (session.isCompacting) {
-      let resolveCompaction!: () => void;
-      const compactionEnded = new Promise<void>((resolve) => { resolveCompaction = resolve; });
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === "compaction_end") resolveCompaction();
-      });
-      try {
-        session.abortCompaction();
-        await compactionEnded;
-      } finally {
-        unsubscribe();
-      }
-    } else {
-      await session.abort();
-    }
-    await session.waitForIdle();
+    // Pi 0.99 runs automatic compaction inside the run. Its abort cancels the
+    // compaction and also ends the run, so a queued message or an extension's
+    // agent_before_settle continuation cannot call the model after this abort.
+    // Cancelling only the compaction would let the run continue.
+    await session.abort();
   }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
