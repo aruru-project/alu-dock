@@ -25,6 +25,7 @@ const SETTING_PRESENTATIONS = {
   doubleEscapeAction: { label: '连按两次 Esc', description: '输入框为空时连按两次 Esc 执行的操作' },
   treeFilterMode: { label: 'Session Tree 默认筛选', description: '打开 Session Tree 时默认显示哪些内容' },
   defaultProjectTrust: { label: '默认项目信任方式', description: '项目尚无信任记录时采用的处理方式' },
+  cacheWarming: { label: '缓存保温', description: '任务中途发小请求让 Model 的提示缓存不过期，每次刷新都会计费；对所有项目生效' },
   httpIdleTimeoutMs: { label: 'HTTP 空闲等待时间', description: '等待 HTTP 数据期间允许的最长空闲时间（毫秒）' },
   editorPaddingX: { label: '输入框水平留白', description: '输入框左右两侧的留白' },
   outputPad: { label: '消息水平留白', description: '用户消息、回复和 Thinking 两侧的留白' },
@@ -39,6 +40,7 @@ const OPTION_LABELS: Partial<Record<SettingKey, Record<string, string>>> = {
   doubleEscapeAction: { tree: '打开 Session Tree', fork: '从当前位置创建分支', none: '不执行操作' },
   treeFilterMode: { default: '默认', 'no-tools': '隐藏 Tools', 'user-only': '仅用户消息', 'labeled-only': '仅有标签的内容', all: '全部内容' },
   defaultProjectTrust: { ask: '每次询问', always: '始终信任', never: '从不信任' },
+  cacheWarming: { off: '关闭', streaming: '仅运行中', idle: '运行中和空闲时' },
 }
 
 export function settingLabel(key: SettingKey): string {

@@ -1,5 +1,5 @@
 //! Conversation records share byte transport, not file source or storage semantics.
-use super::{ContentAssembler, ConversationContentChunk, protocol};
+use super::{ContentAssembler, parse_content_chunk, protocol};
 use crate::{ContentBlock, DockClient, Result};
 use serde_json::{Value, json};
 use std::{
@@ -29,7 +29,7 @@ impl ContentSink {
             if newline.is_none() {
                 break;
             }
-            let chunk: ConversationContentChunk = serde_json::from_slice(&self.record)?;
+            let chunk = parse_content_chunk(serde_json::from_slice(&self.record)?)?;
             self.assembler.push(chunk)?;
             self.record.clear();
             bytes = &bytes[length + 1..];
@@ -150,6 +150,40 @@ mod tests {
                 ])
             );
         }
+    }
+
+    // #356: a block kind only a newer Host knows is placed as "unrecognized" and the
+    // known text around it still reads; a malformed known chunk is still an error.
+    #[test]
+    fn unknown_block_kinds_keep_the_known_blocks_readable() {
+        let records = concat!(
+            "{\"type\":\"text\",\"blockIndex\":0,\"text\":\"before\",\"offset\":0,\"blockComplete\":true}\n",
+            "{\"type\":\"hologram\",\"blockIndex\":1,\"frames\":[1,2],\"offset\":0,\"blockComplete\":false}\n",
+            "{\"type\":\"hologram\",\"blockIndex\":1,\"frames\":[3],\"offset\":2,\"blockComplete\":true}\n",
+            "{\"type\":\"citation\",\"blockIndex\":2,\"url\":\"https://example.test\"}\n",
+            "{\"type\":\"text\",\"blockIndex\":3,\"text\":\"after\",\"offset\":0,\"blockComplete\":true}\n"
+        )
+        .as_bytes();
+        let mut sink = ContentSink::default();
+        sink.consume(records).unwrap();
+        assert_eq!(
+            serde_json::to_value(sink.finish(4).unwrap()).unwrap(),
+            json!([
+                {"type":"text", "text":"before"},
+                {"type":"unrecognized"},
+                {"type":"unrecognized"},
+                {"type":"text", "text":"after"}
+            ])
+        );
+
+        let mut sink = ContentSink::default();
+        assert!(
+            sink.consume(
+                b"{\"type\":\"text\",\"blockIndex\":0,\"offset\":0,\"blockComplete\":true}\n"
+            )
+            .is_err(),
+            "a known chunk kind missing its fields must not pass as unrecognized"
+        );
     }
 
     #[test]

@@ -177,6 +177,9 @@ pub enum ContentBlock {
         kind: String,
         description: String,
     },
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

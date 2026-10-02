@@ -53,5 +53,10 @@ const base = { lifecycle: 'active', execution: 'idle', compacting: false, active
   assert.equal(presence.tone, 'stopped')
   assert.equal(presence.label, '已停止')
 }
+{
+  // #356: a state only a newer Host knows must not read as "空闲".
+  const presence = workPresence({ ...base, lifecycle: 'unrecognized' })
+  assert.equal(presence.label, '状态未知，请更新客户端')
+}
 
 console.log('work presence tests passed')

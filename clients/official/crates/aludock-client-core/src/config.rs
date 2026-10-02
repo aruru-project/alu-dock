@@ -20,7 +20,9 @@ const MAX_COMMAND_CONTENT_PAGE_CHARS: usize = 64_000;
 const MAX_COMMAND_ARGUMENT_PREFIX_CHARS: usize = 16_384;
 const MAX_COMMAND_COMPLETION_TEXT_CHARS: usize = 2_048;
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+/// The Host owns which levels exist; this client only needs to show and echo them,
+/// so a level this build does not know keeps its real name and still round-trips.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
     Off,
@@ -30,6 +32,8 @@ pub enum ThinkingLevel {
     High,
     Xhigh,
     Max,
+    #[serde(untagged)]
+    Unrecognized(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,6 +68,7 @@ struct ThinkingConfigurationResult {
     instance: InstanceSnapshot,
 }
 
+/// Echoed back to the Host inside `CommandReference`, so an unknown kind keeps its real name.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceKind {
@@ -71,6 +76,8 @@ pub enum SourceKind {
     Extension,
     Skill,
     Prompt,
+    #[serde(untagged)]
+    Unrecognized(String),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -189,11 +196,15 @@ pub enum SettingKey {
     DoubleEscapeAction,
     TreeFilterMode,
     DefaultProjectTrust,
+    CacheWarming,
     HttpIdleTimeoutMs,
     EditorPaddingX,
     OutputPad,
     AutocompleteMaxVisible,
     Warnings,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -211,6 +222,9 @@ pub enum SettingSource {
     Global,
     Project,
     Effective,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -220,6 +234,9 @@ pub enum SettingValueType {
     Enum,
     Integer,
     Object,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -264,6 +281,9 @@ pub enum ResourceKind {
     Skill,
     Prompt,
     Context,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -306,6 +326,9 @@ pub enum DiagnosticSeverity {
     Info,
     Warning,
     Error,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -606,7 +629,13 @@ impl DockClient {
     }
 
     pub async fn settings(&self, instance_id: &str) -> Result<SettingsResult> {
-        let result: SettingsResult = self
+        // A newer Host may list settings this build cannot name, type or edit, with values of
+        // any shape. Those are skipped before parsing so the rest of the page stays usable.
+        #[derive(Deserialize)]
+        struct RawSettingsResult {
+            settings: Vec<Value>,
+        }
+        let raw: RawSettingsResult = self
             .request(
                 "settings.get",
                 &InstanceParams { instance_id },
@@ -614,7 +643,22 @@ impl DockClient {
                 None,
             )
             .await?;
-        Ok(result)
+        let mut settings = Vec::with_capacity(raw.settings.len());
+        for item in raw.settings {
+            let key_known = item.get("key").is_some_and(|value| {
+                serde_json::from_value::<SettingKey>(value.clone())
+                    .is_ok_and(|key| key != SettingKey::Unrecognized)
+            });
+            let type_known = item.get("valueType").is_some_and(|value| {
+                serde_json::from_value::<SettingValueType>(value.clone())
+                    .is_ok_and(|kind| kind != SettingValueType::Unrecognized)
+            });
+            if !key_known || !type_known {
+                continue;
+            }
+            settings.push(serde_json::from_value::<SettingInfo>(item)?);
+        }
+        Ok(SettingsResult { settings })
     }
 
     pub async fn update_setting(
@@ -899,6 +943,31 @@ mod tests {
         assert_eq!(
             serde_json::to_value(source).unwrap(),
             serde_json::json!({ "kind": "built-in" })
+        );
+    }
+
+    // #356: values the Host owns are shown and echoed by their real name, not a placeholder.
+    #[test]
+    fn unknown_thinking_levels_and_command_sources_round_trip_by_name() {
+        let levels: Vec<ThinkingLevel> =
+            serde_json::from_value(serde_json::json!(["off", "ultra"])).unwrap();
+        assert_eq!(
+            levels,
+            vec![
+                ThinkingLevel::Off,
+                ThinkingLevel::Unrecognized("ultra".into())
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&levels).unwrap(),
+            serde_json::json!(["off", "ultra"])
+        );
+        let source: SourceInfo =
+            serde_json::from_value(serde_json::json!({ "kind": "mcp-server" })).unwrap();
+        assert_eq!(source.kind, SourceKind::Unrecognized("mcp-server".into()));
+        assert_eq!(
+            serde_json::to_value(source).unwrap(),
+            serde_json::json!({ "kind": "mcp-server" })
         );
     }
 

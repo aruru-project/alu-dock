@@ -21,6 +21,9 @@ pub enum InstanceLifecycle {
     Stopped,
     HostLost,
     RuntimeError,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -30,6 +33,9 @@ pub enum InstanceExecution {
     Running,
     Failed,
     Unavailable,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -179,6 +185,9 @@ pub struct InstanceCatalog {
 pub enum MachineKind {
     Main,
     Subhost,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -186,6 +195,9 @@ pub enum MachineKind {
 pub enum MachinePlatform {
     Linux,
     Windows,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -210,6 +222,9 @@ struct MachinesResult {
 pub enum WorkspaceEntryKind {
     Directory,
     Symlink,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -725,6 +740,8 @@ fn machine_workspace_root_is_valid(root: &str, platform: MachinePlatform) -> boo
                 && bytes[1] == b':'
                 && matches!(bytes[2], b'\\' | b'/')
         }
+        // A platform this build does not know has a root shape it cannot judge.
+        MachinePlatform::Unrecognized => !root.is_empty(),
     }
 }
 

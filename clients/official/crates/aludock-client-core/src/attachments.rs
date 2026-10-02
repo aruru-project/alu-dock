@@ -80,6 +80,9 @@ impl<'de> Deserialize<'de> for AttachmentDto {
 pub enum AttachmentUploadStatus {
     Stored,
     Reused,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -552,6 +555,13 @@ fn terminal_result(
             ),
         ));
     }
+    // #356: a status only a newer Host knows is not a confirmed upload; the job reports unknown.
+    if result.status == AttachmentUploadStatus::Unrecognized {
+        return Err(effect_unknown(
+            operation_id,
+            ClientError::Protocol("attachment receipt status is not known to this client".into()),
+        ));
+    }
     Ok(result)
 }
 
@@ -878,6 +888,41 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.status, AttachmentUploadStatus::Stored);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    // #356: a receipt status only a newer Host knows must not be reported as a stored upload.
+    #[tokio::test]
+    async fn receipt_with_unknown_status_leaves_the_upload_outcome_unknown() {
+        let path = temp_file("unknown-status", b"same");
+        let cancellation = AttachmentUploadCancellation::new();
+        let mut ignored = |_| {};
+        let prepared = prehash_file(&path, &cancellation, &mut ignored)
+            .await
+            .unwrap();
+        let (client, mut host) = duplex(4096);
+        let mut client = tokio::io::BufReader::new(client);
+        let mut receipt = terminal("request", &prepared.sha256, prepared.size_bytes);
+        receipt["result"]["status"] = json!("quarantined");
+        write_json_line(&mut host, &receipt).await.unwrap();
+        let error = upload_after_header(
+            &mut client,
+            &path,
+            "request",
+            "epoch",
+            4096,
+            "operation",
+            &prepared,
+            &cancellation,
+            &mut ignored,
+            &mut false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, ClientError::EffectUnknown { operation_id, .. } if operation_id == "operation")
+        );
         std::fs::remove_file(path).unwrap();
     }
 

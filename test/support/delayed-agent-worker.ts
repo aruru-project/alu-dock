@@ -121,7 +121,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     showCacheMissNotices: false, showHardwareCursor: false, clearOnShrink: true, showTerminalProgress: true,
     quietStartup: false, collapseChangelog: false, enableInstallTelemetry: true,
     steeringMode: "all", followUpMode: "all", transport: "auto",
-    doubleEscapeAction: "tree", treeFilterMode: "default", defaultProjectTrust: "ask",
+    doubleEscapeAction: "tree", treeFilterMode: "default", defaultProjectTrust: "ask", cacheWarming: "off",
     httpIdleTimeoutMs: 0, editorPaddingX: 0, outputPad: 0, autocompleteMaxVisible: 10, warnings: {},
   };
   private modelState: AgentModelState = {

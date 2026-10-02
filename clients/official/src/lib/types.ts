@@ -1,5 +1,8 @@
-export type Lifecycle = 'active' | 'stopping' | 'stopped' | 'host_lost' | 'runtime_error'
-export type Execution = 'idle' | 'running' | 'failed' | 'unavailable'
+// The Rust core turns any Host enum value this build does not know into 'unrecognized'
+// instead of failing the whole response; newer Hosts may add values at any time.
+export type Unrecognized = 'unrecognized'
+export type Lifecycle = 'active' | 'stopping' | 'stopped' | 'host_lost' | 'runtime_error' | Unrecognized
+export type Execution = 'idle' | 'running' | 'failed' | 'unavailable' | Unrecognized
 export type WindowsAwayDelay = 'immediate' | 'one_minute' | 'five_minutes' | 'thirty_minutes' | 'one_hour' | 'never'
 
 export interface ClientPreferences {
@@ -294,6 +297,7 @@ export type ContentBlock =
   | { type: 'tool_call'; toolCallId: string; toolName: string; args: unknown; omittedFields?: string[] }
   | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; nestedCalls?: unknown; omittedFields?: string[] }
   | { type: 'omitted'; kind: string; description: string }
+  | { type: Unrecognized }
 
 export interface LocalAttachmentUpload {
   connectionId: string
@@ -559,7 +563,7 @@ export type SettingKey =
   | 'enableSkillCommands' | 'hideThinking' | 'showCacheMissNotices' | 'showHardwareCursor'
   | 'clearOnShrink' | 'showTerminalProgress' | 'quietStartup' | 'collapseChangelog'
   | 'enableInstallTelemetry' | 'steeringMode' | 'followUpMode' | 'transport'
-  | 'doubleEscapeAction' | 'treeFilterMode' | 'defaultProjectTrust' | 'httpIdleTimeoutMs'
+  | 'doubleEscapeAction' | 'treeFilterMode' | 'defaultProjectTrust' | 'cacheWarming' | 'httpIdleTimeoutMs'
   | 'editorPaddingX' | 'outputPad' | 'autocompleteMaxVisible' | 'warnings'
 export type SettingValue = boolean | number | string | { anthropicExtraUsage?: boolean }
 export interface SettingInfo {

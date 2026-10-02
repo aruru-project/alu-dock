@@ -27,6 +27,9 @@ pub enum WorkspaceFileKind {
     File,
     Directory,
     Symlink,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -35,6 +38,9 @@ pub enum WorkspaceTargetKind {
     File,
     Directory,
     Unavailable,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -68,6 +74,9 @@ impl WorkspaceFileEntry {
                 Some(WorkspaceTargetKind::Directory | WorkspaceTargetKind::Unavailable),
                 None,
             ) => {}
+            // Kinds this build does not know have a shape it cannot judge.
+            (WorkspaceFileKind::Unrecognized, _, _)
+            | (WorkspaceFileKind::Symlink, Some(WorkspaceTargetKind::Unrecognized), _) => {}
             _ => return Err(protocol("workspace file metadata shape was invalid")),
         }
         Ok(())

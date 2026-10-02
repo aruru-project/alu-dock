@@ -197,6 +197,65 @@ pub enum ConversationContentChunk {
         kind: String,
         description: String,
     },
+    /// A chunk kind only a newer Host knows. `blockIndex` and `blockComplete` are the
+    /// continuity contract every chunk kind shares, so the block can still be placed and
+    /// the known blocks around it still read. Built by [`parse_content_chunk`], never by serde.
+    #[serde(skip)]
+    Unrecognized {
+        block_index: usize,
+        block_complete: bool,
+    },
+}
+
+/// Only the `type` tag decides whether a chunk is unrecognized; a known kind with
+/// missing or malformed fields is still a protocol error.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ContentChunkKind {
+    Text,
+    Thinking,
+    ImageRef,
+    Image,
+    ToolCall,
+    ToolResult,
+    Omitted,
+    #[serde(other)]
+    Unrecognized,
+}
+
+pub(crate) fn parse_content_chunk(
+    value: serde_json::Value,
+) -> serde_json::Result<ConversationContentChunk> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Continuity {
+        block_index: usize,
+        #[serde(default = "chunk_complete_by_default")]
+        block_complete: bool,
+    }
+    match serde_json::from_value::<ContentChunkKind>(value.clone())? {
+        ContentChunkKind::Unrecognized => {
+            let continuity: Continuity = serde_json::from_value(value)?;
+            Ok(ConversationContentChunk::Unrecognized {
+                block_index: continuity.block_index,
+                block_complete: continuity.block_complete,
+            })
+        }
+        _ => serde_json::from_value(value),
+    }
+}
+
+fn chunk_complete_by_default() -> bool {
+    true
+}
+
+fn parse_content_chunks<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<ConversationContentChunk>, D::Error> {
+    Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| parse_content_chunk(value).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -206,6 +265,7 @@ pub struct ConversationContentPage {
     pub runtime_generation: u64,
     pub revision: String,
     pub content_ref: String,
+    #[serde(deserialize_with = "parse_content_chunks")]
     pub chunks: Vec<ConversationContentChunk>,
     pub complete: bool,
     pub next_cursor: Option<String>,
@@ -347,6 +407,9 @@ pub enum TreeNodeKind {
     CustomMessage,
     Label,
     SessionInfo,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -356,6 +419,9 @@ pub enum TreeNodeRole {
     Assistant,
     Tool,
     System,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -365,6 +431,9 @@ pub enum TreeDisplayClass {
     Tool,
     Metadata,
     Structural,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -372,6 +441,9 @@ pub enum TreeDisplayClass {
 pub enum TreeNodeState {
     Error,
     Aborted,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1089,6 +1161,7 @@ enum PartialBlock {
         kind: String,
         description: String,
     },
+    Unrecognized,
 }
 
 impl ContentAssembler {
@@ -1100,7 +1173,8 @@ impl ContentAssembler {
             | ConversationContentChunk::ImageRef { block_index, .. }
             | ConversationContentChunk::ToolCall { block_index, .. }
             | ConversationContentChunk::ToolResult { block_index, .. }
-            | ConversationContentChunk::Omitted { block_index, .. } => *block_index,
+            | ConversationContentChunk::Omitted { block_index, .. }
+            | ConversationContentChunk::Unrecognized { block_index, .. } => *block_index,
         };
         if index != self.next_block {
             return Err(protocol("conversation content blocks were not contiguous"));
@@ -1185,6 +1259,12 @@ impl ContentAssembler {
                 self.blocks
                     .insert(index, PartialBlock::Omitted { kind, description });
                 self.next_block += 1;
+            }
+            ConversationContentChunk::Unrecognized { block_complete, .. } => {
+                self.blocks.insert(index, PartialBlock::Unrecognized);
+                if block_complete {
+                    self.next_block += 1;
+                }
             }
         }
         Ok(())
@@ -1444,6 +1524,7 @@ impl ContentAssembler {
                 PartialBlock::Omitted { kind, description } => {
                     crate::ContentBlock::Omitted { kind, description }
                 }
+                PartialBlock::Unrecognized => crate::ContentBlock::Unrecognized,
                 _ => {
                     return Err(protocol(
                         "conversation content declared completion before a block completed",
