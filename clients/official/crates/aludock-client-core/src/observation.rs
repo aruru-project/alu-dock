@@ -188,20 +188,24 @@ impl ConversationObservation {
     ) {
         let delivery = crate::InstanceDeliveryContext::default();
         let checkpoint_pending = Arc::new(AtomicBool::new(false));
+        // Set while an interruption is on screen; retries then add no status.
+        let mut retrying = false;
         loop {
             if !self.content.owns(&key, owner)
                 || (!read_required && self.content.terminal(&key, owner))
             {
                 return;
             }
-            let _ = self.content.commit(
-                &key,
-                owner,
-                SessionUpdate::Status {
-                    state: "connecting".into(),
-                    message: None,
-                },
-            );
+            if !retrying {
+                let _ = self.content.commit(
+                    &key,
+                    owner,
+                    SessionUpdate::Status {
+                        state: "connecting".into(),
+                        message: None,
+                    },
+                );
+            }
             if read_required || self.content.needs_read(&key, owner) {
                 match client
                     .read_instance_records(
@@ -241,14 +245,14 @@ impl ConversationObservation {
                         }
                         Ok(_) => return,
                         Err(error) => {
-                            if !self.failed(&key, owner, &error).await {
+                            if !self.failed(&key, owner, &error, &mut retrying).await {
                                 return;
                             }
                             continue;
                         }
                     },
                     Err(error) => {
-                        if !self.failed(&key, owner, &error).await {
+                        if !self.failed(&key, owner, &error, &mut retrying).await {
                             return;
                         }
                         continue;
@@ -276,7 +280,7 @@ impl ConversationObservation {
                             }
                             Ok(_) => return,
                             Err(error) => {
-                                self.failed(&key, owner, &error).await;
+                                self.failed(&key, owner, &error, &mut retrying).await;
                                 return;
                             }
                         }
@@ -292,6 +296,7 @@ impl ConversationObservation {
                             message: None,
                         },
                     );
+                    retrying = false;
                     loop {
                         match stream.next_event().await {
                             Ok(event) => {
@@ -310,7 +315,7 @@ impl ConversationObservation {
                                     }
                                     Ok(_) => return,
                                     Err(error) => {
-                                        self.failed(&key, owner, &error).await;
+                                        self.failed(&key, owner, &error, &mut retrying).await;
                                         return;
                                     }
                                 }
@@ -350,7 +355,9 @@ impl ConversationObservation {
                                             Err(error)
                                                 if failure_state(&error) == "unavailable" =>
                                             {
-                                                service.failed(&key, owner, &error).await;
+                                                service
+                                                    .failed(&key, owner, &error, &mut false)
+                                                    .await;
                                             }
                                             _ => {} // Optional checkpoint failure never interrupts a valid Follow.
                                         }
@@ -359,7 +366,7 @@ impl ConversationObservation {
                                 }
                             }
                             Err(error) => {
-                                if !self.failed(&key, owner, &error).await {
+                                if !self.failed(&key, owner, &error, &mut retrying).await {
                                     return;
                                 }
                                 break;
@@ -368,36 +375,52 @@ impl ConversationObservation {
                     }
                 }
                 Err(error) => {
-                    if !self.failed(&key, owner, &error).await {
+                    if !self.failed(&key, owner, &error, &mut retrying).await {
                         return;
                     }
                 }
             }
         }
     }
-    async fn failed(&self, key: &str, owner: u64, error: &ClientError) -> bool {
+    /// Show why observation stopped or will retry; true means retry after a
+    /// pause. While `retrying`, the interruption already on screen stays as it
+    /// is instead of being written again, so a long outage keeps nothing extra.
+    async fn failed(
+        &self,
+        key: &str,
+        owner: u64,
+        error: &ClientError,
+        retrying: &mut bool,
+    ) -> bool {
         if self.content.terminal(key, owner) {
             return false;
         }
         let state = failure_state(error);
-        let message = match state {
-            "unavailable" => "这项工作当前不可用，请刷新工作列表。",
-            "identity_error" => "无法确认 Host 身份或连接授权，请检查 Host 设置后重试。",
-            _ => "连接暂时中断，正在尝试恢复。你可以继续编辑。",
-        };
-        let accepted = self
-            .content
-            .commit(
-                key,
-                owner,
-                SessionUpdate::Status {
-                    state: state.into(),
-                    message: Some(message.into()),
-                },
-            )
-            .unwrap_or(false);
-        if !accepted || state != "disconnected" {
-            return false;
+        if *retrying && state == "disconnected" {
+            if !self.content.owns(key, owner) {
+                return false;
+            }
+        } else {
+            let message = match state {
+                "unavailable" => "这项工作当前不可用，请刷新工作列表。",
+                "identity_error" => "无法确认 Host 身份或连接授权，请检查 Host 设置后重试。",
+                _ => "连接暂时中断，正在尝试恢复。你可以继续编辑。",
+            };
+            let accepted = self
+                .content
+                .commit(
+                    key,
+                    owner,
+                    SessionUpdate::Status {
+                        state: state.into(),
+                        message: Some(message.into()),
+                    },
+                )
+                .unwrap_or(false);
+            if !accepted || state != "disconnected" {
+                return false;
+            }
+            *retrying = true;
         }
         tokio::time::sleep(RETRY_DELAY).await;
         true
@@ -1431,6 +1454,89 @@ mod tests {
             std::fs::remove_dir_all(directory).unwrap();
         }
     }
+    // #314: a Work page left open while the Host was unreachable gained a
+    // "connecting" and an "interrupted" status on every retry and kept them all.
+    #[tokio::test]
+    async fn a_long_outage_shows_one_interruption_and_reconnects_when_the_host_returns() {
+        let directory = std::env::temp_dir().join(format!(
+            "off-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("s");
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "offline".into(),
+            )
+            .unwrap(),
+        );
+        let service = ConversationObservation::default();
+        let mut binding = service
+            .bind("work".into(), client, "work".into(), "epoch".into(), false)
+            .unwrap();
+        let statuses = |batch: Vec<crate::SessionCommit>| {
+            batch
+                .into_iter()
+                .filter_map(|commit| match commit.update {
+                    SessionUpdate::Status { state, .. } => Some(state),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Two minutes with no Host: dozens of retries at the observation's own pace.
+        tokio::time::pause();
+        let mut shown = Vec::new();
+        let outage = tokio::time::sleep(Duration::from_secs(120));
+        tokio::pin!(outage);
+        loop {
+            tokio::select! {
+                () = &mut outage => break,
+                batch = binding.next_batch() => shown.extend(statuses(batch.unwrap())),
+            }
+        }
+        tokio::time::resume();
+        assert_eq!(shown, ["connecting", "disconnected"]);
+
+        // The Host comes back and the next retry reconnects without user action.
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let peer = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut socket = tokio::io::BufReader::new(socket);
+                    let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    if !legacy_peer(&mut socket, &hello).await {
+                        return;
+                    }
+                    write_json_line(&mut socket,&json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
+                    let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    let result = if request["type"] == "instance.read" {
+                        read()
+                    } else {
+                        let since = request["params"]["since"].clone();
+                        json!({"page":{"events":[],"earliest":since,"latest":since,"truncated":false,"epochChanged":false,"generationChanged":false}})
+                    };
+                    write_json_line(&mut socket,&json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":true,"result":result})).await.unwrap();
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !statuses(binding.next_batch().await.unwrap())
+                .iter()
+                .any(|state| state == "connected")
+            {}
+        })
+        .await
+        .expect("the Work page reconnects once the Host is reachable");
+        service.pause("work");
+        peer.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     // Master-side review: run the production observation wake plus visibility
     // intent, rather than proving image API caching while a background reader
     // silently downloads all image bodies again.
