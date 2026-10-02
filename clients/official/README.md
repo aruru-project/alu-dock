@@ -90,6 +90,10 @@ npm run package:windows
 
 Windows 用户入口为 `dist/AluDock-<version>-windows-x86_64-Setup.exe`。源码 checkout 默认使用当前分支可达的最新版本 tag，正式构建可通过 `ALUDOCK_RELEASE_VERSION` 指定。组装保留 bundled Pi、系统 Node 版本检查、native prebuild 修剪及 PE/DLL 闭包检查。`-components.zip` 供后续构建复用 Desktop/DLL；仅 Host/Worker/Pi 改动时无需重编译 Desktop，用户安装仍使用 Setup.exe。
 
+发布标签支持 `v0.2.14` 和 `v0.2.14-rc.1` 这两种格式；不是任意文本后缀。RC 会标为 GitHub 预发布，不替换最新正式版，也不作为 Windows 组件复用的基准。同一基础版本的正式版优先于 RC，RC 序号按数字排序。
+
+Android 安装编号沿用 Tauri 的现有算法，不随 RC 序号增加：`0.2.13` 是 `2013`，`0.2.14-rc.1`、`0.2.14-rc.2` 和 `0.2.14` 都是 `2014`。同签名 APK 可覆盖安装，但 Android 不区分同一基础版本内 RC 的先后；把基础版本号填小仍会被视为降级。本次不改变安装编号规则。
+
 从托盘正常退出 Alu Dock，再运行 Setup，按标准安装器提示安装或覆盖更新。默认程序目录是 `%LOCALAPPDATA%\AluDock`，原有资料保留在 `%LOCALAPPDATA%\Alu Dock`、Pi 和客户端资料目录中。只有启用本机服务才需要符合根 `package.json#engines.node` 的系统 [Node.js](https://nodejs.org/)；纯客户端不需要本机 Node。安装器的工程边界见根[部署文档](../../docs/agent_maps/deployment.md#本地安装与-windows-发行)。
 
 Windows 无配置时默认随客户端启动本机 Dock，可在托盘取消此选项作为纯客户端；本机 Dock 的起停选择独立于当前连接的 Main。X 隐藏到托盘，工作继续；手动 **退出 Alu Dock** 正常停止所管理的本机 Host/Worker 后退出，停止受阻时说明原因并保留界面。**停止本机 Dock** 保留客户端，远端不受影响。托盘显示实际状态及对应操作。登录启动保留既有选择，只打开同一个客户端并遵循本机服务选项。日志仍在 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。

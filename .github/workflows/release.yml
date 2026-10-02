@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
       tag: ${{ steps.release.outputs.tag }}
       source_sha: ${{ steps.release.outputs.source_sha }}
       linux: ${{ steps.artifacts.outputs.linux }}
@@ -45,11 +46,12 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
-          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Release tag must use vMAJOR.MINOR.PATCH." >&2
-            exit 1
-          fi
-          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          node --input-type=module <<'JS' >> "$GITHUB_OUTPUT"
+          import { parseReleaseTag } from './clients/official/scripts/release-version.mjs';
+          const { version, prerelease } = parseReleaseTag(process.env.RELEASE_TAG);
+          console.log(`version=${version}`);
+          console.log(`prerelease=${prerelease}`);
+          JS
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "source_sha=$(git rev-list -n 1 "$RELEASE_TAG")" >> "$GITHUB_OUTPUT"
 
@@ -61,6 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          # RCs compare with the last published final release; they never become reusable bases.
           version_tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           published_release_tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             --jq '.[] | select(.draft == false and .prerelease == false) | select(any(.assets[]; .name == "SHA256SUMS.txt")) | .tag_name')
@@ -465,9 +468,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         shell: bash
         run: |
+          release_flags=()
+          if [[ "$PRERELEASE" == "true" ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$PRERELEASE" == "true" ]]; then
+              gh release edit "$RELEASE_TAG" "${release_flags[@]}" --repo "$GITHUB_REPOSITORY"
+            fi
             gh release upload "$RELEASE_TAG" release-assets/* \
               --clobber \
               --repo "$GITHUB_REPOSITORY"
@@ -476,5 +487,6 @@ jobs:
               --generate-notes \
               --title "AluDock $VERSION" \
               --verify-tag \
+              "${release_flags[@]}" \
               --repo "$GITHUB_REPOSITORY"
           fi
