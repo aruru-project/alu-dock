@@ -442,7 +442,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   )
 
   function workGroup(work: Work) {
-    if (work.lifecycle === 'active' || work.lifecycle === 'stopping') return 'current'
+    // A lifecycle only a newer Host knows is not history: it stays visible, without a 移除 that cannot act (#356).
+    if (work.lifecycle === 'active' || work.lifecycle === 'stopping' || work.lifecycle === 'unrecognized') return 'current'
     if (work.reopenable) return 'continue'
     return 'history'
   }

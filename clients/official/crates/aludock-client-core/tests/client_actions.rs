@@ -40,9 +40,10 @@ async fn host_settings_and_command_results_are_usable_without_a_catalog_prefligh
         newer_branch["eventCursor"]["sequence"] = json!(32);
         let mut receipt_first = instance.clone();
         receipt_first["eventCursor"]["sequence"] = json!(42);
-        // #356: a newer Host lists a setting this build has never heard of; the page must still open.
-        let newer_setting = json!({"key":"somethingFromAFutureHost","value":true,"source":"global","writable":true,
-            "valueType":"boolean","allowedValues":null,"reloadRequired":false,"hostRestartRequired":false});
+        // #356: a newer Host lists a setting this build has never heard of, with a value shape
+        // this build cannot even parse; the page must still open with the known settings.
+        let newer_setting = json!({"key":"somethingFromAFutureHost","value":[1.5,"x"],"source":"global","writable":true,
+            "valueType":"list","allowedValues":null,"reloadRequired":false,"hostRestartRequired":false});
         let replies = [
             ("attachment.upload", json!({})),
             (

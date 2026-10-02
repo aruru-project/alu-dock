@@ -436,6 +436,12 @@ export function createLiveConversationProjector(
           messageItems.set(`${messageId}:thinking`, item)
         }
         blocks.forEach((block, index) => applyLiveContentBlock(block, groupId, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items, time()))
+        // Live events carry the Host's own block types; a kind this build does not know must not vanish.
+        if (blocks.some(isUnrecognizedBlock) && !messageItems.has(`${messageId}:unrecognized`)) {
+          const item: ConversationItem = { id: `live-${messageId}-unrecognized`, kind: 'notice', groupId, tone: 'info', text: UNRECOGNIZED_BLOCK_TEXT, groupTime: time() }
+          items.push(item)
+          messageItems.set(`${messageId}:unrecognized`, item)
+        }
         // Inside a run the same error ends it and reaches the turn summary through run.settled.
         if (typeof data.error === 'string' && data.error && !turn) {
           items.push({ id: `live-${messageId}-error`, kind: 'notice', groupId, tone: 'error', text: data.error, groupTime: time() })
@@ -607,8 +613,9 @@ export function createLiveConversationProjector(
   /** A recovery read can confirm completion without replaying run.settled, or
    * find a run in progress whose events were never delivered here. */
   function reconcileRun(instance: ConversationBootstrap['instance']) {
-    if (instance.execution !== 'running') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
-    else if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true)
+    if (instance.execution === 'running') { if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true) }
+    // A state only a newer Host knows neither confirms completion nor a run in progress (#356).
+    else if (instance.execution !== 'unrecognized') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
   }
   /** A rebuild from a read keeps what this client already saw of every command the record has not
    * taken over yet: output is never replayed, so the rebuilt row starts empty whether the command
@@ -886,9 +893,17 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
     renderToolDetail(tool)
   } else if (block.type === 'omitted') {
     output.push({ id, kind: 'notice', groupId, tone: 'info', text: block.description || '这部分内容暂时没有载入。请刷新对话后重试。' })
-  } else if (block.type === 'unrecognized') {
-    output.push({ id, kind: 'notice', groupId, tone: 'info', text: '这部分内容需要更新客户端才能显示。' })
+  } else if (isUnrecognizedBlock(block)) {
+    output.push({ id, kind: 'notice', groupId, tone: 'info', text: UNRECOGNIZED_BLOCK_TEXT })
   }
+}
+
+const UNRECOGNIZED_BLOCK_TEXT = '这部分内容需要更新客户端才能显示。'
+const KNOWN_BLOCK_TYPES: ReadonlySet<string> = new Set(['text', 'thinking', 'image', 'tool_call', 'tool_result', 'omitted'])
+
+/** History blocks arrive from the Rust core as 'unrecognized'; live events still carry the Host's own name. */
+function isUnrecognizedBlock(block: ContentBlock): boolean {
+  return !KNOWN_BLOCK_TYPES.has(block.type)
 }
 
 function applyLiveContentBlock(

@@ -132,8 +132,10 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
       break
     }
     case 'instance.state_changed': {
-      instance.lifecycle = enumValue(data.lifecycle, ['active', 'stopping', 'stopped', 'host_lost', 'runtime_error'] as const) ?? instance.lifecycle
-      instance.execution = enumValue(data.execution, ['idle', 'running', 'failed', 'unavailable'] as const) ?? instance.execution
+      // Live events carry the Host's own names: a state this build does not know becomes
+      // 'unrecognized' rather than silently keeping the previous state (#356).
+      instance.lifecycle = enumValue(data.lifecycle, ['active', 'stopping', 'stopped', 'host_lost', 'runtime_error'] as const) ?? (typeof data.lifecycle === 'string' ? 'unrecognized' : instance.lifecycle)
+      instance.execution = enumValue(data.execution, ['idle', 'running', 'failed', 'unavailable'] as const) ?? (typeof data.execution === 'string' ? 'unrecognized' : instance.execution)
       if (typeof data.compacting === 'boolean') instance.compacting = data.compacting
       instance.lastRun = enumValue(data.lastRun, ['never', 'succeeded', 'failed', 'aborted', 'interrupted'] as const) ?? instance.lastRun
       instance.pending = pendingValue(data.pending) ?? instance.pending

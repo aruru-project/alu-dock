@@ -694,6 +694,13 @@ fn validate_interaction_result(
             message: "interaction response did not correlate to the requested interaction".into(),
         });
     }
+    // #356: a state only a newer Host knows is not a confirmed answer; the question stays open.
+    if result.state == InteractionResolutionState::Unrecognized {
+        return Err(ClientError::EffectUnknown {
+            operation_id: operation_id.to_owned(),
+            message: "interaction response state is not known to this client".into(),
+        });
+    }
     Ok(result)
 }
 
@@ -837,13 +844,16 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(additive.interaction_id, "expected");
-        // #356: a state this build does not know still correlates; it is not a lost answer.
+        // #356: a state only a newer Host knows still parses, but it is not a confirmed answer.
         let future = serde_json::from_value::<InteractionRespondResult>(serde_json::json!({
             "interactionId":"expected", "state":"future"
         }))
         .unwrap();
         assert_eq!(future.state, InteractionResolutionState::Unrecognized);
-        assert!(validate_interaction_result(future, "expected", "operation-2").is_ok());
+        let error = validate_interaction_result(future, "expected", "operation-2").unwrap_err();
+        assert!(
+            matches!(error, ClientError::EffectUnknown { operation_id, .. } if operation_id == "operation-2")
+        );
     }
 }
 

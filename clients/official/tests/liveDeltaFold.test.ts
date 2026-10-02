@@ -1,7 +1,7 @@
 // 流式 delta 折叠：同一消息的连续 delta 折叠进单个事件后，
 // 整段重投影的结果必须与逐条回放完全一致（流式性能优化不改动用户可见内容）。
 import { strict as assert } from 'node:assert'
-import { foldLiveDelta, projectConversation, mergeLiveEvents } from '../src/lib/conversation.ts'
+import { createLiveConversationProjector, foldLiveDelta, projectConversation, mergeLiveEvents } from '../src/lib/conversation.ts'
 import { conversationRows } from '../src/lib/conversationPresentation.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
 
@@ -61,6 +61,29 @@ const completedThinking = projectConversation(bootstrap([
   }),
 ])).find((item) => item.kind === 'thinking')
 assert.equal(completedThinking?.kind === 'thinking' && completedThinking.open, false, '未操作的思考在回复完成后折叠')
+
+// #356: a live reply with a block kind only a newer Host knows keeps its text and says what it cannot show.
+const withUnknownBlock = projectConversation(bootstrap([
+  event(1, 'message.completed', {
+    messageId: 'm3',
+    role: 'assistant',
+    content: [
+      { type: 'text', text: '能显示的部分' },
+      { type: 'hologram', frames: [1, 2, 3] },
+    ],
+  }),
+]))
+assert.ok(withUnknownBlock.some((item) => item.kind === 'assistant' && item.text === '能显示的部分'))
+assert.ok(withUnknownBlock.some((item) => item.kind === 'notice' && item.text === '这部分内容需要更新客户端才能显示。'))
+
+// #356: a refresh that reports an execution state only a newer Host knows must not mark the turn finished.
+{
+  const live = createLiveConversationProjector(bootstrap([]))
+  live.apply(event(1, 'run.started', {}))
+  live.reconcileRun({ id: 'work-1', execution: 'unrecognized', lastRun: 'succeeded' } as unknown as Work)
+  const turn = live.snapshot().find((item) => item.kind === 'turn')
+  assert.equal(turn?.kind === 'turn' && turn.status, 'running')
+}
 // 2026-09-07: independently produced text deltas blocked send receipts in the
 // real App. Exercise the content owner with a held presentation frame so bursts,
 // completion and intervening rebuilds retain exactly the text the user received.
