@@ -189,6 +189,7 @@ pub enum SettingKey {
     DoubleEscapeAction,
     TreeFilterMode,
     DefaultProjectTrust,
+    CacheWarming,
     HttpIdleTimeoutMs,
     EditorPaddingX,
     OutputPad,

@@ -66,6 +66,8 @@ export function applyPiSetting(session: AgentSession, manager: SettingsManager, 
     case "doubleEscapeAction": manager.setDoubleEscapeAction(update.value); break;
     case "treeFilterMode": manager.setTreeFilterMode(update.value); break;
     case "defaultProjectTrust": manager.setDefaultProjectTrust(update.value); break;
+    // The session setter also re-evaluates active warming; the manager setter alone only persists.
+    case "cacheWarming": session.setCacheWarmingMode(update.value); break;
     case "httpIdleTimeoutMs": manager.setHttpIdleTimeoutMs(update.value); break;
     case "editorPaddingX": manager.setEditorPaddingX(update.value); break;
     case "outputPad": manager.setOutputPad(update.value); break;
@@ -99,6 +101,7 @@ function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMa
     case "doubleEscapeAction": return manager.getDoubleEscapeAction();
     case "treeFilterMode": return manager.getTreeFilterMode();
     case "defaultProjectTrust": return manager.getDefaultProjectTrust();
+    case "cacheWarming": return manager.getCacheWarmingMode();
     case "httpIdleTimeoutMs": return manager.getHttpIdleTimeoutMs();
     case "editorPaddingX": return manager.getEditorPaddingX();
     case "outputPad": return manager.getOutputPad();
@@ -108,8 +111,8 @@ function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMa
 }
 
 function settingSource(manager: SettingsManager, key: SettingKey): "global" | "project" | "effective" {
-  const path = SETTING_DEFINITIONS[key].sourcePath;
-  if (key !== "defaultProjectTrust" && manager.isProjectTrusted() && hasOwnPath(manager.getProjectSettings(), path)) return "project";
+  const { sourcePath: path, globalOnly } = SETTING_DEFINITIONS[key];
+  if (!globalOnly && manager.isProjectTrusted() && hasOwnPath(manager.getProjectSettings(), path)) return "project";
   if (hasOwnPath(manager.getGlobalSettings(), path)) return "global";
   return "effective";
 }

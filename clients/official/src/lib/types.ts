@@ -559,7 +559,7 @@ export type SettingKey =
   | 'enableSkillCommands' | 'hideThinking' | 'showCacheMissNotices' | 'showHardwareCursor'
   | 'clearOnShrink' | 'showTerminalProgress' | 'quietStartup' | 'collapseChangelog'
   | 'enableInstallTelemetry' | 'steeringMode' | 'followUpMode' | 'transport'
-  | 'doubleEscapeAction' | 'treeFilterMode' | 'defaultProjectTrust' | 'httpIdleTimeoutMs'
+  | 'doubleEscapeAction' | 'treeFilterMode' | 'defaultProjectTrust' | 'cacheWarming' | 'httpIdleTimeoutMs'
   | 'editorPaddingX' | 'outputPad' | 'autocompleteMaxVisible' | 'warnings'
 export type SettingValue = boolean | number | string | { anthropicExtraUsage?: boolean }
 export interface SettingInfo {

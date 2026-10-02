@@ -83,6 +83,7 @@ export interface SettingValueMap {
   doubleEscapeAction: "fork" | "tree" | "none";
   treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
   defaultProjectTrust: "ask" | "always" | "never";
+  cacheWarming: "off" | "streaming" | "idle";
   httpIdleTimeoutMs: number;
   editorPaddingX: number;
   outputPad: 0 | 1;
@@ -117,13 +118,16 @@ export interface SettingDefinition {
   writable: boolean;
   /** Public Settings shape path used only to report the source of the effective value. */
   sourcePath: readonly string[];
+  /** Pi reads this key from global settings only, so a project value never becomes the source. */
+  globalOnly?: boolean;
 }
 
 const booleanDefinition = (sourcePath: readonly string[], reloadRequired = false): SettingDefinition => Object.freeze({
   valueType: "boolean", reloadRequired, hostRestartRequired: false, writable: true, sourcePath: Object.freeze([...sourcePath]),
 });
-const enumDefinition = (sourcePath: readonly string[], allowedValues: readonly string[]): SettingDefinition => Object.freeze({
+const enumDefinition = (sourcePath: readonly string[], allowedValues: readonly string[], globalOnly = false): SettingDefinition => Object.freeze({
   valueType: "enum", allowedValues: Object.freeze([...allowedValues]), reloadRequired: false, hostRestartRequired: false, writable: true, sourcePath: Object.freeze([...sourcePath]),
+  ...(globalOnly ? { globalOnly } : {}),
 });
 const integerDefinition = (sourcePath: readonly string[], min: number, max: number, hostRestartRequired = false): SettingDefinition => Object.freeze({
   valueType: "integer", min, max, reloadRequired: false, hostRestartRequired, writable: true, sourcePath: Object.freeze([...sourcePath]),
@@ -149,7 +153,9 @@ export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinitio
   transport: enumDefinition(["transport"], ["auto", "sse", "websocket", "websocket-cached"]),
   doubleEscapeAction: enumDefinition(["doubleEscapeAction"], ["fork", "tree", "none"]),
   treeFilterMode: enumDefinition(["treeFilterMode"], ["default", "no-tools", "user-only", "labeled-only", "all"]),
-  defaultProjectTrust: enumDefinition(["defaultProjectTrust"], ["ask", "always", "never"]),
+  defaultProjectTrust: enumDefinition(["defaultProjectTrust"], ["ask", "always", "never"], true),
+  // Each refresh is a paid request; Pi keeps the choice global and the Dock fork defaults it to off.
+  cacheWarming: enumDefinition(["cacheWarming"], ["off", "streaming", "idle"], true),
   httpIdleTimeoutMs: integerDefinition(["httpIdleTimeoutMs"], 0, 2_147_483_647),
   editorPaddingX: integerDefinition(["editorPaddingX"], 0, 3),
   outputPad: integerDefinition(["outputPad"], 0, 1),

@@ -48,10 +48,12 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
   const extensionDir = join(agentDir, "extensions");
   const lifecycleLog = join(root, "extension-lifecycle.log");
   await Promise.all([
-    mkdir(cwd),
+    mkdir(join(cwd, ".pi"), { recursive: true }),
     mkdir(sessionDir),
     mkdir(extensionDir, { recursive: true }),
   ]);
+  // Pi only reads cacheWarming from global settings; a project value must not show up as the source.
+  await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({ cacheWarming: "streaming" }));
   await writeFile(join(agentDir, "auth.json"), JSON.stringify({ openai: { type: "api_key", key: "fixture-no-network" } }));
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({
     defaultProvider: "openai",
@@ -107,6 +109,10 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.equal(instance.snapshot().metrics?.context?.contextWindow, 111_111);
     const updated = await instance.updateSetting({ key: "autoRetry", value: false }, "real-setting");
     assert.equal(updated.value, false);
+    const cacheWarmingBefore = (await instance.getSettings()).find((setting) => setting.key === "cacheWarming");
+    assert.deepEqual({ value: cacheWarmingBefore?.value, source: cacheWarmingBefore?.source }, { value: "off", source: "effective" });
+    const cacheWarming = await instance.updateSetting({ key: "cacheWarming", value: "idle" }, "real-cache-warming");
+    assert.deepEqual({ value: cacheWarming.value, source: cacheWarming.source }, { value: "idle", source: "global" });
     const initialTools = await instance.listTools();
     assert.ok(initialTools.tools.some((tool) => tool.name === "dock_attachment_list"));
     assert.ok(initialTools.tools.some((tool) => tool.name === "dock_attachment_resolve"));
@@ -148,8 +154,10 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     const persistedSettings = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8")) as {
       retry?: { enabled?: unknown };
       compaction?: { enabled?: unknown; reserveTokens?: unknown; keepRecentTokens?: unknown };
+      cacheWarming?: unknown;
     };
     assert.equal(persistedSettings.retry?.enabled, false);
+    assert.equal(persistedSettings.cacheWarming, "idle");
     assert.deepEqual(persistedSettings.compaction, { enabled: true, reserveTokens: 100, keepRecentTokens: 100 });
     const resources = await instance.getResources();
     assert.ok(resources.resources.some((resource) => resource.kind === "extension" && resource.name.includes("stage3-fixture")));
