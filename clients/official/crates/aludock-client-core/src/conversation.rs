@@ -163,6 +163,13 @@ pub enum ContentBlock {
         #[serde(rename = "publishedFile", skip_serializing_if = "Option::is_none")]
         published_file: Option<PublishedFileDto>,
         presentation: Option<Value>,
+        /// Calls the tool made to other tools while it ran; shown inside the tool.
+        #[serde(
+            rename = "nestedCalls",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        nested_calls: Option<Value>,
         #[serde(rename = "omittedFields", default)]
         omitted_fields: Vec<String>,
     },

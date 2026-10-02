@@ -245,7 +245,7 @@ async function reservePort(): Promise<number> {
 
 // Card 271 P1: directory existence did not prove initialization, so empty directories
 // and failed first attempts silently lost the only base candidate on the next query.
-for (const scenario of ["existing empty directory", "generation failure", "partial write failure", "existing user body"] as const) {
+for (const scenario of ["existing empty directory", "generation failure", "partial write failure", "body left by an older Pi"] as const) {
   test(`system initialization preserves a usable base candidate after ${scenario}`, async (context) => {
     const home = await mkdtemp(join(tmpdir(), "alu-system-init-"));
     context.after(() => rm(home, { recursive: true, force: true }));
@@ -253,9 +253,8 @@ for (const scenario of ["existing empty directory", "generation failure", "parti
     const marker = join(home, ".aludock", "systems-initialized");
     const provider = createPiSystemTemplateProvider(join(home, "agent"));
     const original = provider.initialTemplate();
-    if (scenario === "existing empty directory" || scenario === "existing user body") await mkdir(systems, { recursive: true });
-    const userBody = original.replace('"intro":', '"intro" :');
-    if (scenario === "existing user body") await writeFile(target, userBody);
+    if (scenario === "existing empty directory" || scenario === "body left by an older Pi") await mkdir(systems, { recursive: true });
+    if (scenario === "body left by an older Pi") await writeFile(target, original.replace('"intro":', '"intro" :'));
     if (scenario === "generation failure") {
       let first = true;
       provider.initialTemplate = () => { if (first) { first = false; throw new Error("Injected first generation failure"); } return original; };
@@ -286,7 +285,7 @@ for (const scenario of ["existing empty directory", "generation failure", "parti
     assert.deepEqual(retried.warnings, []);
     assert.equal(retried.total, 1);
     assert.equal(retried.candidates[0]?.warning, undefined);
-    assert.equal(await readFile(target, "utf8"), scenario === "existing user body" ? userBody : original);
+    assert.equal(await readFile(target, "utf8"), original);
     assert.equal(await readFile(marker, "utf8"), "\n");
     // Completion survives restart; deletion cannot revive an already saved target.
     await service.setDefault(home, retried.candidates[0]!.id);
@@ -298,6 +297,29 @@ for (const scenario of ["existing empty directory", "generation failure", "parti
     await assert.rejects(readFile(target), { code: "ENOENT" });
   });
 }
+
+// Card 350: a template written by Pi 0.85 kept its prose after the upgrade to 0.99, so Work on it
+// missed the default prose of the new Pi.
+test("after a Pi upgrade the Pi default template carries the new default prose, and a deleted one stays deleted", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "alu-system-follow-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const target = join(home, ".aludock", "systems", "pi-default.json");
+  const provider = createPiSystemTemplateProvider(join(home, "agent"));
+  const current = provider.initialTemplate();
+  const olderPi = JSON.stringify({ ...JSON.parse(current), documentationInstructions: ["Older Pi documentation guidance"] }, null, 2) + "\n";
+  await new SystemService(home, provider).catalog(home);
+  await writeFile(target, olderPi);
+  // The Host brings it up to date when it starts, before any Work reopens.
+  await new SystemService(home, provider).followDefaultTemplate();
+  assert.equal(await readFile(target, "utf8"), current);
+  await writeFile(target, olderPi);
+  assert.equal((await new SystemService(home, provider).catalog(home)).total, 1);
+  assert.equal(await readFile(target, "utf8"), current);
+  await rm(target);
+  await new SystemService(home, provider).followDefaultTemplate();
+  assert.equal((await new SystemService(home, provider).catalog(home)).total, 0);
+  await assert.rejects(readFile(target), { code: "ENOENT" });
+});
 
 // Card 271 review: no published Work ever used a template without its source Home.
 test("old Work keeps native behavior while a template must name its source Home", () => {

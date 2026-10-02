@@ -57,7 +57,9 @@ import {
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
   MAX_CONVERSATION_CONTENT_BLOCKS,
+  MAX_CONVERSATION_CONTENT_PAGE_BYTES,
 } from "../core/instance-dto.js";
+import type { NestedToolCallsDto } from "../core/nested-tool-calls.js";
 import { projectJsonObject, type JsonObject, type JsonValue } from "../core/json-value.js";
 import { sliceSemanticHistory, slimSemanticHistoryBlock, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
@@ -133,6 +135,8 @@ import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import { retryExtension } from "./retry-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
+import { piBuiltinExtensions } from "./pi-builtin-extensions.js";
+import { LiveNestedToolCalls, nestedCallArgumentsJson, projectPiNestedToolCalls } from "./pi-nested-tool-calls.js";
 import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension, SHOW_IMAGE_UNAVAILABLE_MESSAGE } from "./show-image-extension.js";
 import {
   applyPiSetting,
@@ -941,13 +945,23 @@ export class PiAgentAdapter {
         chars += argumentsJson.length;
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else if (block.type === "tool_result") {
+        const { nestedCalls, ...identity } = block;
         const remaining = Math.max(1, 64_000 - chars);
         const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(MAX_CONVERSATION_CHUNK_CHARS, remaining)));
         const text = block.text.slice(offset, end);
-        const blockComplete = end >= block.text.length;
-        chunks.push({ ...block, blockIndex, text, offset, blockComplete });
+        let chunk: Extract<AgentConversationContentChunk, { type: "tool_result" }> = { ...identity, blockIndex, text, offset, blockComplete: end >= block.text.length };
+        if (chunk.blockComplete && nestedCalls !== undefined) {
+          // The calls arrive once, with the chunk that completes the result. A page that cannot
+          // also hold them ends before it, or carries the text alone and leaves them for the next.
+          const withCalls = { ...chunk, nestedCalls };
+          if (contentPageFits(state.revision, contentRef, [...chunks, withCalls])) chunk = withCalls;
+          else if (chunks.length > 0) break;
+          else if (text.length > 0) chunk = { ...chunk, blockComplete: false };
+          // Otherwise the calls alone exceed a page: the result still completes, without them.
+        }
+        chunks.push(chunk);
         chars += text.length;
-        if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
+        if (chunk.blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else {
         chunks.push({ ...block, blockIndex } as AgentConversationContentChunk);
         blockIndex += 1;
@@ -1888,6 +1902,19 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
   if (type === "message_update" && isRecord(source.assistantMessageEvent)) {
     return { type, assistantMessageEvent: projectAssistantMessageEvent(source.assistantMessageEvent) };
   }
+  // Calls a tool made itself (for example from a codemode script) name the call that made them.
+  const parent = typeof source.parentToolCallId === "string" ? { parentToolCallId: safeRequiredText(source.parentToolCallId, 128, "unknown") } : {};
+  if (type === "tool_execution_start" && "parentToolCallId" in parent) {
+    // Shown only inside the caller: the arguments follow Pi's record, not Dock's model-call bounds.
+    const argumentsJson = nestedCallArgumentsJson(source.args);
+    return {
+      type,
+      toolCallId: safeRequiredText(source.toolCallId, 128, "unknown"),
+      toolName: safeRequiredText(source.toolName, 256, "tool"),
+      ...(argumentsJson === undefined ? {} : { argumentsJson }),
+      ...parent,
+    };
+  }
   if (type === "tool_execution_start") {
     return {
       type,
@@ -1912,6 +1939,7 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
       toolName: safeRequiredText(source.toolName, 256, "tool"),
       [resultKey]: { content, ...(publishedFile === undefined ? {} : { publishedFile }), ...(showImageError === undefined ? {} : { showImageError }), ...(presentation === undefined ? {} : { presentation }) },
       ...(type === "tool_execution_end" ? { isError } : {}),
+      ...parent,
     };
   }
   if (type === "compaction_end") {
@@ -2039,6 +2067,9 @@ export class PiConversationProjector {
   constructor(private readonly attachmentContextKey: Uint8Array) {}
   private readonly announcedToolCalls = new Set<string>();
   private readonly completedToolCalls = new Set<string>();
+  private readonly nestedCalls = new LiveNestedToolCalls();
+  /** Latest output of each running tool, repeated when only its nested calls change. */
+  private readonly toolOutputs = new Map<string, Extract<ConversationFrame, { type: "tool.output_updated" }>["data"]>();
   private messageSequence = 0;
   private currentUserMessageId: string | undefined;
   private currentUserAttachments: AttachmentDto[] | undefined;
@@ -2099,6 +2130,8 @@ export class PiConversationProjector {
       this.currentAssistantMessageId = undefined;
       this.announcedToolCalls.clear();
       this.completedToolCalls.clear();
+      this.nestedCalls.clear();
+      this.toolOutputs.clear();
       this.lastAssistantOutcome = undefined;
       return [event];
     }
@@ -2244,6 +2277,11 @@ export class PiConversationProjector {
   private projectToolStart(event: AgentEvent): AgentEvent[] {
     const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
     const toolName = safeRequiredText(event.toolName, 256, "tool");
+    // Nested calls never reach the model as tool calls; they are listed inside their caller, as in Pi.
+    if (typeof event.parentToolCallId === "string") {
+      const argumentsJson = typeof event.argumentsJson === "string" ? event.argumentsJson : undefined;
+      return this.nestedCallsChanged(this.nestedCalls.start(toolCallId, event.parentToolCallId, toolName, argumentsJson));
+    }
     const args = projectJsonObject(event.args ?? {});
     if (this.announcedToolCalls.has(toolCallId)) {
       return [this.frame({ type: "tool.args_updated", data: {
@@ -2262,6 +2300,7 @@ export class PiConversationProjector {
   }
 
   private projectToolUpdate(event: AgentEvent): AgentEvent[] {
+    if (typeof event.parentToolCallId === "string") return [];
     const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.partialResult) ? event.partialResult : undefined;
@@ -2273,13 +2312,16 @@ export class PiConversationProjector {
       this.announcedToolCalls.add(toolCallId);
       frames.push(this.frame({ type: "tool.started", data: { toolCallId, toolName, args: {} } }));
     }
-    frames.push(this.frame({ type: "tool.output_updated", data: {
+    const data = {
       toolCallId,
       text,
       ...(Array.isArray(result?.content) ? { content: projectPublicToolContent(toolName, result.content, text) } : {}),
       ...(publishedFile === undefined ? {} : { publishedFile }),
       ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
-    } }));
+    };
+    this.toolOutputs.set(toolCallId, data);
+    const nestedCalls = this.nestedCalls.snapshot(toolCallId);
+    frames.push(this.frame({ type: "tool.output_updated", data: { ...data, ...(nestedCalls === undefined ? {} : { nestedCalls }) } }));
     return frames;
   }
 
@@ -2288,6 +2330,12 @@ export class PiConversationProjector {
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.result) ? event.result : undefined;
     const isError = event.isError === true;
+    if (typeof event.parentToolCallId === "string") {
+      const root = this.nestedCalls.end(toolCallId, isError, toolResultText(result?.content) ?? "");
+      return root === undefined ? [] : this.nestedCallsChanged(root);
+    }
+    const nestedCalls = this.nestedCalls.finish(toolCallId);
+    this.toolOutputs.delete(toolCallId);
     const publishedFile = result?.publishedFile as never;
     const showImageError = typeof result?.showImageError === "string" ? result.showImageError : undefined;
     const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), publishedFile, showImageError), 256_000);
@@ -2302,8 +2350,17 @@ export class PiConversationProjector {
       ...(Array.isArray(result?.content) ? { content: projectPublicToolContent(toolName, result.content, text) } : {}),
       ...(publishedFile === undefined ? {} : { publishedFile }),
       ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
+      ...(nestedCalls === undefined ? {} : { nestedCalls }),
       ...(projected.omittedFields.length === 0 ? {} : { omittedFields: projected.omittedFields }),
     } })];
+  }
+
+  /** Repeat the calling tool's latest output with its current list of nested calls. */
+  private nestedCallsChanged(toolCallId: string): AgentEvent[] {
+    const nestedCalls = this.nestedCalls.snapshot(toolCallId);
+    if (nestedCalls === undefined || !this.announcedToolCalls.has(toolCallId)) return [];
+    const output = this.toolOutputs.get(toolCallId) ?? { toolCallId, text: "" };
+    return [this.frame({ type: "tool.output_updated", data: { ...output, nestedCalls } })];
   }
 
   private ensureAssistantMessageId(): string {
@@ -2343,6 +2400,7 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       const showImageError = publishedFiles === undefined ? undefined : publishedFileFailureFromDetails(message.details, publishedFiles);
       const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(message.content) ?? ""), publishedFile, showImageError), 256_000);
       const presentation = projectBuiltInToolPresentation(toolName, text, message.details, isError);
+      const nestedCalls = projectPiNestedToolCalls(message.nestedCalls);
       let firstText = true;
       return {
         ...base,
@@ -2358,6 +2416,7 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
             text: boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, part.text as string), publishedFile, showImageError), 256_000),
             ...(attachMetadata && publishedFile !== undefined ? { publishedFile } : {}),
             ...(attachMetadata && presentation !== undefined ? { presentation } : {}),
+            ...(attachMetadata && nestedCalls !== undefined ? { nestedCalls } : {}),
           }];
         })),
         toolCallId,
@@ -2618,8 +2677,14 @@ type ConversationSourceBlock =
   | ConversationTextSourceBlock
   | { type: "image"; mimeType: string; data: string; contentRef?: string; fileId?: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string }
-  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; nestedCalls?: NestedToolCallsDto; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
+
+/** Whether a conversation.content page with these chunks stays within the Worker's page bound. */
+function contentPageFits(revision: string, contentRef: string, chunks: readonly AgentConversationContentChunk[]): boolean {
+  const page = { revision, contentRef, chunks, complete: false, nextCursor: randomUUID() };
+  return Buffer.byteLength(JSON.stringify(page), "utf8") <= MAX_CONVERSATION_CONTENT_PAGE_BYTES;
+}
 
 function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array, publishedFiles: TransientFileRegistry): ConversationSourceBlock[] {
   // Reuse canonical image identities in source order, independently of text clipping.
@@ -2673,6 +2738,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
           text: redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, part.text as string),
             projectedToolResult?.publishedFile, projectedToolResult?.text ?? SHOW_IMAGE_UNAVAILABLE_MESSAGE),
           ...(attachMetadata && projectedToolResult?.publishedFile !== undefined ? { publishedFile: projectedToolResult.publishedFile } : {}),
+          ...(attachMetadata && projectedToolResult?.nestedCalls !== undefined ? { nestedCalls: projectedToolResult.nestedCalls } : {}),
         };
       });
     }
@@ -2757,7 +2823,8 @@ function conversationPreviewIsComplete(blocks: readonly ConversationSourceBlock[
           && source.argumentsJson === JSON.stringify(preview.args);
       case "tool_result":
         return preview.type === "tool_result" && !preview.omittedFields?.length && source.text === preview.text
-          && JSON.stringify(source.publishedFile) === JSON.stringify(preview.publishedFile);
+          && JSON.stringify(source.publishedFile) === JSON.stringify(preview.publishedFile)
+          && JSON.stringify(source.nestedCalls) === JSON.stringify(preview.nestedCalls);
       case "omitted":
         return preview.type === "omitted" && preview.kind === source.kind && preview.description === source.description;
     }
@@ -3288,6 +3355,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
+          ...piBuiltinExtensions(),
         ],
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],

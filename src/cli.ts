@@ -259,6 +259,10 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     : undefined;
   const { createPiSystemTemplateProvider } = await import("./pi/system-template-provider.js");
   const systemService = new SystemService(homedir(), createPiSystemTemplateProvider(managedPiAgentDir));
+  // Before any Work reopens, so Work on the Pi default template starts with this Pi's prose.
+  await systemService.followDefaultTemplate().catch((error: unknown) => {
+    console.error(`Could not update the Pi default system template: ${error instanceof Error ? error.message : String(error)}`);
+  });
   const trustPreflight = createPiProjectTrustCoordinator(managedPiAgentDir);
   const sessionInventory = createPiSessionInventory({
     ...(managedPiAgentDir === undefined ? {} : { sessionsRoot: join(managedPiAgentDir, "sessions") }),

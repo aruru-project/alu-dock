@@ -7,6 +7,8 @@ import type {
   ConversationRecord,
   ConversationTurnItem,
   ConversationTurnStatus,
+  NestedToolCall,
+  NestedToolCalls,
   ProjectedEvent,
   PublishedFileDto,
   ShellRunItem,
@@ -66,16 +68,85 @@ function shellRecordItem(record: ConversationRecord, id: string): ShellRunItem {
   }
 }
 export function toolDetailText(item: ToolItem): string {
-  if (item.detailArgs === undefined && item.detailOutputText === undefined && !item.detailOmittedFields?.length) return item.detail ?? ''
+  if (item.detailArgs === undefined && item.detailOutputText === undefined && !item.detailOmittedFields?.length && !item.nestedCalls) return item.detail ?? ''
   const sections: string[] = []
   if (item.detailArgs !== undefined) sections.push(`参数\n${JSON.stringify(item.detailArgs, null, 2)}`)
+  if (item.nestedCalls) {
+    const calls = item.nestedCalls.calls.flatMap((call) => {
+      const row = nestedCallRow(call, Number.POSITIVE_INFINITY)
+      return [[row.icon, row.name, row.args, row.duration, call.status === 'unfinished' ? row.label : ''].filter(Boolean).join(' '), ...(call.error ? [`    ${call.error}`] : [])]
+    })
+    if (laterNestedCallsLeftOut(item.nestedCalls)) calls.push(LATER_NESTED_CALLS_LEFT_OUT)
+    sections.push(`调用\n${calls.join('\n')}`)
+  }
   if (item.detailOutputText !== undefined) sections.push(`结果\n${item.detailOutputText}`)
   if (item.detailOmittedFields?.length) sections.push(`未载入内容\n${item.detailOmittedFields.join('\n')}`)
   return sections.join('\n\n')
 }
 
+const COLLAPSED_NESTED_CALLS = 8
+const COLLAPSED_NESTED_CALL_ARGS = 80
+export const LATER_NESTED_CALLS_LEFT_OUT = '之后的调用太多，没有保留。'
+const NESTED_CALL_ARGS_LEFT_OUT = '（参数太大，没有保留）'
+const NESTED_CALL_STATUS = {
+  running: { icon: '…', label: '运行中' },
+  ok: { icon: '✓', label: '成功' },
+  error: { icon: '✗', label: '失败' },
+  unfinished: { icon: '⊘', label: '未完成' },
+} as const
+
+export interface NestedCallRow { key: string; status: NestedToolCall['status']; icon: string; label: string; name: string; args: string; duration: string }
+
+/** The calls shown on the card, newest last as in Pi's terminal; the full list is in the details. */
+export function nestedCallRows(calls: NestedToolCalls): { earlier: number; rows: NestedCallRow[]; laterLeftOut: boolean } {
+  const shown = calls.calls.slice(-COLLAPSED_NESTED_CALLS)
+  const earlier = calls.calls.length - shown.length
+  return { earlier, laterLeftOut: laterNestedCallsLeftOut(calls), rows: shown.map((call, index) => ({ key: `${earlier + index}`, ...nestedCallRow(call, COLLAPSED_NESTED_CALL_ARGS) })) }
+}
+
+/** Unfinished calls and left-out arguments show on their own rows; anything else missing is later calls. */
+function laterNestedCallsLeftOut(calls: NestedToolCalls): boolean {
+  return !calls.complete && calls.calls.every((call) => call.status !== 'unfinished' && call.argumentsJson !== undefined)
+}
+
+function nestedCallRow(call: NestedToolCall, maximumArgs: number) {
+  // Pi keeps every call's arguments unless they are over its size bounds.
+  const json = call.argumentsJson ?? NESTED_CALL_ARGS_LEFT_OUT
+  const args = json.length > maximumArgs ? `${json.slice(0, maximumArgs - 1)}…` : json
+  const duration = call.durationMs === undefined ? '' : call.durationMs < 1_000 ? `${call.durationMs}ms` : `${(call.durationMs / 1_000).toFixed(1)}s`
+  return { status: call.status, ...NESTED_CALL_STATUS[call.status], name: call.toolName, args, duration }
+}
+
+/** Once the calling tool has ended, a call still shown as running will never finish. */
+function settledNestedCalls(nested: NestedToolCalls): NestedToolCalls {
+  if (!nested.calls.some((call) => call.status === 'running')) return nested
+  return { calls: nested.calls.map((call) => call.status === 'running' ? { ...call, status: 'unfinished' } : call), complete: false }
+}
+
+/** Display-only reading of a tool's nested calls; a malformed entry is left out, not guessed. */
+function nestedCallsFrom(value: unknown): NestedToolCalls | undefined {
+  if (!isRecord(value) || !Array.isArray(value.calls)) return undefined
+  const calls = value.calls.flatMap((item): NestedToolCall[] => {
+    if (!isRecord(item) || typeof item.toolName !== 'string' || !item.toolName) return []
+    const status = item.status === 'running' || item.status === 'ok' || item.status === 'error' || item.status === 'unfinished' ? item.status : undefined
+    if (!status) return []
+    return [{
+      toolName: item.toolName,
+      status,
+      ...(typeof item.argumentsJson === 'string' ? { argumentsJson: item.argumentsJson } : {}),
+      ...(typeof item.durationMs === 'number' && Number.isFinite(item.durationMs) ? { durationMs: item.durationMs } : {}),
+      ...(typeof item.error === 'string' && item.error ? { error: item.error } : {}),
+    }]
+  })
+  return { calls, complete: value.complete !== false && calls.length === value.calls.length }
+}
+
 export function standardToolCallPreview(toolName: string, args: unknown): ToolCallPreview | undefined {
   if (!isRecord(args)) return undefined
+  if (toolName === 'codemode' && typeof args.code === 'string') {
+    const script = textPrefix(args.code, COMMAND_PREVIEW_CHARS, 6)
+    return { title: '脚本', body: script.text, variant: 'command', truncated: script.truncated }
+  }
   if (toolName === 'bash' && typeof args.command === 'string') {
     const command = textPrefix(args.command, COMMAND_PREVIEW_CHARS, 3)
     return {
@@ -381,6 +452,8 @@ export function createLiveConversationProjector(
           if (tool.item.name !== 'show_image') tool.args = data.args
         }
         if (typeof data.text === 'string' && tool.item.name !== 'show_image') tool.outputText = data.text
+        const nestedCalls = nestedCallsFrom(data.nestedCalls)
+        if (nestedCalls) tool.item.nestedCalls = nestedCalls
         addOmitted(tool, data.omittedFields)
         tool.item.groupTime ||= time()
         const eventContent = Array.isArray(data.content) ? (data.content as ContentBlock[]) : []
@@ -492,6 +565,7 @@ export function createLiveConversationProjector(
           if (tool.item.status !== 'running') continue
           tool.item.status = result === 'succeeded' ? 'done' : 'error'
           tool.item.summary = result === 'succeeded' ? '工具调用完成' : result === 'aborted' ? '工具调用已中止' : '工具调用未完成'
+          if (tool.item.nestedCalls) tool.item.nestedCalls = settledNestedCalls(tool.item.nestedCalls)
         }
         toolItems.clear()
         // The turn summary carries the outcome; a separate notice would repeat it.
@@ -719,6 +793,8 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
     tool.item.summary = block.isError ? '工具调用失败' : '工具调用完成'
     const publishedFile = publishedFileFrom(block.publishedFile)
     tool.outputText = block.toolName === 'show_image' ? safeShowImageOutput(block.isError, publishedFile) : block.text
+    const nestedCalls = nestedCallsFrom(block.nestedCalls)
+    if (nestedCalls) tool.item.nestedCalls = nestedCalls
     addOmitted(tool, block.omittedFields)
     if (publishedFile) ensurePublishedImage(tool, publishedFile, output, images)
     renderToolDetail(tool)
@@ -765,6 +841,8 @@ function applyLiveContentBlock(
     tool.item.summary = block.isError ? '工具调用失败' : '工具调用完成'
     const publishedFile = publishedFileFrom(block.publishedFile)
     tool.outputText = block.toolName === 'show_image' ? safeShowImageOutput(block.isError, publishedFile) : block.text
+    const nestedCalls = nestedCallsFrom(block.nestedCalls)
+    if (nestedCalls) tool.item.nestedCalls = nestedCalls
     if (publishedFile) ensurePublishedImage(tool, publishedFile, output, images)
   }
   addOmitted(tool, block.omittedFields)

@@ -14,6 +14,7 @@ import {
   type BuiltInToolPresentation,
   type ToolResultNotice,
 } from "../core/tool-result-presentation.js";
+import { settledNestedToolCalls, type NestedToolCallsDto } from "../core/nested-tool-calls.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import type { AttachmentDto } from "../core/instance-attachments.js";
@@ -39,6 +40,7 @@ interface ConversationEntry {
   toolArgs?: string;
   toolOutput?: string;
   toolPresentation?: BuiltInToolPresentation;
+  toolNestedCalls?: NestedToolCallsDto;
   toolOmitted?: string[];
   toolRenderFloor?: { width: number; expanded: boolean; rows: number };
   summaryKind?: "compaction" | "branch";
@@ -60,6 +62,7 @@ interface ToolProjection {
   summary?: string;
   output?: string;
   presentation?: BuiltInToolPresentation;
+  nestedCalls?: NestedToolCallsDto;
   omitted: string[];
 }
 
@@ -221,6 +224,7 @@ export class DockConversation implements Component {
         projected.summary = summarizeToolArgs(name, event.data.args);
         projected.omitted = [...new Set([...projected.omitted, ...(event.data.omittedFields ?? [])])];
         projected.presentation = undefined;
+        projected.nestedCalls = undefined;
         projected.entry.complete = false;
         projected.entry.diffText = undefined;
         this.tools.set(callId, projected);
@@ -249,9 +253,11 @@ export class DockConversation implements Component {
         if (!tool) break;
         const output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
         const presentation = event.data.presentation?.kind === toolBaseName(tool.name) ? event.data.presentation : undefined;
-        if (tool.output === output && tool.presentation === presentation) break;
+        const nestedCalls = event.data.nestedCalls ?? tool.nestedCalls;
+        if (tool.output === output && tool.presentation === presentation && nestedCalls === tool.nestedCalls) break;
         tool.output = output;
         tool.presentation = presentation;
+        tool.nestedCalls = nestedCalls;
         this.updateTool(tool, "running");
         break;
       }
@@ -268,6 +274,7 @@ export class DockConversation implements Component {
         tool.name = name;
         tool.output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
         tool.presentation = event.data.presentation?.kind === toolBaseName(name) ? event.data.presentation : undefined;
+        tool.nestedCalls = event.data.nestedCalls ?? tool.nestedCalls;
         tool.omitted = [...new Set([...tool.omitted, ...(event.data.omittedFields ?? [])])];
         const isError = event.data.isError === true;
         tool.entry.complete = true;
@@ -363,6 +370,7 @@ export class DockConversation implements Component {
           // A user shell command is not part of the reply; it reports its own completion.
           if (callId.startsWith("shell:")) continue;
           tool.entry.complete = true;
+          if (tool.nestedCalls) tool.nestedCalls = settledNestedToolCalls(tool.nestedCalls);
           const interruption = result === "succeeded" ? undefined : `interrupted by ${result ?? "settlement"}`;
           if (interruption) tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, result === "succeeded" ? "done" : "failed");
@@ -379,6 +387,7 @@ export class DockConversation implements Component {
         if (this.currentThinking) this.currentThinking.complete = true;
         for (const tool of this.tools.values()) {
           tool.entry.complete = true;
+          if (tool.nestedCalls) tool.nestedCalls = settledNestedToolCalls(tool.nestedCalls);
           const interruption = "interrupted by session replacement";
           tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, "failed");
@@ -573,6 +582,7 @@ export class DockConversation implements Component {
         if (entry.toolOmitted && entry.toolOmitted.length > 0) {
           content.push(paint.warning(`omitted: ${entry.toolOmitted.join(", ")}`));
         }
+        if (entry.toolNestedCalls) content.push(paint.faint("calls"), ...renderNestedCalls(entry.toolNestedCalls, width, true));
         if (entry.diffText) {
           content.push(paint.faint(entry.toolState === "running" ? "changes" : "result"));
           const diff = removeProjectedNoticeLines(entry.diffText, entry.toolPresentation);
@@ -703,6 +713,7 @@ export class DockConversation implements Component {
           tool.name = block.toolName;
           tool.output = truncate(safeTerminalText(block.text), MAX_TOOL_OUTPUT);
           tool.presentation = block.presentation?.kind === toolBaseName(block.toolName) ? block.presentation : undefined;
+          tool.nestedCalls = block.nestedCalls;
           tool.omitted = [...new Set([...tool.omitted, ...(block.omittedFields ?? [])])];
           projectToolState(tool, block.isError ? "failed" : "done");
           projectedTools.delete(block.toolCallId);
@@ -721,11 +732,7 @@ export class DockConversation implements Component {
   }
 
   private updateTool(tool: ToolProjection, state: ToolState): void {
-    const parts = [`${tool.name} ${state}`];
-    if (tool.args) parts.push(`args\n${tool.args}`);
-    if (tool.omitted.length > 0) parts.push(`omitted: ${tool.omitted.join(", ")}`);
-    if (tool.output) parts.push(`result\n${tool.output}`);
-    const text = safeTerminalText(parts.join("\n"));
+    const text = toolEntryText(tool, state);
     if (
       tool.entry.text === text
       && tool.entry.toolName === tool.name
@@ -733,6 +740,7 @@ export class DockConversation implements Component {
       && tool.entry.toolSummary === tool.summary
       && tool.entry.toolErrorSummary === (state === "failed" ? summarizeToolFailure(tool.output) : undefined)
       && toolPresentationsEqual(tool.entry.toolPresentation, tool.presentation)
+      && tool.entry.toolNestedCalls === tool.nestedCalls
     ) return;
     tool.entry.text = text;
     tool.entry.toolName = tool.name;
@@ -742,6 +750,7 @@ export class DockConversation implements Component {
     tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
     tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
     tool.entry.toolPresentation = tool.presentation;
+    tool.entry.toolNestedCalls = tool.nestedCalls;
     tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
     tool.entry.diffText = state !== "failed"
       ? tool.presentation?.displayDiff ?? (looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined)
@@ -805,12 +814,17 @@ export class DockConversation implements Component {
   private markOutputChanged(): void { this.revisionValue += 1; }
 }
 
-function projectToolState(tool: ToolProjection, state: ToolState): void {
+function toolEntryText(tool: ToolProjection, state: ToolState): string {
   const parts = [`${tool.name} ${state}`];
   if (tool.args) parts.push(`args\n${tool.args}`);
   if (tool.omitted.length > 0) parts.push(`omitted: ${tool.omitted.join(", ")}`);
+  if (tool.nestedCalls) parts.push(`calls\n${nestedCallLines(tool.nestedCalls, true).map((line) => line.text).join("\n")}`);
   if (tool.output) parts.push(`result\n${tool.output}`);
-  tool.entry.text = safeTerminalText(parts.join("\n"));
+  return safeTerminalText(parts.join("\n"));
+}
+
+function projectToolState(tool: ToolProjection, state: ToolState): void {
+  tool.entry.text = toolEntryText(tool, state);
   tool.entry.toolName = tool.name;
   tool.entry.toolState = state;
   tool.entry.toolSummary = tool.summary;
@@ -818,6 +832,7 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
   tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
   tool.entry.toolPresentation = tool.presentation;
+  tool.entry.toolNestedCalls = tool.nestedCalls;
   tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
   tool.entry.diffText = state !== "failed"
     ? tool.presentation?.displayDiff ?? (looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined)
@@ -979,6 +994,7 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
   if (entry.toolOmitted && entry.toolOmitted.length > 0) {
     lines.push(paint.warning(`omitted: ${entry.toolOmitted.join(", ")}`));
   }
+  if (entry.toolNestedCalls) lines.push(...renderNestedCalls(entry.toolNestedCalls, width, false));
   const output = entry.toolOutput?.trim() ?? "";
   const toolName = toolBaseName(entry.toolName ?? "tool");
   if (!entry.diffText && !entry.toolPresentation && !KNOWN_PREVIEW_TOOLS.has(toolName) && looksLikeStructuredJson(output)) {
@@ -1012,6 +1028,42 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
     lines.push(...preview.map((line) => `  ${line}`));
   }
   lines.push(...renderToolPresentationNotices(entry.toolPresentation, width));
+  return lines;
+}
+
+const COLLAPSED_NESTED_CALLS = 8;
+const COLLAPSED_NESTED_CALL_ARGS = 80;
+
+type NestedCallLine = { text: string; tone: "success" | "error" | "running" | "muted" };
+
+/** Calls the tool made itself, as in Pi's terminal: the latest ones when collapsed, all with errors when expanded. */
+function renderNestedCalls(nested: NestedToolCallsDto, width: number, expanded: boolean): string[] {
+  return nestedCallLines(nested, expanded).flatMap(({ text, tone }) => {
+    const painted = paint[tone](text);
+    return expanded ? renderToolDetailLine(painted, width) : [`  ${truncateToWidth(painted, Math.max(1, width - 4))}`];
+  });
+}
+
+function nestedCallLines(nested: NestedToolCallsDto, expanded: boolean): NestedCallLine[] {
+  const shown = expanded ? nested.calls : nested.calls.slice(-COLLAPSED_NESTED_CALLS);
+  const lines: NestedCallLine[] = [];
+  if (shown.length < nested.calls.length) lines.push({ text: `${nested.calls.length - shown.length} earlier calls · Ctrl+O details`, tone: "muted" });
+  for (const call of shown) {
+    // Pi keeps every call's arguments unless they are over its size bounds.
+    let args = call.argumentsJson ?? "(arguments too large to keep)";
+    if (!expanded && args.length > COLLAPSED_NESTED_CALL_ARGS) args = `${args.slice(0, COLLAPSED_NESTED_CALL_ARGS - 1)}…`;
+    const duration = call.durationMs === undefined ? "" : call.durationMs < 1_000 ? `${call.durationMs}ms` : `${(call.durationMs / 1_000).toFixed(1)}s`;
+    const [icon, tone, status] = call.status === "ok" ? ["✓", "success", ""] as const
+      : call.status === "error" ? ["×", "error", ""] as const
+        : call.status === "running" ? ["…", "running", ""] as const
+          : ["⊘", "muted", "not finished"] as const;
+    lines.push({ text: safeTerminalLine([`${icon} ${call.toolName}`, args, duration, status].filter(Boolean).join(" ")), tone });
+    if (expanded && call.error) lines.push(...safeTerminalText(call.error).split("\n").map((line) => ({ text: `    ${line}`, tone: "error" as const })));
+  }
+  // Unfinished calls and left-out arguments show on their own rows; anything else missing is later calls.
+  if (!nested.complete && nested.calls.every((call) => call.status !== "unfinished" && call.argumentsJson !== undefined)) {
+    lines.push({ text: "later calls were too many to keep", tone: "muted" });
+  }
   return lines;
 }
 
@@ -1358,6 +1410,10 @@ function summarizeToolArgs(toolName: string, args: JsonObject): string | undefin
     return joinToolSummary([commandPreview(firstStringArgument(args, ["command"]))]);
   }
 
+  if (name === "codemode") {
+    return joinToolSummary([commandPreview(firstStringArgument(args, ["code"]))]);
+  }
+
   if (name === "edit") {
     const editCount = Array.isArray(args.edits)
       ? args.edits.length
@@ -1503,14 +1559,21 @@ function failureTextFromJson(value: unknown): string | undefined {
   return undefined;
 }
 
-function formatToolArgs(toolName: string, args: JsonObject, limit: number): string | undefined {
-  const name = toolBaseName(toolName);
-  if (name !== "bash" || typeof args.command !== "string") return formatJson(args, limit);
+/** Source text arguments keep their lines: a bash command, or the script of a codemode call. */
+const SOURCE_ARGUMENTS: Readonly<Record<string, { key: string; label: string }>> = {
+  bash: { key: "command", label: "command" },
+  codemode: { key: "code", label: "script" },
+};
 
-  const command = safeTerminalText(args.command).replace(/\t/gu, "    ");
-  const remaining = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "command"));
+function formatToolArgs(toolName: string, args: JsonObject, limit: number): string | undefined {
+  const source = SOURCE_ARGUMENTS[toolBaseName(toolName)];
+  const text = source === undefined ? undefined : args[source.key];
+  if (source === undefined || typeof text !== "string") return formatJson(args, limit);
+
+  const body = safeTerminalText(text).replace(/\t/gu, "    ");
+  const remaining = Object.fromEntries(Object.entries(args).filter(([key]) => key !== source.key));
   const suffix = Object.keys(remaining).length === 0 ? undefined : formatJson(remaining, limit);
-  return truncate(["command", ...command.split("\n").map((line) => `  ${line}`), ...(suffix ? ["options", suffix] : [])].join("\n"), limit);
+  return truncate([source.label, ...body.split("\n").map((line) => `  ${line}`), ...(suffix ? ["options", suffix] : [])].join("\n"), limit);
 }
 
 function formatJson(value: unknown, limit: number): string | undefined {

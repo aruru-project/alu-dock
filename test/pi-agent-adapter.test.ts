@@ -492,6 +492,35 @@ test("historical image descriptors directly recover original bytes after other i
   assert.equal(adapter.getConversationImage(original.contentRef!).data, PNG);
 });
 
+// Review of card #350: a crowded history page left out a codemode card's calls and nothing could bring them back.
+test("a codemode card whose calls do not fit a crowded history page gets them back when its full content is loaded", async () => {
+  const manager = SessionManager.inMemory(process.cwd());
+  const adapter = await reader(manager);
+  const script = manager.appendMessage({ role: "toolResult", toolCallId: "script", toolName: "codemode", isError: false, timestamp: 1,
+    content: [{ type: "text", text: "Script completed\nOutput:\nharbor echoed lantern" }],
+    nestedCalls: { calls: [{ id: "script/1", name: "mcp__harbor__echo", arguments: { text: "lantern" }, status: "ok", durationMs: 12 }], complete: true } });
+  // A Chinese conversation fills one history page past its size budget.
+  for (let index = 0; index < 45; index += 1) manager.appendMessage({ role: "user", content: "雪".repeat(4_000), timestamp: index + 2 });
+  const page = parseConversationHistoryBody(await adapter.getConversationHistory(undefined, 50, "references"));
+  const preview = page.entries.find(({ entry }) => entry.entryId === script)!;
+  const previewResult = preview.entry.content.find((block) => block.type === "tool_result");
+  assert.ok(previewResult?.type === "tool_result" && previewResult.nestedCalls === undefined, "the crowded page leaves the calls out");
+  assert.equal(preview.contentComplete, false, "the client is told to load the rest");
+
+  const chunks = [];
+  let cursor: string | undefined;
+  do {
+    const body = parseConversationContentBody(await adapter.getConversationContent(preview.contentRef, cursor, "references"));
+    chunks.push(...body.chunks);
+    cursor = body.nextCursor;
+  } while (cursor);
+  const completed = chunks.find((chunk) => chunk.type === "tool_result" && chunk.blockComplete);
+  assert.deepEqual(completed?.type === "tool_result" && completed.nestedCalls, {
+    calls: [{ toolName: "mcp__harbor__echo", argumentsJson: "{\"text\":\"lantern\"}", status: "ok", durationMs: 12 }],
+    complete: true,
+  });
+});
+
 // Review's real 100-long-text + late toolCall reproducer: the canonical record
 // used by Host and the Worker's descriptor page must both keep the tool group.
 test("long assistant previews keep tool identities and their results in one history page", async () => {

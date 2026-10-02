@@ -301,7 +301,9 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 客户端只在用户明确选择时，将候选 `workerConfig` 原样传给 `instance.create`；使用 Host 默认时省略选择，不把 catalog 的旧快照变成本次 override。显式选择、目标 Host/cwd 在 project trust continuation 中保留。预览、刷新、返回、取消均不创建 Work。坏默认在 catalog 中仍作为 warning 展示，让支持选择的客户端可以明确改选；不代替创建边界的报错。保存默认与 create 有各自的 operation/失败结果，不合并成一次成功提示。
 
-Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一实例；它拥有目录默认和 Dock 模板文件事实。Pi 原生来源、五字段模板校验、显式选择识别及 opaque workerConfig 合并由组合入口注入的 provider 负责。CLI 的 Main/SubHost 均使用已解析的原生 agentDir 与机器本地 Home。首次 catalog 发现触发初始化；默认解析、content 和 default.set 不初始化模板，不能通过读取缺失来源来复活它。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成；已有用户正文不覆盖。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
+Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一实例；它拥有目录默认和 Dock 模板文件事实。Pi 原生来源、五字段模板校验、显式选择识别及 opaque workerConfig 合并由组合入口注入的 provider 负责。CLI 的 Main/SubHost 均使用已解析的原生 agentDir 与机器本地 Home。首次 catalog 发现触发初始化；默认解析、content 和 default.set 不初始化模板，不能通过读取缺失来源来复活它。首次初始化（尚无 marker）时，即使 systems 目录已存在，也会在缺少 `pi-default.json` 时由 fork SDK 的 `getDefaultSystemPromptBody()` 原样序列化生成。完整正文以不覆盖目标的方式发布，校验可用后才写 Home `.aludock/systems-initialized`，生成或写入失败可重试。这个文件是一次初始化标记，不是目录选择；标记存在后删除模板或整个 systems 目录都不会重建文件来冒充保存默认仍有效。
+
+`pi-default.json` 由 Dock 维护，始终是当前 Pi 的默认正文：CLI Host 启动时（在任何 Work reopen 之前）和首次 catalog 初始化时，内容与 `getDefaultSystemPromptBody()` 的序列化不同就整份替换，不判断是否由用户修改，也不提示；想保留自己的正文，另存为其他名字的模板。替换只发生在文件仍存在时，被删除的模板不会因此重建。用这份模板的 Work 在下次加载 resource（新建、reopen、reload）时读到新正文。
 
 官方 Client、Hub/direct new 保留选择和阅读界面；有效目录默认可直接进入创建，由 Host 在创建时应用，否则由用户明确选择。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
 

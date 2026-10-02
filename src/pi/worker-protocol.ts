@@ -44,6 +44,7 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_CONVERSATION_CONTENT_PAGE_BYTES,
   MAX_SEMANTIC_HISTORY_PAGE_BYTES,
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
   MAX_STOP_CLEANUP_ERROR_CHARS,
@@ -455,7 +456,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
       return;
     }
     case "conversation.content": {
-      if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 512 * 1024) throw new Error("Conversation content page exceeds the Worker capability bound");
+      if (Buffer.byteLength(JSON.stringify(raw), "utf8") > MAX_CONVERSATION_CONTENT_PAGE_BYTES) throw new Error("Conversation content page exceeds the Worker capability bound");
       parseConversationContentBody(raw);
       return;
     }

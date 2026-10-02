@@ -843,11 +843,16 @@ fn restore_body_metadata(preview: &[crate::ContentBlock], content: &mut [crate::
             tool_call_id,
             tool_name,
             presentation,
+            nested_calls,
             ..
         } = block
         {
-            if let Some(ToolResult { presentation: prior, .. }) = preview.iter().find(|prior| matches!(prior, ToolResult { tool_call_id: id, tool_name: name, .. } if id == tool_call_id && name == tool_name)) {
+            if let Some(ToolResult { presentation: prior, nested_calls: prior_calls, .. }) = preview.iter().find(|prior| matches!(prior, ToolResult { tool_call_id: id, tool_name: name, .. } if id == tool_call_id && name == tool_name)) {
                 *presentation = prior.clone();
+                // The body carries the calls itself; a body from an older Host leaves them to the preview.
+                if nested_calls.is_none() {
+                    *nested_calls = prior_calls.clone();
+                }
             }
         }
     }
@@ -1138,6 +1143,40 @@ mod tests {
         assert!(
             matches!(&full[1], Image { content_ref: Some(reference), file_id: Some(file), data: Some(data), .. } if reference == "opaque-image" && file == "attachment" && data == "original bytes")
         );
+    }
+    // Card #350: a long codemode result is read in full; its calls come with the full content, or,
+    // from an older Host, only with the preview. A crowded preview may leave them out.
+    #[test]
+    fn completing_a_long_tool_result_keeps_the_calls_the_tool_made() {
+        use crate::ContentBlock::ToolResult;
+        let result = |text: &str, nested_calls: Option<serde_json::Value>| ToolResult {
+            tool_call_id: "script".into(),
+            tool_name: "codemode".into(),
+            text: text.into(),
+            is_error: false,
+            published_file: None,
+            presentation: None,
+            nested_calls,
+            omitted_fields: Vec::new(),
+        };
+        let calls =
+            json!({"calls":[{"toolName":"mcp__harbor__echo","status":"ok"}],"complete":true});
+        let preview = vec![result("Script completed", Some(calls.clone()))];
+        let mut full = vec![result(
+            "Script completed\nOutput:\nharbor echoed lantern",
+            None,
+        )];
+        restore_body_metadata(&preview, &mut full);
+        assert!(
+            matches!(&full[0], ToolResult { text, nested_calls: Some(restored), .. } if text.ends_with("harbor echoed lantern") && *restored == calls)
+        );
+        let crowded = vec![result("", None)];
+        let mut full = vec![result(
+            "Script completed\nOutput:\nharbor echoed lantern",
+            Some(calls.clone()),
+        )];
+        restore_body_metadata(&crowded, &mut full);
+        assert!(matches!(&full[0], ToolResult { nested_calls: Some(kept), .. } if *kept == calls));
     }
     #[tokio::test]
     async fn a_checkpoint_candidate_cannot_discard_an_earlier_page_accepted_during_coverage() {

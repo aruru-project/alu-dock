@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { reactive } from 'vue'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
-import { toolDetailText } from '../lib/conversation'
+import { LATER_NESTED_CALLS_LEFT_OUT, nestedCallRows, toolDetailText } from '../lib/conversation'
 import ConversationImage from './ConversationImage.vue'
 import MarkdownContent from './MarkdownContent.vue'
 
@@ -55,6 +55,16 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
         <div v-if="part.preview.title || part.preview.truncated" class="tool-call-preview-meta"><span v-if="part.preview.title" class="tool-call-preview-title">{{ part.preview.title }}</span><span v-if="part.preview.truncated" class="tool-call-preview-truncated">已省略</span></div>
         <pre v-if="part.preview.body" class="tool-call-preview-body">{{ part.preview.body }}</pre>
       </div>
+      <ol v-if="part.nestedCalls?.calls.length" class="tool-nested-calls" aria-label="脚本调用的工具">
+        <li v-if="nestedCallRows(part.nestedCalls).earlier" class="tool-nested-more">还有 {{ nestedCallRows(part.nestedCalls).earlier }} 个更早的调用，在「参数与结果」里查看</li>
+        <li v-for="row in nestedCallRows(part.nestedCalls).rows" :key="row.key" class="tool-nested-call" :data-status="row.status">
+          <span class="tool-nested-status" :title="row.label" :aria-label="row.label">{{ row.icon }}</span>
+          <span class="tool-nested-name">{{ row.name }}</span>
+          <span v-if="row.args" class="tool-nested-args">{{ row.args }}</span>
+          <span v-if="row.duration" class="tool-nested-duration">{{ row.duration }}</span>
+        </li>
+        <li v-if="nestedCallRows(part.nestedCalls).laterLeftOut" class="tool-nested-more">{{ LATER_NESTED_CALLS_LEFT_OUT }}</li>
+      </ol>
       <details :open="toolOpen(part.id)" @toggle="emit('toolToggle', part.id, $event)">
         <summary><span>参数与结果</span><span class="tool-disclosure" aria-hidden="true">›</span></summary>
         <pre v-if="toolOpen(part.id)" class="tool-output msg-tool-output">{{ toolDetailText(part) }}</pre>
@@ -150,6 +160,23 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+.tool-nested-calls {
+  margin: 0;
+  padding: 7px 10px 8px;
+  list-style: none;
+  border-top: 1px solid color-mix(in srgb, var(--alu-amber) 12%, var(--alu-border));
+  color: var(--alu-text-muted);
+  font: 10.5px/1.6 var(--font-mono);
+}
+.tool-nested-call { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
+.tool-nested-status { flex: 0 0 auto; width: 1em; text-align: center; }
+.tool-nested-call[data-status='ok'] .tool-nested-status { color: var(--alu-mint); }
+.tool-nested-call[data-status='error'] .tool-nested-status { color: var(--alu-rose); }
+.tool-nested-call[data-status='running'] .tool-nested-status { color: var(--alu-blue); }
+.tool-nested-name { flex: 0 0 auto; color: var(--alu-text); }
+.tool-nested-args { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tool-nested-duration { flex: 0 0 auto; color: var(--alu-text-faint); }
+.tool-nested-more { color: var(--alu-text-faint); }
 .tool-call-preview.is-diff .tool-call-preview-body { color: color-mix(in srgb, var(--alu-amber) 76%, var(--alu-text)); }
 .tool-call-preview.is-path .tool-call-preview-body { color: var(--alu-text-muted); }
 .msg-toolcall details { border-top: 1px solid color-mix(in srgb, var(--alu-amber) 14%, var(--alu-border)); }
