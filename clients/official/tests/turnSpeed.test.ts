@@ -26,12 +26,14 @@ function feed() {
   apply('message.delta', 5, 100, { block: 'thinking', delta: '想' })
   apply('tool.started', 6, 100, { toolCallId: 'call-1' })
   apply('message.completed', 7, 100, { role: 'assistant' })
+  assert.deepEqual(apply('session.metrics_changed', 7, 300), { turnId: 'live-turn-1', tokensPerSecond: 100 })
   // Execution: the same call reports its start again, a running tool calls another one.
-  apply('tool.args_updated', 8, 100, { toolCallId: 'call-1' })
-  apply('tool.started', 9, 100, { toolCallId: 'call-1/1' })
-  apply('tool.completed', 20, 100, { toolCallId: 'call-1' })
-  apply('message.delta', 30, 100, { block: 'text', delta: '好' })
-  apply('message.completed', 32, 100, { role: 'assistant' })
+  apply('tool.args_updated', 8, 300, { toolCallId: 'call-1' })
+  apply('tool.started', 9, 300, { toolCallId: 'call-1/1' })
+  apply('tool.completed', 20, 300, { toolCallId: 'call-1' })
+  apply('message.delta', 30, 300, { block: 'text', delta: '好' })
+  // Review of #353: the second reply ended before its tokens arrived and briefly showed half the speed.
+  assert.equal(apply('message.completed', 32, 300, { role: 'assistant' }), undefined, '第二次回复的 token 还没报到时，速度不会暂时算低')
   assert.deepEqual(apply('session.metrics_changed', 32, 500), { turnId: 'live-turn-1', tokensPerSecond: 100 },
     '一轮的速度 = 新增输出 400 ÷ 两次出字共 4 秒；等待首字和工具执行的时间不算')
   apply('run.settled', 33, 500)
@@ -81,6 +83,21 @@ function feed() {
   apply('message.delta', 1, 100)
   apply('message.completed', 1.5, 100, { role: 'assistant' })
   assert.equal(apply('session.metrics_changed', 2, 150), undefined, '出字不到 1 秒不显示速度')
+}
+
+{
+  // Review of #353: after switching away mid-run, the partial value stayed until another event arrived.
+  const meter = createTurnSpeedMeter()
+  const event = (sequence: number, seconds: number, eventType: string, data: Record<string, unknown> = {}): ProjectedEvent => ({ sequence, runtimeGeneration: 1, occurredAt: at(seconds), eventType, data })
+  meter.apply(event(1, 0, 'run.started'), 0, 100)
+  meter.apply(event(2, 1, 'message.delta'), 1, 100)
+  meter.apply(event(3, 4, 'message.completed', { role: 'assistant' }), 2, 400)
+  assert.deepEqual(meter.interrupt(), { turnId: 'live-turn-1' }, '运行中切走，这一轮的速度立刻撤下')
+  meter.apply(event(4, 5, 'run.started'), 3, 400)
+  meter.apply(event(5, 6, 'message.delta'), 4, 400)
+  meter.apply(event(6, 9, 'message.completed', { role: 'assistant' }), 5, 700)
+  meter.apply(event(7, 9, 'run.settled'), 6, 700)
+  assert.equal(meter.interrupt(), undefined, '已结束的轮切走后保留速度')
 }
 
 assert.deepEqual(turnsHandedOff(['turn:a', 'live-turn-5'], ['turn:a', 'turn:b']), [['live-turn-5', 'turn:b']],

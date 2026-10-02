@@ -12,6 +12,8 @@ interface MeasuredTurn {
   turnId: string
   baselineOutput: number
   generationMs: number
+  /** The output total the last value was computed from. */
+  sampledOutput: number
   outputStartedAt?: number
   toolCalls: Set<string>
   settled: boolean
@@ -45,7 +47,7 @@ export function createTurnSpeedMeter() {
     if (event.eventType === 'run.started') {
       drop()
       turn = outputTokens === undefined || !Number.isFinite(at) ? undefined
-        : { turnId: liveTurnId(event.sequence), baselineOutput: outputTokens, generationMs: 0, toolCalls: new Set(), settled: false }
+        : { turnId: liveTurnId(event.sequence), baselineOutput: outputTokens, sampledOutput: outputTokens, generationMs: 0, toolCalls: new Set(), settled: false }
       return undefined
     }
     if (!turn) return undefined
@@ -87,14 +89,20 @@ export function createTurnSpeedMeter() {
   }
 
   function sample(measured: MeasuredTurn, outputTokens: number | undefined): TurnSpeedChange | undefined {
-    // Only finished model calls count; an open one has tokens not yet reported.
-    if (outputTokens === undefined || measured.outputStartedAt !== undefined) return undefined
-    const tokens = outputTokens - measured.baselineOutput
-    if (tokens <= 0 || measured.generationMs < MIN_GENERATION_MS) return undefined
-    return { turnId: measured.turnId, tokensPerSecond: tokens / (measured.generationMs / 1000) }
+    // Only finished model calls count, and only once the total includes the latest
+    // one: before that its time would be divided into the previous calls' tokens.
+    if (outputTokens === undefined || measured.outputStartedAt !== undefined || outputTokens <= measured.sampledOutput) return undefined
+    if (measured.generationMs < MIN_GENERATION_MS) return undefined
+    measured.sampledOutput = outputTokens
+    return { turnId: measured.turnId, tokensPerSecond: (outputTokens - measured.baselineOutput) / (measured.generationMs / 1000) }
   }
 
-  return { apply }
+  /** This client stopped following the Work: whatever happens next to a running turn goes unseen. */
+  function interrupt(): TurnSpeedChange | undefined {
+    return drop()
+  }
+
+  return { apply, interrupt }
 }
 
 function closeOutput(turn: MeasuredTurn, at: number) {

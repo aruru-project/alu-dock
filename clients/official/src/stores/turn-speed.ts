@@ -36,15 +36,26 @@ export const useTurnSpeedStore = defineStore('turn-speed', () => {
     else target.speeds.set(turnId, change.tokensPerSecond)
   }
 
+  let followed: Scope | undefined
   const stopListening = observation.onEventApplied((applied: AppliedEvent) => {
     try {
       const target = scope(scopeKey(applied.connectionId, applied.hostEpoch, applied.instance))
+      followed = target
       const change = target.meter.apply(applied.event, applied.previousSequence, applied.instance.metrics?.tokens?.output)
       if (change) record(target, change)
     } catch (cause) {
       console.error('Turn speed could not be measured.', cause)
     }
   })
+
+  // Switching away, pausing or refreshing ends this follow; a running turn would
+  // go on unseen, so its partial value is withdrawn now rather than at a later event.
+  watch(() => observation.active?.subscriptionId, () => {
+    const target = followed
+    followed = undefined
+    const change = target?.meter.interrupt()
+    if (target && change) record(target, change)
+  }, { flush: 'sync' })
 
   const shownKey = computed(() => {
     const state = conversation.conversationState
