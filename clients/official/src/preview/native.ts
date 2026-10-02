@@ -93,8 +93,6 @@ function sampleData() {
           { id: 'preview-local', label: '家中局域网', kind: 'local', endpoint: { host: '192.168.1.20', port: 33781 }, state: 'verified' },
           { id: 'preview-remote', label: '外网域名', kind: 'remote', endpoint: { host: 'dock.example.com', port: 443 }, state: 'verified' },
         ],
-        policy: { mode: 'automatic' },
-        lastSuccessfulEndpointId: 'preview-local',
       },
     },
     total: 5,
@@ -236,6 +234,10 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'pending_operations': return []
     case 'restored_image_count': return 0
     case 'system_device_name': case 'begin_windows_away': return null
+    case 'watch_host_route':
+      // Like the native watch: a known route is answered only after a long wait.
+      if (args.seenRouteGeneration != null) await delay(25_000)
+      return { connectionId: args.connectionId, selectionGeneration: args.selectionGeneration, routeGeneration: 1, activeEndpointId: 'preview-local' }
     case 'cancel_windows_away': case 'cancel_pairing': case 'reselect_host_route': case 'stop_conversation_follow':
     case 'cancel_attachment_upload': case 'remove_attachment': case 'cancel_workspace_file_read': return false
     // Following, frame ACKs and release calls have nothing to answer in a preview.

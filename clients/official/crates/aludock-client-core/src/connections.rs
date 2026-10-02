@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::HashSet,
+    fs,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,13 +18,67 @@ use crate::{
 const PROFILE_DIRECTORY: &str = "connection-profile-history";
 const PROFILE_SCHEMA_VERSION: u32 = 1;
 
+/// What kind of network an address belongs to, judged from the address itself.
+/// It decides the order addresses are tried in; users never choose it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionKind {
     Local,
     Remote,
     Vpn,
+    /// Only read from profiles saved by older clients; loading re-judges it.
     Manual,
+}
+
+impl ConnectionKind {
+    /// Private networks: 10/8, 172.16/12, 192.168/16, link-local, loopback,
+    /// IPv6 unique-local and link-local, and `.local` names. VPN: the shared
+    /// 100.64/10 range and Tailscale's IPv6 range. Everything else is remote.
+    pub fn of(endpoint: &Endpoint) -> Self {
+        match endpoint.host().parse::<IpAddr>() {
+            Ok(IpAddr::V4(address)) => ipv4_kind(address),
+            Ok(IpAddr::V6(address)) => match address.to_ipv4_mapped() {
+                Some(mapped) => ipv4_kind(mapped),
+                None => ipv6_kind(address),
+            },
+            Err(_) if endpoint.host().ends_with(".local") => Self::Local,
+            Err(_) => Self::Remote,
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::Local => 0,
+            Self::Vpn => 1,
+            Self::Remote => 2,
+            Self::Manual => 3,
+        }
+    }
+}
+
+fn ipv4_kind(address: Ipv4Addr) -> ConnectionKind {
+    let [first, second, ..] = address.octets();
+    if address.is_private() || address.is_link_local() || address.is_loopback() {
+        ConnectionKind::Local
+    } else if first == 100 && second & 0b1100_0000 == 0b0100_0000 {
+        ConnectionKind::Vpn
+    } else {
+        ConnectionKind::Remote
+    }
+}
+
+fn ipv6_kind(address: Ipv6Addr) -> ConnectionKind {
+    let segments = address.segments();
+    if segments[..3] == [0xfd7a, 0x115c, 0xa1e0] {
+        ConnectionKind::Vpn
+    } else if address.is_loopback()
+        || segments[0] & 0xfe00 == 0xfc00
+        || segments[0] & 0xffc0 == 0xfe80
+    {
+        ConnectionKind::Local
+    } else {
+        ConnectionKind::Remote
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -47,7 +106,6 @@ pub struct HostEndpoint {
     pub endpoint: Endpoint,
     pub state: EndpointState,
     pub verified_at: Option<String>,
-    pub last_success_at: Option<String>,
     #[serde(default)]
     pub disabled_from: Option<EndpointState>,
     #[serde(default)]
@@ -63,11 +121,13 @@ pub struct EndpointTestResult {
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Written so older clients can read profiles saved by this one. This client
+/// always chooses the address itself and ignores what older clients stored.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ConnectionPolicy {
+    #[default]
     Automatic,
-    Fixed { endpoint_id: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -78,37 +138,31 @@ pub struct HostConnectionProfile {
     pub host_id: String,
     pub display_name: String,
     pub endpoints: Vec<HostEndpoint>,
+    #[serde(skip_deserializing)]
     pub policy: ConnectionPolicy,
-    pub last_successful_endpoint_id: Option<String>,
 }
 
 impl HostConnectionProfile {
+    /// Verified addresses in the order a connection tries them: local, VPN,
+    /// then remote, each kind in the order the addresses were added.
     pub fn ordered_verified_endpoints(&self) -> Vec<&HostEndpoint> {
-        let fixed = match &self.policy {
-            ConnectionPolicy::Automatic => None,
-            ConnectionPolicy::Fixed { endpoint_id } => Some(endpoint_id.as_str()),
-        };
         let mut endpoints = self
             .endpoints
             .iter()
             .filter(|candidate| candidate.state == EndpointState::Verified)
             .collect::<Vec<_>>();
-        endpoints.sort_by_key(|candidate| {
-            let fixed_rank = usize::from(fixed.is_some_and(|id| id != candidate.id));
-            let kind_rank = match candidate.kind {
-                ConnectionKind::Local => 0,
-                ConnectionKind::Vpn => 1,
-                ConnectionKind::Remote => 2,
-                ConnectionKind::Manual => 3,
-            };
-            let last_success_rank = usize::from(
-                self.last_successful_endpoint_id.as_deref() != Some(candidate.id.as_str()),
-            );
-            // `sort_by_key` is stable, so the user-controlled profile order is
-            // retained after kind and last-success routing preferences.
-            (fixed_rank, kind_rank, last_success_rank)
-        });
+        endpoints.sort_by_key(|candidate| ConnectionKind::of(&candidate.endpoint).rank());
         endpoints
+    }
+
+    /// Every address's kind comes from the address, and addresses are kept in
+    /// the order they are tried, so what is saved and shown matches behaviour.
+    fn normalize(&mut self) {
+        for endpoint in &mut self.endpoints {
+            endpoint.kind = ConnectionKind::of(&endpoint.endpoint);
+        }
+        self.endpoints.sort_by_key(|endpoint| endpoint.kind.rank());
+        self.policy = ConnectionPolicy::Automatic;
     }
 
     fn validate(&self, expected_host_id: &str) -> Result<()> {
@@ -152,22 +206,6 @@ impl HostConnectionProfile {
                 "Host connection profile must retain an enabled verified address".into(),
             ));
         }
-        if let ConnectionPolicy::Fixed { endpoint_id } = &self.policy
-            && !self.endpoints.iter().any(|candidate| {
-                candidate.id == *endpoint_id && candidate.state == EndpointState::Verified
-            })
-        {
-            return Err(ClientError::InvalidPairing(
-                "fixed Host address is not enabled and verified".into(),
-            ));
-        }
-        if let Some(endpoint_id) = &self.last_successful_endpoint_id
-            && !ids.contains(endpoint_id.as_str())
-        {
-            return Err(ClientError::InvalidPairing(
-                "last successful Host address no longer exists".into(),
-            ));
-        }
         Ok(())
     }
 }
@@ -191,17 +229,15 @@ impl IdentityStore {
             display_name: "AluDock".into(),
             endpoints: vec![HostEndpoint {
                 id: Uuid::new_v4().to_string(),
-                label: "局域网".into(),
-                kind: ConnectionKind::Local,
+                label: "配对地址".into(),
+                kind: ConnectionKind::of(&paired.metadata.endpoint),
                 endpoint: paired.metadata.endpoint,
                 state: EndpointState::Verified,
                 verified_at: None,
-                last_success_at: None,
                 disabled_from: None,
                 last_manual_test: None,
             }],
             policy: ConnectionPolicy::Automatic,
-            last_successful_endpoint_id: None,
         };
         if !write_profile(&directory, &profile)? {
             return load_latest_profile(&directory, &profile.host_id);
@@ -241,6 +277,7 @@ impl IdentityStore {
             |expected, actual| ClientError::ProfileConflict { expected, actual },
         )?;
         update(&mut profile)?;
+        profile.normalize();
         profile.revision = profile.revision.checked_add(1).ok_or_else(|| {
             ClientError::InvalidPairing("Host connection profile revision overflowed".into())
         })?;
@@ -271,7 +308,6 @@ pub fn save_unverified_endpoint(
     store: &IdentityStore,
     endpoint: Endpoint,
     label: &str,
-    kind: ConnectionKind,
     expected_revision: u64,
 ) -> Result<HostConnectionProfile> {
     validate_label(label)?;
@@ -288,11 +324,10 @@ pub fn save_unverified_endpoint(
         profile.endpoints.push(HostEndpoint {
             id: Uuid::new_v4().to_string(),
             label: label.to_owned(),
-            kind,
+            kind: ConnectionKind::of(&endpoint),
             endpoint,
             state: EndpointState::DraftUnverified,
             verified_at: None,
-            last_success_at: None,
             disabled_from: None,
             last_manual_test: None,
         });
@@ -310,7 +345,6 @@ pub fn save_verified_endpoint(
     store: &IdentityStore,
     endpoint: Endpoint,
     label: &str,
-    kind: ConnectionKind,
     expected_revision: u64,
 ) -> Result<HostConnectionProfile> {
     validate_label(label)?;
@@ -328,11 +362,10 @@ pub fn save_verified_endpoint(
         profile.endpoints.push(HostEndpoint {
             id: Uuid::new_v4().to_string(),
             label: label.to_owned(),
-            kind,
+            kind: ConnectionKind::of(&endpoint),
             endpoint,
             state: EndpointState::Verified,
             verified_at: Some(tested_at.clone()),
-            last_success_at: None,
             disabled_from: None,
             last_manual_test: Some(EndpointTestStatus {
                 tested_at,
@@ -481,12 +514,6 @@ pub fn set_endpoint_enabled(
             let endpoint = &mut profile.endpoints[index];
             endpoint.state = EndpointState::Disabled;
             endpoint.disabled_from = Some(prior);
-            if matches!(
-                &profile.policy,
-                ConnectionPolicy::Fixed { endpoint_id: fixed } if fixed == endpoint_id
-            ) {
-                profile.policy = ConnectionPolicy::Automatic;
-            }
         }
         Ok(())
     })
@@ -516,66 +543,6 @@ pub fn delete_endpoint(
                 "at least one enabled verified Host address must remain".into(),
             ));
         }
-        if matches!(
-            &profile.policy,
-            ConnectionPolicy::Fixed { endpoint_id: fixed } if fixed == endpoint_id
-        ) {
-            profile.policy = ConnectionPolicy::Automatic;
-        }
-        if profile.last_successful_endpoint_id.as_deref() == Some(endpoint_id) {
-            profile.last_successful_endpoint_id = None;
-        }
-        Ok(())
-    })
-}
-
-pub fn reorder_endpoints(
-    store: &IdentityStore,
-    endpoint_ids: &[String],
-    expected_revision: u64,
-) -> Result<HostConnectionProfile> {
-    store.update_connection_profile_at(expected_revision, |profile| {
-        let requested = endpoint_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<HashSet<_>>();
-        if endpoint_ids.len() != profile.endpoints.len()
-            || requested.len() != endpoint_ids.len()
-            || !profile
-                .endpoints
-                .iter()
-                .all(|candidate| requested.contains(candidate.id.as_str()))
-        {
-            return Err(ClientError::InvalidEndpoint(
-                "address order must contain every saved address exactly once".into(),
-            ));
-        }
-        profile.endpoints.sort_by_key(|candidate| {
-            endpoint_ids
-                .iter()
-                .position(|id| id == &candidate.id)
-                .expect("validated endpoint order")
-        });
-        Ok(())
-    })
-}
-
-pub fn set_connection_policy(
-    store: &IdentityStore,
-    policy: ConnectionPolicy,
-    expected_revision: u64,
-) -> Result<HostConnectionProfile> {
-    store.update_connection_profile_at(expected_revision, |profile| {
-        if let ConnectionPolicy::Fixed { endpoint_id } = &policy
-            && !profile.endpoints.iter().any(|candidate| {
-                candidate.id == *endpoint_id && candidate.state == EndpointState::Verified
-            })
-        {
-            return Err(ClientError::InvalidEndpoint(
-                "fixed address must be enabled and verified".into(),
-            ));
-        }
-        profile.policy = policy;
         Ok(())
     })
 }
@@ -615,6 +582,9 @@ fn load_latest_profile(
             Some(current) if current.revision > profile.revision => {}
             _ => latest = Some(profile),
         }
+    }
+    if let Some(profile) = &mut latest {
+        profile.normalize();
     }
     Ok(latest)
 }
@@ -692,9 +662,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        ConnectionKind, ConnectionPolicy, EndpointState, HostEndpoint, delete_endpoint,
-        load_latest_profile, record_endpoint_test, reorder_endpoints, save_unverified_endpoint,
-        set_connection_policy, set_endpoint_enabled, write_profile,
+        ConnectionKind, EndpointState, HostEndpoint, delete_endpoint, load_latest_profile,
+        record_endpoint_test, save_unverified_endpoint, set_endpoint_enabled, write_profile,
     };
     use crate::{ClientError, ClientIdentity, Endpoint, IdentityStore};
 
@@ -721,37 +690,81 @@ mod tests {
     }
 
     #[test]
-    fn initial_profile_orders_local_before_remote() {
-        let (path, store) = paired_store("migration");
-        let initial = store
-            .load_connection_profile()
-            .expect("profile")
-            .expect("paired profile");
-        assert_eq!(initial.endpoints.len(), 1);
-        assert_eq!(initial.endpoints[0].kind, ConnectionKind::Local);
+    fn the_kind_of_an_address_is_judged_from_the_address() {
+        for (address, kind) in [
+            ("192.168.1.20:33781", ConnectionKind::Local),
+            ("10.0.0.5:33781", ConnectionKind::Local),
+            ("172.20.1.1:33781", ConnectionKind::Local),
+            ("169.254.10.1:33781", ConnectionKind::Local),
+            ("127.0.0.1:33781", ConnectionKind::Local),
+            ("nuc.local:33781", ConnectionKind::Local),
+            ("[fd12:3456::1]:33781", ConnectionKind::Local),
+            ("[fe80::1]:33781", ConnectionKind::Local),
+            ("100.101.102.103:33781", ConnectionKind::Vpn),
+            ("[fd7a:115c:a1e0::1]:33781", ConnectionKind::Vpn),
+            ("100.128.0.1:33781", ConnectionKind::Remote),
+            ("172.32.0.1:33781", ConnectionKind::Remote),
+            ("203.0.113.7:443", ConnectionKind::Remote),
+            ("[2001:db8::1]:443", ConnectionKind::Remote),
+            ("dock.example.com:443", ConnectionKind::Remote),
+        ] {
+            let endpoint: Endpoint = address.parse().unwrap();
+            assert_eq!(ConnectionKind::of(&endpoint), kind, "{address}");
+        }
+    }
 
-        let remote: Endpoint = "dock.example:443".parse().expect("remote endpoint");
-        let updated = store
-            .update_connection_profile(|profile| {
-                profile.endpoints.push(HostEndpoint {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    label: "外网".into(),
-                    kind: ConnectionKind::Remote,
-                    endpoint: remote.clone(),
-                    state: EndpointState::Verified,
-                    verified_at: Some("2026-08-16T00:00:00Z".into()),
-                    last_success_at: None,
-                    disabled_from: None,
-                    last_manual_test: None,
-                });
-                Ok(())
+    // Profiles saved before #328 carry user-chosen kinds, a fixed preferred
+    // address and a manual order; none of them may change what is tried first.
+    #[test]
+    fn a_profile_saved_by_an_older_client_is_tried_local_then_vpn_then_remote() {
+        let (path, store) = paired_store("legacy-routing");
+        let initial = store.load_connection_profile().unwrap().unwrap();
+        let mut legacy = serde_json::to_value(&initial).unwrap();
+        let pairing_id = initial.endpoints[0].id.clone();
+        let entry = |label: &str, kind: &str, host: &str, port: u16| {
+            serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(), "label": label, "kind": kind,
+                "endpoint": { "host": host, "port": port }, "state": "verified",
+                "verifiedAt": "2026-08-16T00:00:00Z", "lastSuccessAt": null,
+                "disabledFrom": null, "lastManualTest": null
             })
-            .expect("updated profile");
-        let ordered = updated.ordered_verified_endpoints();
-        assert_eq!(ordered[0].kind, ConnectionKind::Local);
-        assert_eq!(ordered[1].kind, ConnectionKind::Remote);
-        assert_eq!(updated.policy, ConnectionPolicy::Automatic);
-        fs::remove_dir_all(path).expect("cleanup");
+        };
+        let wan = entry("WAN", "local", "dock.example.com", 443);
+        let wan_id = wan["id"].clone();
+        let endpoints = legacy["endpoints"].as_array_mut().unwrap();
+        endpoints.insert(0, wan);
+        endpoints.push(entry("Tailscale", "manual", "100.101.102.103", 33781));
+        endpoints.push(entry("LAN 2", "remote", "192.168.1.9", 33781));
+        legacy["revision"] = serde_json::json!(initial.revision + 1);
+        legacy["policy"] = serde_json::json!({ "mode": "fixed", "endpoint_id": wan_id });
+        legacy["lastSuccessfulEndpointId"] = wan_id;
+        let directory = store.root().join(super::PROFILE_DIRECTORY);
+        fs::write(
+            directory.join(format!("profile-{:020}.json", initial.revision + 1)),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = store.load_connection_profile().unwrap().unwrap();
+
+        let tried = loaded
+            .ordered_verified_endpoints()
+            .iter()
+            .map(|endpoint| (endpoint.label.as_str(), endpoint.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tried,
+            [
+                ("配对地址", ConnectionKind::Local),
+                ("LAN 2", ConnectionKind::Local),
+                ("Tailscale", ConnectionKind::Vpn),
+                ("WAN", ConnectionKind::Remote),
+            ]
+        );
+        assert_eq!(loaded.endpoints[0].id, pairing_id);
+        let saved = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(saved["policy"], serde_json::json!({ "mode": "automatic" }));
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
@@ -795,7 +808,6 @@ mod tests {
             &store,
             "unreachable.example:443".parse().unwrap(),
             "以后验证",
-            ConnectionKind::Remote,
             initial.revision,
         )
         .unwrap();
@@ -812,7 +824,6 @@ mod tests {
             &store,
             "wrong.example:443".parse().unwrap(),
             "错误目标",
-            ConnectionKind::Remote,
             initial.revision,
         )
         .unwrap();
@@ -842,8 +853,8 @@ mod tests {
     }
 
     #[test]
-    fn disabling_or_deleting_fixed_route_falls_back_without_losing_last_route() {
-        let (path, store) = paired_store("disable-fixed");
+    fn disabling_and_deleting_always_keep_one_usable_address() {
+        let (path, store) = paired_store("disable-delete");
         let initial = store.load_connection_profile().unwrap().unwrap();
         let first_id = initial.endpoints[0].id.clone();
         let with_second = store
@@ -852,26 +863,17 @@ mod tests {
                     id: uuid::Uuid::new_v4().to_string(),
                     label: "VPN".into(),
                     kind: ConnectionKind::Vpn,
-                    endpoint: "vpn.example:443".parse().unwrap(),
+                    endpoint: "100.101.102.103:443".parse().unwrap(),
                     state: EndpointState::Verified,
                     verified_at: Some("2026-08-16T00:00:00Z".into()),
-                    last_success_at: None,
                     disabled_from: None,
                     last_manual_test: None,
                 });
                 Ok(())
             })
             .unwrap();
-        let fixed = set_connection_policy(
-            &store,
-            ConnectionPolicy::Fixed {
-                endpoint_id: first_id.clone(),
-            },
-            with_second.revision,
-        )
-        .unwrap();
-        let disabled = set_endpoint_enabled(&store, &first_id, false, fixed.revision).unwrap();
-        assert_eq!(disabled.policy, ConnectionPolicy::Automatic);
+        let disabled =
+            set_endpoint_enabled(&store, &first_id, false, with_second.revision).unwrap();
         assert_eq!(
             disabled.endpoints[0].disabled_from,
             Some(EndpointState::Verified)
@@ -879,92 +881,8 @@ mod tests {
         let enabled = set_endpoint_enabled(&store, &first_id, true, disabled.revision).unwrap();
         assert_eq!(enabled.endpoints[0].state, EndpointState::Verified);
         let second_id = enabled.endpoints[1].id.clone();
-        let fixed_again = set_connection_policy(
-            &store,
-            ConnectionPolicy::Fixed {
-                endpoint_id: second_id.clone(),
-            },
-            enabled.revision,
-        )
-        .unwrap();
-        let deleted = delete_endpoint(&store, &second_id, fixed_again.revision).unwrap();
-        assert_eq!(deleted.policy, ConnectionPolicy::Automatic);
+        let deleted = delete_endpoint(&store, &second_id, enabled.revision).unwrap();
         assert!(delete_endpoint(&store, &first_id, deleted.revision).is_err());
-        fs::remove_dir_all(path).unwrap();
-    }
-
-    #[test]
-    fn automatic_routing_keeps_user_order_but_prefers_last_success_within_kind() {
-        let (path, store) = paired_store("reorder");
-        let initial = store.load_connection_profile().unwrap().unwrap();
-        let with_routes = store
-            .update_connection_profile_at(initial.revision, |profile| {
-                for (label, endpoint, kind) in [
-                    ("WAN", "wan.example:443", ConnectionKind::Remote),
-                    ("LAN 2", "192.168.1.9:33781", ConnectionKind::Local),
-                    ("VPN", "vpn.example:443", ConnectionKind::Vpn),
-                ] {
-                    profile.endpoints.push(HostEndpoint {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        label: label.into(),
-                        kind,
-                        endpoint: endpoint.parse().unwrap(),
-                        state: EndpointState::Verified,
-                        verified_at: Some("2026-08-16T00:00:00Z".into()),
-                        last_success_at: None,
-                        disabled_from: None,
-                        last_manual_test: None,
-                    });
-                }
-                Ok(())
-            })
-            .unwrap();
-        let ids = vec![
-            with_routes.endpoints[2].id.clone(),
-            with_routes.endpoints[1].id.clone(),
-            with_routes.endpoints[3].id.clone(),
-            with_routes.endpoints[0].id.clone(),
-        ];
-        let reordered = reorder_endpoints(&store, &ids, with_routes.revision).unwrap();
-        assert_eq!(
-            reordered
-                .endpoints
-                .iter()
-                .map(|item| &item.id)
-                .collect::<Vec<_>>(),
-            ids.iter().collect::<Vec<_>>()
-        );
-        assert_eq!(
-            reordered
-                .ordered_verified_endpoints()
-                .iter()
-                .map(|item| item.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["LAN 2", "局域网", "VPN", "WAN"]
-        );
-        let last_lan_id = reordered.endpoints[3].id.clone();
-        let with_last_success = store
-            .update_connection_profile_at(reordered.revision, |profile| {
-                profile.last_successful_endpoint_id = Some(last_lan_id);
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(
-            with_last_success
-                .endpoints
-                .iter()
-                .map(|item| item.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["LAN 2", "WAN", "VPN", "局域网"]
-        );
-        assert_eq!(
-            with_last_success
-                .ordered_verified_endpoints()
-                .iter()
-                .map(|item| item.label.as_str())
-                .collect::<Vec<_>>(),
-            vec!["局域网", "LAN 2", "VPN", "WAN"]
-        );
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -982,7 +900,6 @@ mod tests {
                     endpoint: "legacy.example:443".parse().unwrap(),
                     state: EndpointState::Disabled,
                     verified_at: Some("2026-08-16T00:00:00Z".into()),
-                    last_success_at: None,
                     disabled_from: None,
                     last_manual_test: None,
                 });
@@ -1051,28 +968,5 @@ mod tests {
                 if expected == initial.revision && actual == initial.revision + 1
         ));
         fs::remove_dir_all(path).unwrap();
-    }
-
-    #[test]
-    fn rejects_a_fixed_unverified_endpoint() {
-        let (path, store) = paired_store("unverified-fixed");
-        let result = store.update_connection_profile(|profile| {
-            let id = uuid::Uuid::new_v4().to_string();
-            profile.endpoints.push(HostEndpoint {
-                id: id.clone(),
-                label: "待验证".into(),
-                kind: ConnectionKind::Manual,
-                endpoint: "dock.invalid:33781".parse().expect("syntactic endpoint"),
-                state: EndpointState::DraftUnverified,
-                verified_at: None,
-                last_success_at: None,
-                disabled_from: None,
-                last_manual_test: None,
-            });
-            profile.policy = ConnectionPolicy::Fixed { endpoint_id: id };
-            Ok(())
-        });
-        assert!(result.is_err());
-        fs::remove_dir_all(path).expect("cleanup");
     }
 }

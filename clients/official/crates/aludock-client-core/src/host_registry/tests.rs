@@ -90,7 +90,12 @@ fn current_012_saved_host_reopens_and_duplicate_pairing_keeps_its_profile() {
         "33333333-3333-4333-8333-333333333333"
     );
     let saved_profile = store.load_connection_profile().unwrap().unwrap();
-    assert_eq!(serde_json::to_value(&saved_profile).unwrap(), profile);
+    // Addresses and name survive; the old fixed preference no longer applies (#328).
+    let reopened_profile = json!({"schemaVersion":1,"revision":9,"hostId":id,"displayName":"Saved desktop","endpoints":[{"id":"55555555-5555-4555-8555-555555555555","label":"Home","kind":"local","endpoint":{"host":"127.0.0.1","port":4444},"state":"verified","verifiedAt":null,"disabledFrom":null,"lastManualTest":null}],"policy":{"mode":"automatic"}});
+    assert_eq!(
+        serde_json::to_value(&saved_profile).unwrap(),
+        reopened_profile
+    );
     let preferences = ClientPreferencesStore::open(root.join("client-preferences"))
         .unwrap()
         .snapshot()

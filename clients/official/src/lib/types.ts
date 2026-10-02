@@ -65,7 +65,8 @@ export interface Work {
   updatedAt: string
 }
 
-export type ConnectionKind = 'local' | 'remote' | 'vpn' | 'manual'
+/** Judged by the client from the address itself; users never choose it. */
+export type ConnectionKind = 'local' | 'remote' | 'vpn'
 export type EndpointState = 'draft_unverified' | 'verified' | 'disabled'
 
 export interface EndpointTestStatus {
@@ -81,7 +82,6 @@ export interface HostEndpoint {
   endpoint: { host: string; port: number }
   state: EndpointState
   verifiedAt?: string
-  lastSuccessAt?: string
   disabledFrom?: Exclude<EndpointState, 'disabled'>
   lastManualTest?: EndpointTestStatus
 }
@@ -98,14 +98,19 @@ export interface HostConnectionProfile {
   revision: number
   hostId: string
   displayName: string
+  /** Kept in the order a connection tries them. */
   endpoints: HostEndpoint[]
-  policy: { mode: 'automatic' } | { mode: 'fixed'; endpointId: string }
-  lastSuccessfulEndpointId?: string
 }
 
 export interface ConnectionContext {
   connectionId: string
   selectionGeneration: number
+}
+
+/** Which saved address the selected Host's connection is using right now. */
+export interface HostRoute extends ConnectionContext {
+  routeGeneration: number
+  activeEndpointId: string | null
 }
 
 export type ConnectionTarget =
