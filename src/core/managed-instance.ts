@@ -271,6 +271,7 @@ interface WorkingCheckpoint {
   agentSettledCount: number;
   lastAssistantOutcome: AssistantOutcome | undefined;
   stopRequestedWhileRunning: boolean;
+  abortRequestedWhileRunning: boolean;
   catalogAdmissionOperationId: string | undefined;
   replacementIntent: CatalogInstanceRecord["replacement"];
   durableSessionFile: string | undefined;
@@ -407,6 +408,10 @@ export class ManagedInstance {
   private runtimeFollowUpHashes: string[] = [];
   private lastAssistantOutcome: AssistantOutcome | undefined;
   private stopRequestedWhileRunning = false;
+  /** An abort reached the Agent during this run; Pi may end it without an aborted reply, e.g. during compaction. */
+  private abortRequestedWhileRunning = false;
+  /** Generation whose Agent is finishing a run and asked the Host to hold input until that run settles. */
+  private hostQueueAwaitsSettleGeneration: number | undefined;
   private compactionActive = false;
   /** Synchronous runtime-edge truth closes the gap before catalog projection catches up. */
   private runtimeCompactingObserved: boolean | undefined;
@@ -1308,6 +1313,7 @@ export class ManagedInstance {
     let actualInputKind: AgentInputKind = "prompt";
     let actualCustody: "host" | "runtime" = "runtime";
     let actuallyQueued = false;
+    let handledByExtension = false;
     const commandId = operationId;
     const agentStartsBeforeCommand = this.agentStartCount;
     const agentSettlesBeforeCommand = this.agentSettledCount;
@@ -1389,12 +1395,16 @@ export class ManagedInstance {
       actualCustody = result.custody;
       actuallyQueued = actualInputKind === "prompt" && actualDelivery !== "prompt";
       if (result.custody === "host") {
+        // Custody the Host did not ask for: the Agent is finishing a run and takes
+        // input again once that run settles, so the Queue waits for agent_settled.
+        if (!shouldDeferToHost) this.hostQueueAwaitsSettleGeneration = inputGeneration;
         preflightTransition = this.completeCompactionDeferredAdmission(
           message,
           result.delivery,
           commandId,
           inputImages,
           inputAttachments,
+          this.hostQueueAwaitsSettleGeneration === inputGeneration ? "command_deferred_until_settled" : "command_deferred_for_compaction",
         ).then((receipt) => {
           if (!receiptSettled) {
             receiptSettled = true;
@@ -1408,6 +1418,51 @@ export class ManagedInstance {
             rejectReceipt(error);
           }
         }).finally(release);
+        return;
+      }
+      if (result.inputKind === "prompt" && result.custody === "runtime" && result.handled === true) {
+        // An extension input hook took it over: no message, queue item or run follows.
+        // A Protocol V2 receipt can only be immediate for the running command, so during
+        // another run it reads like queued input; command.handled then closes it.
+        handledByExtension = true;
+        actuallyQueued = false;
+        const receiptQueued = actualDelivery !== "prompt";
+        const handledAt = this.timestamp();
+        this.catalogAdmissionOperationId = undefined;
+        const precedingAgentEvents = this.flushAdmissionAgentEvents();
+        const handledTransition = this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => {
+            this.state.lastError = undefined;
+            this.touch(handledAt);
+          },
+          () => {
+            this.appendEvent("command.accepted", { operationId: commandId, delivery: actualDelivery, queued: receiptQueued, acceptedAt: handledAt }, handledAt);
+            this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
+            this.appendStateEvent("command_handled_without_run", handledAt);
+          },
+        ));
+        preflightTransition = Promise.all([precedingAgentEvents, handledTransition]).then(() => {
+          if (!receiptSettled) {
+            receiptSettled = true;
+            resolveReceipt({
+              accepted: true,
+              instanceId: this.id,
+              operationId: commandId,
+              kind: "prompt",
+              delivery: actualDelivery,
+              queued: receiptQueued,
+              acceptedAt: handledAt,
+            });
+          }
+          release();
+        }, (error: unknown) => {
+          if (!receiptSettled) {
+            receiptSettled = true;
+            rejectReceipt(error);
+          }
+          release();
+        });
         return;
       }
       let precedingAgentEvents = Promise.resolve();
@@ -1533,7 +1588,7 @@ export class ManagedInstance {
     const observedPromise = runtimePromise.then(async () => {
       if (preflightStatus === "pending") throw new Error("Worker resolved message submission without reporting actual delivery");
       await preflightTransition;
-      if (actualCustody === "host") return;
+      if (actualCustody === "host" || handledByExtension) return;
       if (preflightStatus === "accepted" && actualInputKind === "extension_command") {
         await Promise.resolve();
         await this.transitionTail;
@@ -1678,6 +1733,7 @@ export class ManagedInstance {
     operationId: string,
     images: readonly ImagePathDto[],
     attachments: readonly AttachmentDto[],
+    reason: "command_deferred_for_compaction" | "command_deferred_until_settled" = "command_deferred_for_compaction",
   ): Promise<CommandReceipt> {
     const acceptedAt = this.timestamp();
     const pendingMessage: PendingQueueMessage = {
@@ -1717,7 +1773,7 @@ export class ManagedInstance {
           acceptedAt,
         }, acceptedAt);
         this.appendEvent("message.queued", pendingMessageProjection([pendingMessage])[0]!, acceptedAt);
-        this.appendStateEvent("command_deferred_for_compaction", acceptedAt);
+        this.appendStateEvent(reason, acceptedAt);
       },
     ));
     this.catalogAdmissionOperationId = undefined;
@@ -1739,6 +1795,8 @@ export class ManagedInstance {
   private scheduleCompactionQueueDrain(willRetry: boolean): void {
     if (
       (this.compactionQueueDrainTask && this.compactionQueueDrainGeneration === this.runtimeGenerationValue)
+      // The Agent hands back control with agent_settled; its transition resumes this drain.
+      || this.hostQueueAwaitsSettleGeneration === this.runtimeGenerationValue
       || this.runtimeCompactionInProgress()
       || this.manualCompactionAdmissionActive()
       || this.commandScheduler.activeCommand("control", "queue") !== undefined
@@ -1825,6 +1883,7 @@ export class ManagedInstance {
     if (item.phase !== "host_deferred") return true;
     item.phase = "dispatching";
     if (forceRuntimeQueue) {
+      let handled = false;
       try {
         await this.invokeAgent<void>("command.submit", {
           operationId: item.operationId,
@@ -1832,8 +1891,15 @@ export class ManagedInstance {
           ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
           ...(item.attachments === undefined ? {} : { attachments: item.attachments.map((attachment) => attachment.fileId) }),
           delivery: item.delivery,
-        }, { context: { type: "force_queue", ...(item.attachments === undefined ? {} : { attachments: cloneInputAttachments(item.attachments) }) } });
-        item.phase = "runtime_queued";
+        }, {
+          context: { type: "force_queue", ...(item.attachments === undefined ? {} : { attachments: cloneInputAttachments(item.attachments) }) },
+          // The Agent may let an input hook take queued input over instead of queueing it.
+          preflightResult: (result) => {
+            handled = result.success && result.inputKind === "prompt" && result.custody === "runtime" && result.handled === true;
+          },
+        });
+        if (handled) await this.dropHandledQueueItem(item);
+        else item.phase = "runtime_queued";
         await this.transitionTail;
         return true;
       } catch (error) {
@@ -1867,6 +1933,11 @@ export class ManagedInstance {
         return;
       }
       preflightStatus = "accepted";
+      if (result.inputKind === "prompt" && result.custody === "runtime" && result.handled === true) {
+        // Leave the Queue before the drain may pass on to the next message.
+        void this.dropHandledQueueItem(item).then(() => resolvePreflight(true), () => resolvePreflight(false));
+        return;
+      }
       if (result.delivery !== "prompt") {
         item.delivery = result.delivery;
         item.phase = "runtime_queued";
@@ -1910,29 +1981,8 @@ export class ManagedInstance {
           this.nextAgentStartBoundary = undefined;
           resolveFreshStart();
         }
-        // An input hook handled the text without a run. It is no longer a
-        // resendable queue item, but must leave the tray explicitly.
-        await this.enqueueTransition(() => this.commitCatalogTransition(
-          { kind: "command.no_run", effect: "post_effect", operationId: item.operationId, instanceId: this.id },
-          () => {
-            const index = this.pendingQueueMessages.indexOf(item);
-            if (index >= 0) this.pendingQueueMessages.splice(index, 1);
-            if (item.delivery === "steer") this.state.pendingSteering = Math.max(0, this.state.pendingSteering - 1);
-            else this.state.pendingFollowUp = Math.max(0, this.state.pendingFollowUp - 1);
-            this.touch();
-          },
-          () => {
-            this.appendEvent("queue.cleared", {
-              steering: item.delivery === "steer" ? 1 : 0,
-              followUp: item.delivery === "followUp" ? 1 : 0,
-              total: 1,
-              queueItemIds: [item.queueItemId],
-              reason: "dequeued",
-            });
-            this.appendEvent("command.handled", { operationId: item.operationId, kind: "no_run" });
-            this.appendStateEvent("deferred_command_handled_without_run");
-          },
-        ));
+        // The prompt ended without a run, as when an input hook handled it.
+        await this.dropHandledQueueItem(item);
       }
     }).catch(async (error: unknown) => {
       if (preflightStatus === "pending") {
@@ -1961,6 +2011,31 @@ export class ManagedInstance {
     // before deciding whether a later FIFO item may advance.
     await Promise.resolve();
     return accepted && dispatchMayContinue;
+  }
+
+  /** A Host-held message an input hook took over is no longer resendable; it leaves the Queue explicitly. */
+  private dropHandledQueueItem(item: PendingQueueMessage): Promise<void> {
+    return this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "command.no_run", effect: "post_effect", operationId: item.operationId, instanceId: this.id },
+      () => {
+        const index = this.pendingQueueMessages.indexOf(item);
+        if (index >= 0) this.pendingQueueMessages.splice(index, 1);
+        if (item.delivery === "steer") this.state.pendingSteering = Math.max(0, this.state.pendingSteering - 1);
+        else this.state.pendingFollowUp = Math.max(0, this.state.pendingFollowUp - 1);
+        this.touch();
+      },
+      () => {
+        this.appendEvent("queue.cleared", {
+          steering: item.delivery === "steer" ? 1 : 0,
+          followUp: item.delivery === "followUp" ? 1 : 0,
+          total: 1,
+          queueItemIds: [item.queueItemId],
+          reason: "dequeued",
+        });
+        this.appendEvent("command.handled", { operationId: item.operationId, kind: "no_run" });
+        this.appendStateEvent("deferred_command_handled_without_run");
+      },
+    ));
   }
 
   private async reportDeferredDispatchFailure(
@@ -2145,6 +2220,7 @@ export class ManagedInstance {
       try {
         resumeHostQueue = false;
         const request = !restoreQueue ? "command.abort" : running ? "command.abort_restore_queue" : "queue.dequeue";
+        if (running) this.abortRequestedWhileRunning = true;
         const cleared = await this.invokeAgent<ClearedAgentQueue | null>(request, { operationId });
         if (running) {
           await this.session.control({ type: "wait_for_idle" });
@@ -2509,6 +2585,7 @@ export class ManagedInstance {
       agentSettledCount: this.agentSettledCount,
       lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
+      abortRequestedWhileRunning: this.abortRequestedWhileRunning,
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
       replacementIntent: this.replacementIntent ? cloneJson(this.replacementIntent) : undefined,
       durableSessionFile: this.durableSessionFileValue,
@@ -2539,6 +2616,7 @@ export class ManagedInstance {
     this.agentSettledCount = checkpoint.agentSettledCount;
     this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
     this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
+    this.abortRequestedWhileRunning = checkpoint.abortRequestedWhileRunning;
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
     this.replacementIntent = checkpoint.replacementIntent;
     this.durableSessionFileValue = checkpoint.durableSessionFile;
@@ -3144,6 +3222,7 @@ export class ManagedInstance {
             if (carriedOperationId !== undefined) this.state.activeCommandId = carriedOperationId;
             this.agentStartCount += 1;
             this.lastAssistantOutcome = undefined;
+            this.abortRequestedWhileRunning = false;
             this.state.execution = "running";
             this.state.lastError = undefined;
             this.touch();
@@ -3173,7 +3252,8 @@ export class ManagedInstance {
               this.state.execution = "failed";
               // Catalog status is a preview; events and history retain the full Agent error.
               this.state.lastError = truncate(outcome.errorMessage || "Pi run failed", MAX_CATALOG_LAST_ERROR_CHARS);
-            } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning) {
+            } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning || this.abortRequestedWhileRunning) {
+              // Aborting during automatic compaction ends the run after a completed reply.
               result = "aborted";
               this.state.execution = "idle";
               this.state.lastError = undefined;
@@ -3193,6 +3273,7 @@ export class ManagedInstance {
             if (this.compactionActive) this.state.execution = "running";
             this.state.lastRun = result;
             this.state.activeCommandId = undefined;
+            this.abortRequestedWhileRunning = false;
             this.touch();
           },
           publish: () => {
@@ -3203,6 +3284,12 @@ export class ManagedInstance {
               error: outcome?.errorMessage,
             });
             this.appendStateEvent("agent_settled");
+          },
+          // Input held while the Agent finished this run goes to it now.
+          settle: () => {
+            if (this.hostQueueAwaitsSettleGeneration === undefined) return;
+            this.hostQueueAwaitsSettleGeneration = undefined;
+            this.scheduleCompactionQueueDrain(false);
           },
         };
       }

@@ -372,7 +372,6 @@ export class PiAgentAdapter {
       case "command.submit": {
         const { operationId, delivery: requestedDelivery, message, images } = request.params;
         const binding = this.requireActive();
-        await this.waitForSettledBoundary(binding);
         const attachments = context !== undefined && context.type !== "session_switch" ? context.attachments : undefined;
         const inputKind = this.classifyInput(message);
         if (inputKind === "extension_command" && ((images?.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
@@ -380,9 +379,12 @@ export class PiAgentAdapter {
           throw new Error("Registered extension commands do not accept attachments");
         }
         if (inputKind === "extension_command") {
-          // Resolve and start the registered invocation in the same Worker
-          // turn, before its handler can suspend on a long-lived Promise.
+          // Report custody before the registered handler can suspend on a
+          // long-lived Promise. Pi 0.99 would only queue a command sent while an
+          // extension still handles agent_settled and return before it ran, so the
+          // command starts after that boundary; the Host is not held meanwhile.
           preflightResult?.({ success: true, inputKind, delivery: "prompt", custody: "runtime" });
+          await this.waitForSettledBoundary(binding);
           this.extensionCommandOperationId = operationId;
           try {
             await binding.session.prompt(message, { source: "rpc" } as PromptOptions);
@@ -391,7 +393,9 @@ export class PiAgentAdapter {
             if (this.extensionCommandOperationId === operationId) this.extensionCommandOperationId = undefined;
           }
         }
-        const admissionRunning = context?.type === "defer_to_host" || this.isStreaming;
+        // While Pi finishes a reply the Host still shows the Work as running, so
+        // input is admitted as during the reply.
+        const admissionRunning = context?.type === "defer_to_host" || this.isStreaming || piIsSettling(binding);
         const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt") : requestedDelivery;
         const validatesRequestedDelivery = context?.type !== "force_queue" && context?.type !== "host_queue";
         const invalidDelivery = validatesRequestedDelivery && (
@@ -417,6 +421,24 @@ export class PiAgentAdapter {
         const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const attachmentImages = await resolveAttachmentImages(attachments, this.options.dockAttachmentPort);
         const runtimeImages = attachmentImages === undefined ? images : [...(images ?? []), ...attachmentImages];
+        const visualContent = context?.type === "force_queue" ? undefined : await loadPiImages(runtimeImages);
+        // Pi 0.99 holds input that arrives while an extension still handles
+        // agent_settled and reports nothing about it until much later. Decide only
+        // now, after every read above, and hand the input to Pi without waiting
+        // in between: a reply can finish while attachments are being read.
+        if (context?.type === "host_queue") {
+          // A Host Queue hand-off holds no client admission, so it may simply wait.
+          await this.waitForSettledBoundary(binding);
+        } else if (context?.type === "command" && piIsSettling(binding)) {
+          // Like input during compaction, the Host keeps it in its Queue, where it
+          // can be taken back, and hands it over once Pi publishes agent_settled.
+          if (!queueAvailable) {
+            preflightResult?.({ success: false });
+            throw new AgentQueueRejectedBeforeEffectError();
+          }
+          preflightResult?.({ success: true, inputKind, delivery: delivery === "prompt" ? "steer" : delivery, custody: "host" });
+          return null;
+        }
         const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
         const input = binding.conversation.trackInput({
           operationId,
@@ -428,10 +450,14 @@ export class PiAgentAdapter {
           attachments,
         });
         const reportPreflight = (disposition: PiPromptDisposition): void => {
-          // Input an extension handled never becomes a Pi message, so it must not
-          // claim the operation identity of the next run.
-          if (disposition === "handled") binding.conversation.cancelInput(input);
           const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
+          if (disposition === "handled") {
+            // An extension input hook took the input over. It never becomes a Pi
+            // message or queue item, so it must not claim the next run either.
+            binding.conversation.cancelInput(input);
+            preflightResult?.({ success: true, inputKind, delivery: actualDelivery, custody: "runtime", handled: true });
+            return;
+          }
           input.delivery = actualDelivery;
           input.fromQueue = hostQueued || actualDelivery !== "prompt";
           preflightResult?.({ success: true, inputKind, delivery: actualDelivery, custody: "runtime" });
@@ -439,14 +465,19 @@ export class PiAgentAdapter {
         try {
           if (context?.type === "force_queue") {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
-            return await this.queueMessage(runtimeMessage, delivery, runtimeImages);
+            // Pi 0.99 runs input hooks before queueing, so an extension may take it over here too.
+            const handled = await this.queueMessage(runtimeMessage, delivery, runtimeImages) === "handled";
+            if (handled) binding.conversation.cancelInput(input);
+            preflightResult?.({ success: true, inputKind, delivery, custody: "runtime", ...(handled ? { handled: true as const } : {}) });
+            return null;
           }
-          return await this.prompt(runtimeMessage, {
+          await binding.session.prompt(runtimeMessage, {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
-            ...(runtimeImages === undefined ? {} : { images: runtimeImages }),
+            ...(visualContent === undefined ? {} : { images: visualContent }),
             preflightResult: reportPreflight,
-          });
+          } as PromptOptions);
+          return null;
         } catch (error) {
           binding.conversation.cancelInput(input);
           throw error;
@@ -533,32 +564,32 @@ export class PiAgentAdapter {
   /**
    * Pi 0.99 defers input that arrives while extensions still handle agent_settled:
    * prompt() then returns before reporting a disposition and runs the input later.
-   * Start Dock input after Pi publishes agent_settled instead.
+   * Only paths that hold no client admission wait here for Pi to publish agent_settled.
    */
   private async waitForSettledBoundary(binding: Binding): Promise<void> {
-    while (binding.token.active && binding.awaitingSettled && !binding.session.isStreaming) {
+    while (piIsSettling(binding)) {
       await new Promise<void>((resolve) => binding.settledWaiters.push(resolve));
     }
     if (!binding.token.active) throw new Error("Pi session changed before this input could start");
   }
 
-  async queueMessage(text: string, delivery: "steer" | "followUp", images?: ImagePathDto[]): Promise<void> {
+  /** Queue input in Pi; resolves with "handled" when an extension input hook took it over instead. */
+  async queueMessage(text: string, delivery: "steer" | "followUp", images?: ImagePathDto[]): Promise<"handled" | "queued"> {
     let visualContent: PiImageContent[] | undefined;
     try { visualContent = await loadPiImages(images); }
     catch (error) { throw new AgentQueueRejectedBeforeEffectError(error); }
     const session = this.requireActive().session;
     const updateSequenceBefore = this.queueUpdateSequence;
-    const before = delivery === "steer"
-      ? session.getSteeringMessages().length
-      : session.getFollowUpMessages().length;
-    const mutation = delivery === "steer" ? session.steer(text, visualContent) : session.followUp(text, visualContent);
-    const appliedSynchronously = this.queueUpdateSequence > updateSequenceBefore || (delivery === "steer"
-      ? session.getSteeringMessages().length
-      : session.getFollowUpMessages().length) > before;
-    return mutation.then(() => {}, (error: unknown) => {
-      if (!appliedSynchronously) throw new AgentQueueRejectedBeforeEffectError(error);
+    const queued = (): number => delivery === "steer" ? session.getSteeringMessages().length : session.getFollowUpMessages().length;
+    const before = queued();
+    try {
+      return await (delivery === "steer" ? session.steer(text, visualContent) : session.followUp(text, visualContent));
+    } catch (error) {
+      // Pi 0.99 runs input hooks before it queues, so only a visible queue change
+      // shows that the input may already be in Pi's custody.
+      if (this.queueUpdateSequence === updateSequenceBefore && queued() <= before) throw new AgentQueueRejectedBeforeEffectError(error);
       throw new AgentQueueEffectUnknownError(error);
-    });
+    }
   }
 
   async listModels(): Promise<AgentModelListBody> {
@@ -2287,6 +2318,11 @@ export class PiConversationProjector {
 
 function releaseSettledWaiters(binding: Binding): void {
   for (const resolve of binding.settledWaiters.splice(0)) resolve();
+}
+
+/** Pi finished the run and extensions still handle agent_settled; it defers new input until then. */
+function piIsSettling(binding: Binding): boolean {
+  return binding.token.active && binding.awaitingSettled && !binding.session.isStreaming;
 }
 
 function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): AgentHistoryEntry {

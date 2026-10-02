@@ -7,9 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { AttachmentService } from "../../src/control/attachment-service.js";
+import { AttachmentStorageState } from "../../src/control/attachment-storage-state.js";
 import { DockClient } from "../../src/control/dock-client.js";
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
+import type { InstanceAttachmentHostPort } from "../../src/core/instance-attachments.js";
 import type { DockEvent } from "../../src/core/managed-instance.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 
@@ -24,6 +27,11 @@ const TEMPLATE_PROMPT = "SDK_COMPAT_TEMPLATE_EXPANDED: consume this queued templ
 const HANDLED_PROMPT = "SDK_COMPAT_HANDLED: an input hook takes this over";
 const SETTLE_FIRST_PROMPT = "SDK_COMPAT_SETTLE_FIRST: finish while an extension holds settlement";
 const SETTLE_SECOND_PROMPT = "SDK_COMPAT_SETTLE_SECOND: sent before settlement finished";
+const SETTLE_TAKEBACK_PROMPT = "SDK_COMPAT_SETTLE_TAKEBACK: taken back before settlement finished";
+const OVERFLOW_PROMPT = "SDK_COMPAT_OVERFLOW: exceed the context window";
+const AFTER_COMPACTION_PROMPT = "SDK_COMPAT_AFTER_COMPACTION: steer the retried turn";
+const SUMMARY_TEXT = "SDK_COMPAT_SUMMARY: the earlier conversation";
+const ONE_PIXEL_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const COMPACT_PROMPT = "SDK_COMPAT_COMPACT: report a context-filling answer";
 const CONTINUE_TEXT = "SDK_COMPAT_CONTINUE: an extension continues after automatic compaction";
 const SUMMARIZATION_MARKER = "You are a context summarization assistant";
@@ -66,7 +74,7 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
               id: MODEL,
               name: "SDK compatibility loopback model",
               reasoning: false,
-              input: ["text"],
+              input: ["text", "image"],
               contextWindow: 32_000,
               maxTokens: 2_000,
               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -110,6 +118,15 @@ export default function (pi) {
     ]);
 
     const workerEnvironment = sanitizedWorkerEnvironment(homeDir);
+    const attachmentService = new AttachmentService(new AttachmentStorageState(join(root, "state"), join(root, "attachments")));
+    // Resolving an attachment can be held, so a reply can finish while it is read.
+    const attachmentResolution = new Pause();
+    const attachments: InstanceAttachmentHostPort = {
+      async accessAttachments(sourceInstanceId, request) {
+        if (request.type === "resolve") await attachmentResolution.pass();
+        return attachmentService.accessAttachments(sourceInstanceId, request);
+      },
+    };
     const registry = new DockRegistry(
       // This is the Registry's production Pi factory. The scenario enters only through DockClient.
       (input) => createPiInstance({
@@ -120,9 +137,9 @@ export default function (pi) {
         onWorkerSpawn: (pid) => workerPids.push(pid),
       }),
       () => "pi-sdk-compat-instance",
-      { reopenTargetResolver: { resolve: resolvePiReopenTarget } },
+      { reopenTargetResolver: { resolve: resolvePiReopenTarget }, attachmentHostPort: attachments },
     );
-    host = new DockHost({ socketPath, registry });
+    host = new DockHost({ socketPath, registry, attachmentService });
     client = new DockClient({ socketPath, timeoutMs: 3_000, longMutationTimeoutMs: 8_000 });
     await host.start();
     const created = await client.create(
@@ -207,6 +224,11 @@ export default function (pi) {
     assert.equal(steered.receipt.delivery, "steer");
     assert.equal(followed.receipt.queued, true);
     assert.equal(followed.receipt.delivery, "followUp");
+    // Pi 0.99 lets input hooks take over queued input too; it must not wait in the Queue.
+    await client.prompt(created.id, `${HANDLED_PROMPT} while running`, "steer", "sdk-handled-running");
+    await waitForEvent(events, holdEvent, (event) => event.type === "command.handled" && event.data.operationId === "sdk-handled-running");
+    assert.equal(events.slice(holdEvent).some((event) => event.type === "message.queued" && event.data.operationId === "sdk-handled-running"), false);
+    assert.equal((await client.status(created.id)).pending.total, 2);
     const restored = await client.abortRestoreQueue(created.id, "sdk-abort-restore");
     assert.deepEqual(restored.receipt.restored.map((item) => item.operationId).sort(), ["sdk-follow-up", "sdk-steer"]);
     assert.equal(restored.instance.pending.total, 0);
@@ -230,21 +252,69 @@ export default function (pi) {
     assert.equal(recovered.data.result, "succeeded");
 
     // Pi 0.99 defers input that arrives while an extension still handles agent_settled.
-    // Dock starts it after that boundary instead of reporting a rejected message that Pi runs later.
+    // Dock keeps it in its Queue meanwhile: Escape hands it back at once, and nothing starts afterwards.
     await writeFile(holdSettle, "");
-    const settleEvent = events.length;
+    const takeBackEvent = events.length;
     await client.prompt(created.id, SETTLE_FIRST_PROMPT, "prompt", "sdk-settle-first");
     await waitForFile(settleEntered);
-    const duringSettle = client.prompt(created.id, SETTLE_SECOND_PROMPT, "auto", "sdk-settle-second").then((value) => value, (error: unknown) => error);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await rm(holdSettle);
-    const settleAccepted = await duringSettle;
+    const held = await client.prompt(created.id, SETTLE_TAKEBACK_PROMPT, "auto", "sdk-settle-takeback");
+    assert.equal(held.receipt.queued, true);
+    const handedBack = await client.abortRestoreQueue(created.id, "sdk-settle-escape");
+    assert.deepEqual(handedBack.receipt.restored.map((item) => item.operationId), ["sdk-settle-takeback"]);
+    await Promise.all([rm(holdSettle), rm(settleEntered)]);
+    await waitForEvent(events, takeBackEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-settle-first");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(SETTLE_TAKEBACK_PROMPT)), false, "returned input never starts");
+    assert.equal((await client.status(created.id)).pending.total, 0);
+
+    // A reply can finish while an attached image is still being read. The message is
+    // accepted rather than reported as failed, and runs exactly once after the extension finishes.
+    const imagePath = join(root, "photo.png");
+    await writeFile(imagePath, ONE_PIXEL_PNG);
+    const uploaded = await client.uploadFile(imagePath, "image/png", "sdk-upload-image", created.id);
+    await writeFile(holdSettle, "");
+    const settleEvent = events.length;
+    await client.prompt(created.id, HOLD_PROMPT, "prompt", "sdk-settle-hold");
+    await waitForEvent(events, settleEvent, (event) => event.type === "message.delta" && event.data.delta.includes("holding"));
+    attachmentResolution.close();
+    const withImage = client.prompt(created.id, SETTLE_SECOND_PROMPT, "auto", "sdk-settle-second", undefined, [uploaded.attachment.fileId])
+      .then((value) => value, (error: unknown) => error);
+    await attachmentResolution.waitUntilHeld();
+    fixture.releaseHold();
+    await waitForFile(settleEntered);
+    attachmentResolution.open();
+    const settleAccepted = await withImage;
     assert.ok(!(settleAccepted instanceof Error), `input sent before settlement must be accepted: ${String(settleAccepted)}`);
-    assert.equal((settleAccepted as Awaited<ReturnType<DockClient["prompt"]>>).receipt.queued, false);
+    assert.equal((settleAccepted as Awaited<ReturnType<DockClient["prompt"]>>).receipt.queued, true);
+    await Promise.all([rm(holdSettle), rm(settleEntered)]);
     const settledSecond = await waitForEvent(events, settleEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-settle-second");
     assert.equal(settledSecond.type, "run.settled");
     assert.equal(settledSecond.data.result, "succeeded");
-    assert.ok(fixture.requests.some((body) => lastUserText(body).includes(SETTLE_SECOND_PROMPT)));
+    assert.equal(fixture.requests.filter((body) => lastUserText(body).includes(SETTLE_SECOND_PROMPT)).length, 1);
+    assert.equal((await client.status(created.id)).pending.total, 0);
+
+    // After overflow compaction Pi retries the turn, and Dock hands it the messages it held meanwhile.
+    // One an extension takes over leaves the Queue and does not claim a later run.
+    const overflowEvent = events.length;
+    await client.prompt(created.id, OVERFLOW_PROMPT, "prompt", "sdk-overflow-run");
+    await fixture.waitForHeldSummarization();
+    await waitForEvent(events, overflowEvent, (event) => event.type === "compaction.started");
+    const handledHeld = await client.prompt(created.id, `${HANDLED_PROMPT} after compaction`, "auto", "sdk-handled-after-compaction");
+    assert.equal(handledHeld.receipt.queued, true);
+    await client.prompt(created.id, AFTER_COMPACTION_PROMPT, "auto", "sdk-steer-after-compaction");
+    fixture.releaseSummarization();
+    const handledAt = await waitForEvent(events, overflowEvent, (event) => event.type === "command.handled" && event.data.operationId === "sdk-handled-after-compaction");
+    await waitForEvent(events, events.indexOf(handledAt), (event) => event.type === "queue.changed" && event.data.steering === 1);
+    await fixture.waitForHeldReply();
+    fixture.releaseHold();
+    await waitForEvent(events, overflowEvent, (event) => event.type === "message.submitted" && event.data.operationId === "sdk-steer-after-compaction");
+    const overflowSettled = await waitForEvent(events, overflowEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-overflow-run");
+    assert.equal(overflowSettled.type, "run.settled");
+    assert.equal(overflowSettled.data.result, "succeeded");
+    assert.equal((await client.status(created.id)).pending.total, 0);
+    const afterHandledEvent = events.length;
+    await client.prompt(created.id, RECOVERY_PROMPT, "prompt", "sdk-after-handled");
+    await waitForEvent(events, afterHandledEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-after-handled");
     assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(HANDLED_PROMPT)), false, "handled input never reaches the model");
 
     // Pi 0.99 compacts inside the run, and an extension may ask to continue it afterwards.
@@ -255,11 +325,15 @@ export default function (pi) {
     await fixture.waitForHeldSummarization();
     await waitForEvent(events, compactEvent, (event) => event.type === "compaction.started");
     await client.abort(created.id, "sdk-compact-abort");
-    await waitForEvent(events, compactEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-compact-run");
+    const compactSettled = await waitForEvent(events, compactEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-compact-run");
+    assert.equal(compactSettled.type, "run.settled");
+    assert.equal(compactSettled.data.result, "aborted");
     assert.ok(events.slice(compactEvent).some((event) => event.type === "compaction.completed" && event.data.aborted === true));
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(fixture.requests.some((body) => JSON.stringify(body).includes(CONTINUE_TEXT)), false, "no model request may follow an abort during automatic compaction");
-    assert.equal((await client.status(created.id)).execution === "running", false);
+    const afterCompactionAbort = await client.status(created.id);
+    assert.equal(afterCompactionAbort.execution === "running", false);
+    assert.equal(afterCompactionAbort.lastRun, "aborted");
     await rm(continueAfterCompaction, { force: true });
 
     await client.nameSession(created.id, "SDK compatibility persisted", "sdk-name");
@@ -352,7 +426,11 @@ class LoopbackChatFixture {
   private readonly sockets = new Set<Socket>();
   private readonly server = createServer((request, response) => { void this.respond(request, response); });
   private pendingHoldResponse: ServerResponse | undefined;
-  private heldSummarization: ServerResponse | undefined;
+  /** One compaction may ask for several summaries (history and a split turn's prefix). */
+  private readonly heldSummaries: ServerResponse[] = [];
+  private answerSummaries = false;
+  private overflowRejected = false;
+  private holdNextReply = false;
 
   async start(): Promise<void> {
     this.server.on("connection", (socket) => {
@@ -378,9 +456,25 @@ class LoopbackChatFixture {
     finish(response, "stop");
   }
 
+  /** Answer this compaction's summaries; the turn Pi then retries is held instead. */
+  releaseSummarization(): void {
+    assert.ok(this.heldSummaries.length > 0, "the fixture must have a held compaction summary");
+    this.answerSummaries = true;
+    this.holdNextReply = true;
+    for (const response of this.heldSummaries.splice(0)) answerSummary(response);
+  }
+
+  async waitForHeldReply(): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (this.pendingHoldResponse) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail("Pi never retried the turn after compaction");
+  }
+
   async waitForHeldSummarization(): Promise<void> {
     for (let attempt = 0; attempt < 400; attempt += 1) {
-      if (this.heldSummarization) return;
+      if (this.heldSummaries.length > 0) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.fail("Pi never requested an automatic compaction summary");
@@ -407,7 +501,22 @@ class LoopbackChatFixture {
     // A summarization request quotes the whole conversation, so recognise it before any prompt text.
     if (JSON.stringify(body).includes(SUMMARIZATION_MARKER)) {
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-      this.heldSummarization = response;
+      if (this.answerSummaries) answerSummary(response);
+      else this.heldSummaries.push(response);
+      return;
+    }
+    if (this.holdNextReply) {
+      this.holdNextReply = false;
+      this.answerSummaries = false;
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      sendDelta(response, { role: "assistant", content: "retried turn " });
+      this.pendingHoldResponse = response;
+      return;
+    }
+    if (latestUserText.includes(OVERFLOW_PROMPT) && !this.overflowRejected) {
+      this.overflowRejected = true;
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "This endpoint's maximum context length is 32000 tokens. However, you requested about 40000 tokens.", type: "invalid_request_error" } }));
       return;
     }
     if (latestUserText.includes(ERROR_PROMPT)) {
@@ -450,6 +559,42 @@ class LoopbackChatFixture {
     }
     sendDelta(response, { role: "assistant", content: "fixture response" });
     finish(response, "stop");
+  }
+}
+
+function answerSummary(response: ServerResponse): void {
+  sendDelta(response, { role: "assistant", content: SUMMARY_TEXT });
+  finish(response, "stop");
+}
+
+/** Holds one waiting step until the test lets it continue. */
+class Pause {
+  private gate: Promise<void> | undefined;
+  private release = (): void => {};
+  private held = false;
+
+  close(): void {
+    this.held = false;
+    this.gate = new Promise((resolve) => { this.release = resolve; });
+  }
+
+  open(): void {
+    this.gate = undefined;
+    this.release();
+  }
+
+  async pass(): Promise<void> {
+    if (!this.gate) return;
+    this.held = true;
+    await this.gate;
+  }
+
+  async waitUntilHeld(): Promise<void> {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (this.held) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail("the held step never started");
   }
 }
 
