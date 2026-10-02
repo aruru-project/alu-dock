@@ -4,6 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { copyStagedPackage, installUserExecutable } from "../scripts/install-local.js";
 
@@ -26,8 +27,43 @@ test("package exposes the installed Alu Dock runtime and its operator/client doc
   };
   assert.deepEqual(manifest.bin, { aludock: "dist/src/cli.js" });
   assert.deepEqual(manifest.files, ["dist/src", "docs", "skills", "README.md"]);
-  assert.equal(manifest.scripts?.["install:local"], "npm run build && node dist/scripts/install-local.js");
+  assert.equal(manifest.scripts?.["install:local"], "node scripts/ensure-locked-dependencies.mjs && npm run build && node dist/scripts/install-local.js");
   assert.doesNotMatch(manifest.scripts?.["install:local"] ?? "", /\btest\b/u);
+});
+
+test("local install refreshes dependencies that no longer match the lock before building", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-locked-deps-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const script = fileURLToPath(new URL("../../scripts/ensure-locked-dependencies.mjs", import.meta.url));
+  // Stands in for npm and records each request.
+  const npmLog = join(root, "npm.log");
+  const fakeNpm = join(root, "fake-npm.mjs");
+  await writeFile(fakeNpm, `import { appendFileSync } from "node:fs";\nappendFileSync(${JSON.stringify(npmLog)}, process.argv.slice(2).join(" ") + "\\n");\n`);
+  const pi = { version: "0.99.2-dock.1", resolved: "https://example.invalid/pi-0.99.2-dock.1.tgz", integrity: "sha512-new" };
+  await writeFile(join(root, "package-lock.json"), JSON.stringify({
+    lockfileVersion: 3,
+    packages: {
+      "": { name: "fixture" },
+      "node_modules/pi": pi,
+      "node_modules/other-platform": { version: "1.0.0", resolved: "https://example.invalid/o.tgz", integrity: "sha512-o", optional: true },
+    },
+  }));
+  const install = () => spawnSync(process.execPath, [script], { cwd: root, env: { ...process.env, npm_execpath: fakeNpm }, encoding: "utf8" });
+  const npmRequests = async () => (await readFile(npmLog, "utf8").catch(() => "")).split("\n").filter(Boolean);
+  const installed = (entry: typeof pi) => writeFile(join(root, "node_modules", ".package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/pi": entry } }));
+
+  assert.equal(install().status, 0);
+  assert.deepEqual(await npmRequests(), ["ci"], "nothing installed yet");
+
+  await mkdir(join(root, "node_modules"));
+  await installed({ version: "0.85.1-dock.3", resolved: "https://example.invalid/pi-0.85.1-dock.3.tgz", integrity: "sha512-old" });
+  assert.equal(install().status, 0);
+  assert.deepEqual(await npmRequests(), ["ci", "ci"], "installed from an older lock, as before pulling a new Pi release");
+
+  // The other platform's optional package is absent by design.
+  await installed(pi);
+  assert.equal(install().status, 0);
+  assert.deepEqual(await npmRequests(), ["ci", "ci"], "a matching install builds as before");
 });
 
 test("Windows release has one complete package entry and uses the user's compatible Node.js", async () => {
