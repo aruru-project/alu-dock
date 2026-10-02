@@ -112,8 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&chosen.worker_config),
         )
         .await?;
-    // Independent public SDK observation: controlled 0.85.1-dock.3, Pi source
-    // f552c4faeedd24208fb4eb95cae829cb219a17b1. Hash complete bytes, not previews.
+    // Independent public SDK observation: controlled 0.99.2-dock.1, Pi source
+    // 3d6f2ce11985e60e1b4fdddf410e72ccd5b05f5e. Hash complete bytes, not previews.
     let prompts = client.compaction_prompts(&work.id).await?;
     for (field, text, expected) in [
         (
@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (
             "turnPrefix",
             &prompts.turn_prefix,
-            "9aeeb36ea731a8497d38abb03c2da351d81bcade4b2ae389bb6ae74300cf6ba5",
+            "7b0a15be5e0fdcce338ce7c1ef1fdd386faed258cc25d03915a05b05e7a6a183",
         ),
     ] {
         assert_eq!(

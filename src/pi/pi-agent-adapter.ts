@@ -227,6 +227,9 @@ interface Binding {
   bufferEvents: boolean;
   conversation: PiConversationProjector;
   runOperationId?: string;
+  /** Pi published agent_start and has not yet published the matching agent_settled. */
+  awaitingSettled: boolean;
+  settledWaiters: Array<() => void>;
   conversationReadState?: ConversationReadState;
   /** User shell commands (bash.run) still executing against this session, with what bash.started announced. */
   runningBash: Map<string, { command: string; excludeFromContext: boolean }>;
@@ -238,6 +241,12 @@ interface Binding {
 
 /** Pi's abortBash kills the process tree; its record is appended once the process is gone. */
 const BASH_RECORD_SETTLE_MS = 1_500;
+
+/** How Pi dispatched accepted input. Pi does not report rejected input; prompt() throws instead. */
+type PiPromptDisposition = Parameters<NonNullable<PromptOptions["preflightResult"]>>[0];
+interface PiPromptOptions extends Omit<AgentPromptOptions, "preflightResult"> {
+  preflightResult?: (disposition: PiPromptDisposition) => void;
+}
 
 type PiBashResult = Awaited<ReturnType<AgentSession["executeBash"]>>;
 
@@ -370,9 +379,12 @@ export class PiAgentAdapter {
           throw new Error("Registered extension commands do not accept attachments");
         }
         if (inputKind === "extension_command") {
-          // Resolve and start the registered invocation in the same Worker
-          // turn, before its handler can suspend on a long-lived Promise.
+          // Report custody before the registered handler can suspend on a
+          // long-lived Promise. Pi 0.99 would only queue a command sent while an
+          // extension still handles agent_settled and return before it ran, so the
+          // command starts after that boundary; the Host is not held meanwhile.
           preflightResult?.({ success: true, inputKind, delivery: "prompt", custody: "runtime" });
+          await this.waitForSettledBoundary(binding);
           this.extensionCommandOperationId = operationId;
           try {
             await binding.session.prompt(message, { source: "rpc" } as PromptOptions);
@@ -381,7 +393,9 @@ export class PiAgentAdapter {
             if (this.extensionCommandOperationId === operationId) this.extensionCommandOperationId = undefined;
           }
         }
-        const admissionRunning = context?.type === "defer_to_host" || this.isStreaming;
+        // While Pi finishes a reply the Host still shows the Work as running, so
+        // input is admitted as during the reply.
+        const admissionRunning = context?.type === "defer_to_host" || this.isStreaming || piIsSettling(binding);
         const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt") : requestedDelivery;
         const validatesRequestedDelivery = context?.type !== "force_queue" && context?.type !== "host_queue";
         const invalidDelivery = validatesRequestedDelivery && (
@@ -407,6 +421,23 @@ export class PiAgentAdapter {
         const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const attachmentImages = await resolveAttachmentImages(attachments, this.options.dockAttachmentPort);
         const runtimeImages = attachmentImages === undefined ? images : [...(images ?? []), ...attachmentImages];
+        const visualContent = context?.type === "force_queue" ? undefined : await loadPiImages(runtimeImages);
+        // Pi 0.99 holds input that arrives while an extension still handles
+        // agent_settled and reports nothing about it until much later. Decide only
+        // now, after every read above, and hand the input to Pi without waiting
+        // in between: a reply can finish while attachments are being read.
+        if ((context?.type === "command" || context?.type === "host_queue") && piIsSettling(binding)) {
+          // Like input during compaction, the Host keeps it in its Queue, where it
+          // can be taken back, and hands it over once Pi publishes agent_settled.
+          // A Host Queue hand-off goes back the same way: waiting here would make
+          // Escape wait for the extension too.
+          if (!queueAvailable) {
+            preflightResult?.({ success: false });
+            throw new AgentQueueRejectedBeforeEffectError();
+          }
+          preflightResult?.({ success: true, inputKind, delivery: delivery === "prompt" ? "steer" : delivery, custody: "host" });
+          return null;
+        }
         const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
         const input = binding.conversation.trackInput({
           operationId,
@@ -417,12 +448,15 @@ export class PiAgentAdapter {
           images,
           attachments,
         });
-        const reportPreflight = (success: boolean): void => {
-          if (!success) {
-            preflightResult?.({ success: false });
+        const reportPreflight = (disposition: PiPromptDisposition): void => {
+          const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
+          if (disposition === "handled") {
+            // An extension input hook took the input over. It never becomes a Pi
+            // message or queue item, so it must not claim the next run either.
+            binding.conversation.cancelInput(input);
+            preflightResult?.({ success: true, inputKind, delivery: actualDelivery, custody: "runtime", handled: true });
             return;
           }
-          const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
           input.delivery = actualDelivery;
           input.fromQueue = hostQueued || actualDelivery !== "prompt";
           preflightResult?.({ success: true, inputKind, delivery: actualDelivery, custody: "runtime" });
@@ -430,14 +464,19 @@ export class PiAgentAdapter {
         try {
           if (context?.type === "force_queue") {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
-            return await this.queueMessage(runtimeMessage, delivery, runtimeImages);
+            // Pi 0.99 runs input hooks before queueing, so an extension may take it over here too.
+            const handled = await this.queueMessage(runtimeMessage, delivery, runtimeImages) === "handled";
+            if (handled) binding.conversation.cancelInput(input);
+            preflightResult?.({ success: true, inputKind, delivery, custody: "runtime", ...(handled ? { handled: true as const } : {}) });
+            return null;
           }
-          return await this.prompt(runtimeMessage, {
+          await binding.session.prompt(runtimeMessage, {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
-            ...(runtimeImages === undefined ? {} : { images: runtimeImages }),
+            ...(visualContent === undefined ? {} : { images: visualContent }),
             preflightResult: reportPreflight,
-          });
+          } as PromptOptions);
+          return null;
         } catch (error) {
           binding.conversation.cancelInput(input);
           throw error;
@@ -512,32 +551,45 @@ export class PiAgentAdapter {
       : "extension_command";
   }
 
-  async prompt(text: string, options?: AgentPromptOptions): Promise<void> {
+  async prompt(text: string, options?: PiPromptOptions): Promise<void> {
     const { images, ...promptOptions } = options ?? {};
     const visualContent = await loadPiImages(images);
     await this.requireActive().session.prompt(text, {
       ...promptOptions,
       ...(visualContent === undefined ? {} : { images: visualContent }),
-    } as PromptOptions);
+    });
   }
 
-  async queueMessage(text: string, delivery: "steer" | "followUp", images?: ImagePathDto[]): Promise<void> {
+  /**
+   * Pi 0.99 defers input that arrives while extensions still handle agent_settled:
+   * prompt() then returns before reporting a disposition and runs the input later.
+   * Only a registered extension command, whose custody is already reported, waits
+   * here for Pi to publish agent_settled.
+   */
+  private async waitForSettledBoundary(binding: Binding): Promise<void> {
+    while (piIsSettling(binding)) {
+      await new Promise<void>((resolve) => binding.settledWaiters.push(resolve));
+    }
+    if (!binding.token.active) throw new Error("Pi session changed before this input could start");
+  }
+
+  /** Queue input in Pi; resolves with "handled" when an extension input hook took it over instead. */
+  async queueMessage(text: string, delivery: "steer" | "followUp", images?: ImagePathDto[]): Promise<"handled" | "queued"> {
     let visualContent: PiImageContent[] | undefined;
     try { visualContent = await loadPiImages(images); }
     catch (error) { throw new AgentQueueRejectedBeforeEffectError(error); }
     const session = this.requireActive().session;
     const updateSequenceBefore = this.queueUpdateSequence;
-    const before = delivery === "steer"
-      ? session.getSteeringMessages().length
-      : session.getFollowUpMessages().length;
-    const mutation = delivery === "steer" ? session.steer(text, visualContent) : session.followUp(text, visualContent);
-    const appliedSynchronously = this.queueUpdateSequence > updateSequenceBefore || (delivery === "steer"
-      ? session.getSteeringMessages().length
-      : session.getFollowUpMessages().length) > before;
-    return mutation.catch((error: unknown) => {
-      if (!appliedSynchronously) throw new AgentQueueRejectedBeforeEffectError(error);
+    const queued = (): number => delivery === "steer" ? session.getSteeringMessages().length : session.getFollowUpMessages().length;
+    const before = queued();
+    try {
+      return await (delivery === "steer" ? session.steer(text, visualContent) : session.followUp(text, visualContent));
+    } catch (error) {
+      // Pi 0.99 runs input hooks before it queues, so only a visible queue change
+      // shows that the input may already be in Pi's custody.
+      if (this.queueUpdateSequence === updateSequenceBefore && queued() <= before) throw new AgentQueueRejectedBeforeEffectError(error);
       throw new AgentQueueEffectUnknownError(error);
-    });
+    }
   }
 
   async listModels(): Promise<AgentModelListBody> {
@@ -1096,22 +1148,11 @@ export class PiAgentAdapter {
       await navigation.then(() => {}, (error) => { throw error; });
       return;
     }
-    if (session.isCompacting) {
-      let resolveCompaction!: () => void;
-      const compactionEnded = new Promise<void>((resolve) => { resolveCompaction = resolve; });
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === "compaction_end") resolveCompaction();
-      });
-      try {
-        session.abortCompaction();
-        await compactionEnded;
-      } finally {
-        unsubscribe();
-      }
-    } else {
-      await session.abort();
-    }
-    await session.waitForIdle();
+    // Pi 0.99 runs automatic compaction inside the run. Its abort cancels the
+    // compaction and also ends the run, so a queued message or an extension's
+    // agent_before_settle continuation cannot call the model after this abort.
+    // Cancelling only the compaction would let the run continue.
+    await session.abort();
   }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
@@ -1340,6 +1381,7 @@ export class PiAgentAdapter {
         return { cancelled: false };
       } catch (error) {
         binding.token.active = false;
+        releaseSettledWaiters(binding);
         binding.unsubscribe();
         binding.gitBranchObserver?.dispose();
         this.active = undefined;
@@ -1463,12 +1505,15 @@ export class PiAgentAdapter {
       buffered: [],
       bufferEvents: true,
       conversation: new PiConversationProjector(this.options.attachmentContextKey),
+      awaitingSettled: false,
+      settledWaiters: [],
       runningBash: new Map(),
       bashTasks: new Set(),
       deferredBash: new Set(),
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
+      if (event.type === "agent_start") binding.awaitingSettled = true;
       if (event.type === "bash_execution_update") {
         // Only commands started through bash.run carry an id; output arrives as conversation frames.
         if (typeof event.id === "string" && binding.runningBash.has(event.id) && typeof event.delta === "string") {
@@ -1488,7 +1533,11 @@ export class PiAgentAdapter {
         const outbound = projected.type === "conversation_checkpoint" ? this.checkpoint(binding) : projected;
         this.publishFromBinding(binding, outbound);
       }
-      if (event.type === "agent_settled") binding.runOperationId = undefined;
+      if (event.type === "agent_settled") {
+        binding.runOperationId = undefined;
+        binding.awaitingSettled = false;
+        releaseSettledWaiters(binding);
+      }
     });
     this.staged = binding;
     const previousProcessCwd = this.processCwdValue;
@@ -1516,6 +1565,7 @@ export class PiAgentAdapter {
         : GitBranchObserver.create(binding.cwd, publishBranch));
     } catch (error) {
       token.active = false;
+      releaseSettledWaiters(binding);
       binding.unsubscribe();
       binding.gitBranchObserver?.dispose();
       if (this.staged === binding) this.staged = undefined;
@@ -1627,6 +1677,7 @@ export class PiAgentAdapter {
     for (const binding of [this.active, this.staged]) {
       if (!binding) continue;
       binding.token.active = false;
+      releaseSettledWaiters(binding);
       binding.unsubscribe();
       binding.gitBranchObserver?.dispose();
     }
@@ -2150,7 +2201,8 @@ export class PiConversationProjector {
 
   private projectMessageEnd(event: AgentEvent): AgentEvent[] {
     const message = isRecord(event.message) ? event.message : undefined;
-    if (!message) return [];
+    // Pi 0.99 records system prompt and tool changes as system messages; they are not conversation.
+    if (!message || message.role === "system") return [];
     const role = typeof message.role === "string" ? message.role : "system";
     if (role === "toolResult") {
       const toolCallId = safeRequiredText(message.toolCallId, 128, "unknown");
@@ -2264,6 +2316,15 @@ export class PiConversationProjector {
   }
 }
 
+function releaseSettledWaiters(binding: Binding): void {
+  for (const resolve of binding.settledWaiters.splice(0)) resolve();
+}
+
+/** Pi finished the run and extensions still handle agent_settled; it defers new input until then. */
+function piIsSettling(binding: Binding): boolean {
+  return binding.token.active && binding.awaitingSettled && !binding.session.isStreaming;
+}
+
 function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): AgentHistoryEntry {
   const base = {
     recordId: entry.id,
@@ -2352,7 +2413,8 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       ...base,
       kind: custom ? "custom_message" : "message",
       source: custom ? "extension" : role === "user" ? "user" : role === "assistant" ? "assistant" : "system",
-      visibility: custom && message.display === false ? "hidden" : "conversation",
+      // Pi 0.99 system messages carry system prompt and tool changes, not conversation.
+      visibility: custom && message.display === false ? "hidden" : message.role === "system" ? "metadata" : "conversation",
       content: userProjection?.content ?? projectDockContent(message.content, undefined, publishedFiles),
       ...(userProjection?.attachments === undefined ? {} : { attachments: userProjection.attachments }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
@@ -2432,15 +2494,20 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       ...(entry.name === undefined ? {} : { name: boundedString(entry.name, 256, "") }),
     };
   }
-  return {
-    ...base,
-    kind: "label",
-    source: "runtime",
-    visibility: "metadata",
-    content: [],
-    targetEntryId: boundedString(entry.targetId, 128, "unknown"),
-    ...(entry.label === undefined ? {} : { label: boundedString(entry.label, 256, "") }),
-  };
+  if (entry.type === "label") {
+    return {
+      ...base,
+      kind: "label",
+      source: "runtime",
+      visibility: "metadata",
+      content: [],
+      targetEntryId: boundedString(entry.targetId, 128, "unknown"),
+      ...(entry.label === undefined ? {} : { label: boundedString(entry.label, 256, "") }),
+    };
+  }
+  // Pi 0.99 usage and context-edit records have no Protocol V2 kind. They stay
+  // runtime metadata that conversation views skip.
+  return { ...base, kind: "custom", source: "runtime", visibility: "metadata", content: [], customType: boundedString(entry.type, 256, "runtime") };
 }
 
 function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): { content: ContentBlockDto[]; attachments?: AttachmentDto[] } {
@@ -2763,10 +2830,8 @@ function projectTreeNode(
   attachmentContextKey: Uint8Array,
 ): void {
   const entry = node.entry;
-  const kind = entry.type;
-  if (!["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"].includes(kind)) {
-    throw new Error(`Unsupported Pi session tree entry kind: ${kind}`);
-  }
+  // Pi 0.99 usage and context-edit records have no Protocol V2 tree kind; they are metadata nodes.
+  const kind: TreeNodeDto["kind"] = TREE_NODE_KINDS.has(entry.type) ? entry.type as TreeNodeDto["kind"] : "custom";
   const message = entry.type === "message" ? entry.message as unknown as Record<string, unknown> : undefined;
   const role = message === undefined ? undefined : treeMessageRole(message.role);
   const state = message === undefined ? undefined : treeMessageState(message);
@@ -2775,7 +2840,7 @@ function projectTreeNode(
     entryId: entry.id,
     ...(parentId === undefined ? {} : { parentId }),
     depth,
-    kind: kind as TreeNodeDto["kind"],
+    kind,
     ...(role === undefined ? {} : { role }),
     displayClass,
     ...(state === undefined ? {} : { state }),
@@ -2802,6 +2867,7 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
         return treeLine(message.errorMessage, 2_048, "Assistant error");
       }
       if (message.role === "assistant" && message.stopReason === "aborted") return "(aborted)";
+      if (message.role === "system") return "System prompt update";
       const summaryText = contentText(message.content);
       return treeLine(message.role === "user" && summaryText !== undefined ? extractDockAttachmentContext(summaryText, attachmentContextKey).text : summaryText, 2_048, `${treeMessageRole(message.role)} message`);
     }
@@ -2813,8 +2879,12 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
     case "custom_message": return treeLine(contentText(entry.content), 2_048, `Custom message: ${entry.customType}`);
     case "label": return treeLine(entry.label ? `Label ${entry.targetId}: ${entry.label}` : `Label cleared: ${entry.targetId}`, 2_048, "Label change");
     case "session_info": return treeLine(entry.name ? `Session name: ${entry.name}` : "Session name cleared", 2_048, "Session info");
+    case "usage": return treeLine(`Usage: ${entry.kind}`, 2_048, "Usage");
+    case "context_edit": return treeLine(`Context ${entry.replacement === null ? "omit" : "replace"}: ${entry.targetId}`, 2_048, "Context edit");
   }
 }
+
+const TREE_NODE_KINDS: ReadonlySet<string> = new Set<TreeNodeDto["kind"]>(["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
 
 function treeMessageRole(value: unknown): "user" | "assistant" | "tool" | "system" {
   if (value === "user" || value === "assistant") return value;
@@ -2839,6 +2909,7 @@ function treeDisplayClass(
   if (entry.type === "message") {
     const message = entry.message as unknown as Record<string, unknown>;
     if (role === "tool") return "tool";
+    if (message.role === "system") return "metadata";
     if (role === "assistant" && state === undefined && !hasTreeText(message.content) && hasTreeToolCall(message.content)) return "structural";
     return "content";
   }

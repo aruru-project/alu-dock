@@ -120,13 +120,14 @@ test("change the next model and Thinking while the current compaction continues"
 });
 
 function assertTemplates(templates: Awaited<ReturnType<DockClient["compactionPrompts"]>>): void {
-  // Frozen from the published .3 consumer, not recomputed with the getter under test.
+  // Frozen from the upstream release text, not recomputed with the getter under test;
+  // Pi 0.99.2 rewrote only the turn-prefix prompt.
   // Both Protocol and Agent bash must read the complete native text, not a preview or assembled payload.
   assert.deepEqual(Object.fromEntries(Object.entries(templates).map(([key, text]) => [key, createHash("sha256").update(text).digest("hex")])), {
     system: "c464889dcfa60441e642f291445b49523f263e6fb2725d0c25075543a2ec3f8f",
     summarize: "9b00aa68df1a64279bc36e9093367f638701d48ec82e3d08436f65092a515f9b",
     update: "240c52982209146eae47d73c7172f6ba1dab60f44520bcb6a6ec1a883fef2ec7",
-    turnPrefix: "9aeeb36ea731a8497d38abb03c2da351d81bcade4b2ae389bb6ae74300cf6ba5",
+    turnPrefix: "7b0a15be5e0fdcce338ce7c1ef1fdd386faed258cc25d03915a05b05e7a6a183",
   });
 }
 

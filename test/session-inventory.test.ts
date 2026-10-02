@@ -80,9 +80,15 @@ test("saved session shows its latest conversation time and recorded cost; renami
   assert.equal(sessions.get("paid")?.costTotal, 0.75);
   assert.equal(sessions.get("paid")?.firstUserMessage, "整理发布清单", "a restarted Host still finds the preview before the appended part");
 
+  // Pi 0.99 records paid cache warming between runs outside the conversation.
+  await appendFile(paid, line({ type: "usage", id: "w1", parentId: "a2", timestamp: "2026-09-22T00:00:00.000Z", kind: "cache_warm", provider: "fixture", model: "fixture", usage: { cost: { total: 0.125 } } }), "utf8");
+  sessions = await byId();
+  assert.equal(sessions.get("paid")?.costTotal, 0.875);
+  assert.equal(sessions.get("paid")?.lastActivityAt, "2026-09-21T00:00:00.000Z", "cache warming is not conversation activity");
+
   // Pi rewrites old-format sessions in place when it migrates them; the file only grows.
   const migrated = (await readFile(paid, "utf8")).replaceAll('"parentId":', '"migratedFrom":"an older Pi session format that had no entry ids yet","parentId":');
   await writeFile(paid, migrated, "utf8");
   sessions = await byId();
-  assert.equal(sessions.get("paid")?.costTotal, 0.75, "a rewritten file is summarized again, not counted twice");
+  assert.equal(sessions.get("paid")?.costTotal, 0.875, "a rewritten file is summarized again, not counted twice");
 });

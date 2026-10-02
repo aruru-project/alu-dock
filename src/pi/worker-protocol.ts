@@ -311,11 +311,12 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       return { kind, event, state: parseAgentWorkerState(value.state) };
     }
     case "preflight": {
-      exactKeys(value, ["kind", "callId", "success", "inputKind", "delivery", "custody"], "Worker preflight envelope");
+      exactKeys(value, ["kind", "callId", "success", "inputKind", "delivery", "custody", "handled"], "Worker preflight envelope");
       if (typeof value.success !== "boolean") throw new Error("Worker preflight status is invalid");
       const callId = boundedString(value.callId, 128, "Worker call ID");
+      if (value.handled !== undefined && value.handled !== true) throw new Error("Worker handled-input flag is invalid");
       if (!value.success) {
-        if (value.inputKind !== undefined || value.delivery !== undefined || value.custody !== undefined) {
+        if (value.inputKind !== undefined || value.delivery !== undefined || value.custody !== undefined || value.handled !== undefined) {
           throw new Error("Rejected Worker preflight cannot declare accepted input facts");
         }
         return { kind, callId, success: false };
@@ -324,14 +325,14 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       const delivery = oneOf(value.delivery, ["prompt", "steer", "followUp"] as const, "Worker actual delivery");
       const custody = oneOf(value.custody, ["host", "runtime"] as const, "Worker input custody");
       if (inputKind === "extension_command") {
-        if (delivery !== "prompt" || custody !== "runtime") throw new Error("Worker extension-command custody is invalid");
+        if (delivery !== "prompt" || custody !== "runtime" || value.handled !== undefined) throw new Error("Worker extension-command custody is invalid");
         return { kind, callId, success: true, inputKind, delivery, custody };
       }
       if (custody === "host") {
-        if (delivery === "prompt") throw new Error("Worker Host input custody is invalid");
+        if (delivery === "prompt" || value.handled !== undefined) throw new Error("Worker Host input custody is invalid");
         return { kind, callId, success: true, inputKind, delivery, custody };
       }
-      return { kind, callId, success: true, inputKind, delivery, custody };
+      return { kind, callId, success: true, inputKind, delivery, custody, ...(value.handled === true ? { handled: true as const } : {}) };
     }
     case "fatal":
       exactKeys(value, ["kind", "error"], "Worker fatal envelope");

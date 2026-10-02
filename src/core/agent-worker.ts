@@ -316,9 +316,15 @@ export type AgentInvokeContext =
   | { type: "force_queue"; attachments?: AttachmentDto[] }
   | { type: "host_queue"; attachments?: AttachmentDto[] };
 
+/**
+ * How the Agent took a submission. `handled` means an extension input hook took it
+ * over: it never becomes a message, a queue item or a run. Host custody reported
+ * for a submission the Host did not defer means the Agent is finishing a run and
+ * takes input again only after its run settles.
+ */
 export type AgentCommandPreflightResult =
   | { success: false }
-  | { success: true; inputKind: "prompt"; delivery: "prompt" | "steer" | "followUp"; custody: "runtime" }
+  | { success: true; inputKind: "prompt"; delivery: "prompt" | "steer" | "followUp"; custody: "runtime"; handled?: true }
   | { success: true; inputKind: "extension_command"; delivery: "prompt"; custody: "runtime" }
   | { success: true; inputKind: "prompt"; delivery: "steer" | "followUp"; custody: "host" };
 

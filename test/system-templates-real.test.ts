@@ -214,7 +214,7 @@ export default function(pi) {
     await local.reloadSession(native.id);
     await rm(observed);
     await local.prompt(native.id, "/capture-system", "prompt");
-    await waitFor(async () => (await readFile(observed, "utf8").catch(() => "")).includes("Available tools:"));
+    await waitFor(async () => (await readFile(observed, "utf8").catch(() => "")).includes("<tools>"));
     const bomOnly = await readFile(observed, "utf8");
     assert.ok(bomOnly.includes("Use bash for file operations like ls, rg, find"), "native default dynamic guidelines survive");
     assert.ok(bomOnly.includes("NATIVE APPEND RETAINED"));
