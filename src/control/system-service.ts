@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { link, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { JsonObject } from "../core/json-value.js";
 import { readResourceContent, ResourceContentError } from "../core/resource-content.js";
@@ -29,8 +29,10 @@ export class SystemService {
     await mkdir(dirname(this.systemsPath), { recursive: true });
     // The marker lives outside systems so deleting that directory cannot revive a saved target.
     const marker = join(dirname(this.systemsPath), "systems-initialized");
-    try { await lstat(marker); return; }
-    catch (error) { if (errorCode(error) !== "ENOENT") throw error; }
+    let initialized = true;
+    try { await lstat(marker); }
+    catch (error) { if (errorCode(error) !== "ENOENT") throw error; initialized = false; }
+    if (initialized) return this.followDefaultTemplate();
     await mkdir(this.systemsPath, { recursive: true });
     const path = join(this.systemsPath, "pi-default.json");
     let exists = true;
@@ -43,15 +45,40 @@ export class SystemService {
       try {
         try { await handle.writeFile(text); await handle.sync(); }
         finally { await handle.close(); }
-        // Publish only complete bytes, without overwriting a user file created meanwhile.
+        // Publish only complete bytes; a file created meanwhile is brought up to date below.
         try { await link(temporary, path); }
         catch (error) { if (errorCode(error) !== "EEXIST") throw error; }
       } finally { await rm(temporary, { force: true }); }
     }
-    // Existing prose is never replaced. An incomplete/unusable target must not record success.
+    await this.followDefaultTemplate();
+    // An incomplete/unusable target must not record success.
     this.provider.validate({ kind: "dock-template", path }, await readAll(path));
     try { await writeFile(marker, "\n", { flag: "wx", mode: 0o600 }); }
     catch (error) { if (errorCode(error) !== "EEXIST") throw error; }
+  }
+
+  /**
+   * Keep the Pi default template on the current Agent's default prose, so an Agent upgrade reaches
+   * Work that uses it. The file is Dock-owned and replaced whole; users keep their own wording in a
+   * template of another name. A deleted template stays deleted.
+   */
+  async followDefaultTemplate(): Promise<void> {
+    const path = join(this.systemsPath, "pi-default.json");
+    let current: Buffer;
+    try { current = await readFile(path); }
+    catch (error) { if (errorCode(error) === "ENOENT") return; throw error; }
+    const text = this.provider.initialTemplate();
+    if (current.equals(Buffer.from(text))) return;
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try { await handle.writeFile(text); await handle.sync(); }
+      finally { await handle.close(); }
+      // A file deleted meanwhile stays deleted; rename publishes complete bytes only.
+      try { await lstat(path); }
+      catch (error) { if (errorCode(error) === "ENOENT") return; throw error; }
+      await rename(temporary, path);
+    } finally { await rm(temporary, { force: true }); }
   }
 
   private async directory(cwd: string): Promise<string> {
