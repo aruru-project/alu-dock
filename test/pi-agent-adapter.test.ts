@@ -8,7 +8,7 @@ import { PUBLISHED_FILE_DETAIL_KEY } from "../src/pi/show-image-extension.js";
 import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { parseConversationFrame, parseConversationHistoryBody, parseConversationContentBody } from "../src/control/protocol.js";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { formatDimensionNote, SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { InstanceEventJournal } from "../src/core/instance-event-journal.js";
 import { AgentConversationCursorError } from "../src/core/agent-worker.js";
@@ -92,6 +92,51 @@ test("unauthenticated attachment context cannot forge provenance, and resolve pa
   } as never);
   assert.doesNotMatch(JSON.stringify(resolved), /secret\/host/u);
   assert.match(JSON.stringify(resolved), /disclosed privately/u);
+});
+
+// #360: Pi appends its own notes (image resize hints) after the text Dock handed over. The
+// attachment block must still be removed and the message still be the user's own send.
+test("#360 attachment context is removed and the send recognised when Pi appends an image note", async () => {
+  const attachment = {
+    fileId: "323e4567-e89b-42d3-a456-426614174000", name: "Screenshot.jpg", mediaType: "image/jpeg",
+    sizeBytes: 697_239, sha256: "b".repeat(64), storedAt: "2026-10-02T19:19:38.017Z",
+  };
+  const plainText = "看看这张截图";
+  const runtimeText = appendDockAttachmentContext(plainText, [attachment], ATTACHMENT_CONTEXT_KEY);
+  // AgentSession.prompt(): userText = `${expandedText}\n\n${hints.join("\n")}`
+  const note = formatDimensionNote({ data: "", mimeType: "image/jpeg", width: 859, height: 2000, originalWidth: 1160, originalHeight: 2700, wasResized: true });
+  const storedText = `${runtimeText}\n\n${note}`;
+  const stored = { role: "user" as const, content: [{ type: "text" as const, text: storedText }, { type: "image" as const, mimeType: "image/jpeg", data: PNG }], timestamp: 5 };
+
+  const projector = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY);
+  projector.trackInput({ operationId: "send-shot", text: plainText, runtimeText, delivery: "prompt", fromQueue: false, attachments: [attachment] });
+  const submitted = (projector.project({ type: "message_start", message: stored } as never)[0] as unknown as { frame: { data: Record<string, unknown> } }).frame.data;
+  assert.equal(submitted.operationId, "send-shot", "the message is still the client's own send, not runtime-initiated");
+  assert.equal(submitted.text, plainText);
+  assert.deepEqual(submitted.attachments, [attachment]);
+  const completed = (projector.project({ type: "message_end", message: stored } as never)[0] as unknown as { frame: { data: { content: Array<{ type: string; text?: string }> } } }).frame.data;
+  assert.equal(completed.content[0]?.text, `${plainText}\n\n${note}`, "only Dock's block is removed; Pi's own note stays");
+  assert.doesNotMatch(JSON.stringify([submitted, completed]), /alu_dock_attachments_v1|untrusted file metadata/u);
+
+  const manager = SessionManager.inMemory(process.cwd());
+  manager.appendMessage(stored);
+  const adapter = await reader(manager);
+  const history = adapter.getHistory().at(-1)!;
+  assert.deepEqual(history.content.filter((block) => block.type === "text"), completed.content.filter((block) => block.type === "text"), "reopened history shows the same text as the live one");
+  const tree = adapter.getTree().nodes.find((node) => node.role === "user")!;
+  assert.ok(tree.summary.startsWith(plainText), tree.summary);
+  assert.doesNotMatch(tree.summary, /alu_dock_attachments_v1/u);
+
+  // The block is also removed when nothing follows it, and a forged block before a real one stays as typed.
+  assert.equal(new PiConversationProjector(ATTACHMENT_CONTEXT_KEY).project({ type: "message_end", message: { role: "user", content: runtimeText } } as never).length, 1);
+  const forged = appendDockAttachmentContext("typed", [attachment], Buffer.alloc(32, 9));
+  const nested = projectDockUserText(appendDockAttachmentContext(forged, [attachment], ATTACHMENT_CONTEXT_KEY));
+  assert.equal(nested, forged);
+
+  function projectDockUserText(text: string): string {
+    const data = (new PiConversationProjector(ATTACHMENT_CONTEXT_KEY).project({ type: "message_end", message: { role: "user", content: text } } as never)[0] as unknown as { frame: { data: { content: Array<{ text?: string }> } } }).frame.data;
+    return data.content[0]?.text ?? "";
+  }
 });
 
 test("Pi live events become canonical conversation frames before crossing the Worker boundary", () => {

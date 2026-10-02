@@ -2068,6 +2068,11 @@ function piInputConsumedText(input: PiConversationInput): string {
   return input.consumedText ?? input.runtimeText ?? input.text;
 }
 
+/** Pi keeps the handed-over text intact and only appends its own notes after a blank line. */
+function piStoredTextMatches(stored: string, handedOver: string): boolean {
+  return stored === handedOver || stored.startsWith(`${handedOver}\n\n`);
+}
+
 export class PiConversationProjector {
   private readonly inputs: PiConversationInput[] = [];
   private steeringQueue: string[] = [];
@@ -2171,7 +2176,11 @@ export class PiConversationProjector {
     }
     const consumedText = toolResultText(message.content) ?? "";
     const extracted = extractDockAttachmentContext(consumedText, this.attachmentContextKey);
-    const inputIndex = this.inputs.findIndex((candidate) => piInputConsumedText(candidate) === consumedText || candidate.text === extracted.text);
+    // An exact match wins; otherwise accept the same text with Pi's notes appended.
+    let inputIndex = this.inputs.findIndex((candidate) => piInputConsumedText(candidate) === consumedText || candidate.text === extracted.text);
+    if (inputIndex < 0) {
+      inputIndex = this.inputs.findIndex((candidate) => piStoredTextMatches(consumedText, piInputConsumedText(candidate)) || piStoredTextMatches(extracted.text, candidate.text));
+    }
     const input = inputIndex < 0 ? undefined : this.inputs.splice(inputIndex, 1)[0];
     const operationId = input?.operationId ?? "runtime-initiated";
     this.currentUserMessageId = input === undefined
