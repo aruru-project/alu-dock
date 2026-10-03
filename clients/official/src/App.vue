@@ -7,7 +7,6 @@ import OperationResults from './components/OperationResults.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import WorkTopbar from './components/WorkTopbar.vue'
 import InputRegion from './components/InputRegion.vue'
-import WorkToolbar from './components/WorkToolbar.vue'
 import ConversationRegion from './components/ConversationRegion.vue'
 import ConnectionLanding from './components/ConnectionLanding.vue'
 import WorkSidebar from './components/WorkSidebar.vue'
@@ -91,9 +90,7 @@ onUnmounted(() => {
 
     <MachineSettingsResults />
 
-    <InputRegion>
-      <WorkToolbar />
-    </InputRegion>
+    <InputRegion />
 
     <WorkspaceBrowser
       :open="surfaces.workspaceBrowserOpen"

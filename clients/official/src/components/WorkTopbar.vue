@@ -5,13 +5,20 @@ import { FileDown, Wrench } from '@lucide/vue'
 import { dockToolsState } from '../lib/dockTools'
 import { formatCacheHitRate, formatContextUsage, formatTokenCount } from '../lib/uiBoundaries'
 import dockIconUrl from '../../../../assets/icon.svg'
+import ConnectionStatus from './ConnectionStatus.vue'
 import { useAppStore } from '../stores/app'
 import { useDeliveriesStore } from '../stores/deliveries'
+import { useHostStore } from '../stores/host'
+import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
 import { useSurfacesStore } from '../stores/surfaces'
 
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
+const observation = useObservationStore()
+const { status: observationStatus, label: connectionLabel, refreshing } = storeToRefs(observation)
+const { refreshCurrent } = observation
+const { openHostSettings } = useHostStore()
 const surfaces = useSurfacesStore()
 const { deliveryOpen, dockToolsTrigger, dockToolsOpen } = storeToRefs(surfaces)
 const { openControlCenter, openDockTools } = surfaces
@@ -34,6 +41,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   <nav class="alu-navbar select-none">
     <div class="alu-navbar-left">
       <img :src="dockIconUrl" class="alu-navbar-avatar session-dot" alt="Alu Dock" />
+      <ConnectionStatus v-if="selected && selected.lifecycle === 'active'" :state="observationStatus" :label="connectionLabel" :busy="refreshing" @reconnect="refreshCurrent" @settings="openHostSettings" @works="app.workDrawerOpen = true" />
       <button type="button" class="alu-navbar-breadcrumb" title="查看项目状态" aria-label="查看项目状态" :disabled="!selected" @click="openControlCenter('resources')">
         <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
         <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>

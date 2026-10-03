@@ -9,6 +9,7 @@ import NewWorkDialog from './NewWorkDialog.vue'
 import MessageTextDialog from './MessageTextDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useInputStore } from '../stores/input'
+import { useObservationStore } from '../stores/observation'
 import { usePlatformStore } from '../stores/platform'
 import { useSurfacesStore } from '../stores/surfaces'
 import { useWorkActionsStore } from '../stores/work-actions'
@@ -19,6 +20,7 @@ const surfaces = useSurfacesStore()
 const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
 const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
+const { refreshCurrent } = useObservationStore()
 const workActions = useWorkActionsStore()
 const { mutationOutcomeUnknown, globalOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome, acceptCreatedWork } = workActions
@@ -55,6 +57,7 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
           @close="closeModal"
           @stop="closeModal(); stopSelectedWork()"
           @restore-queue="closeModal(); restoreQueue()"
+          @refresh="closeModal(); refreshCurrent()"
           @title="setControlDialogTitle"
           @size="controlSizeOverride = $event"
         />

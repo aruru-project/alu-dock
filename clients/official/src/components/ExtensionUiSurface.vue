@@ -359,11 +359,11 @@ function interactionMethodLabel(method: string) {
       </details>
     </div>
 
-    <slot />
-
     <div v-if="Object.keys(visibleStatus).length" class="alu-extension-status" aria-label="Extension 状态">
       <span v-for="(text, key) in visibleStatus" :key="key">{{ key }}: {{ text }}</span>
     </div>
+
+    <slot />
 
     <div class="extension-widgets below">
       <details v-for="widget in extension.belowWidgets" :key="widget.key" :open="widgetIsOpen(widget)" @toggle="rememberWidgetOpen(widget, $event)">
@@ -411,11 +411,12 @@ function interactionMethodLabel(method: string) {
     margin-inline: auto;
   }
 }
+/* Above the input card, never on the screen's bottom edge. */
 .alu-extension-status {
   display: flex;
   gap: 10px;
   overflow-x: auto;
-  padding: 5px 2px 0;
+  padding: 6px 4px 0;
   color: var(--alu-amber-dim);
   font-size: var(--alu-meta-size);
 }

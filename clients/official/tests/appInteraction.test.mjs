@@ -216,6 +216,8 @@ const renderer = createRenderer({ querySelector: () => teleport, createElement: 
   insertStaticContent: (text, parent, anchor) => { const item = element('#static', text); insert(item, parent, anchor); return [item, item] },
 })
 const find = (item, predicate) => predicate(item) ? item : item.children.map(child => find(child, predicate)).find(Boolean)
+// #358: the standalone refresh button is gone; refresh is the connection popover's action and the palette's 刷新状态.
+const refreshControl = (view) => find(find(view, item => item.type === 'details' && item.props['aria-label'] === '连接状态'), item => item.type === 'button' && String(item.props.class).includes('alu-status-action'))
 const all = (item, predicate) => [...(predicate(item) ? [item] : []), ...item.children.flatMap(child => all(child, predicate))]
 const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
@@ -491,7 +493,7 @@ try {
   assertSameReference(find(container, item => item.type === 'textarea'), compact)
   failCatalog = true
   observation({ kind: 'status', state: 'disconnected', message: 'offline' })
-  const refresh = find(container, item => item.type === 'button' && item.props.title === '刷新')
+  const refresh = refreshControl(container)
   await refresh.props.onClick(); await settle()
   const offlineList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
   assert.ok(text(offlineList).includes('工作列表没有刷新'), '#313: a failed refresh is visible in the Work list')
@@ -808,6 +810,14 @@ try {
     assert.equal(bootstraps(), beforeControlCheck + 1, "the command center's refresh checks the Work's unconfirmed Stop")
     controlDialog.parent.props.onKeydown({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} }); await settle()
     assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined)
+    // #358: without a toolbar refresh button, the palette's 刷新状态 is the refresh entry and closes the palette.
+    find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+    const beforePaletteRefresh = bootstraps()
+    const paletteDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
+    await find(paletteDialog, item => item.type === 'button' && String(item.props.class).includes('cmd-palette-item') && text(item).includes('刷新状态')).props.onClick(); await settle()
+    assert.equal(bootstraps(), beforePaletteRefresh + 1, 'the palette entry refreshes the Work list and current Work')
+    assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined, 'the palette closes after refresh')
+    assertSameReference(find(container, item => item.type === 'button' && item.props.title === '刷新'), undefined, 'no standalone refresh button remains')
   }
   // Review P2: action feedback belongs to its initiating Work, including a
   // failure delivered after selection changes. Native failures stay retained.
@@ -891,7 +901,7 @@ try {
     observation({ kind: 'content', token: 'follow-failure', change: { kind: 'checkpoint_end' } }); await settle()
     assert.ok(text(container).includes('FOLLOWED MESSAGE'))
     failFollowStart = true
-    await find(container, item => item.type === 'button' && item.props.title === '刷新').props.onClick(); await settle()
+    await refreshControl(container).props.onClick(); await settle()
     failFollowStart = false
     assert.ok(text(container).includes('FOLLOWED MESSAGE'), 'the conversation stays on screen')
     assert.ok(followNotice() && text(followNotice()).includes('暂时连不上这项工作'), 'a failed start is shown over the existing conversation')
@@ -1348,7 +1358,7 @@ try {
     const switchPinia = createPinia(), switchApp = useAppStore(switchPinia), switchView = element('switch-host-app')
     mounted = renderer.createApp({ render: () => h(App) }).use(switchPinia)
     mounted.mount(switchView); await settle(); switchApp.selectWork('work'); await settle()
-    const refreshButton = () => find(switchView, item => item.type === 'button' && ['刷新', '正在刷新'].includes(item.props.title))
+    const refreshButton = () => refreshControl(switchView)
     const openHosts = async () => {
       observation({ kind: 'status', state: 'identity_error' }); await settle()
       const details = find(switchView, item => item.type === 'details' && item.props['aria-label'] === '连接状态')

@@ -11,6 +11,8 @@ export function useComposer(options: {
   const expandedTextarea = ref<HTMLTextAreaElement | null>(null)
   const expanded = options.expanded ?? ref(false)
   const composing = options.composing ?? ref(false)
+  /** The compact editor currently needs more than two lines (wrapped lines included). */
+  const tall = ref(false)
   const selection = ref({ start: 0, end: 0, direction: 'none' as 'forward' | 'backward' | 'none' })
   let frame = 0
   let transfer = 0
@@ -32,10 +34,16 @@ export function useComposer(options: {
       if (!textarea) return
       textarea.style.height = 'auto'
       const limit = expanded.value ? Math.max(220, Math.floor(window.innerHeight * 0.45)) : 180
-      textarea.style.height = `${Math.min(textarea.scrollHeight, limit)}px`
+      const contentHeight = textarea.scrollHeight
+      textarea.style.height = `${Math.min(contentHeight, limit)}px`
+      if (textarea === compact.value) {
+        const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight) || 20
+        tall.value = contentHeight > lineHeight * 2.5
+      }
     })
   }
   watch(draft, () => { void nextTick(resize) })
+  watch(compact, (textarea) => { if (textarea) resize() })
   watch(expanded, async (open) => {
     const revision = ++transfer
     const from = open ? compact.value : expandedTextarea.value
@@ -50,5 +58,5 @@ export function useComposer(options: {
   }, { flush: 'pre' })
   watch(options.identity, () => { transfer++; composing.value = false; selection.value = { start: 0, end: 0, direction: 'none' }; options.flush(); void nextTick(resize) })
   onScopeDispose(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); options.flush() })
-  return { draft, compact, expandedTextarea, expanded, composing, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
+  return { draft, compact, expandedTextarea, expanded, composing, tall, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
 }
