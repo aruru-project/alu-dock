@@ -5,6 +5,7 @@ import { isTauri } from '../lib/bridge'
 import AttachmentCard from './AttachmentCard.vue'
 import OperationResults from './OperationResults.vue'
 import ExtensionUiSurface from './ExtensionUiSurface.vue'
+import StopRunPill from './StopRunPill.vue'
 import { useAppStore } from '../stores/app'
 import { useAttachmentsStore } from '../stores/attachments'
 import { useCommandCatalogStore } from '../stores/command-catalog'
@@ -45,7 +46,10 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 
 <template>
   <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
-    <button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
+    <div class="alu-input-float">
+      <div class="alu-input-float-centre"><button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button></div>
+      <div class="alu-input-float-right"><StopRunPill /></div>
+    </div>
     <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
       <div v-if="visibleComposerError" :class="submitOutcomeUnknown ? 'alu-composer-notice' : 'alu-composer-error'" :role="submitOutcomeUnknown ? 'status' : undefined"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!submitAcknowledged" @click="allowAnotherSubmit">允许再次发送</button></template></div>
       <div v-if="actionNotice || canConfirmOutcome" class="alu-composer-notice" role="status"><span>{{ actionNotice ?? '上一次操作的结果还没有确认。可以刷新查看，其他操作照常可用。' }}</span><button v-if="canConfirmOutcome" @click="reconcileMutationOutcome()">刷新并确认</button></div>
@@ -292,12 +296,26 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 @media (max-width: 640px) {
   .alu-native-attachments { max-height: 140px; }
 }
-.alu-scroll-bottom {
+/* One row floating on the top edge of the input region: scroll-to-bottom in the centre, the stop pill
+   at the right. Sharing a grid keeps them apart on any width; a wide stop pill pushes the centre left. */
+.alu-input-float {
   position: absolute;
   z-index: 3;
   top: -44px;
   right: 24px;
+  left: 24px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  column-gap: 8px;
+  align-items: start;
+  pointer-events: none;
+}
+.alu-input-float-centre { grid-column: 2; }
+.alu-input-float-right { grid-column: 3; justify-self: end; }
+.alu-scroll-bottom {
+  pointer-events: auto;
   display: inline-flex;
+  white-space: nowrap;
   min-height: 32px;
   align-items: center;
   gap: 7px;
@@ -316,6 +334,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 .alu-scroll-bottom:hover { border-color: var(--alu-blue); color: var(--alu-text); transform: translateY(-1px); }
 .alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; box-shadow: var(--focus-ring); }
 @media (max-width: 640px) {
-  .alu-scroll-bottom { top: -42px; right: 12px; min-height: 30px; padding: 0 10px; }
+  .alu-input-float { top: -42px; right: 12px; left: 12px; }
+  .alu-scroll-bottom { min-height: 30px; padding: 0 10px; }
 }
 </style>
