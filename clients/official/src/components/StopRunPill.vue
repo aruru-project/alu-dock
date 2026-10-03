@@ -56,13 +56,11 @@ const label = computed(() => `${aborting.value ? '正在中止当前回复' : '�
 </template>
 
 <style scoped>
-/* Floats on the top edge of the input region, right side; the scroll-to-bottom pill keeps the centre. */
+/* Placed by the input region's floating row (right cell); the row is click-through, the pill is not. */
 .alu-stop-run {
-  position: absolute;
-  z-index: 3;
-  top: -44px;
-  right: 24px;
+  pointer-events: auto;
   display: inline-flex;
+  white-space: nowrap;
   min-height: 32px;
   align-items: center;
   gap: 7px;
@@ -96,6 +94,6 @@ const label = computed(() => `${aborting.value ? '正在中止当前回复' : '�
 .alu-stop-run:disabled { cursor: default; transform: none; }
 .alu-stop-run.is-pending { color: var(--alu-rose-dim); }
 @media (max-width: 640px) {
-  .alu-stop-run { top: -42px; right: 12px; min-height: 30px; padding: 0 10px 0 9px; }
+  .alu-stop-run { min-height: 30px; padding: 0 10px 0 9px; }
 }
 </style>
