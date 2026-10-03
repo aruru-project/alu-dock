@@ -417,7 +417,7 @@ export const useInputStore = defineStore('input', () => {
     pendingSubmits.value.add(pendingKey)
     submissionError.value = null
     try {
-      const result = await submitText(work.id, text, app.captureOperationTarget(capturedHost, work.id))
+      const result = await submitText(work.id, text, work.executor.piSessionId, app.captureOperationTarget(capturedHost, work.id))
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
         if (!result.receipt.queued) conversation.showAgentActivity(work.id)
       }

@@ -49,16 +49,15 @@ export const useQuickButtonsStore = defineStore('quick-buttons', () => {
   function remove(id: string) {
     commit(buttons.value.filter((item) => item.id !== id))
   }
-  /** Moves a button one place up (-1) or down (1); the order decides which ones fit in the row. */
-  function move(id: string, offset: -1 | 1) {
+  /** Puts a button at a new place in the order, which decides the ones that fit in the row. */
+  function moveTo(id: string, index: number) {
     const from = buttons.value.findIndex((item) => item.id === id)
-    const to = from + offset
-    if (from < 0 || to < 0 || to >= buttons.value.length) return
+    if (from < 0 || index < 0 || index >= buttons.value.length || index === from) return
     const next = [...buttons.value]
     const [button] = next.splice(from, 1)
-    next.splice(to, 0, button!)
+    next.splice(index, 0, button!)
     commit(next)
   }
 
-  return { buttons, saveError, editing, formError, edit, cancelEdit, save, remove, move }
+  return { buttons, saveError, editing, formError, edit, cancelEdit, save, remove, moveTo }
 })

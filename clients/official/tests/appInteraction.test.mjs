@@ -1813,6 +1813,23 @@ try {
     assert.deepEqual([quickSend.attachmentFileIds, quickSend.textOnly], [[], true], 'attachments and retrieved images stay with the editor')
     assert.equal(quickApp.currentDraft, 'half-typed draft')
 
+    // An unconfirmed quick send blocks sending again, like any send, so a command is not silently run twice.
+    // Native records the send under the Session the request names (an editor send names it in its capture).
+    let unconfirmedSend
+    const lost = { code: 'connection_failed', message: '连接中断，无法确认是否已发送。', outcomeUnknown: true }
+    submitNative = args => {
+      unconfirmedSend = args
+      emit('aludock://operation', { operationId: args.operationId, kind: 'submit_message', connectionId: args.connectionId, instanceId: args.instanceId,
+        hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration, sessionId: args.sessionId, editor: args.operationEditor, state: 'unknown', error: lost })
+      return Promise.reject({ ...lost, operationId: args.operationId })
+    }
+    await quickButton('codex-fast').props.onClick(); await settle()
+    assert.equal(unconfirmedSend.sessionId, 'old', 'the quick send names the Session it belongs to')
+    assert.ok(text(quickView).includes('还无法确认消息是否已进入 Queue'), 'the unconfirmed quick send is reported like any send')
+    assert.equal(quickButton('codex-fast').props.disabled, true, 'the quick button cannot send again while the result is unknown')
+    assert.equal(find(quickView, item => item.props.class === 'alu-send-btn').props.disabled, true, 'nor can the send button')
+    assert.equal(quickApp.currentDraft, 'half-typed draft')
+
     // Restarting the client keeps this device's buttons.
     await mountQuickView()
     assert.deepEqual(rowNames(), ['恢复', 'Tree', 'codex-fast'], 'a restarted client keeps the buttons')
@@ -1842,7 +1859,7 @@ try {
     assert.equal(paletteSend?.message, 'overflow check 7', 'a button without room in the row runs from the palette')
     assertSameReference(find(quickView, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined, 'the palette closes once the button is sent')
     await openManager()
-    find(quickView, item => item.props['aria-label'] === '上移「第7」').props.onClick(); await settle()
+    await find(quickView, item => item.props['aria-label'] === '调整「第7」的位置').props.onKeydown({ key: 'ArrowUp', preventDefault() {} }); await settle()
     assert.deepEqual(rowNames(), ['第1', '第2', '第3', '第4', '第5', '第7'], 'the order decides which buttons fit in the row')
     await closeDialog()
     catalogNative = undefined

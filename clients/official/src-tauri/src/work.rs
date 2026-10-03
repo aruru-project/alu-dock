@@ -53,6 +53,7 @@ pub(crate) async fn submit_message(
     message: String,
     attachment_file_ids: Option<Vec<String>>,
     text_only: Option<bool>,
+    session_id: Option<String>,
 ) -> Result<SubmitResult, CommandError> {
     let text_only = text_only.unwrap_or(false);
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
@@ -68,7 +69,7 @@ pub(crate) async fn submit_message(
     let authority = attachment_authority(&runtime, &connection_id)?;
     let attachments = attachments.inner().clone();
     let restored_images = restored_images.inner().clone();
-    let association = operation_association(
+    let mut association = operation_association(
         &operation_id,
         "submit_message",
         &connection_id,
@@ -77,6 +78,21 @@ pub(crate) async fn submit_message(
         expected_runtime_generation,
         operation_editor,
     );
+    if text_only {
+        // A quick send claims no editor, so the Session it belongs to comes with the
+        // request: pending and unconfirmed sends are matched by Session, and a send
+        // without one would escape the duplicate-send guard.
+        let Some(session_id) = session_id else {
+            return Err(CommandError {
+                code: "invalid_request".into(),
+                message: "这次发送缺少所属 Session，没有发出。请重试。".into(),
+                details: None,
+                outcome_unknown: false,
+                operation_id: None,
+            });
+        };
+        association.session_id = session_id;
+    }
     operations
         .execute(association, async move {
             // A quick button sends only its own text. The editor's attachments and

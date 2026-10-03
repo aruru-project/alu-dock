@@ -1,15 +1,35 @@
 <script setup lang="ts">
 import { nextTick, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ArrowDown, ArrowUp, Pencil, Plus, Trash2 } from '@lucide/vue'
+import { GripVertical, Pencil, Plus, Trash2 } from '@lucide/vue'
+import { useDragReorder } from '../lib/dragReorder'
 import { MAX_QUICK_BUTTON_NAME_CHARS, MAX_QUICK_BUTTON_TEXT_CHARS, type QuickButtonMode } from '../lib/quickButtons'
 import { useQuickButtonsStore } from '../stores/quick-buttons'
 
 // 命令面板里的「管理快捷按钮」：一张列表和一个表单，表单也是钉住命令时打开的那个。
 const quickButtons = useQuickButtonsStore()
 const { buttons, editing, formError, saveError } = storeToRefs(quickButtons)
-const { edit, cancelEdit, save, remove, move } = quickButtons
+const { edit, cancelEdit, save, remove, moveTo } = quickButtons
 const textInput = ref<HTMLTextAreaElement | null>(null)
+
+// Order by dragging a row's handle (mouse or finger); the handle also takes the arrow keys.
+const scroller = ref<HTMLElement | null>(null)
+const rows = new Map<string, HTMLElement>()
+function bindRow(id: string, element: unknown) {
+  if (element instanceof HTMLElement) rows.set(id, element)
+  else rows.delete(id)
+}
+const reorder = useDragReorder({ scroller, ids: () => buttons.value.map((button) => button.id), row: (id) => rows.get(id), commit: moveTo })
+const { active: draggingId, shift: dragShift } = reorder
+async function nudge(event: KeyboardEvent, id: string, index: number) {
+  const offset = event.key === 'ArrowUp' ? -1 : event.key === 'ArrowDown' ? 1 : 0
+  if (!offset) return
+  event.preventDefault()
+  moveTo(id, index + offset)
+  // Reordering moves the row's element, which can drop focus; keep it on the same handle.
+  await nextTick()
+  rows.get(id)?.querySelector<HTMLElement>('.quick-buttons-grip')?.focus()
+}
 
 // The form opens with the cursor after the prefilled text, ready for an argument.
 watch(() => editing.value !== null, async (open) => {
@@ -29,7 +49,7 @@ function modeLabel(mode: QuickButtonMode) {
 </script>
 
 <template>
-  <section class="quick-buttons-editor">
+  <section ref="scroller" class="quick-buttons-editor">
     <div v-if="saveError" class="alu-dialog-error" role="status">{{ saveError }}</div>
     <form v-if="editing" class="quick-button-form" @submit.prevent="save">
       <label class="quick-button-field">
@@ -58,21 +78,20 @@ function modeLabel(mode: QuickButtonMode) {
         <button type="button" class="ui-dialog-btn" @click="edit({ name: '', text: '', mode: 'send' })"><Plus :size="14" />新建快捷按钮</button>
       </div>
       <ol v-if="buttons.length" class="quick-buttons-list" aria-label="快捷按钮">
-        <li v-for="(button, index) in buttons" :key="button.id" class="quick-buttons-item">
+        <li v-for="(button, index) in buttons" :key="button.id" :ref="element => bindRow(button.id, element)" class="quick-buttons-item" :class="{ 'is-dragging': draggingId === button.id, 'is-shifting': draggingId !== null && draggingId !== button.id }" :style="dragShift[button.id] ? { transform: `translateY(${dragShift[button.id]}px)` } : undefined">
+          <button type="button" class="quick-buttons-grip" :aria-label="`调整「${button.name}」的位置`" title="拖动排序，或按上下方向键" @pointerdown="reorder.start($event, button.id)" @pointermove="reorder.move" @pointerup="reorder.end" @pointercancel="reorder.cancel" @lostpointercapture="reorder.cancel" @keydown="nudge($event, button.id, index)"><GripVertical :size="16" /></button>
           <div class="quick-buttons-item-copy">
             <span class="quick-buttons-item-top"><strong>{{ button.name }}</strong><span class="quick-buttons-item-mode">{{ modeLabel(button.mode) }}</span></span>
             <code>{{ button.text }}</code>
           </div>
           <div class="quick-buttons-item-actions">
-            <button type="button" :aria-label="`上移「${button.name}」`" title="上移" :disabled="index === 0" @click="move(button.id, -1)"><ArrowUp :size="14" /></button>
-            <button type="button" :aria-label="`下移「${button.name}」`" title="下移" :disabled="index === buttons.length - 1" @click="move(button.id, 1)"><ArrowDown :size="14" /></button>
             <button type="button" :aria-label="`修改「${button.name}」`" title="修改" @click="edit(button)"><Pencil :size="14" /></button>
             <button type="button" :aria-label="`删除「${button.name}」`" title="删除" @click="remove(button.id)"><Trash2 :size="14" /></button>
           </div>
         </li>
       </ol>
       <p v-else class="ui-dialog-empty">还没有快捷按钮。在命令面板里点命令右边的图钉，或在这里新建。</p>
-      <p class="quick-buttons-note">输入框下方显示排在前面的几个：手机 3 个，桌面 6 个。其余在命令面板的「快捷按钮」组里。</p>
+      <p class="quick-buttons-note">按住左边的把手拖动排序。输入框下方显示排在前面的几个：手机 3 个，桌面 6 个；其余在命令面板的「快捷按钮」组里。</p>
     </template>
   </section>
 </template>
@@ -92,7 +111,13 @@ function modeLabel(mode: QuickButtonMode) {
 .quick-buttons-toolbar { display: flex; padding: 12px 16px 4px; }
 .quick-buttons-toolbar .ui-dialog-btn { display: inline-flex; align-items: center; gap: 6px; }
 .quick-buttons-list { display: grid; gap: 4px; margin: 6px 0 0; padding: 0 10px; list-style: none; }
-.quick-buttons-item { display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 10px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); }
+.quick-buttons-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 2px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); }
+.quick-buttons-item.is-shifting { transition: transform 0.15s ease; }
+.quick-buttons-item.is-dragging { position: relative; z-index: 2; border-color: var(--alu-pink-border); box-shadow: 0 12px 30px rgba(2, 6, 18, 0.5); }
+/* 把手：按在这里就开始拖，手指在行的其他地方滑动仍是滚动。 */
+.quick-buttons-grip { display: inline-grid; width: 30px; height: 44px; flex: 0 0 auto; place-items: center; border-radius: 7px; color: var(--alu-text-faint); cursor: grab; touch-action: none; }
+.quick-buttons-grip:hover, .quick-buttons-grip:focus-visible { outline: none; background: var(--alu-hover); color: var(--alu-text); }
+.quick-buttons-item.is-dragging .quick-buttons-grip { cursor: grabbing; color: var(--alu-pink); }
 .quick-buttons-item-copy { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 3px; }
 .quick-buttons-item-top { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .quick-buttons-item-top strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); text-overflow: ellipsis; white-space: nowrap; }
@@ -100,10 +125,10 @@ function modeLabel(mode: QuickButtonMode) {
 .quick-buttons-item code { overflow: hidden; color: var(--alu-amber); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .quick-buttons-item-actions { display: flex; flex: 0 0 auto; gap: 2px; }
 .quick-buttons-item-actions button { display: inline-grid; width: 32px; height: 32px; place-items: center; border-radius: 7px; color: var(--alu-text-muted); }
-.quick-buttons-item-actions button:hover:not(:disabled) { background: var(--alu-hover); color: var(--alu-text); }
-.quick-buttons-item-actions button:disabled { opacity: 0.3; cursor: default; }
+.quick-buttons-item-actions button:hover { background: var(--alu-hover); color: var(--alu-text); }
 .quick-buttons-note { margin: 12px 16px 4px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.5; }
 @media (max-width: 640px) {
   .quick-buttons-item-actions button { width: 40px; height: 40px; }
+  .quick-buttons-grip { width: 36px; }
 }
 </style>
