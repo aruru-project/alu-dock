@@ -1,4 +1,4 @@
-export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'tools' | 'resources' | 'settings'
+export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'tools' | 'resources' | 'settings' | 'quick-buttons'
 export type LocalControlAction = 'stop' | 'restoreQueue' | 'refresh'
 
 export interface LocalControlCommand {

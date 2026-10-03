@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ArrowUp, FolderTree, GitFork, History, Maximize2, Paperclip, SquareSlash } from '@lucide/vue'
+import { ArrowUp, FolderTree, Maximize2, Paperclip, SquareSlash } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
+import { QUICK_BUTTONS_IN_ROW, quickButtonNameIsShort } from '../lib/quickButtons'
 import AttachmentCard from './AttachmentCard.vue'
 import OperationResults from './OperationResults.vue'
 import ExtensionUiSurface from './ExtensionUiSurface.vue'
@@ -14,6 +15,7 @@ import { useConversationStore } from '../stores/conversation'
 import { useInputStore } from '../stores/input'
 import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
+import { useQuickButtonsStore } from '../stores/quick-buttons'
 import { useSurfacesStore } from '../stores/surfaces'
 import { useWorkActionsStore } from '../stores/work-actions'
 
@@ -21,13 +23,16 @@ const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const input = useInputStore()
 const { draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
-const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages } = input
+const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, runQuickButton, quickButtonDisabled } = input
 const attachments = useAttachmentsStore()
 const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, maxMessageAttachments } = storeToRefs(attachments)
 const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, chooseAttachments } = attachments
 const surfaces = useSurfacesStore()
 const { modalOpen, composerExpanded, workspaceBrowserOpen } = storeToRefs(surfaces)
 const { rememberModalTrigger, handleModalKeydown, handleModalWheel, bindSurface, openControlCenter, openWorkspaceBrowser } = surfaces
+// The middle of the button row: the user's quick buttons in their order. Phones show the first three (CSS).
+const quickButtons = useQuickButtonsStore()
+const rowQuickButtons = computed(() => quickButtons.buttons.slice(0, QUICK_BUTTONS_IN_ROW))
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '\u2318K' : 'Ctrl+K'
 const workActions = useWorkActionsStore()
 const { actionNotice, mutationOutcomeUnknown, reconcilingReopenWorkId } = storeToRefs(workActions)
@@ -89,9 +94,12 @@ const applyExtensionTitle = (title: string) => { document.title = title }
         <div class="alu-composer-actions">
           <button type="button" class="alu-bar-btn" title="添加附件" aria-label="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= maxMessageAttachments" @click="chooseAttachments"><Paperclip :size="15" /><span>附件</span></button>
           <button type="button" class="alu-bar-btn" title="浏览当前 Work 的工作区" aria-label="打开工作区" :aria-expanded="workspaceBrowserOpen" :disabled="!isTauri" @click="openWorkspaceBrowser"><FolderTree :size="15" /><span>工作区</span></button>
-          <div class="alu-composer-actions-sep" aria-hidden="true" />
-          <button type="button" class="alu-bar-btn" title="恢复 Session" aria-label="恢复 Session" @click="openControlCenter('sessions')"><History :size="15" /><span>恢复</span></button>
-          <button type="button" class="alu-bar-btn" title="打开 Session Tree" aria-label="打开 Session Tree" @click="openControlCenter('tree')"><GitFork :size="15" /><span>Tree</span></button>
+          <template v-if="rowQuickButtons.length">
+            <div class="alu-composer-actions-sep" aria-hidden="true" />
+            <div class="alu-quick-buttons">
+              <button v-for="button in rowQuickButtons" :key="button.id" type="button" class="alu-bar-btn alu-quick-btn" :class="{ 'is-short': quickButtonNameIsShort(button.name) }" :title="`${button.text}（${button.mode === 'send' ? '立即发送' : '填入输入框'}）`" :disabled="quickButtonDisabled(button)" @click="runQuickButton(button)"><span>{{ button.name }}</span></button>
+            </div>
+          </template>
           <div class="alu-composer-actions-end">
             <button type="button" class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-label="打开命令中心" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><SquareSlash :size="15" /><span>命令</span><kbd>{{ commandShortcutLabel }}</kbd></button>
             <button class="alu-send-btn" type="submit" :disabled="!canSubmit" :aria-label="submitting ? '发送中' : '发送'"><ArrowUp :size="18" aria-hidden="true" /><span>{{ submitting ? '发送中…' : '发送' }}</span></button>
@@ -254,6 +262,21 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   margin-left: auto;
 }
 .alu-composer-actions .alu-bar-btn > svg { flex-shrink: 0; }
+.alu-composer-actions > .alu-bar-btn, .alu-composer-actions-end { flex-shrink: 0; }
+/* 快捷按钮：用户起的名字，不用图标。放不下时一起收窄、名字截断，按钮行永远不换行。 */
+.alu-quick-buttons { display: flex; min-width: 0; flex: 0 1 auto; align-items: center; gap: 4px; overflow: hidden; }
+.alu-quick-btn {
+  min-width: 0;
+  flex: 0 1 auto;
+  padding: 3px 10px;
+  border: 1px solid var(--alu-border);
+  border-radius: 999px;
+  color: var(--alu-text-dim);
+}
+.alu-quick-btn > span { display: block; max-width: 4.8em; overflow: hidden; text-overflow: ellipsis; }
+/* Short names never shrink; when the row is tight, longer names are shortened instead. */
+.alu-quick-btn.is-short { flex-shrink: 0; }
+.alu-quick-btn:hover:not(:disabled) { border-color: var(--alu-border-light); }
 .alu-composer-actions .alu-bar-btn kbd { margin-left: 2px; }
 /* 发送按钮 */
 .alu-send-btn {
@@ -366,10 +389,14 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   .alu-composer-text.is-tall textarea { padding-right: 38px; }
   /* 手机上只留图标：文字标签、快捷键提示都不显示。 */
   .alu-composer-actions { gap: 2px; margin-left: -6px; }
-  .alu-composer-actions .alu-bar-btn > span,
+  .alu-composer-actions > .alu-bar-btn > span,
+  .alu-composer-actions-end .alu-bar-btn > span,
   .alu-composer-actions .alu-bar-btn kbd,
   .alu-send-btn > span { display: none; }
-  .alu-composer-actions .alu-bar-btn { min-width: 40px; min-height: 40px; padding: 0; justify-content: center; border-radius: 10px; }
+  .alu-composer-actions > .alu-bar-btn,
+  .alu-composer-actions-end .alu-bar-btn { min-width: 40px; min-height: 40px; padding: 0; justify-content: center; border-radius: 10px; }
+  .alu-quick-btn { min-height: 34px; padding: 0 8px; }
+  .alu-quick-btn:nth-child(n+4) { display: none; }
   .alu-composer-actions .alu-bar-btn > svg { width: 18px; height: 18px; }
   .alu-composer-actions-sep { margin: 0 2px; }
   .alu-composer-actions-end { gap: 4px; }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, Pencil, Plus, RefreshCw, RotateCw, Search, Settings, Square, Undo2, Wrench, Zap } from '@lucide/vue'
+import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, MousePointerClick, Pencil, Pin, Plus, RefreshCw, RotateCw, Search, Settings, Square, Undo2, Wrench, Zap } from '@lucide/vue'
 import {
   getCommandCompletions,
   getCommandContent,
@@ -20,12 +20,15 @@ import { localControlCommands, type ControlSection, type LocalControlCommand } f
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
 import { formatContextUsage, workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
+import QuickButtonsEditor from './QuickButtonsEditor.vue'
 import ResourceDocument from './ResourceDocument.vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
 import { useControlPanelStore, type ControlMutationDomain } from '../stores/control-panel'
+import { useInputStore } from '../stores/input'
+import { useQuickButtonsStore } from '../stores/quick-buttons'
 import { useWorkActionsStore } from '../stores/work-actions'
 import type {
   CommandArgumentCompletion,
@@ -47,6 +50,8 @@ const { models, tools, resources, settings, loading, loadErrors } = storeToRefs(
 const { loadSection } = panel
 const catalog = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
+const quickButtons = useQuickButtonsStore()
+const { runQuickButton, quickButtonDisabled } = useInputStore()
 const { openMachineSettings } = useWorkActionsStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
@@ -79,8 +84,11 @@ const localControlIcons = {
   settings: Settings,
   state: Info,
   resources: LayoutList,
+  'quick-buttons': Pin,
 } as const
-const staticCommands = localControlCommands.map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] }))
+/** Managing quick buttons lives only in the palette; it is not a slash command. */
+const manageQuickButtons: LocalControlCommand = { id: 'quick-buttons', name: '', label: '管理快捷按钮', keywords: '快捷按钮 钉住 自定义 quick button pin', description: '新建、修改、排序或删除输入框下方的快捷按钮', section: 'quick-buttons' }
+const staticCommands = [...localControlCommands, manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] }))
 
 const commandSearch = ref('')
 const modelSearch = ref('')
@@ -141,10 +149,18 @@ const catalogCommands = computed(() => {
   return catalog.commands.filter((item) => !localNames.has(item.name))
 })
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
+/** Every quick button, including those the row has no room for. */
+const filteredQuickButtons = computed(() => filterCommandPaletteItems(
+  quickButtons.buttons.map((button) => ({ id: button.text, label: button.name, keywords: button.text, description: '', button })),
+  commandSearch.value,
+).map((item) => item.button))
 const commandSelections = computed(() => [
+  ...filteredQuickButtons.value.map((item) => ({ kind: 'quick' as const, item })),
   ...filteredStaticCommands.value.map((item) => ({ kind: 'static' as const, item })),
   ...filteredCommands.value.map((item) => ({ kind: 'catalog' as const, item })),
 ])
+const staticOffset = computed(() => filteredQuickButtons.value.length)
+const catalogOffset = computed(() => staticOffset.value + filteredStaticCommands.value.length)
 const commandFooter = computed(() => {
   const count = catalogCommands.value.length
   if (catalog.state === 'idle' || catalog.state === 'loading') return '正在同步当前 Session 的 Extension、Skill 和 Prompt 命令…'
@@ -253,6 +269,7 @@ function forwardSessionCompact(customInstructions?: string) {
 }
 
 function activateStatic(item: LocalControlCommand) {
+  if (item.section === 'quick-buttons') quickButtons.cancelEdit()
   if (item.section) emit('section', item.section)
   else if (item.action === 'stop') emit('stop')
   else if (item.action === 'refresh') emit('refresh')
@@ -262,8 +279,15 @@ function activateStatic(item: LocalControlCommand) {
 function activateCommandIndex(index = commandSelectedIndex.value) {
   const selected = commandSelections.value[index]
   if (!selected) return
-  if (selected.kind === 'static') activateStatic(selected.item)
+  if (selected.kind === 'quick') { if (!quickButtonDisabled(selected.item)) void runQuickButton(selected.item) }
+  else if (selected.kind === 'static') activateStatic(selected.item)
   else activateCatalogCommand(selected.item)
+}
+
+/** 图钉：命令带进快捷按钮表单，文本停在命令名后，可以接着写参数，再保存。 */
+function pinCommand(name: string, takesArguments: boolean) {
+  quickButtons.edit({ name, text: takesArguments ? `/${name} ` : `/${name}`, mode: 'send' })
+  emit('section', 'quick-buttons')
 }
 
 /** prompt/skill 命令的本质是发一条消息：草稿空着时直接填进输入框交回对话；
@@ -574,22 +598,33 @@ function isCurrentModel(model: ModelInfo) {
           <button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button>
         </div>
         <div id="cmd-palette-list" class="cmd-palette-list" role="listbox">
+          <template v-if="filteredQuickButtons.length">
+            <div class="cmd-palette-group">快捷按钮</div>
+            <button v-for="(item, index) in filteredQuickButtons" :key="item.id" :id="`cmd-opt-${index}`" class="cmd-palette-item cmd-palette-quick" :class="{ selected: commandSelectedIndex === index }" role="option" :aria-selected="commandSelectedIndex === index" :disabled="quickButtonDisabled(item)" @mouseenter="commandSelectedIndex = index" @click="runQuickButton(item)">
+              <span class="cmd-palette-item-icon"><MousePointerClick :size="13" /></span>
+              <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">{{ item.name }}</span><span class="cmd-palette-item-hint">{{ item.mode === 'send' ? '立即发送' : '填入输入框' }}</span></span><span class="cmd-palette-item-desc">{{ item.text }}</span></span>
+            </button>
+          </template>
           <div v-if="filteredStaticCommands.length" class="cmd-palette-group">Work 操作</div>
-          <button v-for="(item, index) in filteredStaticCommands" :key="item.id" :id="`cmd-opt-${index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === index, 'is-important': item.id === 'stop' }" role="option" :aria-selected="commandSelectedIndex === index" @mouseenter="commandSelectedIndex = index" @click="activateStatic(item)">
-            <span class="cmd-palette-item-icon"><component :is="item.icon" :size="13" /></span>
-            <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">{{ item.label }}</span></span><span class="cmd-palette-item-desc">{{ item.description }}</span></span>
-          </button>
+          <div v-for="(item, index) in filteredStaticCommands" :key="item.id" class="cmd-palette-item-row">
+            <button :id="`cmd-opt-${staticOffset + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === staticOffset + index, 'is-important': item.id === 'stop' }" role="option" :aria-selected="commandSelectedIndex === staticOffset + index" @mouseenter="commandSelectedIndex = staticOffset + index" @click="activateStatic(item)">
+              <span class="cmd-palette-item-icon"><component :is="item.icon" :size="13" /></span>
+              <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">{{ item.label }}</span></span><span class="cmd-palette-item-desc">{{ item.description }}</span></span>
+            </button>
+            <button v-if="item.name" type="button" class="cmd-palette-pin" :aria-label="`把 /${item.name} 做成快捷按钮`" title="做成快捷按钮" @click="pinCommand(item.name, false)"><Pin :size="13" /></button>
+          </div>
           <template v-if="filteredCommands.length">
             <div class="cmd-palette-group">Pi Commands</div>
             <div v-for="(item, index) in filteredCommands" :key="item.referenceId" class="cmd-palette-item-row">
-              <button :id="`cmd-opt-${filteredStaticCommands.length + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === filteredStaticCommands.length + index }" role="option" :aria-selected="commandSelectedIndex === filteredStaticCommands.length + index" @mouseenter="commandSelectedIndex = filteredStaticCommands.length + index" @click="activateCatalogCommand(item)">
+              <button :id="`cmd-opt-${catalogOffset + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === catalogOffset + index }" role="option" :aria-selected="commandSelectedIndex === catalogOffset + index" @mouseenter="commandSelectedIndex = catalogOffset + index" @click="activateCatalogCommand(item)">
                 <span class="cmd-palette-item-icon"><ChevronRight :size="13" /></span>
                 <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}<span v-if="item.argumentHint" class="cmd-palette-item-argument"> {{ item.argumentHint }}</span></span><span class="cmd-palette-item-hint">{{ catalogSourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
               </button>
               <button v-if="item.contentAvailable" type="button" class="cmd-palette-content-btn" :aria-label="`查看 /${item.name} 的 Prompt 内容`" @click="openCommandContent(item)">内容</button>
+              <button type="button" class="cmd-palette-pin" :aria-label="`把 /${item.name} 做成快捷按钮`" title="做成快捷按钮" @click="pinCommand(item.name, true)"><Pin :size="13" /></button>
             </div>
           </template>
-          <div v-if="!filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ catalog.state === 'idle' || catalog.state === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
+          <div v-if="!filteredQuickButtons.length && !filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ catalog.state === 'idle' || catalog.state === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
         </div>
         <div class="cmd-palette-footer">{{ commandFooter }}<button v-if="catalog.state === 'failed'" type="button" @click="loadSection('commands', true)">重试读取命令</button></div>
       </template>
@@ -616,6 +651,8 @@ function isCurrentModel(model: ModelInfo) {
         <div class="cmd-palette-footer cmd-center-footer">内容仅供查看 · 选择命令后仍会回到输入框确认发送</div>
       </template>
     </template>
+
+    <QuickButtonsEditor v-else-if="section === 'quick-buttons'" />
 
     <section v-else-if="section === 'dock-tools'" class="dock-tools-panel">
       <header class="dock-tools-header">
@@ -870,7 +907,14 @@ function isCurrentModel(model: ModelInfo) {
   text-align: left;
   transition: background 0.08s, border-color 0.08s;
 }
-.cmd-palette-item-row { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: center; gap: 3px; }
+.cmd-palette-item-row { display: grid; grid-template-columns: minmax(0, 1fr); grid-auto-columns: max-content; grid-auto-flow: column; align-items: center; gap: 3px; }
+.cmd-palette-item:disabled { cursor: not-allowed; opacity: 0.45; }
+/* 图钉：命令旁的次要动作，把它做成输入框下方的快捷按钮。 */
+.cmd-palette-pin { display: inline-grid; width: 32px; height: 32px; place-items: center; border-radius: 7px; color: var(--alu-text-faint); }
+.cmd-palette-pin:hover, .cmd-palette-pin:focus-visible { outline: none; background: var(--alu-hover); color: var(--alu-pink); }
+@media (max-width: 640px) {
+  .cmd-palette-pin { width: 40px; height: 40px; }
+}
 .cmd-palette-item.selected { background: var(--alu-hover); border-color: var(--alu-border); }
 .cmd-palette-item.is-important .cmd-palette-item-icon, .cmd-palette-item.is-important .cmd-palette-item-label { color: color-mix(in srgb, var(--alu-red) 78%, var(--alu-text)); }
 .cmd-palette-content-btn {

@@ -1,7 +1,7 @@
 import { defineStore, storeToRefs } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { useComposer } from '../lib/composer'
-import { dequeueMessages, getCommandCompletions, isTauri, submitMessage } from '../lib/bridge'
+import { dequeueMessages, getCommandCompletions, isTauri, submitMessage, submitText } from '../lib/bridge'
 import { attachmentUploadMatches, attachmentUploadTarget } from '../lib/attachmentDraft'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { conversationBoundaryKey } from '../lib/uiBoundaries'
@@ -10,6 +10,7 @@ import { filterLocalControlCommands, localControlCommands, submittedLocalControl
 import { shellRunQuote } from '../lib/conversation'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { EditorCapture, NativeOperation } from '../lib/operationBinding'
+import type { QuickButton } from '../lib/quickButtons'
 import type { CommandArgumentCompletion, CommandInfo, ShellRunItem } from '../lib/types'
 import { useAppStore } from './app'
 import { useAttachmentsStore } from './attachments'
@@ -261,6 +262,11 @@ export const useInputStore = defineStore('input', () => {
    *  焦点走 modal 关闭时的 trigger 归位通道，避免和归位逻辑抢时序。 */
   function prefillSlashCommand(name: string) {
     draft.value = prefixSlashCommand(name, draft.value)
+    focusComposerEnd()
+  }
+
+  /** Hands focus back to the compact editor with the cursor at the end, after an open palette closes. */
+  function focusComposerEnd() {
     surfaces.returnFocusTo(composerTextarea.value)
     surfaces.closeControl()
     void nextTick(() => {
@@ -356,27 +362,31 @@ export const useInputStore = defineStore('input', () => {
       && !attachments.uploadDrafts.length) composerExpanded.value = false
   }
 
-  async function executeLocalControl(command: LocalControlCommand, captured: string): Promise<boolean> {
+  /** `typed` is the editor text that asked for the control, cleared once it runs; a quick button passes null. */
+  async function executeLocalControl(command: LocalControlCommand, typed: string | null): Promise<boolean> {
     if (!selected.value || selected.value.lifecycle !== 'active') return false
+    const clearTyped = () => { if (typed !== null && draft.value === typed) draft.value = '' }
     if (command.section) {
-      if (draft.value === captured) draft.value = ''
+      clearTyped()
       surfaces.openControlCenter(command.section)
       return true
     }
     if (command.action === 'restoreQueue') {
-      if (draft.value === captured) draft.value = ''
+      clearTyped()
       return restoreQueue()
     }
     if (command.action === 'refresh') {
-      if (draft.value === captured) draft.value = ''
+      clearTyped()
       await observation.refreshCurrent()
       return true
     }
     if (command.action === 'stop') {
       const context = requireConnectionContext(app)
       let original: EditorCapture | undefined
-      try { original = app.captureSubmitDraft(context.connectionId, selected.value.id, []) }
-      catch { /* Stop must remain available; without a durable capture, keep the local command text. */ }
+      if (typed !== null) {
+        try { original = app.captureSubmitDraft(context.connectionId, selected.value.id, []) }
+        catch { /* Stop must remain available; without a durable capture, keep the local command text. */ }
+      }
       const stopped = await workActions.stopSelectedWork()
       if (stopped && original) app.completeSubmitDraft(original)
       return stopped
@@ -386,6 +396,58 @@ export const useInputStore = defineStore('input', () => {
 
   function applyExtensionEditorText(text: string) {
     draft.value = text
+  }
+
+  /* ── 快捷按钮 ────────────────────────────────
+   * 立即发送 = typing the text and pressing send, except the draft, its attachments and
+   * retrieved images stay in the editor: the operation claims no editor and carries only
+   * this text. Pending and unconfirmed sends gate it exactly like the send button.
+   */
+  const canSendText = computed(() => !!selected.value && selected.value.lifecycle === 'active' && isTauri
+    && app.operationResultsReady && !submitBlocked.value)
+
+  async function sendText(text: string): Promise<boolean> {
+    const localCommand = submittedLocalControl(text)
+    if (localCommand) return executeLocalControl(localCommand, null)
+    const work = selected.value
+    if (!work || !canSendText.value || !text.trim() || !app.connectionContext) return false
+    const capturedHost = { ...requireConnectionContext(app) }
+    const viewRevision = submitViewRevision
+    const pendingKey = submitWorkKey.value
+    pendingSubmits.value.add(pendingKey)
+    submissionError.value = null
+    try {
+      const result = await submitText(work.id, text, work.executor.piSessionId, app.captureOperationTarget(capturedHost, work.id))
+      if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
+        if (!result.receipt.queued) conversation.showAgentActivity(work.id)
+      }
+      return true
+    } catch (cause) {
+      if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) submissionError.value = errorMessage(cause)
+      return false
+    } finally { pendingSubmits.value.delete(pendingKey) }
+  }
+
+  /** 填入: the text goes in front of the draft, the same as choosing a command in the palette. */
+  function insertText(text: string) {
+    if (!selected.value) return
+    draft.value = `${text}${draft.value}`
+    focusComposerEnd()
+  }
+
+  function quickButtonDisabled(button: QuickButton) {
+    if (!selected.value || selected.value.lifecycle !== 'active') return true
+    return button.mode === 'send' && !submittedLocalControl(button.text) && !canSendText.value
+  }
+
+  async function runQuickButton(button: QuickButton): Promise<boolean> {
+    if (button.mode === 'insert') {
+      insertText(button.text)
+      return true
+    }
+    // A control that opens a panel switches an open palette to it; anything else closes the palette first.
+    if (!submittedLocalControl(button.text)?.section) surfaces.closeControl()
+    return sendText(button.text)
   }
 
   /** 「发给 agent」: the shell run is quoted into the draft after whatever is there; the reader still decides whether to send. */
@@ -492,6 +554,6 @@ export const useInputStore = defineStore('input', () => {
     draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit,
     suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading,
     rememberSelection: composer.remember, trackComposition: composer.composition,
-    submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
+    submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, runQuickButton, quickButtonDisabled, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
   }
 })

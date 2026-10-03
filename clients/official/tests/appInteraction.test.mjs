@@ -1760,6 +1760,112 @@ try {
   assert.equal(uploadApp.currentAttachments.length, 0, 'real Session replacement revokes the old pending selection')
   console.log('PASS: App upload query/progress + A/B/A + reconstructed frontend + later typing + no unsolicited upload-history tray + deletion/queued-send duplicate snapshots + local save failures')
 
+  // #359: quick buttons in the input card. Real App, Pinia, palette and editor; only native IPC is a fixture.
+  {
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear(); pickedJobs = []
+    let quickApp, quickView
+    const mountQuickView = async () => {
+      mounted?.unmount(); await settle()
+      const pinia = createPinia()
+      quickApp = useAppStore(pinia); quickView = element('quick-buttons-app')
+      mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+      mounted.mount(quickView); await settle()
+      quickApp.selectWork('work'); await settle(); contentSnapshot(); await settle()
+    }
+    const row = () => find(quickView, item => item.props.class === 'alu-quick-buttons')
+    const rowNames = () => row() ? all(row(), item => item.type === 'button').map(text) : []
+    const quickButton = name => all(row(), item => item.type === 'button').find(item => text(item) === name)
+    const editor = () => find(quickView, item => item.type === 'textarea' && item.props.placeholder === '输入消息…')
+    const openPalette = async () => { find(quickView, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle() }
+    const closeDialog = async () => { find(quickView, item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle() }
+    const openManager = async () => {
+      await openPalette()
+      find(quickView, item => item.type === 'button' && String(item.props.class).includes('cmd-palette-item') && text(item).includes('管理快捷按钮')).props.onClick(); await settle()
+    }
+    const form = () => find(quickView, item => item.type === 'form' && String(item.props.class).includes('quick-button-form'))
+    const formText = () => find(form(), item => item.type === 'textarea')
+    const sends = () => calls.filter(call => call.command === 'submit_message').length
+
+    catalogNative = () => ({ commands: [{ name: 'codex-fast', referenceId: 'codex-fast-ref', source: { kind: 'extension' }, contentAvailable: false }], total: 1, truncated: false })
+    await mountQuickView()
+    assert.deepEqual(rowNames(), ['恢复', 'Tree'], 'a device without saved buttons starts with 恢复 and Tree')
+    editor().props['onUpdate:modelValue']('half-typed draft')
+    await quickButton('恢复').props.onClick(); await settle()
+    assert.ok(find(quickView, item => item.props.role === 'dialog' && item.props['aria-label'] === '恢复 Session'), '恢复 is /resume sent at once, which opens the saved Sessions')
+    await closeDialog()
+
+    // Pinning a command opens the form with room for an argument; saving adds it to the row.
+    await openPalette()
+    find(quickView, item => item.type === 'button' && item.props['aria-label'] === '把 /codex-fast 做成快捷按钮').props.onClick(); await settle()
+    assert.equal(formText().value, '/codex-fast ', 'the pinned command waits for its argument')
+    formText().props['onUpdate:modelValue']('/codex-fast all')
+    await form().props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual(rowNames(), ['恢复', 'Tree', 'codex-fast'])
+    await closeDialog()
+
+    // 立即发送 sends only the button's text: the half-typed draft, its attachments and retrieved images stay.
+    let quickSend
+    submitNative = async args => { quickSend = args; return { receipt: { queued: false, delivery: 'prompt' }, instance: work } }
+    assert.equal(quickButton('codex-fast').props.disabled, false)
+    await quickButton('codex-fast').props.onClick(); await settle()
+    assert.equal(quickSend?.message, '/codex-fast all', 'the button sends its whole line, argument included')
+    assert.equal(quickSend.operationEditor, null, 'the send claims no editor, so its success cannot clear the draft')
+    assert.deepEqual([quickSend.attachmentFileIds, quickSend.textOnly], [[], true], 'attachments and retrieved images stay with the editor')
+    assert.equal(quickApp.currentDraft, 'half-typed draft')
+
+    // An unconfirmed quick send blocks sending again, like any send, so a command is not silently run twice.
+    // Native records the send under the Session the request names (an editor send names it in its capture).
+    let unconfirmedSend
+    const lost = { code: 'connection_failed', message: '连接中断，无法确认是否已发送。', outcomeUnknown: true }
+    submitNative = args => {
+      unconfirmedSend = args
+      emit('aludock://operation', { operationId: args.operationId, kind: 'submit_message', connectionId: args.connectionId, instanceId: args.instanceId,
+        hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration, sessionId: args.sessionId, editor: args.operationEditor, state: 'unknown', error: lost })
+      return Promise.reject({ ...lost, operationId: args.operationId })
+    }
+    await quickButton('codex-fast').props.onClick(); await settle()
+    assert.equal(unconfirmedSend.sessionId, 'old', 'the quick send names the Session it belongs to')
+    assert.ok(text(quickView).includes('还无法确认消息是否已进入 Queue'), 'the unconfirmed quick send is reported like any send')
+    assert.equal(quickButton('codex-fast').props.disabled, true, 'the quick button cannot send again while the result is unknown')
+    assert.equal(find(quickView, item => item.props.class === 'alu-send-btn').props.disabled, true, 'nor can the send button')
+    assert.equal(quickApp.currentDraft, 'half-typed draft')
+
+    // Restarting the client keeps this device's buttons.
+    await mountQuickView()
+    assert.deepEqual(rowNames(), ['恢复', 'Tree', 'codex-fast'], 'a restarted client keeps the buttons')
+
+    // 填入 puts its text in front of the draft, like a palette command, and sends nothing.
+    editor().props['onUpdate:modelValue']('half-typed draft')
+    await openManager()
+    find(quickView, item => item.type === 'button' && text(item).includes('新建快捷按钮')).props.onClick(); await settle()
+    find(form(), item => item.type === 'input' && item.props.placeholder === '留空则用文本').props['onUpdate:modelValue']('审查')
+    formText().props['onUpdate:modelValue']('请审查这次改动：')
+    find(form(), item => item.type === 'input' && item.props.value === 'insert').props['onUpdate:modelValue']('insert')
+    await form().props.onSubmit({ preventDefault() {} }); await settle()
+    await closeDialog()
+    const sendsBeforeInsert = sends()
+    await quickButton('审查').props.onClick(); await settle()
+    assert.equal(quickApp.currentDraft, '请审查这次改动：half-typed draft')
+    assert.equal(sends(), sendsBeforeInsert, '填入 does not send')
+
+    // More buttons than the row holds: the rest run from the palette, and moving one up brings it into the row.
+    storage.set('aludock.quickButtons', JSON.stringify(Array.from({ length: 7 }, (_, index) => ({ id: `seed-${index}`, name: `第${index + 1}`, text: `overflow check ${index + 1}`, mode: 'send' }))))
+    await mountQuickView()
+    assert.deepEqual(rowNames(), ['第1', '第2', '第3', '第4', '第5', '第6'], 'the row holds the first six')
+    let paletteSend
+    submitNative = async args => { paletteSend = args; return { receipt: { queued: true, delivery: 'followUp' }, instance: work } }
+    await openPalette()
+    await find(quickView, item => item.type === 'button' && String(item.props.class).includes('cmd-palette-quick') && text(item).includes('第7')).props.onClick(); await settle()
+    assert.equal(paletteSend?.message, 'overflow check 7', 'a button without room in the row runs from the palette')
+    assertSameReference(find(quickView, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined, 'the palette closes once the button is sent')
+    await openManager()
+    await find(quickView, item => item.props['aria-label'] === '调整「第7」的位置').props.onKeydown({ key: 'ArrowUp', preventDefault() {} }); await settle()
+    assert.deepEqual(rowNames(), ['第1', '第2', '第3', '第4', '第5', '第7'], 'the order decides which buttons fit in the row')
+    await closeDialog()
+    catalogNative = undefined
+    console.log('PASS: quick buttons: defaults run local controls; pinned command takes an argument; send keeps draft/attachments; restart keeps buttons; insert fills without sending; overflow runs from palette; order decides the row')
+  }
+
   }
 } finally {
   mounted?.unmount(); await settle(); await rm(directory, { recursive: true, force: true })
