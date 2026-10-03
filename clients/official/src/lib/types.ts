@@ -124,7 +124,6 @@ export interface HostCatalogEntry {
   hostId: string
   displayName: string
   deviceName: string
-  endpointSummary: string
   addedAt: string
   profile: HostConnectionProfile
 }
@@ -147,7 +146,6 @@ export interface HostSummary {
   piSdkVersion: string
   startedAt: string
   profile?: HostConnectionProfile
-  activeEndpointId: string
 }
 
 export interface BootstrapPayload {

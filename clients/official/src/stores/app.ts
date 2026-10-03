@@ -356,11 +356,6 @@ export const useAppStore = defineStore('app', () => {
     if (entry) {
       entry.profile = profile
       entry.displayName = profile.displayName
-      // Endpoints arrive in the order a connection tries them.
-      const endpoint = profile.endpoints.find((candidate) => candidate.state === 'verified')
-      entry.endpointSummary = endpoint
-        ? `${endpoint.endpoint.host}:${endpoint.endpoint.port}`
-        : '没有已保存地址'
     }
     if (payload.value?.connectionId === profile.hostId) payload.value.host.profile = profile
   }

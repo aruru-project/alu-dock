@@ -83,7 +83,6 @@ function sampleData() {
       dockVersion: '0.2.0',
       piSdkVersion: 'preview',
       startedAt: now,
-      activeEndpointId: 'preview-local',
       profile: {
         schemaVersion: 1,
         revision: 1,
@@ -116,7 +115,6 @@ function sampleData() {
       hostId: previewBootstrap.connectionId,
       displayName: previewBootstrap.host.profile!.displayName,
       deviceName: '浏览器预览设备',
-      endpointSummary: '192.168.1.20:33781',
       addedAt: now,
       profile: previewBootstrap.host.profile!,
     }],

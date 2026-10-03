@@ -11,7 +11,7 @@ import {
 } from '../lib/deviceName'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { ConnectionKind, HostConnectionProfile, HostEndpoint } from '../lib/types'
+import type { ConnectionKind, HostCatalogEntry, HostConnectionProfile, HostEndpoint } from '../lib/types'
 import { useAppStore } from './app'
 import { useExtensionUiStore } from './extension-ui'
 import { useSurfacesStore } from './surfaces'
@@ -324,6 +324,12 @@ export const useHostStore = defineStore('host', () => {
     }
   }
 
+  /** A Host's line in the Host list. Which address a connection uses is the client's choice and shows in that Host's details. */
+  function hostAddressSummary(host: HostCatalogEntry) {
+    const endpoints = host.profile.endpoints
+    return endpoints.some((endpoint) => endpoint.state === 'verified') ? `${endpoints.length} 个地址` : '没有可用的地址'
+  }
+
   function endpointKindLabel(kind: ConnectionKind) {
     return kind === 'local' ? '局域网' : kind === 'vpn' ? 'VPN' : '广域网'
   }
@@ -391,5 +397,5 @@ export const useHostStore = defineStore('host', () => {
     if (disposed) release(); else unlisten = release
   }
   onScopeDispose(() => { disposed = true; unlisten?.(); const id = pairingRequestId.value; pairingRequestId.value = ''; if (id) void (startingPairing ?? Promise.resolve()).catch(() => {}).then(() => cancelPairing(id)).catch(() => {}) })
-  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, currentEndpointId, currentEndpoint, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, testEndpoint, toggleEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, watchRoute, stopRouteWatch, listenNative }
+  return { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, currentEndpointId, currentEndpoint, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost, pairingInProgress, initializePairDeviceName, rememberPairDeviceName, beginPairing, stopPairing, openHostSettings, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, testEndpoint, toggleEndpoint, removeEndpoint, hostAddressSummary, endpointKindLabel, endpointStateLabel, testStatusLabel, watchRoute, stopRouteWatch, listenNative }
 })

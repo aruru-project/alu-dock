@@ -1157,6 +1157,11 @@ try {
   // #328: settings names the saved address the connection is using; kinds come from the addresses.
   assert.ok(text(hostDialog).includes('正在使用「外网域名」'), 'the header names the address in use')
   assert.ok(text(hostDialog).includes('广域网 · 正在使用') && text(hostDialog).includes('局域网 · 身份已验证'), 'only the address in use is marked')
+  // The Host list names each Host and how many addresses it has. The address in use is only in the
+  // details, so the current Host is never shown beside its LAN address while the details say 外网域名.
+  const hostRow = name => all(hostDialog, item => item.type === 'article' && String(item.props.class ?? '').split(' ').includes('host-choice')).find(row => text(row).startsWith(name))
+  assert.equal(text(hostRow('Host')), 'Host2 个地址当前', 'the current Host lists how many addresses it has')
+  assert.ok(text(hostRow('Spare')).includes('没有可用的地址'), 'a Host without a verified address says so')
   const removeHost = find(hostDialog, item => item.props['aria-label'] === '从此设备删除 Host')
   removeHost.focus()
   const removal = removeHost.props.onClick(); await settle()
