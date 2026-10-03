@@ -6,11 +6,11 @@ use crate::errors::CommandError;
 use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
-    AttachmentState, BashRunResult, ExtensionControlState, InstanceSnapshot, Machine, ModelRef,
-    ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult, RestoredImageState,
-    SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor,
-    SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor, WorkspacePage,
-    operation_association, project_queue_dequeue, resolve_machine_session_token,
+    AttachmentState, BashRunResult, DeliveryMode, ExtensionControlState, InstanceSnapshot, Machine,
+    ModelRef, ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult,
+    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
+    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
+    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
     restored_image_scope,
 };
 use serde::Serialize;
@@ -52,7 +52,9 @@ pub(crate) async fn submit_message(
     instance_id: String,
     message: String,
     attachment_file_ids: Option<Vec<String>>,
+    text_only: Option<bool>,
 ) -> Result<SubmitResult, CommandError> {
+    let text_only = text_only.unwrap_or(false);
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let scope = restored_image_scope(
@@ -77,6 +79,19 @@ pub(crate) async fn submit_message(
     );
     operations
         .execute(association, async move {
+            // A quick button sends only its own text. The editor's attachments and
+            // retrieved Queue images stay with the editor for its own send.
+            if text_only {
+                return client
+                    .submit_message(
+                        &instance_id,
+                        &message,
+                        DeliveryMode::Auto,
+                        Some(&operation_id),
+                    )
+                    .await
+                    .map_err(CommandError::from);
+            }
             restored_images
                 .submit(
                     &client,

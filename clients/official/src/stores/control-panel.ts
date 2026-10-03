@@ -63,7 +63,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   }
 
   async function loadSection(section: ControlSection, force = false): Promise<boolean> {
-    if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return true
+    if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session', 'quick-buttons'].includes(section)) return true
     const work = selected.value
     if (!work) return false
     if (section === 'resources') void loadSection('tools', force)

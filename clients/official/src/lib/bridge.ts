@@ -284,6 +284,11 @@ export async function submitMessage(instanceId: string, message: string, attachm
   return native('submit_message', { ...context, instanceId, message, attachmentFileIds, operationId: crypto.randomUUID() })
 }
 
+/** Sends this text alone (a quick button): it claims no editor, and the editor's attachments and retrieved images stay for its own send. */
+export async function submitText(instanceId: string, message: string, context: OperationTarget): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
+  return native('submit_message', { ...context, operationEditor: null, instanceId, message, attachmentFileIds: [], textOnly: true, operationId: crypto.randomUUID() })
+}
+
 /** Stops the reply and takes the waiting Queue back in the same Host step. */
 export async function abortRun(instanceId: string, context: OperationTarget): Promise<QueueDequeueResult> {
   return native<QueueDequeueResult>('abort_run', { ...context, operationEditor: null, operationId: crypto.randomUUID(), instanceId })
