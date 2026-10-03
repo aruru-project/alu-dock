@@ -11,6 +11,8 @@ export function useComposer(options: {
   const expandedTextarea = ref<HTMLTextAreaElement | null>(null)
   const expanded = options.expanded ?? ref(false)
   const composing = options.composing ?? ref(false)
+  /** The compact editor currently needs more than two lines (wrapped lines included). */
+  const tall = ref(false)
   const selection = ref({ start: 0, end: 0, direction: 'none' as 'forward' | 'backward' | 'none' })
   let frame = 0
   let transfer = 0
@@ -32,10 +34,35 @@ export function useComposer(options: {
       if (!textarea) return
       textarea.style.height = 'auto'
       const limit = expanded.value ? Math.max(220, Math.floor(window.innerHeight * 0.45)) : 180
-      textarea.style.height = `${Math.min(textarea.scrollHeight, limit)}px`
+      const contentHeight = textarea.scrollHeight
+      textarea.style.height = `${Math.min(contentHeight, limit)}px`
+      if (textarea === compact.value) {
+        // scrollHeight includes the vertical padding; only the text lines count.
+        const style = window.getComputedStyle(textarea)
+        const lineHeight = Number.parseFloat(style.lineHeight) || 20
+        const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
+        tall.value = contentHeight - padding > lineHeight * 2.5
+      }
     })
   }
   watch(draft, () => { void nextTick(resize) })
+  // Wrapping depends on the editor's width, so a narrower window re-measures the same draft.
+  let widthObserver: ResizeObserver | undefined
+  let observedWidth = 0
+  watch(compact, (textarea) => {
+    widthObserver?.disconnect()
+    widthObserver = undefined
+    if (!textarea) return
+    observedWidth = 0
+    widthObserver = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0
+      if (width === observedWidth) return
+      observedWidth = width
+      resize()
+    })
+    widthObserver.observe(textarea)
+    resize()
+  })
   watch(expanded, async (open) => {
     const revision = ++transfer
     const from = open ? compact.value : expandedTextarea.value
@@ -49,6 +76,6 @@ export function useComposer(options: {
     resize()
   }, { flush: 'pre' })
   watch(options.identity, () => { transfer++; composing.value = false; selection.value = { start: 0, end: 0, direction: 'none' }; options.flush(); void nextTick(resize) })
-  onScopeDispose(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); options.flush() })
-  return { draft, compact, expandedTextarea, expanded, composing, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
+  onScopeDispose(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); widthObserver?.disconnect(); options.flush() })
+  return { draft, compact, expandedTextarea, expanded, composing, tall, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
 }

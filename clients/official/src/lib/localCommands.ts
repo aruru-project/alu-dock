@@ -1,5 +1,5 @@
 export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'tools' | 'resources' | 'settings'
-export type LocalControlAction = 'stop' | 'restoreQueue'
+export type LocalControlAction = 'stop' | 'restoreQueue' | 'refresh'
 
 export interface LocalControlCommand {
   readonly id: string
@@ -23,6 +23,7 @@ export const localControlCommands: readonly LocalControlCommand[] = [
   { id: 'name', name: 'name', label: 'Rename Session', keywords: '重命名会话', description: '修改当前 Session 名称', section: 'rename-session' },
   { id: 'compact', name: 'compact', label: 'Compact Context', keywords: '压缩上下文', description: '手动压缩当前上下文', section: 'compact-session' },
   { id: 'dequeue', name: 'dequeue', label: 'Restore Queue', keywords: '取回排队消息', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },
+  { id: 'refresh', name: 'refresh', label: '刷新状态', keywords: '刷新 重新连接 reconnect reload status', description: '重新读取工作列表和当前 Work 的状态', action: 'refresh' },
   { id: 'tools', name: 'tools', label: 'Active Tools', keywords: '启用工具', description: '查看或切换可用工具', section: 'tools' },
   { id: 'settings', name: 'settings', label: 'Settings', keywords: '设置', description: '查看或修改 Pi 设置', section: 'settings' },
   { id: 'state', name: 'state', label: 'Project Status', keywords: '当前状态 git branch', description: '查看 Work、Git、Session 与已加载能力', section: 'resources' },

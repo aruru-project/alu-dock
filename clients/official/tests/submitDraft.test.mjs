@@ -15,8 +15,10 @@ let storageWrites = 0, storageFails = false, consumeFails = false, stops = 0
 const retainedOperations = new Map()
 globalThis.document = { activeElement: null, title: '' }
 globalThis.HTMLElement = class {}
+globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} }
 globalThis.window = {
   history: { pushState() {}, back() {}, go() {} },
+  getComputedStyle: () => ({ lineHeight: '20px' }),
   localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => { if (storageFails) throw Error("fixture storage failure"); storageWrites++; storage.set(key, value) }, removeItem: key => storage.delete(key) },
   __TAURI_INTERNALS__: { invoke: async (command, args) => {
     if (command === 'pending_operations') return [...retainedOperations.values()]

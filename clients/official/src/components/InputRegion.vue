@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
+import { ArrowUp, FolderTree, GitFork, History, Maximize2, Paperclip, SquareSlash } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
 import AttachmentCard from './AttachmentCard.vue'
 import OperationResults from './OperationResults.vue'
@@ -19,14 +20,15 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const input = useInputStore()
-const { draft, composerTextarea, expandedTextarea, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
+const { draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
 const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages } = input
 const attachments = useAttachmentsStore()
-const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount } = storeToRefs(attachments)
-const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview } = attachments
+const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, maxMessageAttachments } = storeToRefs(attachments)
+const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, chooseAttachments } = attachments
 const surfaces = useSurfacesStore()
-const { modalOpen, composerExpanded } = storeToRefs(surfaces)
-const { rememberModalTrigger, handleModalKeydown, handleModalWheel, bindSurface } = surfaces
+const { modalOpen, composerExpanded, workspaceBrowserOpen } = storeToRefs(surfaces)
+const { rememberModalTrigger, handleModalKeydown, handleModalWheel, bindSurface, openControlCenter, openWorkspaceBrowser } = surfaces
+const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '\u2318K' : 'Ctrl+K'
 const workActions = useWorkActionsStore()
 const { actionNotice, mutationOutcomeUnknown, reconcilingReopenWorkId } = storeToRefs(workActions)
 const { reconcileMutationOutcome } = workActions
@@ -80,13 +82,23 @@ const applyExtensionTitle = (title: string) => { document.title = title }
           <div v-else-if="!suggestItems.length && commandCatalogStore.state === 'failed'" class="cmd-suggest-hint">当前命令目录暂时不可用，请稍后重试。</div>
           <div v-else-if="!suggestItems.length && slashQuery" class="cmd-suggest-hint">无匹配命令</div>
         </div>
-        <textarea ref="composerTextarea" v-model="draft" rows="1" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @select="rememberSelection" @blur="rememberSelection" @compositionstart="trackComposition" @compositionend="trackComposition" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
-        <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
-        <button class="alu-send-btn" type="submit" :disabled="!canSubmit">{{ submitting ? '发送中…' : '发送' }}</button>
+        <div class="alu-composer-text" :class="{ 'is-tall': composerTall }">
+          <textarea ref="composerTextarea" v-model="draft" rows="1" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @select="rememberSelection" @blur="rememberSelection" @compositionstart="trackComposition" @compositionend="trackComposition" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
+          <button v-if="composerTall" type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" @click="rememberModalTrigger(); composerExpanded = true"><Maximize2 :size="14" /></button>
+        </div>
+        <div class="alu-composer-actions">
+          <button type="button" class="alu-bar-btn" title="添加附件" aria-label="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= maxMessageAttachments" @click="chooseAttachments"><Paperclip :size="15" /><span>附件</span></button>
+          <button type="button" class="alu-bar-btn" title="浏览当前 Work 的工作区" aria-label="打开工作区" :aria-expanded="workspaceBrowserOpen" :disabled="!isTauri" @click="openWorkspaceBrowser"><FolderTree :size="15" /><span>工作区</span></button>
+          <div class="alu-composer-actions-sep" aria-hidden="true" />
+          <button type="button" class="alu-bar-btn" title="恢复 Session" aria-label="恢复 Session" @click="openControlCenter('sessions')"><History :size="15" /><span>恢复</span></button>
+          <button type="button" class="alu-bar-btn" title="打开 Session Tree" aria-label="打开 Session Tree" @click="openControlCenter('tree')"><GitFork :size="15" /><span>Tree</span></button>
+          <div class="alu-composer-actions-end">
+            <button type="button" class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-label="打开命令中心" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><SquareSlash :size="15" /><span>命令</span><kbd>{{ commandShortcutLabel }}</kbd></button>
+            <button class="alu-send-btn" type="submit" :disabled="!canSubmit" :aria-label="submitting ? '发送中' : '发送'"><ArrowUp :size="18" aria-hidden="true" /><span>{{ submitting ? '发送中…' : '发送' }}</span></button>
+          </div>
+        </div>
       </form>
     </ExtensionUiSurface>
-
-    <slot />
   </section>
 
   <Transition name="fade">
@@ -117,18 +129,64 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   background: var(--alu-nav-bg);
   border-top: 1px solid var(--alu-nav-border);
   flex-shrink: 0;
-  padding: 0 16px;
+  padding: 0 16px 12px;
 }
+/* ── 输入卡片：文字区整行在上，按钮行在下 ── */
+.alu-input-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 2px solid var(--alu-border-light);
+  border-radius: 20px;
+  margin: 16px 0 0;
+  padding: 10px 10px 8px 18px;
+  background: var(--alu-surface);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.alu-input-wrap:focus-within {
+  border-color: var(--alu-pink);
+  box-shadow:
+      0 0 0 4px rgba(244, 114, 182, 0.10),
+      0 0 32px rgba(244, 114, 182, 0.10),
+      inset 0 0 24px rgba(244, 114, 182, 0.03);
+}
+.alu-composer-text { position: relative; display: flex; }
+/* Keep the first lines clear of the expand button. */
+.alu-composer-text.is-tall textarea { padding-right: 34px; }
+.alu-input-wrap textarea {
+  flex: 1;
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none !important;
+  box-shadow: none !important;
+  resize: none;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--alu-text);
+  line-height: 1.6;
+  padding: 4px 0;
+  max-height: 200px;
+  min-height: 28px;
+}
+.alu-input-wrap textarea::placeholder {
+  color: var(--alu-text-muted);
+  opacity: 0.7;
+}
+/* 展开编辑：只在内容超过两行时出现在文字区右上角。 */
 .alu-composer-expand {
+  position: absolute;
+  top: 0;
+  right: 0;
   display: inline-grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
   place-items: center;
   border: 1px solid var(--alu-border);
-  border-radius: 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--alu-surface) 88%, transparent);
   color: var(--alu-text-muted);
-  font-size: 15px;
   transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .alu-composer-expand:hover,
@@ -138,15 +196,77 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   background: var(--alu-blue-bg);
   border-color: var(--alu-blue-border);
 }
-.alu-composer-expand:disabled { opacity: 0.35; cursor: not-allowed; }
+/* ── 按钮行：带进来 │ 中间段 │ 动作 ── */
+.alu-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: -8px;
+}
+.alu-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--alu-text-muted);
+  font-size: var(--alu-meta-size);
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s;
+}
+.alu-bar-btn:hover {
+  background: var(--alu-hover);
+  color: var(--alu-text-dim);
+}
+.alu-bar-btn[aria-expanded="true"] { color: var(--alu-blue); }
+.alu-bar-btn kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 4px;
+  border: 1px solid var(--alu-border-light);
+  border-radius: 3px;
+  font-size: var(--alu-micro-size);
+  font-family: inherit;
+  line-height: 1.3;
+  color: inherit;
+}
+.alu-bar-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.alu-composer-actions-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--alu-border);
+  flex-shrink: 0;
+}
+.alu-composer-actions-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.alu-composer-actions .alu-bar-btn > svg { flex-shrink: 0; }
+.alu-composer-actions .alu-bar-btn kbd { margin-left: 2px; }
 /* 发送按钮 */
 .alu-send-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex-shrink: 0;
-  padding: 10px 24px;
+  min-height: 34px;
+  padding: 0 18px 0 14px;
   background: linear-gradient(135deg, #c8386e 0%, #a02858 100%);
   border: none;
   color: #fce8f0;
-  border-radius: 13px;
+  border-radius: 11px;
   font-size: 14px;
   font-weight: 700;
   font-family: inherit;
@@ -225,20 +345,40 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 .cmd-suggest-kind { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .cmd-suggest-hint { padding: 10px 12px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 @media (max-width: 1000px) {
-  .alu-input-section { padding: 0 clamp(10px, 3vw, 24px); }
-  .alu-composer-expand {
-    min-width: 44px;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border-radius: 11px;
+  .alu-input-section { padding: 0 clamp(10px, 3vw, 24px) 8px; }
+  .alu-input-wrap {
+    width: min(100%, 760px);
+    gap: 2px;
+    margin: 8px auto 0;
+    padding: 4px 6px 6px 12px;
+    border-width: 1px;
+    border-radius: 16px;
   }
+  .alu-input-wrap textarea {
+    min-height: 44px;
+    max-height: min(30vh, 180px);
+    max-height: min(30dvh, 180px);
+    padding: 10px 0 8px;
+    font-family: var(--font-reading);
+    font-size: 15px;
+  }
+  .alu-composer-expand { top: 6px; width: 32px; height: 32px; }
+  .alu-composer-text.is-tall textarea { padding-right: 38px; }
+  /* 手机上只留图标：文字标签、快捷键提示都不显示。 */
+  .alu-composer-actions { gap: 2px; margin-left: -6px; }
+  .alu-composer-actions .alu-bar-btn > span,
+  .alu-composer-actions .alu-bar-btn kbd,
+  .alu-send-btn > span { display: none; }
+  .alu-composer-actions .alu-bar-btn { min-width: 40px; min-height: 40px; padding: 0; justify-content: center; border-radius: 10px; }
+  .alu-composer-actions .alu-bar-btn > svg { width: 18px; height: 18px; }
+  .alu-composer-actions-sep { margin: 0 2px; }
+  .alu-composer-actions-end { gap: 4px; }
   .alu-send-btn {
-    min-width: 64px;
-    height: 44px;
-    padding: 0 14px;
-    border-radius: 11px;
-    font-size: 13px;
+    width: 40px;
+    min-height: 40px;
+    padding: 0;
+    justify-content: center;
+    border-radius: 10px;
   }
 }
 @media (max-width: 640px) {

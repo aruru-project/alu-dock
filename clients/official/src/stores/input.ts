@@ -44,7 +44,7 @@ export const useInputStore = defineStore('input', () => {
     canFocus: () => !extensionUi.activeRequest && (!surfaces.modalOpen || composerExpanded.value),
     expanded: composerExpanded, composing: composerComposing,
   })
-  const { draft, compact: composerTextarea, expandedTextarea } = composer
+  const { draft, compact: composerTextarea, expandedTextarea, tall: composerTall } = composer
 
   let composerExpansionRevision = 0
   watch(composerExpanded, () => { composerExpansionRevision += 1 }, { flush: 'sync' })
@@ -367,6 +367,11 @@ export const useInputStore = defineStore('input', () => {
       if (draft.value === captured) draft.value = ''
       return restoreQueue()
     }
+    if (command.action === 'refresh') {
+      if (draft.value === captured) draft.value = ''
+      await observation.refreshCurrent()
+      return true
+    }
     if (command.action === 'stop') {
       const context = requireConnectionContext(app)
       let original: EditorCapture | undefined
@@ -484,7 +489,7 @@ export const useInputStore = defineStore('input', () => {
     offAttachmentError(); offFailurePresenter()
   })
   return {
-    draft, composerTextarea, expandedTextarea, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit,
+    draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit,
     suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading,
     rememberSelection: composer.remember, trackComposition: composer.composition,
     submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,

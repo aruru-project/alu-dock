@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
-import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, Pencil, Plus, RotateCw, Search, Settings, Square, Undo2, Wrench, Zap } from '@lucide/vue'
+import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, Pencil, Plus, RefreshCw, RotateCw, Search, Settings, Square, Undo2, Wrench, Zap } from '@lucide/vue'
 import {
   getCommandCompletions,
   getCommandContent,
@@ -58,6 +58,7 @@ const emit = defineEmits<{
   close: []
   stop: []
   restoreQueue: []
+  refresh: []
   title: [title: string, body?: string]
   size: [size: 'default' | 'wide' | 'tree']
 }>()
@@ -73,6 +74,7 @@ const localControlIcons = {
   compact: Zap,
   reload: RotateCw,
   dequeue: Undo2,
+  refresh: RefreshCw,
   tools: Wrench,
   settings: Settings,
   state: Info,
@@ -253,6 +255,7 @@ function forwardSessionCompact(customInstructions?: string) {
 function activateStatic(item: LocalControlCommand) {
   if (item.section) emit('section', item.section)
   else if (item.action === 'stop') emit('stop')
+  else if (item.action === 'refresh') emit('refresh')
   else emit('restoreQueue')
 }
 

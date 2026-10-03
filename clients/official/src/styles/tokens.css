@@ -47,13 +47,10 @@
   --alu-ui-size: clamp(12px, calc(11px + 0.08vw), 13px);
   --alu-meta-size: clamp(11px, calc(10px + 0.08vw), 12px);
   --alu-micro-size: clamp(10px, calc(9px + 0.08vw), 11px);
-  /* Bottom bar */
-  --alu-bar-height:     44px;
 }
 @media (max-width: 1000px) {
   :root {
     --alu-nav-height: 56px;
-    --alu-bar-height: 48px;
   }
 }
 @media (max-width: 840px) {
