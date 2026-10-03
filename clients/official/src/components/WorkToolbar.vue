@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { FolderTree } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
@@ -9,19 +8,14 @@ import { useAttachmentsStore } from '../stores/attachments'
 import { useHostStore } from '../stores/host'
 import { useObservationStore } from '../stores/observation'
 import { useSurfacesStore } from '../stores/surfaces'
-import { useWorkActionsStore } from '../stores/work-actions'
 
 const app = useAppStore()
-const selected = computed(() => app.selectedWork)
 const surfaces = useSurfacesStore()
 const { workspaceBrowserOpen } = storeToRefs(surfaces)
 const { openControlCenter, openWorkspaceBrowser } = surfaces
 const attachments = useAttachmentsStore()
 const { draftAttachments, uploadDrafts, attachmentPicking, maxMessageAttachments } = storeToRefs(attachments)
 const { chooseAttachments } = attachments
-const workActions = useWorkActionsStore()
-const { aborting } = storeToRefs(workActions)
-const { abortCurrentRun } = workActions
 const observation = useObservationStore()
 const { status: observationStatus, label: connectionLabel, refreshing } = storeToRefs(observation)
 const { refreshCurrent } = observation
@@ -42,7 +36,6 @@ const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '�
         <div class="alu-bar-sep" />
         <button class="alu-bar-btn" :title="refreshing ? '正在刷新' : '刷新'" :aria-label="refreshing ? '正在刷新' : '刷新'" :disabled="refreshing" @click="refreshCurrent">↻<span class="sm-inline">{{ refreshing ? '正在刷新…' : '刷新' }}</span></button>
         <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
-        <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || selected?.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline" :class="{ 'is-pending': aborting }">{{ aborting ? '中止中' : '中止' }}</span></button>
       </div>
     </div>
 
@@ -72,13 +65,6 @@ const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '�
   gap: 8px;
   flex-shrink: 0;
 }
-.alu-bar-btn-abort {
-  color: var(--alu-rose-dim);
-}
-.alu-bar-btn-abort:hover {
-  background: var(--alu-rose-bg);
-  color: var(--alu-rose);
-}
 .alu-bar-sep {
   width: 1px;
   height: 16px;
@@ -87,8 +73,6 @@ const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '�
   flex-shrink: 0;
 }
 @media (max-width: 1000px) {
-  /* Button labels are hidden on narrow screens, but an abort in progress keeps its words. */
-  .alu-bar-btn-abort .sm-inline.is-pending { display: inline; }
   .alu-input-section > .alu-bottom-bar {
     width: min(100%, 760px);
     margin-inline: auto;

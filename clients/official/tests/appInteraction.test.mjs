@@ -746,7 +746,10 @@ try {
   assert.equal(calls.filter(call => call.command === 'consume_operation' && call.args.operationId === sentOperation.operationId).length, 2)
   assert.equal(calls.filter(call => call.command === 'submit_message').length, sendCount)
   // #326: Abort takes the waiting Queue back in the same native call and inserts it like retrieval.
+  // #357: the abort control only exists while the Work is running.
   {
+    assert.equal(app.selectedWork.execution === 'running', false)
+    assert.equal(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'an idle Work shows no abort control')
     const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', pending: { steering: 0, followUp: 2, total: 2 } }
     const restored = [{ ...queueItem('abort-1'), text: 'queued a' }, { ...queueItem('abort-2'), text: 'queued b' }]
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
@@ -757,7 +760,7 @@ try {
     emit('aludock://operation', unconfirmedCompaction)
     await settle()
     assert.ok(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), 'the unconfirmed result keeps its refresh action')
-    const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort'))
+    const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
     assert.equal(abortButton.props.disabled, false, 'an unconfirmed result elsewhere does not disable Abort')
     const dequeues = calls.filter(call => call.command === 'dequeue_messages').length
     let resolveAbort, abortArgs
@@ -770,6 +773,7 @@ try {
     resolveAbort(result); await pendingAbort; await settle()
     assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'returned messages precede the editor text')
     assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues, 'Abort needs no separate Queue retrieval')
+    assert.equal(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves with the run')
     assert.ok(text(container).includes('已中止，2 条排队消息已放回输入框'))
     emit('aludock://operation', { ...unconfirmedCompaction, state: 'succeeded', error: undefined, result: { instance: result.instance } })
     compact.props['onUpdate:modelValue']('later input')
@@ -812,7 +816,7 @@ try {
     await settle()
     let rejectAbort, abortArgs
     abortNative = args => { abortArgs = args; return new Promise((_resolve, reject) => { rejectAbort = reject }) }
-    const abort = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort'))
+    const abort = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
     assert.equal(abort.props.disabled, false)
     const pendingAbort = abort.props.onClick(); await settle()
     if (timing === 'failed-after-switch') { app.selectWork('other'); await settle() }
@@ -1605,7 +1609,7 @@ try {
   failStorage = true
   abortNative = args => controlResult('abort_run', args, { receipt: { instanceId: 'work', restored: [], inFlight: [] }, instance: work })
   const abortsBefore = countCalls('abort_run')
-  await find(uploadContainer, item => item.type === 'button' && String(item.props.class).includes('alu-bar-btn-abort')).props.onClick(); await settle()
+  await find(uploadContainer, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')).props.onClick(); await settle()
   assert.equal(countCalls('abort_run'), abortsBefore + 1)
   assertControlTarget('abort_run')
   assert.equal(uploadApp.currentDraft, 'draft must survive control buttons')
