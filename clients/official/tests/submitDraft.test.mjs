@@ -15,6 +15,7 @@ let storageWrites = 0, storageFails = false, consumeFails = false, stops = 0
 const retainedOperations = new Map()
 globalThis.document = { activeElement: null, title: '' }
 globalThis.HTMLElement = class {}
+globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} }
 globalThis.window = {
   history: { pushState() {}, back() {}, go() {} },
   getComputedStyle: () => ({ lineHeight: '20px' }),

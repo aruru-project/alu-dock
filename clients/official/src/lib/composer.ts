@@ -37,13 +37,32 @@ export function useComposer(options: {
       const contentHeight = textarea.scrollHeight
       textarea.style.height = `${Math.min(contentHeight, limit)}px`
       if (textarea === compact.value) {
-        const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight) || 20
-        tall.value = contentHeight > lineHeight * 2.5
+        // scrollHeight includes the vertical padding; only the text lines count.
+        const style = window.getComputedStyle(textarea)
+        const lineHeight = Number.parseFloat(style.lineHeight) || 20
+        const padding = (Number.parseFloat(style.paddingTop) || 0) + (Number.parseFloat(style.paddingBottom) || 0)
+        tall.value = contentHeight - padding > lineHeight * 2.5
       }
     })
   }
   watch(draft, () => { void nextTick(resize) })
-  watch(compact, (textarea) => { if (textarea) resize() })
+  // Wrapping depends on the editor's width, so a narrower window re-measures the same draft.
+  let widthObserver: ResizeObserver | undefined
+  let observedWidth = 0
+  watch(compact, (textarea) => {
+    widthObserver?.disconnect()
+    widthObserver = undefined
+    if (!textarea) return
+    observedWidth = 0
+    widthObserver = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0
+      if (width === observedWidth) return
+      observedWidth = width
+      resize()
+    })
+    widthObserver.observe(textarea)
+    resize()
+  })
   watch(expanded, async (open) => {
     const revision = ++transfer
     const from = open ? compact.value : expandedTextarea.value
@@ -57,6 +76,6 @@ export function useComposer(options: {
     resize()
   }, { flush: 'pre' })
   watch(options.identity, () => { transfer++; composing.value = false; selection.value = { start: 0, end: 0, direction: 'none' }; options.flush(); void nextTick(resize) })
-  onScopeDispose(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); options.flush() })
+  onScopeDispose(() => { transfer++; if (frame) window.cancelAnimationFrame(frame); widthObserver?.disconnect(); options.flush() })
   return { draft, compact, expandedTextarea, expanded, composing, tall, selection, remember, composition, resize, collapse: () => { expanded.value = false } }
 }
