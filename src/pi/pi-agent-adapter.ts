@@ -2349,7 +2349,7 @@ export class PiConversationProjector {
     const result = isRecord(event.result) ? event.result : undefined;
     const isError = event.isError === true;
     if (typeof event.parentToolCallId === "string") {
-      const root = this.nestedCalls.end(toolCallId, isError, toolResultText(result?.content) ?? "");
+      const root = this.nestedCalls.end(toolCallId, isError, result?.content);
       return root === undefined ? [] : this.nestedCallsChanged(root);
     }
     const nestedCalls = this.nestedCalls.finish(toolCallId);

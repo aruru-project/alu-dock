@@ -21,6 +21,8 @@ const SCRIPT = [
   "const echoed = await tools.mcp__harbor__echo({ text: \"lantern\" });",
   "await tools.mcp__harbor__echo({ text: \"k\".repeat(8100) });",
   "await tools.mcp__harbor__echo({ text: \"o\".repeat(9000) });",
+  // An MCP error does not throw in a script; the call is listed as failed.
+  "await tools.mcp__harbor__fail({});",
   "return echoed;",
 ].join("\n");
 /** What Pi keeps of the script's calls: arguments whole, or left out when over its bound, never shortened. */
@@ -29,11 +31,12 @@ const HARBOR_CALLS = {
     { toolName: "mcp__harbor__echo", argumentsJson: "{\"text\":\"lantern\"}", status: "ok" },
     { toolName: "mcp__harbor__echo", argumentsJson: `{"text":"${"k".repeat(8_100)}"}`, status: "ok" },
     { toolName: "mcp__harbor__echo", status: "ok" },
+    { toolName: "mcp__harbor__fail", argumentsJson: "{}", status: "error", error: "first part\nsecond part" },
   ],
   complete: false,
 };
 
-/** The smallest stdio MCP server: one `echo` tool. */
+/** The smallest stdio MCP server: an `echo` tool, and a `fail` tool whose error has two text blocks. */
 const MCP_SERVER = `
 import { createInterface } from "node:readline";
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
@@ -41,7 +44,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params } = JSON.parse(line);
   if (id === undefined) return;
   if (method === "initialize") return send({ id, result: { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "harbor", version: "1.0.0" } } });
-  if (method === "tools/list") return send({ id, result: { tools: [{ name: "echo", description: "Echo a word back", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }] } });
+  if (method === "tools/list") return send({ id, result: { tools: [
+    { name: "echo", description: "Echo a word back", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
+    { name: "fail", description: "Always fails", inputSchema: { type: "object", properties: {} } },
+  ] } });
+  if (method === "tools/call" && params.name === "fail") return send({ id, result: { isError: true, content: [{ type: "text", text: "first part" }, { type: "text", text: "second part" }] } });
   if (method === "tools/call") return send({ id, result: { content: [{ type: "text", text: "harbor echoed " + params.arguments.text }] } });
   if (method === "ping") return send({ id, result: {} });
   send({ id, error: { code: -32601, message: "Method not found" } });
@@ -109,7 +116,7 @@ test("a Work reaches a configured MCP server through codemode, shows inside the 
     const statusStart = events.length;
     await client.prompt(work.id, "/mcp", "prompt", "mcp-status");
     const status = await waitForEvent(events, (event) => event.type === "extension.notification" && event.data.operationId === "mcp-status", statusStart);
-    assert.ok(status.type === "extension.notification" && /harbor: connected, 1 tools/u.test(status.data.message));
+    assert.ok(status.type === "extension.notification" && /harbor: connected, 2 tools/u.test(status.data.message));
   } finally {
     follower?.close();
     client.closeActiveConnections();
