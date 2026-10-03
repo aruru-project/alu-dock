@@ -10,6 +10,7 @@ import {
   type HistoryEntryDto,
   type HistoryPageDto,
   type InstanceSnapshot,
+  MAX_TEXT_CHARS,
 } from "./instance-dto.js";
 
 export class InvalidHistoryCursorError extends Error {
@@ -172,7 +173,7 @@ export class InstanceEventJournal {
     if (previous?.type === "message.delta" && copy.type === "message.delta"
       && previous.data.messageId === copy.data.messageId
       && previous.data.block === copy.data.block
-      && previous.data.delta.length + copy.data.delta.length <= 8_000) {
+      && previous.data.delta.length + copy.data.delta.length <= MAX_TEXT_CHARS) {
       previous.data.delta += copy.data.delta;
       previous.sequence = copy.sequence;
       previous.occurredAt = copy.occurredAt;

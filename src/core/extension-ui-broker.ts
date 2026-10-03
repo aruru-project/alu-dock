@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { EventDataMap } from "./instance-dto.js";
+import { MAX_TEXT_CHARS, type EventDataMap } from "./instance-dto.js";
 
 export type DialogMethod = "select" | "confirm" | "input" | "editor";
 export type InteractionCancelReason = "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow";
@@ -104,7 +104,6 @@ const MAX_TOMBSTONES = 256;
 const MAX_STATUS_KEYS = 64;
 const MAX_WIDGET_KEYS = 64;
 const MAX_TITLE_CHARS = 2_048;
-const MAX_TEXT_CHARS = 8_000;
 const MAX_EDITOR_CHARS = 256_000;
 const MAX_OPTIONS = 200;
 export const MAX_EXTENSION_WIDGET_LINES = 200;
