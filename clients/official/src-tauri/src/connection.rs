@@ -48,7 +48,6 @@ pub(crate) struct HostCatalogEntry {
     pub(crate) host_id: String,
     pub(crate) display_name: String,
     pub(crate) device_name: String,
-    pub(crate) endpoint_summary: String,
     pub(crate) added_at: String,
     pub(crate) profile: HostConnectionProfile,
 }
@@ -75,7 +74,6 @@ pub(crate) struct HostSummary {
     pub(crate) pi_sdk_version: String,
     pub(crate) started_at: String,
     pub(crate) profile: Option<HostConnectionProfile>,
-    pub(crate) active_endpoint_id: String,
 }
 
 #[derive(Clone, Default)]
@@ -132,11 +130,6 @@ pub(crate) fn catalog_from_snapshot(
             .resolve_store(Some(&record.host_id))
             .map_err(CommandError::from)?;
         let profile = connection_profile(&store, &record.host_id)?;
-        let endpoint_summary = profile
-            .ordered_verified_endpoints()
-            .first()
-            .map(|endpoint| format!("{}:{}", endpoint.endpoint.host(), endpoint.endpoint.port()))
-            .unwrap_or_else(|| "没有可用的 TLS 地址".into());
         let device_name = store
             .load_pairing()
             .map_err(CommandError::from)?
@@ -147,7 +140,6 @@ pub(crate) fn catalog_from_snapshot(
             host_id: record.host_id.clone(),
             display_name: profile.display_name.clone(),
             device_name,
-            endpoint_summary,
             added_at: record.added_at.clone(),
             profile,
         });
@@ -842,15 +834,6 @@ pub(crate) async fn bootstrap(
             "Host epoch changed while bootstrapping the instance catalog".into(),
         )));
     }
-    let active_endpoint_id = client
-        .router()
-        .snapshot()
-        .active_endpoint_id
-        .ok_or_else(|| {
-            CommandError::from(ClientError::Protocol(
-                "Host connection completed without an active address".into(),
-            ))
-        })?;
     let InstanceCatalog {
         instances,
         total,
@@ -867,7 +850,6 @@ pub(crate) async fn bootstrap(
             pi_sdk_version: info.host.pi_sdk_version,
             started_at: info.host.started_at,
             profile,
-            active_endpoint_id,
         },
         works: instances,
         total,

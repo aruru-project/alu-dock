@@ -40,6 +40,7 @@ import {
   MAX_STOP_CLEANUP_ERRORS,
   MAX_RECORD_USAGE_TEXT_CHARS,
   MAX_SYSTEM_PROMPT_NAME_CHARS,
+  MAX_TEXT_CHARS,
   type ConversationImageBody,
   type RecordUsageDto,
   type SystemPromptBlockDto,
@@ -156,7 +157,6 @@ export const MAX_WORKSPACE_ENTRY_NAME_CHARS = 1_024;
 // Leave ample room for the response envelope under MAX_CONTROL_LINE_BYTES.
 export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
 export const MAX_CATALOG_PRUNE_ITEMS = 1_000;
-const MAX_TEXT = 8_000;
 const MAX_TOOL_RESULT_TEXT = 256_000;
 const MAX_MESSAGE = 2_048;
 const MAX_COLLECTION = 2_000;
@@ -2176,7 +2176,7 @@ export function parseCompactionPromptTemplatesResult(input: unknown): Compaction
 export function parseCompactionBody(input: unknown): SessionCompactionResult["result"] {
   const result = object(input, "result"); exact(result, ["summary", "firstKeptEntryId", "tokensBefore"]);
   return {
-    summary: boundedString(result.summary, "result.summary", MAX_TEXT),
+    summary: boundedString(result.summary, "result.summary", MAX_TEXT_CHARS),
     firstKeptEntryId: id(result.firstKeptEntryId, "result.firstKeptEntryId"),
     tokensBefore: unsigned(result.tokensBefore, "result.tokensBefore"),
   };
@@ -2602,8 +2602,8 @@ export function parseConversationFrame(input: unknown, field = "conversation fra
 
 function parseEventData(type: keyof EventDataMap, input: unknown, field: string): unknown {
   const data = object(input, field);
-  const text = (key: string, max = MAX_TEXT): string => string(data[key], `${field}.${key}`, max);
-  const optionalText = (key: string, max = MAX_TEXT): string | undefined => optionalString(data[key], `${field}.${key}`, max);
+  const text = (key: string, max = MAX_TEXT_CHARS): string => string(data[key], `${field}.${key}`, max);
+  const optionalText = (key: string, max = MAX_TEXT_CHARS): string | undefined => optionalString(data[key], `${field}.${key}`, max);
   const levels = (key: string): ThinkingLevel[] => thinkingLevels(data[key]);
   switch (type) {
     case "instance.created": exact(data, ["cwd", "name", "displayName", "executor"]); return { cwd: text("cwd", MAX_CONTROL_CWD_CHARS), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(data.displayName, `${field}.displayName`), executor: parseExecutor(data.executor, `${field}.executor`) };
@@ -2626,7 +2626,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
       const queueItemId = optionalText("queueItemId", 128);
       return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: boundedString(data.text, `${field}.text`, MAX_PROMPT_CHARS), ...(data.images === undefined ? {} : { images: parseImagePaths(data.images, `${field}.images`) }), ...(data.attachments === undefined ? {} : { attachments: parseAttachmentDtos(data.attachments, `${field}.attachments`) }), delivery, queueItemId };
     }
-    case "message.delta": exact(data, ["messageId", "block", "delta"]); return { messageId: text("messageId", 128), block: enumeration(data.block, "block", ["text", "thinking"]), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
+    case "message.delta": exact(data, ["messageId", "block", "delta"]); return { messageId: text("messageId", 128), block: enumeration(data.block, "block", ["text", "thinking"]), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT_CHARS) };
     case "message.completed": exact(data, ["messageId", "role", "content", "attachments", "stopReason", "error"]); return { messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user", "assistant", "tool", "system"]), content: parseContent(data.content, `${field}.content`), ...(data.attachments === undefined ? {} : { attachments: parseAttachmentDtos(data.attachments, `${field}.attachments`) }), stopReason: optionalText("stopReason", 128), error: parseOptionalAgentErrorText(data.error, `${field}.error`) };
     case "tool.started": exact(data, ["toolCallId", "toolName", "args", "omittedFields"]); return toolArgs(data, field, true);
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
@@ -2651,7 +2651,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
       return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), ...(nestedCalls === undefined ? {} : { nestedCalls }), omittedFields: omitted(data.omittedFields, "omittedFields") };
     }
     case "bash.started": exact(data, ["operationId", "command", "excludeFromContext"]); return { operationId: text("operationId", 128), command: boundedString(data.command, `${field}.command`, MAX_BASH_COMMAND_CHARS), excludeFromContext: boolean(data.excludeFromContext, "excludeFromContext") };
-    case "bash.output": exact(data, ["operationId", "delta"]); return { operationId: text("operationId", 128), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
+    case "bash.output": exact(data, ["operationId", "delta"]); return { operationId: text("operationId", 128), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT_CHARS) };
     case "bash.completed": {
       exact(data, ["operationId", "exitCode", "cancelled", "truncated", "fullOutputPath", "error"]);
       const exitCode = data.exitCode === undefined ? undefined : safeInteger(data.exitCode, `${field}.exitCode`);
@@ -2680,7 +2680,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
       exact(data, ["message", "level", "operationId"]);
       const operationId = optionalText("operationId", 128);
       return {
-        message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT),
+        message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT_CHARS),
         level: enumeration(data.level, "level", ["info", "warning", "error"]),
         ...(operationId === undefined ? {} : { operationId }),
       };
@@ -2699,7 +2699,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     }
     case "extension.status_changed": exact(data, ["key", "text"]); return { key: extensionKey(data.key, `${field}.key`), text: data.text === undefined ? undefined : payloadFreeString(data.text, `${field}.text`, MAX_MESSAGE) };
     case "extension.tools_expanded_changed": exact(data, ["expanded"]); return { expanded: boolean(data.expanded, `${field}.expanded`) };
-    case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_EXTENSION_WIDGET_LINES, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
+    case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_EXTENSION_WIDGET_LINES, MAX_TEXT_CHARS), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
     case "extension.error": exact(data, ["source", "event", "error"]); return { source: data.source === undefined ? undefined : payloadFreeString(data.source, `${field}.source`, 256), event: data.event === undefined ? undefined : payloadFreeString(data.event, `${field}.event`, 128), error: payloadFreeString(data.error, `${field}.error`, MAX_MESSAGE) };
     default: throw validation("invalid_response", `Unsupported event type: ${type}`);
   }
@@ -2750,7 +2750,7 @@ function parseNestedToolCalls(input: unknown, field: string): NestedToolCallsDto
 function parseContent(input: unknown, field: string): ContentBlockDto[] {
   return array(input, field, MAX_CONVERSATION_CONTENT_BLOCKS).map((item, index) => {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
-    if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
+    if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT_CHARS) }; }
     if (type === "image") {
       exact(block, ["type", "mimeType", "contentRef", "fileId"]);
       const mimeType = imageMimeType(block.mimeType, `${field}[${index}].mimeType`);
@@ -2809,7 +2809,7 @@ export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDt
     display: optionalBoolean(entry.display, `${field}.display`, "invalid_response"),
     metadata: entry.metadata === undefined ? undefined : parseJsonValue(entry.metadata, `${field}.metadata`, 0),
     metadataOmittedFields: omitted(entry.metadataOmittedFields, `${field}.metadataOmittedFields`),
-    command: optionalString(entry.command, `${field}.command`, MAX_TEXT),
+    command: optionalString(entry.command, `${field}.command`, MAX_BASH_COMMAND_CHARS),
     exitCode,
     cancelled: optionalBoolean(entry.cancelled, `${field}.cancelled`, "invalid_response"),
     truncated: optionalBoolean(entry.truncated, `${field}.truncated`, "invalid_response"),
@@ -2913,7 +2913,7 @@ function parseInteractionResponse(input: unknown, field: string, code = "invalid
     return { method, confirmed: boolean(value.confirmed, `${field}.confirmed`, code) };
   }
   exact(value, ["method", "value"], code);
-  const responseValue = string(value.value, `${field}.value`, method === "select" ? MAX_TEXT : MAX_PROMPT_CHARS, code);
+  const responseValue = string(value.value, `${field}.value`, method === "select" ? MAX_TEXT_CHARS : MAX_PROMPT_CHARS, code);
   return { method, value: responseValue };
 }
 
@@ -2925,9 +2925,9 @@ function parseDialogRequest(data: Record<string, unknown>, field: string): Event
   const issuedAt = timestamp(data.issuedAt, `${field}.issuedAt`);
   const expiresAt = data.expiresAt === undefined ? undefined : timestamp(data.expiresAt, `${field}.expiresAt`);
   const lifetime = expiresAt === undefined ? {} : { expiresAt };
-  if (method === "select") { exact(data, ["controllerId", "interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT), issuedAt, ...lifetime }; }
-  if (method === "confirm") { exact(data, ["controllerId", "interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), issuedAt, ...lifetime }; }
-  if (method === "input") { exact(data, ["controllerId", "interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT) }), issuedAt, ...lifetime }; }
+  if (method === "select") { exact(data, ["controllerId", "interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT_CHARS), issuedAt, ...lifetime }; }
+  if (method === "confirm") { exact(data, ["controllerId", "interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT_CHARS), issuedAt, ...lifetime }; }
+  if (method === "input") { exact(data, ["controllerId", "interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT_CHARS) }), issuedAt, ...lifetime }; }
   exact(data, ["controllerId", "interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, ...lifetime };
 }
 

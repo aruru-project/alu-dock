@@ -41,7 +41,7 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有本地 IPC（POSIX Unix sock
 {"kind":"request","version":2,"requestId":"request-id","type":"host.info","params":{}}
 ```
 
-客户端必须校验 response 的 request ID、Protocol version、Host epoch 和自己使用的已知字段。Client→Host 的 hello/request 是 closed shape；Host→Client 的 response/event 可以增加未知可选字段，客户端应忽略它们，而不是让连接失败。已有枚举字段出现新值、`settings.get` 列出新的 setting key 也属于可增加的内容：客户端把不认识的枚举值当作“未知”继续显示其余内容，跳过不认识的 setting 项，而不是让整个 response 失败；官方客户端的 Rust core 把这类值统一映射为 `unrecognized`。字段删除、既有字段类型或语义改变、以及未知 event type 仍是不兼容变化。单条 JSONL 有 frame 上限；大型 conversation 通过分页和 chunk 传输，不能把 frame 上限误当成内容上限。
+客户端必须校验 response 的 request ID、Protocol version、Host epoch 和自己使用的已知字段。Client→Host 的 hello/request 是 closed shape；Host→Client 的 response/event 可以增加未知可选字段，客户端应忽略它们，而不是让连接失败。已有枚举字段出现新值、`settings.get` 列出新的 setting key 也属于可增加的内容：客户端把不认识的枚举值当作“未知”继续显示其余内容，跳过不认识的 setting 项，而不是让整个 response 失败；官方客户端的 Rust core 把这类值映射为 `unrecognized`；Thinking 档位、命令来源这类客户端只显示、并原样送回 Host 的值保留原名。字段删除、既有字段类型或语义改变、以及未知 event type 仍是不兼容变化。单条 JSONL 有 frame 上限；大型 conversation 通过分页和 chunk 传输，不能把 frame 上限误当成内容上限。
 
 `session.tree.v2` 请求固定为 `{instanceId}`，一次逻辑调用返回当前 Pi Session Tree 的完整 compact `{nodes, leafId?}`。compact node 只有 ID/parent/depth、kind/role/displayClass/state、可选 label/timestamp、summary 和 hasChildren；绝不包含 raw Session JSONL、完整 message 或 tool content。客户端不发送 revision、cursor 或 limit，也不拼接 Tree pages。
 

@@ -41,6 +41,7 @@ import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import { hardenWindowsPrivatePath, noFollowFlag } from "../platform/private-state.js";
 
 import {
+  MAX_BASH_COMMAND_CHARS,
   MAX_IMAGE_AGGREGATE_BYTES,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_MIME_TYPE_CHARS,
@@ -50,6 +51,7 @@ import {
   MAX_SEMANTIC_HISTORY_PAGE_BYTES,
   MAX_STOP_CLEANUP_ERROR_CHARS,
   MAX_SYSTEM_PROMPT_NAME_CHARS,
+  MAX_TEXT_CHARS,
   type AttachmentDto,
   type ContentBlockDto,
   type ConversationFrame,
@@ -1356,7 +1358,7 @@ export class PiAgentAdapter {
       try {
         const result = await session.compact(customInstructions);
         return {
-          summary: boundedString(result.summary, 8_000, ""),
+          summary: boundedString(result.summary, MAX_TEXT_CHARS, ""),
           firstKeptEntryId: result.firstKeptEntryId,
           tokensBefore: result.tokensBefore,
         };
@@ -1881,11 +1883,11 @@ export function projectAgentSessionEvents(event: AgentSessionEvent, publishedFil
   const source = event as unknown as Record<string, unknown>;
   if (source.type === "message_update" && isRecord(source.assistantMessageEvent)) {
     const update = source.assistantMessageEvent;
-    if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string" && update.delta.length > 8_000) {
+    if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string" && update.delta.length > MAX_TEXT_CHARS) {
       const projected: AgentEvent[] = [];
       let offset = 0;
       while (offset < update.delta.length) {
-        const end = unicodeSafeEnd(update.delta, Math.min(update.delta.length, offset + 8_000));
+        const end = unicodeSafeEnd(update.delta, Math.min(update.delta.length, offset + MAX_TEXT_CHARS));
         projected.push(projectAgentSessionEvent({ ...source, assistantMessageEvent: { ...update, delta: update.delta.slice(offset, end) } }, publishedFiles));
         offset = end;
       }
@@ -1982,7 +1984,7 @@ function projectAssistantMessageEvent(update: Record<string, unknown>): Record<s
   const type = safeRequiredText(update.type, 64, "unknown");
   const projected: Record<string, unknown> = { type };
   if (typeof update.contentIndex === "number" && Number.isSafeInteger(update.contentIndex) && update.contentIndex >= 0) projected.contentIndex = update.contentIndex;
-  const delta = safeOptionalText(update.delta, 8_000);
+  const delta = safeOptionalText(update.delta, MAX_TEXT_CHARS);
   if (delta !== undefined) projected.delta = delta;
   if (isRecord(update.partial)) projected.partial = { content: projectPrivateContent(update.partial.content) };
   if (isRecord(update.toolCall)) projected.toolCall = projectPrivateToolCall(update.toolCall);
@@ -1998,9 +2000,9 @@ function projectPrivateContent(content: unknown, publishedFiles?: TransientFileR
   for (const item of content.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS)) {
     if (!isRecord(item)) continue;
     if (item.type === "text" && typeof item.text === "string" && item.text.length > 0) {
-      blocks.push({ type: "text", text: user ? item.text : boundedContentString(item.text, 8_000) });
+      blocks.push({ type: "text", text: user ? item.text : boundedContentString(item.text, MAX_TEXT_CHARS) });
     } else if (item.type === "thinking") {
-      const thinking = optionalContentString(item.thinking, 8_000);
+      const thinking = optionalContentString(item.thinking, MAX_TEXT_CHARS);
       if (thinking !== undefined) blocks.push({ type: "thinking", thinking });
     }
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
@@ -2215,7 +2217,7 @@ export class PiConversationProjector {
         data: {
           messageId: this.ensureAssistantMessageId(),
           block: update.type === "text_delta" ? "text" : "thinking",
-          delta: boundedContentString(update.delta, 8_000),
+          delta: boundedContentString(update.delta, MAX_TEXT_CHARS),
         },
       })];
     }
@@ -2349,7 +2351,7 @@ export class PiConversationProjector {
     const result = isRecord(event.result) ? event.result : undefined;
     const isError = event.isError === true;
     if (typeof event.parentToolCallId === "string") {
-      const root = this.nestedCalls.end(toolCallId, isError, toolResultText(result?.content) ?? "");
+      const root = this.nestedCalls.end(toolCallId, isError, result?.content);
       return root === undefined ? [] : this.nestedCallsChanged(root);
     }
     const nestedCalls = this.nestedCalls.finish(toolCallId);
@@ -2449,7 +2451,7 @@ function projectHistoryEntry(
       };
     }
     if (role === "bashExecution") {
-      const command = boundedContentString(message.command, 8_000);
+      const command = boundedContentString(message.command, MAX_BASH_COMMAND_CHARS);
       const output = boundedContentString(message.output, 256_000);
       return {
         ...base,
@@ -2457,7 +2459,7 @@ function projectHistoryEntry(
         source: "runtime",
         visibility: "conversation",
         content: command.length > 0 || output.length > 0
-          ? [{ type: "text", text: boundedContentString(command.length > 0 ? `! ${command}${output ? `\n${output}` : ""}` : output, 8_000) }]
+          ? [{ type: "text", text: boundedContentString(command.length > 0 ? `! ${command}${output ? `\n${output}` : ""}` : output, MAX_TEXT_CHARS) }]
           : [],
         command,
         ...(typeof message.exitCode === "number" && Number.isSafeInteger(message.exitCode) ? { exitCode: message.exitCode } : {}),
@@ -2468,7 +2470,7 @@ function projectHistoryEntry(
       };
     }
     if (role === "branchSummary") {
-      const summary = boundedContentString(message.summary, 8_000);
+      const summary = boundedContentString(message.summary, MAX_TEXT_CHARS);
       return {
         ...base,
         kind: "branch_summary",
@@ -2479,7 +2481,7 @@ function projectHistoryEntry(
       };
     }
     if (role === "compactionSummary") {
-      const summary = boundedContentString(message.summary, 8_000);
+      const summary = boundedContentString(message.summary, MAX_TEXT_CHARS);
       return {
         ...base,
         kind: "compaction_summary",
@@ -2560,7 +2562,7 @@ function projectHistoryEntry(
       kind: "compaction_summary",
       source: "runtime",
       visibility: "conversation",
-      content: entry.summary ? [{ type: "text", text: boundedContentString(entry.summary, 8_000) }] : [],
+      content: entry.summary ? [{ type: "text", text: boundedContentString(entry.summary, MAX_TEXT_CHARS) }] : [],
       firstKeptEntryId: boundedString(entry.firstKeptEntryId, 128, "unknown"),
       tokensBefore: Math.max(0, Math.floor(entry.tokensBefore)),
       ...projectRecordMetadata(entry.details),
@@ -2572,7 +2574,7 @@ function projectHistoryEntry(
       kind: "branch_summary",
       source: "runtime",
       visibility: "conversation",
-      content: entry.summary ? [{ type: "text", text: boundedContentString(entry.summary, 8_000) }] : [],
+      content: entry.summary ? [{ type: "text", text: boundedContentString(entry.summary, MAX_TEXT_CHARS) }] : [],
       fromEntryId: boundedString(entry.fromId, 128, "unknown"),
       ...projectRecordMetadata(entry.details),
     };
@@ -2641,8 +2643,8 @@ function contextEditReplacement(entry: Extract<SessionEntry, { type: "context_ed
  * read through the record's content reference.
  */
 function recordedToolText(block: ContentBlockDto): ContentBlockDto {
-  if (block.type === "tool_result") return { type: "text", text: boundedContentString(block.text, 8_000) };
-  if (block.type === "tool_call") return { type: "text", text: boundedContentString(`${block.toolName} ${JSON.stringify(block.args)}`, 8_000) };
+  if (block.type === "tool_result") return { type: "text", text: boundedContentString(block.text, MAX_TEXT_CHARS) };
+  if (block.type === "tool_call") return { type: "text", text: boundedContentString(`${block.toolName} ${JSON.stringify(block.args)}`, MAX_TEXT_CHARS) };
   return block;
 }
 
@@ -2732,7 +2734,7 @@ function projectPublicToolContent(toolName: string, content: unknown, redactedTe
 }
 
 function projectDockContent(content: unknown, attachments?: readonly AttachmentDto[], publishedFiles?: TransientFileRegistry): ContentBlockDto[] {
-  if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, 8_000) }] : [];
+  if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, MAX_TEXT_CHARS) }] : [];
   if (!Array.isArray(content)) return [];
   const imageAttachments = new Map<string, AttachmentDto[]>();
   for (const attachment of attachments ?? []) {
@@ -2746,8 +2748,8 @@ function projectDockContent(content: unknown, attachments?: readonly AttachmentD
   for (const item of content.slice(0, MAX_CONVERSATION_CONTENT_BLOCKS)) {
     if (!isRecord(item)) continue;
     let block: ContentBlockDto | undefined;
-    if (item.type === "text" && typeof item.text === "string") block = { type: "text", text: boundedContentString(item.text, 8_000) };
-    else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, 8_000) };
+    if (item.type === "text" && typeof item.text === "string") block = { type: "text", text: boundedContentString(item.text, MAX_TEXT_CHARS) };
+    else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, MAX_TEXT_CHARS) };
     else if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
       const registered = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType, item);
@@ -2991,7 +2993,7 @@ function bashOutputFrames(operationId: string, output: string): AgentEvent[] {
   const frames: AgentEvent[] = [];
   let offset = 0;
   while (offset < output.length) {
-    const end = unicodeSafeEnd(output, Math.min(output.length, offset + 8_000));
+    const end = unicodeSafeEnd(output, Math.min(output.length, offset + MAX_TEXT_CHARS));
     frames.push(bashFrame({ type: "bash.output", data: { operationId, delta: output.slice(offset, end) } }));
     offset = end;
   }

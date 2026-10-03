@@ -25,6 +25,12 @@ export interface ExecutorIdentity {
 export interface ImagePathDto { path: string; mimeType: string }
 
 export const MAX_CONVERSATION_CONTENT_BLOCKS = 200;
+/**
+ * The longest text one field carries in an event or history entry: a text or thinking block, a
+ * streamed delta, a summary, a notice. Producers cut or split longer text to it, and the Protocol V2 parser
+ * rejects anything longer; the rest of a long text is read through its content reference.
+ */
+export const MAX_TEXT_CHARS = 8_000;
 
 export type ContentBlockDto =
   | { type: "text"; text: string }

@@ -11,7 +11,7 @@ import { useSurfacesStore } from '../stores/surfaces'
 const app = useAppStore()
 const hostStore = useHostStore()
 const { pairHost, pairPort, pairDeviceName, pairingStage, pairingPin, pairingMessage, pairingError, endpointHost, endpointPort, endpointLabel, currentEndpoint, endpointSaving, endpointFormOpen, endpointError, endpointCanSaveDraft, endpointMutatingId, hostDisplayName, hostNameSaving, hostNameError, hostNameSaved, hostRemovalError, addingHost } = storeToRefs(hostStore)
-const { rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, testEndpoint, toggleEndpoint, removeEndpoint, endpointKindLabel, endpointStateLabel, testStatusLabel, watchRoute, stopRouteWatch } = hostStore
+const { rememberPairDeviceName, beginPairing, stopPairing, showHostPairingForm, toggleEndpointForm, switchSavedHost, connectLocal, updateLocalEndpoint, removeSavedHost, saveHostDisplayName, addHostEndpoint, saveEndpointDraft, testEndpoint, toggleEndpoint, removeEndpoint, hostAddressSummary, endpointKindLabel, endpointStateLabel, testStatusLabel, watchRoute, stopRouteWatch } = hostStore
 const { pairingInProgress: busy } = storeToRefs(hostStore)
 const { closeModal } = useSurfacesStore()
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
@@ -41,7 +41,7 @@ onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
               <article v-for="host in app.catalog?.hosts" :key="host.hostId" class="host-choice" :class="{ active: host.hostId === app.activeHost?.hostId && !app.localSelected }">
                 <button class="host-choice-main" :disabled="host.hostId === app.activeHost?.hostId && !app.localSelected || busy" @click="switchSavedHost(host.hostId)">
                   <span class="host-choice-dot" aria-hidden="true" />
-                  <span class="host-choice-copy"><strong>{{ host.displayName }}</strong><small>{{ host.endpointSummary }}</small></span>
+                  <span class="host-choice-copy"><strong>{{ host.displayName }}</strong><small>{{ hostAddressSummary(host) }}</small></span>
                   <span v-if="host.hostId === app.activeHost?.hostId && !app.localSelected" class="host-choice-current">当前</span>
                 </button>
                 <button class="host-choice-delete" :aria-label="`从此设备删除 ${host.displayName}`" :disabled="busy" @click="removeSavedHost(host.hostId, host.displayName)"><Trash2 :size="14" /></button>

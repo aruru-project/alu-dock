@@ -80,14 +80,15 @@ export class LiveNestedToolCalls {
     return root;
   }
 
-  /** Returns the model-issued call whose list changed, if the call is known. */
-  end(toolCallId: string, isError: boolean, errorText: string): string | undefined {
+  /** Returns the model-issued call whose list changed, if the call is known. `resultContent` is the content of Pi's result. */
+  end(toolCallId: string, isError: boolean, resultContent: unknown): string | undefined {
     const root = this.roots.get(toolCallId);
     const live = root === undefined ? undefined : this.scopes.get(root)?.byId.get(toolCallId);
     if (live === undefined) return root;
     live.call.status = isError ? "error" : "ok";
     live.call.durationMs = Math.round(performance.now() - live.startedAt);
-    if (isError && errorText) live.call.error = errorText.slice(0, MAX_NESTED_TOOL_CALL_ERROR_CHARS);
+    const errorText = isError ? recordedErrorText(resultContent) : "";
+    if (errorText) live.call.error = errorText.slice(0, MAX_NESTED_TOOL_CALL_ERROR_CHARS);
     return root;
   }
 
@@ -110,6 +111,16 @@ export class LiveNestedToolCalls {
     this.scopes.clear();
     this.roots.clear();
   }
+}
+
+/** A failed call's error text as Pi records it: the result's text blocks, one per line. */
+function recordedErrorText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block): block is { type: "text"; text: string } => isRecord(block) && block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("\n");
 }
 
 /** Pi's bound on the arguments of all calls in one list, counted in the order the calls started. */
