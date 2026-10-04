@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { Eye, EyeOff, Server, X } from '@lucide/vue'
-import { getModelVisibility } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
-import { defaultMachineHostId, machineDisplayLabel, machineSelectorVisible } from '../lib/machines'
+import { defaultMachineHostId, machineDisplayLabel, machineRequestTarget, machineSelectorVisible } from '../lib/machines'
 import { hideModels, modelRowMatches, modelVisibilityChanges, modelVisibilityColumns, showModels, type ModelVisibilityRow } from '../lib/modelVisibility'
 import type { MachineDto, ModelRef, ModelVisibilityResult } from '../lib/types'
 import { userErrorMessage } from '../lib/userError'
 import { useAppStore } from '../stores/app'
 import { useSurfacesStore } from '../stores/surfaces'
+import { useModelCatalogStore } from '../stores/model-catalog'
 import { useModelVisibilityStore } from '../stores/model-visibility'
 import AluSelect from './AluSelect.vue'
 import MachineSettingsResults from './MachineSettingsResults.vue'
@@ -24,6 +24,7 @@ const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
 const app = useAppStore()
 const surfaces = useSurfacesStore()
 const submissions = useModelVisibilityStore()
+const catalog = useModelCatalogStore()
 
 /** Empty when the Dock has no machine list: the connected Host itself. */
 const hostId = ref('')
@@ -33,7 +34,7 @@ const draft = ref<ModelRef[]>([])
 const loading = ref(false)
 const loadError = ref('')
 const currentNotice = ref('')
-const targetHostId = computed(() => machine.value?.kind === 'main' ? undefined : hostId.value || undefined)
+const targetHostId = computed(() => machine.value ? machineRequestTarget(machine.value) : hostId.value || undefined)
 const submission = computed(() => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value))
 const saving = computed(() => submission.value?.state === 'pending')
 const shownQuery = ref('')
@@ -106,7 +107,8 @@ async function load() {
   saved.value = []
   draft.value = []
   try {
-    const value = await currentConnectionCall(app, (context) => getModelVisibility(context, target))
+    // This page always reads the Machine's current settings; the shared catalog follows that read.
+    const value = await currentConnectionCall(app, (context) => catalog.read(context, target, true))
     if (epoch !== loadEpoch) return
     // A save can finish while the read is in flight. Its confirmed response wins
     // over that older read; reopening later still reads current Host settings.

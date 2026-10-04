@@ -50,6 +50,7 @@ globalThis.window = { clearTimeout, setTimeout,
   __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
 globalThis.document = { addEventListener() {}, removeEventListener() {} }
 const fastModel = { provider: 'fixture', id: 'fast', name: 'Fast', reasoning: false }
+const fasterModel = { provider: 'fixture', id: 'faster', name: 'Faster', reasoning: false }
 const hiddenModel = { provider: 'fixture', id: 'slow', name: 'Slow', reasoning: true }
 const project = { id: 'project', name: '项目 SYSTEM', kind: 'project-system', path: '/project/SYSTEM.md', workerConfig: { systemPrompt: { kind: 'native', path: '/project/SYSTEM.md' } } }
 const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template', path: '/home/.aludock/systems/chosen.json', workerConfig: { systemPrompt: { kind: 'dock-template', path: '/home/.aludock/systems/chosen.json' }, opaque: { keep: [1, '原样'] } } }
@@ -85,12 +86,14 @@ try {
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, outcomeUnknown: false })
     let lateResolve, lateReject
     let currentDefault = scenario === 'default' ? template : undefined
+    let machineModels = [fastModel, hiddenModel]
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
       if (command === 'model_visibility') {
         if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
-        return { models: [fastModel, hiddenModel], total: 2, truncated: false, hidden: [{ provider: hiddenModel.provider, id: hiddenModel.id }] }
+        assert.equal(args.targetHostId, null, 'the connected Host itself is addressed by omitting the target, like the hidden-model settings')
+        return { models: machineModels, total: machineModels.length, truncated: false, hidden: [{ provider: hiddenModel.provider, id: hiddenModel.id }] }
       }
       if (command === 'system_catalog') {
         if (scenario.startsWith('legacy') || (scenario === 'partial-unsupported' && args.cursor) || (scenario === 'refresh-unsupported' && calls.filter(call => call.command === command).length > 2)) {
@@ -195,7 +198,23 @@ try {
       await click('确认并创建')
       assert.equal(created.length, 1)
       assert.deepEqual(calls.find(c => c.command === 'create_work').args.workerConfig, { ...project.workerConfig, model: { provider: 'fixture', id: 'fast' } }, 'the chosen model rides with the preselected system')
-      app.unmount(); continue
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, 1)
+      app.unmount(); await settle()
+      // Reopening reuses the client's cached list (reading it starts a Pi on the Machine);
+      // the refresh button asks the Machine again and shows what was added there.
+      machineModels = [fastModel, fasterModel, hiddenModel]
+      const reopened = node('root')
+      const again = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated() {}, onUnknown() {}, onClose() {} }) })
+      again.mount(reopened); await settle()
+      const buttonAgain = label => find(reopened, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
+      const clickAgain = async label => { const target = buttonAgain(label); assert.ok(target, `reopened: button ${label} exists`); assert.ok(!target.props.disabled, `reopened: ${label} enabled`); target.props.onClick(); await settle() }
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, 1, 'reopening the dialog does not read the Machine again')
+      await clickAgain('选择模型'); assert.ok(buttonAgain('Fast')); assert.ok(!buttonAgain('Faster'), 'the cached list is shown until the user refreshes')
+      await clickAgain('Fast')
+      await clickAgain('刷新模型列表')
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, 2, 'refresh reads the Machine again')
+      await clickAgain('选择模型'); assert.ok(buttonAgain('Faster'), 'models added on the Machine appear after refresh')
+      again.unmount(); continue
     }
     await click('选择的模板')
     await click('阅读 选择的模板')

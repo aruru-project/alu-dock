@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { setModelVisibility } from '../lib/bridge'
 import type { ConnectionContext, ModelRef } from '../lib/types'
 import { userErrorMessage } from '../lib/userError'
+import { useModelCatalogStore } from './model-catalog'
 
 interface ModelVisibilitySave {
   key: string
@@ -17,6 +18,7 @@ interface ModelVisibilitySave {
 
 /** Submitted Host settings outlive the editor, but are not Work operations or a notification history. */
 export const useModelVisibilityStore = defineStore('model-visibility', () => {
+  const catalog = useModelCatalogStore()
   const saves = ref(new Map<string, ModelVisibilitySave>())
   const keyFor = (connectionId: string, targetHostId?: string) => JSON.stringify([connectionId, targetHostId ?? null])
   function forTarget(connectionId: string, targetHostId?: string) {
@@ -39,6 +41,7 @@ export const useModelVisibilityStore = defineStore('model-visibility', () => {
       submission.hidden = result.hidden
       submission.state = 'succeeded'
       submission.message = '已保存，下次打开模型选择时生效。'
+      catalog.applyHidden(context.connectionId, targetHostId, result.hidden)
     } catch (cause) {
       const unknown = !!cause && typeof cause === 'object'
         && (('code' in cause && cause.code === 'effect_unknown') || ('outcomeUnknown' in cause && cause.outcomeUnknown === true))

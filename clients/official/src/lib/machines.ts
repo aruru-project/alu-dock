@@ -33,6 +33,11 @@ export function selectedMachineTarget(
   return selected?.hostId ?? (defaultMachineHostId(machines) || undefined)
 }
 
+/** Machine-level Host settings and model lists name the connected Host by omitting the target. */
+export function machineRequestTarget(machine: MachineDto | undefined): string | undefined {
+  return !machine || machine.kind === 'main' ? undefined : machine.hostId
+}
+
 export function machineWorkspaceStart(machine: MachineDto | undefined) {
   return machine?.homePath || WORKSPACE_ROOT_FALLBACK
 }
