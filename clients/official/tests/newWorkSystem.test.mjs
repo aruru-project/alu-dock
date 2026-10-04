@@ -88,16 +88,15 @@ try {
     let currentDefault = scenario === 'default' ? template : undefined
     let machineModels = [fastModel, hiddenModel]
     let machineHidden = [{ provider: hiddenModel.provider, id: hiddenModel.id }]
-    let holdModelRead, failModelRead = false
+    let holdModelRead
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
       if (command === 'model_visibility') {
         if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
         assert.equal(args.targetHostId, null, 'the connected Host itself is addressed by omitting the target, like the hidden-model settings')
-        if (failModelRead) { failModelRead = false; throw { code: 'model_catalog_unavailable', message: '暂时读不到。' } }
         const answer = { models: machineModels, total: machineModels.length, truncated: false, hidden: machineHidden }
-        if (holdModelRead) return new Promise(resolve => { holdModelRead(() => resolve(answer)) })
+        if (holdModelRead) return new Promise((resolve, reject) => { holdModelRead(error => error ? reject(error) : resolve(answer)) })
         return answer
       }
       if (command === 'set_model_visibility') return { hidden: args.hidden }
@@ -223,26 +222,33 @@ try {
       assert.equal(calls.filter(c => c.command === 'model_visibility').length, 2, 'refresh reads the Machine again')
       await clickAgain('选择模型'); assert.ok(modelOption(fasterModel), 'models added on the Machine appear after refresh')
       await clickAgain('Faster')
-      // Review of #361: a hidden-list save confirmed while a read is in flight must not be undone by
-      // that older read when it returns, nor by a failed read restoring a pre-read snapshot.
+      // Review of #361: a hidden-list save confirmed while a read is in flight must not be undone
+      // when that read fails (a pre-read snapshot restored) or when it returns later with the older list.
       let releaseRead
       holdModelRead = release => { releaseRead = release }
       await clickAgain('刷新模型列表')
       assert.ok(releaseRead, 'the refresh is in flight')
-      const savedHidden = [{ provider: fastModel.provider, id: fastModel.id }]
+      let savedHidden = [{ provider: fastModel.provider, id: fastModel.id }]
+      await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      machineHidden = savedHidden
+      holdModelRead = undefined
+      releaseRead(new Error('fixture: read failed after the save')); await settle()
+      await clickAgain('选择模型')
+      assert.ok(!modelOption(fastModel), 'a read that fails after a save keeps the saved hidden list, not a snapshot from before the read')
+      assert.ok(modelOption(hiddenModel), 'the model shown by the save stays shown')
+      assert.ok(text(reopened).includes('读不到这台机器的模型列表'))
+      await clickAgain('Slow')
+      holdModelRead = release => { releaseRead = release }
+      await clickAgain('刷新模型列表')
+      savedHidden = [{ provider: fasterModel.provider, id: fasterModel.id }]
       await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
       machineHidden = savedHidden
       holdModelRead = undefined
       releaseRead(); await settle()
       await clickAgain('选择模型')
-      assert.ok(!modelOption(fastModel), 'the model hidden by the save stays hidden after the older read returns')
-      assert.ok(modelOption(hiddenModel), 'the model shown by the save stays shown')
-      await clickAgain('Slow')
-      failModelRead = true
-      await clickAgain('刷新模型列表')
-      await clickAgain('选择模型')
-      assert.ok(!modelOption(fastModel) && modelOption(hiddenModel), 'a failed refresh keeps the current list, not a snapshot from before the previous read')
-      assert.ok(text(reopened).includes('读不到这台机器的模型列表'))
+      assert.ok(!modelOption(fasterModel), 'the model hidden by the save stays hidden after the older read returns with the previous list')
+      assert.ok(modelOption(fastModel) && modelOption(hiddenModel), 'models shown by the save stay shown')
+      assert.ok(!text(reopened).includes('读不到这台机器的模型列表'), 'a successful read clears the earlier failure note')
       again.unmount(); continue
     }
     await click('选择的模板')
