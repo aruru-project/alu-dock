@@ -10,6 +10,12 @@ export interface MachineModelCatalog {
   error?: unknown
 }
 
+interface Flight {
+  request: Promise<ModelVisibilityResult>
+  /** A hidden list saved while this read was in flight is newer than what the read returns. */
+  savedHidden?: ModelRef[]
+}
+
 /**
  * The models each Machine offers for a new Work, with that Machine's hidden list. Reading
  * them starts a Pi on the Machine, so the answer is kept for the app's lifetime and has no
@@ -18,7 +24,7 @@ export interface MachineModelCatalog {
  */
 export const useModelCatalogStore = defineStore('model-catalog', () => {
   const catalogs = ref(new Map<string, MachineModelCatalog>())
-  const inFlight = new Map<string, Promise<ModelVisibilityResult>>()
+  const flights = new Map<string, Flight>()
   const keyFor = (connectionId: string, targetHostId?: string) => JSON.stringify([connectionId, targetHostId ?? null])
 
   function forTarget(connectionId: string, targetHostId?: string) {
@@ -28,26 +34,32 @@ export const useModelCatalogStore = defineStore('model-catalog', () => {
   /** The cached answer, or one read; `fresh` always asks the Machine again and replaces the cache for every reader. */
   function read(context: ConnectionContext, targetHostId: string | undefined, fresh = false): Promise<ModelVisibilityResult> {
     const key = keyFor(context.connectionId, targetHostId)
-    const existing = catalogs.value.get(key)
-    if (!fresh && existing?.result) return Promise.resolve(existing.result)
-    const pending = inFlight.get(key)
-    if (pending) return pending
-    catalogs.value.set(key, { state: 'loading', result: existing?.result })
-    const request = getModelVisibility(context, targetHostId).then((result) => {
+    const current = catalogs.value.get(key)
+    if (!fresh && current?.result) return Promise.resolve(current.result)
+    const pending = flights.get(key)
+    if (pending) return pending.request
+    const flight: Flight = { request: undefined as unknown as Promise<ModelVisibilityResult> }
+    catalogs.value.set(key, { state: 'loading', result: current?.result })
+    flight.request = getModelVisibility(context, targetHostId).then((answer) => {
+      // A save confirmed during this read is the Machine's newer hidden list; the models still come from the read.
+      const result = flight.savedHidden ? { ...answer, hidden: flight.savedHidden, fileProblem: undefined } : answer
       catalogs.value.set(key, { state: 'ready', result })
       return result
     }, (cause: unknown) => {
       const code = cause && typeof cause === 'object' && 'code' in cause ? cause.code : ''
-      catalogs.value.set(key, { state: code === 'capability_missing' ? 'unsupported' : 'failed', result: existing?.result, error: cause })
+      // Keep what the cache holds now (including saves applied meanwhile), not a snapshot from before the read.
+      catalogs.value.set(key, { state: code === 'capability_missing' ? 'unsupported' : 'failed', result: catalogs.value.get(key)?.result, error: cause })
       throw cause
-    }).finally(() => { inFlight.delete(key) })
-    inFlight.set(key, request)
-    return request
+    }).finally(() => { flights.delete(key) })
+    flights.set(key, flight)
+    return flight.request
   }
 
-  /** A confirmed hidden-list save is the Machine's current setting; the cached list follows it. */
+  /** A confirmed hidden-list save is the Machine's current setting; the cached list follows it, and so does a read still in flight. */
   function applyHidden(connectionId: string, targetHostId: string | undefined, hidden: ModelRef[]) {
     const key = keyFor(connectionId, targetHostId)
+    const flight = flights.get(key)
+    if (flight) flight.savedHidden = hidden
     const entry = catalogs.value.get(key)
     if (entry?.result) catalogs.value.set(key, { ...entry, result: { ...entry.result, hidden, fileProblem: undefined } })
   }

@@ -57,7 +57,7 @@ const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template',
 const original = '\uFEFF{"identity":"逐字复制中文"}\n'
 try {
   const entry = join(directory, 'entry.ts')
-  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app';`)
+  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app'; export { useModelVisibilityStore } from '../src/stores/model-visibility';`)
   await build({ root, configFile: false, logLevel: 'silent',
     build: { outDir: directory, emptyOutDir: false, minify: false,
       lib: { entry, formats: ['es'], fileName: () => 'component.mjs' },
@@ -65,7 +65,7 @@ try {
     },
     plugins: [vue()],
   })
-  const { default: NewWorkDialog, useAppStore } = await import(join(directory, 'component.mjs'))
+  const { default: NewWorkDialog, useAppStore, useModelVisibilityStore } = await import(join(directory, 'component.mjs'))
   async function createStore() {
     setActivePinia(createPinia())
     const store = useAppStore()
@@ -87,14 +87,20 @@ try {
     let lateResolve, lateReject
     let currentDefault = scenario === 'default' ? template : undefined
     let machineModels = [fastModel, hiddenModel]
+    let machineHidden = [{ provider: hiddenModel.provider, id: hiddenModel.id }]
+    let holdModelRead, failModelRead = false
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
       if (command === 'model_visibility') {
         if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
         assert.equal(args.targetHostId, null, 'the connected Host itself is addressed by omitting the target, like the hidden-model settings')
-        return { models: machineModels, total: machineModels.length, truncated: false, hidden: [{ provider: hiddenModel.provider, id: hiddenModel.id }] }
+        if (failModelRead) { failModelRead = false; throw { code: 'model_catalog_unavailable', message: '暂时读不到。' } }
+        const answer = { models: machineModels, total: machineModels.length, truncated: false, hidden: machineHidden }
+        if (holdModelRead) return new Promise(resolve => { holdModelRead(() => resolve(answer)) })
+        return answer
       }
+      if (command === 'set_model_visibility') return { hidden: args.hidden }
       if (command === 'system_catalog') {
         if (scenario.startsWith('legacy') || (scenario === 'partial-unsupported' && args.cursor) || (scenario === 'refresh-unsupported' && calls.filter(call => call.command === command).length > 2)) {
           throw { code: 'capability_missing', message: 'Required capabilities are unavailable', details: { missing: ['system.templates.v1'] } }
@@ -208,12 +214,35 @@ try {
       again.mount(reopened); await settle()
       const buttonAgain = label => find(reopened, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
       const clickAgain = async label => { const target = buttonAgain(label); assert.ok(target, `reopened: button ${label} exists`); assert.ok(!target.props.disabled, `reopened: ${label} enabled`); target.props.onClick(); await settle() }
+      // "Fast" is a prefix of "Faster": match a model option by its full label + provider/id text.
+      const modelOption = model => find(reopened, item => item.type === 'button' && text(item).endsWith(`${model.name}${model.provider}/${model.id}`))
       assert.equal(calls.filter(c => c.command === 'model_visibility').length, 1, 'reopening the dialog does not read the Machine again')
-      await clickAgain('选择模型'); assert.ok(buttonAgain('Fast')); assert.ok(!buttonAgain('Faster'), 'the cached list is shown until the user refreshes')
+      await clickAgain('选择模型'); assert.ok(modelOption(fastModel)); assert.ok(!modelOption(fasterModel), 'the cached list is shown until the user refreshes')
       await clickAgain('Fast')
       await clickAgain('刷新模型列表')
       assert.equal(calls.filter(c => c.command === 'model_visibility').length, 2, 'refresh reads the Machine again')
-      await clickAgain('选择模型'); assert.ok(buttonAgain('Faster'), 'models added on the Machine appear after refresh')
+      await clickAgain('选择模型'); assert.ok(modelOption(fasterModel), 'models added on the Machine appear after refresh')
+      await clickAgain('Faster')
+      // Review of #361: a hidden-list save confirmed while a read is in flight must not be undone by
+      // that older read when it returns, nor by a failed read restoring a pre-read snapshot.
+      let releaseRead
+      holdModelRead = release => { releaseRead = release }
+      await clickAgain('刷新模型列表')
+      assert.ok(releaseRead, 'the refresh is in flight')
+      const savedHidden = [{ provider: fastModel.provider, id: fastModel.id }]
+      await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      machineHidden = savedHidden
+      holdModelRead = undefined
+      releaseRead(); await settle()
+      await clickAgain('选择模型')
+      assert.ok(!modelOption(fastModel), 'the model hidden by the save stays hidden after the older read returns')
+      assert.ok(modelOption(hiddenModel), 'the model shown by the save stays shown')
+      await clickAgain('Slow')
+      failModelRead = true
+      await clickAgain('刷新模型列表')
+      await clickAgain('选择模型')
+      assert.ok(!modelOption(fastModel) && modelOption(hiddenModel), 'a failed refresh keeps the current list, not a snapshot from before the previous read')
+      assert.ok(text(reopened).includes('读不到这台机器的模型列表'))
       again.unmount(); continue
     }
     await click('选择的模板')
