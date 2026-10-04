@@ -183,3 +183,36 @@ Dock 不需要兼容 Pi 插件的全部用法。这两处只影响带这类处�
 ### 何时重访
 
 Dock 或实际使用的插件开始依赖 `input` 接管消息，或依赖较慢的 `input` 与 `agent_settled` 处理时。届时可考虑：回执表达“已被插件接管”；在 Pi fork 里让 `prompt()` 等上一轮收尾结束再开始新一轮。
+
+## 不引入第二套插件生命周期容器（Cordis / Chord FacetHost）
+
+**保持现状；2026-10-04 决定，当前没有需要它的真实问题。**
+
+### 当前权衡
+
+插件资源的生命周期仍由 Pi 现有扩展运行时管理：失败 factory 的暂存注册被丢弃并撤销加载期订阅；reload 时旧 runner 的 `pi.events` 订阅清理、旧 API 失效；工具与 provider 可在运行中动态注册。Dock 在这之上只做 Worker 内的 reload 串行化、提交边界和失败后标记不可用（`src/pi/pi-agent-adapter.ts` 的 `reload`），Host 继续唯一管理 Work、generation、Queue、控制权与 Stop。
+
+不引入 Cordis，也不切到 Pi fork 源码里的 Chord FacetHost：
+
+- Cordis 的增量是“资源跟随所属插件释放、依赖变化只重启相关插件”。但它的 `dispose` 完成不代表所有资源都已释放（同一清理链中一个 disposer 抛错，更早登记的就跳过且不重试），也回滚不了任何外部副作用。这些边界 Dock 已经由 Host 的 Stop/generation/提交机制承担；在 Worker 里再放一套，会出现两个地方都声称对同一 Work 有最终控制权。
+- Chord 的 FacetHost 走 `dist/experimental`，发布包 `0.99.2-dock.1` 排除了它；Dock 走 `createAgentSessionFromServices` 的传统扩展路径。它的 reload 只支持同形状替换，多服务切换不是全图事务，切换后清理失败会终止 host，且不排空在途旧调用；PLANNING.md 明确它不是稳定公共 API。
+- Pi 的 `registerTool` 没有对称的 `unregisterTool`；把它包进任何容器的 effect 都不会凭空获得卸载语义。
+
+### 已知边界
+
+Dock 自带扩展已按 Pi 约定管理自有资源：`dock-tools-extension` 在 `session_start` attach、`session_shutdown` detach；`dock-attachments`、`show-image`、`retry` 只用 `pi.on`，随 runtime 失效回收；git 分支监视器归 adapter 持有，reload 与失败路径都 dispose。Pi 的 `invalidate` 不会中断已进入 `await` 的回调，也不清理原生 EventEmitter、timer、watcher；这些仍是扩展作者的责任。
+
+依据：2026-10-04《DSH 与 Cordis 采用决策报告》（固定 Pi `3d6f2ce` / Dock `dda9d21`，附 25 个机制探针）。报告没有跑 Dock 测试套件、HMR 文件监听集成，也没有任务成功率或成本数据。
+
+### 为什么现在接受
+
+Pi 现有机制已覆盖 Dock 自带扩展的需要；没有任何一个真实插件因依赖顺序反复启动失败，或 reload 后出现重复监听、残留后台任务。单用户项目没有收益证据抵消新生命周期语义、插件兼容、每次 Pi 升级回放和跨平台验收的维护面。
+
+### 何时重访
+
+- 真实常用插件因依赖先后反复启动失败；
+- 一次资源泄漏导致 reload 后重复监听或后台任务残留（先按所有者就地修复并补一个真实入口回归，不是先加容器）；
+- 用户需要频繁局部替换某个服务且不想重启无关插件，或出现作者难以维护的跨服务资源归属；
+- 要在隔离工作台探索可回退的 harness 自修改。
+
+届时先取一个真实任务或事故作基线，在一个具体 extension 内比较 Chord 与 Cordis，验收回答：功能是否保持、未受影响插件是否继续、旧调用按哪一代完成、失败能否恢复、有无资源残留、外部效果是否恰好一次、要维护多少桥接代码。先验证工作台 extension 内的局部组合，不先改 Dock Host 或迁移 session authority；无论选哪个，工具、provider、命令和事件订阅都只能有一个注册者和撤销者。
