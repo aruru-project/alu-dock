@@ -54,8 +54,8 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 <template>
   <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
     <div class="alu-input-float">
-      <div class="alu-input-float-centre"><button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button></div>
-      <div class="alu-input-float-right"><StopRunPill /></div>
+      <div class="alu-input-float-scroll"><button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button></div>
+      <div class="alu-input-float-stop"><StopRunPill /></div>
     </div>
     <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
       <div v-if="visibleComposerError" :class="submitOutcomeUnknown ? 'alu-composer-notice' : 'alu-composer-error'" :role="submitOutcomeUnknown ? 'status' : undefined"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!submitAcknowledged" @click="allowAnotherSubmit">允许再次发送</button></template></div>
@@ -463,8 +463,10 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 @media (max-width: 640px) {
   .alu-native-attachments { max-height: 140px; }
 }
-/* One row floating on the top edge of the input region: scroll-to-bottom in the centre, the stop pill
-   at the right. Sharing a grid keeps them apart on any width; a wide stop pill pushes the centre left. */
+/* One row floating on the top edge of the input region. Desktop: scroll-to-bottom in the centre, the stop
+   pill at the right. Phones swap them: the right edge is where the thumb rests on a one-handed or folded
+   screen, so the harmless scroll button takes it and the stop pill moves to the centre. Sharing a grid
+   keeps them apart on any width; a wide pill in a side column pushes the centre away from it. */
 .alu-input-float {
   position: absolute;
   z-index: 3;
@@ -477,8 +479,10 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   align-items: start;
   pointer-events: none;
 }
-.alu-input-float-centre { grid-column: 2; }
-.alu-input-float-right { grid-column: 3; justify-self: end; }
+/* Both pin to row 1: with columns only, auto-placement would drop the stop pill to a second row
+   whenever it is placed in a column left of the scroll button. */
+.alu-input-float-scroll { grid-row: 1; grid-column: 2; }
+.alu-input-float-stop { grid-row: 1; grid-column: 3; justify-self: end; }
 .alu-scroll-bottom {
   pointer-events: auto;
   display: inline-flex;
@@ -502,6 +506,8 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 .alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; box-shadow: var(--focus-ring); }
 @media (max-width: 640px) {
   .alu-input-float { top: -42px; right: 12px; left: 12px; }
+  .alu-input-float-scroll { grid-column: 3; justify-self: end; }
+  .alu-input-float-stop { grid-column: 2; justify-self: auto; }
   .alu-scroll-bottom { min-height: 30px; padding: 0 10px; }
 }
 </style>
