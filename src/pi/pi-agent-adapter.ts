@@ -1,4 +1,5 @@
 import { piSystemPromptResolver } from "./system-template-provider.js";
+import { resolvePiStartingModel } from "./pi-starting-model.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, open, realpath } from "node:fs/promises";
@@ -3528,9 +3529,12 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         }),
       },
     });
-    const piCreateOptions = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
+    // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
+    const { model: requestedModel, ...piCreateOptions } = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
+    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager);
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
+      ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
       // Worker-owned services and Session continuity cannot be replaced by wire JSON.

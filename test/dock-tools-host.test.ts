@@ -12,9 +12,10 @@ import { DockRegistry, type InstanceFactoryInput } from "../src/control/dock-reg
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 
-function fixtureInstance(input: InstanceFactoryInput, runtimes: DelayedAgentWorkerConnection[]): ManagedInstance {
+function fixtureInstance(input: InstanceFactoryInput, runtimes: DelayedAgentWorkerConnection[], workerConfigs?: unknown[]): ManagedInstance {
   const runtime = new DelayedAgentWorkerConnection(`dock-tools-${runtimes.length + 1}`);
   runtimes.push(runtime);
+  workerConfigs?.push(input.workerConfig);
   return new ManagedInstance({
     id: input.id,
     creationOperationId: input.creationOperationId,
@@ -40,11 +41,12 @@ test("Dock tools create peers off and send visibly attributed messages through c
   const sourceCwd = await mkdtemp(join(root, "source-"));
   const targetCwd = await mkdtemp(join(root, "target-"));
   const createdCwd = await mkdtemp(join(root, "created-"));
-  const ids = ["source-instance", "target-instance", "created-instance"];
+  const ids = ["source-instance", "target-instance", "created-instance", "model-instance"];
   const runtimes: DelayedAgentWorkerConnection[] = [];
+  const workerConfigs: unknown[] = [];
   const systems = new SystemService(root, createPiSystemTemplateProvider(join(root, "agent")));
   const registry = new DockRegistry(
-    async (input) => fixtureInstance(input, runtimes),
+    async (input) => fixtureInstance(input, runtimes, workerConfigs),
     () => ids.shift()!,
     { hostEpoch: "dock-tools-host", systemService: systems },
   );
@@ -68,6 +70,21 @@ test("Dock tools create peers off and send visibly attributed messages through c
   assert.equal(created.instance.id, "created-instance");
   assert.equal(created.instance.name, "Fresh Work");
   assert.equal(registry.dockToolsEnabled(created.instance.id), false, "new peers must never inherit the source switch");
+  assert.deepEqual(workerConfigs[2], chosenSystem.workerConfig);
+
+  // Card 361: the Agent names the model the new Work starts with, beside its system choice.
+  const withModel = await registry.invokeDockTool(source.id, {
+    type: "create",
+    operationId: "tool-create-model",
+    systemId: chosenSystem.id,
+    model: { provider: "settings-fixture", id: "plain" },
+    cwd: createdCwd,
+    name: "Model Work",
+  });
+  assert.equal(withModel.type, "create");
+  if (withModel.type !== "create") assert.fail("expected create result");
+  assert.equal(withModel.instance.id, "model-instance");
+  assert.deepEqual(workerConfigs[3], { ...chosenSystem.workerConfig, model: { provider: "settings-fixture", id: "plain" } });
 
   const body = "Please inspect the change exactly.\nKeep this second line.";
   const sent = await registry.invokeDockTool(source.id, {

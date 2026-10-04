@@ -11,6 +11,7 @@ import {
   type DockToolsResult,
 } from "../core/dock-tools.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef } from "../control/protocol.js";
 import {
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
   MAX_OBSERVATION_CURSOR_CHARS,
@@ -96,6 +97,15 @@ const CREATE_SCHEMA = {
     saveDefault: { type: "boolean" },
     name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
     machine: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
+    model: {
+      type: "object",
+      properties: {
+        provider: { type: "string", minLength: 1, maxLength: MAX_MODEL_PROVIDER_CHARS },
+        id: { type: "string", minLength: 1, maxLength: MAX_MODEL_ID_CHARS },
+      },
+      required: ["provider", "id"],
+      additionalProperties: false,
+    },
   },
   required: ["cwd"],
   additionalProperties: false,
@@ -332,14 +342,15 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_create",
       label: "Create Dock work",
-      description: toolDescription("Create a new Dock instance in an absolute working directory. Use an exact Machine name to place it on another Machine; omit machine to use this work's Machine. Select systemId from dock_system to override the Host default. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. The new instance starts with Dock tools off."),
+      description: toolDescription("Create a new Dock instance in an absolute working directory. Use an exact Machine name to place it on another Machine; omit machine to use this work's Machine. Select systemId from dock_system to override the Host default. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new instance starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. The new instance starts with Dock tools off."),
       parameters: CREATE_SCHEMA,
-      execute: async (_toolCallId: string, params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean }) => toolResult(await bridge.invoke({
+      execute: async (_toolCallId: string, params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }) => toolResult(await bridge.invoke({
         type: "create",
         operationId: randomUUID(),
         cwd: params.cwd,
         ...(params.systemId === undefined ? {} : { systemId: params.systemId }),
         ...(params.saveDefault === undefined ? {} : { saveDefault: params.saveDefault }),
+        ...(params.model === undefined ? {} : { model: { provider: params.model.provider, id: params.model.id } }),
         ...(params.name === undefined ? {} : { name: params.name }),
         ...(params.machine === undefined ? {} : { machine: params.machine }),
       })),
