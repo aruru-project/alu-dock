@@ -63,6 +63,8 @@ Work 的 `model.list` 与 Host 设置页使用的机器级可选模型列表共�
 
 `instance.create` 可携带 bounded JSON `workerConfig`。这个对象在 generic Protocol/Host/catalog 中保持 opaque，随 durable reopen 原样交给选中的 Worker adapter；Host 不枚举字段、不把 Pi option 提升为 Dock 语义。Pi adapter 把其中 JSON-safe create fields 交给 Pi 的 session constructor，Worker-owned services、SessionManager、identity 与 transport 不能由该对象替换。不同 Agent adapter 可以按自己的原生 contract 解释同一容器。
 
+`workerConfig.model` 是 `{provider,id}`，不是 Pi 的 Model 对象；adapter（`src/pi/pi-starting-model.ts`）在每次构建 session 时按 Pi 的 `modelRuntime.getModel` + `checkAuth` 解析，语义同 `pi --model`：它是这个 Work 新会话的起始模型（创建、`/new` 都适用），不写入 Pi 的默认模型；会话已经记录自己的选择（model_change 或已有回答）时沿用会话，所以在 Work 里切过模型后 reopen 或 resume 不会被创建时的选择覆盖。模型不存在或未登录时以 `AgentModelNotFoundError`（wire `model_not_found`，与 `model.set` 同一失败）结束启动。Worker 构建 adapter 失败时先发 `fatal` envelope 再退出，Host 因此拿到真正的原因而不是退出码，选中 system 不可读等启动失败同样受益。
+
 ### 显式 system 来源
 
 Pi provider 生成 `workerConfig.systemSelection`：原生 `project-system`/`global-system` 保留 custom 文本语义；`dock-template` 是 fork SDK 的 `DefaultSystemPromptBody` 五字段 JSON（`intro/toolNotes/guidelines/documentationHeading/documentationInstructions`），不是最终组装 prompt，也没有占位符语言。项目来源同时保存原始 cwd，Dock 模板保存发现时的原始 Home（限定其 `.aludock/systems/*.json`），避免 session replacement 或 Worker 登录 shell 改变 HOME 后重新发现或拒绝原来源。模板选择必须携带来源 Home；没有 systemSelection 的旧 Work 继续使用原生行为。
@@ -165,7 +167,7 @@ Dock 通过 Pi resource `extensionsOverride` 明确持有 canonical inline `show
 
 Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久化，默认关闭；新建、adopt 和从别的来源创建的 instance 都不会继承。`dock.tools.configure` reverse capability 始终存在，Host 在开关为 on 时授予 `dock.tools`。开关通过 Pi 原生 `setActiveTools` 更新可用工具及其提示，off 时这些工具离开 active set。使用手册随包保存在 `docs/agent/dock-tools.md`，由各工具的 description 提供实际文件路径，Agent 需要时读取；它不注册为 Pi Skill。切换开关不执行 resource reload，正在进行的调用继续使用有效上下文。用户主动 reload/rebind 时，开关仍从 Worker-level capability state 恢复。
 
-开关开启后恰好提供：`dock_list({scope?: "live" | "all"})`、`dock_machines()`、target 必填的 `dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file({path})`、`dock_system({cwd,machine?,id?,cursor?,offset?,revision?})`、`dock_create({cwd,name?,machine?,systemId?,saveDefault?})` 和 `dock_send({target,message})`。list 只读短状态，不拉取 conversation；inspect 才按需读取一个按消息条数分页的 conversation page。Agent-facing client 把 canonical message page 渲染成 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。`limit` 只限制一次返回的消息条数，选中的消息正文保持完整；若底层传输无法承载则明确失败，禁止返回截断内容。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
+开关开启后恰好提供：`dock_list({scope?: "live" | "all"})`、`dock_machines()`、target 必填的 `dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file({path})`、`dock_system({cwd,machine?,id?,cursor?,offset?,revision?})`、`dock_create({cwd,name?,machine?,systemId?,saveDefault?,model?})` 和 `dock_send({target,message})`。list 只读短状态，不拉取 conversation；inspect 才按需读取一个按消息条数分页的 conversation page。Agent-facing client 把 canonical message page 渲染成 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。`limit` 只限制一次返回的消息条数，选中的消息正文保持完整；若底层传输无法承载则明确失败，禁止返回截断内容。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
 
 `dock_deliver_file` 只接受 absolute path。Host 从 authenticated Worker connection 取得 source instance，把 readable regular source 的 path 与 identity metadata 暂存在当前 `ManagedInstance`；它不在 registration 时读全文、hash、复制或持久化。最多 100 MiB（含边界），跨 Pi session replacement 保留，stop/Host restart 后消失；已有登记不因 `/dock-tools off` 删除。公开 list/download 只含 path-free `DeliverableDto`，bytes 由 Host 专用 stream 直接送给客户端并用 terminal SHA-256 核对，始终不经过 Worker。`show_image` 继续使用独立的 Worker session-scoped inline image 语义。
 
@@ -203,4 +205,4 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 
 具体实现按以上边界组织。出现跨层重复定义或投影时，先将能力收敛到所属层，并复用 Protocol V2 的同一定义。
 
-`dock_system` 通过同一 Protocol 查询目录候选或分页读取原文件；返回正文与元数据始终作为 untrusted task data 引用。`dock_create` 显式选择覆盖目录默认；未选择时交给创建 Host 应用目录默认，未配置才用 Pi 原生行为，已配置但损坏则明确报错，不创建首项。`saveDefault` 是独立明确保存，必须提供显式 ID，不开放 generic workerConfig。来源授权和新 Work off 规则不变。
+`dock_system` 通过同一 Protocol 查询目录候选或分页读取原文件；返回正文与元数据始终作为 untrusted task data 引用。`dock_create` 显式选择覆盖目录默认；未选择时交给创建 Host 应用目录默认，未配置才用 Pi 原生行为，已配置但损坏则明确报错，不创建首项。`saveDefault` 是独立明确保存，必须提供显式 ID。`model` 是新 Work 的起始模型，与 system 选择并入同一份 workerConfig，由目标 Worker 按上文规则解析；不开放 generic workerConfig。来源授权和新 Work off 规则不变。
