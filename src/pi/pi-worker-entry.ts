@@ -134,26 +134,34 @@ async function runWorker(): Promise<void> {
   });
 
   const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
-  const reopened = sessionPath
-    ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
-    : undefined;
-  if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
-  runtime = await createPiAgentAdapter({
-    cwd: init.cwd,
-    agentDir: init.agentDir,
-    ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
-    ...(init.tools === undefined ? {} : { tools: init.tools }),
-    ...(init.excludeTools === undefined ? {} : { excludeTools: init.excludeTools }),
-    ...(init.workerConfig === undefined ? {} : { workerConfig: init.workerConfig }),
-    projectTrusted: init.projectTrusted,
-    extensionUiBroker: ui,
-    extensionUiContextPortFactory: () => ui.createGenerationPort(),
-    setProcessCwd: (cwd) => process.chdir(cwd),
-    ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
-    dockToolsBridge,
-    ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
-  });
-  if (init.initialName !== undefined && !reopened) runtime.currentSession().setSessionName(init.initialName);
+  let reopened: Awaited<ReturnType<typeof openValidatedPiSession>> | undefined;
+  try {
+    reopened = sessionPath
+      ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
+      : undefined;
+    if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
+    runtime = await createPiAgentAdapter({
+      cwd: init.cwd,
+      agentDir: init.agentDir,
+      ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
+      ...(init.tools === undefined ? {} : { tools: init.tools }),
+      ...(init.excludeTools === undefined ? {} : { excludeTools: init.excludeTools }),
+      ...(init.workerConfig === undefined ? {} : { workerConfig: init.workerConfig }),
+      projectTrusted: init.projectTrusted,
+      extensionUiBroker: ui,
+      extensionUiContextPortFactory: () => ui.createGenerationPort(),
+      setProcessCwd: (cwd) => process.chdir(cwd),
+      ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
+      dockToolsBridge,
+      ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
+    });
+  } catch (error) {
+    // The Host learns why this Work could not start (an unavailable chosen model, an
+    // unreadable selected system) instead of only seeing the exit code.
+    await sender.sendEnvelope({ kind: "fatal", error: encodeWorkerError(error) }).catch(() => {});
+    throw error;
+  }
+  if (init.initialName !== undefined && !reopened) runtime!.currentSession().setSessionName(init.initialName);
   runtime.subscribe((event) => {
     const envelope: WorkerEnvelope = { kind: "event", event, state: captureState(runtime!) };
     forwardWorkerEvent(sender, envelope, () => process.exit(1));

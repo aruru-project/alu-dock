@@ -48,12 +48,16 @@ Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { cl
 globalThis.window = { clearTimeout, setTimeout,
   matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
+globalThis.document = { addEventListener() {}, removeEventListener() {} }
+const fastModel = { provider: 'fixture', id: 'fast', name: 'Fast', reasoning: false }
+const fasterModel = { provider: 'fixture', id: 'faster', name: 'Faster', reasoning: false }
+const hiddenModel = { provider: 'fixture', id: 'slow', name: 'Slow', reasoning: true }
 const project = { id: 'project', name: '项目 SYSTEM', kind: 'project-system', path: '/project/SYSTEM.md', workerConfig: { systemPrompt: { kind: 'native', path: '/project/SYSTEM.md' } } }
 const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template', path: '/home/.aludock/systems/chosen.json', workerConfig: { systemPrompt: { kind: 'dock-template', path: '/home/.aludock/systems/chosen.json' }, opaque: { keep: [1, '原样'] } } }
 const original = '\uFEFF{"identity":"逐字复制中文"}\n'
 try {
   const entry = join(directory, 'entry.ts')
-  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app';`)
+  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app'; export { useModelVisibilityStore } from '../src/stores/model-visibility';`)
   await build({ root, configFile: false, logLevel: 'silent',
     build: { outDir: directory, emptyOutDir: false, minify: false,
       lib: { entry, formats: ['es'], fileName: () => 'component.mjs' },
@@ -61,7 +65,7 @@ try {
     },
     plugins: [vue()],
   })
-  const { default: NewWorkDialog, useAppStore } = await import(join(directory, 'component.mjs'))
+  const { default: NewWorkDialog, useAppStore, useModelVisibilityStore } = await import(join(directory, 'component.mjs'))
   async function createStore() {
     setActivePinia(createPinia())
     const store = useAppStore()
@@ -76,15 +80,26 @@ try {
   }
 
   // A missing optional Host feature must not block the existing creation contract.
-  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
+  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
     const store = await createStore()
     const calls = [], created = [], unknown = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, outcomeUnknown: false })
     let lateResolve, lateReject
     let currentDefault = scenario === 'default' ? template : undefined
+    let machineModels = [fastModel, hiddenModel]
+    let machineHidden = [{ provider: hiddenModel.provider, id: hiddenModel.id }]
+    let holdModelRead
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
+      if (command === 'model_visibility') {
+        if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
+        assert.equal(args.targetHostId, null, 'the connected Host itself is addressed by omitting the target, like the hidden-model settings')
+        const answer = { models: machineModels, total: machineModels.length, truncated: false, hidden: machineHidden }
+        if (holdModelRead) return new Promise((resolve, reject) => { holdModelRead(error => error ? reject(error) : resolve(answer)) })
+        return answer
+      }
+      if (command === 'set_model_visibility') return { hidden: args.hidden }
       if (command === 'system_catalog') {
         if (scenario.startsWith('legacy') || (scenario === 'partial-unsupported' && args.cursor) || (scenario === 'refresh-unsupported' && calls.filter(call => call.command === command).length > 2)) {
           throw { code: 'capability_missing', message: 'Required capabilities are unavailable', details: { missing: ['system.templates.v1'] } }
@@ -120,6 +135,13 @@ try {
     app.mount(container)
     const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} enabled`); target.props.onClick(); await settle() }
+    await settle()
+    if (scenario === 'model') {
+      // Card 361: the model is chosen on the first screen; hidden models stay out of the list.
+      await click('选择模型')
+      assert.ok(!button('Slow'), 'a model hidden on this machine is not offered')
+      await click('Fast')
+    }
     if (scenario === 'once') {
       await click('选择其他目录')
       await click('使用这个目录')
@@ -139,6 +161,7 @@ try {
       continue
     }
     if (scenario.startsWith('legacy')) {
+      assert.ok(!button('选择模型'), 'an old Host without a machine model list shows no model choice; creation proceeds as before')
       assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'new Client uses ordinary creation when old Host lacks system selection')
       assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null)
       assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
@@ -171,8 +194,63 @@ try {
     }
     assert.equal(created.length, 0, 'Even a project SYSTEM is not a directory default')
     assert.ok(button('项目 SYSTEM')); assert.ok(button('选择的模板'))
+    // Card 361: without a saved default the first usable candidate is already selected.
+    assert.equal(button('项目 SYSTEM').props['aria-pressed'], true, 'first usable candidate is preselected')
+    assert.equal(button('确认并创建').props.disabled, false)
     const checkbox = find(container, item => item.type === 'input' && item.props.type === 'checkbox')
     assert.equal(checkbox.checked, false)
+    if (scenario === 'model') {
+      await click('确认并创建')
+      assert.equal(created.length, 1)
+      assert.deepEqual(calls.find(c => c.command === 'create_work').args.workerConfig, { ...project.workerConfig, model: { provider: 'fixture', id: 'fast' } }, 'the chosen model rides with the preselected system')
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, 1)
+      app.unmount(); await settle()
+      // Reopening reuses the client's cached list (reading it starts a Pi on the Machine);
+      // the refresh button asks the Machine again and shows what was added there.
+      machineModels = [fastModel, fasterModel, hiddenModel]
+      const reopened = node('root')
+      const again = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated() {}, onUnknown() {}, onClose() {} }) })
+      again.mount(reopened); await settle()
+      const buttonAgain = label => find(reopened, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
+      const clickAgain = async label => { const target = buttonAgain(label); assert.ok(target, `reopened: button ${label} exists`); assert.ok(!target.props.disabled, `reopened: ${label} enabled`); target.props.onClick(); await settle() }
+      // "Fast" is a prefix of "Faster": match a model option by its full label + provider/id text.
+      const modelOption = model => find(reopened, item => item.type === 'button' && text(item).endsWith(`${model.name}${model.provider}/${model.id}`))
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, 1, 'reopening the dialog does not read the Machine again')
+      await clickAgain('选择模型'); assert.ok(modelOption(fastModel)); assert.ok(!modelOption(fasterModel), 'the cached list is shown until the user refreshes')
+      await clickAgain('Fast')
+      await clickAgain('刷新模型列表')
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, 2, 'refresh reads the Machine again')
+      await clickAgain('选择模型'); assert.ok(modelOption(fasterModel), 'models added on the Machine appear after refresh')
+      await clickAgain('Faster')
+      // Review of #361: a hidden-list save confirmed while a read is in flight must not be undone
+      // when that read fails (a pre-read snapshot restored) or when it returns later with the older list.
+      let releaseRead
+      holdModelRead = release => { releaseRead = release }
+      await clickAgain('刷新模型列表')
+      assert.ok(releaseRead, 'the refresh is in flight')
+      let savedHidden = [{ provider: fastModel.provider, id: fastModel.id }]
+      await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      machineHidden = savedHidden
+      holdModelRead = undefined
+      releaseRead(new Error('fixture: read failed after the save')); await settle()
+      await clickAgain('选择模型')
+      assert.ok(!modelOption(fastModel), 'a read that fails after a save keeps the saved hidden list, not a snapshot from before the read')
+      assert.ok(modelOption(hiddenModel), 'the model shown by the save stays shown')
+      assert.ok(text(reopened).includes('读不到这台机器的模型列表'))
+      await clickAgain('Slow')
+      holdModelRead = release => { releaseRead = release }
+      await clickAgain('刷新模型列表')
+      savedHidden = [{ provider: fasterModel.provider, id: fasterModel.id }]
+      await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      machineHidden = savedHidden
+      holdModelRead = undefined
+      releaseRead(); await settle()
+      await clickAgain('选择模型')
+      assert.ok(!modelOption(fasterModel), 'the model hidden by the save stays hidden after the older read returns with the previous list')
+      assert.ok(modelOption(fastModel) && modelOption(hiddenModel), 'models shown by the save stay shown')
+      assert.ok(!text(reopened).includes('读不到这台机器的模型列表'), 'a successful read clears the earlier failure note')
+      again.unmount(); continue
+    }
     await click('选择的模板')
     await click('阅读 选择的模板')
     if (scenario.startsWith('body-')) {
@@ -273,7 +351,7 @@ try {
     assert.equal(calls.filter(c => c.command === 'set_system_default').length, saves, 'Trust continuation saves once; a new explicit confirmation saves its requested default again')
     app.unmount()
   }
-  console.log('PASS: directory/recent → ordered selection → raw whole-file preview/copy → retained choice → once/save/failures/trust; stale discovery fenced; actual TS IPC payloads')
+  console.log('PASS: directory/recent → first candidate preselected → raw whole-file preview/copy → retained choice → once/save/failures/trust; model choice rides with the system; stale discovery fenced; actual TS IPC payloads')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

@@ -1,4 +1,4 @@
-import type { SystemCatalogResult, SystemCatalogCursor, ResourceContentResult } from "../control/protocol.js";
+import type { ModelRef, SystemCatalogResult, SystemCatalogCursor, ResourceContentResult } from "../control/protocol.js";
 import type { CommandReceipt } from "./instance-dto.js";
 import type { DeliverableDto } from "./instance-deliverables.js";
 import type { MachineDto } from "./machine-dto.js";
@@ -19,7 +19,7 @@ export type DockToolsRequest =
   | { type: "machines" }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
-  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean }
+  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }
   | { type: "send"; operationId: string; target: string; message: string };
 
 export type DockToolsResult =

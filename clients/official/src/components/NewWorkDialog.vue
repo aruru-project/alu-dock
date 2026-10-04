@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { FolderOpen, RotateCcw } from '@lucide/vue'
+import { FolderOpen, RefreshCw, RotateCcw } from '@lucide/vue'
 import {
   adoptSession,
   createWork,
@@ -16,17 +16,20 @@ import { currentConnectionCall, requireConnectionContext } from '../lib/hostResu
 import {
   defaultMachineHostId,
   machineDisplayLabel,
+  machineRequestTarget,
   machineSelectorVisible,
   machineWorkspaceRoots,
   machineWorkspaceRootSelectorVisible,
   machineWorkspaceStart,
   workspaceChildPath,
 } from '../lib/machines'
+import { modelKey } from '../lib/modelVisibility'
 import { useSavedSessionPages } from '../lib/savedSessions'
 import type { DirectoryPage } from '../lib/workspaceBrowser'
-import type { MachineDto, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
+import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
+import { useModelCatalogStore } from '../stores/model-catalog'
 import AluSelect from './AluSelect.vue'
 import DirectoryBrowser from './DirectoryBrowser.vue'
 import ResourceDocument from './ResourceDocument.vue'
@@ -58,6 +61,7 @@ const emit = defineEmits<{
   view: [view: View]
 }>()
 const app = useAppStore()
+const catalog = useModelCatalogStore()
 
 const view = ref<View>('launcher')
 const machineHostId = ref('')
@@ -78,6 +82,8 @@ const systemCatalogState = ref<'idle' | 'ready' | 'unsupported' | 'failed'>('idl
 const saveDefault = ref(false)
 const savedDefaultId = ref('')
 const saveFailed = ref(false)
+// The model the new Work starts with; null leaves the choice to Pi on that Machine.
+const modelChoice = ref<ModelRef | null>(null)
 let systemEpoch = 0
 let inventoryEpoch = 0
 
@@ -101,6 +107,27 @@ const workspaceRootOptions = computed(() => {
   ]
 })
 const recentWorkspaces = computed(() => machineHostId.value ? app.recentWorkspaces(machineHostId.value) : [])
+const PI_DEFAULT_MODEL = ''
+// The Machine's model list is cached for the app's lifetime; the refresh button asks the Machine again.
+const modelCatalog = computed(() => machine.value?.available
+  ? catalog.forTarget(app.connectionContext?.connectionId ?? '', machineRequestTarget(machine.value))
+  : undefined)
+const modelListState = computed(() => modelCatalog.value?.state ?? 'idle')
+const modelList = computed(() => {
+  const result = modelCatalog.value?.result
+  if (!result) return []
+  const hidden = new Set(result.hidden.map(modelKey))
+  return result.models.filter((model) => !hidden.has(modelKey(model)))
+})
+const modelOptions = computed(() => [
+  { value: PI_DEFAULT_MODEL, label: 'Pi 默认', description: modelListState.value === 'loading' && !modelList.value.length ? '正在读取这台机器的模型…' : '这台机器上 Pi 自己的默认模型' },
+  ...modelList.value.map((model) => ({
+    value: modelKey(model),
+    label: model.name && model.name !== model.id ? model.name : `${model.provider}/${model.id}`,
+    description: `${model.provider}/${model.id}`,
+  })),
+])
+const modelChoiceValue = computed(() => modelChoice.value ? modelKey(modelChoice.value) : PI_DEFAULT_MODEL)
 const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
   if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
@@ -130,9 +157,38 @@ watch([
   trust.value = null
   view.value = 'launcher'
   clearError()
-}, { flush: 'sync' })
+  modelChoice.value = null
+  void loadModels()
+}, { flush: 'sync', immediate: true })
+// A refreshed or newly hidden list drops a choice it no longer offers.
+watch(modelList, (models) => {
+  if (modelChoice.value && !models.some((model) => modelKey(model) === modelChoiceValue.value)) modelChoice.value = null
+})
 
 onUnmounted(() => { ++inventoryEpoch; ++systemEpoch; sessionPages.reset() })
+
+/** The Machine's selectable models, read without a Work. Failure leaves "Pi 默认" available; it never blocks creation. */
+async function loadModels(fresh = false) {
+  const selectedMachine = machine.value
+  if (!selectedMachine?.available || (fresh && modelListState.value === 'loading')) return
+  try {
+    await currentConnectionCall(app, (context) => catalog.read(context, machineRequestTarget(selectedMachine), fresh))
+  } catch {
+    // The row shows the outcome from the shared catalog; creation never waits for this list.
+  }
+}
+
+function selectModel(value: string) {
+  if (actionBusy.value) return
+  modelChoice.value = modelList.value.find((model) => modelKey(model) === value) ?? null
+}
+
+/** The chosen model rides with the system choice; without a choice the Host and Pi decide as before. */
+function workerConfigWithModel(workerConfig?: Record<string, unknown>) {
+  const model = modelChoice.value
+  if (!model) return workerConfig
+  return { ...workerConfig, model: { provider: model.provider, id: model.id } }
+}
 
 function resetSystems() {
   ++systemEpoch
@@ -180,7 +236,8 @@ async function chooseDirectory(path: string, refresh = false) {
     systemCandidates.value = candidates
     systemWarnings.value = warnings
     savedDefaultId.value = defaultSelection?.id === previouslySaved ? previouslySaved : ''
-    systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? null
+    // Without a saved default the first usable candidate is already selected; confirming is one click.
+    systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? candidates.find(candidate => !candidate.warning) ?? null
     if (!refresh && defaultSelection && !defaultSelection.warning) {
       systemSelection.value = defaultSelection
       await createAt(path, hostId)
@@ -351,11 +408,13 @@ async function loadInventory() {
   }
 }
 
-async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, workerConfig?: Record<string, unknown>) {
+async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, systemConfig?: Record<string, unknown>) {
   if (!isTauri || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
   const epoch = systemEpoch
+  // Trust continuation replays the configuration of the original attempt, including its model.
+  const workerConfig = continuation ? systemConfig : workerConfigWithModel(systemConfig)
   pending.value = 'create'
   clearError()
   try {
@@ -457,6 +516,18 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
     <div v-if="pending" class="alu-dialog-pending"><span class="alu-agent-activity-spinner" />{{ pending === 'save' ? '正在保存目录默认…' : '正在创建 Work…' }}</div>
 
     <template v-if="machine">
+      <label v-if="view === 'launcher' && modelListState !== 'unsupported' && modelListState !== 'idle'" class="alu-directory-machine new-work-model">
+        <span>模型</span>
+        <AluSelect
+          :value="modelChoiceValue"
+          :options="modelOptions"
+          label="选择模型"
+          :disabled="actionBusy || !machine.available"
+          @select="selectModel"
+        />
+        <button type="button" class="new-work-model-refresh" aria-label="刷新模型列表" title="刷新模型列表" :disabled="actionBusy || !machine.available || modelListState === 'loading'" @click="loadModels(true)"><RefreshCw :size="15" :class="{ spinning: modelListState === 'loading' }" /></button>
+        <span v-if="modelListState === 'failed'" class="new-work-model-note">读不到这台机器的模型列表，将使用 Pi 默认。改过模型或登录后，点右侧刷新。</span>
+      </label>
       <section v-if="view === 'launcher'" class="new-work-launcher">
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
@@ -486,6 +557,8 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         <DirectoryBrowser
           :key="browseVersion"
           :start-path="browseStartPath"
+          :home-path="machine.homePath"
+          :platform="machine.platform"
           :load-page="readDirectoryPage"
           :describe-error="describeDirectoryError"
           :disabled="actionBusy || !machine.available"
@@ -560,7 +633,12 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
   font-size: var(--alu-meta-size);
 }
 .alu-directory-machine:focus-within { z-index: 30; }
-.alu-directory-machine > span { flex: 0 0 auto; }
+.alu-directory-machine > span { flex: 0 0 auto; min-width: 4em; }
+.new-work-model { flex-wrap: wrap; }
+.new-work-model-refresh { display: inline-flex; width: 32px; min-height: 32px; flex: 0 0 auto; align-items: center; justify-content: center; padding: 0; color: var(--alu-text-muted); border: 0; border-radius: 7px; background: transparent; }
+.new-work-model-refresh:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
+.new-work-model-refresh:disabled { opacity: .5; }
+.new-work-model-note { flex: 1 1 100%; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 @media (max-width: 640px) {
   .alu-directory-machine { padding: 9px 12px; }
 }
@@ -592,7 +670,8 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .system-confirm input { accent-color: var(--alu-blue); }
 .new-work-dialog > .resource-document { flex: 1; min-height: 0; }
 .alu-dialog-error > span { display: block; }
-.new-work-launcher { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow-y: auto; padding: 12px 16px 18px; }
+/* Leaves room under the first-screen selectors for their open menus, which the dialog otherwise clips. */
+.new-work-launcher { display: flex; min-height: 290px; flex: 1 1 auto; flex-direction: column; overflow-y: auto; padding: 12px 16px 18px; }
 .new-work-section-label { padding: 8px 4px 6px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; }
 .new-work-recent-options,
 .new-work-action-options { flex: 0 0 auto; overflow: visible; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg); }

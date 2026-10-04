@@ -1,4 +1,4 @@
-import { parseControlRequest, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
+import { parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
 import {
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
@@ -44,7 +44,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: "system", ...input, ...(machine === undefined ? {} : { machine }) };
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
@@ -52,10 +52,12 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     const systemId = value.systemId === undefined ? undefined : boundedString(value.systemId, 128, "Dock system selection");
     if (value.saveDefault !== undefined && typeof value.saveDefault !== "boolean") throw new Error("saveDefault must be boolean");
     if (value.saveDefault === true && systemId === undefined) throw new Error("Saving a directory default requires an explicit systemId");
+    const model = value.model === undefined ? undefined : parseModelRef(value.model, "Dock create model", "invalid_request");
     return {
       type: "create",
       ...(systemId === undefined ? {} : { systemId }),
       ...(value.saveDefault === undefined ? {} : { saveDefault: value.saveDefault }),
+      ...(model === undefined ? {} : { model }),
       operationId: boundedString(value.operationId, 128, "Dock create operation ID"),
       cwd,
       ...(name === undefined ? {} : { name }),

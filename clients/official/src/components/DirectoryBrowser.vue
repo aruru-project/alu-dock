@@ -11,7 +11,8 @@ import {
   type DirectoryPage,
   type WorkspaceDirectoryState,
 } from '../lib/workspaceBrowser'
-import type { WorkspaceFileCursor, WorkspaceFileEntry } from '../lib/types'
+import { typedDirectoryTarget } from '../lib/machines'
+import type { MachinePlatform, WorkspaceFileCursor, WorkspaceFileEntry } from '../lib/types'
 import { userErrorMessage, type UserErrorPresentation } from '../lib/userError'
 import { copyPlainText } from '../lib/clipboard'
 
@@ -20,7 +21,11 @@ const props = defineProps<{
   loadPage: (path: string, cursor?: WorkspaceFileCursor) => Promise<DirectoryPage>
   describeError?: (cause: unknown, path: string) => UserErrorPresentation
   selectedPath?: string
+  /** Pick one directory: one level at a time, with a filter that doubles as a path entry. */
   picker?: boolean
+  /** The Machine's Home for `~` in a typed path, and its path style. */
+  homePath?: string
+  platform?: MachinePlatform
   disabled?: boolean
 }>()
 const showHidden = defineModel<boolean>('showHidden', { default: false })
@@ -36,9 +41,8 @@ type TreeRow =
   | { kind: 'status'; path: string; depth: number; state: WorkspaceDirectoryState }
 const directories = reactive<Record<string, WorkspaceDirectoryState>>({})
 const expanded = ref(new Set<string>())
-const filterCollapsed = ref(new Set<string>())
 const rootPath = ref(props.startPath)
-const mobilePath = ref(props.startPath)
+const listPath = ref(props.startPath)
 const selectedDirectory = ref(props.startPath)
 const trail = ref([{ path: props.startPath, name: props.startPath }])
 const search = ref('')
@@ -46,10 +50,13 @@ const isMobile = ref(false)
 const refreshing = ref(false)
 let epoch = 0
 let mediaQuery: MediaQueryList | undefined
-const currentPath = computed(() => isMobile.value ? mobilePath.value : rootPath.value)
+// The picker shows one level at a time everywhere; the Work file tree does so only on narrow screens.
+const listMode = computed(() => isMobile.value || !!props.picker)
+const currentPath = computed(() => listMode.value ? listPath.value : rootPath.value)
 const currentState = computed(() => directories[currentPath.value])
-const currentParent = computed(() => currentState.value?.parent ?? (isMobile.value ? trail.value.at(-2)?.path : undefined))
+const currentParent = computed(() => currentState.value?.parent ?? (listMode.value ? trail.value.at(-2)?.path : undefined))
 const selected = computed(() => props.picker ? selectedDirectory.value : props.selectedPath)
+// The filter only narrows the level being viewed; entering a directory clears it.
 const filterText = computed(() => search.value.trim().toLocaleLowerCase())
 
 function visibleEntries(path: string, filterNames = true) {
@@ -59,8 +66,7 @@ function visibleEntries(path: string, filterNames = true) {
 }
 
 function directoryExpanded(path: string) {
-  return !filterCollapsed.value.has(path)
-    && (expanded.value.has(path) || (!!filterText.value && !!directories[path]))
+  return expanded.value.has(path)
 }
 
 const treeRows = computed<TreeRow[]>(() => {
@@ -69,13 +75,8 @@ const treeRows = computed<TreeRow[]>(() => {
     if (!state) return []
     const rows: TreeRow[] = []
     for (const entry of visibleEntries(path, false)) {
-      const children = isDirectory(entry) && (filterText.value || expanded.value.has(entry.path))
-        ? visit(entry.path, depth + 1) : []
-      // Keep matching descendants and their loading/retry routes, without scanning new directories.
-      if (filterText.value && !entry.name.toLocaleLowerCase().includes(filterText.value)
-        && !children.some(row => row.kind === 'entry' || row.state.loading || row.state.error)) continue
       rows.push({ kind: 'entry', entry, depth })
-      if (directoryExpanded(entry.path)) for (const child of children) rows.push(child)
+      if (isDirectory(entry) && directoryExpanded(entry.path)) rows.push(...visit(entry.path, depth + 1))
     }
     if (state.loading || state.error || state.nextCursor || !rows.length) {
       rows.push({ kind: 'status', path, depth, state })
@@ -138,7 +139,7 @@ function reset() {
   ++epoch
   for (const key of Object.keys(directories)) delete directories[key]
   rootPath.value = props.startPath
-  mobilePath.value = props.startPath
+  listPath.value = props.startPath
   trail.value = [{ path: props.startPath, name: props.startPath }]
   expanded.value = new Set([props.startPath])
   search.value = ''
@@ -151,14 +152,20 @@ function navigate(path: string, name = path) {
   if (props.disabled) return
   const index = trail.value.findIndex(crumb => crumb.path === path)
   trail.value = index >= 0 ? trail.value.slice(0, index + 1) : [...trail.value, { path, name }]
-  mobilePath.value = path
-  if (!isMobile.value) {
+  listPath.value = path
+  if (!listMode.value) {
     rootPath.value = path
     expanded.value = new Set([path])
   }
   search.value = ''
   choose(path)
   if (!directories[path]) void loadDirectory(path, true)
+}
+
+/** Enter in the filter box: a path goes there; a plain name keeps filtering this level. */
+function goToTypedPath() {
+  const target = typedDirectoryTarget(search.value, listPath.value, props.homePath, props.platform)
+  if (target !== undefined) navigate(target)
 }
 
 function goBack(): boolean {
@@ -176,20 +183,18 @@ function activate(entry: WorkspaceFileEntry) {
     if (isFile(entry)) emit('file', entry)
     return
   }
-  if (isMobile.value) navigate(entry.path, entry.name)
+  if (listMode.value) navigate(entry.path, entry.name)
   else toggleDirectory(entry.path)
 }
 
 async function refresh() {
   if (props.disabled || refreshing.value) return
-  // Retain expanded descendants under collapsed ancestors, plus branches shown by filtering.
-  const filteredPaths = filterText.value ? treeRows.value.flatMap(row =>
-    row.kind === 'entry' && isDirectory(row.entry) && directories[row.entry.path] ? [row.entry.path] : []) : []
-  const paths = isMobile.value ? [mobilePath.value] : [...new Set([rootPath.value, ...expanded.value, ...filteredPaths])]
+  // Retain expanded descendants under collapsed ancestors.
+  const paths = listMode.value ? [listPath.value] : [...new Set([rootPath.value, ...expanded.value])]
     .filter(path => path === rootPath.value || directories[path])
   const requestEpoch = ++epoch
   for (const key of Object.keys(directories)) delete directories[key]
-  if (isMobile.value) expanded.value = new Set([rootPath.value])
+  if (listMode.value) expanded.value = new Set([rootPath.value])
   refreshing.value = true
   emit('refresh')
   try {
@@ -205,11 +210,8 @@ async function refresh() {
 function toggleDirectory(path: string) {
   if (props.disabled) return
   choose(path)
-  if (directoryExpanded(path)) {
-    expanded.value.delete(path)
-    if (filterText.value) filterCollapsed.value.add(path)
-  } else {
-    filterCollapsed.value.delete(path)
+  if (directoryExpanded(path)) expanded.value.delete(path)
+  else {
     expanded.value.add(path)
     if (!directories[path]) void loadDirectory(path, true)
   }
@@ -220,7 +222,6 @@ function updateMobileMode() {
   emit('mobile', isMobile.value)
   if (!directories[currentPath.value]) void loadDirectory(currentPath.value, true)
 }
-watch(filterText, () => { filterCollapsed.value = new Set() }, { flush: 'sync' })
 watch(() => props.startPath, reset, { immediate: true })
 onMounted(() => {
   mediaQuery = window.matchMedia('(max-width: 720px)')
@@ -238,7 +239,7 @@ defineExpose({ goBack })
   <aside class="directory-browser" :class="{ 'directory-picker': picker }" aria-label="工作区目录">
     <div class="directory-toolbar">
       <button v-if="picker && currentParent" type="button" class="directory-icon-button" aria-label="返回上级目录" :disabled="disabled" @click="goBack"><ArrowLeft :size="17" /></button>
-      <div v-if="isMobile" class="directory-breadcrumbs" aria-label="当前目录">
+      <div v-if="listMode" class="directory-breadcrumbs" aria-label="当前目录">
         <template v-for="(crumb, index) in trail" :key="crumb.path">
           <span v-if="index" aria-hidden="true">/</span>
           <button type="button" :disabled="disabled" :title="crumb.path" @click="navigate(crumb.path)">{{ crumb.name }}</button>
@@ -248,21 +249,21 @@ defineExpose({ goBack })
       <button v-if="picker" type="button" class="directory-icon-button" :aria-label="showHidden ? '隐藏隐藏目录' : '显示隐藏目录'" :aria-pressed="showHidden" @click="showHidden = !showHidden"><Eye v-if="showHidden" :size="17" /><EyeOff v-else :size="17" /></button>
       <button type="button" class="directory-icon-button" :disabled="disabled || refreshing || currentState?.loading" aria-label="刷新目录" @click="refresh"><RefreshCw :size="16" :class="{ spinning: refreshing || currentState?.loading }" /></button>
     </div>
-    <div v-if="picker" class="directory-search"><input v-model="search" type="search" aria-label="搜索目录名称" placeholder="筛选已加载的目录…" /></div>
+    <div v-if="picker" class="directory-search"><input v-model="search" type="search" aria-label="筛选目录或输入路径" placeholder="筛选这一层，或输入路径后回车…" :disabled="disabled" @keydown.enter.prevent="goToTypedPath" /></div>
 
-    <div v-if="isMobile" class="directory-scroll directory-mobile-list" role="list">
-      <button v-for="entry in visibleEntries(mobilePath)" :key="entry.path" type="button" class="directory-mobile-row" :class="{ selected: selected === entry.path }" :disabled="disabled || (!isDirectory(entry) && !isFile(entry))" @click="activate(entry)">
+    <div v-if="listMode" class="directory-scroll directory-mobile-list" role="list">
+      <button v-for="entry in visibleEntries(listPath)" :key="entry.path" type="button" class="directory-mobile-row" :class="{ selected: selected === entry.path }" :disabled="disabled || (!isDirectory(entry) && !isFile(entry))" @click="activate(entry)">
         <Folder v-if="isDirectory(entry)" :size="19" /><FileImage v-else-if="classifyWorkspacePreview(entry) === 'image'" :size="19" /><File v-else :size="19" />
         <span><strong>{{ entry.name }}</strong><small>{{ isDirectory(entry) ? (entry.kind === 'symlink' ? '目录链接' : '文件夹') : formatBytes(entry.sizeBytes) }}{{ entry.hidden ? ' · 隐藏' : '' }}</small></span>
         <ChevronRight v-if="isDirectory(entry) || isFile(entry)" :size="17" />
       </button>
       <div v-if="currentState?.loading" class="directory-status" role="status"><span class="directory-spinner" />正在读取目录…</div>
       <div v-else-if="currentState?.error" class="directory-error-actions">
-        <button type="button" class="directory-status error" :disabled="disabled" @click="loadDirectory(mobilePath, true)">{{ currentState.error }} · 重试</button>
+        <button type="button" class="directory-status error" :disabled="disabled" @click="loadDirectory(listPath, true)">{{ currentState.error }} · 重试</button>
         <button v-if="currentState.diagnostic" type="button" class="directory-diagnostic" :disabled="disabled" @click="copyDiagnostic(currentState)">{{ currentState.diagnosticCopyState === 'copied' ? '诊断信息已复制' : currentState.diagnosticCopyState === 'failed' ? '复制失败，请重试' : '复制诊断信息' }}</button>
       </div>
-      <button v-else-if="currentState?.nextCursor" type="button" class="directory-more" :disabled="disabled" @click="loadDirectory(mobilePath)">加载更多</button>
-      <div v-else-if="currentState && !visibleEntries(mobilePath).length" class="directory-status">{{ search ? '没有匹配项' : `这个目录没有${showHidden ? '' : '可见'}项目` }}</div>
+      <button v-else-if="currentState?.nextCursor" type="button" class="directory-more" :disabled="disabled" @click="loadDirectory(listPath)">加载更多</button>
+      <div v-else-if="currentState && !visibleEntries(listPath).length" class="directory-status">{{ search ? '这一层没有匹配的目录。输入完整路径后回车可以直接前往。' : `这个目录没有${showHidden ? '' : '可见'}项目` }}</div>
     </div>
 
     <div v-else class="directory-scroll" role="tree" aria-label="工作区文件树">
@@ -280,7 +281,7 @@ defineExpose({ goBack })
             <button v-if="row.state.diagnostic" type="button" class="directory-diagnostic" :disabled="disabled" @click="copyDiagnostic(row.state)">{{ row.state.diagnosticCopyState === 'copied' ? '诊断信息已复制' : row.state.diagnosticCopyState === 'failed' ? '复制失败，请重试' : '复制诊断信息' }}</button>
           </div>
           <button v-else-if="row.state.nextCursor" type="button" class="directory-more" :style="{ paddingLeft: `${48 + row.depth * 18}px` }" :disabled="disabled" @click="loadDirectory(row.path)">加载更多</button>
-          <div v-else class="directory-status" :style="{ paddingLeft: `${30 + row.depth * 18}px` }">{{ search ? '没有匹配项' : `这个目录没有${showHidden ? '' : '可见'}项目` }}</div>
+          <div v-else class="directory-status" :style="{ paddingLeft: `${30 + row.depth * 18}px` }">这个目录没有{{ showHidden ? '' : '可见' }}项目</div>
         </template>
       </template>
     </div>

@@ -1868,12 +1868,14 @@ export function parseModelCatalogBody(input: unknown): Pick<ModelsResult, "model
 }
 /** Hidden-model entries from a request, a Host response, or the Host's own list file share this shape and bound. */
 export function parseModelRefs(input: unknown, field: string, code = "invalid_response"): ModelRef[] {
-  const refs = array(input, field, MAX_COLLECTION, code).map((item, index) => {
-    const ref = object(item, `${field}[${index}]`, code); exact(ref, ["provider", "id"], code);
-    return { provider: string(ref.provider, `${field}[${index}].provider`, MAX_MODEL_PROVIDER_CHARS, code), id: string(ref.id, `${field}[${index}].id`, MAX_MODEL_ID_CHARS, code) };
-  });
+  const refs = array(input, field, MAX_COLLECTION, code).map((item, index) => parseModelRef(item, `${field}[${index}]`, code));
   if (Buffer.byteLength(JSON.stringify(refs), "utf8") > MAX_HIDDEN_MODELS_BYTES) throw validation(code, `${field} is too large`);
   return refs;
+}
+/** One exact Pi `provider + id`: a hidden-list entry or the model a new Work starts with. */
+export function parseModelRef(input: unknown, field: string, code = "invalid_response"): ModelRef {
+  const ref = object(input, field, code); exact(ref, ["provider", "id"], code);
+  return { provider: string(ref.provider, `${field}.provider`, MAX_MODEL_PROVIDER_CHARS, code), id: string(ref.id, `${field}.id`, MAX_MODEL_ID_CHARS, code) };
 }
 export function parseModelVisibilityResult(input: unknown): ModelVisibilityResult {
   const value = object(input, "model visibility result"); exact(value, ["models", "total", "truncated", "hidden", "fileProblem"]);

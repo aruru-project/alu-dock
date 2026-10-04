@@ -120,7 +120,7 @@ Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字�
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 
-`instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure` 和 adopt 不接受该创建配置；Agent-facing `dock_create` 只允许选择 system ID，不开放 generic workerConfig 编辑。
+`instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure` 和 adopt 不接受该创建配置；Agent-facing `dock_create` 只允许选择 system ID 和起始模型（`model: {provider,id}`），不开放 generic workerConfig 编辑。
 
 `workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
 
@@ -268,7 +268,7 @@ Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力�
 
 watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 instance state，固定首次 terminal transition 的状态后删除 watch，再向当前来源 Worker 投递仅含 target/reason/time 的 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、Dock tools 关闭会清理，目标 forget 按 unavailable 完成。cancel/off 与 completion delivery 在来源实例栅栏内排序；取消确认后，尚未交付的 completion 不能再次唤醒。watch 不跨 Host restart 恢复或补发。
 
-`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?,systemId?,saveDefault?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交固定可见来源包装的正文，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
+`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?,systemId?,saveDefault?,model?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议；除 system 与起始模型外不接受其他 Pi 启动参数。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交固定可见来源包装的正文，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
 ## 资源正文阅读
 
@@ -282,7 +282,7 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 - 拥有 Worker 的 Host 在 `model.list` 把 Worker 结果返回前删去隐藏条目，`total` 同步减去，响应形状不变，所有客户端不改就搜不到它们。Main 把 SubHost Work 的 `model.list` 原样转给 SubHost，因此各机器只用自己的列表。
 - `model.set`、Pi 自己的 scoped models 与 extension 的模型调用不受影响；当前模型即使被隐藏，snapshot 仍照常报告它。
-- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是这台机器新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要该机器上有 Work。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。同一 Host 同时只运行一个这样的进程，并发读取共用结果；整次读取在 20 秒内给出结果或错误，留在客户端 30 秒请求期限之内。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
+- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是这台机器新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要该机器上有 Work。官方客户端新建 Work 第一屏的模型选择读的就是它（去掉 `hidden`），并在客户端按连接 + 机器缓存、由用户手动刷新，Host 不另设缓存；读不到或旧 Host 没有这项能力时只剩「Pi 默认」，不阻止创建。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。同一 Host 同时只运行一个这样的进程，并发读取共用结果；整次读取在 20 秒内给出结果或错误，留在客户端 30 秒请求期限之内。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
 - `model.visibility.set {operationId,hostId?,hidden}` → `{hidden}`：整份替换，去重并排序后原子写入，最后一次保存为准；沿用 operation ledger。写入失败返回 `model_visibility_write_failed`，原列表不变。
 - 两条请求都是 directory-scoped，按可选 `hostId` 复用 InstanceManager 的机器路由；Main 向目标 SubHost 要求同一能力，旧 SubHost 得到 `capability_missing`。模型列表上限（`MAX_MODEL_LIST_BYTES` 等）与 `hidden` 的序列化上限 `MAX_HIDDEN_MODELS_BYTES` 都定义在 `protocol.ts`，后者取一条控制记录减去完整模型列表后剩余的空间；请求、响应和文件共用同一 parser。
 
