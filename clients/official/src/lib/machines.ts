@@ -45,10 +45,34 @@ export function machineWorkspaceRootSelectorVisible(machine: MachineDto | undefi
   return machineWorkspaceRoots(machine).length >= 2
 }
 
-export function workspaceChildPath(path: string, name: string, platform?: MachinePlatform) {
-  const windows = platform === 'windows'
+function windowsPaths(path: string, platform?: MachinePlatform) {
+  return platform === 'windows'
     || (platform === undefined && (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')))
+}
+
+export function workspaceChildPath(path: string, name: string, platform?: MachinePlatform) {
+  const windows = windowsPaths(path, platform)
   const separator = windows ? '\\' : '/'
   const trailingSeparators = windows ? /[\\/]+$/ : /\/+$/
   return `${path.replace(trailingSeparators, '')}${separator}${name}`
+}
+
+/**
+ * What the directory picker's search box means as a destination: an absolute path, `~`
+ * for the Machine's Home, or a path relative to the directory being viewed. Plain text
+ * (no separator) is a name filter and resolves to nothing.
+ */
+export function typedDirectoryTarget(input: string, current: string, homePath: string | undefined, platform?: MachinePlatform): string | undefined {
+  const text = input.trim()
+  if (!text) return undefined
+  const windows = windowsPaths(current, platform)
+  const separators = windows ? /[\\/]/ : /\//
+  if (text === '~' || /^~[\\/]/.test(text)) {
+    if (!homePath) return undefined
+    const rest = text.slice(1).replace(windows ? /^[\\/]+/ : /^\/+/, '')
+    return rest ? workspaceChildPath(homePath, rest.replace(/\//g, windows ? '\\' : '/'), platform) : homePath
+  }
+  if (/^[A-Za-z]:[\\/]/.test(text) || text.startsWith('\\\\') || (!windows && text.startsWith('/'))) return text
+  if (!separators.test(text)) return undefined
+  return workspaceChildPath(current, text.replace(windows ? /^[\\/]+|[\\/]+$/g : /^\/+|\/+$/g, '').replace(/\//g, windows ? '\\' : '/'), platform)
 }

@@ -28,3 +28,7 @@ const trustRequired = userErrorMessage({ code: 'project_trust_required', message
 assert.doesNotMatch(trustRequired, /刷新|Project trust/u)
 assert.match(trustRequired, /信任.*目录/u)
 assert.match(trustRequired, /Alu Dock 终端/u)
+
+// Card 361: a typed directory path that does not exist, and a chosen model that is gone, say what to do next.
+assert.match(userErrorMessage({ code: 'workspace_not_found', message: '/x no longer exists.' }), /目录不存在.*路径/u)
+assert.match(userErrorMessage({ code: 'model_not_found', message: 'Pi model not found or unavailable: a/b' }), /模型.*不可用.*换一个/u)

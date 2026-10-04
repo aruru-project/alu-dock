@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { defaultMachineHostId, machineDisplayLabel, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, workspaceChildPath } from '../src/lib/machines.ts'
+import { defaultMachineHostId, machineDisplayLabel, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, typedDirectoryTarget, workspaceChildPath } from '../src/lib/machines.ts'
 import type { MachineDto } from '../src/lib/types.ts'
 
 const main: MachineDto = { hostId: 'main-host', name: 'Main', kind: 'main', available: true }
@@ -38,3 +38,17 @@ assert.equal(machineWorkspaceStart(subhost), '/')
 assert.equal(workspaceChildPath('C:\\Users\\alice', 'project', 'windows'), 'C:\\Users\\alice\\project')
 assert.equal(workspaceChildPath('C:\\', 'project', 'windows'), 'C:\\project')
 assert.equal(workspaceChildPath('/', 'project', 'linux'), '/project')
+
+// Card 361: the picker's filter box doubles as a path entry.
+assert.equal(typedDirectoryTarget('work', '/home/alu', '/home/alu', 'linux'), undefined, '纯名字只筛选当前层')
+assert.equal(typedDirectoryTarget('   ', '/home/alu', '/home/alu', 'linux'), undefined)
+assert.equal(typedDirectoryTarget('~', '/tmp', '/home/alu', 'linux'), '/home/alu')
+assert.equal(typedDirectoryTarget('~/workshop/alu_dock', '/tmp', '/home/alu', 'linux'), '/home/alu/workshop/alu_dock')
+assert.equal(typedDirectoryTarget('~/x', '/tmp', undefined, 'linux'), undefined, '不知道 Home 时 ~ 不猜')
+assert.equal(typedDirectoryTarget('/var/log', '/home/alu', '/home/alu', 'linux'), '/var/log')
+assert.equal(typedDirectoryTarget('workshop/alu_dock/', '/home/alu', '/home/alu', 'linux'), '/home/alu/workshop/alu_dock', '相对路径按当前目录解析')
+assert.equal(typedDirectoryTarget('D:\\project', 'C:\\Users\\alice', 'C:\\Users\\alice', 'windows'), 'D:\\project')
+assert.equal(typedDirectoryTarget('~\\repo', 'D:\\', 'C:\\Users\\alice', 'windows'), 'C:\\Users\\alice\\repo')
+assert.equal(typedDirectoryTarget('~/repo/sub', 'D:\\', 'C:\\Users\\alice', 'windows'), 'C:\\Users\\alice\\repo\\sub', 'Windows 机器上正斜杠也按它的写法拼')
+assert.equal(typedDirectoryTarget('src/lib', 'C:\\Users\\alice', 'C:\\Users\\alice', 'windows'), 'C:\\Users\\alice\\src\\lib')
+assert.equal(typedDirectoryTarget('\\\\server\\share', 'C:\\', 'C:\\Users\\alice', 'windows'), '\\\\server\\share')

@@ -48,6 +48,9 @@ Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { cl
 globalThis.window = { clearTimeout, setTimeout,
   matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   __TAURI_INTERNALS__: { invoke: (command, args) => globalThis[stateKey].invoke(command, args) } }
+globalThis.document = { addEventListener() {}, removeEventListener() {} }
+const fastModel = { provider: 'fixture', id: 'fast', name: 'Fast', reasoning: false }
+const hiddenModel = { provider: 'fixture', id: 'slow', name: 'Slow', reasoning: true }
 const project = { id: 'project', name: '项目 SYSTEM', kind: 'project-system', path: '/project/SYSTEM.md', workerConfig: { systemPrompt: { kind: 'native', path: '/project/SYSTEM.md' } } }
 const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template', path: '/home/.aludock/systems/chosen.json', workerConfig: { systemPrompt: { kind: 'dock-template', path: '/home/.aludock/systems/chosen.json' }, opaque: { keep: [1, '原样'] } } }
 const original = '\uFEFF{"identity":"逐字复制中文"}\n'
@@ -76,7 +79,7 @@ try {
   }
 
   // A missing optional Host feature must not block the existing creation contract.
-  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection']) {
+  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
     const store = await createStore()
     const calls = [], created = [], unknown = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, outcomeUnknown: false })
@@ -85,6 +88,10 @@ try {
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
+      if (command === 'model_visibility') {
+        if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
+        return { models: [fastModel, hiddenModel], total: 2, truncated: false, hidden: [{ provider: hiddenModel.provider, id: hiddenModel.id }] }
+      }
       if (command === 'system_catalog') {
         if (scenario.startsWith('legacy') || (scenario === 'partial-unsupported' && args.cursor) || (scenario === 'refresh-unsupported' && calls.filter(call => call.command === command).length > 2)) {
           throw { code: 'capability_missing', message: 'Required capabilities are unavailable', details: { missing: ['system.templates.v1'] } }
@@ -120,6 +127,13 @@ try {
     app.mount(container)
     const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} enabled`); target.props.onClick(); await settle() }
+    await settle()
+    if (scenario === 'model') {
+      // Card 361: the model is chosen on the first screen; hidden models stay out of the list.
+      await click('选择模型')
+      assert.ok(!button('Slow'), 'a model hidden on this machine is not offered')
+      await click('Fast')
+    }
     if (scenario === 'once') {
       await click('选择其他目录')
       await click('使用这个目录')
@@ -139,6 +153,7 @@ try {
       continue
     }
     if (scenario.startsWith('legacy')) {
+      assert.ok(!button('选择模型'), 'an old Host without a machine model list shows no model choice; creation proceeds as before')
       assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'new Client uses ordinary creation when old Host lacks system selection')
       assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null)
       assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
@@ -171,8 +186,17 @@ try {
     }
     assert.equal(created.length, 0, 'Even a project SYSTEM is not a directory default')
     assert.ok(button('项目 SYSTEM')); assert.ok(button('选择的模板'))
+    // Card 361: without a saved default the first usable candidate is already selected.
+    assert.equal(button('项目 SYSTEM').props['aria-pressed'], true, 'first usable candidate is preselected')
+    assert.equal(button('确认并创建').props.disabled, false)
     const checkbox = find(container, item => item.type === 'input' && item.props.type === 'checkbox')
     assert.equal(checkbox.checked, false)
+    if (scenario === 'model') {
+      await click('确认并创建')
+      assert.equal(created.length, 1)
+      assert.deepEqual(calls.find(c => c.command === 'create_work').args.workerConfig, { ...project.workerConfig, model: { provider: 'fixture', id: 'fast' } }, 'the chosen model rides with the preselected system')
+      app.unmount(); continue
+    }
     await click('选择的模板')
     await click('阅读 选择的模板')
     if (scenario.startsWith('body-')) {
@@ -273,7 +297,7 @@ try {
     assert.equal(calls.filter(c => c.command === 'set_system_default').length, saves, 'Trust continuation saves once; a new explicit confirmation saves its requested default again')
     app.unmount()
   }
-  console.log('PASS: directory/recent → ordered selection → raw whole-file preview/copy → retained choice → once/save/failures/trust; stale discovery fenced; actual TS IPC payloads')
+  console.log('PASS: directory/recent → first candidate preselected → raw whole-file preview/copy → retained choice → once/save/failures/trust; model choice rides with the system; stale discovery fenced; actual TS IPC payloads')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

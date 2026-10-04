@@ -12,8 +12,11 @@ import { createPinia, setActivePinia } from 'pinia'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const directory = await mkdtemp(join(root, '.directory-check-'))
 const node = (type, value = '') => ({ type, text: value, props: {}, children: [], parent: null,
-  focus() {}, select() {}, addEventListener(name, handler) { this[name] = handler }, removeEventListener() {}, querySelectorAll() { return [] },
+  focus() {}, select() {}, getRootNode() { return null }, addEventListener(name, handler) { this[name] = handler }, removeEventListener() {}, querySelectorAll() { return [] },
 })
+// v-model clears the filter box when entering a directory; it asks where the input lives first.
+globalThis.Document = class Document {}
+globalThis.ShadowRoot = class ShadowRoot {}
 const detach = item => { if (item.parent) item.parent.children.splice(item.parent.children.indexOf(item), 1) }
 const insert = (item, parent, anchor) => {
   detach(item); item.parent = parent
@@ -88,6 +91,7 @@ try {
     invoke = async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return readPage(args)
+      if (command === 'model_visibility') return { models: [], total: 0, truncated: false, hidden: [] }
       if (command === 'system_catalog') throw { code: 'capability_missing', details: { missing: ['system.templates.v1'] } }
       if (command === 'create_work') return { id: 'new-work', hostId: args.targetHostId, cwd: args.cwd }
       throw new Error(`Unexpected IPC ${command}`)
@@ -99,7 +103,8 @@ try {
     return { ...ui, calls, created, store }
   }
 
-  // No Work exists: desktop expansion, hidden directories, paged retry, symlink and create target.
+  // Card 361: the picker shows one level at a time on the desktop too. The filter narrows only
+  // the level being viewed and clears on entering; Enter on a path goes there directly.
   let failMore = true
   let failProjectsRefresh = false
   const desktop = await newWork([main], args => {
@@ -109,10 +114,11 @@ try {
     }
     if (args.path === '/home/alu/projects') {
       if (failProjectsRefresh) { failProjectsRefresh = false; throw { code: 'protocol_error', details: { reason: 'fixture-directory-decoding-failed' } } }
-      return page(args.path, [dir('app')], '/home/alu')
+      return page(args.path, [dir('app'), dir('archive')], '/home/alu')
     }
-    // Host normalizes a directory link back to Home; tree locations must still be independent.
+    // Host normalizes a directory link back to Home; the picker must show the normalized target.
     if (args.path === '/home/alu/link') return page('/home/alu', [dir('projects'), dir('link', 'symlink')], '/home')
+    if (args.path.endsWith('/missing')) throw { code: 'workspace_not_found', message: '这个目录不存在。请检查路径后重试。' }
     return page(args.path, [], '/home/alu/projects')
   })
   assert.ok(!desktop.button('.hidden'))
@@ -132,30 +138,42 @@ try {
   await desktop.click('使用这个目录')
   assert.equal(desktop.calls.findLast(call => call.command === 'create_work').args.cwd, '/home/alu', 'creating through a link uses its normalized target, not the link path')
   await desktop.click('选择其他目录')
-  await desktop.click('projects'); await desktop.click('projects')
-  // Card 308 browser check: matching a loaded child must keep its ancestor visible,
-  // including a cached collapsed branch and refreshing that filtered result.
-  const search = find(desktop.container, item => item.type === 'input' && item.props['aria-label'] === '搜索目录名称')
-  search.value = 'app'; search.input({ target: search }); await settle()
-  assert.ok(desktop.button('app'), 'loaded child remains selectable when its parent name does not match')
+  // The user's case: filter for one folder on this level, enter it, and see all of it.
+  const search = find(desktop.container, item => item.type === 'input' && item.props['aria-label'] === '筛选目录或输入路径')
+  const type = async value => { search.value = value; search.input({ target: search }); await settle() }
+  const enter = async () => { search.props.onKeydown({ key: 'Enter', preventDefault() {} }); await settle() }
+  await type('proj')
+  assert.ok(desktop.button('projects')); assert.ok(!desktop.button('link'), 'the filter narrows only the level being viewed')
   await desktop.click('projects')
-  assert.ok(!desktop.button('app') && desktop.button('projects'), 'filtered branch can collapse without losing its ancestor')
-  await desktop.click('projects')
-  assert.ok(desktop.button('app'), 'filtered branch can expand again')
+  assert.ok(desktop.button('app') && desktop.button('archive'), 'entering a directory shows all of it')
+  assert.equal(search.value, '', 'entering a directory clears the filter')
+  assert.ok(!desktop.button('link'), 'the previous level is no longer on screen, so nothing jumps')
+  await type('ap'); assert.ok(desktop.button('app')); assert.ok(!desktop.button('archive'))
+  await type(''); assert.ok(desktop.button('archive'))
   failProjectsRefresh = true
   await desktop.click('刷新目录')
-  assert.ok(desktop.button('重试'), 'read failure remains visible inside the filtered branch')
+  assert.ok(desktop.button('重试'), 'a failed refresh of this level is shown in place')
   await desktop.click('复制诊断信息')
   assert.ok(copiedDiagnostic.includes('fixture-directory-decoding-failed'))
   assert.ok(copiedDiagnostic.includes('/home/alu/projects'))
   await desktop.click('重试')
-  assert.ok(desktop.button('app'), 'retry keeps the matching branch visible')
-  await desktop.click('app')
+  assert.ok(desktop.button('app'))
+  // Enter on a path goes there; a path that does not exist reports in place and keeps a way back.
+  await type('/home/alu/projects/missing'); await enter()
+  assert.ok(text(desktop.container).includes('这个目录不存在'), 'a typed path that does not exist is reported in place')
+  await desktop.click('返回上级目录')
+  assert.ok(desktop.button('app'), 'back returns to the directory viewed before the typed path')
+  await type('~/projects'); await enter()
+  assert.ok(desktop.button('app'), '~ means the Machine Home')
+  await type('app/'); await enter()
+  const target = find(desktop.container, item => item.type === 'footer' && String(item.props.class).includes('directory-confirm'))
+  assert.equal(text(target.children.find(item => item.type === 'span')), '/home/alu/projects/app', 'a relative path resolves against the directory being viewed')
+  assert.ok(text(desktop.container).includes('这个目录没有可见项目'))
   await desktop.click('使用这个目录')
   const create = desktop.calls.findLast(call => call.command === 'create_work')
   assert.equal(create.args.cwd, '/home/alu/projects/app')
   assert.equal(create.args.targetHostId, 'main')
-  assert.equal(desktop.created[0].id, 'new-work')
+  assert.equal(desktop.created.at(-1).id, 'new-work')
   desktop.unmount(); await settle()
 
   // Mobile Windows uses Machine roots, can return after failed reads, and reselect Home.
@@ -178,6 +196,10 @@ try {
   assert.ok(copiedDiagnostic.includes('C:\\Users\\alu\\decode-error'))
   await phone.click('返回上级目录')
   assert.ok(!phone.button('诊断信息已复制'), 'leaving a failed directory hides its diagnostic action')
+  const phoneSearch = find(phone.container, item => item.type === 'input' && item.props['aria-label'] === '筛选目录或输入路径')
+  phoneSearch.value = '~\\repo'; phoneSearch.input({ target: phoneSearch }); await settle()
+  phoneSearch.props.onKeydown({ key: 'Enter', preventDefault() {} }); await settle()
+  assert.ok(phone.button('inside'), 'a typed ~ path uses the Windows Home and path style')
   await phone.click('快速前往'); await phone.click('D:\\')
   await phone.click('project'); await phone.click('使用这个目录')
   const windowsCreate = phone.calls.find(call => call.command === 'create_work')
@@ -251,7 +273,7 @@ try {
     assert.ok(calls.filter(call => call.command === 'workspace_entries').every(call => call.args.instanceId === 'work'))
     browser.unmount(); await settle()
   }
-  console.log('PASS: desktop/mobile directory selection → correct Machine/cwd create; hidden/paged retry/link/Home navigation; original Work tree → Markdown/image preview/save')
+  console.log('PASS: one-level directory picker → filter this level, enter clears, typed path goes there; correct Machine/cwd create; hidden/paged retry/link/Home navigation; original Work tree → Markdown/image preview/save')
 } finally {
   await rm(directory, { recursive: true, force: true })
 }
