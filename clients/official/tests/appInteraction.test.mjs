@@ -450,20 +450,21 @@ try {
   assert.equal(nativeResults.size, 0)
   find(workList, item => item.props['aria-label'] === '关闭工作列表').props.onClick(); await settle()
   assert.equal(calls.some(call => ['new_session', 'reload_session', 'navigate_session'].includes(call.command)), false, 'reading/acknowledging results never replays operations')
-  for (const scenario of ['send-away', 'send-switch-during-handoff']) {
+  for (const scenario of ['send-away', 'send-switch-during-handoff', 'lost-away']) {
+    const lost = scenario === 'lost-away'
     const failure = { operationId: scenario, kind: 'submit_message', connectionId: 'host', instanceId: 'work',
-      hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'old', editor: capturedBeforeF5, state: 'failed',
-      error: { code: 'busy', outcomeUnknown: false, message: '这次消息没有发送，请检查后重试。' } }
-    if (scenario === 'send-away') { app.selectWork('other'); await settle() }
+      hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'old', editor: capturedBeforeF5, state: lost ? 'unknown' : 'failed',
+      error: lost ? { code: 'effect_unknown', outcomeUnknown: true, message: 'fixture' } : { code: 'busy', outcomeUnknown: false, message: '这次消息没有发送，请检查后重试。' } }
+    if (scenario !== 'send-switch-during-handoff') { app.selectWork('other'); await settle() }
     nativeResults.set(scenario, failure); emit('aludock://operation', failure)
     if (scenario === 'send-switch-during-handoff') app.selectWork('other') // before nextTick/frame handoff
     await settle()
     assert.equal(nativeResults.has(scenario), true, 'an unseen send failure cannot be consumed')
     assert.equal(app.selectedWorkId, 'other'); assert.equal(app.currentDraft, 'other draft')
     assert.equal(resultEntry(), undefined)
-    assert.equal(text(container).includes('这次消息没有发送'), false, 'do not write the original send error into another Work')
+    assert.equal(text(container).includes(lost ? '没收到结果' : '这次消息没有发送'), false, 'do not write the original send error into another Work')
     app.selectWork('work'); await settle(); contentSnapshot(); await settle()
-    assert.ok(text(resultEntry()).includes('发送消息没有完成')); resultEntry().open = true
+    assert.ok(text(resultEntry()).includes(lost ? '发送消息没收到结果' : '发送消息没有完成')); resultEntry().open = true
     await find(resultEntry(), item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
     assert.equal(nativeResults.has(scenario), false)
     assert.equal(app.currentDraft, 'F5 draft preserved')
@@ -604,6 +605,14 @@ try {
   emit('aludock://operation', visibleSendFailure); await settle()
   assert.ok(text(container).includes('当前消息没有发送'))
   assert.equal(nativeResults.has(visibleSendFailure.operationId), false, 'current, still-visible inline failure can acknowledge after a frame')
+  assert.equal(app.currentDraft, 'later input')
+  // Review of 63b1b31: the sending button's own catch is gone after switching Works and back;
+  // a lost reply that then arrives is still reported once, like any failed send.
+  const visibleLostSend = { ...visibleSendFailure, operationId: 'visible-lost-send', state: 'unknown', error: { code: 'effect_unknown', outcomeUnknown: true, message: 'fixture' } }
+  nativeResults.set(visibleLostSend.operationId, visibleLostSend)
+  emit('aludock://operation', visibleLostSend); await settle()
+  assert.ok(text(container).includes('连接中断，没收到结果'), 'a lost send reply arriving on its own Work is shown')
+  assert.equal(nativeResults.has(visibleLostSend.operationId), false, 'once shown, it is acknowledged like a failed send')
   assert.equal(app.currentDraft, 'later input')
   assert.ok(all(container, item => item.type === 'textarea').includes(expanded))
   // User-reported Queue order: retrieve 1/2/3 before the current draft, together
@@ -757,11 +766,11 @@ try {
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
     observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
     compact.props['onUpdate:modelValue']('editor at abort')
-    // A lost compaction reply was reported once by its button; it leaves no standing notice and does not disable Abort.
+    // A lost compaction reply is an ordinary failed result: no refresh-to-confirm action, and Abort stays usable.
     const unconfirmedCompaction = { ...base, operationId: 'unconfirmed-compaction', kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '压缩结果尚未确认。', outcomeUnknown: true } }
     emit('aludock://operation', unconfirmedCompaction)
     await settle()
-    assert.equal(app.nativeOperations.has('unconfirmed-compaction'), false, 'a lost reply is not kept')
+    assert.ok(text(container).includes('压缩上下文没收到结果'), 'it is told once in the Work result entry, like a failure')
     assertSameReference(find(container, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined, 'no refresh-to-confirm action')
     const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
     assert.equal(abortButton.props.disabled, false, 'a lost reply elsewhere does not disable Abort')

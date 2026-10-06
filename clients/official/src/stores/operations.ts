@@ -34,7 +34,7 @@ export const useOperationsStore = defineStore('operations', () => {
   const returnedOperations = computed(() => [...app.nativeOperations.values()].filter(operation => operation.state === 'succeeded'
     && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id && operation.editor
     && !appliedOperations.value.has(operation.operationId) && hasReturnedContent(operation)))
-  const visibleResults = computed(() => [...app.nativeOperations.values()].filter(operation => (operation.state === 'failed'
+  const visibleResults = computed(() => [...app.nativeOperations.values()].filter(operation => (operation.state === 'failed' || operation.state === 'unknown'
     || (operation.state === 'succeeded' && acknowledgementErrors.value.has(operation.operationId)))
     && !inlineFailureClaims.value.has(operation.operationId) && operation.connectionId === app.activeConnectionId
     && (!operation.hostEpoch || operation.hostEpoch === app.payload?.host.hostEpoch)))
@@ -84,11 +84,8 @@ export const useOperationsStore = defineStore('operations', () => {
   async function acceptNativeOperation(operation: NativeOperation) {
     if (!operationsReady) { bufferedOperations.set(operation.operationId, operation); return }
     if (appliedOperations.value.has(operation.operationId)) return
-    // A lost reply was already reported once by the action that sent it. Nothing
-    // waits on it afterwards: the conversation and Work state show what happened.
-    if (operation.state === 'unknown') { app.forgetNativeOperation(operation.operationId, 'pending'); return }
     app.bindNativeOperation(operation)
-    if (operation.state !== 'succeeded' && operation.state !== 'failed') return
+    if (operation.state === 'pending') return
     if (operation.state === 'succeeded' && app.operationWasApplied(operation.operationId)) {
       appliedOperations.value.add(operation.operationId)
       await acknowledgeApplied(operation)
@@ -96,7 +93,9 @@ export const useOperationsStore = defineStore('operations', () => {
     }
     // A terminal failure is not a UI acknowledgement. Keep it in native state
     // until the corresponding Work/list result entry is explicitly acknowledged.
-    if (operation.state === 'failed') {
+    // A lost reply is the same kind of failure: nothing is checked or retried, it
+    // is only told once — inline if its send is on screen, otherwise in the entry.
+    if (operation.state === 'failed' || operation.state === 'unknown') {
       const presenter = presentFailure
       if (operation.kind === 'submit_message' && presenter && !inlineFailureClaims.value.has(operation.operationId)) {
         inlineFailureClaims.value.add(operation.operationId)

@@ -58,11 +58,13 @@ impl OperationAssociations {
     pub fn pending(&self) -> Vec<OperationAssociation> {
         self.entries.lock().unwrap().values().cloned().collect()
     }
+    /// The client has shown a finished result, including one whose reply was lost.
     pub fn consume(&self, id: &str) {
         let mut entries = self.entries.lock().unwrap();
-        if entries.get(id).is_some_and(|entry| {
-            entry.state == OperationState::Succeeded || entry.state == OperationState::Failed
-        }) {
+        if entries
+            .get(id)
+            .is_some_and(|entry| entry.state != OperationState::Pending)
+        {
             entries.remove(id);
         }
     }
@@ -178,7 +180,10 @@ mod tests {
         ));
         assert_eq!(operations.pending()[0].state, OperationState::Unknown);
         operations.consume("send");
-        assert_eq!(operations.pending().len(), 1);
+        assert!(
+            operations.pending().is_empty(),
+            "a shown lost reply is released like a failure"
+        );
     }
 }
 

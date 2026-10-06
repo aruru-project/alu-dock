@@ -1157,16 +1157,15 @@ mod tests {
             .unwrap();
         assert!(unknown.is_err());
         assert_eq!(operations.pending()[0].state, OperationState::Unknown);
-        operations.consume("new-lost");
-        assert_eq!(
-            operations.pending()[0].state,
-            OperationState::Unknown,
-            "display refresh/consume cannot establish a missing operation result"
-        );
         let replay: crate::Result<std::result::Result<(), ClientError>> = operations
             .execute(duplicate, async { panic!("mutation must not be replayed") })
             .await;
-        assert!(replay.is_err());
+        assert!(replay.is_err(), "a lost reply is never replayed");
+        operations.consume("new-lost");
+        assert!(
+            operations.pending().is_empty(),
+            "once shown, a lost reply is released like a failure"
+        );
         service.pause("authority:work:epoch");
         peer.abort();
         std::fs::remove_dir_all(directory).unwrap();

@@ -218,11 +218,11 @@ try {
   assert.deepEqual(JSON.parse(storage.get('aludock.uiState')).appliedOperationIds, [])
   console.log('PASS: Queue/Fork/explicit return save failure preserves receipt and editor; ACK failure + F5 applies once and reclaims confirmed marker')
 
-  // A lost model reply was reported once by its own action. After F5 nothing of it
-  // stays behind to report again or to hold up later controls.
+  // A lost model reply survives F5 only as an ordinary failed result to acknowledge;
+  // it holds up no later control, and acknowledging it releases it natively.
   retainedOperations.set('unknown-model', { ...fork, operationId: 'unknown-model', kind: 'set_model', state: 'unknown', editor: null, result: null })
   view.scope.stop(); view = await rebuild(); await view.results.initialize()
-  assert.equal(view.store.nativeOperations.has('unknown-model'), false)
+  assert.equal(view.results.workResults.some(operation => operation.operationId === 'unknown-model'), true)
   const actions = useWorkActionsStore()
   await view.store.load()
   const stopping = actions.stopSelectedWork()
@@ -230,8 +230,10 @@ try {
   assert.equal(await stopping, true)
   assert.equal(stops, 1)
   assert.equal(actions.actionNotice, null)
-  retainedOperations.delete('unknown-model')
-  console.log('PASS: a lost model reply leaves nothing behind; Stop stays available')
+  await view.results.consumeNativeOperation(view.store.nativeOperations.get('unknown-model'))
+  assert.equal(retainedOperations.has('unknown-model'), false)
+  assert.equal(view.store.nativeOperations.has('unknown-model'), false)
+  console.log('PASS: a lost model reply is an ordinary result to acknowledge; Stop stays available')
 
   // App exit/legacy drafts lose upload jobs but not their permanent Host fileId.
   const target = attachmentUploadTarget(view.store.selectedWork, view.store.connectionContext)

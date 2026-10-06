@@ -18,6 +18,7 @@ const labels: Record<string, string> = {
   create_work: '新建 Work', adopt_session: '恢复 Work', set_system_default: '保存目录默认',
 }
 function label(operation: NativeOperation) { return labels[operation.kind] ?? '操作' }
+function outcome(operation: NativeOperation) { return operation.state === 'succeeded' ? '已完成' : operation.state === 'unknown' ? '没收到结果' : '没有完成' }
 async function acknowledge(operation: NativeOperation) {
   if (pending.value.has(operation.operationId)) return
   pending.value.add(operation.operationId)
@@ -30,9 +31,9 @@ async function acknowledge(operation: NativeOperation) {
 
 <template>
   <details class="alu-operation-results" aria-label="操作结果">
-    <summary>{{ operations[0] ? label(operations[0]) : '操作' }}{{ operations[0]?.state === 'succeeded' ? '已完成，提示尚未关闭' : '未完成' }}<span v-if="operations.length > 1"> · 共 {{ operations.length }} 项</span><span class="alu-operation-results-link">查看结果</span></summary>
+    <summary>{{ operations[0] ? label(operations[0]) : '操作' }}{{ operations[0]?.state === 'succeeded' ? '已完成，提示尚未关闭' : operations[0]?.state === 'unknown' ? '没收到结果' : '未完成' }}<span v-if="operations.length > 1"> · 共 {{ operations.length }} 项</span><span class="alu-operation-results-link">查看结果</span></summary>
     <article v-for="operation in operations" :key="operation.operationId">
-      <strong>{{ label(operation) }}{{ operation.state === 'succeeded' ? '已完成' : '没有完成' }}</strong>
+      <strong>{{ label(operation) }}{{ outcome(operation) }}</strong>
       <p v-if="operation.state === 'succeeded'">操作已完成，本机保存或确认尚未完成。请检查本机存储后重试；{{ operation.kind === 'submit_message' ? '会保存已发送内容的清理结果，不会再次发送。' : '会保存尚未接纳的返回内容，不会再次执行操作。' }}</p>
       <p v-else>{{ userErrorMessage(operation.error, '操作没有完成。请检查当前状态后，从原入口重新操作。') }}</p>
       <p v-if="errors[operation.operationId]" role="alert">{{ errors[operation.operationId] }}</p>
