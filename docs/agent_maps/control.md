@@ -213,7 +213,7 @@ DockClient 的下载 API 把 chunk 逐块交给 sink/callback并独立计算 SHA
 
 ## Mutation
 
-Host 对 mutation 负责 admission、operation 去重和结果归属。客户端发送 mutation 后遇到断线或无法确认的 response，不能自动重放；应查询当前状态，并在仍无法确定时保留结果未知。
+Host 对 mutation 负责 admission、operation 去重和结果归属。调用方发送 mutation 后遇到断线、超时或无法确认的 response，不能自动换新的 operationId 重放。这类结果怎样呈现由调用方自己决定，协议不要求客户端保存或追查这个未知结果；是否生效以 instance 和 conversation 状态为准。
 
 显式 stop 先持久化 stopping intent，再清理 Worker；完成提交直接把 instance 从 catalog 退役，同时向调用者和已连接客户端发布最终 stopped 状态。Agent 自己的持久 session 不属于 Dock catalog，stop 不删除它。Host shutdown、Host loss 和可恢复 runtime error 不是显式 stop，必须继续保留 reopen 所需的 catalog 记录。
 

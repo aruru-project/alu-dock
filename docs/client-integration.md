@@ -221,7 +221,7 @@ Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`
 
 `operationId` 同时是异步渲染的关联锚点。由某次 mutation 引发的后续事件携带发起者的 `operationId`：`message.submitted`、`run.started`、`run.settled`、`compaction.started/completed`，以及执行期间的 `extension.notification`。Web 这类界面用它把异步更新定位回发起控件的显示区域：提交时本地记住 ID，事件到达时按 ID 收敛对应区域，而不是按文本或时间猜归属。这个关联由 Host 权威解析——包括 deferred 队列消费和 extension 发起的 run，Worker 不知道客户端的 operation 身份；runtime 自主发起、无外部 mutation 的 run 以 `runtime-initiated` 标记。它是关联字段，不是展示文本；界面不应把 ID 本身渲染给用户。
 
-Mutation 发出后如果发生 timeout、断线或 correlation error，结果可能未知。客户端不能自动生成新的 operation 并重放；应先查询 instance、conversation 和 events。Worker 在接受副作用之前失联，与接受之后失联，会得到不同错误。`effect_unknown` 明确表示副作用可能已经发生。
+Mutation 发出后如果发生 timeout、断线或 correlation error，结果可能未知。客户端不能自动生成新的 operation 并重放。Worker 在接受副作用之前失联，与接受之后失联，会得到不同错误：前者是普通失败；`effect_unknown` 表示副作用可能已经发生，再试可能重复。怎样呈现由客户端自己决定，协议不要求保存或追查这个未知结果；是否生效以 instance、conversation 和 events 为准。
 
 ## Conversation
 
@@ -338,7 +338,7 @@ Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有�
 
 新的操作连接会立即接替旧连接，但不会关闭普通 follow。若已有问题等待回答，Host 会把同一个 `interactionId` 重新发送给新连接。客户端用同一 `interactionId` 恢复原来的交互。操作连接断开只释放操作权，不回答也不取消 pending interaction。
 
-客户端使用当前 `leaseToken + interactionId` 发送 `interaction.respond`。只有 Host 明确确认 response 后，才能关闭交互状态；传输结果未知时先重新查询权威状态，不自动重发。
+客户端使用当前 `leaseToken + interactionId` 发送 `interaction.respond`。只有 Host 明确确认 response 后，才能关闭交互状态；传输结果未知时不自动重发，问题是否还在等待回答以 Host 重新发来的交互为准。
 
 客户端按实际支持情况实现 Extension UI capability。尚未支持的 custom surface 只在该客户端不可用，Worker、Pi extension 和其他客户端继续运行；客户端不得代替用户返回默认答案。
 
