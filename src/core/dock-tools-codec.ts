@@ -1,4 +1,4 @@
-import { parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
 import {
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
@@ -18,6 +18,7 @@ import {
   type ObservationRequest,
 } from "./instance-observation.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "./source-file.js";
+import { THINKING_LEVELS } from "./agent-worker.js";
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "./local-path.js";
 import { MACHINE_PLATFORMS, type MachinePlatform } from "./machine-dto.js";
 
@@ -205,12 +206,21 @@ function validateMachine(raw: unknown): void {
   }
 }
 
+/**
+ * A SubHost reads this status from Main, which may be a newer version. Fields it does not know are
+ * ignored rather than rejected: a rejected Machine record drops the whole Main connection.
+ */
 function validateObservedStatus(raw: unknown): void {
-  const value = record(raw, "Observed instance status"); exactKeys(value, ["id", "key", "name", "cwd", "lifecycle", "execution", "compacting", "executionChangedAt", "runStartedAt", "runtimeGeneration", "lastError"], "Observed instance status");
+  const value = record(raw, "Observed instance status");
   boundedString(value.id, 128, "Observed instance ID"); optionalString(value.key, 128); optionalString(value.name, 256); boundedString(value.cwd, 16_384, "Observed workspace");
   oneOf(value.lifecycle, ["active", "stopping", "stopped", "host_lost", "runtime_error"], "Observed lifecycle"); oneOf(value.execution, ["idle", "running", "failed", "unavailable"], "Observed execution");
   if (typeof value.compacting !== "boolean") throw new Error("Observed compacting state is invalid");
   timestampString(value.executionChangedAt, "Observed execution timestamp"); if (value.runStartedAt !== undefined) timestampString(value.runStartedAt, "Observed run timestamp"); positiveInteger(value.runtimeGeneration, "Observed generation"); optionalString(value.lastError, 2_000);
+  if (value.model !== undefined) {
+    const model = record(value.model, "Observed model");
+    boundedString(model.provider, MAX_MODEL_PROVIDER_CHARS, "Observed model provider"); boundedString(model.id, MAX_MODEL_ID_CHARS, "Observed model ID");
+  }
+  if (value.thinkingLevel !== undefined) oneOf(value.thinkingLevel, THINKING_LEVELS, "Observed thinking level");
 }
 
 function validateWatchReceipt(raw: unknown): void {

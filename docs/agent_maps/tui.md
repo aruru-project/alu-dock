@@ -33,7 +33,7 @@ Devices 是唯一远程设备入口：同一页显示 Remote Access 开关、lis
 
 Devices 列表项来自 Host 保存的短期 metadata，不对应等待中的 socket；客户端请求已经响应并关闭。页面只显示 remote access、port、倒计时、设备名、自然结果和下一步动作，不展示证书 fingerprint、pairing ID、SRP、内部 revision 或其他实现状态。
 
-Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`：显式 session name 优先，其次是 Dock instance key，最后才回退到项目目录；首条用户消息只用于 persisted-session inventory 的未命名 session 摘要，不参与当前 Dock instance 的 `displayName`。重名项由项目路径和相对时间区分，Hub 和默认人类列表不再把短 instance ID 当作名称。
+Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`：显式 session name 优先，其次是 Dock instance key，最后才回退到项目目录；首条用户消息只用于 persisted-session inventory 的未命名 session 摘要，不参与当前 Dock instance 的 `displayName`。重名项由项目路径和相对时间区分，Hub 和默认人类列表不再把短 instance ID 当作名称。Continue 与 History 每项的说明以 `provider/id` 模型开头，因为窄终端会从右边截掉说明；终端窄到连模型也放不下时不另做处理，在多个 Work 之间挑选是官方客户端工作列表的事。
 
 Hub 的 Dock New 从启动 `aludock` 时的当前目录打开 workspace 列表，经 `workspace.list.v1` 返回上级和子目录后再确认 cwd。列表支持搜索、分页/跳页、直接输入路径和隐藏目录切换；隐藏目录默认不显示，但直接输入隐藏路径仍可进入。目录符号链接带标记并按 Host 返回的规范目标继续浏览。取消目录或 system 选择返回 Hub。目录确定后查询 `system.catalog`：有效目录默认可直接进入创建，但不传显式选择，由 Host 在创建时应用当前默认；否则必须主动选择，包括存在项目 SYSTEM 的情况。人工选择才传候选配置。Enter 仅本次，Ctrl+S 每次明确保存目录默认并确认，不用列表中的历史默认跳过本次保存；V 阅读原文后返回保留选择。坏默认说明原因并回选择；确认之后才创建 Work，保存成功不在 project trust 续接中重复。直接 `new`、continue/open miss 只跳过目录浏览，复用同一 system 选择。
 

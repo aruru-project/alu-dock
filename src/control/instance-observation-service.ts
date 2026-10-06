@@ -420,6 +420,8 @@ export function observationStatus(snapshot: InstanceSnapshot): ObservedInstanceS
     ...(snapshot.runStartedAt === undefined ? {} : { runStartedAt: snapshot.runStartedAt }),
     runtimeGeneration: snapshot.runtimeGeneration,
     ...(snapshot.lastError === undefined ? {} : { lastError: truncateText(snapshot.lastError, MAX_OBSERVED_ERROR_CHARS).text }),
+    ...(snapshot.executor.model === undefined ? {} : { model: { provider: snapshot.executor.model.provider, id: snapshot.executor.model.id } }),
+    ...(snapshot.executor.thinkingLevel === undefined ? {} : { thinkingLevel: snapshot.executor.thinkingLevel }),
   };
 }
 

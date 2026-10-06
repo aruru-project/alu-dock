@@ -1,5 +1,5 @@
 import type { InstanceSnapshot } from "./core/managed-instance.js";
-import { humanInstanceStatus } from "./core/instance-display-name.js";
+import { humanInstanceStatus, modelLabel } from "./core/instance-display-name.js";
 import { humanRelativeTime } from "./human-time.js";
 
 const MAX_HUMAN_LIST_INSTANCES = 100;
@@ -80,9 +80,7 @@ function renderInstance(instance: InstanceSnapshot, width: number): [string, str
   const tags = [state, ...decisionTags(instance)];
   const first = fit(`${stateIcon(instance)} ${safeName} · ${tags.join(" · ")}`, width);
 
-  const model = terminalSafe(instance.executor.model
-    ? `${instance.executor.model.provider}/${instance.executor.model.id}`
-    : "no model selected");
+  const model = terminalSafe(modelLabel(instance.executor.model));
   const cwd = terminalSafe(instance.cwd || "(project unavailable)");
   const second = fit(`  ${humanRelativeTime(instance.updatedAt)} · ${cwd} · ${model}`, width);
   return [first, second];

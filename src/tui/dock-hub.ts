@@ -28,7 +28,7 @@ import { MachineSettingsState, machineListenerConfiguration, sameMachineListener
 import type { MachineDto } from "../control/protocol.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import type { PiEnvironmentSnapshot, PiLoginInteraction } from "../pi/pi-environment.js";
-import { humanInstanceStatus } from "../core/instance-display-name.js";
+import { humanInstanceStatus, modelLabel } from "../core/instance-display-name.js";
 import { humanRelativeTime } from "../human-time.js";
 import { sessionDisplayName } from "../session-display.js";
 import { AluHubBrand } from "./alu-mascot.js";
@@ -318,7 +318,8 @@ async function chooseContinueAction(
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `instance:${instance.id}`,
     label: `${stateIcon(instance)} ${displayName(instance)}`,
-    description: `${terminalSafe(instance.cwd)} · ${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${humanRelativeTime(instance.updatedAt)} · ${instanceActionSummary(instance)}`,
+    // The model leads: a narrow terminal cuts the description from the right.
+    description: `${terminalSafe(modelLabel(instance.executor.model))} · ${terminalSafe(instance.cwd)} · ${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${humanRelativeTime(instance.updatedAt)} · ${instanceActionSummary(instance)}`,
   }));
   if (ordered.length > visible.length) {
     entries.push({
@@ -353,7 +354,7 @@ async function chooseHistoryAction(
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `history:${instance.id}`,
     label: displayName(instance),
-    description: `${terminalSafe(instance.cwd)} · ${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${instance.executor.sessionFile ? "saved Pi session available" : "past work only"} · ${humanRelativeTime(instance.updatedAt)}`,
+    description: `${terminalSafe(modelLabel(instance.executor.model))} · ${terminalSafe(instance.cwd)} · ${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${instance.executor.sessionFile ? "saved Pi session available" : "past work only"} · ${humanRelativeTime(instance.updatedAt)}`,
   }));
   if (ordered.length > visible.length) {
     entries.push({
