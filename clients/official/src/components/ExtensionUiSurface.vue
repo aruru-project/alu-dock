@@ -59,16 +59,19 @@ const secondsRemaining = computed(() => {
 const locked = computed(() => phase.value !== 'idle')
 const visibleStatus = computed(() => genericExtensionStatus(extension.status))
 
+// The typed answer belongs to its question. When the question goes away with the
+// connection and the Host sends the same one again, the answer is still there.
+let answerFor = ''
 watch(() => request.value?.interactionId, async (id) => {
-  if (!id) {
-    resetResponse()
-    return
+  if (!id) return
+  if (id !== answerFor) {
+    answerFor = id
+    phase.value = 'idle'
+    responseError.value = ''
+    search.value = ''
+    confirmation.value = null
+    answer.value = request.value?.method === 'editor' ? request.value.prefill ?? '' : ''
   }
-  phase.value = 'idle'
-  responseError.value = ''
-  search.value = ''
-  confirmation.value = null
-  answer.value = request.value?.method === 'editor' ? request.value.prefill ?? '' : ''
   await nextTick()
   if (request.value?.interactionId === id && !props.focusSuspended) focusDialog()
 })
@@ -210,7 +213,8 @@ async function respond(cancelled = false) {
   const response = responseForRequest()
   if (!current || !handle || !response || locked.value) return
   // Reacquiring the same question changes its handle/object, not its interactionId.
-  const isCurrent = () => request.value?.interactionId === current.interactionId
+  // While no question is shown, the reply still belongs to the answer kept for it.
+  const isCurrent = () => (request.value?.interactionId ?? answerFor) === current.interactionId
   phase.value = 'submitting'
   responseError.value = ''
   try {

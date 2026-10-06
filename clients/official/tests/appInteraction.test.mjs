@@ -1326,6 +1326,12 @@ try {
       // A lost reply reads like any failure: one plain sentence, and the still-open question can be answered again.
       assert.ok(text(teleport).includes('连接中断，没收到结果'), text(teleport))
       assertSameReference(find(teleport, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined)
+      // Review of 63b1b31: the connection then drops and the Host sends the same question again.
+      emit('aludock://extension-controller-status', { ...extensionBinding, state: 'disconnected' })
+      await settle()
+      assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined)
+      ask(); await settle()
+      assert.equal(find(teleport, item => item.type === 'input')?.value, 'answer survives background', 'the typed answer stays with its question')
     }
     const submitAgain = find(teleport, item => item.type === 'button' && text(item) === '提交')
     assert.ok(submitAgain && !submitAgain.props.disabled, 'the same question can be answered after its old reply failed')
@@ -1827,6 +1833,24 @@ try {
     assert.equal(quickButton('codex-fast').props.disabled, false, 'the quick button stays usable; the conversation shows whether it ran')
     assert.equal(quickApp.nativeOperations.has(unconfirmedSend.operationId), false, 'nothing of the lost send is kept')
     assert.equal(quickApp.currentDraft, 'half-typed draft')
+
+    // Review of 63b1b31: send on A, switch to B and back, then the reply is lost.
+    // The button's own catch is fenced off by the switch; the result still says so once.
+    let rejectRoundTrip, roundTripArgs
+    submitNative = args => {
+      roundTripArgs = args
+      emit('aludock://operation', { operationId: args.operationId, kind: 'submit_message', connectionId: args.connectionId, instanceId: args.instanceId,
+        hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration, sessionId: args.sessionId, editor: args.operationEditor, state: 'pending' })
+      return new Promise((_resolve, reject) => { rejectRoundTrip = reject })
+    }
+    const roundTripSend = quickButton('codex-fast').props.onClick(); await settle()
+    quickApp.selectWork('other'); await settle()
+    quickApp.selectWork('work'); await settle()
+    emit('aludock://operation', { operationId: roundTripArgs.operationId, kind: 'submit_message', connectionId: roundTripArgs.connectionId, instanceId: roundTripArgs.instanceId,
+      hostEpoch: roundTripArgs.expectedHostEpoch, runtimeGeneration: roundTripArgs.expectedRuntimeGeneration, sessionId: roundTripArgs.sessionId, editor: roundTripArgs.operationEditor, state: 'unknown', error: lost })
+    rejectRoundTrip({ ...lost, operationId: roundTripArgs.operationId }); await roundTripSend; await settle()
+    assert.ok(text(quickView).includes('连接中断，没收到结果'), 'the lost send is told once after A/B/A')
+    assert.equal(quickApp.nativeOperations.has(roundTripArgs.operationId), false, 'once shown, it is acknowledged')
 
     // Restarting the client keeps this device's buttons.
     await mountQuickView()
