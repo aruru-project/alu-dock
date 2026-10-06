@@ -3,7 +3,6 @@ import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Server, Settings, X } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
-import type { Work } from '../lib/types'
 import { workPresence } from '../lib/uiBoundaries'
 import OperationResults from './OperationResults.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
@@ -31,8 +30,6 @@ const operations = useOperationsStore()
 const { listResults } = storeToRefs(operations)
 const { consumeNativeOperation } = operations
 const { label: connectionLabel } = storeToRefs(useObservationStore())
-// Always whole: the provider says whose account pays, and models of one family differ only at the end.
-const modelLabel = (work: Work) => work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '未选择模型'
 </script>
 
 <template>
@@ -57,7 +54,7 @@ const modelLabel = (work: Work) => work.executor.model ? `${work.executor.model.
         <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id }">
           <button class="alu-instance-link" @click="selectWork(work.id)">
             <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
-            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model">{{ modelLabel(work) }}</span></span>
+            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
             <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
           </button>
           <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && workMutating)" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
@@ -183,7 +180,9 @@ const modelLabel = (work: Work) => work.executor.model ? `${work.executor.model.
   white-space: nowrap;
 }
 .alu-instance-cwd { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 模型名总是完整显示：provider 说明走哪家的钱，同一家的模型常常只差尾号。provider 保持灰色，模型名用冰蓝和目录区分。 */
 .alu-instance-model { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow-wrap: anywhere; }
+.alu-instance-model-id { color: var(--alu-blue-dim); }
 .alu-instance-meta { color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
 .alu-instance-action {
   position: absolute;
