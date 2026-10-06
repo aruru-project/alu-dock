@@ -51,12 +51,10 @@ const props = defineProps<{
   machines: readonly MachineDto[]
   machinesLoading: boolean
   machineError?: string
-  outcomeUnknown: boolean
 }>()
 const emit = defineEmits<{
   close: []
   created: [work: Work]
-  unknown: [cause: unknown]
   busy: [busy: boolean]
   view: [view: View]
 }>()
@@ -300,7 +298,6 @@ async function confirmSystem() {
     } catch (cause) {
       if (epoch !== systemEpoch) return
       saveFailed.value = true
-      if ((cause as { outcomeUnknown?: boolean })?.outcomeUnknown) emit('unknown', cause)
       setError(cause, '保存此目录的默认 system', 'set_system_default')
       return
     } finally {
@@ -453,7 +450,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
 }
 
 function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken' | 'workerConfig'>) {
-  const failure = cause as { code?: string; details?: Record<string, unknown>; operationId?: string; outcomeUnknown?: boolean }
+  const failure = cause as { code?: string; details?: Record<string, unknown>; operationId?: string }
   if (failure?.code === 'project_trust_required') {
     const operationId = String(failure.details?.operationId || failure.operationId || '')
     const trustChallengeId = String(failure.details?.challengeId || '')
@@ -464,7 +461,6 @@ function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind
     error.value = { message: 'Dock 返回的信任确认与当前操作对不上。请重新选择后再试。' }
     return
   }
-  if (failure?.outcomeUnknown === true) emit('unknown', cause)
   setError(
     cause,
     attempt.kind === 'create' ? '创建 Work' : '从保存的 Session 创建 Work',
@@ -575,8 +571,8 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         <div v-if="systemLoading" class="alu-dialog-loading" role="status"><span class="alu-agent-activity-spinner" />正在读取这个目录的 system…</div>
         <template v-else>
           <div v-if="systemWarnings.length" class="alu-dialog-error" role="alert"><span v-for="warning in systemWarnings" :key="warning">{{ warning }}</span><span>请修复文件后重新读取，或选择其他可用 system。</span></div>
-          <div v-if="savedDefaultId" class="cmd-palette-footer" role="status">目录默认已保存。{{ outcomeUnknown ? 'Work 是否创建成功尚不确定；请先刷新核对，不要再次创建。' : error ? 'Work 尚未创建；请检查错误后再确认创建。' : '创建 Work 是另一步操作。' }}</div>
-          <div v-if="saveFailed" class="alu-dialog-error">目录默认未确认保存，尚未创建 Work。可取消勾选，仅用于本次；若结果尚不确定，请先检查目录默认。</div>
+          <div v-if="savedDefaultId" class="cmd-palette-footer" role="status">目录默认已保存。{{ error ? '' : '创建 Work 是另一步操作。' }}</div>
+          <div v-if="saveFailed" class="alu-dialog-error">还没有创建 Work。可以重试保存，或取消勾选只用于这一次。</div>
           <div class="ui-dialog-options" role="group" aria-label="可用 system">
             <div v-for="candidate in systemCandidates" :key="candidate.id" class="system-option">
               <button type="button" class="ui-dialog-option" :aria-pressed="systemSelection?.id === candidate.id" :disabled="actionBusy || !!candidate.warning" @click="selectSystem(candidate)">

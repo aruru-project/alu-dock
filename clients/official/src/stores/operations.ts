@@ -84,6 +84,9 @@ export const useOperationsStore = defineStore('operations', () => {
   async function acceptNativeOperation(operation: NativeOperation) {
     if (!operationsReady) { bufferedOperations.set(operation.operationId, operation); return }
     if (appliedOperations.value.has(operation.operationId)) return
+    // A lost reply was already reported once by the action that sent it. Nothing
+    // waits on it afterwards: the conversation and Work state show what happened.
+    if (operation.state === 'unknown') { app.forgetNativeOperation(operation.operationId, 'pending'); return }
     app.bindNativeOperation(operation)
     if (operation.state !== 'succeeded' && operation.state !== 'failed') return
     if (operation.state === 'succeeded' && app.operationWasApplied(operation.operationId)) {

@@ -9,8 +9,6 @@ import {
   setModel,
   setThinking,
   updateSetting,
-  sessionContext,
-  type SessionContext,
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
@@ -26,7 +24,7 @@ import { storeToRefs } from 'pinia'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
-import { useControlPanelStore, type ControlMutationDomain } from '../stores/control-panel'
+import { useControlPanelStore } from '../stores/control-panel'
 import { useInputStore } from '../stores/input'
 import { useQuickButtonsStore } from '../stores/quick-buttons'
 import { useWorkActionsStore } from '../stores/work-actions'
@@ -43,7 +41,7 @@ import type {
   Work,
 } from '../lib/types'
 
-const props = defineProps<{ work: Work; section: ControlSection; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; compactionPending: boolean }>()
+const props = defineProps<{ work: Work; section: ControlSection; compactionPending: boolean }>()
 const app = useAppStore()
 const panel = useControlPanelStore()
 const { models, tools, resources, settings, loading, loadErrors } = storeToRefs(panel)
@@ -55,8 +53,6 @@ const { runQuickButton, quickButtonDisabled } = useInputStore()
 const { openMachineSettings } = useWorkActionsStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
-  unknown: [cause: unknown, domain: ControlMutationDomain, scope: SessionContext]
-  reconcile: [domain?: ControlMutationDomain]
   section: [section: ControlSection]
   prefill: [name: string]
   compact: [customInstructions?: string]
@@ -249,15 +245,6 @@ async function closeResource() {
   if (contentRef) document.getElementById(`resource-${contentRef}`)?.focus()
 }
 
-function reconcileControl() {
-  // Without an unconfirmed setting, the Work's own unconfirmed result (Stop, Continue) is refreshed.
-  emit('reconcile', props.unknownDomain)
-}
-
-function forwardSessionUnknown(cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext) {
-  emit('unknown', cause, domain, scope)
-}
-
 function forwardSessionTitle(title: string, body?: string) {
   emit('title', title, body)
 }
@@ -433,7 +420,6 @@ async function executeCatalogCommand(command: CommandInfo, argumentsText: string
   error.value = ''
   commandConsole.beginOperation(operationId, command.name, argumentsText)
   if (command.name === 'dock-tools') dockToolsOperationId.value = operationId
-  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, app.captureOperationTarget(context, props.work.id)))
     commandConsole.receiveReceipt(operationId, result.receipt)
@@ -441,7 +427,6 @@ async function executeCatalogCommand(command: CommandInfo, argumentsText: string
   } catch (cause) {
     if (commandConsole.operationSucceeded(operationId)) return true
     commandConsole.failOperation(operationId, errorMessage(cause))
-    if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, 'conversation', scope)
     return false
   } finally {
     pending.value = ''
@@ -464,13 +449,12 @@ async function chooseModel(model: ModelInfo) {
   if (pending.value || isCurrentModel(model)) return
   pending.value = `model:${model.provider}/${model.id}`
   error.value = ''
-  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const snapshot = await currentConnectionCall(app, (context) => setModel(props.work.id, model.provider, model.id, app.captureOperationTarget(context, props.work.id)))
     if (models.value) models.value.instance = snapshot
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'models', scope)
+    error.value = errorMessage(cause)
   } finally {
     pending.value = ''
   }
@@ -480,13 +464,12 @@ async function chooseThinking(level: ThinkingLevel) {
   if (pending.value || props.work.executor.thinkingLevel === level) return
   pending.value = `thinking:${level}`
   error.value = ''
-  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const snapshot = await currentConnectionCall(app, (context) => setThinking(props.work.id, level, app.captureOperationTarget(context, props.work.id)))
     if (models.value) models.value.instance = snapshot
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'models', scope)
+    error.value = errorMessage(cause)
   } finally {
     pending.value = ''
   }
@@ -497,13 +480,12 @@ async function toggleTool(tool: ToolInfo) {
   const names = tools.value.tools.filter((item) => item.name === tool.name ? !tool.active : item.active).map((item) => item.name)
   pending.value = `tool:${tool.name}`
   error.value = ''
-  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const result = await currentConnectionCall(app, (context) => setActiveTools(props.work.id, names, app.captureOperationTarget(context, props.work.id)))
     tools.value = result
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'tools', scope)
+    error.value = errorMessage(cause)
   } finally {
     pending.value = ''
   }
@@ -552,22 +534,16 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
   if (!settings.value || !setting.writable || pending.value) return
   pending.value = `setting:${setting.key}`
   error.value = ''
-  const scope: SessionContext = Object.freeze(sessionContext(app.connectionContext ?? { connectionId: '', selectionGeneration: 0 }, props.work))
   try {
     const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, app.captureOperationTarget(context, props.work.id)))
     const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
     if (index >= 0) settings.value.settings[index] = result.setting
     emit('close')
   } catch (cause) {
-    mutationFailure(cause, 'settings', scope)
+    error.value = errorMessage(cause)
   } finally {
     pending.value = ''
   }
-}
-
-function mutationFailure(cause: unknown, domain: ControlMutationDomain, scope: SessionContext) {
-  error.value = errorMessage(cause)
-  if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain, scope)
 }
 
 function runLabel(value: string) {
@@ -583,7 +559,6 @@ function isCurrentModel(model: ModelInfo) {
 
 <template>
   <div class="control-center-port">
-    <div v-if="outcomeUnknown" class="alu-dialog-pending" role="status"><span>上一次修改的结果还没有确认。可以刷新查看，也可以直接继续操作。</span><button @click="reconcileControl">刷新确认</button></div>
     <div v-if="pendingChange" class="alu-dialog-status" role="status"><span><span class="alu-agent-activity-spinner" /> {{ pendingChange }}</span></div>
     <div v-if="error" class="alu-dialog-error">{{ error }}</div>
     <div v-if="section !== 'resources' && loadErrors[section]" class="alu-dialog-error">{{ loadErrors[section] }}<button type="button" @click="loadSection(section, true)">重试</button></div>
@@ -683,7 +658,6 @@ function isCurrentModel(model: ModelInfo) {
       :work="work"
       :mode="sessionMode"
       :compaction-pending="compactionPending"
-      @unknown="forwardSessionUnknown"
       @finished="sessionActionFinished"
       @compact="forwardSessionCompact"
       @title="forwardSessionTitle"

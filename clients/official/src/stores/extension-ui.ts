@@ -32,7 +32,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   const controllerState = ref<'detached' | 'acquiring' | 'attached' | 'disconnected'>('detached')
   let lifecycleRevision = 0
   let acquisitionRevision = 0
-  let uncertainRequest: { instanceId: string; hostEpoch: string; runtimeGeneration: number; interactionId: string } | undefined
 
   const hasAttention = computed(() => !!activeSummary.value && !activeRequest.value)
   const isCurrent = (work: Work | null | undefined) => !!work
@@ -82,15 +81,10 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     toolsExpanded.value = projection.extensionUi.toolsExpanded
     toolsResetRevision.value++
     activeSummary.value = projection.extensionUi.activeInteraction
-    const uncertainMatches = uncertainRequest?.instanceId === cursor.instanceId
-      && uncertainRequest.hostEpoch === cursor.hostEpoch
-      && uncertainRequest.runtimeGeneration === cursor.runtimeGeneration
-      && uncertainRequest.interactionId === projection.extensionUi.activeInteraction?.id
-    activeRequest.value = (sameGeneration || uncertainMatches)
+    activeRequest.value = sameGeneration
       && projection.extensionUi.activeInteraction?.id === previousRequest?.interactionId
       ? previousRequest
       : undefined
-    if (!uncertainMatches) uncertainRequest = undefined
     aboveWidgets.value = {}
     belowWidgets.value = {}
     for (const event of projection.extensionUi.events) reduceEvent(event)
@@ -140,10 +134,8 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     belowWidgets.value = {}
     toolsExpanded.value = false
     toolsResetRevision.value++
-    if (!uncertainRequest) {
-      activeSummary.value = undefined
-      activeRequest.value = undefined
-    }
+    activeSummary.value = undefined
+    activeRequest.value = undefined
     controllerState.value = 'detached'
     return true
   }
@@ -207,7 +199,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
         if (data.interactionId === activeSummary.value?.id || data.interactionId === activeRequest.value?.interactionId) {
           activeSummary.value = undefined
           activeRequest.value = undefined
-          uncertainRequest = undefined
         }
         break
     }
@@ -289,22 +280,9 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     return null
   }
 
-  function markInteractionUnknown(interactionId: string) {
-    if (activeRequest.value?.interactionId !== interactionId) return
-    uncertainRequest = {
-      instanceId: instanceId.value,
-      hostEpoch: hostEpoch.value,
-      runtimeGeneration: runtimeGeneration.value,
-      interactionId,
-    }
-  }
-  function clearInteractionUnknown(interactionId: string) {
-    if (uncertainRequest?.interactionId === interactionId) uncertainRequest = undefined
-  }
   function hideControllerRequest() { activeRequest.value = undefined }
 
   function resolveLocally(interactionId: string) {
-    clearInteractionUnknown(interactionId)
     if (activeRequest.value?.interactionId === interactionId) activeRequest.value = undefined
     if (activeSummary.value?.id === interactionId) activeSummary.value = undefined
   }
@@ -317,7 +295,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     activeSummary.value = work.activeInteraction
     if (!work.activeInteraction || work.activeInteraction.id !== activeRequest.value?.interactionId) {
       activeRequest.value = undefined
-      uncertainRequest = undefined
     }
   }
 
@@ -327,7 +304,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     activeSummary, activeRequest, controller, controllerState,
     hasAttention, isCurrent, bootstrap, bindSubscription, clear, applyLive, beginAcquire,
     attachController, failAcquire, suspendController, controllerEnded, releaseController, applyControllerEvent,
-    markInteractionUnknown, clearInteractionUnknown, hideControllerRequest, resolveLocally,
+    hideControllerRequest, resolveLocally,
     applyAuthoritativeSnapshot,
   }
 })

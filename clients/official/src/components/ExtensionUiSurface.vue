@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { AlertTriangle, ChevronRight, RefreshCw } from '@lucide/vue'
+import { AlertTriangle, ChevronRight } from '@lucide/vue'
 import {
   acquireExtensionControl,
   isTauri,
@@ -16,7 +16,7 @@ import { requireConnectionContext } from '../lib/hostResult'
 import { useExtensionUiStore, type ExtensionWidget } from '../stores/extension-ui'
 import { useAppStore } from '../stores/app'
 
-const props = defineProps<{ work: Work | null; focusSuspended?: boolean; reconcileInteraction: () => Promise<boolean> }>()
+const props = defineProps<{ work: Work | null; focusSuspended?: boolean }>()
 const emit = defineEmits<{ editorText: [text: string]; title: [title: string] }>()
 const extension = useExtensionUiStore()
 const app = useAppStore()
@@ -24,7 +24,7 @@ const root = ref<HTMLElement | null>(null)
 const dialog = ref<HTMLElement | null>(null)
 const acquiringError = ref('')
 const responseError = ref('')
-const phase = ref<'idle' | 'submitting' | 'unknown' | 'reconciling'>('idle')
+const phase = ref<'idle' | 'submitting'>('idle')
 const answer = ref('')
 const search = ref('')
 const confirmation = ref<boolean | null>(null)
@@ -34,7 +34,6 @@ const unlisteners: UnlistenFn[] = []
 let resizeObserver: ResizeObserver | null = null
 let viewportTimer = 0
 let countdownTimer = 0
-let unknownInteractionId = ''
 let mounted = false
 let acquisitionRevision = 0
 let acquisitionInFlight = false
@@ -61,15 +60,10 @@ const locked = computed(() => phase.value !== 'idle')
 const visibleStatus = computed(() => genericExtensionStatus(extension.status))
 
 watch(() => request.value?.interactionId, async (id) => {
-  if (unknownInteractionId && unknownInteractionId !== id) {
-    extension.clearInteractionUnknown(unknownInteractionId)
-    unknownInteractionId = ''
-  }
   if (!id) {
     resetResponse()
     return
   }
-  if (unknownInteractionId === id) return
   phase.value = 'idle'
   responseError.value = ''
   search.value = ''
@@ -118,7 +112,7 @@ onMounted(async () => {
       }),
       await listen<ExtensionControllerStatus>('aludock://extension-controller-status', ({ payload }) => {
         if (!app.contextMatches(payload) || !extension.controllerEnded(payload.handle, 'disconnected')) return
-        if (!unknownInteractionId) extension.hideControllerRequest()
+        extension.hideControllerRequest()
         acquiringError.value = ''
       }),
     )
@@ -227,15 +221,9 @@ async function respond(cancelled = false) {
     resetResponse()
   } catch (cause) {
     if (!isCurrent()) return
-    if (isUnknown(cause)) {
-      phase.value = 'unknown'
-      unknownInteractionId = current.interactionId
-      extension.markInteractionUnknown(current.interactionId)
-      responseError.value = '还无法确认这次回答是否送达。请刷新确认，不要重复提交。'
-    } else {
-      phase.value = 'idle'
-      responseError.value = errorMessage(cause)
-    }
+    // If a lost answer did arrive, the Agent closes this question and the dialog goes away.
+    phase.value = 'idle'
+    responseError.value = errorMessage(cause)
   }
 }
 
@@ -247,52 +235,11 @@ function cancelByEscape(event: KeyboardEvent) {
   void respond(true)
 }
 
-async function reconcile() {
-  const handle = extension.controller?.handle
-  const interactionId = unknownInteractionId
-  if (!interactionId || phase.value !== 'unknown') return
-  const isCurrent = () => request.value?.interactionId === interactionId && unknownInteractionId === interactionId
-  phase.value = 'reconciling'
-  responseError.value = '正在确认这次回答的结果…'
-  const refreshed = await props.reconcileInteraction()
-  if (!isCurrent()) return
-  if (!refreshed) {
-    phase.value = 'unknown'
-    responseError.value = '暂时无法确认这次回答的结果。请刷新确认，不要重复提交。'
-    return
-  }
-  if (extension.activeSummary?.id !== interactionId) {
-    extension.clearInteractionUnknown(interactionId)
-    unknownInteractionId = ''
-    resetResponse()
-    return
-  }
-  responseError.value = '这项操作仍在等待，正在重新连接…'
-  if (handle) {
-    const released = await extension.releaseController(handle, 'detached')
-    if (!isCurrent()) return
-    if (!released) { phase.value = 'unknown'; return }
-  }
-  await acquire()
-  if (isCurrent()) {
-    phase.value = 'unknown'
-    responseError.value = '还没有重新收到这项操作。请稍后再次刷新确认，不要重复提交。'
-  }
-}
-
 function applyEmission(payload: ExtensionControllerEmission): boolean {
   const directive = extension.applyControllerEvent(payload)
   if (directive === null) return false
   if (directive.editorText !== undefined) emit('editorText', directive.editorText)
   if (directive.title !== undefined) emit('title', directive.title)
-  if (payload.event.eventType === 'interaction.requested'
-    && unknownInteractionId
-    && payload.event.data.interactionId === unknownInteractionId
-    && extension.activeRequest?.interactionId === unknownInteractionId) {
-    extension.clearInteractionUnknown(unknownInteractionId)
-    unknownInteractionId = ''
-    resetResponse()
-  }
   return true
 }
 
@@ -338,7 +285,6 @@ async function sendViewport() {
   try { await reportExtensionViewport(handle, width, height, requireConnectionContext(app)) } catch { /* next resize/reacquire reports current truth */ }
 }
 
-function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true }
 function interactionMethodLabel(method: string) {
   return ({ select: '选择', confirm: '确认', input: '输入', editor: '编辑' } as Record<string, string>)[method] ?? '处理'
 }
@@ -391,8 +337,7 @@ function interactionMethodLabel(method: string) {
           <div v-if="responseError" class="extension-dialog-error">{{ responseError }}</div>
           <footer>
             <button :disabled="locked" @click="respond(true)">取消</button>
-            <button v-if="phase === 'unknown'" class="primary" @click="reconcile"><RefreshCw :size="14" />刷新确认</button>
-            <template v-else-if="request.method === 'confirm'">
+            <template v-if="request.method === 'confirm'">
               <button :disabled="locked" @click="confirmation = false; respond(false)">否</button>
               <button class="primary" :disabled="locked" @click="confirmation = true; respond(false)">确认</button>
             </template>

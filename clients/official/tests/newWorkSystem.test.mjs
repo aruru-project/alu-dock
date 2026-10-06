@@ -82,8 +82,8 @@ try {
   // A missing optional Host feature must not block the existing creation contract.
   for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
     const store = await createStore()
-    const calls = [], created = [], unknown = []
-    const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false, outcomeUnknown: false })
+    const calls = [], created = []
+    const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false })
     let lateResolve, lateReject
     let currentDefault = scenario === 'default' ? template : undefined
     let machineModels = [fastModel, hiddenModel]
@@ -131,7 +131,7 @@ try {
       throw new Error(`Unexpected IPC ${command}`)
     } }
     const container = node('root')
-    const app = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated: work => created.push(work), onUnknown: cause => { unknown.push(cause); props.outcomeUnknown = true }, onClose: () => app.unmount() }) })
+    const app = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated: work => created.push(work), onClose: () => app.unmount() }) })
     app.mount(container)
     const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} enabled`); target.props.onClick(); await settle() }
@@ -175,7 +175,8 @@ try {
         assert.ok(attempts.every(call => call.args.workerConfig == null))
       }
       if (scenario === 'legacy-unknown') {
-        assert.equal(created.length, 0); assert.equal(unknown.length, 1)
+        assert.equal(created.length, 0)
+        assert.ok(text(container).includes('连接中断，没收到结果'), 'a lost reply is reported once like a failure')
         await settle()
         assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'unknown creation is never automatically replayed')
       } else assert.equal(created.length, 1)
@@ -295,8 +296,8 @@ try {
     }
     await click('确认并创建')
     if (scenario === 'save-unknown') {
-      // #326: an unconfirmed result is reported without locking the next explicit choice.
-      assert.equal(unknown.length, 1); assert.equal(button('确认并创建').props.disabled, false)
+      // #326: a lost reply is reported once without locking the next explicit choice.
+      assert.ok(text(container).includes('连接中断，没收到结果')); assert.equal(button('确认并创建').props.disabled, false)
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0)
     } else if (scenario === 'save-failure') {
       assert.equal(calls.filter(c => c.command === 'create_work').length, 0)
@@ -307,15 +308,14 @@ try {
       input.checked = false; input.change(); await settle()
       await click('确认并创建'); assert.equal(created.length, 1)
     } else if (scenario === 'save-create-unknown') {
-      assert.equal(unknown.length, 1)
       assert.equal(button('确认并创建').props.disabled, false)
-      assert.ok(text(container).includes('Work 是否创建成功尚不确定'))
-      assert.ok(!text(container).includes('Work 尚未创建'))
-      assert.ok(!text(container).includes('再确认创建'))
+      assert.ok(text(container).includes('目录默认已保存'))
+      assert.ok(text(container).includes('连接中断，没收到结果'))
+      assert.ok(!text(container).includes('不要'), 'no lecture about what not to do')
       assert.equal(calls.filter(c => c.command === 'create_work').length, 1)
     } else if (scenario === 'save-create-failure') {
       assert.ok(text(container).includes('目录默认已保存'))
-      assert.ok(text(container).includes('Work 尚未创建'))
+      assert.ok(text(container).includes('操作没有完成'), 'the failure itself is shown')
       assert.equal(created.length, 0)
       assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'Creation failure is not automatically replayed')
       await click('重新读取')

@@ -1,4 +1,4 @@
-import { operationDomain, type OperationContext, type OperationTarget, type HostOperationContext, type EditorCapture, type NativeOperation } from '../lib/operationBinding'
+import { type OperationContext, type OperationTarget, type HostOperationContext, type EditorCapture, type NativeOperation } from '../lib/operationBinding'
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { bootstrap, connectLocalDock, getHostCatalog, removeSavedHost, setActiveHost, setLocalEndpoint, workCatalog } from '../lib/bridge'
@@ -15,10 +15,6 @@ import { userErrorMessage as humanError } from '../lib/userError'
 import { draftAfterSubmit } from '../lib/uiBoundaries'
 import { prependRestoredQueue, attachmentsAfterSubmit } from '../lib/attachmentDraft'
 
-export function mutationScopeKey(connectionId: string, instanceId: string, domain: string) {
-  return JSON.stringify([connectionId, instanceId, domain])
-}
-
 export const useAppStore = defineStore('app', () => {
   const catalog = ref<HostCatalog | null>(null)
   const payload = ref<BootstrapPayload | null>(null)
@@ -26,10 +22,6 @@ export const useAppStore = defineStore('app', () => {
   const localUiState = ref(emptyLocalUiState())
   const loading = ref(false)
   const error = ref<string | null>(null)
-  const unresolvedMutations = computed(() => new Map([...nativeOperations.value.values()]
-    .filter(operation => operation.state === 'unknown' && operation.kind !== 'submit_message'
-      && (operation.connectionId !== activeConnectionId.value || !operation.hostEpoch || operation.hostEpoch === payload.value?.host.hostEpoch))
-    .map(operation => [mutationScopeKey(operation.connectionId, operation.instanceId, operationDomain(operation.kind)), operation.operationId])))
   const hostUnreachable = ref(false)
   const needsPairing = ref(false)
   const workDrawerOpen = ref(false)
@@ -572,7 +564,7 @@ export const useAppStore = defineStore('app', () => {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, removeOtherHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, unresolvedMutations, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, recentWorkspaces, rememberCreatedWorkspace,
+    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

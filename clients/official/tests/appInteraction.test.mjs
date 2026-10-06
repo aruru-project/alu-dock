@@ -757,13 +757,14 @@ try {
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
     observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
     compact.props['onUpdate:modelValue']('editor at abort')
-    // An unconfirmed compaction is reported, but it does not disable Abort.
+    // A lost compaction reply was reported once by its button; it leaves no standing notice and does not disable Abort.
     const unconfirmedCompaction = { ...base, operationId: 'unconfirmed-compaction', kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '压缩结果尚未确认。', outcomeUnknown: true } }
     emit('aludock://operation', unconfirmedCompaction)
     await settle()
-    assert.ok(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), 'the unconfirmed result keeps its refresh action')
+    assert.equal(app.nativeOperations.has('unconfirmed-compaction'), false, 'a lost reply is not kept')
+    assertSameReference(find(container, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined, 'no refresh-to-confirm action')
     const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
-    assert.equal(abortButton.props.disabled, false, 'an unconfirmed result elsewhere does not disable Abort')
+    assert.equal(abortButton.props.disabled, false, 'a lost reply elsewhere does not disable Abort')
     const dequeues = calls.filter(call => call.command === 'dequeue_messages').length
     let resolveAbort, abortArgs
     abortNative = args => { abortArgs = args; return new Promise(resolve => { resolveAbort = resolve }) }
@@ -783,31 +784,17 @@ try {
     await settle()
   }
   console.log('PASS: Queue insertion and automatic send success / failed confirmation / retry acknowledgement only / Abort returns the Queue in one call')
-  // #313 (from #312): an unconfirmed New Work is reported in the Work list, not on every Work of the Host.
+  // A lost New Work or Stop reply leaves no standing notice in the Work list or the command center.
   {
     const bootstraps = () => calls.filter(call => call.command === 'bootstrap').length
     emit('aludock://operation', { ...base, operationId: 'unconfirmed-create', kind: 'create_work', instanceId: 'global', runtimeGeneration: 0, sessionId: '', editor: null, state: 'unknown', error: { message: '新建结果尚未确认。', outcomeUnknown: true } })
-    await settle()
-    assertSameReference(find(container, item => item.type === 'button' && text(item) === '刷新并确认'), undefined, 'an unconfirmed New Work is not reported on the current Work')
-    const workList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
-    assert.ok(text(workList).includes('上一次新建工作的结果还没有确认'), 'the Work list reports the unconfirmed New Work')
-    const beforeListCheck = bootstraps()
-    await find(workList, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
-    assert.equal(bootstraps(), beforeListCheck + 1, 'checking reloads the Work list')
-    assert.ok(text(workList).includes('暂时无法刷新工作列表'), 'an offline check says so and keeps the check available')
-    failCatalog = false
-    await find(workList, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
-    failCatalog = true
-    assert.ok(text(workList).includes('工作列表已刷新'))
-    assertSameReference(find(workList, item => item.type === 'button' && text(item) === '刷新确认'), undefined)
-    // The Work's own unconfirmed Stop is refreshed from the command center, not silently ignored.
     emit('aludock://operation', { ...base, operationId: 'unconfirmed-stop', kind: 'stop_work', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '停止结果尚未确认。', outcomeUnknown: true } })
     await settle()
+    const workList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
+    assert.equal(/确认|不要重复/.test(text(workList)), false, 'the Work list keeps no unconfirmed notice')
     find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
-    const beforeControlCheck = bootstraps()
     const controlDialog = find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
-    await find(controlDialog, item => item.type === 'button' && text(item) === '刷新确认').props.onClick(); await settle()
-    assert.equal(bootstraps(), beforeControlCheck + 1, "the command center's refresh checks the Work's unconfirmed Stop")
+    assertSameReference(find(controlDialog, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined, 'the command center has no refresh-to-confirm action')
     controlDialog.parent.props.onKeydown({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} }); await settle()
     assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心'), undefined)
     // #358: without a toolbar refresh button, the palette's 刷新状态 is the refresh entry and closes the palette.
@@ -1011,7 +998,7 @@ try {
         ? { code: 'effect_unknown', outcomeUnknown: true, message: 'fixture' }
         : { code: 'io_error', message: '保存没有完成，请重试。' })
       await settle()
-      assert.ok(text(results()).includes(outcome === 'unknown' ? '无法确认' : '改动已保留'), text(results()))
+      assert.ok(text(results()).includes(outcome === 'unknown' ? '没收到保存结果' : '改动已保留'), text(results()))
       assert.equal(find(results(), item => item.props.role === 'alert') !== undefined, outcome === 'failed', 'unknown is not presented as failure')
       const saveCount = calls.filter(call => call.command === 'set_model_visibility').length
       if (outcome === 'unknown') {
@@ -1054,7 +1041,7 @@ try {
     const savesBeforeMatchingRead = calls.filter(call => call.command === 'set_model_visibility').length
     await openSettings()
     assert.ok(text(dialog()).includes('当前设置已与你提交的列表一致'))
-    assert.equal(text(dialog()).includes('还无法确认'), false)
+    assert.equal(text(dialog()).includes('没收到保存结果'), false)
     assert.equal(text(dialog()).includes('已保存'), false, 'reading current settings does not fabricate a successful save receipt')
     assert.equal(button(dialog(), '保存').props.disabled, true)
     assert.equal(calls.filter(call => call.command === 'set_model_visibility').length, savesBeforeMatchingRead)
@@ -1327,12 +1314,9 @@ try {
       continue
     }
     if (outcome === 'unknown') {
-      const refresh = find(teleport, item => item.type === 'button' && text(item) === '刷新确认')
-      assert.ok(refresh, 'an uncertain answer offers manual confirmation after reacquiring the same question')
-      assert.equal(replyInput.props.disabled, true)
-      await refresh.props.onClick(); await settle(); ask(); await settle()
-      assert.equal(calls.filter(call => call.command === 'respond_extension_interaction' && call.args.interactionId === id).length, 1)
-      replyInput.props['onUpdate:modelValue']('confirmed answer'); await settle()
+      // A lost reply reads like any failure: one plain sentence, and the still-open question can be answered again.
+      assert.ok(text(teleport).includes('连接中断，没收到结果'), text(teleport))
+      assertSameReference(find(teleport, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined)
     }
     const submitAgain = find(teleport, item => item.type === 'button' && text(item) === '提交')
     assert.ok(submitAgain && !submitAgain.props.disabled, 'the same question can be answered after its old reply failed')
@@ -1340,11 +1324,11 @@ try {
     respondNative = async args => { submittedAnswer = args; return { interactionId: args.interactionId, state: 'resolved' } }
     await submitAgain.props.onClick(); await settle()
     assert.equal(submittedAnswer?.interactionId, id)
-    assert.equal(submittedAnswer.value, outcome === 'unknown' ? 'confirmed answer' : 'answer survives background')
+    assert.equal(submittedAnswer.value, 'answer survives background')
     assert.equal(submittedAnswer.handle, extensionBinding.handle)
     assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined)
   }
-  console.log('PASS: Model preserves command completion; same-question foreground recovery handles failure/unknown without replay; successful answers close their dialogs')
+  console.log('PASS: Model preserves command completion; same-question foreground recovery handles failure/lost reply without replay; successful answers close their dialogs')
   console.log('PASS: ready command/resource sections and independent Extension answers; late success/failure/unknown stays with the original question')
   console.log('PASS: normal command modal / same Extension answer node and value / both Escape layers honor composition / Extension focus priority')
   console.log('PASS: real input Queue and send entrypoints / event-before-receipt and receipt-before-event / later Queue IDs / display events / double-claim / late edited send')
@@ -1818,7 +1802,7 @@ try {
     assert.deepEqual([quickSend.attachmentFileIds, quickSend.textOnly], [[], true], 'attachments and retrieved images stay with the editor')
     assert.equal(quickApp.currentDraft, 'half-typed draft')
 
-    // An unconfirmed quick send blocks sending again, like any send, so a command is not silently run twice.
+    // A lost quick-send reply is reported once, like any send, and does not lock the buttons.
     // Native records the send under the Session the request names (an editor send names it in its capture).
     let unconfirmedSend
     const lost = { code: 'connection_failed', message: '连接中断，无法确认是否已发送。', outcomeUnknown: true }
@@ -1830,9 +1814,9 @@ try {
     }
     await quickButton('codex-fast').props.onClick(); await settle()
     assert.equal(unconfirmedSend.sessionId, 'old', 'the quick send names the Session it belongs to')
-    assert.ok(text(quickView).includes('还无法确认消息是否已进入 Queue'), 'the unconfirmed quick send is reported like any send')
-    assert.equal(quickButton('codex-fast').props.disabled, true, 'the quick button cannot send again while the result is unknown')
-    assert.equal(find(quickView, item => item.props.class === 'alu-send-btn').props.disabled, true, 'nor can the send button')
+    assert.ok(text(quickView).includes('连接中断，没收到结果'), 'the lost quick send is reported like any send')
+    assert.equal(quickButton('codex-fast').props.disabled, false, 'the quick button stays usable; the conversation shows whether it ran')
+    assert.equal(quickApp.nativeOperations.has(unconfirmedSend.operationId), false, 'nothing of the lost send is kept')
     assert.equal(quickApp.currentDraft, 'half-typed draft')
 
     // Restarting the client keeps this device's buttons.

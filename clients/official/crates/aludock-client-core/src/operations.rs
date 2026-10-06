@@ -101,7 +101,7 @@ impl OperationAssociations {
                 Ok(result) => Ok(result),
                 Err(_) => Err(crate::ClientError::EffectUnknown {
                     operation_id: association.operation_id.clone(),
-                    message: "操作结果尚未确认，请查看当前工作状态，不要重复提交。".into(),
+                    message: "操作中断，没收到结果。请稍后再试。".into(),
                 }),
             };
             match &result {
@@ -122,7 +122,7 @@ impl OperationAssociations {
                     association.state = OperationState::Unknown;
                     association.error = Some(serde_json::json!({
                         "code": "effect_unknown",
-                        "message": "操作结果尚未确认，请查看当前工作状态，不要重复提交。",
+                        "message": "操作中断，没收到结果。请稍后再试。",
                         "outcomeUnknown": true,
                         "operationId": association.operation_id,
                     }));
@@ -139,7 +139,7 @@ impl OperationAssociations {
         .await
         .map_err(|_| crate::ClientError::EffectUnknown {
             operation_id,
-            message: "操作结果暂时无法读取，请查看当前工作状态，不要重复提交。".into(),
+            message: "操作中断，没收到结果。请稍后再试。".into(),
         })?
     }
 }

@@ -20,13 +20,11 @@ import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 import SavedSessionList from './SavedSessionList.vue'
 import type { CompactionPromptTemplatesResult, SessionReloadResult, SavedSession, SessionTree, Work } from '../lib/types'
 import { useAppStore } from '../stores/app'
-import { useControlPanelStore } from '../stores/control-panel'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
 const props = defineProps<{ work: Work; mode: SessionMode; compactionPending: boolean }>()
 const app = useAppStore()
 const emit = defineEmits<{
-  unknown: [cause: unknown, domain: 'sessions' | 'tree', scope: SessionContext]
   finished: []
   compact: [customInstructions?: string]
   title: [title: string, body?: string]
@@ -99,7 +97,7 @@ const context = computed<SessionContext>(() => ({
 }))
 watch(() => JSON.stringify([app.connectionContext, props.work.id, props.work.ownerHostEpoch]), () => { targetRevision++ }, { flush: 'sync' })
 class SessionCallFailure extends Error {
-  constructor(readonly original: unknown, readonly scope: SessionContext, readonly current: boolean) { super(errorMessage(original)) }
+  constructor(readonly original: unknown, readonly current: boolean) { super(errorMessage(original)) }
 }
 async function currentSessionCall<T>(scope: SessionContext, operation: () => Promise<T>, replacementGeneration?: (result: T) => number): Promise<T> {
   const revision = targetRevision
@@ -109,9 +107,9 @@ async function currentSessionCall<T>(scope: SessionContext, operation: () => Pro
     && (scope.expectedRuntimeGeneration === props.work.runtimeGeneration || generation === props.work.runtimeGeneration)
   let result: T
   try { result = await operation() }
-  catch (cause) { throw new SessionCallFailure(cause, scope, matches()) }
+  catch (cause) { throw new SessionCallFailure(cause, matches()) }
   if (!matches(replacementGeneration?.(result))) {
-    throw new SessionCallFailure(new Error('你已切换 Host 或 Work，请在当前页面重试。'), scope, false)
+    throw new SessionCallFailure(new Error('你已切换 Host 或 Work，请在当前页面重试。'), false)
   }
   return result
 }
@@ -437,9 +435,7 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
   if (cause instanceof SessionCallFailure) {
     // Native retains this result independently; a late dialog error must not publish to another target.
     if (!cause.current) return
-    const scope = cause.scope
     cause = cause.original
-    if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, domain, scope)
   }
   const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
   if (domain === 'tree' && code === 'invalid_tree_target') {
@@ -451,12 +447,6 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
   }
   error.value = errorMessage(cause)
 }
-// An unconfirmed Session change is checked by reading the list or Tree shown here.
-onUnmounted(useControlPanelStore().setSessionReloader((domain) => {
-  if (domain === 'sessions' && props.mode === 'sessions') return loadSessionList()
-  if (domain === 'tree' && props.mode === 'tree') return loadTree()
-  return null
-}))
 function time(value?: string | null) { return treeNodeTime(value) }
 </script>
 

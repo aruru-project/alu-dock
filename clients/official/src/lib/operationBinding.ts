@@ -39,15 +39,6 @@ export interface HostOperationContext {
   expectedHostEpoch: string
 }
 
-export function operationDomain(kind: string): string {
-  if (['set_model', 'set_thinking'].includes(kind)) return 'models'
-  if (kind === 'set_active_tools') return 'tools'
-  if (kind === 'update_setting') return 'settings'
-  if (['navigate_session', 'fork_session', 'clone_session'].includes(kind)) return 'tree'
-  if (kind.endsWith('_session')) return kind === 'adopt_session' ? 'work' : 'sessions'
-  if (['create_work', 'reopen_work', 'forget_work', 'stop_work', 'set_system_default'].includes(kind)) return 'work'
-  return 'conversation'
-}
 export function operationWork(operation: NativeOperation): Work | undefined {
   const result = operation.result
   return result ? ('instance' in result ? result.instance : 'id' in result ? result : undefined) : undefined

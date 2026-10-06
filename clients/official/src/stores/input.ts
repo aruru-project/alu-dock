@@ -52,29 +52,19 @@ export const useInputStore = defineStore('input', () => {
 
   const pendingSubmits = ref(new Set<string>())
   const submitWorkKey = computed(() => JSON.stringify([app.activeConnectionId, selected.value?.id]))
-  const acknowledgedSubmits = ref<Set<string>>(new Set())
   let submitAttemptSequence = 0
   let submitViewRevision = 0
   watch(() => JSON.stringify([
     conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id),
     selected.value?.ownerHostEpoch, selected.value?.runtimeGeneration, selected.value?.executor.piSessionId,
   ]), () => { submitViewRevision += 1 }, { flush: 'sync' })
-  const selectedSubmitAttempt = computed(() => {
-    const candidates = [...app.nativeOperations.values()].filter(operation => operation.kind === 'submit_message'
-      && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id
-      && operation.hostEpoch === selected.value.ownerHostEpoch && operation.runtimeGeneration === selected.value.runtimeGeneration
-      && operation.sessionId === selected.value.executor.piSessionId)
-    return candidates.find(operation => operation.state === 'pending') ?? candidates.find(operation => operation.state === 'unknown')
-  })
-  const submitting = computed(() => pendingSubmits.value.has(submitWorkKey.value) || selectedSubmitAttempt.value?.state === 'pending')
-  const submitOutcomeUnknown = computed(() => selectedSubmitAttempt.value?.state === 'unknown')
-  const submitAcknowledged = computed(() => !!selectedSubmitAttempt.value && acknowledgedSubmits.value.has(selectedSubmitAttempt.value.operationId))
-  const submitBlocked = computed(() => submitting.value || (submitOutcomeUnknown.value && !submitAcknowledged.value))
-  const submitAttemptError = computed(() => submitOutcomeUnknown.value
-    ? '还无法确认消息是否已进入 Queue，内容已保留。请刷新查看；再次发送可能重复。' : null)
-  function allowAnotherSubmit() {
-    if (selectedSubmitAttempt.value?.state === 'unknown') acknowledgedSubmits.value.add(selectedSubmitAttempt.value.operationId)
-  }
+  // A send of this Work still waiting for its reply. A lost reply is reported once and frees the editor.
+  const selectedSubmitPending = computed(() => [...app.nativeOperations.values()].some(operation => operation.kind === 'submit_message'
+    && operation.state === 'pending'
+    && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id
+    && operation.hostEpoch === selected.value.ownerHostEpoch && operation.runtimeGeneration === selected.value.runtimeGeneration
+    && operation.sessionId === selected.value.executor.piSessionId))
+  const submitting = computed(() => pendingSubmits.value.has(submitWorkKey.value) || selectedSubmitPending.value)
 
   async function presentSubmitFailure(operation: NativeOperation, consumeNativeOperation: (operation: NativeOperation) => Promise<void>) {
     const revision = submitViewRevision
@@ -122,7 +112,7 @@ export const useInputStore = defineStore('input', () => {
 
   const queueItems = computed(() => observation.queue)
 
-  const visibleComposerError = computed(() => submitAttemptError.value || submissionError.value || workActions.actionError || workActions.currentCompactionError)
+  const visibleComposerError = computed(() => submissionError.value || workActions.actionError || workActions.currentCompactionError)
 
   /* ── 输入框斜杠命令建议 ────────────────────────────────
    * pi 只展开位于消息最开头的 /command，因此建议仅在整段草稿
@@ -309,7 +299,7 @@ export const useInputStore = defineStore('input', () => {
     if (submittedLocalControl(draft.value)) return !!selected.value && selected.value.lifecycle === 'active'
     return app.operationResultsReady && ![...app.nativeOperations.values()].some(operation => operation.kind === 'submit_message' && operation.state === 'succeeded' && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id)
       && !!selected.value && (!!draft.value.trim() || !!attachments.draftAttachments.length || !!attachments.restoredImageCount)
-      && isTauri && !attachments.clearingRestoredImages && !submitBlocked.value
+      && isTauri && !attachments.clearingRestoredImages && !submitting.value
       && !queueRestoring.value && !attachments.attachmentPicking && !attachments.uploadDrafts.length
   })
 
@@ -401,10 +391,10 @@ export const useInputStore = defineStore('input', () => {
   /* ── 快捷按钮 ────────────────────────────────
    * 立即发送 = typing the text and pressing send, except the draft, its attachments and
    * retrieved images stay in the editor: the operation claims no editor and carries only
-   * this text. Pending and unconfirmed sends gate it exactly like the send button.
+   * this text. A pending send gates it exactly like the send button.
    */
   const canSendText = computed(() => !!selected.value && selected.value.lifecycle === 'active' && isTauri
-    && app.operationResultsReady && !submitBlocked.value)
+    && app.operationResultsReady && !submitting.value)
 
   async function sendText(text: string): Promise<boolean> {
     const localCommand = submittedLocalControl(text)
@@ -551,9 +541,9 @@ export const useInputStore = defineStore('input', () => {
     offAttachmentError(); offFailurePresenter()
   })
   return {
-    draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit,
+    draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, visibleComposerError, canSubmit,
     suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading,
     rememberSelection: composer.remember, trackComposition: composer.composition,
-    submit, submitExpanded, restoreQueue, allowAnotherSubmit, prefillSlashCommand, applyExtensionEditorText, runQuickButton, quickButtonDisabled, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
+    submit, submitExpanded, restoreQueue, prefillSlashCommand, applyExtensionEditorText, runQuickButton, quickButtonDisabled, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
   }
 })

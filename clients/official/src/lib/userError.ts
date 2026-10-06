@@ -49,7 +49,7 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'unsupported_protocol') return '当前客户端与这台 Dock 的协议版本不兼容。请更新 Dock，或使用与它匹配的客户端。'
     if (code === 'protocol_error') return '收到的数据无法识别。请刷新当前内容后重试。'
     if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
-    if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '还无法确认刚才的操作是否完成。请刷新状态后确认，不要重复提交。'
+    if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '连接中断，没收到结果。请稍后再试。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
     // The trust question is answered where the flow shows it; a caller without
     // that UI (Reopen, see #304) must not tell the user to refresh.

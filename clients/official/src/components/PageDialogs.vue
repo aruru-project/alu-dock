@@ -22,8 +22,8 @@ const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, control
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const { refreshCurrent } = useObservationStore()
 const workActions = useWorkActionsStore()
-const { mutationOutcomeUnknown, globalOutcomeUnknown, unresolvedControlDomain, selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact } = storeToRefs(workActions)
-const { stopSelectedWork, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome, acceptCreatedWork } = workActions
+const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact } = storeToRefs(workActions)
+const { stopSelectedWork, startCompaction, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
 const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
 const { chooseWindowsAwayDelay } = platform
@@ -46,13 +46,9 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
         <ControlCenter
           :work="selected"
           :section="controlSection"
-          :outcome-unknown="mutationOutcomeUnknown"
-          :unknown-domain="unresolvedControlDomain"
           :compaction-pending="selectedCompactionPending"
           @section="controlSection = $event"
           @prefill="prefillSlashCommand"
-          @unknown="markControlUnknown"
-          @reconcile="reconcileMutationOutcome"
           @compact="startCompaction"
           @close="closeModal"
           @stop="closeModal(); stopSelectedWork()"
@@ -103,10 +99,8 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
           :machines="hostMachines"
           :machines-loading="newWorkMachinesLoading"
           :machine-error="machineListError"
-          :outcome-unknown="globalOutcomeUnknown"
           @close="closeModal"
           @created="acceptCreatedWork"
-          @unknown="handleNewWorkUnknown"
           @busy="directoryBusy = $event"
           @view="newWorkCompact = $event === 'launcher'"
         />

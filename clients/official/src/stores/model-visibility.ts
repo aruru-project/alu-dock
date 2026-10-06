@@ -47,7 +47,7 @@ export const useModelVisibilityStore = defineStore('model-visibility', () => {
         && (('code' in cause && cause.code === 'effect_unknown') || ('outcomeUnknown' in cause && cause.outcomeUnknown === true))
       submission.state = unknown ? 'unknown' : 'failed'
       submission.message = unknown
-        ? '还无法确认是否已保存。'
+        ? '连接中断，没收到保存结果。'
         : userErrorMessage(cause, '隐藏列表没有保存成功，请稍后重试。')
     }
   }

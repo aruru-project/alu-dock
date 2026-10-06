@@ -1,32 +1,25 @@
 import { defineStore } from 'pinia'
-import { computed, nextTick, onScopeDispose, ref, watch } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import {
   abortRun, abortShellCommands, compactSession, forgetWork, isTauri, listMachines, reopenWork, runShellCommand, sessionContext, stopWork,
-  type SessionContext
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { subhostMachineName } from '../lib/machines'
-import { conversationBoundaryKey, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
+import { stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { ConnectionContext, MachineDto, Work } from '../lib/types'
-import { mutationScopeKey, useAppStore } from './app'
-import { useControlPanelStore, type ControlMutationDomain } from './control-panel'
+import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
 import { useSurfacesStore } from './surfaces'
-type MutationDomain = ControlMutationDomain | 'work'
 
 /** Work buttons, the Work list and New Work, with their local feedback. Results are claimed by the operations store. */
 export const useWorkActionsStore = defineStore('work-actions', () => {
   const app = useAppStore()
   const page = useSurfacesStore()
   const observation = useObservationStore()
-  const panel = useControlPanelStore()
   const host = useHostStore()
   const selected = computed(() => app.selectedWork)
-  let conversationSelectionRevision = 0
-  watch(() => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id), () => { conversationSelectionRevision++ }, { flush: 'sync' })
-  const reconcilingReopenWorkId = ref('')
 
   const compactionWorkIds = ref<Set<string>>(new Set())
   const compactionErrors = ref<Record<string, { scope: FeedbackScope; message: string }>>({})
@@ -40,7 +33,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const sessionIdentity = computed(() => JSON.stringify([selected.value?.runtimeGeneration, selected.value?.executor.piSessionId]))
   let feedbackRevision = 0
   type FeedbackScope = Readonly<{ identity: string; revision: number; session?: string }>
-  // A notice reports a state (waiting, unconfirmed, partly done); an error reports a failed action.
+  // A notice reports a state (waiting, partly done); an error reports a failed action.
   type FeedbackTone = 'error' | 'notice'
   const feedback = ref<{ scope: FeedbackScope; message: string | null; tone: FeedbackTone } | null>(null)
   function captureFeedback(session = true): FeedbackScope {
@@ -56,37 +49,14 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   function outcomeUnknown(cause: unknown) {
     return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true
   }
-  // A result that may still have happened is not shown as a failure.
+  // A lost reply is reported once like any failure; the conversation and Work state show what happened.
   function reportFailure(scope: FeedbackScope, cause: unknown) {
-    reportAction(scope, errorMessage(cause), outcomeUnknown(cause) ? 'notice' : 'error')
+    reportAction(scope, errorMessage(cause))
   }
   const currentFeedback = computed(() => feedback.value && feedbackMatches(feedback.value.scope) ? feedback.value : null)
   const actionError = computed(() => currentFeedback.value?.tone === 'error' ? currentFeedback.value.message : null)
   const actionNotice = computed(() => currentFeedback.value?.tone === 'notice' ? currentFeedback.value.message : null)
-  watch(feedbackIdentity, () => { feedbackRevision++; feedback.value = null; reconcilingReopenWorkId.value = '' }, { flush: 'sync' })
-  const continuedUnknowns = ref(new Set<string>())
-  const unresolvedMutations = computed(() => new Map([...app.unresolvedMutations].filter(([, id]) => !continuedUnknowns.value.has(id))))
-
-  // An unconfirmed result is reported and can be refreshed; it does not lock other actions.
-  // It is shown where it belongs: a Work's own results on that Work; New Work,
-  // saved-Session adoption and directory defaults ('global') in the Work list
-  // and the New Work dialog, not on every Work of the Host.
-  function unresolvedDomainsFor(workId: string) {
-    const domains = new Set<MutationDomain>()
-    for (const key of unresolvedMutations.value.keys()) {
-      const [connectionId, keyWorkId, domain] = JSON.parse(key) as [string, string, MutationDomain]
-      if (connectionId === (app.activeConnectionId ?? '') && keyWorkId === workId) domains.add(domain)
-    }
-    return domains
-  }
-  const unresolvedDomains = computed(() => unresolvedDomainsFor(selected.value?.id ?? 'global'))
-  const unresolvedDomain = computed<MutationDomain | null>(() => unresolvedDomains.value.values().next().value ?? null)
-  const mutationOutcomeUnknown = computed(() => unresolvedDomain.value !== null)
-  const globalOutcomeUnknown = computed(() => unresolvedDomainsFor('global').has('work'))
-  const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =>
-    [...unresolvedDomains.value].find((domain): domain is ControlMutationDomain => domain !== 'work'))
-  const globalReconcileMessage = ref('')
-  const globalReconciling = ref(false)
+  watch(feedbackIdentity, () => { feedbackRevision++; feedback.value = null }, { flush: 'sync' })
 
   const selectedCompactionPending = computed(() => !!selected.value && compactionWorkIds.value.has(selected.value.id))
   const currentCompactionError = computed(() => {
@@ -147,11 +117,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       await runShellCommand(work.id, command, excludeFromContext, app.captureOperationTarget(capturedHost, work.id))
       return app.contextMatches(capturedHost)
     } catch (cause) {
-      if (app.contextMatches(capturedHost)) {
-        reportShell(feedbackScope, outcomeUnknown(cause)
-          ? '还无法确认命令是否已经开始执行。等一下看对话里有没有它的运行行；再次运行可能会执行两次。'
-          : errorMessage(cause, '命令没有开始执行。请检查连接后重试。'), outcomeUnknown(cause) ? 'notice' : 'error')
-      }
+      if (app.contextMatches(capturedHost)) reportShell(feedbackScope, errorMessage(cause, '命令没有开始执行。请检查连接后重试。'))
       return false
     } finally {
       pendingShellStarts.value.delete(feedbackScope.identity)
@@ -169,11 +135,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     try {
       await abortShellCommands(work.id, app.captureOperationTarget(capturedHost, work.id))
     } catch (cause) {
-      if (app.contextMatches(capturedHost)) {
-        reportShell(feedbackScope, outcomeUnknown(cause)
-          ? '还无法确认停止请求是否送到。看对话里的运行行是否已结束；必要时再点一次。'
-          : errorMessage(cause, '没有停下正在运行的命令。请重试。'), outcomeUnknown(cause) ? 'notice' : 'error')
-      }
+      if (app.contextMatches(capturedHost)) reportShell(feedbackScope, errorMessage(cause, '没有停下正在运行的命令。请重试。'))
     } finally {
       pendingShellAborts.value.delete(feedbackScope.identity)
     }
@@ -191,10 +153,10 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     try {
       const result = await stopWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return false
-      if (!stoppedResultIsCorrelated(result, work.id)) throw { outcomeUnknown: true, message: '停止结果没有证明对应 Work 已停止。' }
+      if (!stoppedResultIsCorrelated(result, work.id)) throw new Error('停止结果和这个 Work 对不上，请看一下它现在的状态。')
       const cleanupErrors = result.receipt.cleanupErrors ?? []
       reportAction(feedbackScope, cleanupErrors.length
-        ? 'Work 已停止，但相关内容可能仍在更新。请刷新后确认当前状态。'
+        ? 'Work 已停止，有些收尾清理没有完成。'
         : null, 'notice')
       return true
     } catch (cause) {
@@ -220,37 +182,20 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       void observation.load(work.id, true)
     } catch (cause) {
       if (!feedbackMatches(feedbackScope)) return
-      const failure = cause as { code?: string; message?: string; details?: Record<string, unknown>; operationId?: string; outcomeUnknown?: boolean }
-      if (failure?.code === 'project_trust_required') {
-        // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
-        // the native known-failure result visible; never infer a trust decision.
-        reportFailure(feedbackScope, cause)
-      } else if (failure?.outcomeUnknown === true) {
-
-        reconcilingReopenWorkId.value = work.id
-        reportAction(feedbackScope, 'Dock 已收到继续请求，正在确认 Work 的实际状态…', 'notice')
-        void reconcileReopenOutcome(work.id, previousGeneration, capturedHost, feedbackScope)
-      } else {
-        reportFailure(feedbackScope, cause)
-      }
+      // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
+      // the native known-failure result visible; never infer a trust decision.
+      reportFailure(feedbackScope, cause)
+      if (outcomeUnknown(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
     } finally {
       pendingWorkActions.value.delete(feedbackScope.identity)
     }
   }
 
-  async function reconcileReopenOutcome(workId: string, previousGeneration: number, context: ConnectionContext, feedbackScope: FeedbackScope) {
-    if (!await app.refreshWorksQuietly() || !app.contextMatches(context)) {
-      reportAction(feedbackScope, '暂时无法确认 Work 的实际状态；连接恢复后会继续以 Dock 状态为准。', 'notice')
-      return
-    }
-    if (!feedbackMatches(feedbackScope)) return
+  /** If the lost Continue did take effect, show the continued Work without another message. */
+  async function followReopenedWork(workId: string, previousGeneration: number, context: ConnectionContext, feedbackScope: FeedbackScope) {
+    if (!await app.refreshWorksQuietly() || !app.contextMatches(context) || !feedbackMatches(feedbackScope)) return
     const current = app.works.find((work) => work.id === workId)
-    if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) {
-      reportAction(feedbackScope, '还无法确认 Work 是否已继续。请刷新状态后确认，不要重复操作。', 'notice')
-      return
-    }
-    reportAction(feedbackScope, '当前 Work 状态已更新，原操作结果仍待确认。请勿重复提交。', 'notice')
-    reconcilingReopenWorkId.value = ''
+    if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) return
     observation.acceptWork(current, context)
     void observation.load(workId, true)
   }
@@ -321,90 +266,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     } finally {
       setCompactionPending(work.id, false)
     }
-  }
-
-  function handleNewWorkUnknown(cause: unknown) { reportAction(captureFeedback(), errorMessage(cause), 'notice') }
-  function mutationKey(workId: string, domain: MutationDomain) {
-    return mutationScopeKey(app.activeConnectionId ?? '', workId, domain)
-  }
-  function markControlUnknown(cause: unknown, _domain: ControlMutationDomain, scope: SessionContext) {
-    if (app.contextMatches(scope) && scope.instanceId === selected.value?.id
-      && scope.expectedHostEpoch === selected.value.ownerHostEpoch && scope.expectedRuntimeGeneration === selected.value.runtimeGeneration) {
-      reportAction(captureFeedback(), errorMessage(cause), 'notice')
-    }
-  }
-
-  /** The Work list's check of an unconfirmed New Work: refresh the list and report there. */
-  async function reconcileGlobalOutcome() {
-    const unknownId = unresolvedMutations.value.get(mutationKey('global', 'work'))
-    const context = app.connectionContext ? { ...app.connectionContext } : null
-    if (!unknownId || !context || globalReconciling.value) return
-    globalReconciling.value = true
-    globalReconcileMessage.value = ''
-    try {
-      const refreshed = await app.loadActive()
-      if (!app.contextMatches(context)) return
-      if (!refreshed || app.error) {
-        globalReconcileMessage.value = '暂时无法刷新工作列表。请稍后再试，不要重复创建。'
-        return
-      }
-      continuedUnknowns.value.add(unknownId)
-      globalReconcileMessage.value = '工作列表已刷新。如果新建的 Work 没有出现，它的结果仍未确认，不要重复创建。'
-    } finally {
-      globalReconciling.value = false
-    }
-  }
-  watch([() => app.activeConnectionId, () => app.workDrawerOpen], () => { globalReconcileMessage.value = '' })
-
-  async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
-    const workId = selected.value?.id ?? 'global'
-    const context = app.connectionContext ? { ...app.connectionContext } : null
-    const revision = conversationSelectionRevision
-    const feedbackScope = captureFeedback()
-    const isCurrent = () => !!context && app.contextMatches(context) && revision === conversationSelectionRevision && feedbackMatches(feedbackScope)
-    const domain = requestedDomain ?? unresolvedDomain.value
-    if (!domain) return
-    const unknownId = unresolvedMutations.value.get(mutationKey(workId, domain))
-    if (!unknownId) return
-    try {
-      let reconciled = false
-      if (domain === 'conversation' && workId !== 'global') {
-        reconciled = await observation.load(workId)
-      } else if (domain === 'models' && workId !== 'global') {
-        reconciled = await reconcileControlProjection('models', workId)
-      } else if (domain === 'tools' && workId !== 'global') {
-        reconciled = await reconcileControlProjection('tools', workId)
-      } else if (domain === 'settings' && workId !== 'global') {
-        reconciled = await reconcileControlProjection('settings', workId)
-      } else if ((domain === 'sessions' || domain === 'tree') && workId !== 'global') {
-        const refreshed = await app.loadActive()
-        if (!isCurrent()) return
-        if (!refreshed || app.error || selected.value?.id !== workId) throw new Error('暂时无法确认修改后的 Work 状态，请稍后重试。')
-        if (domain === 'sessions' && selected.value?.compacting) throw new Error('上下文仍在压缩；完成后再刷新确认。')
-        await nextTick()
-        if (!isCurrent()) return
-        const projection = await reconcileControlProjection(domain, workId)
-        if (!isCurrent()) return
-        const conversation = await observation.load(workId, true)
-        reconciled = projection && conversation && !app.error
-      } else if (domain === 'work') {
-        reconciled = await app.loadActive()
-        if (!isCurrent()) return
-        reconciled = reconciled && !app.error
-      }
-      if (!isCurrent()) return
-      if (!reconciled) throw new Error('还无法确认刚才的修改是否生效。请再次刷新确认，不要重复提交。')
-      continuedUnknowns.value.add(unknownId)
-      reportAction(feedbackScope, '当前状态已刷新。刚才那次操作的结果仍未确认，不要重复提交它。', 'notice')
-      if (domain === 'sessions' && workId !== 'global' && app.activeConnectionId) setCompactionError(app.activeConnectionId, workId)
-    } catch (cause) {
-      if (!isCurrent()) return
-      reportAction(feedbackScope, errorMessage(cause), 'notice')
-    }
-  }
-
-  function reconcileControlProjection(domain: ControlMutationDomain, workId: string): Promise<boolean> {
-    return selected.value?.id === workId ? panel.reconcileDomain(domain) : Promise.resolve(false)
   }
 
   // A compaction event reported by the conversation replaces this button's earlier failure.
@@ -543,8 +404,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
 
   return {
-    aborting, workMutating, actionError, actionNotice, mutationOutcomeUnknown, globalOutcomeUnknown, globalReconciling, globalReconcileMessage, reconcileGlobalOutcome, unresolvedControlDomain, selectedCompactionPending, currentCompactionError, reconcilingReopenWorkId,
-    abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction, handleNewWorkUnknown, markControlUnknown, reconcileMutationOutcome,
+    aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
+    abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
     hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, acceptCreatedWork,
   }

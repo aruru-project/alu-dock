@@ -115,13 +115,12 @@ try {
     mounted.unmount(); failStorage = false
   }
   console.log('PASS: storage failure permits Session rename but gates Reload/editor handoff; original input remains unchanged')
-  // #326: a compaction still running or with an unconfirmed result is not a reason to ignore a rename click.
-  for (const state of ['pending', 'unknown']) {
+  // #326: a compaction still running is not a reason to ignore a rename click.
+  for (const state of ['pending']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original name', compacting: state === 'pending' })
     const store = await createStore(work)
     store.bindNativeOperation({ operationId: `compact-${state}`, kind: 'compact_session', connectionId: 'connection-a', instanceId: 'work-a', hostEpoch: 'epoch-a',
-      runtimeGeneration: 4, sessionId: 'original-session', editor: null, state, ...(state === 'unknown' ? { error: { message: '压缩结果尚未确认。', outcomeUnknown: true } } : {}) })
-    assert.equal(store.unresolvedMutations.size, state === 'unknown' ? 1 : 0)
+      runtimeGeneration: 4, sessionId: 'original-session', editor: null, state })
     const calls = []
     globalThis[stateKey] = { invoke: async (command, args) => {
       if (command === 'list_sessions') return { sessions: [], total: 0, incomplete: false }
@@ -138,7 +137,7 @@ try {
     assert.deepEqual(calls.map(call => call.command), ['name_session'], `${state} compaction does not silently drop the rename`)
     mounted.unmount()
   }
-  console.log('PASS: rename reaches the Host while compaction is running or its result is unconfirmed')
+  console.log('PASS: rename reaches the Host while compaction is running')
   for (const scenario of ['event-before-reply', 'reply-before-event', 'different-work', 'different-connection', 'different-host', 'newer-runtime', 'failure']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, name: 'Original work' })
     const store = await createStore(work)

@@ -138,11 +138,7 @@ try {
   assert.equal(focusCount, 1, 'only the explicit surface transition transfers focus')
   mounted.unmount()
   assert.ok(flushes > 0, 'unmount reliably flushes the latest draft')
-  app.bindNativeOperation({ connectionId: 'host-a', instanceId: 'A', kind: 'new_session', state: 'unknown', operationId: 'old-operation' })
-  assert.equal(app.unresolvedMutations.get(JSON.stringify(['host-a', 'A', 'sessions'])), 'old-operation')
-  assert.equal(app.unresolvedMutations.has(JSON.stringify(['host-b', 'A', 'sessions'])), false, 'same Work id on another Host is not blocked')
   await app.switchHost('host-a')
-  assert.equal(app.unresolvedMutations.get(JSON.stringify(['host-a', 'A', 'sessions'])), 'old-operation', 'returning to original Host still requires reconciliation, not blind replay')
   app.selectWork('B')
   app.setCurrentDraft('before WebView rebuild')
   const acrossView = app.captureSubmitDraft('host-a', 'B', [])
@@ -222,21 +218,20 @@ try {
   assert.deepEqual(JSON.parse(storage.get('aludock.uiState')).appliedOperationIds, [])
   console.log('PASS: Queue/Fork/explicit return save failure preserves receipt and editor; ACK failure + F5 applies once and reclaims confirmed marker')
 
-  // A new Stop is independent from the old unknown model intent. Refresh and
-  // explicit confirmation unlock new controls without rewriting that receipt.
-  view.store.bindNativeOperation({ ...fork, operationId: 'unknown-model', kind: 'set_model', state: 'unknown', editor: null, result: null })
+  // A lost model reply was reported once by its own action. After F5 nothing of it
+  // stays behind to report again or to hold up later controls.
+  retainedOperations.set('unknown-model', { ...fork, operationId: 'unknown-model', kind: 'set_model', state: 'unknown', editor: null, result: null })
+  view.scope.stop(); view = await rebuild(); await view.results.initialize()
+  assert.equal(view.store.nativeOperations.has('unknown-model'), false)
   const actions = useWorkActionsStore()
   await view.store.load()
-  assert.equal(actions.mutationOutcomeUnknown, true)
   const stopping = actions.stopSelectedWork()
   await nextTick(); useSurfacesStore().settleConfirm(true)
   assert.equal(await stopping, true)
   assert.equal(stops, 1)
-  assert.equal(view.store.nativeOperations.get('unknown-model').state, 'unknown')
-  await actions.reconcileMutationOutcome()
-  assert.equal(actions.mutationOutcomeUnknown, false)
-  assert.equal(view.store.nativeOperations.get('unknown-model').state, 'unknown')
-  console.log('PASS: unknown model + refresh still permits confirmed Stop; manual continuation leaves original unknown intact')
+  assert.equal(actions.actionNotice, null)
+  retainedOperations.delete('unknown-model')
+  console.log('PASS: a lost model reply leaves nothing behind; Stop stays available')
 
   // App exit/legacy drafts lose upload jobs but not their permanent Host fileId.
   const target = attachmentUploadTarget(view.store.selectedWork, view.store.connectionContext)

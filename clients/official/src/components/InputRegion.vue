@@ -13,7 +13,6 @@ import { useAttachmentsStore } from '../stores/attachments'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useConversationStore } from '../stores/conversation'
 import { useInputStore } from '../stores/input'
-import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
 import { useQuickButtonsStore } from '../stores/quick-buttons'
 import { useSurfacesStore } from '../stores/surfaces'
@@ -22,8 +21,8 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const input = useInputStore()
-const { draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, submitOutcomeUnknown, submitAcknowledged, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
-const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, allowAnotherSubmit, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, runQuickButton, quickButtonDisabled } = input
+const { draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
+const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, runQuickButton, quickButtonDisabled } = input
 const attachments = useAttachmentsStore()
 const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, maxMessageAttachments } = storeToRefs(attachments)
 const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, chooseAttachments } = attachments
@@ -35,19 +34,13 @@ const quickButtons = useQuickButtonsStore()
 const rowQuickButtons = computed(() => quickButtons.buttons.slice(0, QUICK_BUTTONS_IN_ROW))
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '\u2318K' : 'Ctrl+K'
 const workActions = useWorkActionsStore()
-const { actionNotice, mutationOutcomeUnknown, reconcilingReopenWorkId } = storeToRefs(workActions)
-const { reconcileMutationOutcome } = workActions
-// An unconfirmed result stays visible with a refresh action; other actions remain usable.
-const canConfirmOutcome = computed(() => !!selected.value && mutationOutcomeUnknown.value && reconcilingReopenWorkId.value !== selected.value.id)
+const { actionNotice } = storeToRefs(workActions)
 const operations = useOperationsStore()
 const { returnedOperations, returnedContentErrors, workResults } = storeToRefs(operations)
 const { consumeNativeOperation, restoreReturnedOperation } = operations
-const observation = useObservationStore()
-const { load: loadSelectedConversation } = observation
 const conversation = useConversationStore()
 const { outputAwayFromBottom: away } = storeToRefs(conversation)
 const commandCatalogStore = useCommandCatalogStore()
-const reconcileExtensionInteraction = () => selected.value ? observation.load(selected.value.id, true) : Promise.resolve(false)
 const applyExtensionTitle = (title: string) => { document.title = title }
 </script>
 
@@ -57,9 +50,9 @@ const applyExtensionTitle = (title: string) => { document.title = title }
       <div class="alu-input-float-scroll"><button v-if="away" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="conversation.scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button></div>
       <div class="alu-input-float-stop"><StopRunPill /></div>
     </div>
-    <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
-      <div v-if="visibleComposerError" :class="submitOutcomeUnknown ? 'alu-composer-notice' : 'alu-composer-error'" :role="submitOutcomeUnknown ? 'status' : undefined"><span>{{ visibleComposerError }}</span><template v-if="submitOutcomeUnknown"><button @click="loadSelectedConversation(selected.id)">刷新查看</button><button v-if="!submitAcknowledged" @click="allowAnotherSubmit">允许再次发送</button></template></div>
-      <div v-if="actionNotice || canConfirmOutcome" class="alu-composer-notice" role="status"><span>{{ actionNotice ?? '上一次操作的结果还没有确认。可以刷新查看，其他操作照常可用。' }}</span><button v-if="canConfirmOutcome" @click="reconcileMutationOutcome()">刷新并确认</button></div>
+    <ExtensionUiSurface :focus-suspended="modalOpen" :work="selected" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
+      <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span></div>
+      <div v-if="actionNotice" class="alu-composer-notice" role="status"><span>{{ actionNotice }}</span></div>
       <div v-for="operation in returnedOperations" :key="operation.operationId" class="alu-composer-notice" role="status">
         <span>{{ returnedContentErrors[operation.operationId] ?? '操作已完成，返回内容已保留。' }}</span><button @click="restoreReturnedOperation(operation)">追加到编辑器</button>
       </div>
