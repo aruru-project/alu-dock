@@ -1,3 +1,5 @@
+import type { ModelRef } from "../control/protocol.js";
+import type { ThinkingLevel } from "./agent-worker.js";
 import type { InstanceExecution, InstanceLifecycle } from "./instance-dto.js";
 
 export const CROSS_INSTANCE_TRUST = "untrusted_cross_instance" as const;
@@ -21,6 +23,9 @@ export interface ObservedInstanceStatus {
   runStartedAt?: string;
   runtimeGeneration: number;
   lastError?: string;
+  /** The model the sibling is using now; for stopped work, the one it last used. */
+  model?: ModelRef;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export interface ObservationMessage {

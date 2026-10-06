@@ -98,9 +98,9 @@ function sampleData() {
     hiddenStopped: 1,
     works: [
       previewWork('Alu Dock Official Client', '/workshop/alu_dock/clients/official', 'running', 'active', 'main'),
-      previewWork('Alubot Admin', '/workshop/alubot_admin', 'idle', 'active', 'master'),
-      previewWork('Alu Workstation', '/workshop/alu_workstation', 'unavailable', 'host_lost'),
-      previewWork('alu_dock', '/workshop/alu_dock', 'idle', 'active', 'main'),
+      previewWork('Alubot Admin', '/workshop/alubot_admin', 'idle', 'active', 'master', { provider: 'anthropic', id: 'claude-sonnet-4-5-20250929' }),
+      previewWork('Alu Workstation', '/workshop/alu_workstation', 'unavailable', 'host_lost', undefined, null),
+      previewWork('alu_dock', '/workshop/alu_dock', 'idle', 'active', 'main', { provider: 'openrouter', id: 'anthropic/claude-opus-4.1-20250805-thinking-preview' }),
     ],
   }
 
@@ -126,6 +126,8 @@ function sampleData() {
     execution: Work['execution'],
     lifecycle: Work['lifecycle'],
     gitBranch?: string,
+    // null: the Work has not chosen a model yet.
+    model: Work['executor']['model'] | null = { provider: 'openai-codex', id: 'gpt-5.6', name: 'GPT-5.6' },
   ): Work {
     return {
       id: `preview-${displayName}`,
@@ -143,7 +145,7 @@ function sampleData() {
       executor: {
         kind: 'pi',
         piSessionId: 'browser-preview',
-        model: { provider: 'openai-codex', id: 'gpt-5.6', name: 'GPT-5.6' },
+        ...(model ? { model } : {}),
         thinkingLevel: 'high',
       },
       metrics: {

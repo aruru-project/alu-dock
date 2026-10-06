@@ -9,6 +9,7 @@ import { AgentUnavailableBeforeEffectError } from "../src/core/agent-worker.js";
 import { CROSS_INSTANCE_TRUST, type ObservationNotification } from "../src/core/instance-observation.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { renderDockToolsResult } from "../src/pi/dock-tools-client.js";
+import { parseDockToolsResult } from "../src/core/dock-tools-codec.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 
 function fixtureInstance(
@@ -214,6 +215,37 @@ test("dock_inspect returns one long sibling message intact to the Agent", async 
   const modelVisible = renderDockToolsResult(result);
   assert.ok(modelVisible.includes(firstBlock));
   assert.ok(modelVisible.includes(secondBlock));
+});
+
+test("dock_list shows the Agent each sibling's whole current model and thinking level", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "alu-dock-observation-model-"));
+  const runtimes: DelayedAgentWorkerConnection[] = [];
+  const ids = ["model-source", "model-target"];
+  const registry = new DockRegistry(
+    async (input) => fixtureInstance(input, runtimes),
+    () => ids.shift()!,
+    { hostEpoch: "observation-model-host" },
+  );
+  const source = await registry.create({ operationId: "create-model-source", cwd, name: "Alu" });
+  const target = await registry.create({ operationId: "create-model-target", cwd, name: "Sol" });
+  await registry.configureDockTools(source.id, true, "model-grant");
+  await target.selectModel("openai-codex", "gpt-6-sol-20261001", "switch-target-model");
+  await target.setThinkingLevel("high", "switch-target-thinking");
+
+  const listed = renderDockToolsResult(await registry.invokeDockTool(source.id, { type: "list" }));
+  assert.match(listed, /model=openai-codex\/gpt-6-sol-20261001 \u00b7 thinking=high/u);
+});
+
+test("a SubHost keeps reading sibling status from a newer Main that adds fields", () => {
+  // Main and a SubHost can run different versions, and a rejected field drops the whole Main connection (found in #362).
+  const status = {
+    id: "sibling", name: "Sol", cwd: "/work", lifecycle: "active", execution: "idle", compacting: false,
+    executionChangedAt: "2026-10-06T00:00:00.000Z", runtimeGeneration: 1,
+    model: { provider: "openai-codex", id: "gpt-6-sol", addedLater: true }, addedLater: "value",
+  };
+  assert.doesNotThrow(() => parseDockToolsResult({ type: "list", result: {
+    trust: CROSS_INSTANCE_TRUST, observedAt: "2026-10-06T00:00:01.000Z", instances: [status], total: 1, truncated: false, includesHistory: false,
+  } }));
 });
 
 test("watch completion captures one trigger snapshot and cancellation fences pending delivery", async () => {

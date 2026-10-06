@@ -41,6 +41,14 @@ export function humanInstanceStatus(lifecycle: InstanceLifecycle, execution: Ins
   return "could not continue";
 }
 
+/**
+ * The model as people and Agents tell Works apart: `provider/id`, always whole. The provider says
+ * whose account pays, and models of one family share a prefix and differ only at the end.
+ */
+export function modelLabel(model: { provider: string; id: string } | undefined): string {
+  return model === undefined ? "no model selected" : `${model.provider}/${model.id}`;
+}
+
 function cwdFallback(cwd: string): string {
   try {
     return safeLabel(basename(cwd), MAX_CWD_FALLBACK_DISPLAY_NAME_CHARS, SAFE_CWD_CHARACTER) ?? "Work";

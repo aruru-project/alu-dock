@@ -26,7 +26,7 @@ const bootstrap = { instance: work, cursor, records: [{ recordId: 'old-message',
   activeEvents: [], queue: [], historyRevision: 1, historyTruncated: true, extensionUi: { status: {}, toolsExpanded: false, events: [] } }
 bootstrap.records.push({ recordId: 'native-image', entryId: 'native-image', kind: 'message', source: 'user', visibility: 'conversation', contentComplete: false,
   content: [{ type: 'image', mimeType: 'image/png', contentRef: 'opaque-server-image', fileId: 'standard-image-file-id' }] })
-const otherWork = { ...work, id: 'other', name: 'Other Work', executor: { kind: 'pi', piSessionId: 'other-session' } }
+const otherWork = { ...work, id: 'other', name: 'Other Work', executor: { kind: 'pi', piSessionId: 'other-session', model: { provider: 'openai-codex', id: 'gpt-6-sol-20261001' } } }
 const capturedBeforeF5 = { connectionId: 'host', workId: 'work', sessionId: 'old', text: 'F5 draft preserved', textRevision: 'before-f5', attachments: [] }
 const nativeResults = new Map(['new_session', 'reload_session', 'set_model'].map(kind => [kind, {
   operationId: kind, kind, connectionId: 'host', instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'old',
@@ -443,6 +443,8 @@ try {
   assert.equal(nativeResults.size, 1, 'directory failure stays separate from the selected Work')
   find(container, item => item.type === 'button' && String(item.props['aria-label'] ?? '').startsWith('打开工作列表，有')).props.onClick(); await settle()
   const workList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
+  assert.deepEqual(all(workList, item => item.props.class === 'alu-instance-model').map(text), ['未选择模型', 'openai-codex/gpt-6-sol-20261001'],
+    'each Work in the list shows its whole provider/model without opening it')
   const listResult = find(workList, item => item.type === 'details' && item.props['aria-label'] === '操作结果')
   assert.ok(text(listResult).includes('新建 Work没有完成')); listResult.open = true
   await find(listResult, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()

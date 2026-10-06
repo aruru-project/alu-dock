@@ -879,6 +879,8 @@ test("Hub Continue opens current work", async (context) => {
   assert.match(continueOutput, /Current Dock work/u);
   assert.match(continueOutput, /Open Work/u);
   assert.match(continueOutput, /display project/u);
+  const continueList = continueOutput.slice(continueOutput.indexOf("Current Dock work"), continueOutput.indexOf("Open Work"));
+  assert.match(continueList, /fixture\/default/u, "each Continue entry names the model its work is using");
   assert.equal(continueOutput.includes(current.id), false);
   assert.match(continueOutput, /cache /u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");

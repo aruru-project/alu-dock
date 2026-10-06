@@ -7,6 +7,8 @@ import {
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
 import type { DockToolsResult } from "../core/dock-tools.js";
+import { modelLabel } from "../core/instance-display-name.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "../control/protocol.js";
 
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult): string {
@@ -105,7 +107,11 @@ function statusLine(status: ObservedInstanceStatus, observedAt: string): string 
   const state = status.compacting ? "compacting" : status.execution;
   const duration = status.runStartedAt === undefined ? "" : ` · running ${elapsed(status.runStartedAt, observedAt)}`;
   const error = status.lastError === undefined ? "" : ` · error=${inline(status.lastError, 160)}`;
-  return `${identity(status)} · ${status.lifecycle}/${state}${duration} · cwd=${inline(status.cwd, 180)}${error}`;
+  // The whole model name: the provider says whose account pays, and family members differ only at the end.
+  const label = inline(modelLabel(status.model), MAX_MODEL_PROVIDER_CHARS + 1 + MAX_MODEL_ID_CHARS);
+  const model = status.model === undefined ? ` · ${label}` : ` · model=${label}`;
+  const thinking = status.thinkingLevel === undefined ? "" : ` · thinking=${status.thinkingLevel}`;
+  return `${identity(status)} · ${status.lifecycle}/${state}${duration}${model}${thinking} · cwd=${inline(status.cwd, 180)}${error}`;
 }
 
 function identity(status: ObservedInstanceStatus): string {
