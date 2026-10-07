@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { MAX_TEXT_CHARS } from "../core/instance-dto.js";
 
 const STATE_TYPE = "alu-dock-plan-goal-state";
 const MESSAGE_TYPE = "alu-dock-plan-goal";
@@ -42,7 +41,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       const active = pi.getActiveTools().filter((name) => !OWN_TOOLS.has(name));
       if (state.mode === "plan") {
         state.tools ??= active;
-        pi.setActiveTools([...new Set([...active.filter(readOnly), ...pi.getAllTools().filter((tool) => readOnly(tool.name)).map((tool) => tool.name), "plan_submit", "plan_question"])]);
+        pi.setActiveTools([...new Set([...active.filter(readOnly), ...pi.getAllTools().filter((tool) => tool.sourceInfo.source === "builtin" && READ_TOOLS.has(tool.name)).map((tool) => tool.name), "plan_submit", "plan_question"])]);
       } else {
         const normal = state.tools ?? active;
         delete state.tools;
@@ -136,11 +135,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "custom" || entry.customType !== STATE_TYPE || !entry.data || typeof entry.data !== "object") continue;
         const record = entry.data as Record<string, unknown>;
-        if (record.version === 1) {
-          state = { mode: record.mode === "plan" ? "plan" : "execute" };
-          if (validPlan(record.plan)) state.plan = record.plan;
-          if (validGoal(record.goal)) state.goal = record.goal;
-        } else if (record.version === 2) {
+        if (record.version === 2) {
           if (record.mode === "plan" || record.mode === "execute") state.mode = record.mode;
           if (record.plan === null) delete state.plan; else if (validPlan(record.plan)) state.plan = record.plan;
           if (record.goal === null) delete state.goal;
@@ -183,19 +178,13 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       if (armed) pause("当前回复已停止。用 /goal 选择“继续”。");
       else render(ctx);
     });
-    pi.on("context_with_system", (event) => {
-      if (state.mode !== "plan") return;
-      const index = event.messages.findIndex((message) => message.role === "system");
-      return { messages: event.messages.map((message, i) => i === index && message.role === "system"
-        ? { ...message, content: `${message.content}\n[Dock Plan] 先使用只读工具调查；重要取舍用 plan_question。准备好后用 plan_submit 提交完整计划，由用户决定执行。` } : message) };
-    });
     pi.on("tool_call", (event) => {
       if (state.mode !== "plan" || ["plan_submit", "plan_question"].includes(event.toolName) || readOnly(event.toolName)) return;
       return { block: true, reason: "正在规划，此工具不能用于只读调查。请提交计划，由用户决定是否执行。" };
     });
 
     pi.registerTool({
-      name: "plan_submit", label: "提交计划", description: "Submit the complete plan for the user to review, edit, discuss or execute. Include investigation, scope, steps and checks. Only the user approves execution.", defaultActive: false,
+      name: "plan_submit", label: "提交计划", description: "In Plan mode, investigate with read-only tools and discuss before implementing. Use plan_question only for material user decisions. Submit the complete plan with facts, scope, steps and checks for review, editing or execution. Only the user approves execution.", defaultActive: false,
       parameters: { type: "object", properties: { content: { type: "string", minLength: 1, maxLength: MAX_CONTENT } }, required: ["content"], additionalProperties: false },
       execute: async (_id: string, params: { content: string }, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
         if (state.mode !== "plan") return result("当前不在规划中。用户可以用 /plan 开始。", true);
@@ -205,15 +194,15 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
         let reviewedRevision: number | undefined;
         while (state.mode === "plan" && !signal?.aborted) {
           const plan = state.plan!;
-          if (plan.content.length >= MAX_TEXT_CHARS - 100 && reviewedRevision !== plan.revision) {
-            const reviewed = await ctx.ui.editor("完整计划（可修改，关闭则继续讨论）", plan.content);
+          if (reviewedRevision !== plan.revision) {
+            const reviewed = await ctx.ui.editor("审阅完整计划（可修改，保存后选择下一步）", plan.content);
             if (reviewed === undefined) return result("用户继续讨论，尚未批准执行。等待用户输入。");
             if (state.plan?.revision !== plan.revision) continue;
             if (!validText(reviewed)) return result("计划为空或太长，请继续讨论后重新提交。");
             updatePlan(reviewed); reviewedRevision = state.plan!.revision;
           }
           const current = state.plan!;
-          const choice = await ctx.ui.select(current.content.length < MAX_TEXT_CHARS - 100 ? `审阅计划\n\n${current.content}` : "已展示完整计划，接下来怎么做？", PLAN_CHOICES, { signal });
+          const choice = await ctx.ui.select("接下来怎么做？", PLAN_CHOICES, { signal });
           if (state.plan?.revision !== current.revision) continue;
           if (signal?.aborted || state.mode !== "plan") return result("规划已停止，尚未批准执行。");
           if (choice === "我来改") {
@@ -225,16 +214,19 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
           if (choice !== "按此执行" && choice !== "执行并自动推进到完成") return result("用户选择继续讨论，尚未批准执行。等待用户输入。");
           state.mode = "execute";
           if (choice === "执行并自动推进到完成") {
-            disarm(); state.goal = newGoal(current.content, DEFAULT_ROUNDS); armed = true; pendingRound = state.goal.id;
+            disarm(); state.goal = newGoal(`执行已批准的第 ${current.revision} 版计划`, DEFAULT_ROUNDS); armed = true; pendingRound = state.goal.id;
           }
           syncTools(); save(ctx);
-          return result(`用户已批准以下计划。${choice === "按此执行" ? "按计划执行一次。" : "按计划推进目标，用 goal_update 记录结果；完成必须附依据。"}\n\n${current.content}`);
+          // One normal transcript message keeps an edited plan intact in Pi's
+          // summarization input; tool results are truncated there to 2,000 chars.
+          announce(`用户已批准第 ${current.revision} 版计划：\n\n${current.content}`);
+          return result(`第 ${current.revision} 版计划已批准。${choice === "按此执行" ? "按计划执行一次。" : "按计划推进目标，用 goal_update 记录结果；完成必须附依据。"}`);
         }
         return result("规划已停止，尚未批准执行。");
       },
     } as never);
     pi.registerTool({
-      name: "plan_question", label: "确认规划取舍", description: "Ask one material planning question after investigating the facts. A missing answer is not approval.", defaultActive: false,
+      name: "plan_question", label: "确认规划取舍", description: "In Plan mode, use read-only tools to investigate facts first, then ask one material planning question. Do not implement until the user approves plan_submit. A missing answer is not approval.", defaultActive: false,
       parameters: { type: "object", properties: { question: { type: "string", minLength: 1, maxLength: 2000 }, options: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 200 } } }, required: ["question"], additionalProperties: false },
       execute: async (_id: string, params: { question: string; options?: string[] }, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
         if (state.mode !== "plan") return result("当前不在规划中，不能弹出规划问题。", true);
@@ -268,8 +260,9 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
         pause("进入规划，目标已暂停。用 /goal 可继续。");
         state.mode = "plan"; syncTools(); save(ctx);
         if (request) {
-          if (ctx.isIdle()) startPrompt(`请先规划：\n${request}`, ctx);
-          else pi.sendUserMessage(`请先规划：\n${request}`, { deliverAs: "followUp" });
+          const message = `请先规划：\n${request}\n\n先用只读工具调查，不执行修改。重要取舍用 plan_question 提问；准备好后用 plan_submit 提交完整计划，由我决定是否执行。`;
+          if (ctx.isIdle()) startPrompt(message, ctx);
+          else pi.sendUserMessage(message, { deliverAs: "followUp" });
         } else ctx.ui.notify("已进入规划。告诉我你的需求；再输入 /plan 可退出。", "info");
       },
     });

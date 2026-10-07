@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process"; // TEMPORARY_PTY_QA
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +9,6 @@ import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
-import { ptyUserEnvironment } from "./support/pty-user-environment.js"; // TEMPORARY_PTY_QA
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { PlanGoalProvider, waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
@@ -43,6 +41,8 @@ import { writeFile } from "node:fs/promises";
 export default function (pi) {
   pi.registerTool({ name: "opaque_write", label: "Opaque write", description: "Fixture deferred write tool", exposure: "deferred", parameters: { type: "object", properties: {} },
     execute: async () => { await writeFile(${JSON.stringify(join(cwd, "fixture.txt"))}, "opaque write"); return { content: [{ type: "text", text: "written" }] }; } });
+  pi.registerTool({ name: "codemode_read", label: "Codemode read", description: "Fixture on-demand read tool", exposure: "codemode", annotations: { readOnlyHint: true }, parameters: { type: "object", properties: {} },
+    execute: async () => ({ content: [{ type: "text", text: "read on demand" }] }) });
   pi.registerTool({ name: "nested_probe", label: "Nested probe", description: "Exercise the nested tool permission path", annotations: { readOnlyHint: true }, parameters: { type: "object", properties: {} },
     execute: async (_id, _args, _signal, _update, ctx) => {
       const outcome = await ctx.executeTool("opaque_write", {});
@@ -116,10 +116,13 @@ function assertOrdinaryTools(request: HeldChatRequest): void {
   assert.ok(request.toolNames.includes("write"));
 }
 
-function lastMessageText(request: HeldChatRequest): string {
-  const content = request.body.messages?.at(-1)?.content;
+function messageText(content: unknown): string {
   return typeof content === "string" ? content : Array.isArray(content)
     ? content.filter((part: { type?: string }) => part.type === "text").map((part: { text: string }) => part.text).join("\n") : "";
+}
+
+function lastMessageText(request: HeldChatRequest): string {
+  return messageText(request.body.messages?.at(-1)?.content);
 }
 
 async function assertGoalCleared(h: Awaited<ReturnType<typeof setup>>): Promise<void> {
@@ -129,13 +132,16 @@ async function assertGoalCleared(h: Awaited<ReturnType<typeof setup>>): Promise<
   assert.equal(widget.data.lines, undefined);
 }
 
+async function savedEntries(h: Awaited<ReturnType<typeof setup>>) {
+  const file = (await h.dock.read(h.work.id)).instance.executor.sessionFile;
+  assert.ok(file);
+  return (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+}
+
 // The 2026-10-07 review reproduced full plans/evidence being appended on every
 // save. Keep a small persistence check in the journeys that expose that growth.
 async function savedChanges(h: Awaited<ReturnType<typeof setup>>) {
-  const file = (await h.dock.read(h.work.id)).instance.executor.sessionFile;
-  assert.ok(file);
-  const records = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-  return records.filter((entry) => entry.type === "custom" && entry.customType === "alu-dock-plan-goal-state" && entry.data?.version === 2)
+  return (await savedEntries(h)).filter((entry) => entry.type === "custom" && entry.customType === "alu-dock-plan-goal-state" && entry.data?.version === 2)
     .map((entry) => entry.data as { plan?: { content: string } | null; goal?: { id?: string; rounds?: number; summary?: string; evidence?: string[] } | null });
 }
 
@@ -153,11 +159,21 @@ test("Plan investigates safely, lets the person discuss and edit the full plan, 
   const h = await setup(context, { probeTools: true });
   const ui = await h.ui();
   const request = "Prepare a report\nKeep the fixture unchanged until I approve.";
+  await h.dock.setActiveTools(h.work.id, ["write", "nested_probe"]);
   await h.start(`/plan ${request}`);
   const investigation = await h.request();
   assert.ok(JSON.stringify(investigation.body.messages).includes(JSON.stringify(request).slice(1, -1)), "Planning preserves the person's multiline request");
   for (const name of ["read", "ls", "find", "grep", "nested_probe", "plan_submit", "plan_question"]) assert.ok(investigation.toolNames.includes(name), `Planning offers ${name}`);
-  for (const name of ["write", "edit", "bash", "opaque_write", "goal_update"]) assert.equal(investigation.toolNames.includes(name), false, `Planning removes ${name} from the model loadout`);
+  // The 2026-10-07 review found planning overriding on-demand tool exposure.
+  for (const name of ["write", "edit", "bash", "opaque_write", "codemode_read", "goal_update"]) assert.equal(investigation.toolNames.includes(name), false, `Planning removes ${name} from the model loadout`);
+  // The same review found planning instructions changing the first system message.
+  assert.doesNotMatch(messageText(investigation.body.messages?.find((message) => message.role === "system")?.content), /\[Dock Plan\]/);
+  assert.match(lastMessageText(investigation), /plan_question/);
+  assert.match(lastMessageText(investigation), /plan_submit/);
+  for (const name of ["plan_submit", "plan_question"]) {
+    const tool = investigation.body.tools?.find((item) => item.function.name === name)?.function as { description?: string } | undefined;
+    assert.match(tool?.description ?? "", /read.only|只读/i, `${name} describes the planning-only investigation`);
+  }
   investigation.tools(
     { id: "plan-read", name: "read", arguments: { path: "fixture.txt" } },
     { id: "plan-write", name: "write", arguments: { path: "fixture.txt", content: "unapproved write" } },
@@ -168,54 +184,93 @@ test("Plan investigates safely, lets the person discuss and edit the full plan, 
   assert.ok(h.events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "plan-nested" && event.data.text.includes("Nested write blocked")), "A read-only extension cannot write through a nested tool call");
   question.tools({ id: "plan-question", name: "plan_question", arguments: { question: "Which report format?", options: ["Plain text", "Markdown"] } });
   await ui.choose("Markdown");
-  const draft = "Read fixture.txt, then write the approved report.";
-  const edited = "Read fixture.txt, then write the human-reviewed Markdown report.";
+  // The 2026-10-07 review reproduced truncation of a 66-line plan at the decision.
+  const draft = ["## Goal", "Write the report...", "", "## Steps",
+    ...Array.from({ length: 60 }, (_, index) => `${index + 1}. Step ${index + 1}: inspect the module and run its checks.`),
+    "", "LAST: never deploy"].join("\n");
+  const revised = draft.replace("Write the report...", "Write the human-reviewed Markdown report.");
+  const edited = revised.replace("LAST: never deploy", "EDITED LAST: never deploy");
   (await h.request()).tools({ id: "plan-draft", name: "plan_submit", arguments: { content: draft } });
+  const review = await ui.next("editor");
+  assert.equal(review.prefill, draft, "The complete plan is visible with its original newlines before deciding");
+  assert.equal(review.prefill?.length, 3_159);
+  assert.equal(review.prefill?.split("\n").length, 66);
+  assert.equal(review.prefill?.split("\n").at(-1), "LAST: never deploy");
+  await ui.respond(review, { method: "editor", value: draft });
   const selection = await ui.next("select");
-  assert.ok(selection.title.includes(draft), "The complete short plan is visible at the decision");
+  assert.equal(selection.title, "接下来怎么做？");
   assert.deepEqual(selection.options, ["按此执行", "执行并自动推进到完成", "我来改", "继续讨论"]);
   await ui.respond(selection, { method: "select", value: "我来改" });
   const editor = await ui.next("editor");
   assert.equal(editor.prefill, draft);
-  await ui.respond(editor, { method: "editor", value: edited });
+  await ui.respond(editor, { method: "editor", value: revised });
   const discussion = await ui.choose("继续讨论");
-  assert.ok(discussion.title.includes(edited), "Saving an edit returns to the same decision with the edited plan");
+  assert.equal(discussion.title, "接下来怎么做？", "An edit returns directly to the decision without another review");
   (await h.request()).text("The revised report plan is ready for your comments.");
   await h.idle();
   assert.match(await h.surface(), /规划中/);
 
   await h.submit("That version is ready to execute.");
-  (await h.request()).tools({ id: "plan-ready", name: "plan_submit", arguments: { content: edited } });
+  (await h.request()).tools({ id: "plan-ready", name: "plan_submit", arguments: { content: revised } });
+  const repeatedReview = await ui.next("editor");
+  assert.equal(repeatedReview.prefill, revised, "Every separate submission shows the full plan again, even when unchanged");
+  // This final constraint exists only in the editor, after the model submitted
+  // its arguments. Pi's summary input truncates tool results at 2,000 characters.
+  await ui.respond(repeatedReview, { method: "editor", value: edited });
   const approval = await ui.next("select");
+  assert.equal(approval.title, "接下来怎么做？");
   await h.submit("Please call the output approved.txt.");
   await ui.respond(approval, { method: "select", value: "按此执行" });
   const execution = await h.request();
   assertOrdinaryTools(execution);
-  assert.ok(JSON.stringify(execution.body.messages).includes(edited));
+  assert.ok(execution.body.messages?.some((message) => message.role === "user" && messageText(message.content).includes(edited)), "The actual model receives the full human-edited plan, including its editor-only final constraint");
   assert.ok(JSON.stringify(execution.body.messages).includes("Please call the output approved.txt."), "A supplement reaches the work without invalidating the unchanged plan");
   execution.tools({ id: "approved-write", name: "write", arguments: { path: "approved.txt", content: "approved report" } });
   (await h.request()).text("The approved report is written.");
   await h.idle();
   assert.equal(await readFile(join(h.cwd, "approved.txt"), "utf8"), "approved report");
   assert.doesNotMatch(await h.surface(), /规划中|推进中/);
-  assert.deepEqual((await savedChanges(h)).flatMap((change) => change.plan ? [change.plan.content] : []), [draft, edited], "Submitting an unchanged plan does not append another full copy");
+  assert.deepEqual((await savedChanges(h)).flatMap((change) => change.plan ? [change.plan.content] : []), [draft, revised, edited], "Submitting an unchanged plan does not append another full copy");
+  const entries = await savedEntries(h);
+  const approvedEntries = entries.filter((entry) => entry.type === "custom_message" && entry.customType === "alu-dock-plan-goal" && messageText(entry.content).includes(edited));
+  assert.equal(approvedEntries.length, 1, "The edited approved plan is saved once as a normal message for future summaries");
+  assert.equal(approvedEntries[0].display, true, "The approved plan stays visible in the session");
+  const approvalResultIndex = entries.findIndex((entry) => entry.type === "message" && entry.message?.role === "toolResult" && entry.message.toolCallId === "plan-ready");
+  assert.ok(approvalResultIndex >= 0);
+  assert.ok(entries.indexOf(approvedEntries[0]) > approvalResultIndex, "The complete approval follows its tool result in the real Pi session");
+  const approvalResult = messageText(entries[approvalResultIndex].message.content);
+  assert.match(approvalResult, /第 3 版计划已批准/);
+  assert.equal(approvalResult.includes(edited), false, "The tool result stays a short action summary");
 
   await h.start("/plan");
   await waitFor(async () => /规划中/.test(await h.surface()), "Bare /plan did not enter planning");
   await h.start("/plan");
   await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
   await h.start("/plan Prepare a detailed follow-up report");
-  const longPlan = "Detailed report plan\n" + "Inspect each documented section and include its evidence.\n".repeat(160) + "Final approved step: deliver the report.";
+  const longPlan = draft.replace("Write the report...", "Write the detailed follow-up report.");
   (await h.request()).tools({ id: "long-plan", name: "plan_submit", arguments: { content: longPlan } });
   const fullReview = await ui.next("editor");
   assert.equal(fullReview.prefill, longPlan, "A long plan is shown in full before approval");
   await ui.respond(fullReview, { method: "editor", value: longPlan });
-  await ui.choose("执行并自动推进到完成");
+  const goalApproval = await ui.choose("执行并自动推进到完成");
+  assert.equal(goalApproval.title, "接下来怎么做？");
   const autonomous = await h.request();
   assert.ok(autonomous.toolNames.includes("goal_update"));
-  assert.ok(JSON.stringify(autonomous.body.messages).includes("Final approved step: deliver the report."));
+  const approvedPlans = autonomous.body.messages?.filter((message) => message.role === "user" && messageText(message.content).includes(longPlan));
+  assert.equal(approvedPlans?.length, 1, "The model receives one complete approved plan message");
+  assert.match(messageText(autonomous.body.messages?.findLast((message) => message.role === "tool")?.content), /第 4 版计划已批准/);
+  const goalWidget = h.events.findLast((event) => event.type === "extension.widget_changed" && event.data.key === "alu-dock-goal");
+  assert.ok(goalWidget?.type === "extension.widget_changed");
+  assert.equal(goalWidget.data.lines?.[0], "目标：执行已批准的第 4 版计划");
   assert.match(await h.surface(), /1\s*\/\s*10/);
-  autonomous.tools({ id: "plan-goal-complete", name: "goal_update", arguments: { status: "complete", summary: "Detailed report delivered", evidence: ["All requested sections are present"] } });
+  autonomous.text("The follow-up report is in progress.");
+  const continuation = await h.request();
+  assert.match(await h.surface(), /2\s*\/\s*10/);
+  assert.ok(lastMessageText(continuation).includes("执行已批准的第 4 版计划"));
+  // Full transcript history includes the tool arguments and approved message;
+  // only new continuation content must avoid appending the plan on each round.
+  assert.equal(lastMessageText(continuation).includes(longPlan), false);
+  continuation.tools({ id: "plan-goal-complete", name: "goal_update", arguments: { status: "complete", summary: "Detailed report delivered", evidence: ["All requested sections are present"] } });
   (await h.request()).text("The detailed report is delivered.");
   await h.idle();
   await assertGoalCleared(h);
@@ -337,7 +392,7 @@ test("Goal joins ongoing work, honors supplements and Esc, then adds budget and 
   assert.equal(unavailable.provider.requests.length, 0, "A request that cannot start does not spend a round or call the provider");
 });
 
-test("Reloading and selecting branches retain spent rounds and wait for the person, including old saved Goals", { timeout: 40_000 }, async (context) => {
+test("Reloading and selecting branches retain spent rounds and wait for the person", { timeout: 40_000 }, async (context) => {
   const h = await setup(context);
   await h.start("/goal --rounds 3 Inspect this branch in stages");
   const first = await h.request();
@@ -378,31 +433,4 @@ test("Reloading and selecting branches retain spent rounds and wait for the pers
   assert.match(await h.surface(), /已暂停/);
   assert.match(await h.surface(), /1\s*\/\s*3/);
   assert.equal(h.provider.requests.length, 4, "Selecting earlier active Goal history waits for explicit continuation");
-
-  // Frozen v1 record from the previous release, including its obsolete deadline.
-  // Loading it must preserve this person's remaining round, not revive the timer.
-  const legacyFile = join(h.sessionDir, "legacy-plan-goal.jsonl");
-  const timestamp = "2026-10-01T00:00:00.000Z";
-  await writeFile(legacyFile, [
-    { type: "session", version: 3, id: "legacy-plan-goal", timestamp, cwd: h.cwd },
-    { type: "message", id: "legacy-user", parentId: null, timestamp, message: { role: "user", content: "Inspect the archived fixture", timestamp: 1 } },
-    { type: "custom", id: "legacy-goal", parentId: "legacy-user", timestamp, customType: "alu-dock-plan-goal-state", data: {
-      version: 1, mode: "execute", goal: { id: "saved-goal", objective: "Inspect the archived fixture", status: "active", maxRounds: 3, rounds: 2,
-        expiresAt: 1, summary: "Two stages already checked", evidence: ["Archived fixture located"] },
-    } },
-  ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
-  await h.dock.switchSession(h.work.id, legacyFile);
-  await h.idle();
-  assert.match(await h.surface(), /已暂停/);
-  assert.match(await h.surface(), /2\s*\/\s*3/);
-  assert.equal(h.provider.requests.length, 4, "Old active records reopen disarmed");
-  const legacyUi = await h.ui();
-  await h.start("/goal");
-  await legacyUi.choose("继续");
-  const restored = await h.request();
-  assert.ok(JSON.stringify(restored.body.messages).includes("Inspect the archived fixture"));
-  restored.text("The archived fixture's final allowed stage is checked.");
-  await h.idle();
-  assert.match(await h.surface(), /3\s*\/\s*3/);
-  assert.match(await h.surface(), /用完|用尽/);
 });
