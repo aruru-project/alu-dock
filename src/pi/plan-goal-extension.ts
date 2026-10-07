@@ -7,7 +7,7 @@ const MAX_CONTENT = 64_000;
 const DEFAULT_ROUNDS = 10;
 const OWN_TOOLS = new Set(["plan_submit", "plan_question", "goal_update"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "tool_search"]);
-const PLAN_CHOICES = ["按此执行", "执行并自动推进到完成", "我来改", "继续讨论"];
+const PLAN_CHOICES = ["按此执行", "执行并自动推进到完成", "继续讨论"];
 
 type GoalStatus = "active" | "paused" | "blocked" | "budget_limited";
 interface Plan { id: string; revision: number; content: string }
@@ -191,26 +191,17 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
         if (!validText(params.content)) return result("请提交完整且简洁的计划。", true);
         context = ctx; updatePlan(params.content);
         if (!ctx.hasUI) return result("计划已保存。请向用户展示完整计划，等待在支持对话框的入口审阅。");
-        let reviewedRevision: number | undefined;
         while (state.mode === "plan" && !signal?.aborted) {
           const plan = state.plan!;
-          if (reviewedRevision !== plan.revision) {
-            const reviewed = await ctx.ui.editor("审阅完整计划（可修改，保存后选择下一步）", plan.content);
-            if (reviewed === undefined) return result("用户继续讨论，尚未批准执行。等待用户输入。");
-            if (state.plan?.revision !== plan.revision) continue;
-            if (!validText(reviewed)) return result("计划为空或太长，请继续讨论后重新提交。");
-            updatePlan(reviewed); reviewedRevision = state.plan!.revision;
-          }
+          const reviewed = await ctx.ui.editor("审阅完整计划（可修改，保存后选择下一步）", plan.content);
+          if (reviewed === undefined) return result("用户继续讨论，尚未批准执行。等待用户输入。");
+          if (state.plan?.revision !== plan.revision) continue;
+          if (!validText(reviewed)) return result("计划为空或太长，请继续讨论后重新提交。");
+          updatePlan(reviewed);
           const current = state.plan!;
           const choice = await ctx.ui.select("接下来怎么做？", PLAN_CHOICES, { signal });
           if (state.plan?.revision !== current.revision) continue;
           if (signal?.aborted || state.mode !== "plan") return result("规划已停止，尚未批准执行。");
-          if (choice === "我来改") {
-            const edited = await ctx.ui.editor("编辑计划", current.content);
-            if (state.plan?.revision !== current.revision) continue;
-            if (edited !== undefined && validText(edited)) { updatePlan(edited); reviewedRevision = state.plan!.revision; }
-            continue;
-          }
           if (choice !== "按此执行" && choice !== "执行并自动推进到完成") return result("用户选择继续讨论，尚未批准执行。等待用户输入。");
           state.mode = "execute";
           if (choice === "执行并自动推进到完成") {
@@ -252,7 +243,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       },
     } as never);
     pi.registerCommand("plan", {
-      description: "规划需求，由你选择执行、修改或继续讨论",
+      description: "审阅和修改计划，再决定执行或继续讨论",
       handler: async (args, ctx) => {
         context = ctx;
         const request = args.trim();

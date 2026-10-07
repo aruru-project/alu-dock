@@ -190,27 +190,42 @@ test("Plan investigates safely, lets the person discuss and edit the full plan, 
     "", "LAST: never deploy"].join("\n");
   const revised = draft.replace("Write the report...", "Write the human-reviewed Markdown report.");
   const edited = revised.replace("LAST: never deploy", "EDITED LAST: never deploy");
+  // Approval is the safety boundary: saving or closing the editor must not
+  // permit writes before the person chooses an execution option.
+  const assertAwaitingApproval = async () => {
+    assert.match(await h.surface(), /规划中/);
+    assert.equal((await savedEntries(h)).some((entry) => entry.type === "custom_message" && entry.customType === "alu-dock-plan-goal"), false, "No approval is recorded before the execution decision");
+    assert.equal(await readFile(join(h.cwd, "fixture.txt"), "utf8"), "original project contents\n");
+    await assert.rejects(readFile(join(h.cwd, "approved.txt")), { code: "ENOENT" }, "No report is written before approval");
+  };
   (await h.request()).tools({ id: "plan-draft", name: "plan_submit", arguments: { content: draft } });
   const review = await ui.next("editor");
   assert.equal(review.prefill, draft, "The complete plan is visible with its original newlines before deciding");
   assert.equal(review.prefill?.length, 3_159);
   assert.equal(review.prefill?.split("\n").length, 66);
   assert.equal(review.prefill?.split("\n").at(-1), "LAST: never deploy");
-  await ui.respond(review, { method: "editor", value: draft });
+  await ui.respond(review, { method: "editor", value: revised });
   const selection = await ui.next("select");
   assert.equal(selection.title, "接下来怎么做？");
-  assert.deepEqual(selection.options, ["按此执行", "执行并自动推进到完成", "我来改", "继续讨论"]);
-  await ui.respond(selection, { method: "select", value: "我来改" });
-  const editor = await ui.next("editor");
-  assert.equal(editor.prefill, draft);
-  await ui.respond(editor, { method: "editor", value: revised });
-  const discussion = await ui.choose("继续讨论");
-  assert.equal(discussion.title, "接下来怎么做？", "An edit returns directly to the decision without another review");
+  assert.deepEqual(selection.options, ["按此执行", "执行并自动推进到完成", "继续讨论"]);
+  await assertAwaitingApproval();
+  await ui.respond(selection, { method: "select", value: "继续讨论" });
   (await h.request()).text("The revised report plan is ready for your comments.");
   await h.idle();
   assert.match(await h.surface(), /规划中/);
 
-  await h.submit("That version is ready to execute.");
+  await h.submit("Show me that version again before I decide.");
+  (await h.request()).tools({ id: "plan-cancelled", name: "plan_submit", arguments: { content: revised } });
+  const cancelledReview = await ui.next("editor");
+  assert.equal(cancelledReview.prefill, revised);
+  await ui.respond(cancelledReview, { method: "editor", cancelled: true });
+  const afterCancel = await h.request();
+  assert.equal(afterCancel.toolNames.includes("write"), false, "Closing the editor keeps planning's write protection");
+  afterCancel.text("The plan is still awaiting your decision.");
+  await h.idle();
+  await assertAwaitingApproval();
+
+  await h.submit("Show the plan again so I can approve the final version.");
   (await h.request()).tools({ id: "plan-ready", name: "plan_submit", arguments: { content: revised } });
   const repeatedReview = await ui.next("editor");
   assert.equal(repeatedReview.prefill, revised, "Every separate submission shows the full plan again, even when unchanged");
@@ -219,6 +234,7 @@ test("Plan investigates safely, lets the person discuss and edit the full plan, 
   await ui.respond(repeatedReview, { method: "editor", value: edited });
   const approval = await ui.next("select");
   assert.equal(approval.title, "接下来怎么做？");
+  await assertAwaitingApproval();
   await h.submit("Please call the output approved.txt.");
   await ui.respond(approval, { method: "select", value: "按此执行" });
   const execution = await h.request();
