@@ -81,7 +81,8 @@ test("bundled CLI install and Protocol Worker configuration work without invokin
     mkdir(cwd),
     mkdir(agentDir),
     mkdir(packageDir),
-    mkdir(stateDir),
+    // The CLI catalog requires a private directory, independent of the runner's umask.
+    mkdir(stateDir, { mode: 0o700 }),
   ]);
   await chmod(root, 0o700);
   await Promise.all([
