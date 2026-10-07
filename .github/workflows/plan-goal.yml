@@ -60,6 +60,5 @@ jobs:
           umask 077
           npm ci --no-audit --no-fund
           npm run check -- --pretty false
-          npm run build
-          node --test dist/test/pi-plan-goal-real.test.js
+          npm test
           CHECKS
