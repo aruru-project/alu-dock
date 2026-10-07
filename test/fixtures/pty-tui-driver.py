@@ -67,6 +67,8 @@ def main() -> int:
         environment["NO_COLOR"] = "1"
         os.execvpe(sys.argv[1], sys.argv[1:], environment)
 
+    original_terminal = termios.tcgetattr(fd)
+    terminal_restored = False
     output = bytearray()
     resized_bytes = 0
     stable_render_batches = 0
@@ -106,7 +108,7 @@ def main() -> int:
             completed_renders = bytes(output).count(b"\x1b[?2026l")
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
-            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry", "context-changes"):
+            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry", "context-changes", "plan-review"):
                 set_size(fd, 40, 120)
             elif action == "flow-frame-stability":
                 set_size(fd, 58, 252)
@@ -639,6 +641,37 @@ def main() -> int:
                 while b"stopped" not in output and time.monotonic() < stop_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "plan-review":
+                def review_dialog():
+                    start = len(output)
+                    write_input(fd, output, b"/plan apply\r")
+                    deadline = time.monotonic() + 5
+                    title = "按计划执行".encode("utf-8")
+                    while (title not in output[start:] or b"PTY review plan" not in output[start:]) and time.monotonic() < deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    if title not in output[start:] or b"PTY review plan" not in output[start:]:
+                        raise TimeoutError("Plan review did not display its title and full plan")
+
+                review_dialog()
+                write_input(fd, output, b"\x1b")  # Cancel leaves the plan unapproved.
+                with open(ready_file + ".cancelled", "w", encoding="utf-8") as marker:
+                    marker.write("cancelled\n")
+                deadline = time.monotonic() + 5
+                while not os.path.exists(ready_file + ".continue") and time.monotonic() < deadline:
+                    read_available(fd, output, 0.05)
+                if not os.path.exists(ready_file + ".continue"):
+                    raise TimeoutError("Plan cancellation was not verified")
+                write_input(fd, output, b"\x1b[<64;20;10M")  # Scroll the visible conversation.
+                write_input(fd, output, b"\x1b[<65;20;10M")
+                review_dialog()
+                write_input(fd, output, b"\x1b[A\r")  # Confirm defaults to No; explicitly choose Yes.
+                deadline = time.monotonic() + 5
+                while b"PTY approved execution complete" not in output and time.monotonic() < deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                if b"PTY approved execution complete" not in output:
+                    raise TimeoutError("The approved Plan did not finish visibly")
             elif action == "extension-dialogs":
                 dialog_steps = [
                     (b"Pick fixture", b"beta\r"),
@@ -998,12 +1031,18 @@ def main() -> int:
         status = os.waitstatus_to_exitcode(wait_status)
     finally:
         try:
+            restored = termios.tcgetattr(fd)
+            terminal_restored = (restored[3] & (termios.ICANON | termios.ECHO)) == (original_terminal[3] & (termios.ICANON | termios.ECHO))
+        except termios.error:
+            pass
+        try:
             os.close(fd)
         except OSError:
             pass
 
     sys.stdout.write(json.dumps({
         "status": status,
+        "terminalRestored": terminal_restored,
         "timedOut": timed_out,
         "resizedBytes": resized_bytes,
         "stableRenderBatches": stable_render_batches,

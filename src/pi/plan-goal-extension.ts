@@ -270,8 +270,8 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
       if (state.goal?.status === "active") {
         state.goal.status = "paused";
         state.goal.summary = "当前活动已结束。用 /goal resume 继续目标。";
-      }
-      render(ctx);
+        save(ctx);
+      } else render(ctx);
     });
     pi.on("context", (event) => {
       const instruction = state.mode === "plan" ? [

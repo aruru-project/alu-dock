@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
+import { ptyUserEnvironment } from "./support/pty-user-environment.js";
 import { PlanGoalProvider, waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 // Confirmed Plan/Goal safety requirements: planning cannot change project files;
@@ -120,7 +122,7 @@ export default function (pi) {
   };
   const idle = async () => waitFor(async () => (await dock.read(work.id)).instance.execution === "idle", "Work did not become idle");
   const surface = async () => Object.values((await dock.read(work.id)).instance.extensionStatus).join("\n");
-  return { root, cwd, gate, gateEntered, dock, work, provider, events, subscriptions, submit, start, command, idle, surface };
+  return { root, cwd, socketPath, gate, gateEntered, dock, work, provider, events, subscriptions, submit, start, command, idle, surface };
 }
 
 function assertPrepared(request: HeldChatRequest, start: number): void {
@@ -453,4 +455,51 @@ test("Pause and new human input take priority while a Goal is deciding whether t
   } finally {
     await release();
   }
+});
+
+
+test("The TUI shows the Plan for review, keeps cancellation safe, executes approval, and restores the terminal", { timeout: 40_000 }, async (context) => {
+  const h = await setup(context);
+  await h.start("/plan on Prepare a report for terminal review");
+  (await h.provider.request(0)).tools({ id: "pty-plan", name: "plan_update", arguments: {
+    content: "PTY review plan: write the approved report after confirmation.",
+  } });
+  (await h.provider.request(1)).text("The Plan is ready for terminal review.");
+  await h.idle();
+  const readyFile = join(h.root, "plan-pty.ready");
+  const environment = await ptyUserEnvironment(join(h.root, "pty"), {
+    ALU_DOCK_PTY_ACTION: "plan-review", ALU_DOCK_PTY_READY_FILE: readyFile,
+    TMPDIR: h.root, TEMP: h.root, TMP: h.root, XDG_RUNTIME_DIR: join(h.root, "pty-run"), npm_config_cache: join(h.root, "pty-npm"),
+  });
+  const pty = new Promise<{ status: number; timedOut: boolean; resizedBytes: number; terminalRestored: boolean; output: string }>((resolve, reject) => {
+    const child = spawn("python3", [join(process.cwd(), "test/fixtures/pty-tui-driver.py"), process.execPath,
+      join(process.cwd(), "dist/src/cli.js"), "--socket", h.socketPath, "attach", h.work.id], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout: Buffer[] = [], stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code !== 0) { reject(new Error(`PTY driver failed: ${Buffer.concat(stderr).toString("utf8")}`)); return; }
+      try { resolve(JSON.parse(Buffer.concat(stdout).toString("utf8"))); } catch (error) { reject(error); }
+    });
+  });
+  void pty.catch(() => {});
+  context.after(async () => { await pty.catch(() => {}); });
+  await waitFor(async () => readFile(`${readyFile}.cancelled`, "utf8").then(() => true, () => false), "The TUI did not cancel the first Plan review");
+  await waitFor(async () => !(await h.dock.read(h.work.id)).instance.activeInteraction, "The first Plan review did not close");
+  assert.match(await h.surface(), /规划中/);
+  assert.equal(h.provider.requests.length, 2, "Cancelling terminal review does not start execution");
+  await writeFile(`${readyFile}.continue`, "continue");
+  (await h.provider.request(2)).text("PTY approved execution complete");
+  const result = await pty;
+  const output = Buffer.from(result.output, "base64").toString("utf8");
+  assert.equal(result.timedOut, false, output.slice(-4_000));
+  assert.equal(result.status, 0, output.slice(-4_000));
+  assert.ok(result.resizedBytes > 0, "The Plan surface renders after a terminal resize");
+  assert.equal(result.terminalRestored, true, "Detach restores canonical input and echo");
+  assert.ok(output.includes("按计划执行") && output.includes("PTY review plan") && output.includes("PTY approved execution complete"));
+  assert.ok(output.includes("\u001b[?25h"), "Detach restores the visible terminal cursor");
+  await h.idle();
+  assert.match(await h.surface(), /已批准/);
+  assert.equal((await h.dock.read(h.work.id)).instance.lifecycle, "active", "TUI detach leaves the Work available");
 });

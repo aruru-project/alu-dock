@@ -58,16 +58,7 @@ jobs:
             bash --noprofile --norc -euo pipefail <<'CHECKS'
           npm ci --no-audit --no-fund
           npm run check -- --pretty false
-          npm run build
-          node --test --test-concurrency=2 \
-            dist/test/pi-plan-goal-real.test.js \
-            dist/test/pi-running-dock-tools-real.test.js \
-            dist/test/pi-dock-tools-real.test.js \
-            dist/test/pi-extension-ui-real.test.js \
-            dist/test/pi-stage3-real.test.js \
-            dist/test/pi-tree-hooks-real.test.js \
-            dist/test/pi-tree-real.test.js \
-            dist/test/pi-reopen-real.test.js \
-            dist/test/pi-reload-real.test.js \
-            dist/test/pi-command-discovery-real.test.js
+          # The extension autoloads in every Pi Work, so validate the full Node
+          # suite once at the final feature commit, including SDK and PTY gates.
+          npm test
           CHECKS
