@@ -917,6 +917,7 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.ok(pty.resizedBytes > 0, "SIGWINCH must produce a resized TUI frame");
+  assert.equal(pty.terminalRestored, true, "Detach restores canonical terminal input and echo");
   assert.match(output, /Alu Dock/);
   assert.match(output, /deterministic delayed task/);
   assert.match(output, /waiting for model/);
@@ -3491,6 +3492,7 @@ interface PtyTuiResult {
   status: number;
   timedOut: boolean;
   resizedBytes: number;
+  terminalRestored: boolean;
   stableRenderBatches: number;
   stableOutputBytes: number;
   stableDraftRewrites: number;

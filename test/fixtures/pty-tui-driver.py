@@ -79,6 +79,8 @@ def main() -> int:
         environment["NO_COLOR"] = "1"
         os.execvpe(sys.argv[1], sys.argv[1:], environment)
 
+    original_terminal = termios.tcgetattr(fd)
+    terminal_restored = False
     output = bytearray()
     resized_bytes = 0
     stable_render_batches = 0
@@ -1010,12 +1012,18 @@ def main() -> int:
         status = os.waitstatus_to_exitcode(wait_status)
     finally:
         try:
+            restored = termios.tcgetattr(fd)
+            terminal_restored = (restored[3] & (termios.ICANON | termios.ECHO)) == (original_terminal[3] & (termios.ICANON | termios.ECHO))
+        except termios.error:
+            pass
+        try:
             os.close(fd)
         except OSError:
             pass
 
     sys.stdout.write(json.dumps({
         "status": status,
+        "terminalRestored": terminal_restored,
         "timedOut": timed_out,
         "resizedBytes": resized_bytes,
         "stableRenderBatches": stable_render_batches,
