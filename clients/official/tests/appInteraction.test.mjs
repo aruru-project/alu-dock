@@ -416,7 +416,7 @@ try {
   // A live initiating panel owns its error UI; the retained entry must not duplicate it.
   find(container, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
   await find(container, item => item.props.id === 'cc-opt-0').props.onClick(); await settle()
-  assert.equal(resultEntry(), undefined, 'do not stack a second error surface on the open operation panel')
+  assertSameReference(resultEntry(), undefined, 'do not stack a second error surface on the open operation panel')
   assert.ok(text(container).includes('这次模型设置没有完成'))
   assert.equal(calls.filter(call => call.command === 'consume_operation').length, initialAcknowledgements)
   find(container, item => item.props['aria-label'] === '关闭').props.onClick(); await settle()
@@ -439,7 +439,7 @@ try {
   resultEntry().open = true
   for (const button of all(resultEntry(), item => item.type === 'button' && text(item) === '知道了')) await button.props.onClick()
   await settle()
-  assert.equal(resultEntry(), undefined)
+  assertSameReference(resultEntry(), undefined)
   assert.equal(nativeResults.size, 1, 'directory failure stays separate from the selected Work')
   find(container, item => item.type === 'button' && String(item.props['aria-label'] ?? '').startsWith('打开工作列表，有')).props.onClick(); await settle()
   const workList = find(container, item => item.type === 'aside' && item.props['aria-label'] === '工作列表')
@@ -463,7 +463,7 @@ try {
     await settle()
     assert.equal(nativeResults.has(scenario), true, 'an unseen send failure cannot be consumed')
     assert.equal(app.selectedWorkId, 'other'); assert.equal(app.currentDraft, 'other draft')
-    assert.equal(resultEntry(), undefined)
+    assertSameReference(resultEntry(), undefined)
     assert.equal(text(container).includes(lost ? '没收到结果' : '这次消息没有发送'), false, 'do not write the original send error into another Work')
     app.selectWork('work'); await settle(); contentSnapshot(); await settle()
     assert.ok(text(resultEntry()).includes(lost ? '发送消息没收到结果' : '发送消息没有完成')); resultEntry().open = true
@@ -762,7 +762,7 @@ try {
   // #357: the abort control only exists while the Work is running.
   {
     assert.equal(app.selectedWork.execution === 'running', false)
-    assert.equal(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'an idle Work shows no abort control')
+    assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'an idle Work shows no abort control')
     const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', pending: { steering: 0, followUp: 2, total: 2 } }
     const restored = [{ ...queueItem('abort-1'), text: 'queued a' }, { ...queueItem('abort-2'), text: 'queued b' }]
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
@@ -787,7 +787,7 @@ try {
     resolveAbort(result); await pendingAbort; await settle()
     assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'returned messages precede the editor text')
     assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues, 'Abort needs no separate Queue retrieval')
-    assert.equal(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves with the run')
+    assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves with the run')
     assert.ok(text(container).includes('已中止，2 条排队消息已放回输入框'))
     emit('aludock://operation', { ...unconfirmedCompaction, state: 'succeeded', error: undefined, result: { instance: result.instance } })
     compact.props['onUpdate:modelValue']('later input')
