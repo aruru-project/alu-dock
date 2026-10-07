@@ -143,7 +143,7 @@ import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-obse
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import { retryExtension } from "./retry-extension.js";
-import { planGoalExtension, PlanGoalControl } from "./plan-goal-extension.js";
+import { planGoalExtension, type PlanGoalStart } from "./plan-goal-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
 import { piBuiltinExtensions } from "./pi-builtin-extensions.js";
 import { LiveNestedToolCalls, nestedCallArgumentsJson, projectPiNestedToolCalls } from "./pi-nested-tool-calls.js";
@@ -191,7 +191,7 @@ export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
 }
 
 export interface PiAgentAdapterOptions {
-  planGoalControl?: PlanGoalControl;
+  planGoalStart?: PlanGoalStart;
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
   setProjectTrust?: (cwd: string, trusted: boolean) => void;
@@ -310,7 +310,7 @@ export class PiAgentAdapter {
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
-    options.planGoalControl?.bindPrompt(async (text, mayStart) => {
+    if (options.planGoalStart) options.planGoalStart.prompt = async (text, mayStart) => {
       let started = false;
       await this.requireActive().session.prompt(text, {
         source: "extension", expandPromptTemplates: false,
@@ -321,7 +321,7 @@ export class PiAgentAdapter {
         },
       } as PromptOptions);
       return started;
-    });
+    };
     this.processCwdValue = options.initialProcessCwd;
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;
@@ -1180,7 +1180,7 @@ export class PiAgentAdapter {
     return cleared;
   }
   async abort(): Promise<void> {
-    this.options.planGoalControl?.pause("当前工作已中止，目标已暂停。用 /goal resume 明确继续。");
+    this.options.planGoalStart?.cancelPending?.();
     const session = this.active?.session;
     if (!session) return;
     const navigation = this.treeNavigation;
@@ -3507,7 +3507,7 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
-  const planGoalControl = new PlanGoalControl();
+  const planGoalStart: PlanGoalStart = {};
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const publishedFiles = new TransientFileRegistry();
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
@@ -3533,7 +3533,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },
-          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalControl) },
+          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalStart) },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
@@ -3571,7 +3571,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     cwd: options.cwd, agentDir: options.agentDir, sessionManager,
   });
   return PiAgentAdapter.create({
-    planGoalControl,
+    planGoalStart,
     runtime,
     extensionUiBroker: options.extensionUiBroker,
     uiContext,

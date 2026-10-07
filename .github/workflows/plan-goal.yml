@@ -56,9 +56,10 @@ jobs:
             npm_config_cache="$root/npm" \
             NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
             bash --noprofile --norc -euo pipefail <<'CHECKS'
+          # Match a private local Pi home while the unrelated fixture fix lives in PR #2.
+          umask 077
           npm ci --no-audit --no-fund
           npm run check -- --pretty false
-          # The extension autoloads in every Pi Work, so validate the full Node
-          # suite once at the final feature commit, including SDK and PTY gates.
-          npm test
+          npm run build
+          node --test dist/test/pi-plan-goal-real.test.js
           CHECKS

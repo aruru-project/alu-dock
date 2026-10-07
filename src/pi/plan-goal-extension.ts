@@ -6,484 +6,311 @@ const STATE_TYPE = "alu-dock-plan-goal-state";
 const MESSAGE_TYPE = "alu-dock-plan-goal";
 const MAX_CONTENT = 64_000;
 const DEFAULT_ROUNDS = 10;
-const DEFAULT_MINUTES = 30;
-const PLAN_TOOLS = new Set(["plan_update", "plan_question", "goal_update"]);
+const OWN_TOOLS = new Set(["plan_submit", "plan_question", "goal_update"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "tool_search"]);
+const PLAN_CHOICES = ["按此执行", "执行并自动推进到完成", "我来改", "继续讨论"];
 
-type GoalStatus = "active" | "paused" | "blocked" | "complete" | "cancelled" | "budget_limited";
-interface Plan {
-  id: string;
-  revision: number;
-  content: string;
-  approvedRevision?: number;
-}
-interface Goal {
-  id: string;
-  objective: string;
-  status: GoalStatus;
-  maxRounds: number;
-  rounds: number;
-  expiresAt: number;
-  summary: string;
-  evidence: string[];
-}
-interface State {
-  version: 1;
-  mode: "plan" | "execute";
-  plan?: Plan;
-  goal?: Goal;
-  addedPlanTools?: string[];
+type GoalStatus = "active" | "paused" | "blocked" | "budget_limited";
+interface Plan { id: string; revision: number; content: string }
+interface Goal { id: string; objective: string; status: GoalStatus; maxRounds: number; rounds: number; summary: string; evidence: string[] }
+interface State { mode: "plan" | "execute"; plan?: Plan; goal?: Goal; tools?: string[] }
+interface StateChange { version: 2; mode?: State["mode"]; plan?: Plan | null; goal?: Partial<Goal> | null; tools?: string[] | null }
+
+/** Pi's extension sendUserMessage is fire-and-forget: pre-start errors/handled
+ * input have no settled event, and abort during preparation does not cancel it.
+ * This small port reports that result and invalidates an unstarted request. */
+export interface PlanGoalStart {
+  prompt?: (text: string, mayStart: () => boolean) => Promise<boolean>;
+  cancelPending?: () => void;
 }
 
-/** The adapter's existing abort must disarm before Pi can skip pre-settle. No Host state. */
-export class PlanGoalControl {
-  private pauseCurrent: ((reason: string) => void) | undefined;
-  private promptCurrent: ((text: string, mayStart: () => boolean) => Promise<boolean>) | undefined;
-
-  attach(pause: (reason: string) => void): () => void {
-    this.pauseCurrent = pause;
-    return () => { if (this.pauseCurrent === pause) this.pauseCurrent = undefined; };
-  }
-
-  pause(reason: string): void { this.pauseCurrent?.(reason); }
-  bindPrompt(prompt: (text: string, mayStart: () => boolean) => Promise<boolean>): void { this.promptCurrent = prompt; }
-  async start(text: string, mayStart: () => boolean): Promise<boolean> {
-    if (!this.promptCurrent) throw new Error("规划与目标尚未连接到当前会话，请重新打开工作后再试。");
-    return this.promptCurrent(text, mayStart);
-  }
-}
-
-export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
+export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
   return (pi) => {
-    let state: State = { version: 1, mode: "execute" };
+    let state: State = { mode: "execute" };
+    let saved: State = structuredClone(state);
     let context: ExtensionContext | undefined;
     let armed = false;
     let pendingRound: string | undefined;
-    let timer: NodeJS.Timeout | undefined;
-    let detach = (): void => {};
-    let noProgressRounds = 0;
-    let progressSinceBoundary = false;
-    let lastAssistantText = "";
-    let intentVersion = 0;
+    let runningGoalId: string | undefined;
+    let requestVersion = 0;
 
-    const stopTimer = (): void => { if (timer) clearTimeout(timer); timer = undefined; };
-    const disarm = (): void => { armed = false; pendingRound = undefined; stopTimer(); };
-    const activatePlanTools = (): void => {
-      // Pi's configured registry already respects explicit tools/excludeTools.
-      // Its default loadout omits search/listing, which planning needs to discover facts.
-      const reads = pi.getAllTools().filter((tool) => tool.sourceInfo.source === "builtin" && READ_TOOLS.has(tool.name)).map((tool) => tool.name);
-      const active = pi.getActiveTools();
-      state.addedPlanTools = [...new Set([...(state.addedPlanTools ?? []), ...reads.filter((name) => !active.includes(name))])];
-      pi.setActiveTools([...new Set([...active, ...reads])]);
+    const readOnly = (name: string): boolean => {
+      const tool = pi.getAllTools().find((item) => item.name === name);
+      return READ_TOOLS.has(name) && tool?.sourceInfo.source === "builtin" || tool?.annotations?.readOnlyHint === true;
     };
-    const setMode = (mode: State["mode"]): void => {
-      state.mode = mode;
-      if (mode === "plan") activatePlanTools();
-      else if (state.addedPlanTools) {
-        pi.setActiveTools(pi.getActiveTools().filter((name) => !state.addedPlanTools!.includes(name)));
-        delete state.addedPlanTools;
+    const syncTools = (): void => {
+      const active = pi.getActiveTools().filter((name) => !OWN_TOOLS.has(name));
+      if (state.mode === "plan") {
+        state.tools ??= active;
+        pi.setActiveTools([...new Set([...active.filter(readOnly), ...pi.getAllTools().filter((tool) => readOnly(tool.name)).map((tool) => tool.name), "plan_submit", "plan_question"])]);
+      } else {
+        const normal = state.tools ?? active;
+        delete state.tools;
+        pi.setActiveTools([...normal, ...(armed && state.goal?.status === "active" ? ["goal_update"] : [])]);
       }
     };
     const render = (ctx: ExtensionContext): void => {
-      const plan = state.plan;
-      ctx.ui.setStatus("Plan", state.mode === "plan" ? `规划中 · 第${plan?.revision ?? 0}版`
-        : plan?.approvedRevision === plan?.revision && plan ? `已批准 · 第${plan.revision}版` : undefined);
-      ctx.ui.setWidget("alu-dock-plan", plan && state.mode === "plan"
-        ? ["规划：先调查、讨论，再按计划执行", ...plan.content.split("\n").slice(0, 24), "/plan show 查看完整计划 · /plan edit 编辑 · /plan apply 执行"]
-        : undefined);
+      ctx.ui.setStatus("Plan", state.mode === "plan" ? "规划中 · /plan 退出" : undefined);
+      ctx.ui.setWidget("alu-dock-plan", state.mode === "plan" && state.plan
+        ? ["当前计划", ...state.plan.content.split("\n").slice(0, 24)] : undefined);
       const goal = state.goal;
-      ctx.ui.setStatus("Goal", goal ? `${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮` : undefined);
-      ctx.ui.setWidget("alu-dock-goal", goal ? [
-        `目标：${goal.objective}`,
-        `${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮 · 截止 ${new Date(goal.expiresAt).toISOString()}`,
-        ...(goal.summary ? [goal.summary] : []),
-        ...goal.evidence.map((item) => `依据：${item}`),
-        goal.status === "active" ? "/goal pause 暂停 · /goal cancel 取消" : "/goal status 查看 · /goal resume 继续",
-      ] : undefined);
+      ctx.ui.setStatus("Goal", goal ? `${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮 · /goal 管理` : undefined);
+      ctx.ui.setWidget("alu-dock-goal", goal?.status === "active" ? [`目标：${goal.objective}`, ...(goal.summary ? [goal.summary] : [])] : undefined);
     };
     const save = (ctx = context): void => {
-      pi.appendEntry(STATE_TYPE, structuredClone(state));
+      const change: StateChange = { version: 2 };
+      if (state.mode !== saved.mode) change.mode = state.mode;
+      if (JSON.stringify(state.plan) !== JSON.stringify(saved.plan)) change.plan = state.plan ?? null;
+      if (JSON.stringify(state.tools) !== JSON.stringify(saved.tools)) change.tools = state.tools ?? null;
+      if (!state.goal && saved.goal) change.goal = null;
+      else if (state.goal) {
+        const goal = state.goal;
+        const previous = saved.goal?.id === goal.id ? saved.goal : undefined;
+        const changed = Object.fromEntries(Object.entries(goal).filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(previous?.[key as keyof Goal])));
+        if (Object.keys(changed).length) change.goal = changed;
+      }
+      if (Object.keys(change).length > 1) pi.appendEntry(STATE_TYPE, change);
+      saved = structuredClone(state);
       if (ctx) render(ctx);
     };
+    const disarm = (): void => { armed = false; pendingRound = undefined; runningGoalId = undefined; requestVersion += 1; };
     const pause = (reason: string): void => {
-      intentVersion += 1;
       disarm();
-      if (state.goal?.status !== "active") return;
-      state.goal.status = "paused";
-      state.goal.summary = reason;
-      save();
+      if (state.goal?.status === "active") { state.goal.status = "paused"; context?.ui.notify(reason, "info"); }
+      syncTools(); save();
     };
-    const exhaust = (reason: string, ctx: ExtensionContext, abort: boolean): void => {
-      disarm();
-      if (!state.goal || state.goal.status !== "active") return;
-      state.goal.status = "budget_limited";
-      state.goal.summary = reason;
-      save(ctx);
-      ctx.ui.notify(`${reason}。要继续，请明确设置一个新的目标和预算。`, "info");
-      if (abort) ctx.abort();
-    };
-    const startTimer = (ctx: ExtensionContext): void => {
-      stopTimer();
-      const goal = state.goal;
-      if (!goal || !armed) return;
-      const goalId = goal.id;
-      timer = setTimeout(() => {
-        if (armed && state.goal?.id === goalId) exhaust("目标的时间预算已用尽", ctx, true);
-      }, Math.max(0, goal.expiresAt - Date.now()));
-      timer.unref();
-    };
-    const startUserRun = (text: string, ctx: ExtensionContext, goalId?: string): void => {
-      const intent = intentVersion;
-      // User-triggered starts need Pi's full prompt preparation (project context,
-      // before_agent_start and tool loadout). A raw custom-message start skips it.
-      const mayStart = (): boolean => intent === intentVersion && (!goalId || armed && state.goal?.id === goalId
-        && state.goal.status === "active" && Date.now() < state.goal.expiresAt);
-      void control.start(text, mayStart).then((started) => {
-        if (started || !goalId || !mayStart() || state.goal?.id !== goalId) return;
-        disarm(); state.goal.status = "blocked";
-        state.goal.summary = "输入已由其他扩展接管，目标没有开始。请确认该扩展的结果后再继续。";
-        save(ctx);
-      }).catch((error: unknown) => {
-        if (intent !== intentVersion) return;
-        if (goalId && state.goal?.id === goalId && state.goal.status !== "active") return;
-        if (goalId && state.goal?.id === goalId && state.goal.status === "active") {
-          disarm(); state.goal.status = "blocked";
-          state.goal.summary = "目标未能开始。请处理模型或会话错误后用 /goal resume 继续。";
-          save(ctx);
-        }
-        ctx.ui.notify(`无法开始当前请求：${error instanceof Error ? error.message : String(error)}。请处理问题后重试。`, "error");
-      });
-    };
-    const goalPrompt = (goal: Goal): string => [
-      "[Dock Goal continuation: runtime-generated context, not new human authorization]",
-      `Goal: ${goal.objective}`,
-      `Goal-scheduled round: ${goal.rounds + 1}/${goal.maxRounds}. Deadline: ${new Date(goal.expiresAt).toISOString()}.`,
-      "Continue the agreed task within its existing scope and tool permissions. Do not expand scope, spend more, commit or deploy unless already authorized.",
-      "Use goal_update to record meaningful progress. When the target is met, report complete with concrete evidence; when a decision, permission or unavailable dependency prevents progress, report blocked and explain the next action.",
-      "A progress checklist or your assertion alone is not an independently verified result. Describe checks honestly. Wait for asynchronous work using its existing wait/result tools rather than repeatedly restating that you are waiting.",
-      "New user input takes priority. This generated Goal context records the existing task and never overrides a newer instruction or grants fresh authorization.",
-      ...(goal.summary ? [`Latest progress: ${goal.summary}`] : []),
-    ].join("\n");
-    const beginRound = (ctx: ExtensionContext): void => {
+    const announce = (text: string): void => pi.sendMessage({ customType: MESSAGE_TYPE, content: text, display: true }, { triggerTurn: false });
+    const finish = (cancelled: boolean, ctx: ExtensionContext): void => {
       const goal = state.goal;
       if (!goal) return;
-      armed = true;
-      pendingRound = goal.id;
-      progressSinceBoundary = false;
-      noProgressRounds = 0;
-      goal.status = "active";
-      save(ctx);
-      startTimer(ctx);
-      startUserRun(`[Dock command: the user explicitly started or resumed this Goal]\n${goalPrompt(goal)}`, ctx, goal.id);
+      announce([cancelled ? "目标已结束" : "目标已完成", goal.objective, goal.summary, ...goal.evidence.map((item) => `依据：${item}`)].filter(Boolean).join("\n"));
+      disarm(); delete state.goal; syncTools(); save(ctx);
+    };
+    const exhaust = (ctx: ExtensionContext): void => {
+      disarm();
+      if (!state.goal) return;
+      state.goal.status = "budget_limited";
+      const message = `已用完 ${state.goal.maxRounds} 轮，目标还没完成。用 /goal 选择“再给 10 轮”。`;
+      syncTools(); save(ctx); ctx.ui.notify(message, "info");
+    };
+    const goalPrompt = (goal: Goal): string => [
+      `[Dock Goal: ${goal.rounds + 1}/${goal.maxRounds}]`,
+      `目标：${goal.objective}`,
+      "在原有授权范围内继续工作。新补充的用户要求优先；这条自动推进消息不增加授权。",
+      "用 goal_update 记录进展；受阻时说明需要什么，完成时给出实际产物或已执行检查作为依据。不要把未运行的检查写成通过。",
+      ...(goal.summary ? [`已有进展：${goal.summary}`] : []),
+    ].join("\n");
+    const startPrompt = (text: string, ctx: ExtensionContext, goalId?: string): void => {
+      const version = requestVersion;
+      const valid = (): boolean => version === requestVersion && (!goalId || armed && state.goal?.id === goalId);
+      void start.prompt?.(text, valid).then((started) => {
+        if (!started && valid() && goalId && state.goal?.id === goalId) {
+          disarm(); state.goal.status = "blocked"; syncTools(); save(ctx); ctx.ui.notify("输入已由其他扩展接管。查看结果后用 /goal 继续。", "info");
+        }
+      }).catch((error: unknown) => {
+        if (!valid()) return;
+        if (goalId && state.goal?.id === goalId) {
+          disarm(); state.goal.status = "blocked"; syncTools(); save(ctx);
+        }
+        ctx.ui.notify(`无法开始：${error instanceof Error ? error.message : String(error)}。处理问题后重试。`, "error");
+      });
+    };
+    const resume = (ctx: ExtensionContext): void => {
+      const goal = state.goal;
+      if (!goal) return;
+      if (goal.rounds >= goal.maxRounds) { exhaust(ctx); return; }
+      requestVersion += 1; state.mode = "execute"; armed = true; goal.status = "active";
+      syncTools(); save(ctx);
+      if (ctx.isIdle()) { pendingRound = goal.id; startPrompt(goalPrompt(goal), ctx, goal.id); }
+      else ctx.ui.notify("目标已就绪，当前回复结束后继续推进。", "info");
+    };
+    const newGoal = (objective: string, rounds: number): Goal => ({ id: randomUUID(), objective, maxRounds: rounds, rounds: 0, status: "active", summary: "", evidence: [] });
+    const updatePlan = (content: string): void => {
+      if (state.plan?.content === content) return;
+      state.plan = { id: state.plan?.id ?? randomUUID(), revision: (state.plan?.revision ?? 0) + 1, content };
+      save();
     };
     const restore = (ctx: ExtensionContext): void => {
-      intentVersion += 1;
-      disarm();
-      context = ctx;
-      state = { version: 1, mode: "execute" };
+      disarm(); context = ctx;
+      state = { mode: "execute" };
       for (const entry of ctx.sessionManager.getBranch()) {
-        if (entry.type === "custom" && entry.customType === STATE_TYPE && isState(entry.data)) state = structuredClone(entry.data);
+        if (entry.type !== "custom" || entry.customType !== STATE_TYPE || !entry.data || typeof entry.data !== "object") continue;
+        const record = entry.data as Record<string, unknown>;
+        if (record.version === 1) {
+          state = { mode: record.mode === "plan" ? "plan" : "execute" };
+          if (validPlan(record.plan)) state.plan = record.plan;
+          if (validGoal(record.goal)) state.goal = record.goal;
+        } else if (record.version === 2) {
+          if (record.mode === "plan" || record.mode === "execute") state.mode = record.mode;
+          if (record.plan === null) delete state.plan; else if (validPlan(record.plan)) state.plan = record.plan;
+          if (record.goal === null) delete state.goal;
+          else if (record.goal && typeof record.goal === "object") {
+            const candidate = { ...state.goal, ...record.goal };
+            if (validGoal(candidate)) state.goal = candidate;
+          }
+          if (record.tools === null) delete state.tools;
+          else if (Array.isArray(record.tools) && record.tools.every((name) => typeof name === "string")) state.tools = record.tools;
+        }
       }
-      if (state.mode === "plan") activatePlanTools();
-      if (state.goal?.status === "active") {
-        state.goal.status = "paused";
-        state.goal.summary = "会话已恢复，目标保留。用 /goal resume 明确继续。";
-        save(ctx);
-      } else render(ctx);
-    };
-    const notifyState = (ctx: ExtensionContext): void => {
-      render(ctx);
-      const goal = state.goal;
-      ctx.ui.notify(goal ? `${goalLabel(goal.status)}：${goal.objective}\n${goal.rounds}/${goal.maxRounds}轮，截止 ${new Date(goal.expiresAt).toISOString()}\n${goal.summary}`
-        : "还没有目标。用 /goal start --rounds 10 --minutes 30 目标内容 开始。", "info");
+      saved = structuredClone(state);
+      if (state.goal?.status === "active") state.goal.status = "paused";
+      syncTools(); save(ctx);
     };
 
-    pi.on("session_start", (_event, ctx) => { detach(); restore(ctx); detach = control.attach(pause); });
+    pi.on("session_start", (_event, ctx) => { restore(ctx); start.cancelPending = () => { if (pendingRound) pause("已暂停。用 /goal 选择“继续”。"); else requestVersion += 1; }; });
     pi.on("session_tree", (_event, ctx) => restore(ctx));
-    pi.on("session_shutdown", () => { intentVersion += 1; disarm(); detach(); });
-    // Ordinary input retains Pi's own steer/Queue semantics. It never arms a
-    // paused goal, but a supplement need not make an active goal require resume.
-    pi.on("input", (event) => {
-      if (event.source !== "extension") { intentVersion += 1; pendingRound = undefined; }
-      return { action: "continue" };
-    });
-    pi.on("agent_start", (_event, ctx) => {
+    pi.on("session_shutdown", () => { disarm(); start.cancelPending = undefined; });
+    pi.on("turn_start", (_event, ctx) => {
       context = ctx;
       const goal = state.goal;
-      if (armed && goal?.status === "active" && pendingRound === goal.id) {
-        pendingRound = undefined;
-        goal.rounds += 1;
-        save(ctx);
-      }
-    });
-    pi.on("tool_result", (event) => {
-      if (!event.isError && !PLAN_TOOLS.has(event.toolName)) progressSinceBoundary = true;
-    });
-    pi.on("message_end", (event) => {
-      if (event.message.role !== "assistant") return;
-      const text = event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
-      if (text && text !== lastAssistantText) progressSinceBoundary = true;
-      lastAssistantText = text;
-    });
-    pi.on("session_compact_failed", (event, ctx) => {
-      if (!armed) return;
-      disarm();
-      if (state.goal) {
-        state.goal.status = event.aborted ? "paused" : "blocked";
-        state.goal.summary = event.aborted ? "上下文整理已中止。可查看结果后继续目标。" : "上下文整理失败。请处理错误后再继续目标。";
-        save(ctx);
-      }
+      if (armed && goal && goal.id === pendingRound) { pendingRound = undefined; runningGoalId = goal.id; goal.rounds += 1; save(ctx); }
     });
     pi.on("agent_before_settle", (event, ctx) => {
-      context = ctx;
       const goal = state.goal;
       if (!armed || !goal || goal.status !== "active") return;
       if (event.outcome !== "completed") {
-        disarm();
-        goal.status = event.outcome === "aborted" ? "paused" : "blocked";
-        goal.summary = event.outcome === "aborted" ? "当前活动已中止。可用 /goal resume 继续。" : "模型请求失败。请处理错误后用 /goal resume 继续。";
-        save(ctx);
-        return;
+        disarm(); goal.status = event.outcome === "aborted" ? "paused" : "blocked";
+        ctx.ui.notify(event.outcome === "aborted" ? "已暂停。用 /goal 继续。" : "当前请求出错。处理错误后用 /goal 继续。", "info");
+        syncTools(); save(ctx); return;
       }
-      if (Date.now() >= goal.expiresAt) { exhaust("目标的时间预算已用尽", ctx, false); return; }
-      if (goal.rounds >= goal.maxRounds) { exhaust("目标的推进轮数已用尽", ctx, false); return; }
-      // Pi gets first chance to deliver already queued input. Never compete with
-      // another extension's explicit continuation or discard its boundary drafts.
-      if (ctx.hasPendingMessages() || event.context.pendingMessages.length > 0 || event.continue) return;
-      noProgressRounds = progressSinceBoundary ? 0 : noProgressRounds + 1;
-      progressSinceBoundary = false;
-      if (noProgressRounds >= 3) {
-        disarm();
-        goal.status = "blocked";
-        goal.summary = "连续几轮只有重复回复，也没有工具结果或新的进展，已停下来。请补充所需信息后继续。";
-        save(ctx);
-        return;
-      }
+      if (ctx.hasPendingMessages() || event.context.pendingMessages.length || event.continue) return;
+      if (goal.rounds >= goal.maxRounds) { exhaust(ctx); return; }
       pendingRound = goal.id;
-      return { entries: [...event.entries, { type: "custom_message", customType: MESSAGE_TYPE,
-        content: goalPrompt(goal), display: true, details: { kind: "goal_continuation", goalId: goal.id } }], continue: true };
+      return { entries: [...event.entries, { type: "custom_message", customType: MESSAGE_TYPE, content: goalPrompt(goal), display: true }], continue: true };
     });
     pi.on("agent_settled", (_event, ctx) => {
-      // This notification cannot restart work. It also closes unforeseen early
-      // exits where a different extension declined our boundary continuation.
-      disarm();
-      if (state.goal?.status === "active") {
-        state.goal.status = "paused";
-        state.goal.summary = "当前活动已结束。用 /goal resume 继续目标。";
-        save(ctx);
-      } else render(ctx);
+      context = ctx;
+      if (armed) pause("当前回复已停止。用 /goal 选择“继续”。");
+      else render(ctx);
     });
-    pi.on("context", (event) => {
-      const instruction = state.mode === "plan" ? [
-        "[Dock Plan mode] Investigate first. Do not implement, send external messages, deploy, or delegate implementation.",
-        "Use the available read-only tools; shell execution and tools without an explicit read-only declaration are blocked while planning.",
-        "Resolve facts from the project yourself. Ask only questions that affect scope, direction or a consequential tradeoff with plan_question.",
-        "Keep an actionable plan using plan_update: goal, facts, decisions, scope/non-goals, implementation and verification, and unresolved questions.",
-        "Only the user can approve execution with /plan apply. You cannot approve your own plan.",
-        state.plan?.content ? `Current plan revision ${state.plan.revision}:\n${state.plan.content}` : "No plan has been saved yet.",
-      ].join("\n") : state.goal?.status === "active" && armed
-        ? goalPrompt({ ...state.goal, rounds: Math.max(0, state.goal.rounds - 1) })
-        : state.goal ? `[Dock Goal state: ${state.goal.status}]\nPrevious objective: ${state.goal.objective}\nAutomatic execution is disarmed. Answer the latest user request; do not restart the old objective from historical continuation messages. Only an explicit /goal start or /goal resume can arm it again.` : undefined;
-      if (!instruction) return;
-      return { messages: [...event.messages, { role: "custom", customType: "alu-dock-plan-goal-context", content: instruction, display: false, timestamp: Date.now() }] };
+    pi.on("context_with_system", (event) => {
+      if (state.mode !== "plan") return;
+      const index = event.messages.findIndex((message) => message.role === "system");
+      return { messages: event.messages.map((message, i) => i === index && message.role === "system"
+        ? { ...message, content: `${message.content}\n[Dock Plan] 先使用只读工具调查；重要取舍用 plan_question。准备好后用 plan_submit 提交完整计划，由用户决定执行。` } : message) };
     });
     pi.on("tool_call", (event) => {
-      if (state.mode !== "plan") return;
-      const tool = pi.getAllTools().find((item) => item.name === event.toolName);
-      if (PLAN_TOOLS.has(event.toolName) && tool?.sourceInfo.path === "<inline:alu-dock-plan-goal>"
-        || READ_TOOLS.has(event.toolName) && tool?.sourceInfo.source === "builtin"
-        || tool?.annotations?.readOnlyHint === true) return;
-      return { block: true, reason: "当前是规划阶段，此工具没有明确的只读声明。请使用读工具调查，保存计划后由用户用 /plan apply 开始执行。" };
+      if (state.mode !== "plan" || ["plan_submit", "plan_question"].includes(event.toolName) || readOnly(event.toolName)) return;
+      return { block: true, reason: "正在规划，此工具不能用于只读调查。请提交计划，由用户决定是否执行。" };
     });
 
     pi.registerTool({
-      name: "plan_update", label: "更新计划", description: "Save or revise the current implementation plan in Plan mode. This never approves execution. Include facts, scope, decisions, implementation, verification, and unresolved questions.",
+      name: "plan_submit", label: "提交计划", description: "Submit the complete plan for the user to review, edit, discuss or execute. Include investigation, scope, steps and checks. Only the user approves execution.", defaultActive: false,
       parameters: { type: "object", properties: { content: { type: "string", minLength: 1, maxLength: MAX_CONTENT } }, required: ["content"], additionalProperties: false },
-      execute: async (_id: string, params: { content: string }, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
-        if (state.mode !== "plan") return result("先用 /plan on 进入规划，再更新计划。", true);
-        if (!validText(params.content)) return result("计划为空或太长，请提供完整且简洁的计划。", true);
-        updatePlan(params.content); save(ctx);
-        return result(`计划已更新为第${state.plan!.revision}版，等待用户决定是否执行。`);
+      execute: async (_id: string, params: { content: string }, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
+        if (state.mode !== "plan") return result("当前不在规划中。用户可以用 /plan 开始。", true);
+        if (!validText(params.content)) return result("请提交完整且简洁的计划。", true);
+        context = ctx; updatePlan(params.content);
+        if (!ctx.hasUI) return result("计划已保存。请向用户展示完整计划，等待在支持对话框的入口审阅。");
+        let reviewedRevision: number | undefined;
+        while (state.mode === "plan" && !signal?.aborted) {
+          const plan = state.plan!;
+          if (plan.content.length >= MAX_TEXT_CHARS - 100 && reviewedRevision !== plan.revision) {
+            const reviewed = await ctx.ui.editor("完整计划（可修改，关闭则继续讨论）", plan.content);
+            if (reviewed === undefined) return result("用户继续讨论，尚未批准执行。等待用户输入。");
+            if (state.plan?.revision !== plan.revision) continue;
+            if (!validText(reviewed)) return result("计划为空或太长，请继续讨论后重新提交。");
+            updatePlan(reviewed); reviewedRevision = state.plan!.revision;
+          }
+          const current = state.plan!;
+          const choice = await ctx.ui.select(current.content.length < MAX_TEXT_CHARS - 100 ? `审阅计划\n\n${current.content}` : "已展示完整计划，接下来怎么做？", PLAN_CHOICES, { signal });
+          if (state.plan?.revision !== current.revision) continue;
+          if (signal?.aborted || state.mode !== "plan") return result("规划已停止，尚未批准执行。");
+          if (choice === "我来改") {
+            const edited = await ctx.ui.editor("编辑计划", current.content);
+            if (state.plan?.revision !== current.revision) continue;
+            if (edited !== undefined && validText(edited)) { updatePlan(edited); reviewedRevision = state.plan!.revision; }
+            continue;
+          }
+          if (choice !== "按此执行" && choice !== "执行并自动推进到完成") return result("用户选择继续讨论，尚未批准执行。等待用户输入。");
+          state.mode = "execute";
+          if (choice === "执行并自动推进到完成") {
+            disarm(); state.goal = newGoal(current.content, DEFAULT_ROUNDS); armed = true; pendingRound = state.goal.id;
+          }
+          syncTools(); save(ctx);
+          return result(`用户已批准以下计划。${choice === "按此执行" ? "按计划执行一次。" : "按计划推进目标，用 goal_update 记录结果；完成必须附依据。"}\n\n${current.content}`);
+        }
+        return result("规划已停止，尚未批准执行。");
       },
     } as never);
     pi.registerTool({
-      name: "plan_question", label: "确认规划取舍", description: "Ask the user one material planning question. Investigate project facts yourself first. A missing/cancelled answer is not approval. Options are optional; otherwise accept free text.",
+      name: "plan_question", label: "确认规划取舍", description: "Ask one material planning question after investigating the facts. A missing answer is not approval.", defaultActive: false,
       parameters: { type: "object", properties: { question: { type: "string", minLength: 1, maxLength: 2000 }, options: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 200 } } }, required: ["question"], additionalProperties: false },
       execute: async (_id: string, params: { question: string; options?: string[] }, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
-        if (!ctx.hasUI) return result("当前入口无法回答交互问题。请在回复中列出问题并等待用户。", true);
+        if (state.mode !== "plan") return result("当前不在规划中，不能弹出规划问题。", true);
+        if (!ctx.hasUI) return result("请在回复中列出问题，等待用户回答。");
         const answer = params.options ? await ctx.ui.select(params.question, params.options, { signal }) : await ctx.ui.input(params.question, undefined, { signal });
-        return result(answer === undefined ? "用户没有回答。请保留这个未决问题，不要假定选择或授权。" : `用户回答：${answer}`);
+        return result(answer === undefined ? "用户没有回答，请等待，不要推测选择或授权。" : `用户回答：${answer}`);
       },
     } as never);
     pi.registerTool({
-      name: "goal_update", label: "记录目标进展", description: "Record meaningful progress, a blocker needing user action, or delivery of the active Goal. Complete requires concrete evidence; this is your report, not independent human acceptance. Cannot change objective, authorization, budget or resume paused work.",
+      name: "goal_update", label: "记录目标进展", description: "Record progress, a blocker or completion of the current Goal. Completion requires concrete evidence. Cannot change the objective, budget or resume paused work.", defaultActive: false,
       parameters: { type: "object", properties: { status: { type: "string", enum: ["progress", "blocked", "complete"] }, summary: { type: "string", minLength: 1, maxLength: 8000 }, evidence: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 2000 } } }, required: ["status", "summary"], additionalProperties: false },
       execute: async (_id: string, params: { status: "progress" | "blocked" | "complete"; summary: string; evidence?: string[] }, _signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
         const goal = state.goal;
-        if (!goal || !armed || goal.status !== "active") return result("当前没有正在推进的目标。只有用户能开始或恢复目标。", true);
-        if (params.status === "complete" && !params.evidence?.some((item) => item.trim())) return result("请附上具体完成依据：已运行的检查、产物或逐项核对结果。不要把未运行的检查写成通过。", true);
-        progressSinceBoundary ||= goal.summary !== params.summary;
-        goal.summary = params.summary;
-        goal.evidence = params.evidence ?? [];
-        if (params.status !== "progress") { goal.status = params.status; disarm(); }
-        save(ctx);
-        return result(params.status === "complete" ? "已记录交付及其依据，自动推进已结束。此记录不是用户验收。" : params.status === "blocked" ? "已记录阻塞，自动推进已停止。说明用户需要采取的下一步。" : "已记录进展。继续在原目标和预算内工作。");
+        if (!armed || !goal || runningGoalId !== goal.id) return result("这轮回复没有在推进当前目标。请等目标开始后再记录结果。", true);
+        if (params.status === "complete" && !params.evidence?.some((item) => item.trim())) return result("完成目标需要具体产物或实际检查结果作为依据。", true);
+        goal.summary = params.summary; goal.evidence = params.evidence ?? [];
+        if (params.status === "complete") finish(false, ctx);
+        else {
+          if (params.status === "blocked") { disarm(); goal.status = "blocked"; }
+          syncTools(); save(ctx);
+        }
+        return result(params.status === "complete" ? "已记录完成结果，自动推进结束。" : params.status === "blocked" ? "已记录阻塞，等待用户处理后继续。" : "已记录进展。");
       },
     } as never);
-
-    function updatePlan(content: string): void {
-      state.plan = { id: state.plan?.id ?? randomUUID(), revision: (state.plan?.revision ?? 0) + 1, content };
-    }
     pi.registerCommand("plan", {
-      description: "规划、编辑计划，再由你决定是否执行",
-      getArgumentCompletions: (prefix) => ["on", "show", "edit", "apply", "off"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+      description: "规划需求，由你选择执行、修改或继续讨论",
       handler: async (args, ctx) => {
         context = ctx;
-        const [action = "show", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-        if (action === "on") {
-          pause("进入规划，当前目标已暂停。计划确认后可继续。");
-          setMode("plan"); save(ctx);
-          const intent = intentVersion;
-          if (!ctx.isIdle()) { ctx.abort(); await ctx.waitForIdle(); }
-          if (intent !== intentVersion) return;
-          if (rest.length) startUserRun(`[Dock command: user-requested planning]\n用户请求规划：${rest.join(" ")}\n先调查，必要时提问，并保存可执行的计划。`, ctx);
-          else ctx.ui.notify("已进入规划。可以开始调查和讨论，用 /plan edit 编辑，用 /plan apply 按计划执行。", "info");
-          return;
-        }
-        if (action === "off") { intentVersion += 1; setMode("execute"); save(ctx); ctx.ui.notify("已退出规划。当前目标不会因此自动恢复。", "info"); return; }
-        if (action === "show") {
-          render(ctx);
-          if (state.plan && state.plan.content.length >= MAX_TEXT_CHARS && ctx.hasUI) await ctx.ui.editor("查看完整计划（此窗口不保存修改）", state.plan.content);
-          else ctx.ui.notify(state.plan?.content || "还没有计划。用 /plan on 开始规划。", "info");
-          return;
-        }
-        if (action === "edit") {
-          if (!ctx.hasUI) { ctx.ui.notify("此入口无法编辑计划，请从支持编辑对话框的入口打开 /plan edit。", "warning"); return; }
-          const revision = state.plan?.revision;
-          const content = await ctx.ui.editor("编辑计划", state.plan?.content ?? "");
-          if (content === undefined) return;
-          if (revision !== state.plan?.revision) { ctx.ui.notify("计划刚刚有了更新。请重新打开 /plan edit，避免覆盖新内容。", "warning"); return; }
-          if (!validText(content)) { ctx.ui.notify("计划为空或太长。请用 /plan edit 写下完整且简洁的计划。", "warning"); return; }
-          const wasExecuting = state.mode === "execute";
-          pause("计划已修改，目标已暂停。确认新计划后可继续。");
-          setMode("plan"); updatePlan(content); save(ctx);
-          if (wasExecuting && !ctx.isIdle()) { ctx.abort(); await ctx.waitForIdle(); }
-          return;
-        }
-        if (action === "apply") {
-          const plan = state.plan;
-          if (!plan?.content) { ctx.ui.notify("还没有可执行的计划。请先用 /plan on 讨论并保存计划。", "warning"); return; }
-          const revision = plan.revision;
-          const approvalIntent = intentVersion;
-          if (!ctx.hasUI) { ctx.ui.notify("此入口无法确认计划。请从支持对话框的入口打开 /plan apply。", "warning"); return; }
-          const reviewText = `第${revision}版\n\n${plan.content}`;
-          const longPlan = reviewText.length > MAX_TEXT_CHARS;
-          if (longPlan) {
-            const reviewed = await ctx.ui.editor("审阅完整计划（保存后确认执行）", plan.content);
-            if (reviewed === undefined) return;
-            if (state.plan?.id !== plan.id || state.plan.revision !== revision) { ctx.ui.notify("审阅期间计划更新了。请重新运行 /plan apply。", "warning"); return; }
-            if (reviewed !== plan.content) {
-              if (!validText(reviewed)) { ctx.ui.notify("计划为空或太长。请用 /plan edit 调整后再执行。", "warning"); return; }
-              const wasExecuting = state.mode === "execute";
-              pause("计划已修改，目标已暂停。确认新计划后可继续。");
-              setMode("plan"); updatePlan(reviewed); save(ctx);
-              if (wasExecuting && !ctx.isIdle()) { ctx.abort(); await ctx.waitForIdle(); }
-              ctx.ui.notify("已保存你修改的计划。用 /plan apply 确认新版本后执行。", "info"); return;
-            }
-          }
-          const accepted = await ctx.ui.confirm("按计划执行", longPlan ? `已完整展示第${revision}版计划。按刚才审阅的全部内容执行？` : reviewText);
-          if (!accepted) return;
-          if (approvalIntent !== intentVersion || state.plan?.id !== plan.id || state.plan.revision !== revision) { ctx.ui.notify("计划或当前请求在确认期间更新了。请用 /plan apply 查看并确认新版本。", "warning"); return; }
-          pause("计划已确认，执行当前计划。目标仍保持暂停。");
-          const handoffIntent = intentVersion;
-          // Keep the Plan gate while stopping the old planning response. Its
-          // already-generated tool calls must not inherit the new approval.
-          if (!ctx.isIdle()) { ctx.abort(); await ctx.waitForIdle(); }
-          if (handoffIntent !== intentVersion) return;
-          if (state.plan?.id !== plan.id || state.plan.revision !== revision) { ctx.ui.notify("计划在交接期间更新了。请用 /plan apply 查看并确认新版本。", "warning"); return; }
-          state.plan.approvedRevision = revision; setMode("execute"); save(ctx);
-          startUserRun(`[Dock command: user-approved plan revision ${revision}]\n用户已批准以下第${revision}版计划，开始在该范围内执行。普通实现细节可自行调整；改变目标、授权或重要取舍时再问用户。\n\n${plan.content}`, ctx);
-          return;
-        }
-        ctx.ui.notify("用 /plan on、show、edit、apply 或 off 操作计划。", "warning");
+        const request = args.trim();
+        if (!request && state.mode === "plan") { state.mode = "execute"; syncTools(); save(ctx); ctx.ui.notify("已退出规划。", "info"); return; }
+        pause("进入规划，目标已暂停。用 /goal 可继续。");
+        state.mode = "plan"; syncTools(); save(ctx);
+        if (request) {
+          if (ctx.isIdle()) startPrompt(`请先规划：\n${request}`, ctx);
+          else pi.sendUserMessage(`请先规划：\n${request}`, { deliverAs: "followUp" });
+        } else ctx.ui.notify("已进入规划。告诉我你的需求；再输入 /plan 可退出。", "info");
       },
     });
     pi.registerCommand("goal", {
-      description: "在明确目标和预算内自动推进，随时暂停或继续",
-      getArgumentCompletions: (prefix) => ["start", "status", "pause", "resume", "cancel"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+      description: "直接输入目标开始；不带内容时管理当前目标",
       handler: async (args, ctx) => {
         context = ctx;
-        const match = args.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/);
-        const action = match?.[1] ?? "status";
-        if (action === "status") { notifyState(ctx); return; }
-        if (action === "pause" || action === "cancel") {
-          intentVersion += 1;
-          const goal = state.goal;
-          const wasActive = armed;
-          disarm();
-          if (!goal) { notifyState(ctx); return; }
-          if (goal.status !== "complete" && goal.status !== "cancelled") {
-            goal.status = action === "pause" ? "paused" : "cancelled";
-            goal.summary = action === "pause" ? "已由你暂停。聊天不会自动恢复目标。" : "已由你取消，会话和已有结果保留。";
-            save(ctx);
-          }
-          if (wasActive) ctx.abort();
-          notifyState(ctx); return;
+        if (args.trim()) {
+          const parsed = parseGoal(args);
+          if (!parsed) { ctx.ui.notify("用 /goal 目标内容 开始，或 /goal --rounds 10 目标内容 指定轮数。", "info"); return; }
+          disarm(); state.mode = "execute"; state.goal = newGoal(parsed.objective, parsed.rounds); resume(ctx); return;
         }
-        if (action === "resume") {
-          const goal = state.goal;
-          if (!goal || goal.status === "complete" || goal.status === "cancelled") { ctx.ui.notify("没有可继续的目标。用 /goal start 设置目标和预算。", "info"); return; }
-          if (armed) { notifyState(ctx); return; }
-          if (goal.rounds >= goal.maxRounds || Date.now() >= goal.expiresAt) { goal.status = "budget_limited"; save(ctx); ctx.ui.notify("原预算已用尽。请用 /goal start 明确设置新的目标和预算。", "warning"); return; }
-          if (!ctx.isIdle()) { ctx.ui.notify("当前回复仍在进行。结束后用 /goal resume 继续，或先中止当前回复。", "info"); return; }
-          intentVersion += 1; beginRound(ctx); return;
-        }
-        if (action === "start") {
-          const options = parseGoalStart(match?.[2] ?? "");
-          if (!options) { ctx.ui.notify("用 /goal start --rounds 10 --minutes 30 目标内容 开始。轮数须为1至1000的整数，分钟须大于0且不超过1440。", "warning"); return; }
-          pause("已开始新的目标，先结束之前的自动工作。");
-          const intent = intentVersion;
-          if (!ctx.isIdle()) { ctx.abort(); await ctx.waitForIdle(); }
-          if (intent !== intentVersion) return;
-          state.goal = { id: randomUUID(), objective: options.objective, status: "active", maxRounds: options.rounds, rounds: 0,
-            expiresAt: Date.now() + options.minutes * 60_000, summary: "", evidence: [] };
-          beginRound(ctx); return;
-        }
-        ctx.ui.notify("用 /goal start、status、pause、resume 或 cancel 操作目标。", "warning");
+        const goal = state.goal;
+        if (!goal) { ctx.ui.notify("用 /goal 目标内容 开始，默认自动推进 10 轮。", "info"); return; }
+        const choices = goal.status === "active" ? ["暂停", "结束"] : goal.status === "budget_limited" ? ["再给 10 轮", "结束"] : ["继续", "结束"];
+        const choice = await ctx.ui.select(`${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮\n${goal.objective}`, choices);
+        if (state.goal?.id !== goal.id) return;
+        if (choice === "结束") { const active = armed; finish(true, ctx); if (active) ctx.abort(); }
+        else if (choice === "暂停") { pause("已暂停。用 /goal 选择“继续”。"); ctx.abort(); }
+        else if (choice === "继续" || choice === "再给 10 轮") { if (choice === "再给 10 轮") goal.maxRounds += DEFAULT_ROUNDS; resume(ctx); }
       },
     });
   };
 }
 
-function goalLabel(status: GoalStatus): string {
-  return { active: "推进中", paused: "已暂停", blocked: "受阻", complete: "已完成", cancelled: "已取消", budget_limited: "预算用尽" }[status];
-}
+function goalLabel(status: GoalStatus): string { return { active: "推进中", paused: "已暂停", blocked: "受阻", budget_limited: "预算用尽" }[status]; }
 function validText(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.length <= MAX_CONTENT; }
+function validPlan(value: unknown): value is Plan { const p = value as Plan | undefined; return !!p && validText(p.id) && validText(p.content) && Number.isInteger(p.revision) && p.revision > 0; }
+function validGoal(value: unknown): value is Goal {
+  const g = value as Goal | undefined;
+  return !!g && validText(g.id) && validText(g.objective) && ["active", "paused", "blocked", "budget_limited"].includes(g.status)
+    && Number.isSafeInteger(g.maxRounds) && g.maxRounds > 0 && Number.isSafeInteger(g.rounds) && g.rounds >= 0 && g.rounds <= g.maxRounds
+    && typeof g.summary === "string" && Array.isArray(g.evidence) && g.evidence.every((item) => typeof item === "string");
+}
 function result(text: string, error = false): { content: Array<{ type: "text"; text: string }>; details: { error: boolean } } {
   if (error) throw new Error(text);
   return { content: [{ type: "text", text }], details: { error } };
 }
-function parseGoalStart(text: string): { objective: string; rounds: number; minutes: number } | undefined {
-  let rounds = DEFAULT_ROUNDS, minutes = DEFAULT_MINUTES;
-  let remaining = text.trim();
-  while (remaining.startsWith("--")) {
-    const option = remaining.match(/^--(rounds|minutes)\s+(\S+)\s+([\s\S]+)$/);
-    if (!option) return;
-    const value = Number(option[2]);
-    if (option[1] === "rounds") rounds = value; else minutes = value;
-    remaining = option[3]!.trim();
-  }
-  if (!validText(remaining) || !Number.isInteger(rounds) || rounds < 1 || rounds > 1000 || !Number.isFinite(minutes) || minutes <= 0 || minutes > 1440) return;
-  return { objective: remaining, rounds, minutes };
-}
-function isState(value: unknown): value is State {
-  if (!value || typeof value !== "object") return false;
-  const s = value as State;
-  if (s.version !== 1 || !["plan", "execute"].includes(s.mode)) return false;
-  if (s.addedPlanTools && (!Array.isArray(s.addedPlanTools) || !s.addedPlanTools.every((name) => READ_TOOLS.has(name)))) return false;
-  if (s.plan && (!validText(s.plan.id) || !validText(s.plan.content) || !Number.isInteger(s.plan.revision) || s.plan.revision < 1)) return false;
-  const g = s.goal;
-  return !g || validText(g.id) && validText(g.objective) && ["active", "paused", "blocked", "complete", "cancelled", "budget_limited"].includes(g.status)
-    && Number.isInteger(g.maxRounds) && g.maxRounds >= 1 && g.maxRounds <= 1000 && Number.isInteger(g.rounds) && g.rounds >= 0 && g.rounds <= g.maxRounds
-    && Number.isFinite(g.expiresAt) && typeof g.summary === "string" && Array.isArray(g.evidence) && g.evidence.every((item) => typeof item === "string");
+function parseGoal(text: string): { objective: string; rounds: number } | undefined {
+  const option = text.trim().match(/^--rounds\s+(\d+)\s+([\s\S]+)$/);
+  const rounds = option ? Number(option[1]) : DEFAULT_ROUNDS;
+  const objective = option ? option[2]!.trim() : text.trim();
+  return validText(objective) && Number.isSafeInteger(rounds) && rounds > 0 ? { objective, rounds } : undefined;
 }
