@@ -67,6 +67,8 @@ Host/Worker 提供的事实包括：
 
 TUI 只拥有显示状态，例如 viewport、focus、搜索、折叠和未提交的 editor draft。TUI 不根据本地动画或 transport 状态改写 Host/Worker 事实。
 
+操作回执和实时事件走不同连接，到达顺序不固定。回执和查询带回的 Work 状态都经过 `dock-tui.ts` 的同一个接纳入口：同一 Host 运行和 Work 内，只接纳不早于当前画面的那份（先比 generation，同 generation 再比事件序号）。不能证明更旧的状态照常接纳。
+
 ## Conversation
 
 Conversation 按 Agent 的真实 record kind、source、visibility 和 content structure 显示。首次进入或连续性丢失时，Work 清空旧 conversation，再按 `recentHistory + active page.events` 重建；当前 page 中尚未持久化的 Extension notification/error 也必须恢复，不能因 TUI 重连而丢失命令反馈。加载 earlier history 时只能沿同一次分页边界向前读取。保有本地画面且 cursor 连续的 reconnect 只追加 event replay/follow，不重建历史。

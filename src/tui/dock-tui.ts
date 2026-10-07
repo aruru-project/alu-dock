@@ -156,6 +156,15 @@ export async function runDockTui(
     submitBlockDepth = Math.max(0, submitBlockDepth - 1);
     refreshEditorSubmit();
   };
+  /**
+   * Operation replies and live events reach this window separately. A reply
+   * that is older than events already shown must not roll the Work back,
+   * e.g. to idle while it is running, which would hide the run from Esc.
+   */
+  const acceptInstance = (candidate: InstanceSnapshot): void => {
+    if (snapshotIsNotOlder(candidate, instance)) instance = candidate;
+    status.update(instance);
+  };
   const requireCoherentControl = (): boolean => {
     if (eventStreamConnected && instance.lifecycle === "active") return true;
     refreshEditorSubmit();
@@ -647,8 +656,7 @@ export async function runDockTui(
       try {
         if (!requireCoherentControl()) { restoreEditorSubmit(); return; }
         const result = await client.stop(instance.id);
-        instance = result.instance;
-        status.update(instance);
+        acceptInstance(result.instance);
         cleanupErrors = result.receipt.cleanupErrors;
         finish("stopped");
       } catch (error) {
@@ -692,8 +700,7 @@ export async function runDockTui(
       const attachments = draftAttachmentIds.length === 0 ? undefined : [...draftAttachmentIds];
       const result = await client.prompt(instance.id, message, delivery, operationId, undefined, attachments);
       if (attachments !== undefined) draftAttachmentIds = [];
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       // A successful admission receipt is not a model run. The stream's
       // run.started or command.handled event alone closes submitting.
     } catch (error) {
@@ -727,8 +734,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.runBash(instance.id, command, excludeFromContext, randomUUID());
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
     } catch (error) {
       editor.setText(`${excludeFromContext ? "!!" : "!"}${command}`);
       showError(error);
@@ -743,8 +749,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.abortBash(instance.id);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       showStatus("Told every running shell command to stop");
     } catch (error) {
       showError(error);
@@ -770,8 +775,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.dequeue(instance.id);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       pendingQueue.remove([...result.receipt.restored, ...result.receipt.inFlight].map((message) => message.queueItemId));
       restoreMessagesToEditor(result.receipt.restored);
       if (result.receipt.inFlight.length > 0) {
@@ -802,8 +806,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await abortRestoringQueue(instance.id);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       pendingQueue.remove([...result.receipt.restored, ...result.receipt.inFlight].map((message) => message.queueItemId));
       restoreMessagesToEditor(result.receipt.restored);
       if (result.receipt.inFlight.length > 0) {
@@ -840,8 +843,7 @@ export async function runDockTui(
     showStatus("loading models");
     try {
       const catalog = await client.models(instance.id);
-      instance = catalog.instance;
-      status.update(instance);
+      acceptInstance(catalog.instance);
       if (catalog.truncated) conversation.addNotice(`Showing ${catalog.models.length} of ${catalog.total} models.`, true);
       const selected = await showModelPicker(catalog.models);
       if (selected) await switchModel(selected.provider, selected.id);
@@ -972,8 +974,7 @@ export async function runDockTui(
       // still pending; otherwise the Host-resolved result wins.
       try {
         const authoritative = await client.status(instance.id);
-        instance = authoritative;
-        status.update(instance);
+        acceptInstance(authoritative);
         if (authoritative.activeInteraction?.id === event.data.interactionId && controllerLeaseToken === leaseToken) {
           conversation.addNotice("Your answer could not be confirmed, so the question is still waiting. Answer it again when it reappears.", true);
           queueMicrotask(() => { void handleExtensionInteraction(event); });
@@ -1132,8 +1133,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.updateSetting(instance.id, update);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       settings = settings.map((setting) => setting.key === result.setting.key ? result.setting : setting);
       applyLiveSetting(result.setting.key, result.setting.value);
       const boundary = result.hostRestartRequired ? " · restart Alu Dock from another shell" : result.reloadRequired ? " · run /reload" : "";
@@ -1165,8 +1165,7 @@ export async function runDockTui(
         if (active.has(selected)) active.delete(selected); else active.add(selected);
         if (!requireCoherentControl()) return;
         const result = await client.setActiveTools(instance.id, [...active].sort());
-        instance = result.instance;
-        status.update(instance);
+        acceptInstance(result.instance);
         tools = result.tools;
         if (result.truncated) conversation.addNotice(`Showing ${tools.length} of ${result.total} tools.`, true);
         showStatus(`tool ${selected} toggled`);
@@ -1189,8 +1188,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.setActiveTools(instance.id, names);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       conversation.addNotice(`Active tools: ${result.tools.filter((tool) => tool.active).map((tool) => tool.name).join(", ") || "none"}.`);
       if (result.truncated) conversation.addNotice(`Showing ${result.tools.length} of ${result.total} tools.`, true);
       showStatus("tools updated");
@@ -1204,8 +1202,7 @@ export async function runDockTui(
     tui.requestRender();
     try {
       const result = await client.models(instance.id);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       const selected = await showFixedActions(
         "Thinking level",
         [`Current: ${instance.executor.thinkingLevel ?? "off"}`],
@@ -1371,8 +1368,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.navigateSession(instance.id, targetId, options);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       if (result.editorText !== undefined && draftWasEmpty && editor.getText().length === 0) editor.setText(result.editorText);
       showStatus(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation stopped" : "navigation cancelled · current branch kept" : "branch selected");
     } catch (error) { showError(error); }
@@ -1418,8 +1414,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.forkSession(instance.id, entryId);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       if (result.selectedText !== undefined) editor.setText(result.selectedText);
       showStatus(result.cancelled ? "fork cancelled · current session kept" : "fork ready · edit and submit selected prompt");
     } catch (error) { showError(error); }
@@ -1439,8 +1434,7 @@ export async function runDockTui(
       }
       if (!requireCoherentControl()) return;
       const result = await client.cloneSession(instance.id, tree.leafId);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       if (!result.cancelled) editor.setText("");
       showStatus(result.cancelled ? "clone cancelled · current session kept" : "session cloned");
     } catch (error) { showError(error); }
@@ -1555,8 +1549,7 @@ export async function runDockTui(
         if (!requireCoherentControl()) return;
         result = await client.switchSession(instance.id, sessionFile, operationId, { challengeId: challenge.challengeId, decision });
       }
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       showStatus(result.cancelled ? "resume cancelled · current session kept" : "session resumed");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
@@ -1579,8 +1572,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.newSession(instance.id);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       showStatus(result.cancelled ? "new session cancelled · current session kept" : "new session ready");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.requestRender(); }
@@ -1593,8 +1585,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.nameSession(instance.id, name);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       pendingTitleDirective = undefined;
       restoreTerminalTitle();
       conversation.addNotice(instance.name ? `Session name: ${terminalSafe(instance.name)}.` : "Session name cleared.");
@@ -1608,8 +1599,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.compactSession(instance.id, customInstructions);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens. The conversation is ready to continue.`);
       runActivity = activityFromSnapshot(instance);
       activity.setActivity(runActivity);
@@ -1643,8 +1633,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.reloadSession(instance.id);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       addResourceDiagnostics(result.diagnostics);
       showStatus(`reloaded ${result.resources.length} resources${result.diagnostics.length === 0 ? "" : ` · ${result.diagnostics.length} problems`}`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
@@ -1782,8 +1771,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.setModel(instance.id, provider, modelId);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       showStatus(`model ${modelId}`);
     } catch (error) {
       showError(error);
@@ -1800,8 +1788,7 @@ export async function runDockTui(
     try {
       if (!requireCoherentControl()) return;
       const result = await client.setThinking(instance.id, level);
-      instance = result.instance;
-      status.update(instance);
+      acceptInstance(result.instance);
       showStatus(`thinking ${instance.executor.thinkingLevel ?? level}`);
     } catch (error) {
       showError(error);
@@ -1815,8 +1802,7 @@ export async function runDockTui(
     showStatus("refreshing");
     tui.requestRender();
     try {
-      instance = await client.status(instance.id);
-      status.update(instance);
+      acceptInstance(await client.status(instance.id));
       conversation.addNotice(formatWorkStatus(instance));
       showStatus("status refreshed");
     } catch (error) {
@@ -2600,9 +2586,15 @@ export function shouldApplyInitialHistory(
     && currentGeneration === initialGeneration;
 }
 
+/**
+ * False only when the candidate is provably behind: same Host run and Work, and
+ * either an earlier session generation or an earlier event in the same one.
+ * Event numbers restart in each generation, so a replaced session is newer.
+ */
 export function snapshotIsNotOlder(candidate: InstanceSnapshot, current: InstanceSnapshot): boolean {
-  return candidate.eventCursor.hostEpoch === current.eventCursor.hostEpoch
-    && candidate.eventCursor.instanceId === current.eventCursor.instanceId
-    && candidate.eventCursor.runtimeGeneration === current.eventCursor.runtimeGeneration
-    && candidate.eventCursor.sequence >= current.eventCursor.sequence;
+  const next = candidate.eventCursor;
+  const known = current.eventCursor;
+  if (next.hostEpoch !== known.hostEpoch || next.instanceId !== known.instanceId) return true;
+  return next.runtimeGeneration > known.runtimeGeneration
+    || (next.runtimeGeneration === known.runtimeGeneration && next.sequence >= known.sequence);
 }

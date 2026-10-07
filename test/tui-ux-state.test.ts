@@ -8,7 +8,7 @@ import { DockWorkMetadata } from "../src/tui/conversation.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
 import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
-import { formatWorkStatus, humanResourceDiagnostic, pickerContentRowBudget } from "../src/tui/dock-tui.js";
+import { formatWorkStatus, humanResourceDiagnostic, pickerContentRowBudget, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import { WorkspaceBrowserSurface } from "../src/tui/workspace-browser.js";
@@ -44,6 +44,23 @@ function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
     executionChangedAt: overrides.executionChangedAt ?? "2026-07-15T00:00:00.000Z",
   };
 }
+
+test("a send reply arriving after the run started does not show the Work as idle again", () => {
+  const runningFromEvents = snapshot({ execution: "running", eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 11 } });
+  const lateReply = snapshot({ execution: "idle", eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 10 } });
+  const laterReply = snapshot({ execution: "idle", eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 12 } });
+
+  assert.equal(snapshotIsNotOlder(lateReply, runningFromEvents), false);
+  assert.equal(snapshotIsNotOlder(laterReply, runningFromEvents), true);
+});
+
+test("a new or switched session's reply is taken even though its event numbers restart", () => {
+  const oldSession = snapshot({ runtimeGeneration: 1, eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 40 } });
+  const newSession = snapshot({ runtimeGeneration: 2, eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 2, sequence: 1 } });
+
+  assert.equal(snapshotIsNotOlder(newSession, oldSession), true);
+  assert.equal(snapshotIsNotOlder(oldSession, newSession), false);
+});
 
 test("keyed instances display their business key beside the Work name", () => {
   const keyed = snapshot({ key: "alu", name: "Alu Workstation" });
