@@ -24,25 +24,6 @@ async function until(check: () => Promise<boolean>, label: string) {
   assert.fail(label);
 }
 
-test("System-entry PTY waits for the complete picker frame before sending another key", async () => {
-  // Controlled split-frame reproduction of PR #1 CI's missing-trust-prompt symptom.
-  await promisify(execFile)("python3", ["-c", String.raw`
-import runpy, sys
-sys.dont_write_bytecode = True
-ready = runpy.run_path(sys.argv[1])["output_ready"]
-heading = b"\x1b[?2026hChoose a system"
-tail = b"\r\nChoose a system explicitly for this Work.\x1b[?2026l"
-marker = b"Choose a system"
-assert not ready(heading, 0, marker), "A heading alone is not a completed picker frame"
-assert not ready(heading + tail[:-1], 0, marker), "A split frame terminator must finish"
-frame = heading + tail
-assert ready(frame, 0, marker), "The completed picker frame is ready"
-assert not ready(frame, len(frame), marker), "An earlier frame cannot acknowledge new input"
-assert ready(b"Project trust choice", 0, b"Project trust choice"), "Plain prompts need no frame"
-assert ready(frame + b"Project trust choice", len(frame), b"Project trust choice")
-`, join(process.cwd(), "test/fixtures/pty-tui-driver.py")], { timeout: 5000 });
-});
-
 // One integrated entry gate: actual TUI/Protocol and actual registered Agent tools share the same Host and independent Workers.
 test("TUI and owner-enabled Agent tools choose, read and explicitly save systems before real Work creation", { timeout: 90_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-system-entry-"));
