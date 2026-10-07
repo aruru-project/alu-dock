@@ -8,6 +8,9 @@ const DEFAULT_ROUNDS = 10;
 const PLAN_TOOLS = ["plan_submit", "plan_question"];
 const OWN_TOOLS = new Set([...PLAN_TOOLS, "goal_update"]);
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "tool_search"]);
+// Pi's codemode hides every other directly declared tool in its "only" mode,
+// whether or not codemode itself is shown. Planning turns it off instead.
+const CODEMODE_TOOL = "codemode";
 const RUN_ONCE = "按此执行";
 const RUN_AS_GOAL = "执行并自动推进到完成";
 const DISCUSS = "继续讨论";
@@ -43,9 +46,11 @@ type Mode = "plan" | "execute";
 type GoalStatus = "active" | "paused" | "blocked" | "budget_limited";
 interface Plan { id: string; revision: number; content: string }
 interface Goal { id: string; objective: string; status: GoalStatus; maxRounds: number; rounds: number; summary: string; evidence: string[] }
-interface State { mode: Mode; plan?: Plan; goal?: Goal; readsAddedByPlan?: string[] }
+/** What planning changed in the tool list, undone when planning ends. */
+interface PlanToolChanges { added: string[]; removed: string[] }
+interface State { mode: Mode; plan?: Plan; goal?: Goal; planToolChanges?: PlanToolChanges }
 /** One session record holds only what changed since the previous record. */
-interface StateRecord { version: 1; mode?: Mode; plan?: Plan | null; goal?: Partial<Goal> | null; readsAddedByPlan?: string[] | null }
+interface StateRecord { version: 1; mode?: Mode; plan?: Plan | null; goal?: Partial<Goal> | null; planToolChanges?: PlanToolChanges | null }
 interface PlanSubmitParams { content: string }
 interface PlanQuestionParams { question: string; options?: string[] }
 interface GoalUpdateParams { status: "progress" | "blocked" | "complete"; summary: string; evidence?: string[] }
@@ -82,22 +87,27 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
     };
 
     /**
-     * Planning adds the built-in read tools and its own tools. It never removes
-     * the person's tools: plan_submit hides the ones that are not read-only, so
-     * tools switched on or off during planning stay that way afterwards.
+     * Planning adds the built-in read tools and its own tools, and turns codemode
+     * off. Other tools stay as the person set them: plan_submit hides the ones
+     * that are not read-only, so tools switched during planning keep that switch.
      */
     const applyTools = (): void => {
       const active = pi.getActiveTools().filter((name) => !OWN_TOOLS.has(name));
       if (state.mode === "plan") {
-        state.readsAddedByPlan ??= pi.getAllTools()
-          .filter((tool) => tool.sourceInfo.source === "builtin" && READ_TOOLS.has(tool.name) && !active.includes(tool.name))
-          .map((tool) => tool.name);
-        pi.setActiveTools([...new Set([...active, ...state.readsAddedByPlan, ...PLAN_TOOLS])]);
+        state.planToolChanges ??= {
+          added: pi.getAllTools()
+            .filter((tool) => tool.sourceInfo.source === "builtin" && READ_TOOLS.has(tool.name) && !active.includes(tool.name))
+            .map((tool) => tool.name),
+          removed: active.filter((name) => name === CODEMODE_TOOL),
+        };
+        const { added, removed } = state.planToolChanges;
+        pi.setActiveTools([...new Set([...active.filter((name) => !removed.includes(name)), ...added, ...PLAN_TOOLS])]);
         return;
       }
-      const ordinary = active.filter((name) => !state.readsAddedByPlan?.includes(name));
-      delete state.readsAddedByPlan;
-      pi.setActiveTools(goalActive() ? [...ordinary, "goal_update"] : ordinary);
+      const changes = state.planToolChanges;
+      const ordinary = changes ? [...active.filter((name) => !changes.added.includes(name)), ...changes.removed] : active;
+      delete state.planToolChanges;
+      pi.setActiveTools([...new Set(goalActive() ? [...ordinary, "goal_update"] : ordinary)]);
     };
 
     const hideNonReadOnlyTools = (loadout: ToolLoadout) => state.mode === "plan" ? {
@@ -108,7 +118,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       const record: StateRecord = { version: 1 };
       if (state.mode !== recorded.mode) record.mode = state.mode;
       if (JSON.stringify(state.plan) !== JSON.stringify(recorded.plan)) record.plan = state.plan ?? null;
-      if (JSON.stringify(state.readsAddedByPlan) !== JSON.stringify(recorded.readsAddedByPlan)) record.readsAddedByPlan = state.readsAddedByPlan ?? null;
+      if (JSON.stringify(state.planToolChanges) !== JSON.stringify(recorded.planToolChanges)) record.planToolChanges = state.planToolChanges ?? null;
       if (!state.goal && recorded.goal) record.goal = null;
       else if (state.goal) {
         const previous = recorded.goal?.id === state.goal.id ? recorded.goal : undefined;
@@ -234,7 +244,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       stopAutomation();
       context = ctx;
       state = { mode: "execute" };
-      let lastReadsAddedByPlan: string[] | undefined;
+      let lastPlanToolChanges: PlanToolChanges | undefined;
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "custom" || entry.customType !== STATE_TYPE) continue;
         const record = entry.data as Partial<StateRecord> | undefined;
@@ -247,16 +257,14 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
           const goal = { ...state.goal, ...record.goal };
           if (validGoal(goal)) state.goal = goal;
         }
-        if (record.readsAddedByPlan === null) delete state.readsAddedByPlan;
-        else if (Array.isArray(record.readsAddedByPlan) && record.readsAddedByPlan.every((name) => typeof name === "string")) {
-          state.readsAddedByPlan = lastReadsAddedByPlan = record.readsAddedByPlan;
-        }
+        if (record.planToolChanges === null) delete state.planToolChanges;
+        else if (validPlanToolChanges(record.planToolChanges)) state.planToolChanges = lastPlanToolChanges = record.planToolChanges;
       }
       recorded = structuredClone(state);
       // Pi records the tool list only with the next request. At a history point
       // between leaving Plan and that request, Pi restores the planning tools.
-      if (state.mode === "execute" && lastReadsAddedByPlan && pi.getActiveTools().includes("plan_submit")) {
-        state.readsAddedByPlan = lastReadsAddedByPlan;
+      if (state.mode === "execute" && lastPlanToolChanges && pi.getActiveTools().includes("plan_submit")) {
+        state.planToolChanges = lastPlanToolChanges;
       }
       // Reopening or switching history never restarts automatic work by itself.
       if (state.goal?.status === "active") state.goal.status = "paused";
@@ -482,6 +490,12 @@ function validText(value: unknown): value is string {
 function validPlan(value: unknown): value is Plan {
   const plan = value as Plan | undefined;
   return !!plan && validText(plan.id) && validText(plan.content) && Number.isInteger(plan.revision) && plan.revision > 0;
+}
+
+function validPlanToolChanges(value: unknown): value is PlanToolChanges {
+  const names = (list: unknown): boolean => Array.isArray(list) && list.every((name) => typeof name === "string");
+  const changes = value as PlanToolChanges | undefined;
+  return !!changes && names(changes.added) && names(changes.removed);
 }
 
 function validGoal(value: unknown): value is Goal {

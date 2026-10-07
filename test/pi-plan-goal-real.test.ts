@@ -19,7 +19,7 @@ import { PlanGoalProvider, waitFor, type HeldChatRequest } from "./support/plan-
 // and within its round budget.
 type Dialog = Extract<DockEvent, { type: "interaction.requested" }>["data"];
 
-async function setup(context: TestContext, options: { probeTools?: boolean; preparationGate?: boolean; missingAuth?: boolean } = {}) {
+async function setup(context: TestContext, options: { probeTools?: boolean; preparationGate?: boolean; codemodeOnly?: boolean; missingAuth?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "alu-plan-goal-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const provider = new PlanGoalProvider();
@@ -76,6 +76,7 @@ export default function (pi) {
     } } })),
     writeFile(join(agentDir, "settings.json"), JSON.stringify({
       defaultProvider: "plan-goal-loopback", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false },
+      ...(options.codemodeOnly ? { codemode: { mode: "only" } } : {}),
     })),
   ]);
   const registry = new DockRegistry((input) => createPiInstance({
@@ -322,6 +323,26 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   await waitFor(async () => /受阻/.test(await unavailable.surface()), "Missing model access did not leave a blocked Goal");
   assert.match(await unavailable.surface(), /0\s*\/\s*10/);
   assert.equal(unavailable.provider.requests.length, 0);
+});
+
+// Review of 805f762 found planning left with only tool_search under codemode-only:
+// Plan hid codemode while codemode still hid every other tool.
+test("Planning works when Pi's codemode-only setting is on, and codemode returns afterwards", { timeout: 40_000 }, async (context) => {
+  const h = await setup(context, { codemodeOnly: true });
+  await h.dock.setActiveTools(h.work.id, ["codemode", "read", "write"]);
+  await h.start("/plan Inspect the fixture.");
+  const planning = await h.request();
+  for (const name of ["read", "plan_submit", "plan_question"]) assert.ok(planning.toolNames.includes(name), `Planning offers ${name}`);
+  assert.equal(planning.toolNames.includes("codemode"), false, "Planning does not run scripts");
+  planning.text("I will inspect it.");
+  await h.idle();
+  await h.start("/plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  await h.submit("Continue normally.");
+  const ordinary = await h.request();
+  assert.ok(ordinary.toolNames.includes("codemode"), "codemode is back after planning");
+  ordinary.text("Continuing.");
+  await h.idle();
 });
 
 // Incident found in review, 2026-10-07: Stop pressed while a Goal was still
