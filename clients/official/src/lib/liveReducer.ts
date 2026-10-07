@@ -65,6 +65,7 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
   const instance: Work = workEvents.has(event.eventType) ? {
     ...state.instance,
     updatedAt: event.occurredAt,
+    eventCursor: { ...state.instance.eventCursor, sequence: event.sequence },
   } : state.instance
   let queue = state.queue
   const data = event.data

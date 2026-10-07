@@ -31,6 +31,9 @@ export interface ModelIdentity {
 export type InteractionMethod = 'select' | 'confirm' | 'input' | 'editor'
 export interface ActiveInteraction { id: string; method: InteractionMethod; expiresAt?: string }
 
+/** Host journal position; event numbers restart with each runtime generation. */
+export interface EventCursor { hostEpoch: string; instanceId: string; runtimeGeneration: number; sequence: number }
+
 export interface Work {
   id: string
   hostId?: string
@@ -66,6 +69,8 @@ export interface Work {
   lastError?: string
   createdAt: string
   updatedAt: string
+  /** Which Host event this state includes; replies and live events are ordered by it, not by time. */
+  eventCursor: EventCursor
 }
 
 /** Judged by the client from the address itself; users never choose it. */
@@ -427,7 +432,7 @@ export interface ConversationBootstrap {
   activeEvents: ProjectedEvent[]
   extensionUi: ExtensionBootstrap
   queue: QueueItem[]
-  cursor: { hostEpoch: string; instanceId: string; runtimeGeneration: number; sequence: number }
+  cursor: EventCursor
   historyRevision: number
   historyTruncated: boolean
 }

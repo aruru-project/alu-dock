@@ -157,6 +157,7 @@ function sampleData() {
       toolsExpanded: false,
       createdAt: now,
       updatedAt: now,
+      eventCursor: { hostEpoch: 'browser-preview', instanceId: `preview-${displayName}`, runtimeGeneration: 1, sequence: 1 },
     }
   }
 

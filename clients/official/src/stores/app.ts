@@ -334,12 +334,14 @@ export const useAppStore = defineStore('app', () => {
     saveLocalState()
   }
 
+  // Replies and live events arrive separately. Order them by the Host event each
+  // state includes: several changes can share one updatedAt millisecond.
   function snapshotIsNewer(candidate: Work, baseline: Work) {
     if (candidate.ownerHostEpoch !== baseline.ownerHostEpoch) return false
     const candidateGeneration = candidate.runtimeGeneration ?? 0
     const baselineGeneration = baseline.runtimeGeneration ?? 0
     return candidateGeneration > baselineGeneration
-      || (candidateGeneration === baselineGeneration && Date.parse(candidate.updatedAt) > Date.parse(baseline.updatedAt))
+      || (candidateGeneration === baselineGeneration && candidate.eventCursor.sequence > baseline.eventCursor.sequence)
   }
 
   function applyHostProfile(profile: HostConnectionProfile, context = connectionContext.value) {

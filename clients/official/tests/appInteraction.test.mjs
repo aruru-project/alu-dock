@@ -20,13 +20,14 @@ let pickedJobs = [], failStorage = false, jobsRevision = 0, deferJobSnapshot = f
 const context = { connectionId: 'host', selectionGeneration: 1 }
 const work = { id: 'work', displayName: 'Work', name: 'Old Session', cwd: '/work', lifecycle: 'active', extensionStatus: {}, execution: 'idle', compacting: false,
   ownerHostEpoch: 'epoch', runtimeGeneration: 1, executor: { kind: 'pi', piSessionId: 'old' }, pending: { steering: 0, followUp: 0, total: 0 }, updatedAt: '2026-09-19',
+  eventCursor: { hostEpoch: 'epoch', instanceId: 'work', runtimeGeneration: 1, sequence: 10 },
   metrics: { messages: { user: 1, assistant: 1, toolCalls: 0, toolResults: 0, total: 2 }, tokens: { input: 100, output: 50, cacheRead: 800, cacheWrite: 100, total: 1050 }, cost: 0.1234, context: { tokens: 76000, contextWindow: 200000, percent: 38 } } }
 const cursor = { hostEpoch: 'epoch', instanceId: 'work', runtimeGeneration: 1, sequence: 10 }
 const bootstrap = { instance: work, cursor, records: [{ recordId: 'old-message', entryId: 'old-message', kind: 'message', source: 'user', visibility: 'conversation', content: [{ type: 'text', text: 'OLD SESSION MESSAGE' }] }],
   activeEvents: [], queue: [], historyRevision: 1, historyTruncated: true, extensionUi: { status: {}, toolsExpanded: false, events: [] } }
 bootstrap.records.push({ recordId: 'native-image', entryId: 'native-image', kind: 'message', source: 'user', visibility: 'conversation', contentComplete: false,
   content: [{ type: 'image', mimeType: 'image/png', contentRef: 'opaque-server-image', fileId: 'standard-image-file-id' }] })
-const otherWork = { ...work, id: 'other', name: 'Other Work', executor: { kind: 'pi', piSessionId: 'other-session', model: { provider: 'openai-codex', id: 'gpt-6-sol-20261001' } } }
+const otherWork = { ...work, id: 'other', eventCursor: { ...work.eventCursor, instanceId: 'other' }, name: 'Other Work', executor: { kind: 'pi', piSessionId: 'other-session', model: { provider: 'openai-codex', id: 'gpt-6-sol-20261001' } } }
 const capturedBeforeF5 = { connectionId: 'host', workId: 'work', sessionId: 'old', text: 'F5 draft preserved', textRevision: 'before-f5', attachments: [] }
 const nativeResults = new Map(['new_session', 'reload_session', 'set_model'].map(kind => [kind, {
   operationId: kind, kind, connectionId: 'host', instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'old',
@@ -50,11 +51,34 @@ const hostEndpoints = [
   { id: 'wan', label: '外网域名', kind: 'remote', endpoint: { host: 'dock.example.com', port: 443 }, state: 'verified' },
 ]
 const emit = (name, payload) => listeners.get(name)?.({ payload })
-const observation = update => emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(update) })
+// Fake Host event journal: the latest position each Work has published in each
+// session generation. Reads and events move it forward. A Work placed in a reply
+// is stamped when the test writes that reply, so a reply delivered after later
+// events keeps its older position, as on a real connection.
+const journal = new Map([['work:1', 10], ['other:1', 10]])
+const journalAt = (instanceId, generation) => journal.get(`${instanceId}:${generation}`) ?? 1
+const publish = cut => { const key = `${cut.instanceId}:${cut.runtimeGeneration}`; if ((journal.get(key) ?? 0) < cut.sequence) journal.set(key, cut.sequence) }
+const atHost = item => ({ ...item, eventCursor: { hostEpoch: 'epoch', instanceId: item.id, runtimeGeneration: item.runtimeGeneration, sequence: journalAt(item.id, item.runtimeGeneration) } })
+const nextCursor = (instanceId = 'work', generation = 1) => {
+  const cut = { hostEpoch: 'epoch', instanceId, runtimeGeneration: generation, sequence: journalAt(instanceId, generation) + 1 }
+  publish(cut); return cut
+}
+// A native read reports its Work at the read's own position, as the Rust core does.
+const atRead = update => {
+  const cut = update.bootstrap?.cursor
+  if (!cut) return update
+  publish(cut)
+  const stamp = item => ({ ...item, eventCursor: { ...cut } })
+  return { ...update, bootstrap: { ...update.bootstrap, instance: stamp(update.bootstrap.instance) }, ...(update.target ? { target: stamp(update.target) } : {}) }
+}
+const observation = update => {
+  for (const event of update.events ?? (update.event ? [update.event] : [])) publish(event)
+  emit('aludock://observation', { ...binding, revision: ++revision, update: structuredClone(atRead(update)) })
+}
 const contentChange = change => observation({ kind: 'content', token: 'native-content', change })
 const recordChunk = (record, beforeEntryId) => contentChange({ kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true, beforeEntryId })
 function contentSnapshot() {
-  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, records: [] }, contentToken: 'native-content', canLoadEarlier: true, state: 'connected' })
+  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, cursor: { ...cursor, sequence: journalAt('work', 1) }, records: [] }, contentToken: 'native-content', canLoadEarlier: true, state: 'connected' })
   for (const record of bootstrap.records) recordChunk(record)
   contentChange({ kind: 'checkpoint_end' })
 }
@@ -82,7 +106,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'cancel_pairing') return cancelPairingNative(args)
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
-  if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([work, otherWork]), total: 2 }
+  if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([atHost(work), atHost(otherWork)]), total: 2 }
   if (command === 'get_host_catalog') { const cut = hostCatalog(); return hostCatalogNative ? hostCatalogNative(cut) : cut }
   if (command === 'set_active_host') {
     context.connectionId = args.hostId; context.selectionGeneration++; hostCatalogRevision++
@@ -95,7 +119,7 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'bootstrap') {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
-    const cut = { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([work, otherWork]), total: 2, maxAttachmentsPerMessage: 32 }
+    const cut = { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([atHost(work), atHost(otherWork)]), total: 2, maxAttachmentsPerMessage: 32 }
     return bootstrapNative ? bootstrapNative(cut) : cut
   }
   if (command === 'acknowledge_conversation_follow' && failAck) throw { code: 'connection_failed', message: '更新确认没有送达，请重试。' }
@@ -128,7 +152,7 @@ const invoke = async (command, args = {}) => {
     nativeResults.delete(args.operationId); return
   }
   if (command === 'consume_operation' || command === 'stop_conversation_follow' || command === 'release_extension_control' || command === 'reselect_host_route') return true
-  if (command === 'list_models') return { instance: work, models: [{ provider: 'fixture', id: 'model', name: 'model' }], availableThinkingLevels: ['off'], total: 1, truncated: false }
+  if (command === 'list_models') return { instance: atHost(work), models: [{ provider: 'fixture', id: 'model', name: 'model' }], availableThinkingLevels: ['off'], total: 1, truncated: false }
   if (command === 'set_model') {
     if (modelNative) return modelNative(args)
     const error = { code: 'busy', outcomeUnknown: false, message: '这次模型设置没有完成，请重试。' }
@@ -137,7 +161,7 @@ const invoke = async (command, args = {}) => {
     throw error
   }
   if (command === 'system_device_name') return 'test'
-  if (command === 'list_commands') return { commands: [], diagnostics: [], instance: work }
+  if (command === 'list_commands') return { commands: [], diagnostics: [], instance: atHost(work) }
   if (command === 'published_image') return { handle: 'published-local-handle', mimeType: 'image/png', sizeBytes: 68, sha256: 'local-file-digest' }
   if (command === 'attachment_preview') return { handle: 'imported-local-handle', mimeType: 'image/png', sizeBytes: 68, sha256: 'verified-by-core' }
   if (command === 'conversation_image') return { handle: args.contentRef === 'attached-original' ? 'imported-local-handle' : args.contentRef === 'changed-mime' ? 'different-image-handle' : 'verified-local-handle', mimeType: args.mimeType, sizeBytes: 68, sha256: 'verified-by-core' }
@@ -254,19 +278,19 @@ try {
     const send = find(container, item => item.props.class === 'alu-send-btn')
     assert.equal(send.props.disabled, false, 'send is available before the first conversation read and during a model change')
     let submitted
-    submitNative = async args => { submitted = args; return { receipt: { queued: true, delivery: 'followUp' }, instance: work } }
+    submitNative = async args => { submitted = args; return { receipt: { queued: true, delivery: 'followUp' }, instance: atHost(work) } }
     await find(container, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} })
     assert.equal(submitted.instanceId, 'work')
     assert.equal(submitted.message, 'F5 draft preserved')
   }
-  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-model', state: 'succeeded', editor: null, result: work })
+  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-model', state: 'succeeded', editor: null, result: atHost(work) })
   await settle()
   // #326: a manual compaction waiting for its result must not stop the user queueing a message.
   emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-compaction', kind: 'compact_session', state: 'pending', editor: null })
   await settle()
   assert.equal(find(container, item => item.props.class === 'alu-send-btn').props.disabled, false, 'a pending compaction leaves send available')
   assert.equal(text(container).includes('正在等待操作结果'), false, 'a pending compaction is not reported as an error')
-  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-compaction', kind: 'compact_session', state: 'succeeded', editor: null, result: work })
+  emit('aludock://operation', { ...nativeResults.get('set_model'), operationId: 'independent-compaction', kind: 'compact_session', state: 'succeeded', editor: null, result: atHost(work) })
   await settle()
   const initialSends = calls.filter(call => call.command === 'submit_message').length
   const initialAcknowledgements = calls.filter(call => call.command === 'consume_operation').length
@@ -378,7 +402,7 @@ try {
     let submitted
     submitNative = args => {
       submitted = args
-      const result = { instance: work, receipt: { queued: false, delivery: 'prompt' } }
+      const result = { instance: atHost(work), receipt: { queued: false, delivery: 'prompt' } }
       emit('aludock://operation', { operationId: args.operationId, kind: 'submit_message', connectionId: args.connectionId, instanceId: args.instanceId,
         hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration, sessionId: 'old', editor: args.operationEditor, state: 'succeeded', result })
       return result
@@ -393,11 +417,11 @@ try {
   if (!filesOnly) {
   // A native read cut arrives before B, while its content handoff is delayed.
   // Control cursor updates alone must not let the display fold B into pre-cut A.
-  const deltaA = { instanceId: 'work', runtimeGeneration: 1, sequence: 11, eventType: 'message.delta', occurredAt: 'now', data: { messageId: 'cut-probe', block: 'text', delta: 'A' } }
+  const deltaA = { instanceId: 'work', runtimeGeneration: 1, sequence: 51, eventType: 'message.delta', occurredAt: 'now', data: { messageId: 'cut-probe', block: 'text', delta: 'A' } }
   observation({ kind: 'event', event: deltaA }); await settle()
-  const cutRead = { ...bootstrap, cursor: { ...cursor, sequence: 11 }, records: [], activeEvents: [structuredClone(deltaA)] }
+  const cutRead = { ...bootstrap, cursor: { ...cursor, sequence: 51 }, records: [], activeEvents: [structuredClone(deltaA)] }
   observation({ kind: 'facts', bootstrap: cutRead })
-  observation({ kind: 'event', event: { ...deltaA, sequence: 12, data: { ...deltaA.data, delta: 'B' } } }); await settle()
+  observation({ kind: 'event', event: { ...deltaA, sequence: 52, data: { ...deltaA.data, delta: 'B' } } }); await settle()
   const cutText = () => text(find(container, item => item.props['data-conversation-id'] === 'live-cut-probe'))
   assert.equal(cutText(), 'AB')
   contentChange({ kind: 'checkpoint_begin', bootstrap: cutRead })
@@ -519,9 +543,9 @@ try {
   assert.ok(text(container).includes('EXPANDED BODY'))
   assert.ok(all(container, item => item.type === 'textarea').includes(expanded))
   assertSameReference(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
-  observation({ kind: 'facts', bootstrap: { ...bootstrap, records: [], cursor: { ...cursor, sequence: 12 } } }); await settle()
+  observation({ kind: 'facts', bootstrap: { ...bootstrap, records: [], cursor: { ...cursor, sequence: 52 } } }); await settle()
   emit('aludock://observation', { ...binding, revision: 0, update: { kind: 'event', replayToken: 'native-content', event: {
-    instanceId: 'work', runtimeGeneration: 1, sequence: 13, eventType: 'message.completed', occurredAt: 'now', data: { messageId: 'native-post-cut', role: 'assistant', content: [{ type: 'text', text: 'NATIVE POST-CUT REPLAY' }] },
+    instanceId: 'work', runtimeGeneration: 1, sequence: 53, eventType: 'message.completed', occurredAt: 'now', data: { messageId: 'native-post-cut', role: 'assistant', content: [{ type: 'text', text: 'NATIVE POST-CUT REPLAY' }] },
   } } }); await settle()
   assert.ok(text(container).includes('NATIVE POST-CUT REPLAY'), 'post-cut seed events are ordered by remote sequence, not discarded by a newer local content revision')
   assert.ok(text(container).includes('OLD SESSION MESSAGE'), 'observation facts do not retire an unproven content prefix')
@@ -558,14 +582,14 @@ try {
   const captured = app.captureSubmitDraft('host', 'work', [])
   const base = { operationId: 'new-1', kind: 'new_session', ...context, instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: 'old', editor: captured }
   for (const state of ['pending', 'unknown', 'failed']) { emit('aludock://operation', { ...base, operationId: state, state, error: { outcomeUnknown: state === 'unknown' } }); await settle(); assert.ok(text(container).includes('OLD SESSION MESSAGE')) }
-  emit('aludock://operation', { ...base, operationId: 'cancelled', state: 'succeeded', result: { instance: work, cancelled: true } }); await settle()
+  emit('aludock://operation', { ...base, operationId: 'cancelled', state: 'succeeded', result: { instance: atHost(work), cancelled: true } }); await settle()
   assert.ok(text(container).includes('OLD SESSION MESSAGE'))
   // Review regression: a newer header for the same native content must not
   // discard complete rows while the bounded seed waits.
   const oldRow = find(container, item => item.props['data-conversation-id'] === 'old-message')
   const retainedBody = text(oldRow)
   const refreshed = { ...work, name: 'Same Session refreshed' }
-  const newerHeader = { ...bootstrap, instance: refreshed, cursor: { ...cursor, sequence: 20 }, records: [] }
+  const newerHeader = { ...bootstrap, instance: refreshed, cursor: { ...cursor, sequence: 60 }, records: [] }
   observation({ kind: 'snapshot', target: refreshed, bootstrap: newerHeader, contentToken: 'native-content', canLoadEarlier: false, state: 'connected' })
   await settle()
   assert.ok(text(container).includes(retainedBody), 'newer same-token header keeps the already displayed complete body before any seed')
@@ -584,7 +608,7 @@ try {
   assertSameReference(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'read-to-start remains current after an older truncated checkpoint ends')
   assertSameReference(document.activeElement, expanded); assert.deepEqual([expanded.selectionStart, expanded.selectionEnd], [2, 6])
 
-  observation({ kind: 'snapshot', target: refreshed, bootstrap: { ...newerHeader, cursor: { ...cursor, sequence: 21 } }, contentToken: 'different-native-branch', canLoadEarlier: false, state: 'connected' })
+  observation({ kind: 'snapshot', target: refreshed, bootstrap: { ...newerHeader, cursor: { ...cursor, sequence: 61 } }, contentToken: 'different-native-branch', canLoadEarlier: false, state: 'connected' })
   await settle()
   assert.equal(text(container).includes(retainedBody), false, 'a different native token retires the branch even when runtime and Session IDs match')
   observation({ kind: 'content', token: 'different-native-branch', change: { kind: 'record_chunk', entryId: 'branch-record', first: true, complete: true,
@@ -592,7 +616,7 @@ try {
   observation({ kind: 'content', token: 'different-native-branch', change: { kind: 'checkpoint_end' } }); await settle()
   assert.ok(text(container).includes('NEW BRANCH BODY'))
   assertSameReference(find(container, item => item.type === 'button' && text(item).includes('加载更早记录')), undefined, 'a fresh native header owns the boundary even without a State before End')
-  const replacement = { ...work, name: 'New Session', runtimeGeneration: 2, executor: { ...work.executor, piSessionId: 'new' } }
+  const replacement = atHost({ ...work, name: 'New Session', runtimeGeneration: 2, executor: { ...work.executor, piSessionId: 'new' } })
   observation({ kind: 'replacement_snapshot', target: replacement }); await settle()
   assert.equal(text(container).includes('OLD SESSION MESSAGE'), false, 'accepted new retires old before any read or Extension cleanup')
   assert.equal(text(container).includes('NEW BRANCH BODY'), false)
@@ -650,7 +674,7 @@ try {
       observation({ kind: 'content', token: `queue-${ordering}`, change: { kind: 'checkpoint_end' } })
       await settle()
     }
-    const result = { instance: { ...queueWork, pending: { steering: 0, followUp: 0, total: 0 } }, receipt: { instanceId: 'work', restored } }
+    const result = { instance: atHost({ ...queueWork, pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored } }
     const receipt = { ...base, operationId: capturedQueue.operationId, kind: 'dequeue_messages', runtimeGeneration: 2, sessionId: '', editor: capturedQueue.operationEditor, state: 'succeeded', result }
     const deliverReceipt = () => { restoredImageCount = 1; nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt) }
     const event = (eventType, data) => observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: '2026-09-20T00:00:00Z', eventType, data } })
@@ -694,7 +718,7 @@ try {
   }
   // A click/await result is not the draft claimant. The operation event is, even
   // if the originating view moves to another Work while native execution runs.
-  for (const operationId of ['unknown', 'pending']) emit('aludock://operation', { ...base, operationId, state: 'succeeded', result: { instance: currentWork, cancelled: true } })
+  for (const operationId of ['unknown', 'pending']) emit('aludock://operation', { ...base, operationId, state: 'succeeded', result: { instance: atHost(currentWork), cancelled: true } })
   await settle()
   // User report: expanded send succeeds before the native draft-clear event, but the dialog stays open.
   const expandedEditor = () => find(container, item => item.type === 'textarea' && item.props.class === 'ui-dialog-composer-editor')
@@ -707,7 +731,7 @@ try {
     const footer = find(container, item => String(item.props.class ?? '').includes('ui-dialog-composer-footer'))
     const sendingExpanded = find(footer, item => item.type === 'button' && text(item) === '发送').props.onClick()
     await settle()
-    const result = { receipt: { queued: true, delivery: 'followUp' }, instance: currentWork }
+    const result = { receipt: { queued: true, delivery: 'followUp' }, instance: atHost(currentWork) }
     const operation = { ...base, operationId: submitted.operationId, kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: submitted.operationEditor, state: 'succeeded', result }
     if (outcome === 'edited') expandedEditor().props['onUpdate:modelValue']('next unsent message')
     if (outcome === 'event-first') { nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation); await settle() }
@@ -740,7 +764,7 @@ try {
     throw { code: 'busy', message: 'B 的消息未发送，请重试。' }
   }
   await find(container, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} })
-  const sendResult = { receipt: { queued: false, delivery: 'prompt' }, instance: currentWork }
+  const sendResult = { receipt: { queued: false, delivery: 'prompt' }, instance: atHost(currentWork) }
   const sentOperation = { ...base, operationId: capturedSend.operationId, kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: capturedSend.operationEditor, state: 'succeeded', result: sendResult }
   consumeFailures.add(sentOperation.operationId); nativeResults.set(sentOperation.operationId, sentOperation)
   emit('aludock://operation', sentOperation); resolveSend(sendResult); await sending; await settle()
@@ -758,6 +782,24 @@ try {
   assert.equal(nativeResults.has(sentOperation.operationId), false)
   assert.equal(calls.filter(call => call.command === 'consume_operation' && call.args.operationId === sentOperation.operationId).length, 2)
   assert.equal(calls.filter(call => call.command === 'submit_message').length, sendCount)
+  // A Model reply the Host wrote while the Work was idle arrives after the run that
+  // started next, in the same millisecond. Event order, not time, decides, so the
+  // late reply cannot put the Work back to idle and hide Abort for that run.
+  {
+    const moment = '2026-10-08T00:00:00.000Z'
+    const idleWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'idle', updatedAt: moment }
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: idleWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: ++remoteSequence }, records: [], activeEvents: [], queue: [] }, contentToken: 'late-model-reply', state: 'connected' })
+    observation({ kind: 'content', token: 'late-model-reply', change: { kind: 'checkpoint_end' } }); await settle()
+    const modelReply = atHost(idleWork)
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: moment, eventType: 'run.started', data: {} } }); await settle()
+    emit('aludock://operation', { ...base, operationId: 'late-model-reply', kind: 'set_model', runtimeGeneration: 2, sessionId: 'new', editor: null, state: 'succeeded', result: modelReply }); await settle()
+    assert.equal(app.selectedWork.execution, 'running', 'the late reply does not put the running Work back to idle')
+    const abort = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
+    assert.equal(abort !== undefined && abort.props.disabled === false, true, 'Abort stays available for the running Work')
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: moment, eventType: 'run.settled', data: { result: 'succeeded' } } }); await settle()
+    remoteSequence += 10
+  }
+  console.log('PASS: a late reply in the same millisecond keeps the running Work and its Abort control')
   // #326: Abort takes the waiting Queue back in the same native call and inserts it like retrieval.
   // #357: the abort control only exists while the Work is running.
   {
@@ -781,7 +823,7 @@ try {
     abortNative = args => { abortArgs = args; return new Promise(resolve => { resolveAbort = resolve }) }
     const pendingAbort = abortButton.props.onClick(); await settle()
     assert.equal(abortArgs.operationEditor, null, 'Abort does not capture the editor before dispatch')
-    const result = { instance: { ...abortWork, execution: 'idle', pending: { steering: 0, followUp: 0, total: 0 } }, receipt: { instanceId: 'work', restored, inFlight: [] } }
+    const result = { instance: atHost({ ...abortWork, execution: 'idle', pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored, inFlight: [] } }
     const receipt = { ...base, operationId: abortArgs.operationId, kind: 'abort_run', runtimeGeneration: 2, sessionId: '', editor: null, state: 'succeeded', result }
     nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt)
     resolveAbort(result); await pendingAbort; await settle()
@@ -1106,7 +1148,7 @@ try {
   allowExtension = true
   app.selectWork('other'); await settle(); app.selectWork('work'); await settle()
   const focusWork = { ...currentWork, activeInteraction: { id: 'focus-question', method: 'input' } }
-  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: focusWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: 200 }, records: [], activeEvents: [], queue: [], extensionUi: { status: {}, toolsExpanded: false, events: [], activeInteraction: focusWork.activeInteraction } }, contentToken: 'focus-test', state: 'connected' })
+  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: focusWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: 1000 }, records: [], activeEvents: [], queue: [], extensionUi: { status: {}, toolsExpanded: false, events: [], activeInteraction: focusWork.activeInteraction } }, contentToken: 'focus-test', state: 'connected' })
   observation({ kind: 'content', token: 'focus-test', change: { kind: 'checkpoint_end' } })
   await settle()
   assert.ok(extensionBinding)
@@ -1143,7 +1185,7 @@ try {
   assertSameReference(toRaw(document.activeElement), answer, 'Extension answer wins focus after a normal modal closes')
   // Work-state events must not apply an unrelated snapshot to the Extension's
   // local answer or reset the conversation's tool-expansion choices.
-  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 201, occurredAt: '2026-09-20', eventType: 'session.metrics_changed', data: { metrics: { cost: 1 } } } })
+  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 1001, occurredAt: '2026-09-20', eventType: 'session.metrics_changed', data: { metrics: { cost: 1 } } } })
   await settle()
   assertSameReference(find(teleport, item => item.type === 'input'), answer)
   assert.equal(answer.value, 'unfinished extension answer')
@@ -1250,7 +1292,7 @@ try {
   assertSameReference(toRaw(document.activeElement), answer)
   assert.equal(answer.value, 'unfinished extension answer')
   // #306: static commands render before a refreshed catalog; resource/tool reads are independent.
-  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 202, occurredAt: 'now', eventType: 'resources.reloaded', data: {} } }); await settle()
+  observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: 1002, occurredAt: 'now', eventType: 'resources.reloaded', data: {} } }); await settle()
   let resolveCatalog, rejectTools
   catalogNative = () => new Promise(resolve => { resolveCatalog = resolve })
   toolsNative = () => new Promise((_resolve, reject) => { rejectTools = reject })
@@ -1264,7 +1306,7 @@ try {
   rejectTools({ code: 'connection_failed', message: '工具暂时没有读到，请重试。' }); await settle()
   assert.ok(text(container).includes('Available skill'))
   assert.ok(find(container, item => item.type === 'button' && text(item) === '重试读取工具'))
-  toolsNative = () => ({ instance: focusWork, tools: [], total: 0, truncated: false })
+  toolsNative = () => ({ instance: atHost(focusWork), tools: [], total: 0, truncated: false })
   catalogNative = undefined
   await find(container, item => item.type === 'button' && text(item) === '重试读取工具').props.onClick(); await settle()
   assert.ok(text(container).includes('当前没有启用工具'))
@@ -1311,7 +1353,7 @@ try {
     assert.ok(calls.some(call => call.command === 'release_extension_control' && call.args.handle === oldHandle))
     globalThis.__appBoundary.focusChanged({ payload: true }); await settle()
     const resumedWork = { ...currentWork, activeInteraction: { id, method: 'input' } }
-    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: resumedWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: 220 }, records: [], activeEvents: [], queue: [], extensionUi: { status: {}, toolsExpanded: false, events: [], activeInteraction: resumedWork.activeInteraction } }, contentToken: 'resumed-interaction', state: 'connected' })
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: resumedWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: 1020 }, records: [], activeEvents: [], queue: [], extensionUi: { status: {}, toolsExpanded: false, events: [], activeInteraction: resumedWork.activeInteraction } }, contentToken: 'resumed-interaction', state: 'connected' })
     await settle(); ask(); await settle()
     assert.notEqual(extensionBinding.handle, oldHandle)
     assert.equal(replyInput.value, 'answer survives background')
@@ -1436,7 +1478,7 @@ try {
   let standaloneCapture
   submitNative = args => {
     standaloneCapture = args
-    const result = { instance: work, receipt: { queued: false, delivery: 'prompt' } }
+    const result = { instance: atHost(work), receipt: { queued: false, delivery: 'prompt' } }
     emit('aludock://operation', { operationId: args.operationId, kind: 'submit_message', connectionId: args.connectionId, instanceId: args.instanceId,
       hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration, sessionId: 'old', editor: args.operationEditor, state: 'succeeded', result })
     return result
@@ -1621,16 +1663,16 @@ try {
   uploadEditor().props['onUpdate:modelValue']('draft must survive control buttons')
   uploadApp.flushLocalState()
   const persistedEditor = storage.get('aludock.uiState')
-  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: { ...work, execution: 'running' } }, contentToken: 'storage-controls', state: 'connected' }); await settle()
+  observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: { ...work, execution: 'running' }, cursor: nextCursor() }, contentToken: 'storage-controls', state: 'connected' }); await settle()
   failStorage = true
-  abortNative = args => controlResult('abort_run', args, { receipt: { instanceId: 'work', restored: [], inFlight: [] }, instance: work })
+  abortNative = args => controlResult('abort_run', args, { receipt: { instanceId: 'work', restored: [], inFlight: [] }, instance: atHost(work) })
   const abortsBefore = countCalls('abort_run')
   await find(uploadContainer, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')).props.onClick(); await settle()
   assert.equal(countCalls('abort_run'), abortsBefore + 1)
   assertControlTarget('abort_run')
   assert.equal(uploadApp.currentDraft, 'draft must survive control buttons')
   contentSnapshot(); await settle()
-  modelNative = args => controlResult('set_model', args, work)
+  modelNative = args => controlResult('set_model', args, atHost(work))
   find(uploadContainer, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
   const modelsBefore = countCalls('set_model')
   await find(uploadContainer, item => item.props.id === 'cc-opt-0').props.onClick(); await settle()
@@ -1641,7 +1683,7 @@ try {
   await find(uploadContainer, item => item.type === 'form' && String(item.props.class).includes('alu-input-wrap')).props.onSubmit({ preventDefault() {} }); await settle()
   assert.equal(countCalls('submit_message'), unsavedSendsBefore, 'ordinary message sending keeps its strong storage gate')
   find(uploadContainer, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
-  stopNative = args => controlResult('stop_work', args, { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: { ...work, lifecycle: 'stopped', execution: 'unavailable' } })
+  stopNative = args => controlResult('stop_work', args, { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...work, lifecycle: 'stopped', execution: 'unavailable' }) })
   const stopsBefore = countCalls('stop_work')
   find(uploadContainer, item => item.type === 'button' && text(item).includes('Stop Work')).props.onClick(); await settle()
   const stopConfirm = find(uploadContainer, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？')
@@ -1731,7 +1773,7 @@ try {
   assert.equal(calls.filter(call => call.command === 'submit_message').length, sendsBefore)
   failStorage = false
   submitNative = args => {
-    const result = { instance: work, receipt: { queued: true, delivery: 'followUp' } }
+    const result = { instance: atHost(work), receipt: { queued: true, delivery: 'followUp' } }
     const operation = { operationId: args.operationId, kind: 'submit_message', connectionId: 'host', instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1,
       sessionId: 'old', editor: args.operationEditor, state: 'succeeded', result }
     failStorage = true; nativeResults.set(operation.operationId, JSON.parse(JSON.stringify(operation))); emit('aludock://operation', operation)
@@ -1761,7 +1803,7 @@ try {
   assert.equal(text(uploadContainer).includes('orphan.txt'), false)
   await chooseJob('orphan')
   assert.equal(uploadApp.currentPendingAttachments[0].jobId, 'orphan')
-  uploadApp.applyWorkSnapshot({ ...work, runtimeGeneration: 2, executor: { kind: 'pi', piSessionId: 'changed-session' } }); await settle()
+  uploadApp.applyWorkSnapshot(atHost({ ...work, runtimeGeneration: 2, executor: { kind: 'pi', piSessionId: 'changed-session' } })); await settle()
   await publishJob('orphan', { state: 'succeeded', revision: 3, result: uploaded('orphan') })
   assert.equal(uploadApp.currentAttachments.length, 0, 'real Session replacement revokes the old pending selection')
   console.log('PASS: App upload query/progress + A/B/A + reconstructed frontend + later typing + no unsolicited upload-history tray + deletion/queued-send duplicate snapshots + local save failures')
@@ -1811,7 +1853,7 @@ try {
 
     // 立即发送 sends only the button's text: the half-typed draft, its attachments and retrieved images stay.
     let quickSend
-    submitNative = async args => { quickSend = args; return { receipt: { queued: false, delivery: 'prompt' }, instance: work } }
+    submitNative = async args => { quickSend = args; return { receipt: { queued: false, delivery: 'prompt' }, instance: atHost(work) } }
     assert.equal(quickButton('codex-fast').props.disabled, false)
     await quickButton('codex-fast').props.onClick(); await settle()
     assert.equal(quickSend?.message, '/codex-fast all', 'the button sends its whole line, argument included')
@@ -1877,7 +1919,7 @@ try {
     await mountQuickView()
     assert.deepEqual(rowNames(), ['第1', '第2', '第3', '第4', '第5', '第6'], 'the row holds the first six')
     let paletteSend
-    submitNative = async args => { paletteSend = args; return { receipt: { queued: true, delivery: 'followUp' }, instance: work } }
+    submitNative = async args => { paletteSend = args; return { receipt: { queued: true, delivery: 'followUp' }, instance: atHost(work) } }
     await openPalette()
     await find(quickView, item => item.type === 'button' && String(item.props.class).includes('cmd-palette-quick') && text(item).includes('第7')).props.onClick(); await settle()
     assert.equal(paletteSend?.message, 'overflow check 7', 'a button without room in the row runs from the palette')
