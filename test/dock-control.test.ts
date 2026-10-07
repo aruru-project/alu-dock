@@ -2195,41 +2195,35 @@ test("Worker projection reads preserve their arrival order", async (context) => 
   assert.deepEqual(outcomes.map((outcome) => outcome.status), ["fulfilled", "fulfilled"]);
 });
 
-test("stop rejects a pending input before starting Worker cleanup", async (context) => {
+test("Stop finishes while an extension never returns from handling the last message", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "stop-input-preflight");
-  const managed = harness.registry.get(created.id);
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  // The input hook is never released, like an extension waiting for an answer
+  // to a question that Stop has already taken away from every client.
   const preflight = runtime.blockNextPromptBeforePreflight();
   const disposal = runtime.blockDispose();
 
-  const submitting = client.prompt(created.id, "rejected after stop", "auto", "pre-stop-input");
+  const notSent = assert.rejects(
+    client.prompt(created.id, "rejected after stop", "auto", "pre-stop-input"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
+  );
   await preflight.entered;
-  const stopping = managed.stop("stop-after-input-reservation");
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  const stopping = client.stop(created.id, "stop-during-input-hook");
+  await disposal.entered;
 
-  assert.equal(managed.snapshot().lifecycle, "stopping");
-  assert.equal(runtime.disposeCalls, 0);
   await assert.rejects(
     client.prompt(created.id, "too late", "auto", "post-stop-input"),
     (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
   );
-
-  preflight.release();
-  await assert.rejects(
-    submitting,
-    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
-  );
-  await disposal.entered;
-  assert.equal(runtime.disposeCalls, 1);
   disposal.release();
   const stopped = await stopping;
 
-  assert.equal(stopped.stopped, true);
-  assert.equal(managed.snapshot().lifecycle, "stopped");
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  await notSent;
   assert.equal(runtime.disposeCalls, 1);
 });
 

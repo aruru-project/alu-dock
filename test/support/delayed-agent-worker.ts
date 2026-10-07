@@ -21,7 +21,7 @@ import type {
   AgentSessionMetrics,
   ThinkingLevel,
 } from "../../src/core/agent-worker.js";
-import { AgentConversationCursorError, AgentInvalidDeliveryModeError, AgentInvalidTreeTargetError, AgentQueueRejectedBeforeEffectError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
+import { AgentConversationCursorError, AgentInvalidDeliveryModeError, AgentInvalidTreeTargetError, AgentMutationEffectUnknownError, AgentQueueRejectedBeforeEffectError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 // SETTING_DEFINITIONS/SETTING_KEYS are the frozen Dock protocol setting schema (protocol.ts imports the
 // same constants and the client parser rejects any worker that omits a canonical key), not Pi internals.
@@ -99,6 +99,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   private currentRunOperationId: string | undefined;
   private manualCompactionOperationId: string | undefined;
   private nextPromptPreflightBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  private activePromptPreflightBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private nextTreeReadBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
@@ -295,7 +296,9 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     this.nextPromptPreflightBlock = undefined;
     if (preflightBlock) {
       preflightBlock.entered.resolve();
-      await preflightBlock.release.promise;
+      this.activePromptPreflightBlock = preflightBlock;
+      try { await preflightBlock.release.promise; }
+      finally { this.activePromptPreflightBlock = undefined; }
     }
     if (this.isStreaming && options?.streamingBehavior) {
       if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
@@ -689,23 +692,31 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
 
   async dispose(): Promise<AgentCleanupResult> {
     this.disposeCalls += 1;
-    const cleanupErrors: string[] = [];
-    if (this.steeringQueue.length > 0 || this.followUpQueue.length > 0) {
-      try { this.clearQueue(); }
-      catch (error) { cleanupErrors.push(`clearQueue: ${error instanceof Error ? error.message : String(error)}`); }
+    try {
+      const cleanupErrors: string[] = [];
+      if (this.steeringQueue.length > 0 || this.followUpQueue.length > 0) {
+        try { this.clearQueue(); }
+        catch (error) { cleanupErrors.push(`clearQueue: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      if (this.isStreaming || this.isCompacting || this.activeNavigationBlock) {
+        try { await this.abort(); }
+        catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      const block = this.disposeBlock;
+      if (block) {
+        block.entered.resolve();
+        await block.release.promise;
+      }
+      if (this.disposeError) throw this.disposeError;
+      if (this.currentRun) this.settle("disposed", "aborted");
+      return { cleanupErrors };
+    } finally {
+      // Like the real Worker connection, disposal settles a message the Worker
+      // accepted but is still handling, instead of leaving it waiting forever.
+      this.activePromptPreflightBlock?.release.reject(
+        new AgentMutationEffectUnknownError("fixture Worker was disposed while handling command.submit"),
+      );
     }
-    if (this.isStreaming || this.isCompacting || this.activeNavigationBlock) {
-      try { await this.abort(); }
-      catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
-    }
-    const block = this.disposeBlock;
-    if (block) {
-      block.entered.resolve();
-      await block.release.promise;
-    }
-    if (this.disposeError) throw this.disposeError;
-    if (this.currentRun) this.settle("disposed", "aborted");
-    return { cleanupErrors };
   }
 
   drainNextQueuedWithoutMessageStart(): string | undefined {

@@ -1647,6 +1647,12 @@ export class ManagedInstance {
     }).catch(async (error: unknown) => {
       const messageText = safeWireText(errorMessage(error), 2_048);
       if (preflightStatus !== "accepted") {
+        if (!inputLease.effectAllowed(inputGeneration)) {
+          // Stop was admitted before this input was accepted; disposing the
+          // Worker ended it. Report it like an input whose hook returned late.
+          await rejectBeforeRun(new InstanceNotActiveError(this.id, "stopping"), "instance_not_active_before_preflight");
+          return;
+        }
         if (error instanceof AgentInvalidDeliveryModeError) {
           error = new InvalidDeliveryModeError(error.mode, error.running);
         } else if (error instanceof AgentQueueRejectedBeforeEffectError) {
@@ -2386,8 +2392,7 @@ export class ManagedInstance {
     const preemptibleEffect = exclusive?.kind === "navigation" || exclusive?.kind === "compaction"
       ? exclusive.effectStarted
       : undefined;
-    const inputAdmission = this.commandScheduler.activeCommand("input")?.completion;
-    return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect, inputAdmission);
+    return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect);
   }
 
   recordExtensionError(error: unknown): void {
@@ -2421,7 +2426,6 @@ export class ManagedInstance {
     operationId: string,
     activeCommands: readonly Promise<void>[],
     preemptibleEffect?: Promise<boolean>,
-    inputAdmission?: Promise<void>,
   ): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
     const pendingQueue = this.trackedQueueMessages();
@@ -2430,8 +2434,9 @@ export class ManagedInstance {
       steering: pendingQueue.filter((item) => item.delivery === "steer").length,
       followUp: pendingQueue.filter((item) => item.delivery === "followUp").length,
     };
-    await this.extensionUi.suspendForHostDrain();
-    if (inputAdmission) await inputAdmission;
+    // An input hook may be waiting on one of these questions, or may never
+    // return at all. Close them and let Worker disposal settle that input;
+    // waiting for it first could keep Stop from ever finishing.
     await this.extensionUi.cancelForHostDrain();
     if (preemptibleEffect) await preemptibleEffect;
 
