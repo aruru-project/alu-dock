@@ -132,6 +132,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
     const restore = (ctx: ExtensionContext): void => {
       disarm(); context = ctx;
       state = { mode: "execute" };
+      let toolsBeforePlan: string[] | undefined;
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "custom" || entry.customType !== STATE_TYPE || !entry.data || typeof entry.data !== "object") continue;
         const record = entry.data as Record<string, unknown>;
@@ -144,10 +145,13 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
             if (validGoal(candidate)) state.goal = candidate;
           }
           if (record.tools === null) delete state.tools;
-          else if (Array.isArray(record.tools) && record.tools.every((name) => typeof name === "string")) state.tools = record.tools;
+          else if (Array.isArray(record.tools) && record.tools.every((name) => typeof name === "string")) state.tools = toolsBeforePlan = record.tools;
         }
       }
       saved = structuredClone(state);
+      // Pi declares a loadout only with the next request. Between leaving Plan
+      // and that request, Pi restores the planning tools for this position.
+      if (state.mode === "execute" && toolsBeforePlan && pi.getActiveTools().includes("plan_submit")) state.tools = toolsBeforePlan;
       if (state.goal?.status === "active") state.goal.status = "paused";
       syncTools(); save(ctx);
     };

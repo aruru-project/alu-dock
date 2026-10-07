@@ -537,4 +537,26 @@ test("Reloading and selecting branches retain spent rounds and wait for the pers
   assert.match(await h.surface(), /已暂停/);
   assert.match(await h.surface(), /1\s*\/\s*3/);
   assert.equal(h.provider.requests.length, 4, "Selecting earlier active Goal history waits for explicit continuation");
+
+  // PR #1 review, 2026-10-07: going back to the point where planning ended
+  // left ordinary work with only the planning tools.
+  await h.start("/plan");
+  await waitFor(async () => /规划中/.test(await h.surface()), "Bare /plan did not enter planning");
+  await h.submit("Look around before we decide.");
+  (await h.request()).text("I looked around.");
+  await h.idle();
+  await h.start("/plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  const planEnded = (await savedEntries(h)).findLast((entry) => entry.type === "custom" && entry.customType === "alu-dock-plan-goal-state" && entry.data?.mode === "execute");
+  assert.ok(planEnded);
+  await h.submit("Continue with ordinary work.");
+  (await h.request()).text("Continuing.");
+  await h.idle();
+  await h.dock.navigateSession(h.work.id, planEnded.id);
+  await h.idle();
+  await h.submit("Write the report now.");
+  const afterPlanEnded = await h.request();
+  assertOrdinaryTools(afterPlanEnded);
+  afterPlanEnded.text("Writing it now.");
+  await h.idle();
 });
