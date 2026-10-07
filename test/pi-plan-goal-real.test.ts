@@ -19,7 +19,7 @@ import { PlanGoalProvider, waitFor, type HeldChatRequest } from "./support/plan-
 // and within its round budget.
 type Dialog = Extract<DockEvent, { type: "interaction.requested" }>["data"];
 
-async function setup(context: TestContext, options: { probeTools?: boolean; preparationGate?: boolean; codemodeOnly?: boolean; missingAuth?: boolean } = {}) {
+async function setup(context: TestContext, options: { probeTools?: boolean; preparationGate?: boolean; codemodeOnlyMcp?: boolean; missingAuth?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "alu-plan-goal-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const provider = new PlanGoalProvider();
@@ -76,8 +76,13 @@ export default function (pi) {
     } } })),
     writeFile(join(agentDir, "settings.json"), JSON.stringify({
       defaultProvider: "plan-goal-loopback", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false },
-      ...(options.codemodeOnly ? { codemode: { mode: "only" } } : {}),
+      ...(options.codemodeOnlyMcp ? { codemode: { mode: "only" } } : {}),
     })),
+    // An MCP server whose tools are reached through codemode, as Pi's MCP sets up by default.
+    ...(options.codemodeOnlyMcp ? [
+      writeFile(join(root, "harbor-mcp.mjs"), MCP_SERVER),
+      writeFile(join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: { harbor: { command: process.execPath, args: [join(root, "harbor-mcp.mjs")] } } })),
+    ] : []),
   ]);
   const registry = new DockRegistry((input) => createPiInstance({
     ...input, agentDir, sessionDir, projectTrusted: true,
@@ -126,6 +131,20 @@ export default function (pi) {
 }
 
 type Harness = Awaited<ReturnType<typeof setup>>;
+
+/** The smallest stdio MCP server, with one tool. */
+const MCP_SERVER = `
+import { createInterface } from "node:readline";
+const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const { id, method, params } = JSON.parse(line);
+  if (id === undefined) return;
+  if (method === "initialize") return send({ id, result: { protocolVersion: params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "harbor", version: "1.0.0" } } });
+  if (method === "tools/list") return send({ id, result: { tools: [{ name: "echo", description: "Echo a word back", inputSchema: { type: "object", properties: {} } }] } });
+  if (method === "ping") return send({ id, result: {} });
+  send({ id, error: { code: -32601, message: "Method not found" } });
+});
+`;
 
 function assertOrdinaryTools(request: HeldChatRequest): void {
   // A review probe found the Plan/Goal tools in every ordinary conversation.
@@ -325,22 +344,32 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   assert.equal(unavailable.provider.requests.length, 0);
 });
 
-// Review of 805f762 found planning left with only tool_search under codemode-only:
-// Plan hid codemode while codemode still hid every other tool.
-test("Planning works when Pi's codemode-only setting is on, and codemode returns afterwards", { timeout: 40_000 }, async (context) => {
-  const h = await setup(context, { codemodeOnly: true });
-  await h.dock.setActiveTools(h.work.id, ["codemode", "read", "write"]);
+// Reviews of 805f762 and b2fbce6 found planning left with only tool_search under
+// codemode-only: codemode, which Pi's MCP switches on (again on reconnect), hid
+// every other tool while Plan hid codemode.
+test("Planning works with MCP under Pi's codemode-only setting, even after an MCP reconnect", { timeout: 40_000 }, async (context) => {
+  const h = await setup(context, { codemodeOnlyMcp: true });
+  await waitFor(async () => (await h.dock.tools(h.work.id)).tools.some((tool) => tool.name === "mcp__harbor__echo"), "The MCP server did not connect");
   await h.start("/plan Inspect the fixture.");
   const planning = await h.request();
   for (const name of ["read", "plan_submit", "plan_question"]) assert.ok(planning.toolNames.includes(name), `Planning offers ${name}`);
   assert.equal(planning.toolNames.includes("codemode"), false, "Planning does not run scripts");
   planning.text("I will inspect it.");
   await h.idle();
+  const beforeReconnect = h.events.length;
+  await h.start("/mcp reconnect harbor");
+  await waitFor(() => h.events.slice(beforeReconnect).some((event) => event.type === "extension.notification" && /reconnect/i.test(event.data.message)), "MCP did not reconnect");
+  await h.submit("Continue the investigation.");
+  const afterReconnect = await h.request();
+  for (const name of ["read", "plan_submit"]) assert.ok(afterReconnect.toolNames.includes(name), `Planning still offers ${name} after the reconnect`);
+  afterReconnect.text("Continuing the investigation.");
+  await h.idle();
   await h.start("/plan");
   await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
   await h.submit("Continue normally.");
   const ordinary = await h.request();
   assert.ok(ordinary.toolNames.includes("codemode"), "codemode is back after planning");
+  assert.equal(ordinary.toolNames.includes("read"), false, "The person's codemode-only setting applies again after planning");
   ordinary.text("Continuing.");
   await h.idle();
 });

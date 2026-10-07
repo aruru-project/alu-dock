@@ -12,10 +12,14 @@ import {
  *
  * The Worker runs on the Host machine, often without a display or anyone in front of it, so MCP
  * sign-in never opens a browser there. Pi still shows the authorization URL to the client.
+ *
+ * While `isPlanning` returns true, codemode uses its "on" mode, so it does not hide the other
+ * tools from a planning model; otherwise it follows the person's `codemode.mode` setting.
  */
-export function piBuiltinExtensions(): InlineExtension[] {
+export function piBuiltinExtensions(isPlanning?: () => boolean): InlineExtension[] {
+  const codemodeOptions = { get mode() { return isPlanning?.() ? "on" as const : undefined; } };
   return [
-    { name: "codemode", factory: createCodemodeExtension(), replaceable: true, builtin: true },
+    { name: "codemode", factory: createCodemodeExtension(codemodeOptions), replaceable: true, builtin: true },
     { name: "tool-search", factory: createToolSearchExtension(), replaceable: true, builtin: true },
     { name: "mcp", factory: createMcpExtension({ openUrl: () => {} }), replaceable: true, builtin: true },
   ];
