@@ -15,12 +15,15 @@ position = 0
 
 def wait(marker, seconds=12):
     global position
+    def ready():
+        return helpers.output_ready(output, position, marker)
+
     deadline = time.monotonic() + seconds
-    while marker not in output[position:] and time.monotonic() < deadline:
+    while not ready() and time.monotonic() < deadline:
         if helpers.read_available(fd, output, .04) < 0:
             break
-    if marker not in output[position:]:
-        raise AssertionError("Missing " + repr(marker) + ": " + bytes(output[-2500:]).decode("utf8", "replace"))
+    if not ready():
+        raise AssertionError("Missing complete output for " + repr(marker) + ": " + bytes(output[-2500:]).decode("utf8", "replace"))
     position = len(output)
 
 def send(data):

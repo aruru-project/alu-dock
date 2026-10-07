@@ -48,6 +48,18 @@ def read_available(fd: int, output: bytearray, timeout: float) -> int:
     return len(chunk)
 
 
+def output_ready(output: bytearray, position: int, marker: bytes) -> bool:
+    found = output.find(marker, position)
+    if found < 0:
+        return False
+    # PR #1 CI: a picker heading can precede its frame's old ready text.
+    # Finish that frame before sending another key, so its tail cannot be
+    # mistaken for the result of a later reload. Plain prompts have no frame.
+    begin = output.rfind(b"\x1b[?2026h", 0, found)
+    end = output.rfind(b"\x1b[?2026l", 0, found)
+    return begin <= end or output.find(b"\x1b[?2026l", found + len(marker)) >= 0
+
+
 def write_input(fd: int, output: bytearray, data: bytes, settle: float = 0.04) -> None:
     os.write(fd, data)
     deadline = time.monotonic() + settle
