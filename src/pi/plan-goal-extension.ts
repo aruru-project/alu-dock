@@ -51,7 +51,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
     const render = (ctx: ExtensionContext): void => {
       ctx.ui.setStatus("Plan", state.mode === "plan" ? "规划中 · /plan 退出" : undefined);
       ctx.ui.setWidget("alu-dock-plan", state.mode === "plan" && state.plan
-        ? ["当前计划", ...state.plan.content.split("\n").slice(0, 24)] : undefined);
+        ? ["当前计划", ...state.plan.content.split("\n").filter((line) => line.trim()).slice(0, 24)] : undefined);
       const goal = state.goal;
       ctx.ui.setStatus("Goal", goal ? `${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮 · /goal 管理` : undefined);
       ctx.ui.setWidget("alu-dock-goal", goal?.status === "active" ? [`目标：${goal.objective}`, ...(goal.summary ? [goal.summary] : [])] : undefined);
