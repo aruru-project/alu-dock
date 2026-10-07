@@ -19,7 +19,7 @@ import { PlanGoalProvider, waitFor, type HeldChatRequest } from "./support/plan-
 // and within its round budget.
 type Dialog = Extract<DockEvent, { type: "interaction.requested" }>["data"];
 
-async function setup(context: TestContext, options: { probeTools?: boolean; missingAuth?: boolean } = {}) {
+async function setup(context: TestContext, options: { probeTools?: boolean; preparationGate?: boolean; missingAuth?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "alu-plan-goal-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const provider = new PlanGoalProvider();
@@ -35,8 +35,22 @@ async function setup(context: TestContext, options: { probeTools?: boolean; miss
     await rm(root, { recursive: true, force: true });
   });
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
+  await mkdir(join(agentDir, "extensions"));
+  // While the hold file exists, every request waits in Pi's preparation step.
+  const hold = join(root, "hold-preparation"), preparing = join(root, "preparing");
+  if (options.preparationGate) {
+    await writeFile(join(agentDir, "extensions", "preparation-gate.ts"), `
+import { existsSync, writeFileSync } from "node:fs";
+export default function (pi) {
+  pi.on("before_agent_start", async () => {
+    if (!existsSync(${JSON.stringify(hold)})) return;
+    writeFileSync(${JSON.stringify(preparing)}, "");
+    while (existsSync(${JSON.stringify(hold)})) await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+}
+`);
+  }
   if (options.probeTools) {
-    await mkdir(join(agentDir, "extensions"));
     await writeFile(join(agentDir, "extensions", "tool-probes.ts"), `
 import { writeFile } from "node:fs/promises";
 export default function (pi) {
@@ -107,7 +121,7 @@ export default function (pi) {
     };
     return { next, respond, choose };
   };
-  return { cwd, dock, work, provider, events, submit, start, request, idle, surface, ui };
+  return { cwd, hold, preparing, dock, work, provider, events, submit, start, request, idle, surface, ui };
 }
 
 type Harness = Awaited<ReturnType<typeof setup>>;
@@ -208,6 +222,27 @@ test("Planning cannot change files, shows the full plan for review, and executes
   (await h.request()).text("The follow-up report is delivered.");
   await h.idle();
   await assertGoalCleared(h);
+
+  // Reviews found Dock tools reappearing in planning after a status check or
+  // reload, and a switch made during planning lost when planning ended.
+  await h.start("/plan");
+  await h.start("/dock-tools on");
+  await waitFor(async () => (await h.dock.read(h.work.id)).instance.extensionStatus["Dock tools"] === "on", "Dock tools did not turn on");
+  await h.dock.reloadSession(h.work.id);
+  await h.submit("Which sibling Works could help?");
+  const planningWithDockTools = await h.request();
+  assertPlanningTools(planningWithDockTools);
+  assert.equal(planningWithDockTools.toolNames.includes("dock_send"), false, "Planning keeps Dock's sending tool from the model");
+  planningWithDockTools.text("I will look at them after planning.");
+  await h.idle();
+  await h.start("/plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  await h.submit("Ask a sibling Work for help.");
+  const afterPlanning = await h.request();
+  assertOrdinaryTools(afterPlanning);
+  assert.ok(afterPlanning.toolNames.includes("dock_send"), "Dock tools turned on during planning are available afterwards");
+  afterPlanning.text("I can reach sibling Works now.");
+  await h.idle();
 });
 
 test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at its budget until the person adds more", { timeout: 40_000 }, async (context) => {
@@ -287,6 +322,28 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   await waitFor(async () => /受阻/.test(await unavailable.surface()), "Missing model access did not leave a blocked Goal");
   assert.match(await unavailable.surface(), /0\s*\/\s*10/);
   assert.equal(unavailable.provider.requests.length, 0);
+});
+
+// Incident found in review, 2026-10-07: Stop pressed while a Goal was still
+// preparing its first request returned at once, then the model was called anyway.
+test("Stopping while a Goal is still preparing its first request keeps the model from being called", { timeout: 40_000 }, async (context) => {
+  const h = await setup(context, { preparationGate: true });
+  for (const stop of ["abort", "abortRestoreQueue"] as const) { // Stop current reply, and Esc
+    await writeFile(h.hold, "");
+    await rm(h.preparing, { force: true });
+    const objective = `Inspect fixture.txt (stopped by ${stop})`;
+    await h.start(`/goal --rounds 1 ${objective}`);
+    await waitFor(async () => readFile(h.preparing).then(() => true, () => false), "The Goal did not reach its preparation step");
+    await h.dock[stop](h.work.id);
+    await rm(h.hold);
+    await h.submit(`Answer normally after ${stop}.`);
+    const next = await h.request();
+    assert.equal(JSON.stringify(next.body.messages).includes(objective), false, `After ${stop}, the stopped Goal does not reach the model`);
+    next.text("Answering normally.");
+    await h.idle();
+    assert.match(await h.surface(), /已暂停/);
+    assert.match(await h.surface(), /0\s*\/\s*1/);
+  }
 });
 
 test("Reopening or going back in history keeps spent rounds and the right tools, and never restarts work by itself", { timeout: 40_000 }, async (context) => {

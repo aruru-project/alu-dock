@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ExtensionFactory, ToolLoadout } from "@earendil-works/pi-coding-agent";
 
 const STATE_TYPE = "alu-dock-plan-goal-state";
 const MESSAGE_TYPE = "alu-dock-plan-goal";
@@ -43,9 +43,9 @@ type Mode = "plan" | "execute";
 type GoalStatus = "active" | "paused" | "blocked" | "budget_limited";
 interface Plan { id: string; revision: number; content: string }
 interface Goal { id: string; objective: string; status: GoalStatus; maxRounds: number; rounds: number; summary: string; evidence: string[] }
-interface State { mode: Mode; plan?: Plan; goal?: Goal; toolsBeforePlan?: string[] }
+interface State { mode: Mode; plan?: Plan; goal?: Goal; readsAddedByPlan?: string[] }
 /** One session record holds only what changed since the previous record. */
-interface StateRecord { version: 1; mode?: Mode; plan?: Plan | null; goal?: Partial<Goal> | null; toolsBeforePlan?: string[] | null }
+interface StateRecord { version: 1; mode?: Mode; plan?: Plan | null; goal?: Partial<Goal> | null; readsAddedByPlan?: string[] | null }
 interface PlanSubmitParams { content: string }
 interface PlanQuestionParams { question: string; options?: string[] }
 interface GoalUpdateParams { status: "progress" | "blocked" | "complete"; summary: string; evidence?: string[] }
@@ -81,27 +81,34 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       return READ_TOOLS.has(name) && tool?.sourceInfo.source === "builtin" || tool?.annotations?.readOnlyHint === true;
     };
 
-    /** Planning shows only read-only tools; the ordinary tools wait in state until it ends. */
+    /**
+     * Planning adds the built-in read tools and its own tools. It never removes
+     * the person's tools: plan_submit hides the ones that are not read-only, so
+     * tools switched on or off during planning stay that way afterwards.
+     */
     const applyTools = (): void => {
       const active = pi.getActiveTools().filter((name) => !OWN_TOOLS.has(name));
       if (state.mode === "plan") {
-        state.toolsBeforePlan ??= active;
-        const builtinReads = pi.getAllTools()
-          .filter((tool) => tool.sourceInfo.source === "builtin" && READ_TOOLS.has(tool.name))
+        state.readsAddedByPlan ??= pi.getAllTools()
+          .filter((tool) => tool.sourceInfo.source === "builtin" && READ_TOOLS.has(tool.name) && !active.includes(tool.name))
           .map((tool) => tool.name);
-        pi.setActiveTools([...new Set([...active.filter(isReadOnlyTool), ...builtinReads, ...PLAN_TOOLS])]);
+        pi.setActiveTools([...new Set([...active, ...state.readsAddedByPlan, ...PLAN_TOOLS])]);
         return;
       }
-      const ordinary = state.toolsBeforePlan ?? active;
-      delete state.toolsBeforePlan;
+      const ordinary = active.filter((name) => !state.readsAddedByPlan?.includes(name));
+      delete state.readsAddedByPlan;
       pi.setActiveTools(goalActive() ? [...ordinary, "goal_update"] : ordinary);
     };
+
+    const hideNonReadOnlyTools = (loadout: ToolLoadout) => state.mode === "plan" ? {
+      hiddenDeclarations: loadout.declared.map((tool) => tool.name).filter((name) => !PLAN_TOOLS.includes(name) && !isReadOnlyTool(name)),
+    } : undefined;
 
     const appendRecord = (): void => {
       const record: StateRecord = { version: 1 };
       if (state.mode !== recorded.mode) record.mode = state.mode;
       if (JSON.stringify(state.plan) !== JSON.stringify(recorded.plan)) record.plan = state.plan ?? null;
-      if (JSON.stringify(state.toolsBeforePlan) !== JSON.stringify(recorded.toolsBeforePlan)) record.toolsBeforePlan = state.toolsBeforePlan ?? null;
+      if (JSON.stringify(state.readsAddedByPlan) !== JSON.stringify(recorded.readsAddedByPlan)) record.readsAddedByPlan = state.readsAddedByPlan ?? null;
       if (!state.goal && recorded.goal) record.goal = null;
       else if (state.goal) {
         const previous = recorded.goal?.id === state.goal.id ? recorded.goal : undefined;
@@ -227,7 +234,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       stopAutomation();
       context = ctx;
       state = { mode: "execute" };
-      let lastToolsBeforePlan: string[] | undefined;
+      let lastReadsAddedByPlan: string[] | undefined;
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "custom" || entry.customType !== STATE_TYPE) continue;
         const record = entry.data as Partial<StateRecord> | undefined;
@@ -240,16 +247,16 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
           const goal = { ...state.goal, ...record.goal };
           if (validGoal(goal)) state.goal = goal;
         }
-        if (record.toolsBeforePlan === null) delete state.toolsBeforePlan;
-        else if (Array.isArray(record.toolsBeforePlan) && record.toolsBeforePlan.every((name) => typeof name === "string")) {
-          state.toolsBeforePlan = lastToolsBeforePlan = record.toolsBeforePlan;
+        if (record.readsAddedByPlan === null) delete state.readsAddedByPlan;
+        else if (Array.isArray(record.readsAddedByPlan) && record.readsAddedByPlan.every((name) => typeof name === "string")) {
+          state.readsAddedByPlan = lastReadsAddedByPlan = record.readsAddedByPlan;
         }
       }
       recorded = structuredClone(state);
       // Pi records the tool list only with the next request. At a history point
       // between leaving Plan and that request, Pi restores the planning tools.
-      if (state.mode === "execute" && lastToolsBeforePlan && pi.getActiveTools().includes("plan_submit")) {
-        state.toolsBeforePlan = lastToolsBeforePlan;
+      if (state.mode === "execute" && lastReadsAddedByPlan && pi.getActiveTools().includes("plan_submit")) {
+        state.readsAddedByPlan = lastReadsAddedByPlan;
       }
       // Reopening or switching history never restarts automatic work by itself.
       if (state.goal?.status === "active") state.goal.status = "paused";
@@ -314,6 +321,7 @@ export function planGoalExtension(start: PlanGoalStart): ExtensionFactory {
       description: "In Plan mode, investigate with read-only tools and discuss before implementing. Use plan_question only for material user decisions. Submit the complete plan with facts, scope, steps and checks for review, editing or execution. Only the user approves execution.",
       parameters: PLAN_SUBMIT_SCHEMA,
       defaultActive: false,
+      prepareLoadout: hideNonReadOnlyTools,
       execute: async (_id: string, params: PlanSubmitParams, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
         if (state.mode !== "plan") throw new Error("当前不在规划中。用户可以用 /plan 开始。");
         if (!validText(params.content)) throw new Error("请提交完整且简洁的计划。");

@@ -3538,12 +3538,11 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },
+          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalStart) },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
           ...piBuiltinExtensions(),
-          // Restore Plan policy after built-in extensions restore their tool visibility.
-          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalStart) },
         ],
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],
