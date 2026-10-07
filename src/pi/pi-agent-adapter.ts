@@ -310,6 +310,18 @@ export class PiAgentAdapter {
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
+    options.planGoalControl?.bindPrompt(async (text, mayStart) => {
+      let started = false;
+      await this.requireActive().session.prompt(text, {
+        source: "extension", expandPromptTemplates: false,
+        preflightResult: (disposition: PiPromptDisposition) => {
+          if (disposition !== "started") return;
+          if (!mayStart()) throw new Error("当前请求已取消或预算已用尽，请按最新请求继续。");
+          started = true;
+        },
+      } as PromptOptions);
+      return started;
+    });
     this.processCwdValue = options.initialProcessCwd;
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;

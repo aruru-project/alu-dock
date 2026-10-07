@@ -10,13 +10,13 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
-import { PlanGoalProvider, waitFor } from "./support/plan-goal-provider.js";
+import { PlanGoalProvider, waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 // Confirmed Plan/Goal safety requirements: planning cannot change project files;
 // autonomous work must remain visible, stoppable and within its approved budget.
 // The tests enter through DockClient; Host, Worker and Pi are all production code.
 
-async function setup(context: TestContext, options: { boundaryGate?: boolean; probeTools?: boolean } = {}) {
+async function setup(context: TestContext, options: { boundaryGate?: boolean; probeTools?: boolean; missingAuth?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "alu-plan-goal-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const provider = new PlanGoalProvider();
@@ -32,6 +32,15 @@ async function setup(context: TestContext, options: { boundaryGate?: boolean; pr
     await rm(root, { recursive: true, force: true });
   });
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
+  await mkdir(join(agentDir, "extensions"), { recursive: true });
+  await writeFile(join(agentDir, "extensions", "preparation-fixture.ts"), `
+export default function (pi) {
+  let starts = 0;
+  pi.on("before_agent_start", () => ({ message: {
+    customType: "fixture-start-marker", content: "PLAN_GOAL_BEFORE_START_" + (++starts), display: false,
+  } }));
+}
+`);
   const gate = join(root, "hold-boundary"), gateEntered = join(root, "boundary-entered");
   if (options.boundaryGate) {
     await mkdir(join(agentDir, "extensions"), { recursive: true });
@@ -66,8 +75,9 @@ export default function (pi) {
   const baseUrl = await provider.start();
   await Promise.all([
     writeFile(join(cwd, "fixture.txt"), "original project contents\n"),
+    writeFile(join(cwd, "AGENTS.md"), "Project instruction: PLAN_GOAL_PROJECT_CONTEXT_MARKER\n"),
     writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { "plan-goal-loopback": {
-      baseUrl, api: "openai-completions", apiKey: "local-fixture-key",
+      baseUrl, api: "openai-completions", ...(options.missingAuth ? {} : { apiKey: "local-fixture-key" }),
       models: [{ id: "fixture", name: "Plan and Goal fixture", reasoning: false, input: ["text"], contextWindow: 32_000, maxTokens: 2_000,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     } } })),
@@ -96,15 +106,27 @@ export default function (pi) {
     const result = await dock.prompt(work.id, text, "auto", operationId);
     return { ...result, operationId };
   };
-  const command = async (text: string) => {
+  const start = async (text: string) => {
     const result = await submit(text);
     assert.equal(result.receipt.kind, "extension_command", `${text} is available on a new Work`);
+    // Run-starting commands do not emit command.handled. Their callers await
+    // the actual provider request instead, so a held response cannot deadlock.
+    return result;
+  };
+  const command = async (text: string) => {
+    const result = await start(text);
     await waitFor(() => events.some((event) => event.type === "command.handled" && event.data.operationId === result.operationId), `${text} did not finish`);
     return result;
   };
   const idle = async () => waitFor(async () => (await dock.read(work.id)).instance.execution === "idle", "Work did not become idle");
   const surface = async () => Object.values((await dock.read(work.id)).instance.extensionStatus).join("\n");
-  return { root, cwd, gate, gateEntered, dock, work, provider, events, subscriptions, submit, command, idle, surface };
+  return { root, cwd, gate, gateEntered, dock, work, provider, events, subscriptions, submit, start, command, idle, surface };
+}
+
+function assertPrepared(request: HeldChatRequest, start: number): void {
+  const messages = JSON.stringify(request.body.messages);
+  assert.ok(messages.includes("PLAN_GOAL_PROJECT_CONTEXT_MARKER"), "User-triggered work receives the project's AGENTS.md instructions");
+  assert.ok(messages.includes(`PLAN_GOAL_BEFORE_START_${start}`), `User-triggered work runs before_agent_start for prepared request ${start}`);
 }
 
 test("Plan is available immediately, protects project files, and executes only the current approved plan", { timeout: 30_000 }, async (context) => {
@@ -126,8 +148,9 @@ test("Plan is available immediately, protects project files, and executes only t
   const draftB = "Inspect fixture.txt, then write a human-reviewed report.";
   const draftC = "Inspect fixture.txt, then write the latest reviewed report.";
 
-  await h.command("/plan on Prepare a report without changing project files");
+  await h.start("/plan on Prepare a report without changing project files");
   const first = await h.provider.request(0);
+  assertPrepared(first, 1);
   for (const name of ["plan_update", "read", "ls", "find", "grep"]) assert.ok(first.toolNames.includes(name), `Plan exposes ${name} to the actual model request`);
   first.tools(
     { id: "plan-read", name: "read", arguments: { path: "fixture.txt" } },
@@ -157,6 +180,7 @@ test("Plan is available immediately, protects project files, and executes only t
 
   await h.submit("Revise the last step while I review the current plan.");
   const revision = await h.provider.request(2);
+  assertPrepared(revision, 2);
   await h.submit("/plan apply");
   const oldApproval = await nextDialog(1, "confirm");
   assert.ok(oldApproval.data.method === "confirm");
@@ -174,6 +198,7 @@ test("Plan is available immediately, protects project files, and executes only t
   assert.ok(approval.data.message.includes(draftC));
   await respond(approval, { method: "confirm", confirmed: true });
   const execution = await h.provider.request(4);
+  assertPrepared(execution, 3);
   assert.equal(revisionResult.closed, true, "The old planning response ends before the approved execution request starts");
   assert.ok(JSON.stringify(execution.body.messages).includes(draftC));
   execution.tools({ id: "approved-write", name: "write", arguments: { path: "approved.txt", content: "approved report" } });
@@ -189,13 +214,17 @@ test("Plan is available immediately, protects project files, and executes only t
 
 test("Goal counts scheduled rounds rather than tool turns and reports budget, completion, and blockers", { timeout: 30_000 }, async (context) => {
   const h = await setup(context);
-  await h.command("/goal start --rounds 2 --minutes 2 Inspect the fixture in two stages");
-  (await h.provider.request(0)).tools(
+  await h.start("/goal start --rounds 2 --minutes 2 Inspect the fixture in two stages");
+  const initialGoal = await h.provider.request(0);
+  assertPrepared(initialGoal, 1);
+  initialGoal.tools(
     { id: "goal-expand-scope", name: "goal_update", arguments: { status: "progress", summary: "Change my assignment", objective: "Deploy unrelated work", maxRounds: 100 } },
     { id: "goal-progress", name: "goal_update", arguments: { status: "progress", summary: "First stage inspected" } },
   );
   (await h.provider.request(1)).text("First stage finished; the second stage remains.");
   const nextRound = await h.provider.request(2);
+  assertPrepared(nextRound, 1);
+  assert.equal(JSON.stringify(nextRound.body.messages).includes("PLAN_GOAL_BEFORE_START_2"), false, "Automatic continuation keeps the prepared context instead of inventing a new human start");
   assert.ok(JSON.stringify(nextRound.body.messages).includes("Inspect the fixture in two stages"));
   nextRound.tools({ id: "goal-read", name: "read", arguments: { path: "fixture.txt" } });
   (await h.provider.request(3)).text("The final allowed stage is finished.");
@@ -205,8 +234,10 @@ test("Goal counts scheduled rounds rather than tool turns and reports budget, co
   assert.ok(h.events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "goal-expand-scope" && event.data.isError), "A model cannot replace the human objective or increase its spending budget");
   assert.equal(h.provider.requests.length, 4, "The two scheduled rounds include their natural tool-result turns");
 
-  await h.command("/goal start --rounds 5 --minutes 2 Confirm the fixture is present");
-  (await h.provider.request(4)).tools({ id: "goal-complete", name: "goal_update", arguments: {
+  await h.start("/goal start --rounds 5 --minutes 2 Confirm the fixture is present");
+  const completionGoal = await h.provider.request(4);
+  assertPrepared(completionGoal, 2);
+  completionGoal.tools({ id: "goal-complete", name: "goal_update", arguments: {
     status: "complete", summary: "Fixture verified", evidence: ["fixture.txt contains the expected contents"],
   } });
   (await h.provider.request(5)).text("Fixture verified.");
@@ -218,17 +249,26 @@ test("Goal counts scheduled rounds rather than tool turns and reports budget, co
   assert.ok(h.events.some((event) => event.type === "extension.notification" && event.data.message.includes("Fixture verified")));
   assert.equal(h.provider.requests.length, 6, "A completed Goal does not spend its remaining rounds");
 
-  await h.command("/goal start --rounds 5 --minutes 2 Wait for missing requirements");
-  (await h.provider.request(6)).tools({ id: "goal-blocked", name: "goal_update", arguments: { status: "blocked", summary: "Need the report format" } });
+  await h.start("/goal start --rounds 5 --minutes 2 Wait for missing requirements");
+  const blockedGoal = await h.provider.request(6);
+  assertPrepared(blockedGoal, 3);
+  blockedGoal.tools({ id: "goal-blocked", name: "goal_update", arguments: { status: "blocked", summary: "Need the report format" } });
   (await h.provider.request(7)).text("Please choose the report format.");
   await h.idle();
   assert.match(await h.surface(), /受阻/);
   assert.equal(h.provider.requests.length, 8, "Blocked work stops for the person to decide");
+
+  const unavailable = await setup(context, { missingAuth: true });
+  await unavailable.start("/goal start --rounds 2 --minutes 2 Inspect after model access is configured");
+  await waitFor(async () => /受阻/.test(await unavailable.surface()), "Missing model access did not leave a clear blocked Goal");
+  await unavailable.idle();
+  assert.match(await unavailable.surface(), /0\s*\/\s*2/);
+  assert.equal(unavailable.provider.requests.length, 0, "Failed prompt preparation does not consume a Goal round or call a provider");
 });
 
 test("Goal defaults to ten rounds and its minute deadline stops a running native response", { timeout: 30_000 }, async (context) => {
   const h = await setup(context);
-  await h.command("/goal start --minutes 2 Continue the approved inspection");
+  await h.start("/goal start --minutes 2 Continue the approved inspection");
   for (let index = 0; index < 10; index += 1) {
     (await h.provider.request(index * 2)).tools({ id: `default-progress-${index}`, name: "goal_update", arguments: {
       status: "progress", summary: `Inspection stage ${index + 1} completed; work remains`,
@@ -240,7 +280,7 @@ test("Goal defaults to ten rounds and its minute deadline stops a running native
   assert.match(await h.surface(), /10\s*\/\s*10/);
   assert.equal(h.provider.requests.length, 20, "Default autonomous spending is ten scheduled rounds including the first");
 
-  await h.command("/goal start --rounds 10 --minutes 0.01 Stop this inspection at its deadline");
+  await h.start("/goal start --rounds 10 --minutes 0.01 Stop this inspection at its deadline");
   const held = await h.provider.request(20);
   await waitFor(() => held.closed, "The minute deadline did not stop the native provider request");
   await h.idle();
@@ -250,8 +290,9 @@ test("Goal defaults to ten rounds and its minute deadline stops a running native
 
 test("A person can pause, stop, supplement, and cancel Goal work while ordinary chat preserves the chosen state", { timeout: 30_000 }, async (context) => {
   const h = await setup(context);
-  await h.command("/goal start --rounds 4 --minutes 2 Inspect the approved project");
+  await h.start("/goal start --rounds 4 --minutes 2 Inspect the approved project");
   const pausedRequest = await h.provider.request(0);
+  assertPrepared(pausedRequest, 1);
   await h.command("/goal pause");
   await waitFor(() => pausedRequest.closed, "Pause did not stop the native model response");
   await h.idle();
@@ -259,22 +300,26 @@ test("A person can pause, stop, supplement, and cancel Goal work while ordinary 
   assert.match(await h.surface(), /1\s*\/\s*4/);
 
   await h.submit("Explain the inspection steps while the Goal stays paused.");
-  (await h.provider.request(1)).text("These are the proposed inspection steps.");
+  const ordinaryChat = await h.provider.request(1);
+  assertPrepared(ordinaryChat, 2);
+  ordinaryChat.text("These are the proposed inspection steps.");
   await h.idle();
   assert.match(await h.surface(), /已暂停/);
   assert.match(await h.surface(), /1\s*\/\s*4/);
   assert.equal(h.provider.requests.length, 2, "Ordinary chat does not rearm a paused Goal");
 
-  await h.command("/goal resume");
+  await h.start("/goal resume");
   const stoppedRequest = await h.provider.request(2);
+  assertPrepared(stoppedRequest, 3);
   await h.dock.abort(h.work.id);
   await waitFor(() => stoppedRequest.closed, "Native Stop did not stop the Goal response");
   await h.idle();
   assert.match(await h.surface(), /已暂停/);
   assert.match(await h.surface(), /2\s*\/\s*4/);
 
-  await h.command("/goal resume");
+  await h.start("/goal resume");
   const activeRequest = await h.provider.request(3);
+  assertPrepared(activeRequest, 4);
   const input = "Include fixture.txt in this inspection and explain what it contains.";
   await h.submit(input);
   activeRequest.text("The current inspection step has ended.");
@@ -289,7 +334,7 @@ test("A person can pause, stop, supplement, and cancel Goal work while ordinary 
   assert.match(await h.surface(), /3\s*\/\s*4/);
   assert.equal(h.provider.requests.length, 6, "A supplement is handled within the current authorized Goal round");
 
-  await h.command("/goal start --rounds 2 --minutes 2 Inspect an optional appendix");
+  await h.start("/goal start --rounds 2 --minutes 2 Inspect an optional appendix");
   const cancelledRequest = await h.provider.request(6);
   await h.command("/goal cancel");
   await waitFor(() => cancelledRequest.closed, "Cancel did not stop the native model response");
@@ -299,7 +344,7 @@ test("A person can pause, stop, supplement, and cancel Goal work while ordinary 
 
 test("Reload, fork, and tree navigation retain the selected Goal budget and wait for explicit resume", { timeout: 30_000 }, async (context) => {
   const h = await setup(context);
-  await h.command("/goal start --rounds 3 --minutes 2 Inspect this branch in stages");
+  await h.start("/goal start --rounds 3 --minutes 2 Inspect this branch in stages");
   const first = await h.provider.request(0);
   const earlyLeaf = (await h.dock.tree(h.work.id)).leafId;
   assert.ok(earlyLeaf, "The running Goal has a navigable history point");
@@ -329,7 +374,7 @@ test("Reload, fork, and tree navigation retain the selected Goal budget and wait
   assert.match(await h.surface(), /已暂停/);
   assert.match(await h.surface(), /2\s*\/\s*3/);
   assert.equal(h.provider.requests.length, 3, "Forking saved work does not authorize another round");
-  await h.command("/goal resume");
+  await h.start("/goal resume");
   (await h.provider.request(3)).text("The last allowed stage in the fork is complete.");
   await h.idle();
   assert.match(await h.surface(), /预算用尽/);
@@ -341,7 +386,7 @@ test("Reload, fork, and tree navigation retain the selected Goal budget and wait
   assert.match(await h.surface(), /已暂停/);
   assert.match(await h.surface(), /1\s*\/\s*3/);
   assert.equal(h.provider.requests.length, 4, "Selecting earlier active Goal history requires renewed execution intent");
-  await h.command("/goal resume");
+  await h.start("/goal resume");
   (await h.provider.request(4)).text("The resumed branch has one more stage.");
   (await h.provider.request(5)).text("The resumed branch has reached its original limit.");
   await h.idle();
@@ -350,8 +395,9 @@ test("Reload, fork, and tree navigation retain the selected Goal budget and wait
   assert.equal(h.provider.requests.length, 6, "Resume keeps the selected branch's original three-round budget");
 });
 
-// A person can act after the model has answered but while Pi is deciding whether
-// to continue. This protects the same explicit stop/user-priority safety boundary.
+// The disk fixture runs before the inline Goal handler. It holds pre-settle
+// before Goal proposes a continuation, not after a proposal has been returned.
+// A person's pause or queued input must win at this explicit safety boundary.
 test("Pause and new human input take priority while a Goal is deciding whether to continue", { timeout: 30_000 }, async (context) => {
   const h = await setup(context, { boundaryGate: true });
   const arm = async () => {
@@ -361,7 +407,7 @@ test("Pause and new human input take priority while a Goal is deciding whether t
   const atBoundary = () => waitFor(async () => readFile(h.gateEntered, "utf8").then(() => true, () => false), "Pi did not reach the held continuation boundary");
   const release = () => rm(h.gate, { force: true });
   try {
-    await h.command("/goal start --rounds 3 --minutes 2 Inspect before continuing");
+    await h.start("/goal start --rounds 3 --minutes 2 Inspect before continuing");
     const first = await h.provider.request(0);
     await arm();
     first.text("The first inspection stage is complete.");
@@ -372,7 +418,7 @@ test("Pause and new human input take priority while a Goal is deciding whether t
     assert.match(await h.surface(), /已暂停/);
     assert.equal(h.provider.requests.length, 1, "Pause takes effect even between native rounds");
 
-    await h.command("/goal start --rounds 3 --minutes 2 Continue only while this remains my task");
+    await h.start("/goal start --rounds 3 --minutes 2 Continue only while this remains my task");
     const second = await h.provider.request(1);
     await arm();
     second.text("The first stage has ended.");
@@ -391,7 +437,7 @@ test("Pause and new human input take priority while a Goal is deciding whether t
     assert.match(await h.surface(), /1\s*\/\s*3/);
     assert.equal(h.provider.requests.length, 4, "Queued human input takes priority while preserving the authorized Goal");
 
-    await h.command("/goal start --rounds 3 --minutes 2 Inspect the original assignment");
+    await h.start("/goal start --rounds 3 --minutes 2 Inspect the original assignment");
     const original = await h.provider.request(4);
     await arm();
     original.text("The original assignment reached its continuation boundary.");

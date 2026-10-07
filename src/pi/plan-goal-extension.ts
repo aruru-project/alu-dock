@@ -38,6 +38,7 @@ interface State {
 /** The adapter's existing abort must disarm before Pi can skip pre-settle. No Host state. */
 export class PlanGoalControl {
   private pauseCurrent: ((reason: string) => void) | undefined;
+  private promptCurrent: ((text: string, mayStart: () => boolean) => Promise<boolean>) | undefined;
 
   attach(pause: (reason: string) => void): () => void {
     this.pauseCurrent = pause;
@@ -45,6 +46,11 @@ export class PlanGoalControl {
   }
 
   pause(reason: string): void { this.pauseCurrent?.(reason); }
+  bindPrompt(prompt: (text: string, mayStart: () => boolean) => Promise<boolean>): void { this.promptCurrent = prompt; }
+  async start(text: string, mayStart: () => boolean): Promise<boolean> {
+    if (!this.promptCurrent) throw new Error("规划与目标尚未连接到当前会话，请重新打开工作后再试。");
+    return this.promptCurrent(text, mayStart);
+  }
 }
 
 export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
@@ -126,6 +132,28 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
       }, Math.max(0, goal.expiresAt - Date.now()));
       timer.unref();
     };
+    const startUserRun = (text: string, ctx: ExtensionContext, goalId?: string): void => {
+      const intent = intentVersion;
+      // User-triggered starts need Pi's full prompt preparation (project context,
+      // before_agent_start and tool loadout). A raw custom-message start skips it.
+      const mayStart = (): boolean => intent === intentVersion && (!goalId || armed && state.goal?.id === goalId
+        && state.goal.status === "active" && Date.now() < state.goal.expiresAt);
+      void control.start(text, mayStart).then((started) => {
+        if (started || !goalId || !mayStart() || state.goal?.id !== goalId) return;
+        disarm(); state.goal.status = "blocked";
+        state.goal.summary = "输入已由其他扩展接管，目标没有开始。请确认该扩展的结果后再继续。";
+        save(ctx);
+      }).catch((error: unknown) => {
+        if (intent !== intentVersion) return;
+        if (goalId && state.goal?.id === goalId && state.goal.status !== "active") return;
+        if (goalId && state.goal?.id === goalId && state.goal.status === "active") {
+          disarm(); state.goal.status = "blocked";
+          state.goal.summary = "目标未能开始。请处理模型或会话错误后用 /goal resume 继续。";
+          save(ctx);
+        }
+        ctx.ui.notify(`无法开始当前请求：${error instanceof Error ? error.message : String(error)}。请处理问题后重试。`, "error");
+      });
+    };
     const goalPrompt = (goal: Goal): string => [
       "[Dock Goal continuation: runtime-generated context, not new human authorization]",
       `Goal: ${goal.objective}`,
@@ -146,8 +174,7 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
       goal.status = "active";
       save(ctx);
       startTimer(ctx);
-      pi.sendMessage({ customType: MESSAGE_TYPE, content: goalPrompt(goal), display: true,
-        details: { kind: "goal_continuation", goalId: goal.id } }, { triggerTurn: true, deliverAs: "followUp" });
+      startUserRun(`[Dock command: the user explicitly started or resumed this Goal]\n${goalPrompt(goal)}`, ctx, goal.id);
     };
     const restore = (ctx: ExtensionContext): void => {
       intentVersion += 1;
@@ -176,7 +203,10 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
     pi.on("session_shutdown", () => { intentVersion += 1; disarm(); detach(); });
     // Ordinary input retains Pi's own steer/Queue semantics. It never arms a
     // paused goal, but a supplement need not make an active goal require resume.
-    pi.on("input", (event) => { if (event.source !== "extension") intentVersion += 1; return { action: "continue" }; });
+    pi.on("input", (event) => {
+      if (event.source !== "extension") { intentVersion += 1; pendingRound = undefined; }
+      return { action: "continue" };
+    });
     pi.on("agent_start", (_event, ctx) => {
       context = ctx;
       const goal = state.goal;
@@ -251,7 +281,9 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
         "Keep an actionable plan using plan_update: goal, facts, decisions, scope/non-goals, implementation and verification, and unresolved questions.",
         "Only the user can approve execution with /plan apply. You cannot approve your own plan.",
         state.plan?.content ? `Current plan revision ${state.plan.revision}:\n${state.plan.content}` : "No plan has been saved yet.",
-      ].join("\n") : state.goal?.status === "active" && armed ? goalPrompt({ ...state.goal, rounds: Math.max(0, state.goal.rounds - 1) }) : undefined;
+      ].join("\n") : state.goal?.status === "active" && armed
+        ? goalPrompt({ ...state.goal, rounds: Math.max(0, state.goal.rounds - 1) })
+        : state.goal ? `[Dock Goal state: ${state.goal.status}]\nPrevious objective: ${state.goal.objective}\nAutomatic execution is disarmed. Answer the latest user request; do not restart the old objective from historical continuation messages. Only an explicit /goal start or /goal resume can arm it again.` : undefined;
       if (!instruction) return;
       return { messages: [...event.messages, { role: "custom", customType: "alu-dock-plan-goal-context", content: instruction, display: false, timestamp: Date.now() }] };
     });
@@ -314,7 +346,7 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
           const intent = intentVersion;
           if (!ctx.isIdle()) { ctx.abort(); await ctx.waitForIdle(); }
           if (intent !== intentVersion) return;
-          if (rest.length) pi.sendMessage({ customType: MESSAGE_TYPE, content: `用户请求规划：${rest.join(" ")}\n先调查，必要时提问，并保存可执行的计划。`, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+          if (rest.length) startUserRun(`[Dock command: user-requested planning]\n用户请求规划：${rest.join(" ")}\n先调查，必要时提问，并保存可执行的计划。`, ctx);
           else ctx.ui.notify("已进入规划。可以开始调查和讨论，用 /plan edit 编辑，用 /plan apply 按计划执行。", "info");
           return;
         }
@@ -370,8 +402,7 @@ export function planGoalExtension(control: PlanGoalControl): ExtensionFactory {
           if (handoffIntent !== intentVersion) return;
           if (state.plan?.id !== plan.id || state.plan.revision !== revision) { ctx.ui.notify("计划在交接期间更新了。请用 /plan apply 查看并确认新版本。", "warning"); return; }
           state.plan.approvedRevision = revision; setMode("execute"); save(ctx);
-          pi.sendMessage({ customType: MESSAGE_TYPE, content: `用户已批准以下第${revision}版计划，开始在该范围内执行。普通实现细节可自行调整；改变目标、授权或重要取舍时再问用户。\n\n${plan.content}`, display: true,
-            details: { kind: "plan_approved", planId: plan.id, revision } }, { triggerTurn: true, deliverAs: "followUp" });
+          startUserRun(`[Dock command: user-approved plan revision ${revision}]\n用户已批准以下第${revision}版计划，开始在该范围内执行。普通实现细节可自行调整；改变目标、授权或重要取舍时再问用户。\n\n${plan.content}`, ctx);
           return;
         }
         ctx.ui.notify("用 /plan on、show、edit、apply 或 off 操作计划。", "warning");
