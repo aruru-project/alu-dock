@@ -177,7 +177,7 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 ## Extension UI
 
-Pi Worker 自动加载 `alu-dock-plan-goal`。`/plan` 只读调查并提交完整计划，由用户在编辑器审阅修改后选择执行或继续讨论；`/goal` 用轮数预算自动推进，`agent_before_settle` 是唯一次轮入口。业务状态只存在 Pi 当前分支 custom entries，恢复后暂停。模型工具按模式启用，计划正文只在变化时保存。薄启动回调处理 Pi 扩展消息在开始前失败/被接管及准备期间取消；运行中 abort 与 settled 由 Pi 负责。Host 不增加目标状态、预算或协议。见[使用说明](../agent/plan-goal.md)。
+Pi Worker 自动加载 `alu-dock-plan-goal`。`/plan` 只读调查并提交完整计划，由用户在编辑器审阅修改后选择执行或继续讨论；`/goal` 用轮数预算自动推进，`agent_before_settle` 是唯一次轮入口。业务状态只存在 Pi 当前分支 custom entries，恢复后暂停。模型工具按模式启用：规划时只保留已启用的只读工具和内置读取工具，调用时再按只读声明拦截（含嵌套调用）；第三方工具的 `readOnlyHint` 需要可信，这不是系统沙箱。计划正文只在变化时保存。薄启动回调处理 Pi 扩展消息在开始前失败/被接管及准备期间取消；运行中 abort 与 settled 由 Pi 负责。Host 不增加目标状态、预算或协议。见[使用说明](../agent/plan-goal.md)。
 
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。
 
