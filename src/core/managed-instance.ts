@@ -388,6 +388,7 @@ export class ManagedInstance {
   private timedExecutionValue: InstanceExecution = "idle";
   private transitionTail: Promise<void> = Promise.resolve();
   private historyRefreshTail: Promise<void> = Promise.resolve();
+  private historyUpdateVersion = 0;
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
   private runtimeDisposePromise: Promise<AgentCleanupResult> | undefined;
@@ -2993,7 +2994,11 @@ export class ManagedInstance {
   }
 
   private async refreshHistory(): Promise<void> {
+    const version = ++this.historyUpdateVersion;
     const history = await this.invokeAgent<AgentHistoryEntry[]>("session.history", { limit: 200 });
+    // A newer refresh or checkpoint may have arrived before this response's
+    // Promise continuation, even when Worker messages were delivered in order.
+    if (version !== this.historyUpdateVersion) return;
     this.journal.replaceHistory(history.map(projectAgentHistoryEntry));
   }
 
@@ -3598,6 +3603,7 @@ export class ManagedInstance {
     if (!Array.isArray(event.history)) throw new Error("Worker conversation checkpoint is missing its authoritative history");
     const history = event.history.map((entry) => projectAgentHistoryEntry(entry as AgentHistoryEntry));
     const unpersistedBash = Array.isArray(event.unpersistedBash) ? event.unpersistedBash.filter((id): id is string => typeof id === "string") : [];
+    this.historyUpdateVersion += 1;
     this.journal.installConversationCheckpoint(history, unpersistedBash);
   }
 
