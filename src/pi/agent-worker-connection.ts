@@ -278,7 +278,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
         case "ui.select": result = await broker.select(args.title as string, args.options as string[], opts); break;
         case "ui.confirm": result = await broker.confirm(args.title as string, args.message as string, opts); break;
         case "ui.input": result = await broker.input(args.title as string, args.placeholder as string | undefined, opts); break;
-        case "ui.editor": result = await broker.editor(args.title as string, args.prefill as string | undefined); break;
+        case "ui.editor": result = await broker.editor(args.title as string, args.prefill as string | undefined, opts); break;
         case "ui.notify": broker.notify(args.message as string, args.level as never, args.operationId as string | undefined); break;
         case "ui.setTitle": broker.setTitle(args.title as string); break;
         case "ui.setEditorText": broker.setEditorText(args.text as string); break;

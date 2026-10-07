@@ -1587,7 +1587,12 @@ export class PiAgentAdapter {
       this.processCwdValue = binding.cwd;
       const uiContext = this.options.uiContextFactory?.() ?? this.options.uiContext;
       await session.bindExtensions({
-        uiContext,
+        uiContext: uiContext && {
+          ...uiContext,
+          // Pi's tracked editor wrapper accepts only two arguments. Attach the
+          // current run's public signal here, after that wrapper, for Dock UI.
+          editor: (title, prefill) => (uiContext.editor as PiExtensionUiPort["editor"])(title, prefill, { signal: session.agent.signal }),
+        },
         mode: uiContext ? "rpc" : "print",
         commandContextActions: this.extensionCommandContextActions(session, binding.services),
         onError: (error) => {
@@ -3533,11 +3538,12 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },
-          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalStart) },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
           ...piBuiltinExtensions(),
+          // Restore Plan policy after built-in extensions restore their tool visibility.
+          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalStart) },
         ],
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],

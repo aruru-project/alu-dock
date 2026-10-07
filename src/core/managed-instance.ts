@@ -2231,13 +2231,12 @@ export class ManagedInstance {
       }
 
       const running = this.state.execution === "running" || this.agentState().isStreaming;
-      if (!running && (!restoreQueue || (pendingBefore.length === 0 && this.state.pendingSteering === 0 && this.state.pendingFollowUp === 0))) {
-        return nothingRestored;
-      }
+      // Preparation can still be pending while the Agent reports idle. Forward
+      // the user's interrupt; only the Worker knows what it has to cancel.
       this.receiptBoundaryOperationId = operationId;
       try {
         resumeHostQueue = false;
-        const request = !restoreQueue ? "command.abort" : running ? "command.abort_restore_queue" : "queue.dequeue";
+        const request = restoreQueue ? "command.abort_restore_queue" : "command.abort";
         if (running) this.abortRequestedWhileRunning = true;
         const cleared = await this.invokeAgent<ClearedAgentQueue | null>(request, { operationId });
         if (running) {

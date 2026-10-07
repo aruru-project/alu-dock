@@ -522,7 +522,7 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
     case "ui.select": keys("title", "options", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); stringArray(args.options, 256, 16_000, "Dialog options"); validateDialogOptions(args.optionsMeta); return;
     case "ui.confirm": keys("title", "message", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); boundedString(args.message, 16_000, "Dialog message", true); validateDialogOptions(args.optionsMeta); return;
     case "ui.input": keys("title", "placeholder", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.placeholder, 4_096); validateDialogOptions(args.optionsMeta); return;
-    case "ui.editor": keys("title", "prefill"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.prefill, 300_000); return;
+    case "ui.editor": keys("title", "prefill", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.prefill, 300_000); validateDialogOptions(args.optionsMeta); return;
     case "ui.notify": keys("message", "level", "operationId"); boundedString(args.message, 16_000, "Notification", true); oneOf(args.level, ["info", "warning", "error"], "Notification level"); optionalString(args.operationId, 128); return;
     case "ui.setTitle": keys("title"); directiveString(args.title, 2_048, "Terminal title", false); return;
     case "ui.setEditorText": keys("text"); directiveString(args.text, 256_000, "Editor text", true); return;

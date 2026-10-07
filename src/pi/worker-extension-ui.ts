@@ -54,7 +54,7 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
       select: (title, options, opts) => active() ? this.select(title, options, opts) : cancelled(),
       confirm: (title, message, opts) => active() ? this.confirm(title, message, opts) : cancelled(),
       input: (title, placeholder, opts) => active() ? this.input(title, placeholder, opts) : cancelled(),
-      editor: (title, prefill) => active() ? this.editor(title, prefill) : cancelled(),
+      editor: (title, prefill, opts) => active() ? this.editor(title, prefill, opts) : cancelled(),
       notify: (message, level) => { if (active()) this.notify(message, level); },
       setTitle: (title) => { if (active()) this.setTitle(title); },
       setEditorText: (text) => { if (active()) this.setEditorText(text); },
@@ -80,8 +80,8 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
     return this.call("ui.input", { title, ...(placeholder === undefined ? {} : { placeholder }), optionsMeta: dialogOptions(opts) }, opts?.signal).then(optionalStringResult);
   }
 
-  editor(title: string, prefill?: string): Promise<string | undefined> {
-    return this.call("ui.editor", { title, ...(prefill === undefined ? {} : { prefill }) }).then(optionalStringResult);
+  editor(title: string, prefill?: string, opts?: ExtensionDialogOptions): Promise<string | undefined> {
+    return this.call("ui.editor", { title, ...(prefill === undefined ? {} : { prefill }), optionsMeta: dialogOptions(opts) }, opts?.signal).then(optionalStringResult);
   }
 
   notify(message: string, level: "info" | "warning" | "error" = "info"): void {

@@ -82,6 +82,7 @@ export default function (pi) {
   const start = async (text: string) => {
     const result = await submit(text);
     assert.equal(result.receipt.kind, "extension_command", `${text} is available on this Work`);
+    return result.receipt;
   };
   const idle = () => waitFor(async () => (await dock.read(work.id)).instance.execution === "idle", "Work did not become idle");
   const surface = async () => Object.values((await dock.read(work.id)).instance.extensionStatus).join("\n");
@@ -114,6 +115,15 @@ function assertOrdinaryTools(request: HeldChatRequest): void {
   // Review probe found these tools leaking into every ordinary conversation.
   for (const name of ["plan_submit", "plan_question", "goal_update"]) assert.equal(request.toolNames.includes(name), false, `${name} is inactive outside its mode`);
   assert.ok(request.toolNames.includes("write"));
+}
+
+function assertPlanningTools(request: HeldChatRequest): void {
+  for (const name of ["read", "plan_submit", "plan_question"]) assert.ok(request.toolNames.includes(name), `Planning still offers ${name}`);
+  // The 2026-10-07 review reproduced Dock's write tools reappearing after
+  // /dock-tools status; the same visibility must survive /reload.
+  for (const name of ["write", "edit", "bash", "dock_create", "dock_send", "dock_deliver_file"]) {
+    assert.equal(request.toolNames.includes(name), false, `Planning keeps ${name} out of the model loadout`);
+  }
 }
 
 function messageText(content: unknown): string {
@@ -225,7 +235,18 @@ test("Plan investigates safely, lets the person discuss and edit the full plan, 
   await h.idle();
   await assertAwaitingApproval();
 
-  await h.submit("Show the plan again so I can approve the final version.");
+  // The 2026-10-07 review found that Stop waited for someone to close the
+  // editor. Leave it unanswered: the real Dock abort must dismiss it itself.
+  await h.submit("Show the plan while I consider whether to continue.");
+  (await h.request()).tools({ id: "plan-interrupted", name: "plan_submit", arguments: { content: revised } });
+  const interruptedReview = await ui.next("editor");
+  await h.dock.abort(h.work.id);
+  await h.idle();
+  await waitFor(() => h.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === interruptedReview.interactionId), "Stop did not dismiss the unanswered plan editor");
+  await assert.rejects(ui.respond(interruptedReview, { method: "editor", value: edited }), { code: "interaction_expired" }, "An editor dismissed by Stop cannot later approve or change the plan");
+  await assertAwaitingApproval();
+
+  await h.start("/plan Show the plan again so I can approve the final version.");
   (await h.request()).tools({ id: "plan-ready", name: "plan_submit", arguments: { content: revised } });
   const repeatedReview = await ui.next("editor");
   assert.equal(repeatedReview.prefill, revised, "Every separate submission shows the full plan again, even when unchanged");
@@ -291,6 +312,32 @@ test("Plan investigates safely, lets the person discuss and edit the full plan, 
   await h.idle();
   await assertGoalCleared(h);
   assertSmallRoundRecords(await savedChanges(h));
+
+  // Both status queries and resource reloads have previously reapplied Dock's
+  // tool list. Inspect the next actual model request after each user action.
+  const enableDockTools = await h.start("/dock-tools on");
+  await waitFor(() => h.events.some((event) => event.type === "extension.notification" && event.data.operationId === enableDockTools.operationId), "Dock tools did not finish enabling");
+  assert.equal((await h.dock.read(h.work.id)).instance.extensionStatus["Dock tools"], "on");
+  await h.start("/plan Investigate how to deliver another report");
+  const enabledPlanning = await h.request();
+  assertPlanningTools(enabledPlanning);
+  enabledPlanning.text("I will investigate the report without making changes.");
+  await h.idle();
+
+  const dockToolsStatus = await h.start("/dock-tools status");
+  await waitFor(() => h.events.some((event) => event.type === "extension.notification" && event.data.operationId === dockToolsStatus.operationId), "Dock tools status did not finish");
+  await h.submit("Which facts still need checking?");
+  const afterStatus = await h.request();
+  assertPlanningTools(afterStatus);
+  afterStatus.text("The report's source facts still need checking.");
+  await h.idle();
+
+  await h.dock.reloadSession(h.work.id); // The public action used by /reload.
+  await h.submit("Continue the read-only investigation after reloading.");
+  const afterReload = await h.request();
+  assertPlanningTools(afterReload);
+  afterReload.text("The read-only investigation can continue.");
+  await h.idle();
 });
 
 test("Goal joins ongoing work, honors supplements and Esc, then adds budget and clears its completed result", { timeout: 40_000 }, async (context) => {
@@ -399,6 +446,47 @@ test("Goal joins ongoing work, honors supplements and Esc, then adds budget and 
   assert.equal(lastMessageText(afterCancel), "Leave the appendix aside and answer normally.", "Ended Goals no longer append instructions");
   afterCancel.text("The appendix is set aside.");
   await h.idle();
+
+  // The 2026-10-07 review reproduced Stop returning during preparation while
+  // the released request still called the model. Cover Stop and TUI Escape
+  // through DockClient, Host, the real Worker and Pi, including an empty Queue.
+  for (const stop of ["abort", "abortRestoreQueue"] as const) {
+    const preparing = await setup(context);
+    const entered = join(preparing.root, "preparation-entered");
+    const release = join(preparing.root, "preparation-release");
+    const marker = `goal-preparation-released-${stop}`;
+    const extensions = join(preparing.root, "agent", "extensions");
+    await mkdir(extensions, { recursive: true });
+    await writeFile(join(extensions, "preparation-gate.ts"), `
+import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+export default function (pi) {
+  pi.on("before_agent_start", async (_event, ctx) => {
+    await writeFile(${JSON.stringify(entered)}, "entered");
+    while (!existsSync(${JSON.stringify(release)})) await new Promise((resolve) => setTimeout(resolve, 10));
+    // This fixture sends no images and has no other preparation hooks. The
+    // next event-loop turn follows Pi's remaining preflight promise callbacks.
+    setImmediate(() => ctx.ui.notify(${JSON.stringify(marker)}, "info"));
+  });
+}
+`);
+    await preparing.dock.reloadSession(preparing.work.id);
+    try {
+      await preparing.start("/goal --rounds 1 Inspect fixture.txt after preparation");
+      await waitFor(async () => await readFile(entered, "utf8").then(() => true, () => false), "Goal preparation did not reach the gate");
+      assert.equal(preparing.provider.requests.length, 0, "The Goal is still preparing its first request");
+      await preparing.dock[stop](preparing.work.id);
+      await writeFile(release, "release");
+      await waitFor(() => preparing.events.some((event) => event.type === "extension.notification" && event.data.message === marker), "The released preparation did not finish its preflight callbacks");
+      await preparing.idle();
+      assert.match(await preparing.surface(), /已暂停/);
+      assert.match(await preparing.surface(), /0\s*\/\s*1/);
+      assert.equal(preparing.provider.requests.length, 0, `${stop} prevents a released Goal preparation from calling the model`);
+    } finally {
+      // Let cleanup finish even when a regression makes an assertion fail.
+      await writeFile(release, "release");
+    }
+  }
 
   const unavailable = await setup(context, { missingAuth: true });
   await unavailable.start("/goal Inspect after model access is configured");
