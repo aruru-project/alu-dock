@@ -143,6 +143,7 @@ import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-obse
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import { retryExtension } from "./retry-extension.js";
+import { planGoalExtension, PlanGoalControl } from "./plan-goal-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
 import { piBuiltinExtensions } from "./pi-builtin-extensions.js";
 import { LiveNestedToolCalls, nestedCallArgumentsJson, projectPiNestedToolCalls } from "./pi-nested-tool-calls.js";
@@ -190,6 +191,7 @@ export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
 }
 
 export interface PiAgentAdapterOptions {
+  planGoalControl?: PlanGoalControl;
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
   setProjectTrust?: (cwd: string, trusted: boolean) => void;
@@ -1166,6 +1168,7 @@ export class PiAgentAdapter {
     return cleared;
   }
   async abort(): Promise<void> {
+    this.options.planGoalControl?.pause("当前工作已中止，目标已暂停。用 /goal resume 明确继续。");
     const session = this.active?.session;
     if (!session) return;
     const navigation = this.treeNavigation;
@@ -3492,6 +3495,7 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
+  const planGoalControl = new PlanGoalControl();
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const publishedFiles = new TransientFileRegistry();
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
@@ -3517,6 +3521,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },
+          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalControl) },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
@@ -3554,6 +3559,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     cwd: options.cwd, agentDir: options.agentDir, sessionManager,
   });
   return PiAgentAdapter.create({
+    planGoalControl,
     runtime,
     extensionUiBroker: options.extensionUiBroker,
     uiContext,

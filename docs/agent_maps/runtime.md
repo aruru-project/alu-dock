@@ -177,6 +177,8 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 ## Extension UI
 
+Pi Worker 同时自动加载 `alu-dock-plan-goal` inline extension，业务状态保存在 Pi 当前分支的 custom entries。`/plan`、`/goal` 和 `plan_update`、`plan_question`、`goal_update` 都沿 Pi 原生命令/工具入口；界面复用现有 editor、confirm、status 和 widget。唯一自动续轮入口是 `agent_before_settle`，`agent_settled` 不启动工作。adapter 的原生 abort 通过 Worker-local `PlanGoalControl` 先解除自动执行，再调用 Pi abort，避免中止路径跳过 pre-settle 后留下活跃目标。Host 不维护 Goal 状态、预算或第二套调度。详细行为和预算语义见[规划与目标手册](../agent/plan-goal.md)。
+
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。
 
 会话替换的 UI 交接由同一生命周期控制：Worker 暂存新插件初始化期间的单向 UI 更新，在发布 `dock_session_replaced` 后按顺序释放；Host 在收到替换事件时立即使旧 UI 失效，不等持久化转换队列才清理。这样新状态不会被后续收尾清空。取消替换不进入交接，失败则丢弃暂存发布；同一 session 的插件 `ctx.reload()` 在原有重置完成后释放新状态。暂存范围仅包含新插件发布的 UI 更新；Work 的 Dock tools 授权保持独立，不参与迁移。
