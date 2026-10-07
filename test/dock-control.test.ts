@@ -3440,6 +3440,31 @@ test("a catalog failure before a command takes effect rejects it cleanly and the
   assert.equal((await client.status(created.id)).execution, "running");
 });
 
+test("a Stop that could not be saved keeps the Work's delivered files downloadable", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-delivering-work");
+  const sourcePath = join(harness.directory, "result.txt");
+  await writeFile(sourcePath, "result");
+  await harness.registry.configureDockTools(created.id, true, "tools-on");
+  const delivered = await harness.registry.invokeDockTool(created.id, { type: "deliver", path: sourcePath });
+  if (delivered.type !== "deliver") assert.fail("expected a delivered file");
+
+  port.failAt(port.calls.length + 1);
+  await assert.rejects(
+    client.stop(created.id, "stop-not-saved"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
+  );
+
+  assert.equal((await client.status(created.id)).lifecycle, "active");
+  assert.deepEqual(await client.listDeliverables(created.id), [delivered.deliverable]);
+  const received: Buffer[] = [];
+  await client.downloadDeliverable(created.id, delivered.deliverable.deliveryRef, (chunk) => { received.push(Buffer.from(chunk)); });
+  assert.equal(Buffer.concat(received).toString("utf8"), "result");
+});
+
 test("a catalog failure after a command took effect reports effect_unknown, then reads work and writes are refused", async (context) => {
   const port = new ScriptedCatalogCommitPort();
   port.failAt(3);

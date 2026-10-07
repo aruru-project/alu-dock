@@ -2374,7 +2374,6 @@ export class ManagedInstance {
       () => {
         this.stopRequestedWhileRunning = this.state.execution === "running" || this.agentState().isStreaming;
         this.stopRequestedAt = requestedAt;
-        this.deliverables.clear();
         // A committed explicit stop retires this instance from its business
         // entry immediately. Cleanup continues by instance ID and must not
         // block a fresh keyed instance in a corrected or moved workspace.
@@ -2386,7 +2385,12 @@ export class ManagedInstance {
         if (this.state.execution === "unavailable") this.state.execution = "failed";
         this.touch(requestedAt);
       },
-      () => this.appendStateEvent("stop_requested", requestedAt),
+      () => {
+        // Only a saved Stop retires the delivered files; a failed save leaves
+        // the Work active and its deliveries still downloadable.
+        this.deliverables.clear();
+        this.appendStateEvent("stop_requested", requestedAt);
+      },
     ));
     const exclusive = this.commandScheduler.activeCommand("exclusive");
     const preemptibleEffect = exclusive?.kind === "navigation" || exclusive?.kind === "compaction"
