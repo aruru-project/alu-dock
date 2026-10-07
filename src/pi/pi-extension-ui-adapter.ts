@@ -8,7 +8,7 @@ export interface PiExtensionUiPort {
   select(title: string, options: string[], opts?: ExtensionDialogOptions): Promise<string | undefined>;
   confirm(title: string, message: string, opts?: ExtensionDialogOptions): Promise<boolean>;
   input(title: string, placeholder?: string, opts?: ExtensionDialogOptions): Promise<string | undefined>;
-  editor(title: string, prefill?: string): Promise<string | undefined>;
+  editor(title: string, prefill?: string, opts?: ExtensionDialogOptions): Promise<string | undefined>;
   notify(message: string, level?: "info" | "warning" | "error"): void;
   setTitle(title: string): void;
   setEditorText(text: string): void;
@@ -83,7 +83,7 @@ export function createPiExtensionUiContext(broker: PiExtensionUiPort): Extension
     select: (title, options, opts) => broker.select(title, options, opts),
     confirm: (title, message, opts) => broker.confirm(title, message, opts),
     input: (title, placeholder, opts) => broker.input(title, placeholder, opts),
-    editor: (title, prefill) => broker.editor(title, prefill),
+    editor: (title, prefill, opts?: ExtensionDialogOptions) => broker.editor(title, prefill, opts),
     notify: (message, level) => broker.notify(message, level),
     onTerminalInput: () => {
       broker.unsupported("raw terminal input");

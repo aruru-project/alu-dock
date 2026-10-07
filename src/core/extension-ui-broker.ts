@@ -345,12 +345,12 @@ export class ExtensionUiBroker {
     }, undefined, opts);
   }
 
-  editor(title: string, prefill?: string): Promise<string | undefined> {
+  editor(title: string, prefill?: string, opts?: ExtensionDialogOptions): Promise<string | undefined> {
     return this.requestDialog({
       method: "editor",
       title: safeLine(title, MAX_TITLE_CHARS),
       ...(prefill === undefined ? {} : { prefill: safeText(prefill, MAX_EDITOR_CHARS) }),
-    }, undefined);
+    }, undefined, opts);
   }
 
   notify(message: string, level: "info" | "warning" | "error" = "info", operationId?: string): void {

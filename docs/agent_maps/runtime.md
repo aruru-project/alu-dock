@@ -143,7 +143,7 @@ Dock 中 Pi 以 RPC 模式运行：`/mcp` 输出 Pi 的文字状态，`/mcp logi
 
 命令发现按能力而不是具体名称接入。Pi adapter 从公开的 loaded prompt template 保留 `argumentHint` 和可检查正文；正文分页来自内存中的 `PromptTemplate.content`，不让 Host 或客户端读取 `filePath`。Extension command 的动态参数候选由注册时的 `getArgumentCompletions` 产生，并通过同一通用结果体返回；Dock 自带 Extension command 也沿这条 owner API 声明候选，不在 Host 建名称表。Catalog 后续读取使用 `{name,source}`，按名称和来源共同确定目标。
 
-Pi 的 abort 会等待 Agent 回到 idle；普通 `command.abort` 不动 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。像 Pi TUI 按 Esc 一样“中止并把排队文本放回输入框”由 `command.abort_restore_queue` 一步完成：Pi adapter 在同一次 Worker 调用中先清空 Pi Queue、紧接着 abort，中间不给 Agent 取下一条的机会；Host 在同一个 interrupt 期间暂停把压缩期间暂存的消息交给 Agent（已开始的那一次交付先完成），停下后把 Host 暂存和 Pi 清出的消息按原顺序返回给调用者，并以 `queue.cleared(reason: abort)` 通知其他入口。已经被 Agent 取走的消息留在对话里，只在回执的 `inFlight` 中列出，不阻止中止。客户端不再先取回再中止。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
+Host 显示空闲时也把中止交给 Worker：扩展发起、仍在准备的请求只有 Worker 能取消。运行中打开的扩展编辑器带着本轮的取消信号，随中止关闭。Pi 的 abort 会等待 Agent 回到 idle；普通 `command.abort` 不动 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。像 Pi TUI 按 Esc 一样“中止并把排队文本放回输入框”由 `command.abort_restore_queue` 一步完成：Pi adapter 在同一次 Worker 调用中先清空 Pi Queue、紧接着 abort，中间不给 Agent 取下一条的机会；Host 在同一个 interrupt 期间暂停把压缩期间暂存的消息交给 Agent（已开始的那一次交付先完成），停下后把 Host 暂存和 Pi 清出的消息按原顺序返回给调用者，并以 `queue.cleared(reason: abort)` 通知其他入口。已经被 Agent 取走的消息留在对话里，只在回执的 `inFlight` 中列出，不阻止中止。客户端不再先取回再中止。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
 
 ### Agent-facing Host capability pattern
 
@@ -176,6 +176,8 @@ Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久�
 watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 只含 target/reason/time，不携带 sibling conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent；Agent 醒来后按主人原始意图决定是否 inspect。watch completion 使用上述独立投递路径，不走用户消息的 `command.submit`。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
 
 ## Extension UI
+
+Pi Worker 自动加载 `alu-dock-plan-goal`。`/plan` 只读调查并提交完整计划，由用户在编辑器审阅修改后选择执行或继续讨论；`/goal` 用轮数预算自动推进，`agent_before_settle` 是唯一次轮入口。业务状态只存在 Pi 当前分支 custom entries，恢复后暂停。模型工具按模式启用：规划时补上内置读取工具，并由 `plan_submit` 的 `prepareLoadout` 把非只读工具从请求中隐藏，不改动用户的工具开关；codemode 在 `only` 模式下会隐藏其余所有直接工具，所以 Dock 内置的 codemode 规划期间改用 `on` 模式（经 `PlanGoalPort.isPlanning` 读取），不改它的开关和用户设置；调用时再按只读声明拦截（含嵌套调用）；第三方工具的 `readOnlyHint` 需要可信，这不是系统沙箱。计划正文只在变化时保存。薄启动回调处理 Pi 扩展消息在开始前失败/被接管及准备期间取消；运行中 abort 与 settled 由 Pi 负责。Host 不增加目标状态、预算或协议。见[使用说明](../agent/plan-goal.md)。
 
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。
 

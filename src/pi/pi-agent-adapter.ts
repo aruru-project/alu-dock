@@ -143,6 +143,7 @@ import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-obse
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import { retryExtension } from "./retry-extension.js";
+import { planGoalExtension, type PlanGoalPort } from "./plan-goal-extension.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
 import { piBuiltinExtensions } from "./pi-builtin-extensions.js";
 import { LiveNestedToolCalls, nestedCallArgumentsJson, projectPiNestedToolCalls } from "./pi-nested-tool-calls.js";
@@ -190,6 +191,7 @@ export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
 }
 
 export interface PiAgentAdapterOptions {
+  planGoalPort?: PlanGoalPort;
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
   setProjectTrust?: (cwd: string, trusted: boolean) => void;
@@ -308,6 +310,18 @@ export class PiAgentAdapter {
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
+    if (options.planGoalPort) options.planGoalPort.prompt = async (text, mayStart) => {
+      let started = false;
+      await this.requireActive().session.prompt(text, {
+        source: "extension", expandPromptTemplates: false,
+        preflightResult: (disposition: PiPromptDisposition) => {
+          if (disposition !== "started") return;
+          if (!mayStart()) throw new Error("当前请求已取消或预算已用尽，请按最新请求继续。");
+          started = true;
+        },
+      } as PromptOptions);
+      return started;
+    };
     this.processCwdValue = options.initialProcessCwd;
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;
@@ -1166,6 +1180,7 @@ export class PiAgentAdapter {
     return cleared;
   }
   async abort(): Promise<void> {
+    this.options.planGoalPort?.cancelPending?.();
     const session = this.active?.session;
     if (!session) return;
     const navigation = this.treeNavigation;
@@ -1572,7 +1587,12 @@ export class PiAgentAdapter {
       this.processCwdValue = binding.cwd;
       const uiContext = this.options.uiContextFactory?.() ?? this.options.uiContext;
       await session.bindExtensions({
-        uiContext,
+        uiContext: uiContext && {
+          ...uiContext,
+          // Pi's tracked editor wrapper accepts only two arguments. Attach the
+          // current run's public signal here, after that wrapper, for Dock UI.
+          editor: (title, prefill) => (uiContext.editor as PiExtensionUiPort["editor"])(title, prefill, { signal: session.agent.signal }),
+        },
         mode: uiContext ? "rpc" : "print",
         commandContextActions: this.extensionCommandContextActions(session, binding.services),
         onError: (error) => {
@@ -3492,6 +3512,7 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
+  const planGoalPort: PlanGoalPort = {};
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const publishedFiles = new TransientFileRegistry();
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
@@ -3517,10 +3538,11 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-retry", factory: retryExtension },
+          { name: "alu-dock-plan-goal", factory: planGoalExtension(planGoalPort) },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
-          ...piBuiltinExtensions(),
+          ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],
@@ -3554,6 +3576,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     cwd: options.cwd, agentDir: options.agentDir, sessionManager,
   });
   return PiAgentAdapter.create({
+    planGoalPort,
     runtime,
     extensionUiBroker: options.extensionUiBroker,
     uiContext,

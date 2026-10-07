@@ -149,6 +149,7 @@ export class DockToolsBridge {
   }
 
   async configure(action: "on" | "off" | "status"): Promise<boolean> {
+    if (action === "status") return this.enabledValue;
     const previous = this.enabledValue;
     const fenced = action === "off";
     if (fenced) {
