@@ -45,7 +45,7 @@ let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = f
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative
 // The fake Host's Work list: extra records it lists, and Works it has retired.
-let extraListed = []
+let extraListed = [], holdWorkCatalog, reopenNative
 const retiredWorks = new Set()
 const hostWorks = () => structuredClone([work, otherWork, ...extraListed].filter(item => !retiredWorks.has(item.id)).map(atHost))
 const hostCatalog = () => ({ revision: hostCatalogRevision, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: context.connectionId },
@@ -110,7 +110,11 @@ const invoke = async (command, args = {}) => {
   if (command === 'cancel_pairing') return cancelPairingNative(args)
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
-  if (command === 'work_catalog') { const instances = hostWorks(); return { ...context, hostEpoch: 'epoch', instances, total: instances.length } }
+  if (command === 'work_catalog') {
+    const list = () => { const instances = hostWorks(); return { ...context, hostEpoch: 'epoch', instances, total: instances.length } }
+    return holdWorkCatalog ? holdWorkCatalog.then(list) : list()
+  }
+  if (command === 'reopen_work') return reopenNative(args)
   if (command === 'get_host_catalog') { const cut = hostCatalog(); return hostCatalogNative ? hostCatalogNative(cut) : cut }
   if (command === 'set_active_host') {
     context.connectionId = args.hostId; context.selectionGeneration++; hostCatalogRevision++
@@ -1859,6 +1863,30 @@ try {
     stopNative = undefined; retiredWorks.delete('work')
   }
   console.log('PASS: Stop events first, older reply later: the Work stays stopped and, once the Host drops it, stays out of the list')
+
+  // Continue: the Host's answer makes the lost Work active and followed at once,
+  // without waiting for the next list read.
+  {
+    const lost = { ...otherWork, id: 'lost-work', eventCursor: { ...otherWork.eventCursor, instanceId: 'lost-work' }, lifecycle: 'host_lost', execution: 'unavailable', reopenable: true, ownerHostEpoch: undefined }
+    extraListed = [lost]
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    mounted?.unmount(); await settle()
+    const continuePinia = createPinia(), continueApp = useAppStore(continuePinia), continueView = element('continue-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(continuePinia)
+    mounted.mount(continueView); await settle()
+    continueApp.selectWork('lost-work'); await settle()
+    const continued = atHost({ ...lost, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })
+    reopenNative = () => { extraListed = [continued]; return continued }
+    let releaseList
+    holdWorkCatalog = new Promise(resolve => { releaseList = resolve })
+    await find(continueView, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.onClick(); await settle()
+    assert.equal(continueApp.selectedWork?.lifecycle, 'active', 'the continued Work is active before the list is read again')
+    assert.ok(find(continueView, item => item.props['aria-label'] === '消息编辑器'), 'its editor is available at once')
+    assert.equal(calls.findLast(call => call.command === 'start_conversation_follow')?.args.instanceId, 'lost-work', 'following starts for the continued Work')
+    releaseList(); holdWorkCatalog = undefined; await settle()
+    extraListed = []; reopenNative = undefined
+  }
+  console.log('PASS: Continue opens the Work from the Host answer without waiting for the list')
 
   // #359: quick buttons in the input card. Real App, Pinia, palette and editor; only native IPC is a fixture.
   {

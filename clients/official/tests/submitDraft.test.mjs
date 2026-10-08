@@ -235,6 +235,7 @@ try {
   assert.equal(retainedOperations.has('unknown-model'), false)
   assert.equal(view.store.nativeOperations.has('unknown-model'), false)
   console.log('PASS: a lost model reply is an ordinary result to acknowledge; Stop stays available')
+  view.scope.stop(); view = await rebuild() // the stopped Work left; the next check starts from a fresh view
 
   // App exit/legacy drafts lose upload jobs but not their permanent Host fileId.
   const target = attachmentUploadTarget(view.store.selectedWork, view.store.connectionContext)

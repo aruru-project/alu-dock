@@ -368,6 +368,29 @@ export const useAppStore = defineStore('app', () => {
     payload.value.works[index] = snapshot
   }
 
+  /** Only the panel that created a Work adds it, from the Host's answer to that request. */
+  function addCreatedWork(snapshot: Work, context = connectionContext.value) {
+    if (!payload.value || !context || !contextMatches(context) || payload.value.connectionId !== context.connectionId) return
+    if (snapshot.ownerHostEpoch && snapshot.ownerHostEpoch !== payload.value.host.hostEpoch) return
+    if (payload.value.works.some((work) => work.id === snapshot.id)) return
+    payload.value.works.push(snapshot)
+    payload.value.total += 1
+  }
+
+  /** A Work the Host has stopped leaves the list and its page; like any Work the list stops showing, its local draft is left alone. */
+  function dropStoppedWork(instanceId: string, context = connectionContext.value) {
+    if (!payload.value || !context || !contextMatches(context) || payload.value.connectionId !== context.connectionId) return
+    const index = payload.value.works.findIndex((work) => work.id === instanceId)
+    if (index < 0) return
+    payload.value.works.splice(index, 1)
+    payload.value.total = Math.max(0, payload.value.total - 1)
+    if (selectedWorkId.value !== instanceId) return
+    selectedWorkId.value = null
+    const connection = localUiState.value.connections[context.connectionId]
+    if (connection?.selectedWorkId === instanceId) connection.selectedWorkId = null
+    saveLocalState()
+  }
+
   function removeWorkSnapshot(instanceId: string, context = connectionContext.value) {
     if (!payload.value || !context || !contextMatches(context) || payload.value.connectionId !== context.connectionId) return false
     const index = payload.value.works.findIndex((work) => work.id === instanceId)
@@ -565,7 +588,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
-    load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, removeOtherHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
+    load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, removeOtherHost, contextMatches, applyHostProfile, applyWorkSnapshot, addCreatedWork, dropStoppedWork, removeWorkSnapshot, selectWork,
     operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
