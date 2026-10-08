@@ -67,7 +67,7 @@ Host/Worker 提供的事实包括：
 
 TUI 只拥有显示状态，例如 viewport、focus、搜索、折叠和未提交的 editor draft。TUI 不根据本地动画或 transport 状态改写 Host/Worker 事实。
 
-操作回执和实时事件走不同连接，到达顺序不固定。回执和查询带回的 Work 状态都经过 `dock-tui.ts` 的同一个接纳入口：同一 Host 运行和 Work 内，只接纳不早于当前画面的那份（先比 generation，同 generation 再比事件序号）。不能证明更旧的状态照常接纳。
+Work TUI 显示的 Work 状态只来自进入时的读取和从该位置接续的实时事件。操作回执只用来报告这次操作的结果（成功与否、取回的 Queue、返回的文字等），不改写显示中的 Work 状态：回执和事件走不同连接，到达顺序不固定，而实时事件已经按顺序带来同样的变化。连接中断时提示中断，恢复后重新读取。
 
 ## Conversation
 
