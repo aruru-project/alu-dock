@@ -209,6 +209,8 @@ DockClient 的下载 API 把 chunk 逐块交给 sink/callback并独立计算 SHA
 - attachment `fileId`：Host logical attachment metadata 的 opaque identity；多个 `fileId` 可以引用同一份 content bytes，它不是路径；
 - event cursor：一次 read/follow reconnect 的观察位置。
 
+客户端维护 Work 状态时按这条分工：显示哪些 Work，以 Host 的列表回答为准；当前打开的 Work 的状态，来自一次 read 加上从该 read 位置接续的 follow 事件，断开时如实显示断开，重连后重新 read。操作的 response 只表示这次操作的结果；其中附带的 instance snapshot 供不订阅事件的调用方使用，订阅了事件的客户端不用它改写显示中的状态，因为它与事件走不同连接，可能比已显示的事件旧，也可能晚于 Work 停止才到达。两份状态需要比较先后时只看 event cursor（同一 Host epoch 与 instance 内，先比 runtimeGeneration，再比 sequence）；`ownerHostEpoch` 表示当前由哪次 Host 运行持有，Work 停止后为空，`updatedAt` 只用于显示，两者都不用于排序。
+
 客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。Snapshot 中可选的 `name` 是当前 Agent session name，不是稳定的 Dock 实例名称。Snapshot 始终携带 `displayName`：Host 统一按 `name → key → cwd fallback → Work` 生成安全的人类展示标签；其中 cwd fallback 只保留 ASCII 字母、数字、空格、下划线和横杠，最长 20 个字符，任意异常都降级而不能使 snapshot/list 失败。`displayName` 不持久化为 session name，不参与 TARGET、key 或 instance identity；客户端只负责渲染，操作仍使用 `instanceId`。
 
 ## Mutation

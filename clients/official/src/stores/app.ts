@@ -334,14 +334,16 @@ export const useAppStore = defineStore('app', () => {
     saveLocalState()
   }
 
-  // Replies and live events arrive separately. Order them by the Host event each
-  // state includes: several changes can share one updatedAt millisecond.
+  // List reads and the current Work's reads and live events arrive separately.
+  // Order them by the Host journal position each state includes. Neither
+  // updatedAt (several changes share a millisecond) nor ownerHostEpoch (empty
+  // once a Work stops) can order two states.
   function snapshotIsNewer(candidate: Work, baseline: Work) {
-    if (candidate.ownerHostEpoch !== baseline.ownerHostEpoch) return false
-    const candidateGeneration = candidate.runtimeGeneration ?? 0
-    const baselineGeneration = baseline.runtimeGeneration ?? 0
-    return candidateGeneration > baselineGeneration
-      || (candidateGeneration === baselineGeneration && candidate.eventCursor.sequence > baseline.eventCursor.sequence)
+    const next = candidate.eventCursor
+    const known = baseline.eventCursor
+    if (next.hostEpoch !== known.hostEpoch || next.instanceId !== known.instanceId) return false
+    return next.runtimeGeneration > known.runtimeGeneration
+      || (next.runtimeGeneration === known.runtimeGeneration && next.sequence > known.sequence)
   }
 
   function applyHostProfile(profile: HostConnectionProfile, context = connectionContext.value) {
@@ -357,12 +359,10 @@ export const useAppStore = defineStore('app', () => {
   function applyWorkSnapshot(snapshot: Work, context = connectionContext.value) {
     if (!payload.value || !context || !contextMatches(context) || payload.value.connectionId !== context.connectionId) return
     if (snapshot.ownerHostEpoch && snapshot.ownerHostEpoch !== payload.value.host.hostEpoch) return
+    // Which Works exist comes only from the Host's list. A state for a Work that
+    // is not listed, such as a late one after it stopped, is dropped.
     const index = payload.value.works.findIndex((work) => work.id === snapshot.id)
-    if (index < 0) {
-      payload.value.works.push(snapshot)
-      payload.value.total += 1
-      return
-    }
+    if (index < 0) return
     const current = payload.value.works[index]!
     if (snapshotIsNewer(current, snapshot)) return
     payload.value.works[index] = snapshot

@@ -44,6 +44,10 @@ let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative
+// The fake Host's Work list: extra records it lists, and Works it has retired.
+let extraListed = []
+const retiredWorks = new Set()
+const hostWorks = () => structuredClone([work, otherWork, ...extraListed].filter(item => !retiredWorks.has(item.id)).map(atHost))
 const hostCatalog = () => ({ revision: hostCatalogRevision, selectionGeneration: context.selectionGeneration, activeTarget: { kind: 'host', hostId: context.connectionId },
   hosts: savedHosts.map(hostId => ({ hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', profile: { revision: 1, hostId, displayName: hostId === 'host' ? 'Host' : 'Spare', endpoints: hostId === 'host' ? hostEndpoints : [] } })) })
 const hostEndpoints = [
@@ -106,7 +110,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'cancel_pairing') return cancelPairingNative(args)
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
-  if (command === 'work_catalog') return { ...context, hostEpoch: 'epoch', instances: structuredClone([atHost(work), atHost(otherWork)]), total: 2 }
+  if (command === 'work_catalog') { const instances = hostWorks(); return { ...context, hostEpoch: 'epoch', instances, total: instances.length } }
   if (command === 'get_host_catalog') { const cut = hostCatalog(); return hostCatalogNative ? hostCatalogNative(cut) : cut }
   if (command === 'set_active_host') {
     context.connectionId = args.hostId; context.selectionGeneration++; hostCatalogRevision++
@@ -119,7 +123,8 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'bootstrap') {
     if (failCatalog) throw { code: 'connection_failed', message: 'offline' }
-    const cut = { ...context, host: { hostEpoch: 'epoch' }, works: structuredClone([atHost(work), atHost(otherWork)]), total: 2, maxAttachmentsPerMessage: 32 }
+    const works = hostWorks()
+    const cut = { ...context, host: { hostEpoch: 'epoch' }, works, total: works.length, maxAttachmentsPerMessage: 32 }
     return bootstrapNative ? bootstrapNative(cut) : cut
   }
   if (command === 'acknowledge_conversation_follow' && failAck) throw { code: 'connection_failed', message: '更新确认没有送达，请重试。' }
@@ -823,6 +828,10 @@ try {
     abortNative = args => { abortArgs = args; return new Promise(resolve => { resolveAbort = resolve }) }
     const pendingAbort = abortButton.props.onClick(); await settle()
     assert.equal(abortArgs.operationEditor, null, 'Abort does not capture the editor before dispatch')
+    // The Host publishes what Abort did on the Work's live events, then replies.
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'queue.cleared',
+      data: { reason: 'dequeued', queueItemIds: restored.map(item => item.queueItemId), steering: 0, followUp: 2, total: 2 } } })
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'run.settled', data: { result: 'aborted' } } })
     const result = { instance: atHost({ ...abortWork, execution: 'idle', pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored, inFlight: [] } }
     const receipt = { ...base, operationId: abortArgs.operationId, kind: 'abort_run', runtimeGeneration: 2, sessionId: '', editor: null, state: 'succeeded', result }
     nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt)
@@ -906,7 +915,8 @@ try {
   const followedBeforeLeaving = { ...binding }
   const stopsBeforeLeaving = calls.filter(call => call.command === 'stop_work' || call.command === 'abort_run').length
   const hostDiagnostic = 'Previous runtime owner release was not confirmed; this instance cannot be reopened'
-  app.applyWorkSnapshot({ ...otherWork, id: 'stopped-work', lifecycle: 'stopped', execution: 'idle', lastError: hostDiagnostic }); await settle()
+  extraListed = [{ ...otherWork, id: 'stopped-work', lifecycle: 'stopped', execution: 'idle', ownerHostEpoch: undefined, lastError: hostDiagnostic }]
+  await app.refreshWorksQuietly(); await settle()
   app.selectWork('stopped-work'); await settle()
   // #313: the Host's engineering wording stays behind “查看详情” and can be copied; the sentence shown first is ours.
   {
@@ -929,7 +939,7 @@ try {
   app.selectWork('work'); await settle()
   assert.equal(binding.instanceId, 'work')
   assert.notEqual(binding.subscriptionId, followedBeforeLeaving.subscriptionId, 'returning follows the Work again')
-  app.removeWorkSnapshot('stopped-work'); await settle()
+  extraListed = []; await app.refreshWorksQuietly(); await settle()
   // #313: when updates for the current Work cannot start or stop arriving, the page says so; nothing claims to retry.
   {
     const followNotice = () => find(container, item => item.props.class === 'alu-follow-failed')
@@ -1660,6 +1670,16 @@ try {
     nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation)
     return result
   }
+  // What the Host does on Stop: publish the final state on the Work's live
+  // events and retire it from its list, then reply.
+  const hostStop = args => {
+    const sequence = journalAt('work', 1)
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 1, sequence: sequence + 1, occurredAt: 'now', eventType: 'instance.stopped', data: { cleanupErrors: [] } } })
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 1, sequence: sequence + 2, occurredAt: 'now', eventType: 'instance.state_changed',
+      data: { lifecycle: 'stopped', execution: 'unavailable', compacting: false, pending: { steering: 0, followUp: 0, total: 0 } } } })
+    retiredWorks.add('work')
+    return controlResult('stop_work', args, { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...work, lifecycle: 'stopped', execution: 'unavailable', ownerHostEpoch: undefined }) })
+  }
   uploadEditor().props['onUpdate:modelValue']('draft must survive control buttons')
   uploadApp.flushLocalState()
   const persistedEditor = storage.get('aludock.uiState')
@@ -1683,17 +1703,18 @@ try {
   await find(uploadContainer, item => item.type === 'form' && String(item.props.class).includes('alu-input-wrap')).props.onSubmit({ preventDefault() {} }); await settle()
   assert.equal(countCalls('submit_message'), unsavedSendsBefore, 'ordinary message sending keeps its strong storage gate')
   find(uploadContainer, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
-  stopNative = args => controlResult('stop_work', args, { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...work, lifecycle: 'stopped', execution: 'unavailable' }) })
+  stopNative = hostStop
   const stopsBefore = countCalls('stop_work')
   find(uploadContainer, item => item.type === 'button' && text(item).includes('Stop Work')).props.onClick(); await settle()
   const stopConfirm = find(uploadContainer, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？')
   find(stopConfirm, item => item.type === 'button' && text(item) === '确认').props.onClick(); await settle()
   assert.equal(countCalls('stop_work'), stopsBefore + 1)
   assertControlTarget('stop_work')
-  assert.equal(uploadApp.selectedWork.lifecycle, 'stopped')
-  assert.equal(uploadApp.currentDraft, 'draft must survive control buttons')
+  assert.equal(uploadApp.works.some(item => item.id === 'work'), false, 'the stopped Work leaves with the list the Host returns')
   assert.equal(storage.get('aludock.uiState'), persistedEditor)
   // The local /stop shortcut must not reintroduce the same editor-storage gate.
+  // That scenario starts from a fresh Host where this Work is running.
+  retiredWorks.delete('work')
   await rebuildUploadView()
   uploadEditor().props['onUpdate:modelValue']('/stop')
   const shortcut = find(uploadContainer, item => item.type === 'form' && String(item.props.class).includes('alu-input-wrap')).props.onSubmit({ preventDefault() {} })
@@ -1701,10 +1722,11 @@ try {
   const shortcutConfirm = find(uploadContainer, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？')
   assert.ok(shortcutConfirm)
   find(shortcutConfirm, item => item.type === 'button' && text(item) === '确认').props.onClick(); await shortcut; await settle()
-  assert.equal(countCalls('stop_work'), stopsBefore + 2)
+  assert.equal(countCalls('stop_work'), stopsBefore + 2, 'if optional command-text cleanup cannot be saved, Stop still runs')
   assertControlTarget('stop_work')
-  assert.equal(uploadApp.currentDraft, '/stop', 'if optional command-text cleanup cannot be saved, Stop still runs and preserves that text')
+  assert.equal(uploadApp.works.some(item => item.id === 'work'), false)
   failStorage = false; modelNative = undefined
+  retiredWorks.delete('work')
   await rebuildUploadView()
   console.log('PASS: full storage permits target-only controls and Queue retrieval; ordinary send keeps durable capture')
   const uploadsBefore = calls.filter(call => call.command === 'upload_attachment').length
@@ -1735,6 +1757,8 @@ try {
   assert.equal(calls.findLast(call => call.command === 'stop_work').args.instanceId, 'work')
   assert.equal(nativeJobs.get('first').state, 'uploading')
   assert.equal(nativeJobs.get('first').workId, 'work')
+  // The checks below start again from a Host where this Work is running.
+  retiredWorks.delete('work')
   await rebuildUploadView()
   failStorage = true
   await publishJob('first', { state: 'succeeded', revision: 3, result: uploaded('first') })
@@ -1807,6 +1831,34 @@ try {
   await publishJob('orphan', { state: 'succeeded', revision: 3, result: uploaded('orphan') })
   assert.equal(uploadApp.currentAttachments.length, 0, 'real Session replacement revokes the old pending selection')
   console.log('PASS: App upload query/progress + A/B/A + reconstructed frontend + later typing + no unsolicited upload-history tray + deletion/queued-send duplicate snapshots + local save failures')
+
+  // Review of the late-reply fix: Stop's final events arrive first; a Model reply
+  // the Host wrote while the Work was still running arrives afterwards, both
+  // before and after the Host's list drops the Work. It may not bring the Work back.
+  {
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    mounted?.unmount(); await settle()
+    const stopPinia = createPinia(), stopApp = useAppStore(stopPinia), stopView = element('stop-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(stopPinia)
+    mounted.mount(stopView); await settle()
+    stopApp.selectWork('work'); await settle(); contentSnapshot(); await settle()
+    const modelReply = { operationId: 'model-before-stop', kind: 'set_model', connectionId: 'host', instanceId: 'work', hostEpoch: 'epoch', runtimeGeneration: 1,
+      sessionId: '', editor: null, state: 'succeeded', result: atHost(work) }
+    let finishStop
+    stopNative = args => new Promise(resolve => { const result = hostStop(args); finishStop = () => resolve(result) })
+    find(stopView, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+    find(stopView, item => item.type === 'button' && text(item).includes('Stop Work')).props.onClick(); await settle()
+    find(find(stopView, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？'), item => item.type === 'button' && text(item) === '确认').props.onClick(); await settle()
+    emit('aludock://operation', { ...modelReply }); await settle()
+    assert.equal(stopApp.works.find(item => item.id === 'work')?.lifecycle, 'stopped', 'a reply written before Stop does not make the stopped Work active again')
+    assertSameReference(find(stopView, item => item.props['aria-label'] === '消息编辑器'), undefined, 'the stopped Work offers no editor')
+    finishStop(); await settle()
+    assert.equal(stopApp.works.some(item => item.id === 'work'), false, 'the stopped Work leaves with the list the Host returns')
+    emit('aludock://operation', { ...modelReply, operationId: 'model-before-stop-replayed' }); await settle()
+    assert.equal(stopApp.works.some(item => item.id === 'work'), false, 'a late reply cannot put a Work the Host no longer lists back into the list')
+    stopNative = undefined; retiredWorks.delete('work')
+  }
+  console.log('PASS: Stop events first, older reply later: the Work stays stopped and, once the Host drops it, stays out of the list')
 
   // #359: quick buttons in the input card. Real App, Pinia, palette and editor; only native IPC is a fixture.
   {

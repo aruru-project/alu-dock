@@ -158,6 +158,10 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       reportAction(feedbackScope, cleanupErrors.length
         ? 'Work 已停止，有些收尾清理没有完成。'
         : null, 'notice')
+      // The Host has retired the Work; its list no longer has it. When cleanup
+      // reported problems, the stopped page with its details stays until the
+      // next list read so they can be read first.
+      if (!cleanupErrors.length) void app.refreshWorksQuietly()
       return true
     } catch (cause) {
 
@@ -179,7 +183,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     try {
       await reopenWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return
-      void observation.load(work.id, true)
+      // The continued Work's state comes from the Host's list, then its own read.
+      void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
     } catch (cause) {
       if (!feedbackMatches(feedbackScope)) return
       // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
@@ -393,13 +398,14 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     }
   }
 
-  function acceptCreatedWork(work: Work) {
-    page.directoryBusy = false
+  async function acceptCreatedWork(work: Work) {
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
     if (machine && work.hostId) app.rememberCreatedWorkspace(work.hostId, work.cwd, machine.platform)
-    observation.acceptWork(work)
+    // Which Works exist comes from the Host's list. Select the new Work now; it
+    // opens once the list read that includes it arrives.
     app.selectWork(work.id)
-    void app.refreshWorksQuietly()
+    await app.refreshWorksQuietly()
+    page.directoryBusy = false
     page.closeDirectory()
   }
 
