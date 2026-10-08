@@ -130,10 +130,10 @@ export const useOperationsStore = defineStore('operations', () => {
         // automatic restoration. Content replacement has already committed.
         if (!applied && (returned || returnedContentErrors.value[operation.operationId])) return
       }
-      if (app.activeConnectionId === operation.connectionId) {
-        if (operation.kind === 'forget_work') app.removeWorkSnapshot(operation.instanceId)
-        else if (snapshot && !newerDomain) observation.acceptWork(snapshot)
-      }
+      // A result reports this operation only. Work state comes from the Host's
+      // list and from the current Work's read and live events; the Work copy in
+      // a result may be older than events already shown, or outlive the Work.
+      if (app.activeConnectionId === operation.connectionId && operation.kind === 'forget_work') app.removeWorkSnapshot(operation.instanceId)
     }
     appliedOperations.value.add(operation.operationId)
     await acknowledgeApplied(operation)

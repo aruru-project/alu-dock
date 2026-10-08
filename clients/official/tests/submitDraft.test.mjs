@@ -9,7 +9,8 @@ import { createPinia, disposePinia, setActivePinia } from 'pinia'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const catalog = { revision: 1, activeTarget: { kind: 'host', hostId: 'host-a' }, selectionGeneration: 1, hosts: [] }
 const attachment = (fileId) => ({ fileId, name: `${fileId}.txt`, mediaType: 'text/plain', sizeBytes: 1, sha256: 'a', storedAt: '2026-09-07' })
-const works = ['A', 'B'].map(id => ({ id, lifecycle: 'active', runtimeGeneration: 1, ownerHostEpoch: 'epoch', executor: { piSessionId: 'session' }, updatedAt: '2026-09-07' }))
+const works = ['A', 'B'].map(id => ({ id, lifecycle: 'active', runtimeGeneration: 1, ownerHostEpoch: 'epoch', executor: { piSessionId: 'session' }, updatedAt: '2026-09-07',
+  eventCursor: { hostEpoch: 'epoch', instanceId: id, runtimeGeneration: 1, sequence: 1 } }))
 const storage = new Map()
 let storageWrites = 0, storageFails = false, consumeFails = false, stops = 0
 const retainedOperations = new Map()
@@ -234,6 +235,7 @@ try {
   assert.equal(retainedOperations.has('unknown-model'), false)
   assert.equal(view.store.nativeOperations.has('unknown-model'), false)
   console.log('PASS: a lost model reply is an ordinary result to acknowledge; Stop stays available')
+  view.scope.stop(); view = await rebuild() // the stopped Work left; the next check starts from a fresh view
 
   // App exit/legacy drafts lose upload jobs but not their permanent Host fileId.
   const target = attachmentUploadTarget(view.store.selectedWork, view.store.connectionContext)

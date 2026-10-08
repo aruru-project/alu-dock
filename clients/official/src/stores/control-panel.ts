@@ -81,7 +81,6 @@ export const useControlPanelStore = defineStore('control-panel', () => {
         const result = await currentConnectionCall(app, (context) => listModels(workId, context))
         if (!current()) return false
         models.value = result
-        observation.acceptWork(result.instance)
         if (section === 'models' && surfaces.commandOpen && surfaces.controlSection === 'models') {
           const model = result.instance.executor.model
           const currentLabel = model ? `${model.provider}/${model.id}` : '—'
@@ -91,7 +90,6 @@ export const useControlPanelStore = defineStore('control-panel', () => {
         const result = await currentConnectionCall(app, (context) => listTools(workId, context))
         if (!current()) return false
         tools.value = result
-        observation.acceptWork(result.instance)
       } else if (section === 'resources') {
         const result = await currentConnectionCall(app, (context) => getResources(workId, context))
         if (!current()) return false

@@ -154,10 +154,10 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       const result = await stopWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return false
       if (!stoppedResultIsCorrelated(result, work.id)) throw new Error('停止结果和这个 Work 对不上，请看一下它现在的状态。')
-      const cleanupErrors = result.receipt.cleanupErrors ?? []
-      reportAction(feedbackScope, cleanupErrors.length
-        ? 'Work 已停止，有些收尾清理没有完成。'
-        : null, 'notice')
+      // The Host has retired this Work and it is no longer followed, so this
+      // answer decides: the Work leaves the list and its page now.
+      app.dropStoppedWork(work.id, capturedHost)
+      void app.refreshWorksQuietly()
       return true
     } catch (cause) {
 
@@ -177,8 +177,11 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     pendingWorkActions.value.add(feedbackScope.identity)
     reportAction(feedbackScope, null)
     try {
-      await reopenWork(work.id, app.captureOperationTarget(capturedHost, work.id))
+      const continued = await reopenWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return
+      // This Work was not followed while it was lost, so the Host's answer says
+      // it is active again; its own read and live events take over from there.
+      observation.acceptWork(continued, capturedHost)
       void observation.load(work.id, true)
     } catch (cause) {
       if (!feedbackMatches(feedbackScope)) return
@@ -397,6 +400,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     page.directoryBusy = false
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
     if (machine && work.hostId) app.rememberCreatedWorkspace(work.hostId, work.cwd, machine.platform)
+    // A new Work is not followed yet, so the Host's answer to this panel opens it.
+    app.addCreatedWork(work)
     observation.acceptWork(work)
     app.selectWork(work.id)
     void app.refreshWorksQuietly()
