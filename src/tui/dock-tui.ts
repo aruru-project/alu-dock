@@ -104,9 +104,13 @@ export async function runDockTui(
   let operationSubscription: OperationSubscription | undefined;
   let controllerLeaseToken: string | undefined;
   let controllerId: string | undefined;
-  let pendingEditorDirective: { controllerId: string; runtimeGeneration: number; text: string } | undefined;
-  let pendingTitleDirective: { controllerId: string; runtimeGeneration: number; title: string } | undefined;
+  let pendingEditorDirective: { runtimeGeneration: number; text: string } | undefined;
+  let pendingTitleDirective: { runtimeGeneration: number; title: string } | undefined;
   let activeExtensionDialog: { interactionId: string; closeFromHost: () => void } | undefined;
+  // A question that arrives before the screen and editor exist waits here; shown earlier,
+  // the editor would take its focus.
+  let screenStarted = false;
+  let deferredQuestion: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
   let lastEventGeneration = instance.runtimeGeneration;
   let lastEventSequence = instance.eventCursor.sequence;
   let operationAcquire: Promise<void> | undefined;
@@ -166,9 +170,7 @@ export async function runDockTui(
 
   const restoreTerminalTitle = (): void => {
     const directive = pendingTitleDirective;
-    if (directive !== undefined
-      && directive.controllerId === controllerId
-      && directive.runtimeGeneration === instance.runtimeGeneration) {
+    if (directive !== undefined && directive.runtimeGeneration === instance.runtimeGeneration) {
       terminal.setTitle(terminalSafe(directive.title));
       return;
     }
@@ -183,16 +185,21 @@ export async function runDockTui(
     restoreTerminalTitle();
   };
 
+  // Shared questions also bring the extension's title and editor text to every open window;
+  // the operator connection only to the window holding it.
+  const directiveForThisWindow = (directiveControllerId: string | undefined): boolean => (
+    sharedQuestions() || (controllerId !== undefined && directiveControllerId === controllerId)
+  );
   const applyControllerDirective = (event: DockEvent): void => {
-    if (event.runtimeGeneration !== instance.runtimeGeneration || controllerId === undefined) return;
-    if (event.type === "extension.title_set" && event.data.controllerId === controllerId) {
-      pendingTitleDirective = { controllerId, runtimeGeneration: event.runtimeGeneration, title: event.data.title };
+    if (event.runtimeGeneration !== instance.runtimeGeneration) return;
+    if (event.type === "extension.title_set" && directiveForThisWindow(event.data.controllerId)) {
+      pendingTitleDirective = { runtimeGeneration: event.runtimeGeneration, title: event.data.title };
       restoreTerminalTitle();
       return;
     }
-    if (event.type === "extension.editor_text_set" && event.data.controllerId === controllerId) {
+    if (event.type === "extension.editor_text_set" && directiveForThisWindow(event.data.controllerId)) {
       if (!editor) {
-        pendingEditorDirective = { controllerId, runtimeGeneration: event.runtimeGeneration, text: event.data.text };
+        pendingEditorDirective = { runtimeGeneration: event.runtimeGeneration, text: event.data.text };
         return;
       }
       editor.setText(event.data.text);
@@ -254,7 +261,11 @@ export async function runDockTui(
     } else {
       conversation.apply(event);
     }
-    if (event.type === "interaction.requested") void handleExtensionInteraction(event);
+    if (event.type === "interaction.requested") showQuestion(event);
+    if (event.type === "session.replaced") deferredQuestion = undefined;
+    if ((event.type === "interaction.cancelled" || event.type === "interaction.resolved") && deferredQuestion?.data.interactionId === event.data.interactionId) {
+      deferredQuestion = undefined;
+    }
     if ((event.type === "interaction.cancelled" || event.type === "interaction.resolved") && activeExtensionDialog?.interactionId === event.data.interactionId) {
       activeExtensionDialog.closeFromHost();
     }
@@ -278,7 +289,10 @@ export async function runDockTui(
     }
   };
 
-  const instanceDelivery: InstanceDeliveryContext = {};
+  // Ask for the Work's questions on the observation itself. A Host that predates this
+  // (a SubHost not yet updated) turns it into "operator": the window then takes the
+  // operator connection as before.
+  const instanceDelivery: InstanceDeliveryContext = { interactions: "shared" };
   subscription = await client.streamEvents(instance.id, { deliveryContext: instanceDelivery, onEvent, requireTuiProjection: true, conversationBootstrap: true });
   const initialProjection = subscription.initial.instance;
   instance = initialProjection;
@@ -320,6 +334,7 @@ export async function runDockTui(
     for (const event of reconciled) pendingQueue.apply(event);
     conversation.applyHistory(historyEntries, false);
     conversation.applyReplay(reconciled, false);
+    presentOpenQuestion(reconciled);
     if (!initialHistory.ok) conversation.addNotice("Some earlier messages could not be loaded. You can keep working from the messages shown here, or run /reload to try again.", true);
     conversation.setToolsExpanded(instance.toolsExpanded);
     status.update(instance);
@@ -329,11 +344,30 @@ export async function runDockTui(
   initialHistoryLoading = false;
   initialBufferedEvents = [];
 
+  function sharedQuestions(): boolean { return instanceDelivery.interactions === "shared"; }
+
+  /** A question already open when this window read the Work: bootstrap events are not live events. */
+  function presentOpenQuestion(events: readonly DockEvent[]): void {
+    if (!sharedQuestions()) return;
+    let open: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
+    for (const event of events) {
+      if (event.type === "interaction.requested") open = event;
+      else if (event.type === "session.replaced") open = undefined;
+      else if ((event.type === "interaction.resolved" || event.type === "interaction.cancelled") && event.data.interactionId === open?.data.interactionId) open = undefined;
+    }
+    if (open !== undefined) showQuestion(open);
+  }
+
+  function showQuestion(event: Extract<DockEvent, { type: "interaction.requested" }>): void {
+    if (screenStarted) void handleExtensionInteraction(event);
+    else deferredQuestion = event;
+  }
+
   function reportExtensionWidgetViewport(width: number): void {
     const leaseToken = controllerLeaseToken;
-    if (!leaseToken || exiting) return;
+    if (exiting || (!sharedQuestions() && !leaseToken)) return;
     const height = Math.max(1, terminal.rows);
-    const requestKey = `${leaseToken}:${instance.runtimeGeneration}:${width}:${height}`;
+    const requestKey = `${leaseToken ?? "shared"}:${instance.runtimeGeneration}:${width}:${height}`;
     if (requestKey === lastWidgetViewportRequest) return;
     lastWidgetViewportRequest = requestKey;
     void client.setExtensionWidgetViewport(
@@ -359,7 +393,7 @@ export async function runDockTui(
   }
 
   function acquireExtensionUiOperation(): Promise<void> {
-    if (exiting || operationSubscription) return Promise.resolve();
+    if (exiting || operationSubscription || sharedQuestions()) return Promise.resolve();
     if (operationAcquire) return operationAcquire;
     if (operationRetryTimer) {
       clearTimeout(operationRetryTimer);
@@ -435,12 +469,9 @@ export async function runDockTui(
     paddingX: numericSetting(settings, "editorPaddingX", 1),
     autocompleteMaxVisible: numericSetting(settings, "autocompleteMaxVisible", 10),
   });
-  const editorDirective = pendingEditorDirective as { controllerId: string; runtimeGeneration: number; text: string } | undefined;
-  if (editorDirective !== undefined) {
-    if (editorDirective.controllerId === controllerId
-      && editorDirective.runtimeGeneration === instance.runtimeGeneration) {
-      editor.setText(editorDirective.text);
-    }
+  const editorDirective = pendingEditorDirective as { runtimeGeneration: number; text: string } | undefined;
+  if (editorDirective !== undefined && editorDirective.runtimeGeneration === instance.runtimeGeneration) {
+    editor.setText(editorDirective.text);
   }
   pendingEditorDirective = undefined;
   tui.setShowHardwareCursor(booleanSetting(settings, "showHardwareCursor", process.env.PI_HARDWARE_CURSOR === "1"));
@@ -927,8 +958,10 @@ export async function runDockTui(
   }
 
   async function handleExtensionInteraction(event: Extract<DockEvent, { type: "interaction.requested" }>): Promise<void> {
-    const leaseToken = controllerLeaseToken;
-    if (!leaseToken) {
+    // The same question is published again when another window takes the operator connection.
+    if (activeExtensionDialog?.interactionId === event.data.interactionId) return;
+    const leaseToken = sharedQuestions() ? undefined : controllerLeaseToken;
+    if (!sharedQuestions() && !leaseToken) {
       conversation.addNotice("This question is being handled in another open window.");
       tui.requestRender();
       return;
@@ -2261,6 +2294,7 @@ export async function runDockTui(
           conversation.applyHistory(rebuiltHistory, false);
           conversation.applyBootstrapReplay(next.initial.page.events);
           conversation.setToolsExpanded(instance.toolsExpanded);
+          presentOpenQuestion(next.initial.page.events);
         }
         instance = next.initial.instance;
         lastEventGeneration = next.initial.page.latest.runtimeGeneration;
@@ -2281,6 +2315,8 @@ export async function runDockTui(
         candidateBufferedEvents.length = 0;
         refreshEditorSubmit();
         watchEventSubscription(next);
+        // The reconnected Host may predate shared questions; then take the operator connection.
+        void acquireExtensionUiOperation();
         updateTerminalProgress();
         tui.requestRender();
       } catch {
@@ -2309,6 +2345,12 @@ export async function runDockTui(
   watchEventSubscription(subscription);
 
   tui.start();
+  screenStarted = true;
+  if (deferredQuestion !== undefined) {
+    const question = deferredQuestion;
+    deferredQuestion = undefined;
+    void handleExtensionInteraction(question);
+  }
   void acquireExtensionUiOperation();
   activityPulse.setEnabled(true);
   updateTerminalProgress();
