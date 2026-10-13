@@ -424,6 +424,8 @@ export interface ExtensionBootstrap {
   toolsExpanded: boolean
   activeInteraction?: ActiveInteraction
   events: ProjectedEvent[]
+  /** Questions arrive with this Work's updates and any window may answer them; older Hosts omit it. */
+  sharedQuestions?: boolean
 }
 
 export interface ConversationBootstrap {

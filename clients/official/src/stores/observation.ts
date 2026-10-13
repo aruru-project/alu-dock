@@ -83,7 +83,8 @@ export const useObservationStore = defineStore('observation', () => {
     if (extensionSnapshot) extensionUi.applyAuthoritativeSnapshot(authoritative)
     return authoritative
   }
-  function applyEvent(payload: ObservationEmission & { event: ProjectedEvent }, render = true) {
+  /** `replayed`: a cached update shown again after F5 or switching back, not a new one. */
+  function applyEvent(payload: ObservationEmission & { event: ProjectedEvent }, render = true, replayed = false) {
     const current = facts.value
     if (!current || !matches(payload)) return
     const reduced = reduceLiveEvent({
@@ -100,7 +101,7 @@ export const useObservationStore = defineStore('observation', () => {
     if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') compactionSettled.emit(payload.connectionId, payload.instanceId)
     if (payload.event.eventType === 'resources.reloaded') commandCatalog.invalidate()
     if (reduced.configChanged) configChanged.emit(payload.event)
-    extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)
+    extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event, !replayed)
     const commandRoute = commandConsole.handleDockEvent(payload.event)
     if (payload.event.eventType === 'extension.notification' && commandRoute.matched) return
     if (render) display.event(payload.event, current.instance, reduced.conversationChanged)
@@ -148,7 +149,7 @@ export const useObservationStore = defineStore('observation', () => {
     if (update.kind === 'event' && update.replayToken && update.event) {
       if (display.matchesToken(update.replayToken)) {
         const restored = display.replay(update.event)
-        applyEvent({ ...payload, event: update.event }, !restored)
+        applyEvent({ ...payload, event: update.event }, !restored, true)
       }
       return
     }

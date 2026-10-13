@@ -39,7 +39,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
 let startPairingNative, cancelPairingNative, downloadNative
-let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
+let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
@@ -93,7 +93,8 @@ const invoke = async (command, args = {}) => {
     extensionBinding = { ...context, handle: crypto.randomUUID(), instanceId: args.instanceId, hostEpoch: args.expectedHostEpoch, runtimeGeneration: args.expectedRuntimeGeneration }
     return extensionBinding
   }
-  if (command === 'set_extension_widget_viewport') return
+  if (command === 'set_extension_widget_viewport' || command === 'set_shared_widget_viewport') return
+  if (command === 'respond_shared_interaction') return sharedRespondNative(args)
   if (command === 'command_catalog') return catalogNative ? catalogNative() : { commands: [], diagnostics: [], total: 0, truncated: false }
   if (command === 'list_tools') {
     if (toolsNative) return toolsNative()
@@ -1406,6 +1407,45 @@ try {
   console.log('PASS: normal command modal / same Extension answer node and value / both Escape layers honor composition / Extension focus priority')
   console.log('PASS: real input Queue and send entrypoints / event-before-receipt and receipt-before-event / later Queue IDs / display events / double-claim / late edited send')
   console.log('PASS: retained failures require scoped visible acknowledgement; footer intervention details are opt-in; actual App/ConversationView/store→native boundary keeps compact and expanded editors through offline refresh; new retires old before read; late receipt/read isolation')
+  // 2026-10-13: a web console tab held the operator connection, so this client never showed a
+  // kanban plugin's confirmation. With shared questions the question comes with the Work's updates.
+  {
+    const acquires = () => calls.filter(call => call.command === 'acquire_extension_control').length
+    const heldHandle = extensionBinding.handle
+    const acquiredBefore = acquires()
+    const sharedWork = { ...currentWork, runtimeGeneration: 3, activeInteraction: { id: 'shared-question', method: 'confirm' } }
+    const question = { interactionId: 'shared-question', method: 'confirm', title: '删除检查项？', message: '这一项会从卡片上移除。', issuedAt: '2026-10-13T00:00:00.000Z' }
+    const at = (sequence, eventType, data) => ({ instanceId: 'work', runtimeGeneration: 3, sequence, occurredAt: 'now', eventType, data })
+    observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: sharedWork, cursor: { ...cursor, runtimeGeneration: 3, sequence: 2000 }, records: [], activeEvents: [], queue: [],
+      extensionUi: { status: {}, toolsExpanded: false, activeInteraction: sharedWork.activeInteraction, sharedQuestions: true, events: [{ ...at(1999, 'interaction.requested', question) }] } }, contentToken: 'shared-questions', state: 'connected' })
+    observation({ kind: 'content', token: 'shared-questions', change: { kind: 'checkpoint_end' } })
+    await settle()
+    assert.ok(text(teleport).includes('这一项会从卡片上移除。'), 'the question already open when the Work was read is shown')
+    assert.equal(acquires(), acquiredBefore, 'this window does not take the question over from other windows')
+    assert.ok(calls.some(call => call.command === 'release_extension_control' && call.args.handle === heldHandle), 'an operator connection held from before is let go')
+    let answered
+    sharedRespondNative = async args => { answered = args; return { interactionId: args.interactionId, state: 'resolved' } }
+    await find(teleport, item => item.type === 'button' && text(item) === '确认').props.onClick(); await settle()
+    assert.deepEqual([answered?.instanceId, answered?.interactionId, answered?.confirmed, Object.hasOwn(answered ?? {}, 'handle')], ['work', 'shared-question', true, false])
+    assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined, 'answering closes the question')
+    // The next question is answered in another window first: the Host's broadcast closes it here.
+    observation({ kind: 'event', event: at(2001, 'interaction.resolved', { interactionId: 'shared-question', method: 'confirm' }) })
+    observation({ kind: 'event', event: at(2002, 'interaction.requested', { ...question, interactionId: 'answered-elsewhere', title: '另一台设备上的问题' }) })
+    await settle()
+    assert.ok(text(teleport).includes('另一台设备上的问题'), 'a new question arrives with the live updates')
+    observation({ kind: 'event', event: at(2003, 'interaction.resolved', { interactionId: 'answered-elsewhere', method: 'confirm' }) })
+    await settle()
+    assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined, 'a question answered elsewhere closes here')
+    assert.equal(calls.some(call => call.command === 'respond_shared_interaction' && call.args.interactionId === 'answered-elsewhere'), false)
+    // The extension's editor text applies when it arrives, not again when cached updates are shown after F5.
+    observation({ kind: 'event', event: at(2004, 'extension.editor_text_set', { text: '扩展填入的草稿' }) }); await settle()
+    assert.equal(app.currentDraft, '扩展填入的草稿')
+    compact.props['onUpdate:modelValue']('之后自己改过的草稿'); await settle()
+    observation({ kind: 'event', replayToken: 'shared-questions', event: at(2005, 'extension.editor_text_set', { text: '旧的扩展草稿' }) }); await settle()
+    assert.equal(app.currentDraft, '之后自己改过的草稿', 'a replayed editor text does not overwrite what the person typed')
+    assert.equal(acquires(), acquiredBefore)
+    console.log('PASS: shared questions open from the Work read and live updates, answer without taking the operator connection, close when answered elsewhere; replayed editor text keeps the draft')
+  }
   // Mount the input region without App/Layout or a conversation view. It reads
   // the real stores and typed native interface, which are enough to edit and submit.
   mounted.unmount(); await settle(); allowExtension = false

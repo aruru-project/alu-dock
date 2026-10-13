@@ -224,6 +224,20 @@ export async function reportExtensionViewport(handle: string, width: number, hei
   await native('set_extension_widget_viewport', { ...context, handle, width, height })
 }
 
+/** Answer the Work's question without taking it over from other windows; the first answer wins. */
+export async function respondSharedInteraction(instanceId: string, interactionId: string, response: InteractionResponse, cancelled: boolean, context: ConnectionContext): Promise<{ interactionId: string; state: 'resolved' | 'already_resolved' }> {
+  const method: InteractionMethod = response.method
+  return native('respond_shared_interaction', {
+    ...context, instanceId, interactionId, method, cancelled,
+    value: 'value' in response ? response.value : null,
+    confirmed: 'confirmed' in response ? response.confirmed : null,
+  })
+}
+
+export async function reportSharedViewport(instanceId: string, expectedRuntimeGeneration: number, width: number, height: number, context: ConnectionContext): Promise<void> {
+  await native('set_shared_widget_viewport', { ...context, instanceId, expectedRuntimeGeneration, width, height })
+}
+
 export async function pickAttachments(workId: string, context: ConnectionContext): Promise<SelectedAttachment[]> {
   return native('pick_attachments', { ...context, workId })
 }

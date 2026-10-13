@@ -219,6 +219,10 @@ impl DockClient {
         params["delivery"] = Value::String("records".into());
         let mut required = capabilities.to_vec();
         required.push(crate::instance_records::CAPABILITY);
+        if context.shared_questions() {
+            params["interactions"] = Value::String("shared".into());
+            required.push(crate::capabilities::EXTENSION_UI_SHARED_INTERACTIONS_V1);
+        }
         let routed = self.negotiate(&required).await?;
         let request_id = Uuid::new_v4().to_string();
         let maximum_bytes = maximum_line_bytes(&routed.hello);

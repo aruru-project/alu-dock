@@ -3,8 +3,8 @@ use crate::connection_state::{
 };
 use crate::errors::{CommandError, lifecycle_error};
 use aludock_client_core::{
-    ClientError, ExtensionControlState, ExtensionControlUpdate, InteractionMethod, ProjectedEvent,
-    safe_controller_event,
+    ClientError, ExtensionControlState, ExtensionControlUpdate, InteractionMethod,
+    InteractionResponse, ProjectedEvent, safe_controller_event,
 };
 use serde::Serialize;
 use tauri::Emitter;
@@ -191,6 +191,49 @@ pub(crate) async fn set_extension_widget_viewport(
             width,
             height,
         )
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Answer the Work's question without the operator connection (shared questions).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn respond_shared_interaction(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    interaction_id: String,
+    method: InteractionMethod,
+    value: Option<String>,
+    confirmed: Option<bool>,
+    cancelled: bool,
+) -> Result<aludock_client_core::InteractionRespondResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let response = InteractionResponse::from_answer(method, value, confirmed, cancelled, None)
+        .map_err(CommandError::from)?;
+    client
+        .respond_shared_interaction(&instance_id, &interaction_id, &response, cancelled, None)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Report this window's width for extension widgets without the operator connection.
+#[tauri::command]
+pub(crate) async fn set_shared_widget_viewport(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_runtime_generation: u64,
+    width: u16,
+    height: u16,
+) -> Result<aludock_client_core::WidgetViewportResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    client
+        .set_shared_widget_viewport(&instance_id, expected_runtime_generation, width, height)
         .await
         .map_err(CommandError::from)
 }
