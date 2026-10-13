@@ -331,6 +331,86 @@ test("Extension UI operation uses live latest takeover without closing observati
   }
 });
 
+// 2026-10-13: a kanban plugin asked to confirm deleting a checklist item. A web console tab held
+// the operator connection, so the official client never saw the question and the Agent waited
+// until the user found that tab. Questions now reach every window that reads them; first answer wins.
+test("an extension question reaches every open window while another client holds the operator connection, and the first answer wins", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-shared-questions-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const broker = new ExtensionUiBroker();
+  let widgetViewport: { width: number; height: number } | undefined;
+  broker.bindWidgetRenderer({ render: (viewport) => { widgetViewport = viewport; }, reset: () => { widgetViewport = undefined; } });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), extensionUiBroker: broker })
+  ), () => "shared-questions-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const webConsole = new DockClient({ socketPath }), desktop = new DockClient({ socketPath });
+  const phone = new DockClient({ socketPath }), observer = new DockClient({ socketPath });
+  const instance = await desktop.create(directory, "shared-questions");
+  const waitFor = async (condition: () => boolean, what: string): Promise<void> => {
+    const deadline = Date.now() + 2_000;
+    while (!condition()) {
+      if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const requested = (events: DockEvent[]) => events.filter((event): event is Extract<DockEvent, { type: "interaction.requested" }> => event.type === "interaction.requested");
+
+  // The older client (the web console) holds the operator connection, as in the incident.
+  const webEvents: DockEvent[] = [];
+  const operator = await webConsole.controlExtensionUi(instance.id, (event) => { webEvents.push(event); });
+  const desktopEvents: DockEvent[] = [], phoneEvents: DockEvent[] = [], observerEvents: DockEvent[] = [];
+  const desktopDelivery = { interactions: "shared" as const };
+  const desktopFollow = await desktop.streamEvents(instance.id, { deliveryContext: desktopDelivery, onEvent: (event) => { desktopEvents.push(event); } });
+  const phoneFollow = await phone.streamEvents(instance.id, { deliveryContext: { interactions: "shared" }, onEvent: (event) => { phoneEvents.push(event); } });
+  const observerFollow = await observer.streamEvents(instance.id, { onEvent: (event) => { observerEvents.push(event); } });
+  assert.equal(desktopDelivery.interactions, "shared");
+
+  const answer = broker.confirm("Delete checklist item?", "The item is removed from the card.");
+  await waitFor(() => requested(desktopEvents).length > 0 && requested(phoneEvents).length > 0 && requested(webEvents).length > 0, "the question in every window");
+  const question = requested(desktopEvents)[0]!.data;
+  assert.equal(question.method === "confirm" && question.message, "The item is removed from the card.");
+  assert.equal(requested(phoneEvents)[0]!.data.interactionId, question.interactionId);
+  assert.equal(requested(webEvents)[0]!.data.interactionId, question.interactionId);
+  assert.equal((await desktop.status(instance.id)).activeInteraction?.id, question.interactionId);
+  // A window opened now finds the question in its first read.
+  const lateRead = await observer.read(instance.id, undefined, "conversation_bootstrap", { interactions: "shared" });
+  assert.equal(requested(lateRead.page.events)[0]?.data.interactionId, question.interactionId);
+
+  assert.deepEqual(
+    await phone.respondInteraction(instance.id, undefined, question.interactionId, { method: "confirm", confirmed: true }, "phone-answer"),
+    { interactionId: question.interactionId, state: "resolved" },
+  );
+  assert.equal(await answer, true);
+  // Later answers do not change it: the same answer again is accepted, a different one or the old connection's is refused.
+  assert.deepEqual(
+    await desktop.respondInteraction(instance.id, undefined, question.interactionId, { method: "confirm", confirmed: true }, "desktop-same-answer"),
+    { interactionId: question.interactionId, state: "already_resolved" },
+  );
+  await assert.rejects(
+    desktop.respondInteraction(instance.id, undefined, question.interactionId, { method: "confirm", confirmed: false }, "desktop-other-answer"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_expired",
+  );
+  await assert.rejects(
+    webConsole.respondInteraction(instance.id, operator.initial.leaseToken, question.interactionId, { method: "confirm", confirmed: false }, "web-late-answer"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_expired",
+  );
+  await waitFor(() => [desktopEvents, phoneEvents, observerEvents].every((events) => events.some((event) => event.type === "interaction.resolved" && event.data.interactionId === question.interactionId)), "every window to close the question");
+  assert.equal(observerEvents.some((event) => event.type === "interaction.requested"), false, "a client that did not ask for questions does not get them");
+
+  // Editor text and width reach the windows reading shared questions without the operator connection.
+  broker.setEditorText("draft from the extension");
+  await waitFor(() => desktopEvents.some((event) => event.type === "extension.editor_text_set" && event.data.text === "draft from the extension"), "the editor text");
+  await desktop.setExtensionWidgetViewport(instance.id, undefined, instance.runtimeGeneration, 88, 30);
+  assert.deepEqual(widgetViewport, { width: 88, height: 30 });
+
+  for (const stream of [operator, desktopFollow, phoneFollow, observerFollow]) stream.close();
+  await Promise.all([operator, desktopFollow, phoneFollow, observerFollow].map((stream) => stream.done.catch(() => {})));
+});
+
 test("SSH TUI controller completes select confirm input and editor extension dialogs", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-pty-"));
   await chmod(directory, 0o700);

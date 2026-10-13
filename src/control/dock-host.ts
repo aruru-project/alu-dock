@@ -872,7 +872,7 @@ export class DockHost {
         const instance=this.registry.get(request.params.instanceId);
         if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
         const projection=await instance.getAttachProjection(request.params.since,MAX_HISTORY_ITEMS,request.params.replay);
-        this.sendSuccessAndEnd(socket,request.requestId,projection,(projected)=>createBoundedReadResult(projected,request.requestId)); return;
+        this.sendSuccessAndEnd(socket,request.requestId,projection,(projected)=>createBoundedReadResult(projected,request.requestId,streamAudience(request))); return;
       }
       case "instance.follow": await this.followEventStream(request,socket,setEventUnsubscribe); return;
       case "interaction.control": await this.controlExtensionUi(request,socket,setEventUnsubscribe); return;
@@ -1034,7 +1034,8 @@ export class DockHost {
     if(request.type==="instance.read")for(const entry of projection.recentHistory){
       await channel.send({kind:"instance_history",version:2,requestId:request.requestId,hostEpoch:this.hostEpoch,entry});historyEntries++;
     }
-    for(const event of projection.page.events)if(!eventHiddenFromStream(event,undefined)){
+    const audience=streamAudience(request);
+    for(const event of projection.page.events)if(!eventHiddenFromStream(event,audience)){
       await channel.send(recordEvent(request.requestId,this.hostEpoch,event));eventCount++;
     }
     await channel.send({kind:"instance_ready",version:2,requestId:request.requestId,hostEpoch:this.hostEpoch,historyEntries,eventCount});
@@ -1089,9 +1090,10 @@ export class DockHost {
         }
       }catch{close();socket.destroy();}finally{sending=false;}
     };
+    const audience=streamAudience(request);
     unsubscribe=instance.subscribe(event=>{
-      if(closed||eventHiddenFromStream(event,undefined))return;
-      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,undefined);
+      if(closed||eventHiddenFromStream(event,audience))return;
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,audience);
       const large=bytes>MAX_ATTACH_EVENT_QUEUE_BYTES;
       if(!Number.isFinite(bytes)||bytes>MAX_DOCK_TRANSFER_BYTES||queue.length>=MAX_ATTACH_EVENT_QUEUE||(large?largeItems>0:ordinaryBytes+bytes>MAX_ATTACH_EVENT_QUEUE_BYTES)){overflow();return;}
       if(event.type==="instance.stopped")terminalQueued=true;
@@ -1121,6 +1123,7 @@ export class DockHost {
     const cursor=request.params.since;
     if(cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
     type QueuedEvent = { event: DockEvent; bytes: number };
+    const audience=streamAudience(request);
     let initializing=true,pending:QueuedEvent[]=[]; let pendingBytes=0,initializationOverflow=false;
     let lastGeneration=instance.runtimeGeneration,lastAccepted=0; let unsubscribe=()=>{};
     let liveQueue:QueuedEvent[]=[]; let liveQueueBytes=0,waitingForDrain=false;
@@ -1129,7 +1132,7 @@ export class DockHost {
     const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();clearQueues();};
     const abortBackpressuredStream=():void=>{closeSubscription();if(!socket.destroyed)socket.destroy();};
     const boundedEvent=(event:DockEvent):QueuedEvent|undefined=>{
-      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,undefined);
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,audience);
       if(bytes===0)return undefined;
       if(!Number.isFinite(bytes)||bytes>MAX_CONTROL_LINE_BYTES){closeSubscription();socket.destroy();return undefined;}
       return {event,bytes};
@@ -1142,7 +1145,7 @@ export class DockHost {
       if(subscriptionClosed||waitingForDrain)return;
       while(liveQueue.length>0){
         const queued=liveQueue.shift() as QueuedEvent;liveQueueBytes-=queued.bytes;
-        const outcome=writeEvent(socket,request.requestId,this.hostEpoch,queued.event,undefined);
+        const outcome=writeEvent(socket,request.requestId,this.hostEpoch,queued.event,audience);
         if(outcome==="written")continue;
         if(outcome==="backpressured"){
           this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
@@ -1164,7 +1167,7 @@ export class DockHost {
       if(event.sequence<=lastAccepted)return true;
       const queued=boundedEvent(event);if(subscriptionClosed)return false;lastAccepted=event.sequence;if(!queued)return true;
       if(waitingForDrain||liveQueue.length>0){const nextBytes=appendBounded(liveQueue,queued,liveQueueBytes);if(nextBytes===undefined){this.attachBackpressureStats.overflow+=1;abortBackpressuredStream();return false;}liveQueueBytes=nextBytes;return true;}
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,undefined);
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,audience);
       if(outcome==="written")return true;
       if(outcome==="backpressured"){
         this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
@@ -1186,7 +1189,7 @@ export class DockHost {
       return;
     }
     if(socket.destroyed){closeSubscription();return;}
-    const result=createBoundedFollowResult(projection,request.requestId);
+    const result=createBoundedFollowResult(projection,request.requestId,audience);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,this.projectResult(result)));
     if(responseOutcome==="backpressured"){
       this.attachBackpressureStats.blocked+=1;const drained=await waitForSocketDrain(socket,SOCKET_DRAIN_TIMEOUT_MS);
@@ -1215,7 +1218,7 @@ export class DockHost {
       if(!claim){if(pending.length<MAX_ATTACH_EVENT_QUEUE)pending.push(event);else{close();socket.destroy();}return;}
       if(event.data.controllerId!==claim.controllerId)return;
       if(!ready){if(pending.length<MAX_ATTACH_EVENT_QUEUE)pending.push(event);else{close();socket.destroy();}return;}
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,claim.controllerId);
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,{controllerId:claim.controllerId});
       if(outcome!=="written"){close();socket.destroy();}
     });
     try{claim=await instance.claimInteractionController();}
@@ -1235,7 +1238,7 @@ export class DockHost {
     ready=true;
     for(const event of pending.splice(0)){
       if(!isControllerTargetedEvent(event)||event.data.controllerId!==claim.controllerId)continue;
-      const written=writeEvent(socket,request.requestId,this.hostEpoch,event,claim.controllerId);
+      const written=writeEvent(socket,request.requestId,this.hostEpoch,event,{controllerId:claim.controllerId});
       if(written!=="written"){close();socket.destroy();return;}
     }
   }
@@ -1480,10 +1483,9 @@ function createBoundedHistoryResult(source:HistoryResult,requestId:string,hostEp
   }
   return {historyRevision:source.historyRevision,entries:[],hasEarlier:false,instance:source.instance};
 }
-function createBoundedReadResult(projection:AttachProjection,requestId:string):InstanceReadResult {
+function createBoundedReadResult(projection:AttachProjection,requestId:string,audience:EventAudience):InstanceReadResult {
   const source=projection.page;
-  // Controller-targeted events are delivered on the Extension UI operation stream only.
-  let events=source.events.filter((event)=>!eventHiddenFromStream(event,undefined));
+  let events=source.events.filter((event)=>!eventHiddenFromStream(event,audience));
   let truncated=source.truncated;
   let history=projection.recentHistory;
   let historyTruncated=projection.historyTruncated;
@@ -1505,10 +1507,9 @@ function createBoundedReadResult(projection:AttachProjection,requestId:string):I
     return result;
   }
 }
-function createBoundedFollowResult(projection:AttachProjection,requestId:string):FollowResult {
+function createBoundedFollowResult(projection:AttachProjection,requestId:string,audience:EventAudience):FollowResult {
   const source=projection.page;
-  // Controller-targeted events are delivered on the Extension UI operation stream only.
-  let events=source.events.filter((event)=>!eventHiddenFromStream(event,undefined));
+  let events=source.events.filter((event)=>!eventHiddenFromStream(event,audience));
   let truncated=source.truncated;
   if(events.length>MAX_REPLAY_EVENTS){events=events.slice(-MAX_REPLAY_EVENTS);truncated=true;}
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
@@ -1531,27 +1532,34 @@ function isControllerTargetedEvent(value: unknown): value is Extract<DockEvent, 
 }
 
 /**
- * Controller-targeted events (pending interactions and controller directives) are routed
- * only to the connection holding the matching Extension UI controller claim. This is Host
- * routing authority, not a capability projection: every other event reaches every stream.
+ * Who receives questions and editor/title directives: a read or follow that asked for
+ * shared interactions receives all of them; an ordinary observer receives none; the
+ * operator connection receives the ones published while it held the lease. Every other
+ * event reaches every stream.
  */
-function eventHiddenFromStream(event: DockEvent, controllerId: string | undefined): boolean {
-  if (!isControllerTargetedEvent(event)) return false;
-  return controllerId === undefined || event.data.controllerId !== controllerId;
+type EventAudience = "observer" | "shared" | { controllerId: string };
+
+function streamAudience(request: Extract<ControlRequest, { type: "instance.read" | "instance.follow" }>): EventAudience {
+  return request.params.interactions === "shared" ? "shared" : "observer";
 }
 
-function controlEventEnvelope(requestId:string,hostEpoch:string,event:DockEvent,controllerId:string|undefined):ControlEventEnvelope|undefined {
-  if (eventHiddenFromStream(event, controllerId)) return undefined;
+function eventHiddenFromStream(event: DockEvent, audience: EventAudience): boolean {
+  if (!isControllerTargetedEvent(event) || audience === "shared") return false;
+  return audience === "observer" || event.data.controllerId !== audience.controllerId;
+}
+
+function controlEventEnvelope(requestId:string,hostEpoch:string,event:DockEvent,audience:EventAudience):ControlEventEnvelope|undefined {
+  if (eventHiddenFromStream(event, audience)) return undefined;
   return {kind:"event",version:2,requestId,hostEpoch,event};
 }
 
-function eventFrameSize(requestId:string,hostEpoch:string,event:DockEvent,controllerId:string|undefined):number {
-  const envelope=controlEventEnvelope(requestId,hostEpoch,event,controllerId);
+function eventFrameSize(requestId:string,hostEpoch:string,event:DockEvent,audience:EventAudience):number {
+  const envelope=controlEventEnvelope(requestId,hostEpoch,event,audience);
   return envelope===undefined?0:encodedSize(envelope);
 }
 
-function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,controllerId:string|undefined):WriteOutcome {
-  const envelope=controlEventEnvelope(requestId,hostEpoch,event,controllerId);
+function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,audience:EventAudience):WriteOutcome {
+  const envelope=controlEventEnvelope(requestId,hostEpoch,event,audience);
   return envelope===undefined?"written":writeEnvelope(socket,envelope);
 }
 

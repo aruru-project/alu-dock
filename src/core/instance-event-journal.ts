@@ -40,6 +40,8 @@ export class InstanceEventJournal {
   private readonly eventCapacity: number;
   private readonly eventLog: DockEvent[] = [];
   private readonly activeConversationEvents: DockEvent[] = [];
+  /** Latest publication of the open question, kept after it leaves the event window. */
+  private openInteractionEvent: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
   private readonly subscribers = new Set<(event: DockEvent) => void>();
   private history: HistoryEntryDto[];
   private historyRevisionValue = 1;
@@ -97,6 +99,7 @@ export class InstanceEventJournal {
       data,
     } as DockEvent;
     this.captureActiveConversationEvent(event);
+    this.captureOpenInteraction(event);
     this.eventLog.push(event);
     if (this.eventLog.length > this.eventCapacity) this.eventLog.shift();
     this.onCursorAdvanced?.(this.cursor());
@@ -115,6 +118,7 @@ export class InstanceEventJournal {
     this.nextEventSequence = 1;
     this.eventLog.length = 0;
     this.activeConversationEvents.length = 0;
+    this.openInteractionEvent = undefined;
   }
 
   replaceHistory(history: HistoryEntryDto[]): void {
@@ -149,18 +153,23 @@ export class InstanceEventJournal {
     };
   }
 
-  conversationBootstrapEvents(replayEvents: readonly DockEvent[], instance: InstanceSnapshot): DockEvent[] {
+  conversationBootstrapEvents(instance: InstanceSnapshot): DockEvent[] {
     const conversation = this.activeConversationEvents
       .filter((event) => event.runtimeGeneration === instance.runtimeGeneration)
       .map((event) => cloneJson(event));
-    const activeInteractionId = instance.activeInteraction?.id;
-    const interaction = activeInteractionId === undefined ? undefined : replayEvents.findLast((event) => (
-      event.type === "interaction.requested" && event.data.interactionId === activeInteractionId
-    ));
-    if (interaction === undefined || conversation.some((event) => event.sequence === interaction.sequence)) return conversation;
+    const interaction = this.openInteractionEvent;
+    if (interaction === undefined
+      || interaction.runtimeGeneration !== instance.runtimeGeneration
+      || interaction.data.interactionId !== instance.activeInteraction?.id) return conversation;
     return [...conversation, cloneJson(interaction)].sort((left, right) => (
       left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence
     ));
+  }
+
+  private captureOpenInteraction(event: DockEvent): void {
+    if (event.type === "interaction.requested") this.openInteractionEvent = cloneJson(event);
+    else if ((event.type === "interaction.resolved" || event.type === "interaction.cancelled")
+      && event.data.interactionId === this.openInteractionEvent?.data.interactionId) this.openInteractionEvent = undefined;
   }
 
   private captureActiveConversationEvent(event: DockEvent): void {

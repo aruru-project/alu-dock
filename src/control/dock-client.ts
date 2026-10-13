@@ -41,6 +41,7 @@ import {
   TOOLS_EXPANDED_CAPABILITY,
   EXTENSION_WIDGET_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
+  SHARED_INTERACTIONS_CAPABILITY,
   INSTANCE_READ_CAPABILITY,
   EVENTS_FOLLOW_CAPABILITY,
   EXTENSION_UI_CONTROL_CAPABILITY,
@@ -220,8 +221,11 @@ export class ControlClientError extends Error {
  * The selected view belongs to that read chain, not the client or Host globally. */
 export interface ConversationReadContext { view?: "references" | "legacy" }
 
-/** Explicit opt-in scoped to one observation; reuse across read, follow and reconnect. */
-export interface InstanceDeliveryContext { delivery?: "records" | "legacy" }
+/** Explicit opt-in scoped to one observation; reuse across read, follow and reconnect.
+ * Set `interactions: "shared"` to receive the Work's questions on this observation and answer
+ * them without the operator connection. It becomes "operator" when the Host serving that Work
+ * predates shared questions; the caller then uses `controlExtensionUi` as before. */
+export interface InstanceDeliveryContext { delivery?: "records" | "legacy"; interactions?: "shared" | "operator" }
 
 export class DockClient {
   readonly socketPath:string;
@@ -418,12 +422,13 @@ export class DockClient {
   pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
   read(instanceId:string,since?:EventCursor,replay:"event_log"|"conversation_bootstrap"="event_log",context?:InstanceDeliveryContext):Promise<InstanceReadResult>{
-    if(context && context.delivery!=="legacy")return this.withInstanceDelivery(context,()=>this.openInstanceRecords({kind:"request",version:2,requestId:this.createRequestId(),type:"instance.read",params:{instanceId,since,replay,delivery:"records"}},context).then(stream=>stream.initial as InstanceReadResult),()=>this.read(instanceId,since,replay));
+    if(context && context.delivery!=="legacy")return this.withInstanceDelivery(context,()=>this.openInstanceRecords({kind:"request",version:2,requestId:this.createRequestId(),type:"instance.read",params:{instanceId,since,replay,delivery:"records",...sharedInteractionsParam(context)}},context).then(stream=>stream.initial as InstanceReadResult),()=>this.read(instanceId,since,replay));
     return this.request("instance.read",{instanceId,since,replay},[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId(),images?:ImagePathDto[],attachments?:string[]):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,...(images===undefined?{}:{images}),...(attachments===undefined?{}:{attachments}),delivery},["session.core",...(images===undefined?[]:[IMAGE_INPUT_CAPABILITY]),...(attachments===undefined?[]:[ATTACHMENTS_CAPABILITY])],parsePromptResult);}
-  respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?MAX_TEXT_CHARS:MAX_PROMPT_CHARS;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],parseInteractionRespondResult);}
+  /** Without a lease token (shared questions) the first answer from any client wins. */
+  respondInteraction(instanceId:string,leaseToken:string|undefined,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?MAX_TEXT_CHARS:MAX_PROMPT_CHARS;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));}return this.request("interaction.respond",{operationId,instanceId,...(leaseToken===undefined?{}:{leaseToken}),interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY,...(leaseToken===undefined?[SHARED_INTERACTIONS_CAPABILITY]:[])],parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
-  setExtensionWidgetViewport(instanceId:string,leaseToken:string,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,leaseToken,expectedRuntimeGeneration,width,height},EXTENSION_WIDGET_CAPABILITY,parseWidgetViewportResult);}
+  setExtensionWidgetViewport(instanceId:string,leaseToken:string|undefined,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,...(leaseToken===undefined?{}:{leaseToken}),expectedRuntimeGeneration,width,height},[EXTENSION_WIDGET_CAPABILITY,...(leaseToken===undefined?[SHARED_INTERACTIONS_CAPABILITY]:[])],parseWidgetViewportResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}
   /** Stop the current reply and take back every waiting Queue message in one Host step. */
@@ -670,7 +675,7 @@ export class DockClient {
     const capabilities:Capability[]=options.requireTuiProjection
       ? [EVENTS_FOLLOW_CAPABILITY,TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,"queue.control.v1","run.abort.v1","tui.projection.v1"]
       : [EVENTS_FOLLOW_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY];
-    if(context && context.delivery!=="legacy")return this.withInstanceDelivery(context,()=>this.openInstanceRecords({kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since,delivery:"records"}},context,options.onEvent,capabilities),()=>this.follow(instanceId,since,{...options,delivery:undefined,deliveryContext:undefined}));
+    if(context && context.delivery!=="legacy")return this.withInstanceDelivery(context,()=>this.openInstanceRecords({kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since,delivery:"records",...sharedInteractionsParam(context)}},context,options.onEvent,capabilities),()=>this.follow(instanceId,since,{...options,delivery:undefined,deliveryContext:undefined}));
     return this.openEventStream({
       request:{kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since}},
       capabilities,
@@ -739,15 +744,22 @@ export class DockClient {
   }
 
   private async withInstanceDelivery<T>(context:InstanceDeliveryContext,records:()=>Promise<T>,legacy:()=>Promise<T>):Promise<T>{
-    try{return await records();}catch(error){
-      if(context.delivery!==undefined || !(error instanceof ControlClientError) || error.code!=="capability_missing" || !Array.isArray(error.details?.missing) || !error.details.missing.includes(INSTANCE_RECORDS_CAPABILITY))throw error;
-      context.delivery="legacy";return legacy();
+    for(;;){
+      try{return await records();}catch(error){
+        const missing=error instanceof ControlClientError&&error.code==="capability_missing"&&Array.isArray(error.details?.missing)?error.details.missing:[];
+        if(context.delivery===undefined&&missing.includes(INSTANCE_RECORDS_CAPABILITY)){
+          // A Host without record delivery predates shared questions too.
+          context.delivery="legacy";if(context.interactions==="shared")context.interactions="operator";return legacy();
+        }
+        if(context.interactions==="shared"&&missing.includes(SHARED_INTERACTIONS_CAPABILITY)){context.interactions="operator";continue;}
+        throw error;
+      }
     }
   }
 
   private openInstanceRecords(request:Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,context:InstanceDeliveryContext,onEvent?:(event:DockEvent)=>void,additionalCapabilities:readonly Capability[]=[]):Promise<FollowSubscription>{
     const socket=this.openSocket(),decoder=new JsonLineDecoder(),helloId=this.createRequestId();
-    const capabilities=[...new Set([...requiredCapabilities(request.type==="instance.read"?INSTANCE_READ_CAPABILITY:EVENTS_FOLLOW_CAPABILITY),IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,INSTANCE_RECORDS_CAPABILITY,...additionalCapabilities.flatMap(item=>requiredCapabilities(item))])];
+    const capabilities=[...new Set([...requiredCapabilities(request.type==="instance.read"?INSTANCE_READ_CAPABILITY:EVENTS_FOLLOW_CAPABILITY),IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,INSTANCE_RECORDS_CAPABILITY,...(request.params.interactions==="shared"?[SHARED_INTERACTIONS_CAPABILITY]:[]),...additionalCapabilities.flatMap(item=>requiredCapabilities(item))])];
     let channel:InstanceRecordChannel|undefined,initial:InstanceRecordInitial|undefined,epoch="",settled=false,closed=false,ended=false;
     let generation=0,sequence=0,processing=Promise.resolve();
     let resolveInitial!:(result:FollowSubscription)=>void,rejectInitial!:(error:unknown)=>void,resolveDone!:()=>void,rejectDone!:(error:unknown)=>void;
@@ -994,6 +1006,7 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
 }
 function isOperationEvent(event:DockEvent):event is Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>{return event.type==="interaction.requested"||event.type==="extension.title_set"||event.type==="extension.editor_text_set";}
 function waitForUploadDrain(socket:Socket,operationId:string):Promise<void>{if(socket.destroyed||socket.writableEnded)return Promise.reject(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));return new Promise((resolveDrain,rejectDrain)=>{const cleanup=():void=>{socket.off("drain",onDrain);socket.off("close",onClose);socket.off("error",onError);};const onDrain=():void=>{cleanup();resolveDrain();};const onClose=():void=>{cleanup();rejectDrain(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));};const onError=(error:Error):void=>{cleanup();rejectDrain(transportError(error));};socket.once("drain",onDrain);socket.once("close",onClose);socket.once("error",onError);});}
+function sharedInteractionsParam(context:InstanceDeliveryContext):{interactions?:"shared"}{return context.interactions==="shared"?{interactions:"shared"}:{};}
 function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolHelloRejectedError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message,undefined,e.rejection.missing?{missing:e.rejection.missing}:undefined);if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
 function workspaceRequestPath(path:string):string{try{return normalizeWorkspaceRelativePath(path);}catch(error){throw normalizeClientError(error);}}
 function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}

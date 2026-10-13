@@ -165,6 +165,13 @@ export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as con
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
 export const CONTROLLER_DIRECTIVES_CAPABILITY = "extension_ui.controller-directives.v1" as const;
 export const PERSISTENT_INTERACTIONS_CAPABILITY = "extension_ui.persistent-interactions.v1" as const;
+/**
+ * A Work's pending extension question belongs to the Work, not to one connection: a read or
+ * follow that asks for `interactions: "shared"` receives questions and editor/title directives,
+ * and any such client may answer (first answer wins) or report the widget width without first
+ * taking the single operator connection. The operator connection keeps working for older clients.
+ */
+export const SHARED_INTERACTIONS_CAPABILITY = "extension_ui.shared-interactions.v1" as const;
 export const INSTANCE_RECORDS_CAPABILITY = "instance.records.v1" as const;
 export const INSTANCE_READ_CAPABILITY = "instance.read.v1" as const;
 export const EVENTS_FOLLOW_CAPABILITY = "events.follow.v2" as const;
@@ -229,6 +236,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   EXTENSION_WIDGET_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
+  SHARED_INTERACTIONS_CAPABILITY,
   GIT_BRANCH_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   "extension_ui.v1",
@@ -317,16 +325,16 @@ export type ControlRequest =
   | Request<"workspace.entry.list", { instanceId: string; path: string; cursor?: WorkspaceListCursor; limit: number }>
   | Request<"workspace.entry.get", { instanceId: string; path: string }>
   | Request<"workspace.file.read", { instanceId: string; path: string }>
-  | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap"; delivery?: "records" }>
-  | Request<"instance.follow", { instanceId: string; since: EventCursor; delivery?: "records" }>
+  | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap"; delivery?: "records"; interactions?: "shared" }>
+  | Request<"instance.follow", { instanceId: string; since: EventCursor; delivery?: "records"; interactions?: "shared" }>
   | Request<"interaction.control", { instanceId: string }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
   | Request<"instance.forget", { operationId: string; instanceId: string }>
   | Request<"catalog.prune", { operationId: string; selector: "stopped" }>
   | Request<"instance.reopen", { operationId: string; instanceId: string; sessionFile?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
-  | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
+  | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken?: string; interactionId: string; response: InteractionResponse }>
   | Request<"extension.tools_expanded.set", { operationId: string; instanceId: string; expectedRuntimeGeneration: number; expanded: boolean }>
-  | Request<"extension.widget_viewport.set", { instanceId: string; leaseToken: string; expectedRuntimeGeneration: number; width: number; height: number }>
+  | Request<"extension.widget_viewport.set", { instanceId: string; leaseToken?: string; expectedRuntimeGeneration: number; width: number; height: number }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; images?: ImagePathDto[]; attachments?: string[]; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
@@ -788,7 +796,13 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 /** Explicit request options, not hello advertisement, select additional delivery contracts. */
 export function requestOptionCapabilities(request: ControlRequest): string[] {
-  if (usesInstanceRecords(request)) return [INSTANCE_RECORDS_CAPABILITY];
+  if (request.type === "instance.read" || request.type === "instance.follow") {
+    return [
+      ...(usesInstanceRecords(request) ? [INSTANCE_RECORDS_CAPABILITY] : []),
+      ...(request.params.interactions === "shared" ? [SHARED_INTERACTIONS_CAPABILITY] : []),
+    ];
+  }
+  if ((request.type === "interaction.respond" || request.type === "extension.widget_viewport.set") && request.params.leaseToken === undefined) return [SHARED_INTERACTIONS_CAPABILITY];
   if (request.type === "session.inventory" && request.params.cursor !== undefined) return [SESSION_INVENTORY_PAGES_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
@@ -1068,17 +1082,17 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, ["instanceId", "path"], "invalid_request");
       return { ...base, type, params: { instanceId: instanceId(), path: normalizeWorkspaceRelativePath(string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request")) } };
     case "instance.read": {
-      exact(params, ["instanceId", "since", "replay", "delivery"], "invalid_request");
+      exact(params, ["instanceId", "since", "replay", "delivery", "interactions"], "invalid_request");
       const delivery = params.delivery === undefined ? {} : { delivery: enumeration(params.delivery, "params.delivery", ["records"], "invalid_request") };
       const replay = enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
       const since = params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request");
       if (replay === "conversation_bootstrap" && since !== undefined) throw validation("invalid_request", "conversation bootstrap requires a fresh read");
-      return { ...base, type, params: { instanceId: instanceId(), since, replay, ...delivery } };
+      return { ...base, type, params: { instanceId: instanceId(), since, replay, ...delivery, ...sharedInteractions(params.interactions) } };
     }
     case "instance.follow": {
-      exact(params, ["instanceId", "since", "delivery"], "invalid_request");
+      exact(params, ["instanceId", "since", "delivery", "interactions"], "invalid_request");
       const delivery = params.delivery === undefined ? {} : { delivery: enumeration(params.delivery, "params.delivery", ["records"], "invalid_request") };
-      return { ...base, type, params: { instanceId: instanceId(), since: parseCursor(params.since, "params.since", "invalid_request"), ...delivery } };
+      return { ...base, type, params: { instanceId: instanceId(), since: parseCursor(params.since, "params.since", "invalid_request"), ...delivery, ...sharedInteractions(params.interactions) } };
     }
     case "interaction.control": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
@@ -1098,7 +1112,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: {
         operationId: operationId(),
         instanceId: instanceId(),
-        leaseToken: string(params.leaseToken, "params.leaseToken", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request"),
+        ...optionalLeaseToken(params.leaseToken),
         interactionId: string(params.interactionId, "params.interactionId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request"),
         response: parseInteractionResponse(params.response, "params.response", "invalid_request"),
       } };
@@ -1118,7 +1132,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if (width > 10_000 || height > 10_000) throw validation("invalid_request", "Extension widget viewport exceeds 10000 cells");
       return { ...base, type, params: {
         instanceId: instanceId(),
-        leaseToken: string(params.leaseToken, "params.leaseToken", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request"),
+        ...optionalLeaseToken(params.leaseToken),
         expectedRuntimeGeneration: positive(params.expectedRuntimeGeneration, "params.expectedRuntimeGeneration", "invalid_request"),
         width,
         height,
@@ -2691,13 +2705,13 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
       exact(data, ["controllerId", "title"]);
       const title = payloadFreeBoundedString(data.title, `${field}.title`, 2_048);
       if (/[\u0000-\u001f\u007f-\u009f]/u.test(title)) throw validation("invalid_response", `${field}.title contains terminal control characters`);
-      return { controllerId: id(data.controllerId, `${field}.controllerId`), title };
+      return { ...optionalControllerId(data.controllerId, field), title };
     }
     case "extension.editor_text_set": {
       exact(data, ["controllerId", "text"]);
       const editorText = payloadFreeBoundedString(data.text, `${field}.text`, 256_000);
       if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(editorText)) throw validation("invalid_response", `${field}.text contains terminal control characters`);
-      return { controllerId: id(data.controllerId, `${field}.controllerId`), text: editorText };
+      return { ...optionalControllerId(data.controllerId, field), text: editorText };
     }
     case "extension.status_changed": exact(data, ["key", "text"]); return { key: extensionKey(data.key, `${field}.key`), text: data.text === undefined ? undefined : payloadFreeString(data.text, `${field}.text`, MAX_MESSAGE) };
     case "extension.tools_expanded_changed": exact(data, ["expanded"]); return { expanded: boolean(data.expanded, `${field}.expanded`) };
@@ -2919,18 +2933,29 @@ function parseInteractionResponse(input: unknown, field: string, code = "invalid
   return { method, value: responseValue };
 }
 
+/** Present only while a client holds the operator connection; shared readers ignore it. */
+function optionalControllerId(input: unknown, field: string): { controllerId?: string } {
+  return input === undefined ? {} : { controllerId: id(input, `${field}.controllerId`) };
+}
+function sharedInteractions(input: unknown): { interactions?: "shared" } {
+  return input === undefined ? {} : { interactions: enumeration(input, "params.interactions", ["shared"] as const, "invalid_request") };
+}
+function optionalLeaseToken(input: unknown): { leaseToken?: string } {
+  return input === undefined ? {} : { leaseToken: string(input, "params.leaseToken", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request") };
+}
+
 function parseDialogRequest(data: Record<string, unknown>, field: string): EventDataMap["interaction.requested"] {
   const method = enumeration(data.method, `${field}.method`, ["select", "confirm", "input", "editor"]);
-  const controllerId = id(data.controllerId, `${field}.controllerId`);
+  const controllerId = optionalControllerId(data.controllerId, field);
   const interactionId = id(data.interactionId, `${field}.interactionId`);
   const title = payloadFreeString(data.title, `${field}.title`, MAX_MESSAGE);
   const issuedAt = timestamp(data.issuedAt, `${field}.issuedAt`);
   const expiresAt = data.expiresAt === undefined ? undefined : timestamp(data.expiresAt, `${field}.expiresAt`);
   const lifetime = expiresAt === undefined ? {} : { expiresAt };
-  if (method === "select") { exact(data, ["controllerId", "interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT_CHARS), issuedAt, ...lifetime }; }
-  if (method === "confirm") { exact(data, ["controllerId", "interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT_CHARS), issuedAt, ...lifetime }; }
-  if (method === "input") { exact(data, ["controllerId", "interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT_CHARS) }), issuedAt, ...lifetime }; }
-  exact(data, ["controllerId", "interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, ...lifetime };
+  if (method === "select") { exact(data, ["controllerId", "interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { ...controllerId, interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT_CHARS), issuedAt, ...lifetime }; }
+  if (method === "confirm") { exact(data, ["controllerId", "interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { ...controllerId, interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT_CHARS), issuedAt, ...lifetime }; }
+  if (method === "input") { exact(data, ["controllerId", "interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { ...controllerId, interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT_CHARS) }), issuedAt, ...lifetime }; }
+  exact(data, ["controllerId", "interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { ...controllerId, interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, ...lifetime };
 }
 
 function payloadFreeString(input: unknown, field: string, max: number, code = "invalid_response"): string {

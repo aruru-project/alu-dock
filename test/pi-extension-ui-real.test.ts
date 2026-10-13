@@ -224,7 +224,7 @@ export default function (pi) {
   }
 });
 
-test("real Pi extension UI promise survives no controller and controller detach", async (context) => {
+test("real Pi extension question waits for any window to answer, with or without an operator connection", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-real-persistent-ui-"));
   const agentDir = join(root, "agent");
   const sessionDir = join(root, "sessions");
@@ -256,31 +256,30 @@ export default function (pi) {
   try {
     const receipt = await instance.submit("/persistent-ui", "followUp", "persistent-extension-command");
     assert.equal(receipt.kind, "extension_command");
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
-    assert.equal(events.some((event) => event.type === "interaction.requested"), false);
-    assert.equal(events.some((event) => event.type === "extension.notification" && /persistent (approved|denied)/u.test(event.data.message)), false);
-
-    const firstClaim = await instance.claimInteractionController();
-    assert.equal(firstClaim.status, "acquired");
-    if (firstClaim.status !== "acquired") assert.fail("first controller was not acquired");
+    // Nobody holds the operator connection: the question is still published and the Work shows it waiting.
     for (let attempt = 0; attempt < 200 && !events.some((event) => event.type === "interaction.requested"); attempt += 1) {
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
     }
     const firstRequest = events.find((event): event is Extract<DockEvent, { type: "interaction.requested" }> => event.type === "interaction.requested");
     assert.ok(firstRequest);
+    assert.equal(firstRequest.data.controllerId, undefined);
     assert.equal(firstRequest.data.expiresAt, undefined);
+    assert.equal(instance.snapshot().activeInteraction?.id, firstRequest.data.interactionId);
 
+    // An older client taking and leaving the operator connection neither answers nor cancels it.
+    const firstClaim = await instance.claimInteractionController();
+    assert.equal(firstClaim.status, "acquired");
+    if (firstClaim.status !== "acquired") assert.fail("operator connection was not acquired");
+    assert.equal(events.findLast((event) => event.type === "interaction.requested")?.data.interactionId, firstRequest.data.interactionId);
     await instance.releaseInteractionController(firstClaim.leaseToken, "detach");
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     assert.equal(events.some((event) => event.type === "extension.notification" && /persistent (approved|denied)/u.test(event.data.message)), false);
     assert.equal(events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === firstRequest.data.interactionId), false);
 
-    const secondClaim = await instance.claimInteractionController();
-    assert.equal(secondClaim.status, "acquired");
-    if (secondClaim.status !== "acquired") assert.fail("replacement controller was not acquired");
-    const requests = events.filter((event): event is Extract<DockEvent, { type: "interaction.requested" }> => event.type === "interaction.requested");
-    assert.equal(requests.at(-1)?.data.interactionId, firstRequest.data.interactionId);
-    await instance.respondInteraction(secondClaim.leaseToken, firstRequest.data.interactionId, { method: "confirm", confirmed: true });
+    assert.deepEqual(
+      await instance.respondInteraction(undefined, firstRequest.data.interactionId, { method: "confirm", confirmed: true }),
+      { interactionId: firstRequest.data.interactionId, state: "resolved" },
+    );
 
     for (let attempt = 0; attempt < 200 && !events.some((event) => event.type === "extension.notification" && event.data.message === "persistent approved"); attempt += 1) {
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));

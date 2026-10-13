@@ -107,12 +107,17 @@ const MAX_TITLE_CHARS = 2_048;
 const MAX_EDITOR_CHARS = 256_000;
 const MAX_OPTIONS = 200;
 export const MAX_EXTENSION_WIDGET_LINES = 200;
+/** Tombstone owner of an answer given without the operator connection. */
+const SHARED_ANSWER = "shared";
 
 /**
  * Host-owned, renderer-independent extension UI state machine.
  *
- * Pi adapters call the dialog/fire-and-forget methods. Control connections own
- * leases and call respond(). The broker never imports Pi or pi-tui types.
+ * Pi adapters call the dialog/fire-and-forget methods. A question belongs to the
+ * Work: it opens whether or not any client holds the operator connection, and any
+ * client may answer it; the first answer wins. The operator connection (lease)
+ * remains for older clients that still answer through it. The broker never
+ * imports Pi or pi-tui types.
  */
 export class ExtensionUiBroker {
   private sink: ExtensionUiEventSink | undefined;
@@ -363,14 +368,12 @@ export class ExtensionUiBroker {
 
   setTitle(title: string): void {
     void this.serialize(() => this.emitControllerDirective("extension.title_set", {
-      controllerId: this.controller?.controllerId ?? "",
       title: safeLine(title, MAX_TITLE_CHARS),
     }));
   }
 
   setEditorText(text: string): void {
     void this.serialize(() => this.emitControllerDirective("extension.editor_text_set", {
-      controllerId: this.controller?.controllerId ?? "",
       text: safeText(text, MAX_EDITOR_CHARS),
     }));
   }
@@ -419,8 +422,9 @@ export class ExtensionUiBroker {
     void this.emit("extension.status_changed", { key: safeKey, ...(text === undefined ? {} : { text: this.statuses.get(safeKey) }) });
   }
 
-  setWidgetViewport(leaseToken: string, viewport: ExtensionWidgetViewport): void {
-    if (this.controller?.token !== leaseToken || this.controller.generation !== this.generation()) {
+  /** Without a lease the latest reporting client sets the width. */
+  setWidgetViewport(leaseToken: string | undefined, viewport: ExtensionWidgetViewport): void {
+    if (leaseToken !== undefined && (this.controller?.token !== leaseToken || this.controller.generation !== this.generation())) {
       throw new InteractionWrongLeaseError("widget-viewport");
     }
     this.widgetViewport = { ...viewport };
@@ -470,21 +474,29 @@ export class ExtensionUiBroker {
     });
   }
 
-  respond(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
+  /**
+   * Without a lease, any client answers the active question and the first answer wins;
+   * the same answer arriving again (another device, a retry) reports already_resolved.
+   * With a lease, the older operator-connection rules apply unchanged.
+   */
+  respond(leaseToken: string | undefined, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
     return this.serialize(async () => {
       this.pruneTombstones();
-      const lease = this.controller;
-      if (!lease) throw new InteractionExpiredError(interactionId);
-      if (lease.token !== leaseToken) throw new InteractionWrongLeaseError(interactionId);
-      if (lease.generation !== this.generation()) throw new InteractionExpiredError(interactionId);
+      if (leaseToken !== undefined) {
+        const lease = this.controller;
+        if (!lease) throw new InteractionExpiredError(interactionId);
+        if (lease.token !== leaseToken) throw new InteractionWrongLeaseError(interactionId);
+        if (lease.generation !== this.generation()) throw new InteractionExpiredError(interactionId);
+      }
+      const answeredBy = leaseToken ?? SHARED_ANSWER;
 
       const responseKey = canonicalResponse(response);
       const tombstone = this.tombstones.get(interactionId);
       if (tombstone) {
         if (
           tombstone.state === "resolved"
-          && tombstone.generation === lease.generation
-          && tombstone.leaseToken === leaseToken
+          && tombstone.generation === this.generation()
+          && (leaseToken === undefined || tombstone.leaseToken === leaseToken)
           && tombstone.responseKey === responseKey
         ) return { interactionId, state: "already_resolved" };
         throw new InteractionExpiredError(interactionId);
@@ -493,8 +505,8 @@ export class ExtensionUiBroker {
       const dialog = this.active;
       if (!dialog || dialog.id !== interactionId) throw new InteractionNotFoundError(interactionId);
       const value = this.validateResponse(dialog, response);
-      if ("cancelled" in response) await this.finishUserCancellation(dialog, leaseToken, responseKey);
-      else await this.finishDialog(dialog, value, "resolved", leaseToken, responseKey);
+      if ("cancelled" in response) await this.finishUserCancellation(dialog, answeredBy, responseKey);
+      else await this.finishDialog(dialog, value, "resolved", answeredBy, responseKey);
       return { interactionId, state: "resolved" };
     });
   }
@@ -578,7 +590,7 @@ export class ExtensionUiBroker {
   }
 
   private async activateNextDialog(): Promise<void> {
-    if (this.active || this.suspended || !this.controller) return;
+    if (this.active || this.suspended) return;
     while (this.queue.length > 0) {
       const dialog = this.queue.shift()!;
       if (dialog.expiresAtMs !== undefined && dialog.expiresAtMs <= this.now().getTime()) {
@@ -742,12 +754,17 @@ export class ExtensionUiBroker {
     void this.emit("extension.error", { error: safeLine(error, MAX_TITLE_CHARS) });
   }
 
-  private emitInteractionRequest(request: PendingInteractionRequest): Promise<void> {
+  /** The operator connection current for this generation, if any client holds one. */
+  private currentControllerId(): { controllerId?: string } {
     const controller = this.controller;
-    if (!controller) return Promise.resolve();
+    return controller !== undefined && controller.generation === this.generation() ? { controllerId: controller.controllerId } : {};
+  }
+
+  /** Shared readers receive every publication; an operator connection receives the ones naming it. */
+  private emitInteractionRequest(request: PendingInteractionRequest): Promise<void> {
     return this.emit("interaction.requested", {
       ...request,
-      controllerId: controller.controllerId,
+      ...this.currentControllerId(),
     } as EventDataMap["interaction.requested"]);
   }
 
@@ -755,9 +772,8 @@ export class ExtensionUiBroker {
     type: T,
     data: EventDataMap[T],
   ): Promise<void> {
-    const controller = this.controller;
-    if (this.suspended || !controller || controller.generation !== this.generation() || !this.sink) return Promise.resolve();
-    const targeted = { ...data, controllerId: controller.controllerId } as EventDataMap[T];
+    if (this.suspended || !this.sink) return Promise.resolve();
+    const targeted = { ...data, ...this.currentControllerId() } as EventDataMap[T];
     try {
       return Promise.resolve(this.sink.emit(type, targeted));
     } catch {

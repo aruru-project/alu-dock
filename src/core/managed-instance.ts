@@ -836,7 +836,8 @@ export class ManagedInstance {
     return this.extensionUi.isControllerLeaseCurrent(leaseToken, runtimeGeneration);
   }
 
-  async respondInteraction(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
+  /** Without a lease any client may answer; the first answer wins. */
+  async respondInteraction(leaseToken: string | undefined, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
     const lease = this.requireCommandStart(
       this.commandScheduler.admit({ class: "control", kind: "immediate" }),
       "responding to an interaction",
@@ -866,7 +867,7 @@ export class ManagedInstance {
   }
 
   setExtensionWidgetViewport(
-    leaseToken: string,
+    leaseToken: string | undefined,
     expectedRuntimeGeneration: number,
     viewport: { width: number; height: number },
   ): void {
@@ -1025,7 +1026,7 @@ export class ManagedInstance {
       const sourcePage = this.eventsSince(replaySince);
       const history = this.journal.historyPage(undefined, historyLimit);
       const page = replayPurpose === "conversation_bootstrap"
-        ? { ...sourcePage, events: this.journal.conversationBootstrapEvents(sourcePage.events, instance) }
+        ? { ...sourcePage, events: this.journal.conversationBootstrapEvents(instance) }
         : sourcePage;
       return {
         instance,

@@ -564,6 +564,41 @@ test("instance delivery retries only explicit missing capability before records 
   }
 });
 
+// A Work on a SubHost not yet updated: the window keeps its records delivery and goes back to the
+// operator connection for questions instead of failing to open the Work.
+test("a Host without shared questions keeps the observation open and leaves questions to the operator connection", async context=>{
+  const {createServer}=await import("node:net");
+  const {mkdtemp,rm}=await import("node:fs/promises");
+  const {tmpdir}=await import("node:os");const {join}=await import("node:path");
+  const {DockClient}=await import("../src/control/dock-client.js");
+  const {createHelloAck,defaultHostIdentity,implementedCapabilities}=await import("../src/control/protocol.js");
+  const directory=await mkdtemp(join(tmpdir(),"alu-shared-question-fallback-"));
+  context.after(()=>rm(directory,{recursive:true,force:true}));
+  const requests:Record<string,unknown>[]=[];
+  const server=createServer(socket=>{
+    const decoder=new JsonLineDecoder();socket.on("error",()=>{});
+    socket.on("data",chunk=>{for(const line of decoder.push(chunk)){
+      const raw=JSON.parse(line);const send=(value:unknown)=>socket.write(JSON.stringify(value)+"\n");
+      if(raw.kind==="hello"&&raw.requiredCapabilities.includes("extension_ui.shared-interactions.v1")){send({kind:"hello_error",requestId:raw.requestId,error:{code:"capability_missing",message:"old host",missing:["extension_ui.shared-interactions.v1"]}});socket.end();}
+      else if(raw.kind==="hello")send(createHelloAck(raw.requestId,defaultHostIdentity("epoch-1","2026-07-14T00:00:00.000Z"),implementedCapabilities().filter(capability=>capability!=="extension_ui.shared-interactions.v1")));
+      else {
+        // Records are available: answer the read with a refusal; the parameters that arrived are what this test checks.
+        requests.push(raw.params);
+        send({kind:"response",version:2,requestId:raw.requestId,hostEpoch:"epoch-1",ok:false,error:{code:"instance_not_found",message:"fixture",retryable:false}});socket.end();
+      }
+    }});
+  });
+  const path=join(directory,"old.sock");await new Promise<void>(resolve=>server.listen(path,resolve));
+  const client=new DockClient({socketPath:path});const delivery:import("../src/control/dock-client.js").InstanceDeliveryContext={interactions:"shared"};
+  try {
+    await assert.rejects(client.read("i1",undefined,"conversation_bootstrap",delivery),(error:unknown)=>(error as {code?:string}).code==="instance_not_found");
+    assert.equal(delivery.interactions,"operator");
+    assert.equal(requests.length,1);
+    assert.equal(requests[0]!.delivery,"records");
+    assert.equal(requests[0]!.interactions,undefined);
+  }finally{client.closeActiveConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 // #325 review: an empty producer queue cannot discard the unacknowledged-byte deadline.
 test("record senders pipeline small items but remain active until their window is consumed", async context=>{
   const {InstanceRecordChannel}=await import("../src/control/instance-record-delivery.js");
