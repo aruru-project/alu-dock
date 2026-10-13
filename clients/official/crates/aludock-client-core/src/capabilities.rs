@@ -10,6 +10,8 @@ const CONVERSATION_IMAGES_V1: &str = "conversation.images.v1";
 const EVENTS_FOLLOW_V2: &str = "events.follow.v2";
 const EXTENSION_UI_CONTROL_V1: &str = "extension_ui.control.v1";
 const EXTENSION_UI_PERSISTENT_INTERACTIONS_V1: &str = "extension_ui.persistent-interactions.v1";
+/// Questions arrive on the Work's observation and any window may answer them.
+pub(crate) const EXTENSION_UI_SHARED_INTERACTIONS_V1: &str = "extension_ui.shared-interactions.v1";
 const EXTENSION_UI_TOOLS_EXPANDED_V1: &str = "extension_ui.tools-expanded.v1";
 const EXTENSION_UI_V1: &str = "extension_ui.v1";
 const EXTENSION_UI_WIDGETS_V1: &str = "extension_ui.widgets.v1";
@@ -141,6 +143,17 @@ pub(crate) const EXTENSION_RESPONSE: &[&str] = &[
     EXTENSION_UI_PERSISTENT_INTERACTIONS_V1,
 ];
 pub(crate) const EXTENSION_WIDGETS: &[&str] = &[CORE_V2, EXTENSION_UI_WIDGETS_V1];
+pub(crate) const SHARED_EXTENSION_RESPONSE: &[&str] = &[
+    CORE_V2,
+    EXTENSION_UI_V1,
+    EXTENSION_UI_PERSISTENT_INTERACTIONS_V1,
+    EXTENSION_UI_SHARED_INTERACTIONS_V1,
+];
+pub(crate) const SHARED_EXTENSION_WIDGETS: &[&str] = &[
+    CORE_V2,
+    EXTENSION_UI_WIDGETS_V1,
+    EXTENSION_UI_SHARED_INTERACTIONS_V1,
+];
 
 pub(crate) fn submit(has_attachments: bool, has_images: bool) -> Vec<&'static str> {
     let mut capabilities = SUBMIT.to_vec();

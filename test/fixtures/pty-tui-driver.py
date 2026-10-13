@@ -118,7 +118,7 @@ def main() -> int:
             completed_renders = bytes(output).count(b"\x1b[?2026l")
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
-            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry", "context-changes"):
+            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry", "extension-reconnect", "extension-refresh", "context-changes"):
                 set_size(fd, 40, 120)
             elif action == "flow-frame-stability":
                 set_size(fd, 58, 252)
@@ -690,6 +690,30 @@ def main() -> int:
                 os.write(fd, b"\x1b[A\r")
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
+            elif action in ("extension-reconnect", "extension-refresh"):
+                # The test drops live updates once the first question is on screen and changes
+                # the Work before this window reconnects.
+                first_deadline = time.monotonic() + 5
+                while b"First question" not in output and time.monotonic() < first_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                with open(ready_file + ".first", "w", encoding="utf-8") as marker:
+                    marker.write("first\n")
+                resumed_start = len(output)
+                if action == "extension-reconnect":
+                    second_deadline = time.monotonic() + 8
+                    while b"Second question" not in output[resumed_start:] and time.monotonic() < second_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    os.write(fd, b"\x1b[A\r")  # Confirm defaults to No; move to explicit Yes.
+                else:
+                    refresh_deadline = time.monotonic() + 8
+                    while b"refreshed conversation" not in output[resumed_start:] and time.monotonic() < refresh_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    os.write(fd, b"typed after refresh\r")
+                time.sleep(0.3)
+                read_available(fd, output, 0.1)
             elif action == "extension-response-retry":
                 dialog_deadline = time.monotonic() + 5
                 while b"Retry response confirm" not in output and time.monotonic() < dialog_deadline:

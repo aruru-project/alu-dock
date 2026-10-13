@@ -71,7 +71,7 @@ Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 2. hello 成功后发送业务 request；
 3. 普通 request 返回一个 response；`session.tree.v2` 成功时改用透明的有界 response-transfer records 重组同一个逻辑 response；未协商整文件模式时 `attachment.upload` 是唯一的多记录 request body；协商 `file-transfer.v1` 的文件请求见下文，仍各自只有一个 terminal response；
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
-5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
+5. Extension UI 的问题随 read/follow 送达（`extension_ui.shared-interactions.v1`）；旧客户端的独立操作连接继续可用，并与读取、实时跟随分别恢复。
 
 ### 一条连接多条流（`transport.multiplex.v1`）
 
@@ -260,7 +260,9 @@ TS 默认 read/follow 不变；传入并复用 `InstanceDeliveryContext`（或 s
 
 Worker persistence checkpoint 确定 active frame 的释放边界。Host 按 generation、sequence 和 checkpoint 暂存或释放 frame，不等待客户端 ACK，也不维护接收名单；不按内容 fingerprint 做匹配或去重。任意数量的客户端可以同时读取和跟随，观察连接中断时 Agent runtime 和 instance 继续运行。
 
-Extension UI 操作使用独立连接，同一 instance 同时只有一个。新连接立即接手，旧操作连接结束但它的普通 follow 不受影响；等待中的 interaction 属于 runtime generation，不因接手或断线而被回答或取消。
+等待回答的问题属于 Work 的 runtime generation，不属于哪条连接：没有客户端持有操作连接时问题照样开放，snapshot 的 `activeInteraction` 照样显示。`extension_ui.shared-interactions.v1`：read/follow 带 `interactions: "shared"` 时，Host 不过滤问题、编辑器文字和标题事件；journal 另外保留当前问题的最新一次发布，`conversation_bootstrap` 因此总能带上它，不受事件窗口限制。任何客户端都可以不带 lease 回答（`interaction.respond`）和报告宽度（`extension.widget_viewport.set`），以第一个回答为准，同样的回答再到返回 `already_resolved`，其余返回 `interaction_expired`。这三种请求选项经 `requestOptionCapabilities` 声明，Main 向目标 SubHost 要求同一能力；旧 SubHost 返回 `capability_missing`，客户端退回旧方式。
+
+旧方式：操作连接（`interaction.control`）同一 instance 同时只有一个。新连接立即接手，旧操作连接结束但它的普通 follow 不受影响；问题不因接手或断线而被回答或取消，新连接取得时 Host 重新发布当前问题并标上它的 `controllerId`。持有 lease 的回答与不带 lease 的回答共用同一个“先到为准”。官方客户端和 Work TUI 只在 Work 所在 Host 缺少新能力时使用旧方式，Rails WebConsole 目前仍使用旧方式。
 
 ## Agent-facing Dock tools
 

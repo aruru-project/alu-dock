@@ -308,6 +308,10 @@ pub struct InstanceReadResult {
     pub history_revision: u64,
     pub history_truncated: bool,
     pub pending_messages: Vec<PendingMessage>,
+    /// This read asked for the Work's questions: they arrive on the observation and are
+    /// answered without the operator connection. Local fact, not part of the Host reply.
+    #[serde(skip)]
+    pub shared_questions: bool,
 }
 
 impl DockClient {
@@ -343,13 +347,16 @@ impl DockClient {
         }
         let params = FollowParams { instance_id, since };
         let records = if let Some(context) = context.filter(|context| !context.legacy()) {
-            match self
-                .open_instance_records("instance.follow", &params, FOLLOW_CAPABILITIES, context)
-                .await
-            {
-                Ok(result) => Some(result),
-                Err(error) if context.fallback(&error) => None,
-                Err(error) => return Err(error),
+            loop {
+                match self
+                    .open_instance_records("instance.follow", &params, FOLLOW_CAPABILITIES, context)
+                    .await
+                {
+                    Ok(result) => break Some(result),
+                    Err(error) if context.fallback(&error) => break None,
+                    Err(error) if context.shared_questions_fallback(&error) => continue,
+                    Err(error) => return Err(error),
+                }
             }
         } else {
             None
@@ -463,18 +470,24 @@ impl DockClient {
             replay,
         };
         let records = if let Some(context) = context.filter(|context| !context.legacy()) {
-            match self
-                .open_instance_records::<_, InstanceReadResult>(
-                    "instance.read",
-                    &params,
-                    READ_CAPABILITIES,
-                    context,
-                )
-                .await
-            {
-                Ok((result, _stream)) => Some(result),
-                Err(error) if context.fallback(&error) => None,
-                Err(error) => return Err(error),
+            loop {
+                match self
+                    .open_instance_records::<_, InstanceReadResult>(
+                        "instance.read",
+                        &params,
+                        READ_CAPABILITIES,
+                        context,
+                    )
+                    .await
+                {
+                    Ok((mut result, _stream)) => {
+                        result.shared_questions = context.shared_questions();
+                        break Some(result);
+                    }
+                    Err(error) if context.fallback(&error) => break None,
+                    Err(error) if context.shared_questions_fallback(&error) => continue,
+                    Err(error) => return Err(error),
+                }
             }
         } else {
             None
@@ -572,6 +585,62 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
         assert_eq!(first.sequence, 11);
         assert_eq!(after_directives.unwrap().sequence, 14);
+    }
+
+    // A Work on a SubHost not yet updated: the observation keeps record delivery and leaves
+    // questions to the operator connection, instead of failing to open the Work.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn older_host_keeps_the_observation_and_leaves_questions_to_the_operator() {
+        use crate::tls::{read_json_line, write_json_line};
+        use crate::{ConnectionRouter, IdentityStore, LocalDockEndpoint};
+        let directory = std::env::temp_dir().join(format!("sq-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let endpoint = directory.join("dock.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let peer = tokio::spawn(async move {
+            let mut params = Vec::new();
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio::io::BufReader::new(socket);
+                let hello: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+                let required = hello["requiredCapabilities"].as_array().unwrap();
+                if required
+                    .iter()
+                    .any(|value| value == "extension_ui.shared-interactions.v1")
+                {
+                    write_json_line(&mut socket, &serde_json::json!({"kind":"hello_error","requestId":hello["requestId"],
+                        "error":{"code":"capability_missing","message":"older Host","missing":["extension_ui.shared-interactions.v1"]}})).await.unwrap();
+                    continue;
+                }
+                write_json_line(&mut socket, &serde_json::json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],
+                    "catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":required,"limits":{"maxLineBytes":16384}})).await.unwrap();
+                let request: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+                params.push(request["params"].clone());
+                write_json_line(&mut socket, &serde_json::json!({"kind":"response","version":2,"requestId":request["requestId"],
+                    "hostEpoch":"epoch","ok":false,"error":{"code":"not_found","message":"fixture","retryable":false}})).await.unwrap();
+            }
+            params
+        });
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "shared-questions".into(),
+            )
+            .unwrap(),
+        );
+        let context = crate::InstanceDeliveryContext::default();
+        let result = client
+            .read_instance_records("work", None, ReadReplay::ConversationBootstrap, &context)
+            .await;
+        let params = peer.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(matches!(result, Err(ClientError::Host { code, .. }) if code == "not_found"));
+        assert!(!context.shared_questions());
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["delivery"], "records");
+        assert!(params[0].get("interactions").is_none());
     }
 
     #[test]

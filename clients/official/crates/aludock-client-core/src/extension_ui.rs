@@ -9,7 +9,9 @@ use crate::{
     ClientError, DockClient, DockEvent, InstanceSnapshot, Result,
     capabilities::{
         EXTENSION_CONTROL as CONTROL_CAPABILITIES, EXTENSION_RESPONSE as RESPONSE_CAPABILITIES,
-        EXTENSION_WIDGETS as WIDGET_CAPABILITIES, SNAPSHOT as TOOLS_CAPABILITIES,
+        EXTENSION_WIDGETS as WIDGET_CAPABILITIES,
+        SHARED_EXTENSION_RESPONSE as SHARED_RESPONSE_CAPABILITIES,
+        SHARED_EXTENSION_WIDGETS as SHARED_WIDGET_CAPABILITIES, SNAPSHOT as TOOLS_CAPABILITIES,
     },
     client::ProtocolEventStream,
 };
@@ -38,8 +40,12 @@ pub struct ActiveInteraction {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum InteractionRequest {
     Select {
-        #[serde(rename = "controllerId")]
-        controller_id: String,
+        #[serde(
+            rename = "controllerId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        controller_id: Option<String>,
         #[serde(rename = "interactionId")]
         interaction_id: String,
         title: String,
@@ -50,8 +56,12 @@ pub enum InteractionRequest {
         expires_at: Option<String>,
     },
     Confirm {
-        #[serde(rename = "controllerId")]
-        controller_id: String,
+        #[serde(
+            rename = "controllerId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        controller_id: Option<String>,
         #[serde(rename = "interactionId")]
         interaction_id: String,
         title: String,
@@ -62,8 +72,12 @@ pub enum InteractionRequest {
         expires_at: Option<String>,
     },
     Input {
-        #[serde(rename = "controllerId")]
-        controller_id: String,
+        #[serde(
+            rename = "controllerId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        controller_id: Option<String>,
         #[serde(rename = "interactionId")]
         interaction_id: String,
         title: String,
@@ -74,8 +88,12 @@ pub enum InteractionRequest {
         expires_at: Option<String>,
     },
     Editor {
-        #[serde(rename = "controllerId")]
-        controller_id: String,
+        #[serde(
+            rename = "controllerId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        controller_id: Option<String>,
         #[serde(rename = "interactionId")]
         interaction_id: String,
         title: String,
@@ -88,12 +106,13 @@ pub enum InteractionRequest {
 }
 
 impl InteractionRequest {
-    pub fn controller_id(&self) -> &str {
+    /// The operator connection current when the question was published, if any.
+    pub fn controller_id(&self) -> Option<&str> {
         match self {
             Self::Select { controller_id, .. }
             | Self::Confirm { controller_id, .. }
             | Self::Input { controller_id, .. }
-            | Self::Editor { controller_id, .. } => controller_id,
+            | Self::Editor { controller_id, .. } => controller_id.as_deref(),
         }
     }
 
@@ -123,7 +142,9 @@ impl InteractionRequest {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_id(self.controller_id(), "controllerId")?;
+        if let Some(controller_id) = self.controller_id() {
+            validate_id(controller_id, "controllerId")?;
+        }
         validate_id(self.interaction_id(), "interactionId")?;
         let (title, issued_at, expires_at) = match self {
             Self::Select {
@@ -193,6 +214,44 @@ pub enum InteractionResponse {
 }
 
 impl InteractionResponse {
+    /// One answer from the window's controls. `options` checks a selection against the
+    /// question when this client still has it; the Host checks it again either way.
+    pub fn from_answer(
+        method: InteractionMethod,
+        value: Option<String>,
+        confirmed: Option<bool>,
+        cancelled: bool,
+        options: Option<&[String]>,
+    ) -> Result<Self> {
+        Ok(match method {
+            InteractionMethod::Select => {
+                let value = value.unwrap_or_default();
+                if !cancelled && options.is_some_and(|options| !options.contains(&value)) {
+                    return Err(ClientError::Action {
+                        code: "invalid_interaction_response",
+                        message: "选择值已经不在当前选项中，请重新选择。",
+                    });
+                }
+                Self::Select { value }
+            }
+            InteractionMethod::Confirm => Self::Confirm {
+                confirmed: confirmed.unwrap_or(false),
+            },
+            InteractionMethod::Input => Self::Input {
+                value: value.unwrap_or_default(),
+            },
+            InteractionMethod::Editor => Self::Editor {
+                value: value.unwrap_or_default(),
+            },
+            InteractionMethod::Unrecognized => {
+                return Err(ClientError::Action {
+                    code: "unsupported_interaction",
+                    message: "当前客户端还不支持这种问题的回答方式，请更新客户端。",
+                });
+            }
+        })
+    }
+
     pub fn cancelled(method: InteractionMethod) -> Value {
         serde_json::json!({ "method": method, "cancelled": true })
     }
@@ -256,6 +315,13 @@ pub enum NotificationLevel {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "data")]
 pub enum ExtensionEvent {
+    /// Shared questions: the Work's question, published on its observation.
+    #[serde(rename = "interaction.requested")]
+    InteractionRequested(InteractionRequest),
+    #[serde(rename = "extension.title_set")]
+    TitleSet(TitleDirective),
+    #[serde(rename = "extension.editor_text_set")]
+    EditorTextSet(EditorDirective),
     #[serde(rename = "interaction.resolved")]
     InteractionResolved(InteractionResolution),
     #[serde(rename = "interaction.cancelled")]
@@ -307,9 +373,10 @@ impl ExtensionEvent {
             }
             "extension.widget_changed" => Self::WidgetChanged(parse_data(&event.data)?),
             "extension.error" => Self::Error(parse_data(&event.data)?),
-            "interaction.requested" | "extension.title_set" | "extension.editor_text_set" => {
-                return protocol("controller-targeted event appeared on ordinary follow");
-            }
+            // Only an observation that asked for shared questions receives these.
+            "interaction.requested" => Self::InteractionRequested(parse_data(&event.data)?),
+            "extension.title_set" => Self::TitleSet(parse_data(&event.data)?),
+            "extension.editor_text_set" => Self::EditorTextSet(parse_data(&event.data)?),
             value if value.starts_with("extension.") || value.starts_with("interaction.") => {
                 return protocol("unsupported Extension UI event");
             }
@@ -321,6 +388,9 @@ impl ExtensionEvent {
 
     fn validate(&self) -> Result<()> {
         match self {
+            Self::InteractionRequested(request) => request.validate(),
+            Self::TitleSet(value) => value.validate(),
+            Self::EditorTextSet(value) => value.validate(),
             Self::InteractionResolved(value) => validate_id(&value.interaction_id, "interactionId"),
             Self::InteractionCancelled(value) => {
                 validate_id(&value.interaction_id, "interactionId")
@@ -374,13 +444,31 @@ pub enum ControllerEventData {
 }
 
 event_data!(TitleDirective {
-    controller_id: String,
+    controller_id: Option<String>,
     title: String
 });
 event_data!(EditorDirective {
-    controller_id: String,
+    controller_id: Option<String>,
     text: String
 });
+
+impl TitleDirective {
+    fn validate(&self) -> Result<()> {
+        if let Some(controller_id) = &self.controller_id {
+            validate_id(controller_id, "controllerId")?;
+        }
+        validate_text(&self.title, 2_048, "title directive")
+    }
+}
+
+impl EditorDirective {
+    fn validate(&self) -> Result<()> {
+        if let Some(controller_id) = &self.controller_id {
+            validate_id(controller_id, "controllerId")?;
+        }
+        validate_text(&self.text, 256_000, "editor directive")
+    }
+}
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -415,25 +503,23 @@ impl ExtensionControlStream {
             "interaction.requested" => {
                 let request: InteractionRequest = parse_data(&event.data)?;
                 request.validate()?;
-                if request.controller_id() != self.controller_id {
+                if request.controller_id() != Some(self.controller_id.as_str()) {
                     return protocol("interaction request targeted another controller");
                 }
                 ControllerEventData::InteractionRequested(request)
             }
             "extension.title_set" => {
                 let value: TitleDirective = parse_data(&event.data)?;
-                validate_id(&value.controller_id, "controllerId")?;
-                validate_text(&value.title, 2_048, "title directive")?;
-                if value.controller_id != self.controller_id {
+                value.validate()?;
+                if value.controller_id.as_deref() != Some(self.controller_id.as_str()) {
                     return protocol("title directive targeted another controller");
                 }
                 ControllerEventData::TitleSet(value)
             }
             "extension.editor_text_set" => {
                 let value: EditorDirective = parse_data(&event.data)?;
-                validate_id(&value.controller_id, "controllerId")?;
-                validate_text(&value.text, 256_000, "editor directive")?;
-                if value.controller_id != self.controller_id {
+                value.validate()?;
+                if value.controller_id.as_deref() != Some(self.controller_id.as_str()) {
                     return protocol("editor directive targeted another controller");
                 }
                 ControllerEventData::EditorTextSet(value)
@@ -496,7 +582,8 @@ struct ControlResult {
 struct RespondParams<'a> {
     operation_id: &'a str,
     instance_id: &'a str,
-    lease_token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_token: Option<&'a str>,
     interaction_id: &'a str,
     response: &'a Value,
 }
@@ -522,7 +609,8 @@ pub struct InteractionRespondResult {
 #[serde(rename_all = "camelCase")]
 struct ViewportParams<'a> {
     instance_id: &'a str,
-    lease_token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_token: Option<&'a str>,
     expected_runtime_generation: u64,
     width: u16,
     height: u16,
@@ -590,6 +678,47 @@ impl DockClient {
         cancelled: bool,
         operation_id: Option<&str>,
     ) -> Result<InteractionRespondResult> {
+        self.answer_interaction(
+            &controller.instance_id,
+            Some(&controller.lease_token),
+            interaction_id,
+            response,
+            cancelled,
+            operation_id,
+        )
+        .await
+    }
+
+    /// Answer the Work's question without the operator connection; the first answer from
+    /// any window wins, and the same answer again reports `already_resolved`.
+    pub async fn respond_shared_interaction(
+        &self,
+        instance_id: &str,
+        interaction_id: &str,
+        response: &InteractionResponse,
+        cancelled: bool,
+        operation_id: Option<&str>,
+    ) -> Result<InteractionRespondResult> {
+        self.answer_interaction(
+            instance_id,
+            None,
+            interaction_id,
+            response,
+            cancelled,
+            operation_id,
+        )
+        .await
+    }
+
+    async fn answer_interaction(
+        &self,
+        instance_id: &str,
+        lease_token: Option<&str>,
+        interaction_id: &str,
+        response: &InteractionResponse,
+        cancelled: bool,
+        operation_id: Option<&str>,
+    ) -> Result<InteractionRespondResult> {
         validate_id(interaction_id, "interactionId")?;
         response.validate()?;
         let generated = Uuid::new_v4().to_string();
@@ -604,12 +733,16 @@ impl DockClient {
                 "interaction.respond",
                 &RespondParams {
                     operation_id,
-                    instance_id: &controller.instance_id,
-                    lease_token: &controller.lease_token,
+                    instance_id,
+                    lease_token,
                     interaction_id,
                     response: &encoded,
                 },
-                RESPONSE_CAPABILITIES,
+                if lease_token.is_some() {
+                    RESPONSE_CAPABILITIES
+                } else {
+                    SHARED_RESPONSE_CAPABILITIES
+                },
                 Some(operation_id),
             )
             .await?;
@@ -622,6 +755,42 @@ impl DockClient {
         width: u16,
         height: u16,
     ) -> Result<WidgetViewportResult> {
+        self.widget_viewport(
+            &controller.instance_id,
+            Some(&controller.lease_token),
+            controller.runtime_generation,
+            width,
+            height,
+        )
+        .await
+    }
+
+    /// Report this window's width for extension widgets; the latest report wins.
+    pub async fn set_shared_widget_viewport(
+        &self,
+        instance_id: &str,
+        expected_runtime_generation: u64,
+        width: u16,
+        height: u16,
+    ) -> Result<WidgetViewportResult> {
+        self.widget_viewport(
+            instance_id,
+            None,
+            expected_runtime_generation,
+            width,
+            height,
+        )
+        .await
+    }
+
+    async fn widget_viewport(
+        &self,
+        instance_id: &str,
+        lease_token: Option<&str>,
+        expected_runtime_generation: u64,
+        width: u16,
+        height: u16,
+    ) -> Result<WidgetViewportResult> {
         if width == 0 || height == 0 || width > 10_000 || height > 10_000 {
             return protocol("widget viewport must be between 1 and 10000 cells");
         }
@@ -629,13 +798,17 @@ impl DockClient {
             .request(
                 "extension.widget_viewport.set",
                 &ViewportParams {
-                    instance_id: &controller.instance_id,
-                    lease_token: &controller.lease_token,
-                    expected_runtime_generation: controller.runtime_generation,
+                    instance_id,
+                    lease_token,
+                    expected_runtime_generation,
                     width,
                     height,
                 },
-                WIDGET_CAPABILITIES,
+                if lease_token.is_some() {
+                    WIDGET_CAPABILITIES
+                } else {
+                    SHARED_WIDGET_CAPABILITIES
+                },
                 None,
             )
             .await?;
@@ -780,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn extension_events_accept_additive_host_metadata_but_keep_stream_types_separate() {
+    fn extension_events_accept_additive_host_metadata() {
         let valid = dock_event(
             "extension.widget_changed",
             serde_json::json!({"key":"build","lines":["ok"],"placement":"aboveEditor"}),
@@ -809,11 +982,27 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(request.method(), InteractionMethod::Confirm);
-        let targeted = dock_event(
-            "extension.title_set",
-            serde_json::json!({"controllerId":"c","title":"x"}),
+    }
+
+    // Shared questions: the question and the extension's editor text arrive on the Work's
+    // observation, with or without an operator connection; the page never sees which one.
+    #[test]
+    fn shared_questions_reach_the_page_without_operator_identity() {
+        let question = dock_event(
+            "interaction.requested",
+            serde_json::json!({"interactionId":"q","method":"confirm","title":"Delete?",
+                "message":"Item goes away","issuedAt":"2026-10-13T00:00:00.000Z"}),
         );
-        assert!(ExtensionEvent::from_dock_event(&targeted).is_err());
+        let projected = crate::conversation::project_event(question).unwrap();
+        assert_eq!(projected.event_type, "interaction.requested");
+        assert_eq!(projected.data["interactionId"], "q");
+        assert_eq!(projected.data["message"], "Item goes away");
+        let draft = dock_event(
+            "extension.editor_text_set",
+            serde_json::json!({"controllerId":"web-console","text":"draft"}),
+        );
+        let projected = crate::conversation::project_event(draft).unwrap();
+        assert_eq!(projected.data, serde_json::json!({"text":"draft"}));
     }
 
     #[test]
@@ -1022,37 +1211,13 @@ impl ExtensionControlState {
                 code: "stale_extension_controller",
                 message: "这个问题已经失效，请重新查看当前问题。",
             })?;
-        let response = match method {
-            InteractionMethod::Select => {
-                let value = value.unwrap_or_default();
-                if !cancelled
-                    && !pending
-                        .select_options()
-                        .is_some_and(|options| options.contains(&value))
-                {
-                    return Err(ClientError::Action {
-                        code: "invalid_interaction_response",
-                        message: "选择值已经不在当前选项中，请重新选择。",
-                    });
-                }
-                InteractionResponse::Select { value }
-            }
-            InteractionMethod::Confirm => InteractionResponse::Confirm {
-                confirmed: confirmed.unwrap_or(false),
-            },
-            InteractionMethod::Input => InteractionResponse::Input {
-                value: value.unwrap_or_default(),
-            },
-            InteractionMethod::Editor => InteractionResponse::Editor {
-                value: value.unwrap_or_default(),
-            },
-            InteractionMethod::Unrecognized => {
-                return Err(ClientError::Action {
-                    code: "unsupported_interaction",
-                    message: "当前客户端还不支持这种问题的回答方式，请更新客户端。",
-                });
-            }
-        };
+        let response = InteractionResponse::from_answer(
+            method,
+            value,
+            confirmed,
+            cancelled,
+            pending.select_options(),
+        )?;
         let result = client
             .respond_interaction(&binding.lease, interaction_id, &response, cancelled, None)
             .await?;

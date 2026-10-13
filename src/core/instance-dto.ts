@@ -310,16 +310,18 @@ export interface EventDataMap {
   "resources.reloaded": { resources: ResourceDto[]; diagnostics: DiagnosticDto[] };
   "settings.changed": SettingsChangedData;
   "settings.write_failed": { key: keyof SettingValueMap | "model" | "thinking"; error: string };
+  // controllerId names the operator connection current when the event was published; it is
+  // absent while no client holds one. Shared readers ignore it.
   "interaction.requested":
-    | { controllerId: string; interactionId: string; method: "select"; title: string; options: string[]; issuedAt: string; expiresAt?: string }
-    | { controllerId: string; interactionId: string; method: "confirm"; title: string; message: string; issuedAt: string; expiresAt?: string }
-    | { controllerId: string; interactionId: string; method: "input"; title: string; placeholder?: string; issuedAt: string; expiresAt?: string }
-    | { controllerId: string; interactionId: string; method: "editor"; title: string; prefill?: string; issuedAt: string; expiresAt?: string };
+    | { controllerId?: string; interactionId: string; method: "select"; title: string; options: string[]; issuedAt: string; expiresAt?: string }
+    | { controllerId?: string; interactionId: string; method: "confirm"; title: string; message: string; issuedAt: string; expiresAt?: string }
+    | { controllerId?: string; interactionId: string; method: "input"; title: string; placeholder?: string; issuedAt: string; expiresAt?: string }
+    | { controllerId?: string; interactionId: string; method: "editor"; title: string; prefill?: string; issuedAt: string; expiresAt?: string };
   "interaction.resolved": { interactionId: string; method: "select" | "confirm" | "input" | "editor" };
   "interaction.cancelled": { interactionId: string; method: "select" | "confirm" | "input" | "editor"; reason: "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow" };
   "extension.notification": { message: string; level: "info" | "warning" | "error"; operationId?: string };
-  "extension.title_set": { controllerId: string; title: string };
-  "extension.editor_text_set": { controllerId: string; text: string };
+  "extension.title_set": { controllerId?: string; title: string };
+  "extension.editor_text_set": { controllerId?: string; text: string };
   "extension.status_changed": { key: string; text?: string };
   "extension.tools_expanded_changed": { expanded: boolean };
   "extension.widget_changed": { key: string; lines?: string[]; placement?: "aboveEditor" | "belowEditor" };

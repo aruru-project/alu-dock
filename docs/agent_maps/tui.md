@@ -45,7 +45,7 @@ Work 的主要对象是一个已打开的 Dock instance。它负责：
 
 - conversation、thinking、tool、compaction 与 Agent activity 的显示；
 - prompt、Queue、model、settings、session/tree 与 Extension UI 的交互；
-- 读取当前视图、跟随实时更新，以及独立恢复 Extension UI 操作连接；
+- 读取当前视图、跟随实时更新；Extension UI 的问题随实时更新到达（Work 所在 Host 不支持时才另开并恢复操作连接）；
 - editor、viewport、focus、搜索和本地 modal 状态。
 
 Work 使用可流动的 main buffer 和终端原生 scrollback/selection。Detach 只断开客户端，不停止 Host 中的 instance。
@@ -83,9 +83,9 @@ Extension component 在 Worker 运行。Work TUI 只实现 Dock 已定义的 int
 
 - 显示 Worker 提供的内容或 frame；
 - 把按键、viewport 和用户回答发回；
-- 根据 Host 提供的当前操作者和会话状态恢复或关闭界面。
+- 根据 Host 发布的问题、回答结果和会话状态显示或关闭界面。
 
-关闭窗口、重连或暂时不能操作时，用户回答仍保持待定。新的操作入口接手后，旧 Work 继续显示实时更新并接受普通消息；等待中的 Extension UI 保留给新入口处理。WebUI 是否实现同一 surface 与 Work TUI 无关。
+问题属于 Work：每个打开它的 Work 窗口（以及官方客户端）都会显示，在任一处回答后其余窗口自动关闭；打开 Work 时已在等待的问题在界面就绪后显示。扩展设置的编辑器文字和标题同样到达每个窗口，只在实时到达时应用，断线期间错过的不补。重连后屏幕上的问题若已在别处结束，换成当前问题或直接关掉。关闭窗口、重连或暂时不能操作时，问题仍保持待定。WebUI 是否实现同一 surface 与 Work TUI 无关。
 
 ## 视觉实现
 

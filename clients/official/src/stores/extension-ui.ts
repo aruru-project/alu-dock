@@ -30,10 +30,18 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   const activeRequest = ref<InteractionRequest | undefined>()
   const controller = ref<ExtensionControllerBinding | undefined>()
   const controllerState = ref<'detached' | 'acquiring' | 'attached' | 'disconnected'>('detached')
+  /** Questions arrive with the Work's updates; this window never takes them over from others. */
+  const shared = ref(false)
+  // Latest live editor text and title from the extension, each applied once by the input area.
+  // Kept apart so one arriving in the same update as the other is not lost.
+  const editorText = ref<{ id: number; text: string } | undefined>()
+  const title = ref<{ id: number; text: string } | undefined>()
+  let directiveId = 0
   let lifecycleRevision = 0
   let acquisitionRevision = 0
 
-  const hasAttention = computed(() => !!activeSummary.value && !activeRequest.value)
+  // Only the operator connection needs a step to open a question; shared questions arrive by themselves.
+  const hasAttention = computed(() => !shared.value && !!activeSummary.value && !activeRequest.value)
   const isCurrent = (work: Work | null | undefined) => !!work
     && work.id === instanceId.value
     && work.ownerHostEpoch === hostEpoch.value
@@ -52,7 +60,9 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     const previousRequest = activeRequest.value
     const binding = controller.value
     const cursor = projection.cursor
-    if (binding && (binding.connectionId !== connection.connectionId
+    const sharedQuestions = projection.extensionUi.sharedQuestions === true
+    // With shared questions this window keeps no operator connection, so others are not displaced.
+    if (binding && (sharedQuestions || binding.connectionId !== connection.connectionId
       || binding.selectionGeneration !== connection.selectionGeneration
       || binding.instanceId !== cursor.instanceId
       || binding.hostEpoch !== cursor.hostEpoch
@@ -76,6 +86,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     hostEpoch.value = cursor.hostEpoch
     runtimeGeneration.value = cursor.runtimeGeneration
     subscriptionId.value = subscription
+    shared.value = sharedQuestions
     if (!binding) controllerState.value = 'detached'
     status.value = { ...projection.extensionUi.status }
     toolsExpanded.value = projection.extensionUi.toolsExpanded
@@ -137,6 +148,9 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     activeSummary.value = undefined
     activeRequest.value = undefined
     controllerState.value = 'detached'
+    shared.value = false
+    editorText.value = undefined
+    title.value = undefined
     return true
   }
 
@@ -151,10 +165,18 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   // The shared Work observation reducer has already authenticated generation and monotonic order.
   // Keep our own binding/cursor for resume, without a second event validator or
   // an unreachable session.replaced branch (that boundary always bootstraps).
-  function applyLive(instance: string, subscription: string, event: ProjectedEvent): boolean {
+  // `live` is false when cached updates are shown again (F5, switching back): the editor and
+  // title text already took effect then and must not overwrite what the person typed since.
+  function applyLive(instance: string, subscription: string, event: ProjectedEvent, live = true): boolean {
     if (instance !== instanceId.value || subscription !== subscriptionId.value) return false
     lastSequence.value = event.sequence
     reduceEvent(event)
+    if (live && event.eventType === 'extension.title_set' && typeof event.data.title === 'string') {
+      title.value = { id: ++directiveId, text: event.data.title }
+    }
+    if (live && event.eventType === 'extension.editor_text_set' && typeof event.data.text === 'string') {
+      editorText.value = { id: ++directiveId, text: event.data.text }
+    }
     return true
   }
 
@@ -194,6 +216,14 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
           toolsResetRevision.value++ // Same-value events intentionally reset every per-tool override.
         }
         break
+      case 'interaction.requested': {
+        // Shared questions only; the operator connection delivers its own copy elsewhere.
+        const request = parseRequest(data)
+        if (!request) return
+        if (activeRequest.value?.interactionId !== request.interactionId) activeRequest.value = request
+        activeSummary.value = { id: request.interactionId, method: request.method, expiresAt: request.expiresAt }
+        break
+      }
       case 'interaction.resolved':
       case 'interaction.cancelled':
         if (data.interactionId === activeSummary.value?.id || data.interactionId === activeRequest.value?.interactionId) {
@@ -301,7 +331,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   return {
     connectionId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
     status, aboveWidgets, belowWidgets, toolsExpanded, toolsResetRevision,
-    activeSummary, activeRequest, controller, controllerState,
+    activeSummary, activeRequest, controller, controllerState, shared, editorText, title,
     hasAttention, isCurrent, bootstrap, bindSubscription, clear, applyLive, beginAcquire,
     attachController, failAcquire, suspendController, controllerEnded, releaseController, applyControllerEvent,
     hideControllerRequest, resolveLocally,

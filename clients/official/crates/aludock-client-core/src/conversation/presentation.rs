@@ -21,6 +21,8 @@ pub struct ExtensionBootstrap {
     pub tools_expanded: bool,
     pub active_interaction: Option<crate::ActiveInteraction>,
     pub events: Vec<ProjectedEvent>,
+    /// Questions arrive on this observation and are answered without the operator connection.
+    pub shared_questions: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -91,6 +93,7 @@ pub fn project_conversation_read(read: crate::InstanceReadResult) -> Result<Conv
             tools_expanded: read.instance.tools_expanded,
             active_interaction: read.instance.active_interaction,
             events: extension_events,
+            shared_questions: read.shared_questions,
         },
         queue,
         cursor: read.page.latest,
@@ -113,13 +116,7 @@ pub fn project_pending_message(item: PendingMessage) -> ProjectedQueueItem {
 pub fn project_event(event: crate::DockEvent) -> crate::Result<ProjectedEvent> {
     let extension = ExtensionEvent::from_dock_event(&event)?;
     let data = match extension {
-        Some(value) => serde_json::to_value(value)
-            .map_err(ClientError::Json)?
-            .get_mut("data")
-            .map(Value::take)
-            .ok_or_else(|| {
-                ClientError::Protocol("Extension UI projection omitted event data".into())
-            })?,
+        Some(value) => extension_data(value)?,
         None => strip_image_paths(event.data),
     };
     Ok(ProjectedEvent {
@@ -135,10 +132,7 @@ pub fn project_extension_event(event: &crate::DockEvent) -> crate::Result<Option
     let Some(value) = ExtensionEvent::from_dock_event(event)? else {
         return Ok(None);
     };
-    let mut encoded = serde_json::to_value(value).map_err(ClientError::Json)?;
-    let data = encoded.get_mut("data").map(Value::take).ok_or_else(|| {
-        ClientError::Protocol("Extension UI projection omitted event data".into())
-    })?;
+    let data = extension_data(value)?;
     Ok(Some(ProjectedEvent {
         sequence: event.sequence,
         runtime_generation: event.runtime_generation,
@@ -146,6 +140,18 @@ pub fn project_extension_event(event: &crate::DockEvent) -> crate::Result<Option
         event_type: event.event_type.clone(),
         data,
     }))
+}
+
+/// Validated Extension UI data; which operator connection a question named stays in core.
+fn extension_data(value: ExtensionEvent) -> Result<Value> {
+    let mut encoded = serde_json::to_value(value).map_err(ClientError::Json)?;
+    let mut data = encoded.get_mut("data").map(Value::take).ok_or_else(|| {
+        ClientError::Protocol("Extension UI projection omitted event data".into())
+    })?;
+    if let Some(object) = data.as_object_mut() {
+        object.remove("controllerId");
+    }
+    Ok(data)
 }
 
 pub fn strip_image_paths(mut data: Value) -> Value {

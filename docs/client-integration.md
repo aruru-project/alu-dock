@@ -99,7 +99,7 @@ paired client ── mutual TLS port ─────────┘
 - `instance.follow` / `events.follow.v2`
 - `interaction.control` / `extension_ui.control.v1`
 
-`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 Host 提供 `extension_ui.v1` 与 `extension_ui.control.v1`。
+`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 Host 提供 `extension_ui.v1`；推荐方式另需 `extension_ui.shared-interactions.v1`（见下文 Extension UI），旧方式另需 `extension_ui.control.v1`。
 
 hello 的 `requiredCapabilities` 用于在连接时确认所需能力：Host 缺少任何一项就拒绝连接并列出缺失项，客户端可立即提示 Host 版本要求。Host 对所有客户端返回同一份完整 canonical response，字段内容由实际事实决定。图片、附件、`presentation`、`displayName`、`gitBranch`、`toolsExpanded`、`activeInteraction` 等可选字段是否出现只取决于事实本身（例如没有 git repo 就没有 `gitBranch`），与客户端声明无关；不渲染某个字段的客户端直接忽略它。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs。本地 IPC 与 mTLS 上的 wire 完全相同。
 
@@ -128,7 +128,7 @@ hello 的 `requiredCapabilities` 用于在连接时确认所需能力：Host 缺
 5. 使用 read response 的 `page.latest` 作为 `since`，调用 `instance.follow`；
 6. 先处理 follow 初始 response 里的 `page.events`，再顺序消费同一连接上的 live event；
 7. 每接受一个事件，都保存它对应的 cursor；
-8. 只有客户端准备实际处理 Extension UI 时，才另开 `interaction.control` 连接。
+8. 准备处理 Extension UI 的客户端在 read/follow 上加 `interactions: "shared"`，在同一条跟随里收到问题（见下文 Extension UI）。
 
 首次读取示例：
 
@@ -324,7 +324,18 @@ Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有�
 
 ## Extension UI
 
-只读的 `instance.read` 和 `instance.follow` 不取得 Extension UI 操作权。客户端只有在确实准备处理 interaction 时，才另开 `interaction.control` 连接。
+等待回答的问题属于 Work，不属于某条连接。准备处理问题的客户端在 `instance.read` / `instance.follow` 的 params 加 `"interactions": "shared"`，并在 hello 的 `requiredCapabilities` 加 `extension_ui.shared-interactions.v1`：
+
+- 这条 read/follow 会收到 `interaction.requested`、`extension.title_set` 与 `extension.editor_text_set`。打开 Work 时已在等待的问题包含在 `conversation_bootstrap` 的 `page.events` 里，即使它早于事件窗口。同一问题可能被再次发布（另一个旧客户端取得操作连接时），按 `interactionId` 去重。`controllerId` 只是旧方式的定向标记，可能缺省，这种客户端忽略它。
+- 回答时 `interaction.respond` 不带 `leaseToken`。所有客户端的回答以第一个为准；随后相同的回答返回 `already_resolved`，不同的回答或问题已结束返回 `interaction_expired` / `interaction_not_found`，界面说明问题已在别处处理即可。问题结束由 follow 上的 `interaction.resolved` / `interaction.cancelled` 通知所有客户端。
+- `extension.widget_viewport.set` 不带 `leaseToken`，最后一次报告的宽度生效。
+- 编辑器文字和标题只在实时到达时应用；断线期间错过的不补：重连时 follow 初始页里补收的、页面重建时回放的都不再应用，以免盖掉用户此间写的草稿。同一批里先后到达的编辑器文字和标题都要应用。
+- 一个 Work 同时只开放一个问题：收到不同 `interactionId` 的新问题时，屏幕上的旧问题已经结束（它的结束通知可能在同一批里稍后才到），直接换成新问题；整页重新读取后没有的问题也已结束，关掉它。
+- 这种客户端不必打开 `interaction.control`，也不应打开：取得操作连接会顶掉仍用旧方式的客户端。
+
+Work 所在 Host（远程机器上的 Work 是它的 SubHost）缺少这项能力时，hello 或请求返回 `capability_missing`，`missing` 含该能力。客户端去掉 `interactions` 重试同一 read/follow，并改用下面的旧方式。
+
+旧方式：只读的 `instance.read` 和 `instance.follow` 不取得 Extension UI 操作权，客户端另开 `interaction.control` 连接。
 
 请求示例：
 
@@ -336,9 +347,9 @@ Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有�
 
 `leaseToken` 是回答凭证，应只留在负责操作的 client process；Web 场景中只留在后端。`controllerId` 用来核对定向 event，不是回答凭证。
 
-新的操作连接会立即接替旧连接，但不会关闭普通 follow。若已有问题等待回答，Host 会把同一个 `interactionId` 重新发送给新连接。客户端用同一 `interactionId` 恢复原来的交互。操作连接断开只释放操作权，不回答也不取消 pending interaction。
+新的操作连接会立即接替旧连接，但不会关闭普通 follow。若已有问题等待回答，Host 会把同一个 `interactionId` 重新发送给新连接。客户端用同一 `interactionId` 恢复原来的交互。操作连接断开只释放操作权，不回答也不取消 pending interaction。没有任何操作连接时问题照样开放，Work snapshot 的 `activeInteraction` 照样显示。
 
-客户端使用当前 `leaseToken + interactionId` 发送 `interaction.respond`。只有 Host 明确确认 response 后，才能关闭交互状态；传输结果未知时不自动重发，问题是否还在等待回答以 Host 重新发来的交互为准。
+客户端使用当前 `leaseToken + interactionId` 发送 `interaction.respond`。其他客户端可能已用推荐方式先回答，此时返回 `interaction_expired`。只有 Host 明确确认 response 后，才能关闭交互状态；传输结果未知时不自动重发，问题是否还在等待回答以 Host 重新发来的交互为准。
 
 客户端按实际支持情况实现 Extension UI capability。尚未支持的 custom surface 只在该客户端不可用，Worker、Pi extension 和其他客户端继续运行；客户端不得代替用户返回默认答案。
 

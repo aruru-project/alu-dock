@@ -7,7 +7,9 @@ import {
   isTauri,
   releaseExtensionControl,
   reportExtensionViewport,
+  reportSharedViewport,
   respondExtensionInteraction,
+  respondSharedInteraction,
 } from '../lib/bridge'
 import type { ExtensionControllerEmission, ExtensionControllerStatus, InteractionResponse, Work } from '../lib/types'
 import { genericExtensionStatus } from '../lib/dockTools'
@@ -38,11 +40,14 @@ let mounted = false
 let acquisitionRevision = 0
 let acquisitionInFlight = false
 let attemptedAutomaticControlKey = ''
+let lastSharedViewport = ''
 const pendingControllerEmissions = new Map<string, ExtensionControllerEmission[]>()
 
 const request = computed(() => extension.activeRequest)
+// Only a Host that predates shared questions needs this window to take the operator connection.
 const automaticControlKey = computed(() => {
   const work = props.work
+  if (extension.shared) return ''
   if (!isTauri || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || !extension.isCurrent(work) || !extension.subscriptionId) return ''
   return `${extension.connectionId}:${extension.selectionGeneration}:${work.id}:${work.ownerHostEpoch}:${work.runtimeGeneration}:${extension.subscriptionId}`
 })
@@ -83,6 +88,9 @@ watch(() => props.focusSuspended, async (suspended) => {
   if (!props.focusSuspended && request.value?.interactionId === id) focusDialog()
 })
 watch(() => extension.controller?.handle, () => scheduleViewport())
+watch(() => extension.shared ? `${extension.instanceId}:${extension.runtimeGeneration}` : '', (key) => { if (key) scheduleViewport() })
+watch(() => extension.editorText?.id, () => { if (extension.editorText) emit('editorText', extension.editorText.text) })
+watch(() => extension.title?.id, () => { if (extension.title) emit('title', extension.title.text) })
 watch(automaticControlKey, (key, previous) => {
   if (key !== previous) {
     acquisitionRevision++
@@ -153,7 +161,7 @@ function tryAutomaticAcquire(key: string) {
 async function acquire() {
   const work = props.work
   const targetKey = automaticControlKey.value
-  if (!isTauri || !targetKey || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || acquisitionInFlight || extension.controllerState === 'acquiring') return
+  if (extension.shared || !isTauri || !targetKey || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || acquisitionInFlight || extension.controllerState === 'acquiring') return
   const revision = ++acquisitionRevision
   const target = {
     key: targetKey,
@@ -210,8 +218,10 @@ function responseForRequest(): InteractionResponse | null {
 async function respond(cancelled = false) {
   const current = request.value
   const handle = extension.controller?.handle
+  const shared = extension.shared
+  const instanceId = extension.instanceId
   const response = responseForRequest()
-  if (!current || !handle || !response || locked.value) return
+  if (!current || (!shared && !handle) || !response || locked.value) return
   // Reacquiring the same question changes its handle/object, not its interactionId.
   // While no question is shown, the reply still belongs to the answer kept for it.
   const isCurrent = () => (request.value?.interactionId ?? answerFor) === current.interactionId
@@ -219,7 +229,8 @@ async function respond(cancelled = false) {
   responseError.value = ''
   try {
     const capturedHost = requireConnectionContext(app)
-    await respondExtensionInteraction(handle, current.interactionId, response, cancelled, capturedHost)
+    if (shared) await respondSharedInteraction(instanceId, current.interactionId, response, cancelled, capturedHost)
+    else await respondExtensionInteraction(handle!, current.interactionId, response, cancelled, capturedHost)
     if (!app.contextMatches(capturedHost) || !isCurrent()) return
     extension.resolveLocally(current.interactionId)
     resetResponse()
@@ -274,7 +285,7 @@ function scheduleViewport() {
 async function sendViewport() {
   const handle = extension.controller?.handle
   const viewport = viewportElements()
-  if (!handle || !viewport || viewport.surface.clientWidth <= 0 || viewport.editor.clientHeight <= 0) return
+  if ((!handle && !extension.shared) || !viewport || viewport.surface.clientWidth <= 0 || viewport.editor.clientHeight <= 0) return
   const { surface, editor } = viewport
   const style = getComputedStyle(editor)
   const canvas = document.createElement('canvas')
@@ -286,7 +297,15 @@ async function sendViewport() {
   if (cellWidth <= 0 || !Number.isFinite(lineHeight) || lineHeight <= 0) return
   const width = Math.max(1, Math.min(10_000, Math.floor(surface.clientWidth / cellWidth)))
   const height = Math.max(1, Math.min(10_000, Math.floor(editor.clientHeight / lineHeight)))
-  try { await reportExtensionViewport(handle, width, height, requireConnectionContext(app)) } catch { /* next resize/reacquire reports current truth */ }
+  if (extension.shared) {
+    // The latest window to report sets the width extension widgets are drawn for.
+    const key = `${extension.instanceId}:${extension.runtimeGeneration}:${width}x${height}`
+    if (key === lastSharedViewport) return
+    lastSharedViewport = key
+    try { await reportSharedViewport(extension.instanceId, extension.runtimeGeneration, width, height, requireConnectionContext(app)) } catch { lastSharedViewport = '' }
+    return
+  }
+  try { await reportExtensionViewport(handle!, width, height, requireConnectionContext(app)) } catch { /* next resize/reacquire reports current truth */ }
 }
 
 function interactionMethodLabel(method: string) {

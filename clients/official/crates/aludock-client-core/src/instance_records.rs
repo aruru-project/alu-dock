@@ -13,7 +13,7 @@ use std::{
     collections::HashSet,
     sync::{
         Arc,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
 use tokio::{
@@ -26,21 +26,36 @@ pub(crate) const CAPABILITY: &str = "instance.records.v1";
 const CHUNK_BYTES: usize = 64 * 1024;
 
 /// The choice belongs to an observation owner, including its checkpoint reads and reconnects.
+/// It also asks for the Work's questions on the observation itself (shared questions); a Host
+/// that predates them leaves this observation with the operator connection instead.
 #[derive(Clone, Default)]
-pub struct InstanceDeliveryContext(Arc<AtomicU8>);
+pub struct InstanceDeliveryContext {
+    delivery: Arc<AtomicU8>,
+    operator_questions: Arc<AtomicBool>,
+}
 impl InstanceDeliveryContext {
     pub(crate) fn legacy(&self) -> bool {
-        self.0.load(Ordering::Acquire) == 2
+        self.delivery.load(Ordering::Acquire) == 2
     }
     fn began(&self) {
-        self.0.store(1, Ordering::Release);
+        self.delivery.store(1, Ordering::Release);
     }
     pub(crate) fn fallback(&self, error: &ClientError) -> bool {
         error.missing_capability(&[CAPABILITY])
             && self
-                .0
+                .delivery
                 .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
+    }
+    /// Whether reads and follows of this observation carry the Work's questions.
+    pub(crate) fn shared_questions(&self) -> bool {
+        !self.legacy() && !self.operator_questions.load(Ordering::Acquire)
+    }
+    /// The Host serving this Work predates shared questions: keep the observation, leave
+    /// questions to the operator connection.
+    pub(crate) fn shared_questions_fallback(&self, error: &ClientError) -> bool {
+        error.missing_capability(&[crate::capabilities::EXTENSION_UI_SHARED_INTERACTIONS_V1])
+            && !self.operator_questions.swap(true, Ordering::AcqRel)
     }
 }
 
@@ -266,7 +281,7 @@ mod tests {
         };
         let (actual, ()) = tokio::join!(records.next(true), sending);
         assert_eq!(actual.unwrap(), value);
-        assert_eq!(context.0.load(Ordering::Acquire), 1);
+        assert_eq!(context.delivery.load(Ordering::Acquire), 1);
 
         let prefix = b"{\"kind\":\"instance_record_fragment\",\"version\":2,\"requestId\":\"r\",\"hostEpoch\":\"h\",\"recordIndex\":1,\"index\":0,\"count\":1,\"data\":\"";
         peer.write_all(prefix).await.unwrap();

@@ -331,6 +331,86 @@ test("Extension UI operation uses live latest takeover without closing observati
   }
 });
 
+// 2026-10-13: a kanban plugin asked to confirm deleting a checklist item. A web console tab held
+// the operator connection, so the official client never saw the question and the Agent waited
+// until the user found that tab. Questions now reach every window that reads them; first answer wins.
+test("an extension question reaches every open window while another client holds the operator connection, and the first answer wins", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-shared-questions-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const broker = new ExtensionUiBroker();
+  let widgetViewport: { width: number; height: number } | undefined;
+  broker.bindWidgetRenderer({ render: (viewport) => { widgetViewport = viewport; }, reset: () => { widgetViewport = undefined; } });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), extensionUiBroker: broker })
+  ), () => "shared-questions-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const webConsole = new DockClient({ socketPath }), desktop = new DockClient({ socketPath });
+  const phone = new DockClient({ socketPath }), observer = new DockClient({ socketPath });
+  const instance = await desktop.create(directory, "shared-questions");
+  const waitFor = async (condition: () => boolean, what: string): Promise<void> => {
+    const deadline = Date.now() + 2_000;
+    while (!condition()) {
+      if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const requested = (events: DockEvent[]) => events.filter((event): event is Extract<DockEvent, { type: "interaction.requested" }> => event.type === "interaction.requested");
+
+  // The older client (the web console) holds the operator connection, as in the incident.
+  const webEvents: DockEvent[] = [];
+  const operator = await webConsole.controlExtensionUi(instance.id, (event) => { webEvents.push(event); });
+  const desktopEvents: DockEvent[] = [], phoneEvents: DockEvent[] = [], observerEvents: DockEvent[] = [];
+  const desktopDelivery = { interactions: "shared" as const };
+  const desktopFollow = await desktop.streamEvents(instance.id, { deliveryContext: desktopDelivery, onEvent: (event) => { desktopEvents.push(event); } });
+  const phoneFollow = await phone.streamEvents(instance.id, { deliveryContext: { interactions: "shared" }, onEvent: (event) => { phoneEvents.push(event); } });
+  const observerFollow = await observer.streamEvents(instance.id, { onEvent: (event) => { observerEvents.push(event); } });
+  assert.equal(desktopDelivery.interactions, "shared");
+
+  const answer = broker.confirm("Delete checklist item?", "The item is removed from the card.");
+  await waitFor(() => requested(desktopEvents).length > 0 && requested(phoneEvents).length > 0 && requested(webEvents).length > 0, "the question in every window");
+  const question = requested(desktopEvents)[0]!.data;
+  assert.equal(question.method === "confirm" && question.message, "The item is removed from the card.");
+  assert.equal(requested(phoneEvents)[0]!.data.interactionId, question.interactionId);
+  assert.equal(requested(webEvents)[0]!.data.interactionId, question.interactionId);
+  assert.equal((await desktop.status(instance.id)).activeInteraction?.id, question.interactionId);
+  // A window opened now finds the question in its first read.
+  const lateRead = await observer.read(instance.id, undefined, "conversation_bootstrap", { interactions: "shared" });
+  assert.equal(requested(lateRead.page.events)[0]?.data.interactionId, question.interactionId);
+
+  assert.deepEqual(
+    await phone.respondInteraction(instance.id, undefined, question.interactionId, { method: "confirm", confirmed: true }, "phone-answer"),
+    { interactionId: question.interactionId, state: "resolved" },
+  );
+  assert.equal(await answer, true);
+  // Later answers do not change it: the same answer again is accepted, a different one or the old connection's is refused.
+  assert.deepEqual(
+    await desktop.respondInteraction(instance.id, undefined, question.interactionId, { method: "confirm", confirmed: true }, "desktop-same-answer"),
+    { interactionId: question.interactionId, state: "already_resolved" },
+  );
+  await assert.rejects(
+    desktop.respondInteraction(instance.id, undefined, question.interactionId, { method: "confirm", confirmed: false }, "desktop-other-answer"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_expired",
+  );
+  await assert.rejects(
+    webConsole.respondInteraction(instance.id, operator.initial.leaseToken, question.interactionId, { method: "confirm", confirmed: false }, "web-late-answer"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_expired",
+  );
+  await waitFor(() => [desktopEvents, phoneEvents, observerEvents].every((events) => events.some((event) => event.type === "interaction.resolved" && event.data.interactionId === question.interactionId)), "every window to close the question");
+  assert.equal(observerEvents.some((event) => event.type === "interaction.requested"), false, "a client that did not ask for questions does not get them");
+
+  // Editor text and width reach the windows reading shared questions without the operator connection.
+  broker.setEditorText("draft from the extension");
+  await waitFor(() => desktopEvents.some((event) => event.type === "extension.editor_text_set" && event.data.text === "draft from the extension"), "the editor text");
+  await desktop.setExtensionWidgetViewport(instance.id, undefined, instance.runtimeGeneration, 88, 30);
+  assert.deepEqual(widgetViewport, { width: 88, height: 30 });
+
+  for (const stream of [operator, desktopFollow, phoneFollow, observerFollow]) stream.close();
+  await Promise.all([operator, desktopFollow, phoneFollow, observerFollow].map((stream) => stream.done.catch(() => {})));
+});
+
 test("SSH TUI controller completes select confirm input and editor extension dialogs", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-pty-"));
   await chmod(directory, 0o700);
@@ -500,6 +580,107 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
   assert.match(output, /Post replacement extension title/);
   assert.match(output, /post replacement injected draft/);
 });
+
+// Review of shared questions: the window reconnects after the question on screen was answered
+// elsewhere and the next one was asked; earlier it dropped the next one, and applied the editor
+// text set while it was away over what the person had typed.
+test("SSH TUI reconnects to the next question after the shown one was answered elsewhere, without late editor text", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-reconnect-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "reconnect.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), extensionUiBroker: broker })
+  ), () => "extension-reconnect-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const instance = await new DockClient({ socketPath }).create(directory, "extension-reconnect");
+  const managed = registry.get(instance.id);
+  const reconnectRead = holdNextAttachRead(managed);
+  const ptyRun = runPtyTui([process.execPath, join(process.cwd(), "dist/src/cli.js"), "--socket", socketPath, "attach", instance.id], "extension-reconnect", readyFile);
+  await waitForPath(readyFile);
+  const first = broker.confirm("First question", "Shown before the connection drops.");
+  await waitForPath(`${readyFile}.first`);
+
+  reconnectRead.hold();
+  (host as unknown as { closeStaleAttachStreams(instanceId: string): void }).closeStaleAttachStreams(instance.id);
+  await managed.respondInteraction(undefined, managed.snapshot().activeInteraction!.id, { method: "confirm", confirmed: true });
+  assert.equal(await first, true);
+  broker.setEditorText("draft set while away");
+  const second = broker.confirm("Second question", "Asked while this window was away.");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  reconnectRead.release();
+
+  let secondTimeout: NodeJS.Timeout | undefined;
+  const answered = await Promise.race([second, new Promise<undefined>((resolve) => { secondTimeout = setTimeout(() => resolve(undefined), 10_000); })])
+    .finally(() => clearTimeout(secondTimeout));
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(answered, true, output.slice(-4_000));
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.doesNotMatch(output, /draft set while away/u);
+});
+
+// Review of shared questions: after a long disconnect the window reads the Work afresh; a
+// question that ended meanwhile stayed on screen and took the keys meant for the editor.
+test("SSH TUI closes a question that ended while it was away when it refreshes the whole Work", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-refresh-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "refresh.ready");
+  const broker = new ExtensionUiBroker();
+  const session = new NoRunAgentWorkerConnection("pi-extension-refresh");
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker, eventCapacity: 20 })
+  ), () => "extension-refresh-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const instance = await new DockClient({ socketPath }).create(directory, "extension-refresh");
+  const managed = registry.get(instance.id);
+  const reconnectRead = holdNextAttachRead(managed);
+  const ptyRun = runPtyTui([process.execPath, join(process.cwd(), "dist/src/cli.js"), "--socket", socketPath, "attach", instance.id], "extension-refresh", readyFile);
+  await waitForPath(readyFile);
+  const first = broker.confirm("First question", "Shown before the connection drops.");
+  await waitForPath(`${readyFile}.first`);
+
+  reconnectRead.hold();
+  (host as unknown as { closeStaleAttachStreams(instanceId: string): void }).closeStaleAttachStreams(instance.id);
+  await managed.respondInteraction(undefined, managed.snapshot().activeInteraction!.id, { method: "confirm", confirmed: true });
+  assert.equal(await first, true);
+  // More happens than the Host keeps for catching up, so the window has to read the Work afresh.
+  const before = managed.snapshot().eventCursor.sequence;
+  for (let index = 0; index < 30; index += 1) broker.setStatus("phase", `step ${index}`);
+  while (managed.snapshot().eventCursor.sequence < before + 30) await new Promise<void>((resolve) => setImmediate(resolve));
+  reconnectRead.release();
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /refreshed conversation/u);
+  assert.ok(session.promptMessages.includes("typed after refresh"), output.slice(-4_000));
+});
+
+/** Keep the window's next read of the Work waiting until the test has changed the Work. */
+function holdNextAttachRead(managed: ManagedInstance): { hold(): void; release(): void } {
+  const read = managed.getAttachProjection.bind(managed);
+  let gate: Promise<void> | undefined;
+  let open = (): void => {};
+  managed.getAttachProjection = async (...args) => {
+    const waiting = gate;
+    gate = undefined;
+    if (waiting) await waiting;
+    return read(...args);
+  };
+  return {
+    hold: () => { gate = new Promise<void>((resolve) => { open = resolve; }); },
+    release: () => open(),
+  };
+}
 
 test("keyed ensure returns one Host-owned instance to simultaneous clients", async (context) => {
   const harness = await createHarness();
@@ -3524,7 +3705,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "context-changes" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "extension-reconnect" | "extension-refresh" | "context-changes" = "detach",
   readyFile?: string,
   workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {

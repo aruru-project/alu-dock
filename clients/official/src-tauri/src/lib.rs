@@ -182,6 +182,8 @@ pub fn run() {
             extension::release_extension_control,
             extension::respond_extension_interaction,
             extension::set_extension_widget_viewport,
+            extension::respond_shared_interaction,
+            extension::set_shared_widget_viewport,
             attachment_import::pick_attachments,
             attachment_import::stage_clipboard_image,
             attachment_import::attachment_preview,

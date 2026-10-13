@@ -54,6 +54,7 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     // The trust question is answered where the flow shows it; a caller without
     // that UI (Reopen, see #304) must not tell the user to refresh.
     if (code === 'project_trust_required') return '这项操作需要先确认信任对应的目录，这个客户端还不能在这里确认。请在电脑上的 Alu Dock 终端里完成。'
+    if (code === 'interaction_expired' || code === 'interaction_not_found') return '这个问题已经在其他窗口回答，或已经结束，不需要再处理。'
     if (code === 'invalid_tree_target') return '这个节点已不在当前 Session 中。请重新打开 Session Tree 后再选择。'
     // Directory picker (`workspace.list`) outcomes; the Host phrases them for its log, not the user.
     if (code === 'workspace_not_found') return '这个目录不存在。请检查路径，或返回上级目录。'

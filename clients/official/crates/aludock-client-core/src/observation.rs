@@ -272,6 +272,11 @@ impl ConversationObservation {
                         continue;
                     }
                     for event in initial.events {
+                        // Catch-up after (re)connecting: editor text or a title set while this
+                        // window was away is not applied late, the person may have typed since.
+                        if is_extension_directive(&event.event_type) {
+                            continue;
+                        }
                         match self.accept(&key, owner, SessionUpdate::Event(event)) {
                             Ok(Admission::Continue) => {}
                             Ok(Admission::Replacement) => {
@@ -425,6 +430,13 @@ impl ConversationObservation {
         tokio::time::sleep(RETRY_DELAY).await;
         true
     }
+}
+
+fn is_extension_directive(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "extension.editor_text_set" | "extension.title_set"
+    )
 }
 
 fn failure_state(error: &ClientError) -> &'static str {
@@ -1534,6 +1546,97 @@ mod tests {
         service.pause("work");
         peer.abort();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    // Review of shared questions: after a reconnect the missed editor text must not replace
+    // what the person typed meanwhile; editor text arriving live still applies.
+    #[tokio::test]
+    async fn editor_text_missed_while_away_is_not_applied_after_reconnecting() {
+        let directory = std::env::temp_dir().join(format!(
+            "late-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("s");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let event = |sequence: u64, event_type: &str, data: Value| {
+            json!({"scope":"instance","instanceId":"work","runtimeGeneration":1,
+            "sequence":sequence,"occurredAt":"2026-10-13T00:00:00.000Z","type":event_type,"data":data})
+        };
+        let missed = event(
+            11,
+            "extension.editor_text_set",
+            json!({"text":"missed while away"}),
+        );
+        let status = event(
+            12,
+            "extension.status_changed",
+            json!({"key":"phase","text":"working"}),
+        );
+        let live = event(
+            13,
+            "extension.editor_text_set",
+            json!({"text":"arrived live"}),
+        );
+        let peer = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let (missed, status, live) = (missed.clone(), status.clone(), live.clone());
+                tokio::spawn(async move {
+                    let mut socket = tokio::io::BufReader::new(socket);
+                    let hello: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    if !legacy_peer(&mut socket, &hello).await {
+                        return;
+                    }
+                    write_json_line(&mut socket,&json!({"kind":"hello_ack","version":2,"requestId":hello["requestId"],"catalogSchemaVersion":1,"host":{"hostEpoch":"epoch"},"capabilities":hello["requiredCapabilities"],"limits":{"maxLineBytes":1048576}})).await.unwrap();
+                    let request: Value = read_json_line(&mut socket, 1048576).await.unwrap();
+                    let result = if request["type"] == "instance.read" {
+                        read()
+                    } else {
+                        json!({"page":{"events":[missed, status],"earliest":cursor(10,1),"latest":cursor(12,1),"truncated":false,"epochChanged":false,"generationChanged":false}})
+                    };
+                    write_json_line(&mut socket,&json!({"kind":"response","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","ok":true,"result":result})).await.unwrap();
+                    if request["type"] == "instance.follow" {
+                        write_json_line(&mut socket,&json!({"kind":"event","version":2,"requestId":request["requestId"],"hostEpoch":"epoch","event":live})).await.unwrap();
+                    }
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "late-directive".into(),
+            )
+            .unwrap(),
+        );
+        let service = ConversationObservation::default();
+        let mut binding = service
+            .bind("work".into(), client, "work".into(), "epoch".into(), false)
+            .unwrap();
+        let mut delivered = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !delivered.iter().any(|(sequence, _)| *sequence == 13) {
+                for commit in binding.next_batch().await.unwrap() {
+                    if let SessionUpdate::Event(event) = commit.update {
+                        delivered.push((event.sequence, event.event_type));
+                    }
+                }
+            }
+        })
+        .await
+        .expect("live editor text arrives");
+        service.pause("work");
+        peer.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            delivered,
+            [
+                (12, "extension.status_changed".to_owned()),
+                (13, "extension.editor_text_set".to_owned())
+            ]
+        );
     }
 
     // Master-side review: run the production observation wake plus visibility
