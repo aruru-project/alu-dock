@@ -329,7 +329,8 @@ Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有�
 - 这条 read/follow 会收到 `interaction.requested`、`extension.title_set` 与 `extension.editor_text_set`。打开 Work 时已在等待的问题包含在 `conversation_bootstrap` 的 `page.events` 里，即使它早于事件窗口。同一问题可能被再次发布（另一个旧客户端取得操作连接时），按 `interactionId` 去重。`controllerId` 只是旧方式的定向标记，可能缺省，这种客户端忽略它。
 - 回答时 `interaction.respond` 不带 `leaseToken`。所有客户端的回答以第一个为准；随后相同的回答返回 `already_resolved`，不同的回答或问题已结束返回 `interaction_expired` / `interaction_not_found`，界面说明问题已在别处处理即可。问题结束由 follow 上的 `interaction.resolved` / `interaction.cancelled` 通知所有客户端。
 - `extension.widget_viewport.set` 不带 `leaseToken`，最后一次报告的宽度生效。
-- 编辑器文字和标题收到就应用；断线期间错过的不补。客户端不要在页面重建时把旧事件再应用一次。
+- 编辑器文字和标题只在实时到达时应用；断线期间错过的不补：重连时 follow 初始页里补收的、页面重建时回放的都不再应用，以免盖掉用户此间写的草稿。同一批里先后到达的编辑器文字和标题都要应用。
+- 一个 Work 同时只开放一个问题：收到不同 `interactionId` 的新问题时，屏幕上的旧问题已经结束（它的结束通知可能在同一批里稍后才到），直接换成新问题；整页重新读取后没有的问题也已结束，关掉它。
 - 这种客户端不必打开 `interaction.control`，也不应打开：取得操作连接会顶掉仍用旧方式的客户端。
 
 Work 所在 Host（远程机器上的 Work 是它的 SubHost）缺少这项能力时，hello 或请求返回 `capability_missing`，`missing` 含该能力。客户端去掉 `interactions` 重试同一 read/follow，并改用下面的旧方式。

@@ -106,10 +106,13 @@ export async function runDockTui(
   let controllerId: string | undefined;
   let pendingEditorDirective: { runtimeGeneration: number; text: string } | undefined;
   let pendingTitleDirective: { runtimeGeneration: number; title: string } | undefined;
-  let activeExtensionDialog: { interactionId: string; closeFromHost: () => void } | undefined;
+  let activeExtensionDialog: { interactionId: string; closeFromHost: () => void; closed: Promise<void> } | undefined;
   // A question that arrives before the screen and editor exist waits here; shown earlier,
   // the editor would take its focus.
   let screenStarted = false;
+  // Set while replaying what was missed during a disconnect: editor text and a title set
+  // meanwhile are not applied late, the person may have typed since.
+  let catchingUp = false;
   let deferredQuestion: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
   let lastEventGeneration = instance.runtimeGeneration;
   let lastEventSequence = instance.eventCursor.sequence;
@@ -191,7 +194,7 @@ export async function runDockTui(
     sharedQuestions() || (controllerId !== undefined && directiveControllerId === controllerId)
   );
   const applyControllerDirective = (event: DockEvent): void => {
-    if (event.runtimeGeneration !== instance.runtimeGeneration) return;
+    if (catchingUp || event.runtimeGeneration !== instance.runtimeGeneration) return;
     if (event.type === "extension.title_set" && directiveForThisWindow(event.data.controllerId)) {
       pendingTitleDirective = { runtimeGeneration: event.runtimeGeneration, title: event.data.title };
       restoreTerminalTitle();
@@ -334,7 +337,7 @@ export async function runDockTui(
     for (const event of reconciled) pendingQueue.apply(event);
     conversation.applyHistory(historyEntries, false);
     conversation.applyReplay(reconciled, false);
-    presentOpenQuestion(reconciled);
+    presentOpenQuestion(reconciled, true);
     if (!initialHistory.ok) conversation.addNotice("Some earlier messages could not be loaded. You can keep working from the messages shown here, or run /reload to try again.", true);
     conversation.setToolsExpanded(instance.toolsExpanded);
     status.update(instance);
@@ -346,8 +349,12 @@ export async function runDockTui(
 
   function sharedQuestions(): boolean { return instanceDelivery.interactions === "shared"; }
 
-  /** A question already open when this window read the Work: bootstrap events are not live events. */
-  function presentOpenQuestion(events: readonly DockEvent[]): void {
+  /**
+   * A question already open when this window read the Work: bootstrap events are not live
+   * events. A fresh read is the whole current state, so a question still on screen that it
+   * no longer has has ended meanwhile and is closed.
+   */
+  function presentOpenQuestion(events: readonly DockEvent[], fresh: boolean): void {
     if (!sharedQuestions()) return;
     let open: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
     for (const event of events) {
@@ -356,6 +363,10 @@ export async function runDockTui(
       else if ((event.type === "interaction.resolved" || event.type === "interaction.cancelled") && event.data.interactionId === open?.data.interactionId) open = undefined;
     }
     if (open !== undefined) showQuestion(open);
+    else if (fresh) {
+      deferredQuestion = undefined;
+      activeExtensionDialog?.closeFromHost();
+    }
   }
 
   function showQuestion(event: Extract<DockEvent, { type: "interaction.requested" }>): void {
@@ -958,16 +969,18 @@ export async function runDockTui(
   }
 
   async function handleExtensionInteraction(event: Extract<DockEvent, { type: "interaction.requested" }>): Promise<void> {
-    // The same question is published again when another window takes the operator connection.
-    if (activeExtensionDialog?.interactionId === event.data.interactionId) return;
+    // The Host keeps one question open at a time, so a different question means the one on
+    // screen has ended, even if word of that is still on its way (e.g. later in the same
+    // catch-up). Close it and show the new one once it is gone.
+    for (let shown = activeExtensionDialog; shown !== undefined; shown = activeExtensionDialog) {
+      // The same question is published again when another window takes the operator connection.
+      if (shown.interactionId === event.data.interactionId) return;
+      shown.closeFromHost();
+      await shown.closed;
+    }
     const leaseToken = sharedQuestions() ? undefined : controllerLeaseToken;
     if (!sharedQuestions() && !leaseToken) {
       conversation.addNotice("This question is being handled in another open window.");
-      tui.requestRender();
-      return;
-    }
-    if (activeExtensionDialog) {
-      conversation.addNotice("Another extension question is waiting and will appear after this one.", true);
       tui.requestRender();
       return;
     }
@@ -1054,10 +1067,13 @@ export async function runDockTui(
       component = dialog;
     }
 
-    activeExtensionDialog = {
+    let markClosed!: () => void;
+    const shown = {
       interactionId: request.interactionId,
       closeFromHost: () => finish({ fromHost: true }),
+      closed: new Promise<void>((resolve) => { markClosed = resolve; }),
     };
+    activeExtensionDialog = shown;
     const frame = new WorkModalFrame(component);
     const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
     tui.setFocus(frame);
@@ -1065,8 +1081,9 @@ export async function runDockTui(
       return await result;
     } finally {
       overlay.hide();
-      if (activeExtensionDialog?.interactionId === request.interactionId) activeExtensionDialog = undefined;
+      if (activeExtensionDialog === shown) activeExtensionDialog = undefined;
       tui.requestRender();
+      markClosed();
     }
   }
 
@@ -2287,14 +2304,16 @@ export async function runDockTui(
           return;
         }
         if (rebuiltHistory === undefined) {
-          for (const event of next.initial.page.events) onEvent(event);
+          catchingUp = true;
+          try { for (const event of next.initial.page.events) onEvent(event); }
+          finally { catchingUp = false; }
         } else {
           instance = next.initial.instance;
           pendingQueue.reset(next.initial.pendingMessages);
           conversation.applyHistory(rebuiltHistory, false);
           conversation.applyBootstrapReplay(next.initial.page.events);
           conversation.setToolsExpanded(instance.toolsExpanded);
-          presentOpenQuestion(next.initial.page.events);
+          presentOpenQuestion(next.initial.page.events, true);
         }
         instance = next.initial.instance;
         lastEventGeneration = next.initial.page.latest.runtimeGeneration;
