@@ -32,8 +32,10 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   const controllerState = ref<'detached' | 'acquiring' | 'attached' | 'disconnected'>('detached')
   /** Questions arrive with the Work's updates; this window never takes them over from others. */
   const shared = ref(false)
-  /** Latest live editor/title text from the extension; applied once by the input area. */
-  const directive = ref<{ id: number; title?: string; editorText?: string } | undefined>()
+  // Latest live editor text and title from the extension, each applied once by the input area.
+  // Kept apart so one arriving in the same update as the other is not lost.
+  const editorText = ref<{ id: number; text: string } | undefined>()
+  const title = ref<{ id: number; text: string } | undefined>()
   let directiveId = 0
   let lifecycleRevision = 0
   let acquisitionRevision = 0
@@ -147,7 +149,8 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     activeRequest.value = undefined
     controllerState.value = 'detached'
     shared.value = false
-    directive.value = undefined
+    editorText.value = undefined
+    title.value = undefined
     return true
   }
 
@@ -169,10 +172,10 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     lastSequence.value = event.sequence
     reduceEvent(event)
     if (live && event.eventType === 'extension.title_set' && typeof event.data.title === 'string') {
-      directive.value = { id: ++directiveId, title: event.data.title }
+      title.value = { id: ++directiveId, text: event.data.title }
     }
     if (live && event.eventType === 'extension.editor_text_set' && typeof event.data.text === 'string') {
-      directive.value = { id: ++directiveId, editorText: event.data.text }
+      editorText.value = { id: ++directiveId, text: event.data.text }
     }
     return true
   }
@@ -328,7 +331,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   return {
     connectionId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
     status, aboveWidgets, belowWidgets, toolsExpanded, toolsResetRevision,
-    activeSummary, activeRequest, controller, controllerState, shared, directive,
+    activeSummary, activeRequest, controller, controllerState, shared, editorText, title,
     hasAttention, isCurrent, bootstrap, bindSubscription, clear, applyLive, beginAcquire,
     attachController, failAcquire, suspendController, controllerEnded, releaseController, applyControllerEvent,
     hideControllerRequest, resolveLocally,

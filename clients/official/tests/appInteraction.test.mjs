@@ -1437,11 +1437,13 @@ try {
     await settle()
     assertSameReference(find(teleport, item => item.props.role === 'dialog'), undefined, 'a question answered elsewhere closes here')
     assert.equal(calls.some(call => call.command === 'respond_shared_interaction' && call.args.interactionId === 'answered-elsewhere'), false)
-    // The extension's editor text applies when it arrives, not again when cached updates are shown after F5.
-    observation({ kind: 'event', event: at(2004, 'extension.editor_text_set', { text: '扩展填入的草稿' }) }); await settle()
+    // The extension's title and editor text in one update both apply; neither is applied again
+    // when cached updates are shown after F5.
+    observation({ kind: 'event', events: [at(2004, 'extension.title_set', { title: '扩展设置的标题' }), at(2005, 'extension.editor_text_set', { text: '扩展填入的草稿' })] }); await settle()
     assert.equal(app.currentDraft, '扩展填入的草稿')
+    assert.equal(document.title, '扩展设置的标题', 'a title arriving with editor text is not lost')
     compact.props['onUpdate:modelValue']('之后自己改过的草稿'); await settle()
-    observation({ kind: 'event', replayToken: 'shared-questions', event: at(2005, 'extension.editor_text_set', { text: '旧的扩展草稿' }) }); await settle()
+    observation({ kind: 'event', replayToken: 'shared-questions', event: at(2006, 'extension.editor_text_set', { text: '旧的扩展草稿' }) }); await settle()
     assert.equal(app.currentDraft, '之后自己改过的草稿', 'a replayed editor text does not overwrite what the person typed')
     assert.equal(acquires(), acquiredBefore)
     console.log('PASS: shared questions open from the Work read and live updates, answer without taking the operator connection, close when answered elsewhere; replayed editor text keeps the draft')

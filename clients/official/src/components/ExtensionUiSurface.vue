@@ -89,11 +89,8 @@ watch(() => props.focusSuspended, async (suspended) => {
 })
 watch(() => extension.controller?.handle, () => scheduleViewport())
 watch(() => extension.shared ? `${extension.instanceId}:${extension.runtimeGeneration}` : '', (key) => { if (key) scheduleViewport() })
-watch(() => extension.directive?.id, () => {
-  const directive = extension.directive
-  if (directive?.editorText !== undefined) emit('editorText', directive.editorText)
-  if (directive?.title !== undefined) emit('title', directive.title)
-})
+watch(() => extension.editorText?.id, () => { if (extension.editorText) emit('editorText', extension.editorText.text) })
+watch(() => extension.title?.id, () => { if (extension.title) emit('title', extension.title.text) })
 watch(automaticControlKey, (key, previous) => {
   if (key !== previous) {
     acquisitionRevision++
