@@ -179,7 +179,7 @@ test("Planning cannot change files, shows the full plan for review, and executes
   const original = "original project contents\n";
   await h.dock.setActiveTools(h.work.id, ["write", "nested_probe"]);
   const request = "Prepare a report\nKeep the fixture unchanged until I approve.";
-  await h.start(`/plan ${request}`);
+  await h.start(`/dock-plan ${request}`);
   const investigation = await h.request();
   assert.ok(JSON.stringify(investigation.body.messages).includes(JSON.stringify(request).slice(1, -1)), "Planning keeps the person's line breaks");
   assertPlanningTools(investigation);
@@ -206,7 +206,7 @@ test("Planning cannot change files, shows the full plan for review, and executes
   await waitFor(() => h.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === review.interactionId), "Esc did not close the plan editor");
   assert.match(await h.surface(), /规划中/);
 
-  await h.start("/plan Show me the plan again.");
+  await h.start("/dock-plan Show me the plan again.");
   (await h.request()).tools({ id: "plan-again", name: "plan_submit", arguments: { content: draft } });
   const edited = draft.replace("LAST: never deploy", "LAST: never deploy; ask before deleting anything");
   await ui.respond(await ui.next("editor"), { method: "editor", value: edited });
@@ -225,7 +225,7 @@ test("Planning cannot change files, shows the full plan for review, and executes
   assert.equal(await readFile(join(h.cwd, "approved.txt"), "utf8"), "approved report");
   assert.doesNotMatch(await h.surface(), /规划中/);
 
-  await h.start("/plan Prepare a follow-up report.");
+  await h.start("/dock-plan Prepare a follow-up report.");
   (await h.request()).tools({ id: "plan-goal", name: "plan_submit", arguments: { content: draft } });
   await ui.respond(await ui.next("editor"), { method: "editor", value: draft });
   await ui.choose("执行并自动推进到完成");
@@ -245,7 +245,7 @@ test("Planning cannot change files, shows the full plan for review, and executes
 
   // Reviews found Dock tools reappearing in planning after a status check or
   // reload, and a switch made during planning lost when planning ended.
-  await h.start("/plan");
+  await h.start("/dock-plan");
   await h.start("/dock-tools on");
   await waitFor(async () => (await h.dock.read(h.work.id)).instance.extensionStatus["Dock tools"] === "on", "Dock tools did not turn on");
   await h.dock.reloadSession(h.work.id);
@@ -255,14 +255,24 @@ test("Planning cannot change files, shows the full plan for review, and executes
   assert.equal(planningWithDockTools.toolNames.includes("dock_send"), false, "Planning keeps Dock's sending tool from the model");
   planningWithDockTools.text("I will look at them after planning.");
   await h.idle();
-  await h.start("/plan");
-  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  await h.start("/dock-plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /dock-plan did not leave planning");
   await h.submit("Ask a sibling Work for help.");
   const afterPlanning = await h.request();
   assertOrdinaryTools(afterPlanning);
   assert.ok(afterPlanning.toolNames.includes("dock_send"), "Dock tools turned on during planning are available afterwards");
   afterPlanning.text("I can reach sibling Works now.");
   await h.idle();
+
+  // Release review, 2026-10-14: choosing only read while planning left no tools at all afterwards.
+  const activeTools = async () => (await h.dock.tools(h.work.id)).tools.filter((tool) => tool.active).map((tool) => tool.name);
+  await h.dock.setActiveTools(h.work.id, ["write"]);
+  await h.start("/dock-plan");
+  await waitFor(async () => /规划中/.test(await h.surface()), "Bare /dock-plan did not enter planning");
+  await h.dock.setActiveTools(h.work.id, ["read"]);
+  await h.start("/dock-plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /dock-plan did not leave planning");
+  assert.deepEqual(await activeTools(), ["read"], "Tools chosen during planning stay as chosen");
 });
 
 test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at its budget until the person adds more", { timeout: 40_000 }, async (context) => {
@@ -272,7 +282,7 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   const ordinary = await h.request();
   assertOrdinaryTools(ordinary);
   const objective = "Inspect the fixture in stages and deliver a report";
-  await h.start(`/goal --rounds 3 ${objective}`);
+  await h.start(`/dock-goal --rounds 3 ${objective}`);
   await waitFor(async () => /0\s*\/\s*3/.test(await h.surface()), "The Goal was not accepted during an ordinary reply");
   assert.equal(ordinary.closed, false, "Starting a Goal leaves the current reply running");
   ordinary.text("I will inspect the project in stages.");
@@ -303,7 +313,7 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   const pausedChat = await h.request();
   assertOrdinaryTools(pausedChat);
   assert.match(await h.surface(), /已暂停/, "Ordinary chat leaves the Goal paused");
-  await h.start("/goal");
+  await h.start("/dock-goal");
   await ui.choose("继续");
   assert.equal(pausedChat.closed, false, "Continuing during a reply leaves that reply running");
   pausedChat.text("The report still needs its final verification.");
@@ -311,7 +321,7 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   await h.idle();
   assert.match(await h.surface(), /3\s*\/\s*3/);
   assert.match(await h.surface(), /预算用尽/);
-  await h.start("/goal");
+  await h.start("/dock-goal");
   await ui.choose("再给 10 轮");
   const extended = await h.request();
   assert.match(await h.surface(), /4\s*\/\s*13/);
@@ -338,7 +348,7 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
   // Pi reports no result when an extension's request cannot start; without
   // Dock's start check the Goal would show as running while nothing runs.
   const unavailable = await setup(context, { missingAuth: true });
-  await unavailable.start("/goal Inspect after model access is configured");
+  await unavailable.start("/dock-goal Inspect after model access is configured");
   await waitFor(async () => /受阻/.test(await unavailable.surface()), "Missing model access did not leave a blocked Goal");
   assert.match(await unavailable.surface(), /0\s*\/\s*10/);
   assert.equal(unavailable.provider.requests.length, 0);
@@ -350,7 +360,7 @@ test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at 
 test("Planning works with MCP under Pi's codemode-only setting, even after an MCP reconnect", { timeout: 40_000 }, async (context) => {
   const h = await setup(context, { codemodeOnlyMcp: true });
   await waitFor(async () => (await h.dock.tools(h.work.id)).tools.some((tool) => tool.name === "mcp__harbor__echo"), "The MCP server did not connect");
-  await h.start("/plan Inspect the fixture.");
+  await h.start("/dock-plan Inspect the fixture.");
   const planning = await h.request();
   for (const name of ["read", "plan_submit", "plan_question"]) assert.ok(planning.toolNames.includes(name), `Planning offers ${name}`);
   assert.equal(planning.toolNames.includes("codemode"), false, "Planning does not run scripts");
@@ -364,8 +374,8 @@ test("Planning works with MCP under Pi's codemode-only setting, even after an MC
   for (const name of ["read", "plan_submit"]) assert.ok(afterReconnect.toolNames.includes(name), `Planning still offers ${name} after the reconnect`);
   afterReconnect.text("Continuing the investigation.");
   await h.idle();
-  await h.start("/plan");
-  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  await h.start("/dock-plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /dock-plan did not leave planning");
   await h.submit("Continue normally.");
   const ordinary = await h.request();
   assert.ok(ordinary.toolNames.includes("codemode"), "codemode is back after planning");
@@ -382,7 +392,7 @@ test("Stopping while a Goal is still preparing its first request keeps the model
     await writeFile(h.hold, "");
     await rm(h.preparing, { force: true });
     const objective = `Inspect fixture.txt (stopped by ${stop})`;
-    await h.start(`/goal --rounds 1 ${objective}`);
+    await h.start(`/dock-goal --rounds 1 ${objective}`);
     await waitFor(async () => readFile(h.preparing).then(() => true, () => false), "The Goal did not reach its preparation step");
     await h.dock[stop](h.work.id);
     await rm(h.hold);
@@ -398,7 +408,7 @@ test("Stopping while a Goal is still preparing its first request keeps the model
 
 test("Reopening or going back in history keeps spent rounds and the right tools, and never restarts work by itself", { timeout: 40_000 }, async (context) => {
   const h = await setup(context);
-  await h.start("/goal --rounds 3 Inspect this branch in stages");
+  await h.start("/dock-goal --rounds 3 Inspect this branch in stages");
   const first = await h.request();
   const earlyLeaf = (await h.dock.tree(h.work.id)).leafId;
   assert.ok(earlyLeaf);
@@ -418,16 +428,16 @@ test("Reopening or going back in history keeps spent rounds and the right tools,
   assert.match(await h.surface(), /1\s*\/\s*3/);
   assert.equal(h.provider.requests.length, 2, "Reopening and going back never call the model by themselves");
 
-  await h.start("/plan");
-  await waitFor(async () => /规划中/.test(await h.surface()), "Bare /plan did not enter planning");
+  await h.start("/dock-plan");
+  await waitFor(async () => /规划中/.test(await h.surface()), "Bare /dock-plan did not enter planning");
   await h.dock.reloadSession(h.work.id);
   await h.submit("Look around before we decide.");
   const afterReload = await h.request();
   assertPlanningTools(afterReload);
   afterReload.text("I looked around.");
   await h.idle();
-  await h.start("/plan");
-  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  await h.start("/dock-plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /dock-plan did not leave planning");
   // A review found the history point where planning ended restoring only the planning tools.
   const planEnded = (await h.dock.tree(h.work.id)).leafId;
   assert.ok(planEnded);

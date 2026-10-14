@@ -196,6 +196,11 @@ const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
 ]);
 
 export interface EventSubscription { initial:InstanceReadResult; close:()=>void; done:Promise<void> }
+/**
+ * `catchUp` is true for the events a follow starts with: they happened before it was live,
+ * between the read it continues from and the moment it joined.
+ */
+export type FollowEventHandler=(event:DockEvent,catchUp:boolean)=>void;
 export interface FollowSubscription { initial:FollowResult; close:()=>void; done:Promise<void> }
 export interface OperationSubscription { initial:ExtensionUiControlResult; close:()=>void; done:Promise<void> }
 export interface DockClientOptions { socketPath:string; timeoutMs?:number; longMutationTimeoutMs?:number; requestId?:()=>string; clientId?:string }
@@ -652,7 +657,7 @@ export class DockClient {
   cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v2",parseSessionCloneResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult,undefined,this.longMutationTimeoutMs);}
 
-  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;conversationBootstrap?:boolean;delivery?:"records";deliveryContext?:InstanceDeliveryContext}):Promise<EventSubscription>{
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:FollowEventHandler;requireTuiProjection?:boolean;conversationBootstrap?:boolean;delivery?:"records";deliveryContext?:InstanceDeliveryContext}):Promise<EventSubscription>{
     const replay=options.conversationBootstrap?"conversation_bootstrap":"event_log";
     const context=options.deliveryContext??(options.delivery==="records"?{}:undefined);
     const initial=await this.read(instanceId,options.since,replay,context);
@@ -670,7 +675,7 @@ export class DockClient {
     return {initial,close:follow.close,done:follow.done};
   }
 
-  follow(instanceId:string,since:EventCursor,options:{onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;delivery?:"records";deliveryContext?:InstanceDeliveryContext}):Promise<FollowSubscription>{
+  follow(instanceId:string,since:EventCursor,options:{onEvent:FollowEventHandler;requireTuiProjection?:boolean;delivery?:"records";deliveryContext?:InstanceDeliveryContext}):Promise<FollowSubscription>{
     const context=options.deliveryContext??(options.delivery==="records"?{}:undefined);
     const capabilities:Capability[]=options.requireTuiProjection
       ? [EVENTS_FOLLOW_CAPABILITY,TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,"queue.control.v1","run.abort.v1","tui.projection.v1"]
@@ -713,22 +718,22 @@ export class DockClient {
     parseInitial:Parser<T>;
     initialCursor:(result:T)=>EventCursor;
     initialEvents:(result:T)=>DockEvent[];
-    onEvent:(event:DockEvent)=>void;
+    onEvent:FollowEventHandler;
     validateInitial:(result:T,hostEpoch:string)=>void;
     cleanEnd:boolean;
   }):Promise<{initial:T;close:()=>void;done:Promise<void>}>{
     const helloId=this.createRequestId(),requestId=options.request.requestId;
     const streamCapabilities=[...new Set(options.capabilities.flatMap((item)=>requiredCapabilities(item)))];
-    const socket=this.openSocket(),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
+    const socket=this.openSocket(),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:Array<[DockEvent,boolean]>=[],runtimeGeneration:number|undefined,lastSequence=-1;
     let resolveInitial!:(x:{initial:T;close:()=>void;done:Promise<void>})=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
     const done=new Promise<void>((r,j)=>{resolveDone=r;rejectDone=j;});void done.catch(()=>{});const initial=new Promise<{initial:T;close:()=>void;done:Promise<void>}>((r,j)=>{resolveInitial=r;rejectInitial=j;});
     const settleDone=(e?:unknown)=>{if(doneSettled)return;doneSettled=true;e===undefined?resolveDone():rejectDone(e);};
     const fail=(e:unknown)=>{clearTimeout(timeout);const error=normalizeClientError(e);if(!initialSettled){initialSettled=true;rejectInitial(error);}pending=[];settleDone(error);socket.destroy();};
     const timeout=setTimeout(()=>fail(new ControlClientError("timeout",`Control request timed out after ${this.timeoutMs}ms`)),this.timeoutMs);
-    const dispatchQueued=()=>{if(closeRequested||doneSettled)return;callbacksReady=true;const queued=pending;pending=[];for(const event of queued){try{options.onEvent(event);}catch(e){fail(e);return;}}};
+    const dispatchQueued=()=>{if(closeRequested||doneSettled)return;callbacksReady=true;const queued=pending;pending=[];for(const [event,catchUp] of queued){try{options.onEvent(event,catchUp);}catch(e){fail(e);return;}}};
     const consume=(line:string)=>{if(!line)return;let raw:unknown;try{raw=JSON.parse(line);}catch{fail(new ControlClientError("invalid_response","Host returned invalid JSON"));return;}try{
       if(phase==="hello"){const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;for(const required of streamCapabilities){if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);}phase="response";socket.write(encodeJsonLine(options.request));return;}
-      if(phase==="response"){const response=parseControlResponse(raw,requestId,hostEpoch);if(!response.ok){fail(new ControlClientError(response.error.code,response.error.message));return;}const result=options.parseInitial(response.result);options.validateInitial(result,hostEpoch);const cursor=options.initialCursor(result);runtimeGeneration=cursor.runtimeGeneration;lastSequence=cursor.sequence;phase="events";clearTimeout(timeout);pending.push(...options.initialEvents(result));initialSettled=true;resolveInitial({initial:result,close:()=>{closeRequested=true;pending=[];socket.destroy();},done});setImmediate(dispatchQueued);return;}
+      if(phase==="response"){const response=parseControlResponse(raw,requestId,hostEpoch);if(!response.ok){fail(new ControlClientError(response.error.code,response.error.message));return;}const result=options.parseInitial(response.result);options.validateInitial(result,hostEpoch);const cursor=options.initialCursor(result);runtimeGeneration=cursor.runtimeGeneration;lastSequence=cursor.sequence;phase="events";clearTimeout(timeout);pending.push(...options.initialEvents(result).map((event):[DockEvent,boolean]=>[event,true]));initialSettled=true;resolveInitial({initial:result,close:()=>{closeRequested=true;pending=[];socket.destroy();},done});setImmediate(dispatchQueued);return;}
       const event=parseControlEventEnvelope(raw,requestId,hostEpoch).event;
       if(event.instanceId!==options.request.params.instanceId)throw new ProtocolValidationError("invalid_response","Live event belongs to another instance");
       if(event.runtimeGeneration!==runtimeGeneration){
@@ -737,7 +742,7 @@ export class DockClient {
       }
       if(event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live updates arrived out of order");
       lastSequence=event.sequence;
-      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ControlClientError("event_handoff_overflow","More than 1000 events arrived during stream handoff; reconnect from the last accepted update position");pending.push(event);}else options.onEvent(event);
+      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ControlClientError("event_handoff_overflow","More than 1000 events arrived during stream handoff; reconnect from the last accepted update position");pending.push([event,false]);}else options.onEvent(event,false);
     }catch(e){fail(e);}};
     socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,streamCapabilities))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){if(closeRequested||options.cleanEnd&&!hadError)settleDone();else settleDone(new ControlClientError("connection_closed",hadError?"Stream closed after a transport error":"Host closed the stream unexpectedly"));}});
     return initial;
@@ -757,7 +762,7 @@ export class DockClient {
     }
   }
 
-  private openInstanceRecords(request:Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,context:InstanceDeliveryContext,onEvent?:(event:DockEvent)=>void,additionalCapabilities:readonly Capability[]=[]):Promise<FollowSubscription>{
+  private openInstanceRecords(request:Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,context:InstanceDeliveryContext,onEvent?:FollowEventHandler,additionalCapabilities:readonly Capability[]=[]):Promise<FollowSubscription>{
     const socket=this.openSocket(),decoder=new JsonLineDecoder(),helloId=this.createRequestId();
     const capabilities=[...new Set([...requiredCapabilities(request.type==="instance.read"?INSTANCE_READ_CAPABILITY:EVENTS_FOLLOW_CAPABILITY),IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,INSTANCE_RECORDS_CAPABILITY,...(request.params.interactions==="shared"?[SHARED_INTERACTIONS_CAPABILITY]:[]),...additionalCapabilities.flatMap(item=>requiredCapabilities(item))])];
     let channel:InstanceRecordChannel|undefined,initial:InstanceRecordInitial|undefined,epoch="",settled=false,closed=false,ended=false;
@@ -792,7 +797,7 @@ export class DockClient {
         // Let the caller install its owner before delivering the staged initial events.
         await new Promise<void>(resolve=>setImmediate(resolve));
         if(closed)return;
-        if(onEvent)for(const event of value.page.events)onEvent(event);
+        if(onEvent)for(const event of value.page.events)onEvent(event,true);
         channel.quiescent();
         return;
       }
@@ -804,7 +809,7 @@ export class DockClient {
         generation=event.runtimeGeneration;sequence=0;
       }
       if(event.sequence<=sequence)throw new ProtocolValidationError("invalid_response","Live events arrived out of order");
-      onEvent?.(event);sequence=event.sequence;channel.quiescent();
+      onEvent?.(event,false);sequence=event.sequence;channel.quiescent();
     };
     socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
     socket.on("data",(chunk:Buffer)=>{

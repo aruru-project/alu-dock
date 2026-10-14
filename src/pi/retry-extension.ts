@@ -8,7 +8,7 @@ export function retryExtension(pi: ExtensionAPI): void {
     messages: event.messages.filter((message) => !(message.role === "custom" && message.customType === RETRY_TRIGGER)),
   }));
 
-  pi.registerCommand("retry", {
+  pi.registerCommand("dock-retry", {
     description: "重试上一条失败的模型请求",
     handler: async (_args, ctx) => {
       if (!ctx.isIdle()) {

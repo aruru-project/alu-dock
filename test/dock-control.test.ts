@@ -583,7 +583,8 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
 
 // Review of shared questions: the window reconnects after the question on screen was answered
 // elsewhere and the next one was asked; earlier it dropped the next one, and applied the editor
-// text set while it was away over what the person had typed.
+// text set while it was away over what the person had typed. The release review found the same
+// with editor text set between the window's read of the Work and its rejoining live updates.
 test("SSH TUI reconnects to the next question after the shown one was answered elsewhere, without late editor text", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-reconnect-"));
   await chmod(directory, 0o700);
@@ -611,17 +612,58 @@ test("SSH TUI reconnects to the next question after the shown one was answered e
   broker.setEditorText("draft set while away");
   const second = broker.confirm("Second question", "Asked while this window was away.");
   await new Promise<void>((resolve) => setImmediate(resolve));
-  reconnectRead.release();
+  reconnectRead.release(() => broker.setEditorText("draft set as the window rejoined"));
 
   let secondTimeout: NodeJS.Timeout | undefined;
   const answered = await Promise.race([second, new Promise<undefined>((resolve) => { secondTimeout = setTimeout(() => resolve(undefined), 10_000); })])
     .finally(() => clearTimeout(secondTimeout));
   const pty = await ptyRun;
   const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.doesNotMatch(output, /draft set while away/u);
+  assert.doesNotMatch(output, /draft set as the window rejoined/u);
   assert.equal(answered, true, output.slice(-4_000));
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  assert.doesNotMatch(output, /draft set while away/u);
+});
+
+// Release review: the question on screen and the next one were both answered elsewhere while the
+// window was away; after reconnecting it still showed the next one, which no longer existed.
+test("SSH TUI does not show a question that was asked and answered elsewhere while it was away", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-ended-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "ended.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), extensionUiBroker: broker })
+  ), () => "extension-ended-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const instance = await new DockClient({ socketPath }).create(directory, "extension-ended");
+  const managed = registry.get(instance.id);
+  const reconnectRead = holdNextAttachRead(managed);
+  const ptyRun = runPtyTui([process.execPath, join(process.cwd(), "dist/src/cli.js"), "--socket", socketPath, "attach", instance.id], "extension-ended-meanwhile", readyFile);
+  await waitForPath(readyFile);
+  const first = broker.confirm("First question", "Shown before the connection drops.");
+  await waitForPath(`${readyFile}.first`);
+
+  reconnectRead.hold();
+  (host as unknown as { closeStaleAttachStreams(instanceId: string): void }).closeStaleAttachStreams(instance.id);
+  await managed.respondInteraction(undefined, managed.snapshot().activeInteraction!.id, { method: "confirm", confirmed: true });
+  assert.equal(await first, true);
+  const second = broker.confirm("Second question", "Asked and answered while this window was away.");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await managed.respondInteraction(undefined, managed.snapshot().activeInteraction!.id, { method: "confirm", confirmed: false });
+  assert.equal(await second, false);
+  reconnectRead.release();
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.match(output, /Live updates resumed/u);
+  assert.doesNotMatch(output, /Second question/u);
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
 });
 
 // Review of shared questions: after a long disconnect the window reads the Work afresh; a
@@ -665,20 +707,25 @@ test("SSH TUI closes a question that ended while it was away when it refreshes t
   assert.ok(session.promptMessages.includes("typed after refresh"), output.slice(-4_000));
 });
 
-/** Keep the window's next read of the Work waiting until the test has changed the Work. */
-function holdNextAttachRead(managed: ManagedInstance): { hold(): void; release(): void } {
+/**
+ * Keep the window's next read of the Work waiting until the test has changed the Work.
+ * `afterRead` changes it once more after that read, before the window rejoins live updates.
+ */
+function holdNextAttachRead(managed: ManagedInstance): { hold(): void; release(afterRead?: () => void): void } {
   const read = managed.getAttachProjection.bind(managed);
-  let gate: Promise<void> | undefined;
-  let open = (): void => {};
+  let gate: Promise<(() => void) | undefined> | undefined;
+  let open = (_afterRead?: () => void): void => {};
   managed.getAttachProjection = async (...args) => {
     const waiting = gate;
     gate = undefined;
-    if (waiting) await waiting;
-    return read(...args);
+    const afterRead = waiting ? await waiting : undefined;
+    const projection = await read(...args);
+    afterRead?.();
+    return projection;
   };
   return {
-    hold: () => { gate = new Promise<void>((resolve) => { open = resolve; }); },
-    release: () => open(),
+    hold: () => { gate = new Promise((resolve) => { open = resolve; }); },
+    release: (afterRead) => open(afterRead),
   };
 }
 
@@ -3705,7 +3752,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "extension-reconnect" | "extension-refresh" | "context-changes" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "extension-reconnect" | "extension-refresh" | "extension-ended-meanwhile" | "context-changes" = "detach",
   readyFile?: string,
   workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {

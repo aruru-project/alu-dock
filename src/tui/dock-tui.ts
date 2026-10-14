@@ -107,13 +107,11 @@ export async function runDockTui(
   let pendingEditorDirective: { runtimeGeneration: number; text: string } | undefined;
   let pendingTitleDirective: { runtimeGeneration: number; title: string } | undefined;
   let activeExtensionDialog: { interactionId: string; closeFromHost: () => void; closed: Promise<void> } | undefined;
-  // A question that arrives before the screen and editor exist waits here; shown earlier,
-  // the editor would take its focus.
   let screenStarted = false;
-  // Set while replaying what was missed during a disconnect: editor text and a title set
-  // meanwhile are not applied late, the person may have typed since.
-  let catchingUp = false;
-  let deferredQuestion: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
+  // The question to show next: one that arrived before the screen and editor existed (shown
+  // earlier, the editor would take its focus), or one waiting for the question on screen to
+  // close. It is dropped if it ends, or the session is replaced, before its turn.
+  let nextQuestion: Extract<DockEvent, { type: "interaction.requested" }> | undefined;
   let lastEventGeneration = instance.runtimeGeneration;
   let lastEventSequence = instance.eventCursor.sequence;
   let operationAcquire: Promise<void> | undefined;
@@ -193,8 +191,10 @@ export async function runDockTui(
   const directiveForThisWindow = (directiveControllerId: string | undefined): boolean => (
     sharedQuestions() || (controllerId !== undefined && directiveControllerId === controllerId)
   );
-  const applyControllerDirective = (event: DockEvent): void => {
-    if (catchingUp || event.runtimeGeneration !== instance.runtimeGeneration) return;
+  // Editor text and a title missed while this window was away are not applied late, when
+  // catching up: the person may have typed since.
+  const applyControllerDirective = (event: DockEvent, catchUp: boolean): void => {
+    if (catchUp || event.runtimeGeneration !== instance.runtimeGeneration) return;
     if (event.type === "extension.title_set" && directiveForThisWindow(event.data.controllerId)) {
       pendingTitleDirective = { runtimeGeneration: event.runtimeGeneration, title: event.data.title };
       restoreTerminalTitle();
@@ -210,7 +210,7 @@ export async function runDockTui(
     }
   };
 
-  const onEvent = (event: DockEvent): void => {
+  const onEvent = (event: DockEvent, catchUp = false): void => {
     if (event.runtimeGeneration < lastEventGeneration) return;
     if (event.runtimeGeneration === lastEventGeneration && event.sequence <= lastEventSequence) return;
     lastEventGeneration = event.runtimeGeneration;
@@ -265,16 +265,16 @@ export async function runDockTui(
       conversation.apply(event);
     }
     if (event.type === "interaction.requested") showQuestion(event);
-    if (event.type === "session.replaced") deferredQuestion = undefined;
-    if ((event.type === "interaction.cancelled" || event.type === "interaction.resolved") && deferredQuestion?.data.interactionId === event.data.interactionId) {
-      deferredQuestion = undefined;
+    if (event.type === "session.replaced") nextQuestion = undefined;
+    if ((event.type === "interaction.cancelled" || event.type === "interaction.resolved") && nextQuestion?.data.interactionId === event.data.interactionId) {
+      nextQuestion = undefined;
     }
     if ((event.type === "interaction.cancelled" || event.type === "interaction.resolved") && activeExtensionDialog?.interactionId === event.data.interactionId) {
       activeExtensionDialog.closeFromHost();
     }
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
     if (event.type === "extension.tools_expanded_changed") conversation.setToolsExpanded(event.data.expanded);
-    applyControllerDirective(event);
+    applyControllerDirective(event, catchUp);
     if (event.type === "session.info_changed") {
       pendingTitleDirective = undefined;
       restoreTerminalTitle();
@@ -364,14 +364,14 @@ export async function runDockTui(
     }
     if (open !== undefined) showQuestion(open);
     else if (fresh) {
-      deferredQuestion = undefined;
+      nextQuestion = undefined;
       activeExtensionDialog?.closeFromHost();
     }
   }
 
   function showQuestion(event: Extract<DockEvent, { type: "interaction.requested" }>): void {
     if (screenStarted) void handleExtensionInteraction(event);
-    else deferredQuestion = event;
+    else nextQuestion = event;
   }
 
   function reportExtensionWidgetViewport(width: number): void {
@@ -414,7 +414,7 @@ export async function runDockTui(
       try {
         const next = await client.controlExtensionUi(instance.id, (event) => {
           if (event.type === "interaction.requested") void handleExtensionInteraction(event);
-          else applyControllerDirective(event);
+          else applyControllerDirective(event, false);
         });
         if (exiting) {
           next.close();
@@ -975,8 +975,12 @@ export async function runDockTui(
     for (let shown = activeExtensionDialog; shown !== undefined; shown = activeExtensionDialog) {
       // The same question is published again when another window takes the operator connection.
       if (shown.interactionId === event.data.interactionId) return;
+      nextQuestion = event;
       shown.closeFromHost();
       await shown.closed;
+      // Meanwhile it may have ended too, or a later question taken its turn.
+      if (nextQuestion !== event) return;
+      nextQuestion = undefined;
     }
     const leaseToken = sharedQuestions() ? undefined : controllerLeaseToken;
     if (!sharedQuestions() && !leaseToken) {
@@ -2250,10 +2254,10 @@ export async function runDockTui(
       const forceFreshBootstrap = !sameDomain;
       let next: EventSubscription | undefined;
       let candidateReady = false;
-      const candidateBufferedEvents: DockEvent[] = [];
-      const onCandidateEvent = (event: DockEvent): void => {
-        if (candidateReady) onEvent(event);
-        else candidateBufferedEvents.push(event);
+      const candidateBufferedEvents: Array<[DockEvent, boolean]> = [];
+      const onCandidateEvent = (event: DockEvent, catchUp: boolean): void => {
+        if (candidateReady) onEvent(event, catchUp);
+        else candidateBufferedEvents.push([event, catchUp]);
       };
       try {
         if (!forceFreshBootstrap) {
@@ -2304,9 +2308,7 @@ export async function runDockTui(
           return;
         }
         if (rebuiltHistory === undefined) {
-          catchingUp = true;
-          try { for (const event of next.initial.page.events) onEvent(event); }
-          finally { catchingUp = false; }
+          for (const event of next.initial.page.events) onEvent(event, true);
         } else {
           instance = next.initial.instance;
           pendingQueue.reset(next.initial.pendingMessages);
@@ -2330,7 +2332,7 @@ export async function runDockTui(
         subscription = next;
         eventStreamConnected = true;
         candidateReady = true;
-        for (const event of candidateBufferedEvents) onEvent(event);
+        for (const [event, catchUp] of candidateBufferedEvents) onEvent(event, catchUp);
         candidateBufferedEvents.length = 0;
         refreshEditorSubmit();
         watchEventSubscription(next);
@@ -2365,9 +2367,9 @@ export async function runDockTui(
 
   tui.start();
   screenStarted = true;
-  if (deferredQuestion !== undefined) {
-    const question = deferredQuestion;
-    deferredQuestion = undefined;
+  if (nextQuestion !== undefined) {
+    const question = nextQuestion;
+    nextQuestion = undefined;
     void handleExtensionInteraction(question);
   }
   void acquireExtensionUiOperation();

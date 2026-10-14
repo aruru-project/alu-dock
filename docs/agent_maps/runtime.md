@@ -129,7 +129,9 @@ Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应�
 
 用户 shell 命令（Protocol `bash.run` / `bash.abort`）在 adapter 内走 Pi 自己 TUI/RPC 的同一条路：先发 `user_bash` 让扩展拦截（远程 operations 或整个结果），再 `executeBash(command, undefined, {excludeFromContext, id: operationId, operations})`，中止对应 `abortBash()`。adapter 在开始前发 `bash.started`，把带 `id` 的 `bash_execution_update` 投影成 `bash.output`，结束后发 `bash.completed`；不带 `id` 的执行不是 Dock 发起的，不转发。Pi 空闲时立即追加 `bashExecution` 记录但不发任何事件，所以 adapter 在命令结束后自己补一次 `conversation_checkpoint`；Pi 正在回复时记录被挂起到本轮结束，此间每次 checkpoint 都在 `unpersistedBash` 里列出还在跑或记录未落地的 operationId，Host 据此保留它们的 active frame。会话替换或 Worker 停止时 Pi 自己中止命令并把记录写进旧 session；旧 binding 已失效，它的完成事件不再发布。
 
-Pi Worker 自带 `/retry`，只在用户主动输入且最近一次模型响应失败、当前空闲时触发。命令使用公开的 extension `sendMessage` 进入 Pi 原有 Session 流程，并等待该轮结束；隐藏的 `alu-dock-retry` 标记保留在 Pi journal 里供识别，但由同一插件的 `context` hook 从模型上下文移除，因此不追加用户聊天指令，也不重放已经完成的工具。它不使用私有 SDK 补丁，不增加自动重试策略；Pi 原有重试、压缩和收尾照常生效。
+Dock 给 Pi Worker 加的命令都以 `dock-` 开头（`/dock-retry`、`/dock-plan`、`/dock-goal`、`/dock-tools`）。两个扩展注册同名命令时，Pi 把两者都改名为 `name:1`、`name:2`，原名不再可用，输入它会当成普通消息发给模型；`/plan` 这类常见名字已有示例扩展在用。
+
+Pi Worker 自带 `/dock-retry`，只在用户主动输入且最近一次模型响应失败、当前空闲时触发。命令使用公开的 extension `sendMessage` 进入 Pi 原有 Session 流程，并等待该轮结束；隐藏的 `alu-dock-retry` 标记保留在 Pi journal 里供识别，但由同一插件的 `context` hook 从模型上下文移除，因此不追加用户聊天指令，也不重放已经完成的工具。它不使用私有 SDK 补丁，不增加自动重试策略；Pi 原有重试、压缩和收尾照常生效。
 
 ### Pi 自带的 MCP、codemode 与工具搜索
 
@@ -177,7 +179,7 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 ## Extension UI
 
-Pi Worker 自动加载 `alu-dock-plan-goal`。`/plan` 只读调查并提交完整计划，由用户在编辑器审阅修改后选择执行或继续讨论；`/goal` 用轮数预算自动推进，`agent_before_settle` 是唯一次轮入口。业务状态只存在 Pi 当前分支 custom entries，恢复后暂停。模型工具按模式启用：规划时补上内置读取工具，并由 `plan_submit` 的 `prepareLoadout` 把非只读工具从请求中隐藏，不改动用户的工具开关；codemode 在 `only` 模式下会隐藏其余所有直接工具，所以 Dock 内置的 codemode 规划期间改用 `on` 模式（经 `PlanGoalPort.isPlanning` 读取），不改它的开关和用户设置；调用时再按只读声明拦截（含嵌套调用）；第三方工具的 `readOnlyHint` 需要可信，这不是系统沙箱。计划正文只在变化时保存。薄启动回调处理 Pi 扩展消息在开始前失败/被接管及准备期间取消；运行中 abort 与 settled 由 Pi 负责。Host 不增加目标状态、预算或协议。见[使用说明](../agent/plan-goal.md)。
+Pi Worker 自动加载 `alu-dock-plan-goal`。`/dock-plan` 只读调查并提交完整计划，由用户在编辑器审阅修改后选择执行或继续讨论；`/dock-goal` 用轮数预算自动推进，`agent_before_settle` 是唯一次轮入口。业务状态只存在 Pi 当前分支 custom entries，恢复后暂停。模型工具按模式启用：规划时补上内置读取工具，并由 `plan_submit` 的 `prepareLoadout` 把非只读工具从请求中隐藏，不改动用户的工具开关；结束规划时只收回自己补上的读取工具，用户在规划期间设置过工具（adapter 经 `PlanGoalPort.toolsChosen` 告知）则保留其选择，不再收回；codemode 在 `only` 模式下会隐藏其余所有直接工具，所以 Dock 内置的 codemode 规划期间改用 `on` 模式（经 `PlanGoalPort.isPlanning` 读取），不改它的开关和用户设置；调用时再按只读声明拦截（含嵌套调用）；第三方工具的 `readOnlyHint` 需要可信，这不是系统沙箱。计划正文只在变化时保存。薄启动回调处理 Pi 扩展消息在开始前失败/被接管及准备期间取消；运行中 abort 与 settled 由 Pi 负责。Host 不增加目标状态、预算或协议。见[使用说明](../agent/plan-goal.md)。
 
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、问题的开放与第一个回答、事件路由；TUI 或 WebUI 负责各自支持的显示与输入。问题属于 Work：没有任何客户端在场时也开放，要求共享问题的 read/follow 都收到它，任何客户端都可回答，以第一个回答为准。旧客户端的操作连接保留；新的操作连接替换旧连接，但不会取消 Worker 中等待的 interaction。见 [control.md](control.md#readfollow-与-extension-ui-操作)。
 

@@ -130,7 +130,7 @@ aludock status demo              # 查看一份工作的状态
 
 ### 配置、文件与跨工作协作
 
-- **规划与目标**：`/plan 需求` 先调查，审阅编辑后决定执行或继续讨论；`/goal 目标` 自动推进，裸命令管理暂停、继续与追加轮数。见 [使用说明](docs/agent/plan-goal.md)。
+- **规划与目标**：`/dock-plan 需求` 先调查，审阅编辑后决定执行或继续讨论；`/dock-goal 目标` 自动推进，裸命令管理暂停、继续与追加轮数。见 [使用说明](docs/agent/plan-goal.md)。
 
 **Pi 配置与扩展。** Hub **Settings → Pi** 管理登录；模型、凭据、packages 和 Session 仍在 Pi 原生目录 `~/.pi/agent/`（或 `PI_CODING_AGENT_DIR`），不需要另装系统 Pi：
 
