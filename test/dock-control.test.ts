@@ -624,6 +624,46 @@ test("SSH TUI reconnects to the next question after the shown one was answered e
   assert.doesNotMatch(output, /draft set while away/u);
 });
 
+// Release review: the question on screen and the next one were both answered elsewhere while the
+// window was away; after reconnecting it still showed the next one, which no longer existed.
+test("SSH TUI does not show a question that was asked and answered elsewhere while it was away", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-ended-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "ended.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), extensionUiBroker: broker })
+  ), () => "extension-ended-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const instance = await new DockClient({ socketPath }).create(directory, "extension-ended");
+  const managed = registry.get(instance.id);
+  const reconnectRead = holdNextAttachRead(managed);
+  const ptyRun = runPtyTui([process.execPath, join(process.cwd(), "dist/src/cli.js"), "--socket", socketPath, "attach", instance.id], "extension-ended-meanwhile", readyFile);
+  await waitForPath(readyFile);
+  const first = broker.confirm("First question", "Shown before the connection drops.");
+  await waitForPath(`${readyFile}.first`);
+
+  reconnectRead.hold();
+  (host as unknown as { closeStaleAttachStreams(instanceId: string): void }).closeStaleAttachStreams(instance.id);
+  await managed.respondInteraction(undefined, managed.snapshot().activeInteraction!.id, { method: "confirm", confirmed: true });
+  assert.equal(await first, true);
+  const second = broker.confirm("Second question", "Asked and answered while this window was away.");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await managed.respondInteraction(undefined, managed.snapshot().activeInteraction!.id, { method: "confirm", confirmed: false });
+  assert.equal(await second, false);
+  reconnectRead.release();
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.match(output, /Live updates resumed/u);
+  assert.doesNotMatch(output, /Second question/u);
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+});
+
 // Review of shared questions: after a long disconnect the window reads the Work afresh; a
 // question that ended meanwhile stayed on screen and took the keys meant for the editor.
 test("SSH TUI closes a question that ended while it was away when it refreshes the whole Work", async (context) => {
@@ -3705,7 +3745,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "extension-reconnect" | "extension-refresh" | "context-changes" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" | "extension-reconnect" | "extension-refresh" | "extension-ended-meanwhile" | "context-changes" = "detach",
   readyFile?: string,
   workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {

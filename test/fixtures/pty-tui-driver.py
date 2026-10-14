@@ -118,7 +118,7 @@ def main() -> int:
             completed_renders = bytes(output).count(b"\x1b[?2026l")
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
-            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry", "extension-reconnect", "extension-refresh", "context-changes"):
+            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry", "extension-reconnect", "extension-refresh", "extension-ended-meanwhile", "context-changes"):
                 set_size(fd, 40, 120)
             elif action == "flow-frame-stability":
                 set_size(fd, 58, 252)
@@ -714,6 +714,24 @@ def main() -> int:
                     os.write(fd, b"typed after refresh\r")
                 time.sleep(0.3)
                 read_available(fd, output, 0.1)
+            elif action == "extension-ended-meanwhile":
+                # The test drops live updates once the first question is on screen; both it and
+                # the next one are answered elsewhere before this window reconnects.
+                first_deadline = time.monotonic() + 5
+                while b"First question" not in output and time.monotonic() < first_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                with open(ready_file + ".first", "w", encoding="utf-8") as marker:
+                    marker.write("first\n")
+                resumed_start = len(output)
+                resumed_deadline = time.monotonic() + 8
+                while b"Live updates resumed" not in output[resumed_start:] and time.monotonic() < resumed_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                settle_deadline = time.monotonic() + 0.5
+                while time.monotonic() < settle_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
             elif action == "extension-response-retry":
                 dialog_deadline = time.monotonic() + 5
                 while b"Retry response confirm" not in output and time.monotonic() < dialog_deadline:
