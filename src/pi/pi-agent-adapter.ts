@@ -651,6 +651,7 @@ export class PiAgentAdapter {
     const unknown = remaining.values().next().value;
     if (unknown !== undefined) throw new AgentUnknownToolError(unknown);
     session.setActiveToolsByName([...names]);
+    this.options.planGoalPort?.toolsChosen?.();
     return this.listTools();
   }
 

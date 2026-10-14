@@ -62,11 +62,15 @@ interface GoalUpdateParams { status: "progress" | "blocked" | "complete"; summar
  * The extension also sets `isPlanning`. Dock's built-in codemode reads it so
  * that while planning, codemode stops hiding the other tools, as its "only"
  * mode otherwise does; Plan hides codemode itself.
+ *
+ * The adapter calls `toolsChosen` after the person sets the active tools, which
+ * Pi does not report to extensions.
  */
 export interface PlanGoalPort {
   prompt?: (text: string, mayStart: () => boolean) => Promise<boolean>;
   cancelPending?: () => void;
   isPlanning?: () => boolean;
+  toolsChosen?: () => void;
 }
 
 export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
@@ -92,7 +96,9 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
     /**
      * Planning adds the built-in read tools and its own tools. It never removes
      * the person's tools: plan_submit hides the ones that are not read-only, so
-     * tools switched on or off during planning stay that way afterwards.
+     * tools switched on or off during planning stay that way afterwards. Once the
+     * person chooses tools while planning, the read tools that are on are theirs
+     * too, and stay when planning ends.
      */
     const applyTools = (): void => {
       const active = pi.getActiveTools().filter((name) => !OWN_TOOLS.has(name));
@@ -106,6 +112,12 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
       const ordinary = active.filter((name) => !state.readsAddedByPlan?.includes(name));
       delete state.readsAddedByPlan;
       pi.setActiveTools(goalActive() ? [...ordinary, "goal_update"] : ordinary);
+    };
+
+    port.toolsChosen = () => {
+      if (state.mode !== "plan" || state.readsAddedByPlan?.length === 0) return;
+      state.readsAddedByPlan = [];
+      appendRecord();
     };
 
     const hideNonReadOnlyTools = (loadout: ToolLoadout) => state.mode === "plan" ? {

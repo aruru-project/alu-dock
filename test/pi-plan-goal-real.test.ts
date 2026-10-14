@@ -263,6 +263,16 @@ test("Planning cannot change files, shows the full plan for review, and executes
   assert.ok(afterPlanning.toolNames.includes("dock_send"), "Dock tools turned on during planning are available afterwards");
   afterPlanning.text("I can reach sibling Works now.");
   await h.idle();
+
+  // Release review, 2026-10-14: choosing only read while planning left no tools at all afterwards.
+  const activeTools = async () => (await h.dock.tools(h.work.id)).tools.filter((tool) => tool.active).map((tool) => tool.name);
+  await h.dock.setActiveTools(h.work.id, ["write"]);
+  await h.start("/plan");
+  await waitFor(async () => /规划中/.test(await h.surface()), "Bare /plan did not enter planning");
+  await h.dock.setActiveTools(h.work.id, ["read"]);
+  await h.start("/plan");
+  await waitFor(async () => !/规划中/.test(await h.surface()), "Bare /plan did not leave planning");
+  assert.deepEqual(await activeTools(), ["read"], "Tools chosen during planning stay as chosen");
 });
 
 test("A Goal joins ongoing work, takes supplements, pauses on Esc, and stops at its budget until the person adds more", { timeout: 40_000 }, async (context) => {
