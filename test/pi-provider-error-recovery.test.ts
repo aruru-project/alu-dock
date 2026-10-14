@@ -16,7 +16,7 @@ import { PROVIDER_ERROR_HTML } from "./support/provider-error-fixture.js";
 
 // #265: a recoverable upstream HTML error was escalated to Worker SIGTERM.
 // Only the HTTP peer is a fixture; Host, catalog, Worker, Pi retry and client parsing are real.
-test("upstream errors remain local and /retry repeats the failed request without replaying tools",  { timeout: 30_000 }, async () => {
+test("upstream errors remain local and /dock-retry repeats the failed request without replaying tools",  { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-provider-error-"));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const rateLimitError = `429 Too Many Requests\n${PROVIDER_ERROR_HTML}`;
@@ -103,7 +103,7 @@ test("upstream errors remain local and /retry repeats the failed request without
     assert.equal(catalogWork?.lastRun, "failed");
     assert.ok(catalogWork?.lastError, "the bounded status preview must still persist successfully");
 
-    await client.prompt(work.id, "/retry", "prompt", "manual-retry");
+    await client.prompt(work.id, "/dock-retry", "prompt", "manual-retry");
     assert.equal((await waitForSettlement(events, "manual-retry")).data.result, "succeeded");
     assert.deepEqual(requests[5]!.messages, requests[3]!.messages, "manual retry must reuse the failed model context without an extra instruction");
     assert.equal(await readFile(join(cwd, "retry-once.txt"), "utf8"), "once", "completed tool side effects must not be replayed");

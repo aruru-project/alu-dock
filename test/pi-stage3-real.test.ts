@@ -163,7 +163,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.ok(resources.resources.some((resource) => resource.kind === "extension" && resource.name.includes("stage3-fixture")));
     assert.ok(resources.resources.some((resource) => resource.kind === "skill" && resource.name === "dock-attachments"));
     const commands = parseCommandsResult(await instance.getCommands()).commands;
-    // Other built-in commands (such as /retry) may coexist with this fixture.
+    // Other built-in commands (such as /dock-retry) may coexist with this fixture.
     for (const name of ["dock-tools", "fixture-a", "fixture-a-long", "fixture-b", "fixture-b-long", "skill:dock-attachments"]) {
       assert.ok(commands.some((command) => command.name === name), `Missing command: ${name}`);
     }

@@ -11,7 +11,7 @@ const READ_TOOLS = new Set(["read", "grep", "find", "ls", "tool_search"]);
 const RUN_ONCE = "按此执行";
 const RUN_AS_GOAL = "执行并自动推进到完成";
 const DISCUSS = "继续讨论";
-const PAUSED_HINT = "已暂停。用 /goal 选择“继续”。";
+const PAUSED_HINT = "已暂停。用 /dock-goal 选择“继续”。";
 
 const PLAN_SUBMIT_SCHEMA = {
   type: "object",
@@ -142,11 +142,11 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
 
     const render = (ctx: ExtensionContext): void => {
       const { plan, goal } = state;
-      ctx.ui.setStatus("Plan", state.mode === "plan" ? "规划中 · /plan 退出" : undefined);
+      ctx.ui.setStatus("Plan", state.mode === "plan" ? "规划中 · /dock-plan 退出" : undefined);
       ctx.ui.setWidget("alu-dock-plan", state.mode === "plan" && plan
         ? ["当前计划", ...plan.content.split("\n").filter((line) => line.trim()).slice(0, 24)]
         : undefined);
-      ctx.ui.setStatus("Goal", goal ? `${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮 · /goal 管理` : undefined);
+      ctx.ui.setStatus("Goal", goal ? `${goalLabel(goal.status)} · ${goal.rounds}/${goal.maxRounds}轮 · /dock-goal 管理` : undefined);
       ctx.ui.setWidget("alu-dock-goal", goal?.status === "active"
         ? [`目标：${goal.objective}`, ...(goal.summary ? [goal.summary] : [])]
         : undefined);
@@ -174,7 +174,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
     };
 
     const stopForBudget = (goal: Goal, ctx: ExtensionContext): void => {
-      setGoalStatus("budget_limited", ctx, `已用完 ${goal.maxRounds} 轮，目标还没完成。用 /goal 选择“再给 10 轮”。`);
+      setGoalStatus("budget_limited", ctx, `已用完 ${goal.maxRounds} 轮，目标还没完成。用 /dock-goal 选择“再给 10 轮”。`);
     };
 
     const pause = (message: string, ctx = context): void => {
@@ -216,7 +216,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
         return;
       }
       void port.prompt(text, current).then((started) => {
-        if (!started && goalId && current()) notStarted("这条请求被其他扩展接管，目标没有开始。查看结果后用 /goal 继续。", "warning");
+        if (!started && goalId && current()) notStarted("这条请求被其他扩展接管，目标没有开始。查看结果后用 /dock-goal 继续。", "warning");
       }).catch((error: unknown) => {
         if (current()) notStarted(`无法开始：${error instanceof Error ? error.message : String(error)}。处理问题后重试。`, "error");
       });
@@ -313,7 +313,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
       const goal = state.goal;
       if (!goalActive() || !goal) return;
       if (event.outcome === "aborted") return setGoalStatus("paused", ctx, PAUSED_HINT);
-      if (event.outcome === "error") return setGoalStatus("blocked", ctx, "当前请求出错。处理错误后用 /goal 继续。");
+      if (event.outcome === "error") return setGoalStatus("blocked", ctx, "当前请求出错。处理错误后用 /dock-goal 继续。");
       if (ctx.hasPendingMessages() || event.context.pendingMessages.length > 0 || event.continue) return;
       if (goal.rounds >= goal.maxRounds) return stopForBudget(goal, ctx);
       pendingRound = goal.id;
@@ -326,7 +326,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
     // Esc skips the settle boundary; the run still ends here.
     pi.on("agent_settled", (_event, ctx) => {
       context = ctx;
-      if (goalActive()) pause("当前回复已停止。用 /goal 选择“继续”。", ctx);
+      if (goalActive()) pause("当前回复已停止。用 /dock-goal 选择“继续”。", ctx);
       else render(ctx);
     });
 
@@ -343,7 +343,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
       defaultActive: false,
       prepareLoadout: hideNonReadOnlyTools,
       execute: async (_id: string, params: PlanSubmitParams, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionContext) => {
-        if (state.mode !== "plan") throw new Error("当前不在规划中。用户可以用 /plan 开始。");
+        if (state.mode !== "plan") throw new Error("当前不在规划中。用户可以用 /dock-plan 开始。");
         if (!validText(params.content)) throw new Error("请提交完整且简洁的计划。");
         context = ctx;
         setPlanContent(params.content);
@@ -421,7 +421,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
       },
     } as never);
 
-    pi.registerCommand("plan", {
+    pi.registerCommand("dock-plan", {
       description: "审阅和修改计划，再决定执行或继续讨论",
       handler: async (args, ctx) => {
         context = ctx;
@@ -432,11 +432,11 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
           ctx.ui.notify("已退出规划。", "info");
           return;
         }
-        pause("进入规划，目标已暂停。用 /goal 可继续。", ctx);
+        pause("进入规划，目标已暂停。用 /dock-goal 可继续。", ctx);
         state.mode = "plan";
         commit(ctx);
         if (!request) {
-          ctx.ui.notify("已进入规划。告诉我你的需求；再输入 /plan 可退出。", "info");
+          ctx.ui.notify("已进入规划。告诉我你的需求；再输入 /dock-plan 可退出。", "info");
           return;
         }
         const message = `请先规划：\n${request}\n\n先用只读工具调查，不执行修改。重要取舍用 plan_question 提问；准备好后用 plan_submit 提交完整计划，由我决定是否执行。`;
@@ -445,14 +445,14 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
       },
     });
 
-    pi.registerCommand("goal", {
+    pi.registerCommand("dock-goal", {
       description: "直接输入目标开始；不带内容时管理当前目标",
       handler: async (args, ctx) => {
         context = ctx;
         if (args.trim()) {
           const parsed = parseGoal(args);
           if (!parsed) {
-            ctx.ui.notify("用 /goal 目标内容 开始，或 /goal --rounds 10 目标内容 指定轮数。", "info");
+            ctx.ui.notify("用 /dock-goal 目标内容 开始，或 /dock-goal --rounds 10 目标内容 指定轮数。", "info");
             return;
           }
           stopAutomation();
@@ -462,7 +462,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
         }
         const goal = state.goal;
         if (!goal) {
-          ctx.ui.notify("用 /goal 目标内容 开始，默认自动推进 10 轮。", "info");
+          ctx.ui.notify("用 /dock-goal 目标内容 开始，默认自动推进 10 轮。", "info");
           return;
         }
         const choices = goal.status === "active" ? ["暂停", "结束"]
