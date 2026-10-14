@@ -583,7 +583,8 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
 
 // Review of shared questions: the window reconnects after the question on screen was answered
 // elsewhere and the next one was asked; earlier it dropped the next one, and applied the editor
-// text set while it was away over what the person had typed.
+// text set while it was away over what the person had typed. The release review found the same
+// with editor text set between the window's read of the Work and its rejoining live updates.
 test("SSH TUI reconnects to the next question after the shown one was answered elsewhere, without late editor text", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-reconnect-"));
   await chmod(directory, 0o700);
@@ -611,17 +612,18 @@ test("SSH TUI reconnects to the next question after the shown one was answered e
   broker.setEditorText("draft set while away");
   const second = broker.confirm("Second question", "Asked while this window was away.");
   await new Promise<void>((resolve) => setImmediate(resolve));
-  reconnectRead.release();
+  reconnectRead.release(() => broker.setEditorText("draft set as the window rejoined"));
 
   let secondTimeout: NodeJS.Timeout | undefined;
   const answered = await Promise.race([second, new Promise<undefined>((resolve) => { secondTimeout = setTimeout(() => resolve(undefined), 10_000); })])
     .finally(() => clearTimeout(secondTimeout));
   const pty = await ptyRun;
   const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.doesNotMatch(output, /draft set while away/u);
+  assert.doesNotMatch(output, /draft set as the window rejoined/u);
   assert.equal(answered, true, output.slice(-4_000));
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  assert.doesNotMatch(output, /draft set while away/u);
 });
 
 // Release review: the question on screen and the next one were both answered elsewhere while the
@@ -705,20 +707,25 @@ test("SSH TUI closes a question that ended while it was away when it refreshes t
   assert.ok(session.promptMessages.includes("typed after refresh"), output.slice(-4_000));
 });
 
-/** Keep the window's next read of the Work waiting until the test has changed the Work. */
-function holdNextAttachRead(managed: ManagedInstance): { hold(): void; release(): void } {
+/**
+ * Keep the window's next read of the Work waiting until the test has changed the Work.
+ * `afterRead` changes it once more after that read, before the window rejoins live updates.
+ */
+function holdNextAttachRead(managed: ManagedInstance): { hold(): void; release(afterRead?: () => void): void } {
   const read = managed.getAttachProjection.bind(managed);
-  let gate: Promise<void> | undefined;
-  let open = (): void => {};
+  let gate: Promise<(() => void) | undefined> | undefined;
+  let open = (_afterRead?: () => void): void => {};
   managed.getAttachProjection = async (...args) => {
     const waiting = gate;
     gate = undefined;
-    if (waiting) await waiting;
-    return read(...args);
+    const afterRead = waiting ? await waiting : undefined;
+    const projection = await read(...args);
+    afterRead?.();
+    return projection;
   };
   return {
-    hold: () => { gate = new Promise<void>((resolve) => { open = resolve; }); },
-    release: () => open(),
+    hold: () => { gate = new Promise((resolve) => { open = resolve; }); },
+    release: (afterRead) => open(afterRead),
   };
 }
 
