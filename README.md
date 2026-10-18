@@ -252,3 +252,7 @@ corepack pnpm verify:preview
 | 各种界面的实现与设计 | [官方客户端](./clients/official/README.md) · [Hub / Work TUI](./docs/agent_maps/tui.md) · [客户端设计理念](./docs/client-design-principles.md) |
 | 测试与 Pi 升级 | [QA](./docs/qa.md) · [Pi SDK 兼容检查](./docs/pi-sdk-upgrades.md) |
 | 参与项目开发 | [AGENTS.md](./AGENTS.md) |
+
+## 许可证
+
+整个仓库采用 [Apache License 2.0](./LICENSE)。
