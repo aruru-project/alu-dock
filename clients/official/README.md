@@ -170,4 +170,4 @@ src/                         Vue 3 界面
 scripts/                     平台开发与本地打包入口
 ```
 
-Client 专用代码采用 [`LICENSE-APACHE`](LICENSE-APACHE)。产品语义与跨层工程规则以根 [`STORY.md`](../../STORY.md) 和 [`AGENTS.md`](../../AGENTS.md) 为准。
+官方客户端与仓库其他部分一样采用 Apache License 2.0，见 [`LICENSE-APACHE`](LICENSE-APACHE)（与根目录 [`LICENSE`](../../LICENSE) 相同）。产品语义与跨层工程规则以根 [`STORY.md`](../../STORY.md) 和 [`AGENTS.md`](../../AGENTS.md) 为准。
