@@ -1,6 +1,6 @@
 # Pi engine maintenance and upgrade gate
 
-Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-project/pi). The current implementation baseline is the upstream **v0.99.2** release, commit `005af57d88ee23b33778f343a9595b32e67ff788`; Dock requires **Node.js 24**.
+Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-project/pi). The current implementation baseline is the upstream **v1.3.0** release, commit `71023aec1546d6d677a65669c5665c0927ce0dd0`; Dock requires **Node.js 24**.
 
 ## Keep upstream, our changes and artifacts separate
 
@@ -11,7 +11,7 @@ Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-proj
 
 All Pi runtime packages used by Dock come from **the same controlled fork release**. This includes the `pi-tui` imported directly by Dock's Hub/Work TUI and extension UI adapter, not just `pi-coding-agent`. Preserve their canonical package names for SDK/extension compatibility, but pin their actual artifact sources to our release. An equal version number on a community npm package is not an equivalent source. Ordinary non-Pi third-party dependencies are fixed by the actual Dock root lock; their first resolution need not reproduce the producer’s upstream build lock. Both platform assemblers consume that Dock lock with `npm ci --omit=dev --ignore-scripts`; unused Pi monorepo packages need not be distributed.
 
-The current controlled cohort is **`0.99.2-dock.1`**, release `dock-v0.99.2-dock.1` at `3d6f2ce11985e60e1b4fdddf410e72ccd5b05f5e`, eight packages including pi-codemode and pi-mcp. It replays the Dock changes on v0.99.2: selectable default prompt body, thinking preference kept on explicit model selection, Dock extension model preferences and the public readonly `getCompactionPromptTemplates()` getter; cache warming is off by default. Native compaction assembly, in-flight calls and extension hooks are unchanged; Dock reads the public templates rather than copying their bodies or intercepting provider requests. The previous cohort, `dock-v0.85.1-dock.3`, is the rollback target.
+The current controlled cohort is **`1.3.0-dock.1`**, release `dock-v1.3.0-dock.1` at `18cc8ac83cfdffabc9a34fc9d8bd70c68886faf4`, seven packages (pi-coding-agent no longer depends on chord). It replays the Dock changes on v1.3.0: selectable default prompt body, thinking preference kept on explicit model selection, Dock extension model preferences and the public readonly `getCompactionPromptTemplates()` getter; cache warming is off by default. Native compaction assembly, in-flight calls and extension hooks are unchanged; Dock reads the public templates rather than copying their bodies or intercepting provider requests. The previous cohort, `dock-v0.99.2-dock.1`, is the rollback target.
 
 ## Build Pi only when Pi changes
 
