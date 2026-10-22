@@ -15,7 +15,7 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24.22.1"
   },
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
@@ -43,10 +43,13 @@
     "@peculiar/x509": "2.0.0",
     "fast-srp-hap": "2.0.4",
     "reflect-metadata": "0.2.2",
-    "undici": "8.9.0"
+    "undici": "8.12.3"
   },
   "devDependencies": {
     "@types/node": "22.19.19",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "undici": "$undici"
   }
 }
