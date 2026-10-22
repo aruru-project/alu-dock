@@ -301,6 +301,8 @@ export interface AgentWorkerState {
   sessionFile?: string;
   durableSessionFile?: string;
   isStreaming: boolean;
+  /** Busy, but extensions still prepare the run before its first request (Pi 1.2+). */
+  isPreparing?: boolean;
   isCompacting: boolean;
   gitBranch?: string;
   modelState: AgentModelState;

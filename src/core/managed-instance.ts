@@ -2247,7 +2247,10 @@ export class ManagedInstance {
         const request = restoreQueue ? "command.abort_restore_queue" : "command.abort";
         if (running) this.abortRequestedWhileRunning = true;
         const cleared = await this.invokeAgent<ClearedAgentQueue | null>(request, { operationId });
-        if (running) {
+        // Since Pi 1.2 a reply is busy while extensions still prepare it, and they
+        // cannot be interrupted. The Agent has recorded the stop, so the reply ends
+        // before its first request; like Pi's own Esc, do not wait for them.
+        if (running && this.agentState().isPreparing !== true) {
           await this.session.control({ type: "wait_for_idle" });
           const compactionBoundary = this.compactionBoundary;
           if (compactionBoundary) await compactionBoundary;
