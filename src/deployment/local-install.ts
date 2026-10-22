@@ -154,6 +154,27 @@ export function localInstallBlockingInstances(instances: readonly LocalInstallIn
   });
 }
 
+/**
+ * package.json#engines.node declares the one minimum Node.js, as `>=MAJOR.MINOR.PATCH`; the
+ * Windows launcher checks the same value. The service keeps the Node.js that ran the install.
+ */
+export function assertSupportedNode(requirement: unknown, version: string = process.versions.node): void {
+  const minimum = typeof requirement === "string" ? /^>=(\d+)\.(\d+)\.(\d+)$/u.exec(requirement) : null;
+  if (!minimum) throw new Error("package.json must declare one minimum supported Node.js version");
+  const wanted = minimum.slice(1).map(Number);
+  const current = version.split(".").map(Number);
+  for (const [index, need] of wanted.entries()) {
+    const have = current[index] ?? 0;
+    if (have > need) return;
+    if (have < need) {
+      throw new Error(
+        `Alu Dock needs Node.js ${wanted.join(".")} or newer; this is ${version}. `
+        + "Update Node.js, then run npm run install:local again with the new version.",
+      );
+    }
+  }
+}
+
 export function assertLocalInstallAllowed(instances: readonly LocalInstallInstanceState[], replaceActive = false): void {
   const blocking = localInstallBlockingInstances(instances);
   if (blocking.length === 0 || replaceActive) return;

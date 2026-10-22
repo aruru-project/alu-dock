@@ -11,6 +11,7 @@ import { copyStagedPackage, installUserExecutable } from "../scripts/install-loc
 import {
   ALU_DOCK_GENERATED_MARKER,
   assertLocalInstallAllowed,
+  assertSupportedNode,
   isAluDockGeneratedContent,
   localInstallBlockingInstances,
   localInstallInspectionMayAssumeHostAbsent,
@@ -81,6 +82,14 @@ test("Windows release has one complete package entry and uses the user's compati
   assert.match(String(rootManifest.engines?.node), /^>=\d+\.\d+\.\d+$/u);
   assert.match(packager, /const releaseName = `AluDock-\$\{version\}-windows-x86_64`/u);
   assert.doesNotMatch(packager, /windows-runtime|nodejs\.org\/dist|materializeNode/u);
+});
+
+// Security boundary: the 2026-10-21 Node.js security release (24.22.1) fixed the Brotli
+// decoder and dropped the compromised eMudhra CAs; Linux installs refuse older Node.js.
+test("Linux install refuses a Node.js older than the declared minimum", () => {
+  assert.throws(() => assertSupportedNode(">=24.22.1", "24.21.0"), /needs Node\.js 24\.22\.1 or newer; this is 24\.21\.0/u);
+  assert.throws(() => assertSupportedNode(">=24.22.1", "22.23.4"));
+  for (const version of ["24.22.1", "24.23.0", "25.0.0", "26.12.1"]) assertSupportedNode(">=24.22.1", version);
 });
 
 test("npm package excludes tests, fixtures, and development scripts", () => {

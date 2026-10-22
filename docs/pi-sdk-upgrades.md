@@ -1,6 +1,6 @@
 # Pi engine maintenance and upgrade gate
 
-Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-project/pi). The current implementation baseline is the upstream **v1.3.0** release, commit `71023aec1546d6d677a65669c5665c0927ce0dd0`; Dock requires **Node.js 24**.
+Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-project/pi). The current implementation baseline is the upstream **v1.3.0** release, commit `71023aec1546d6d677a65669c5665c0927ce0dd0`; Dock requires **Node.js 24.22.1** or later: the 2026-10-21 Node.js security release fixed a Brotli decoder flaw reachable through `fetch` and stopped trusting the compromised eMudhra CAs. `package.json#engines.node` declares it once; the Linux install and the Windows launcher refuse older Node.js.
 
 ## Keep upstream, our changes and artifacts separate
 
@@ -12,6 +12,8 @@ Dock maintains its Pi engine in [aruru-project/pi](https://github.com/aruru-proj
 All Pi runtime packages used by Dock come from **the same controlled fork release**. This includes the `pi-tui` imported directly by Dock's Hub/Work TUI and extension UI adapter, not just `pi-coding-agent`. Preserve their canonical package names for SDK/extension compatibility, but pin their actual artifact sources to our release. An equal version number on a community npm package is not an equivalent source. Ordinary non-Pi third-party dependencies are fixed by the actual Dock root lock; their first resolution need not reproduce the producer’s upstream build lock. Both platform assemblers consume that Dock lock with `npm ci --omit=dev --ignore-scripts`; unused Pi monorepo packages need not be distributed.
 
 The current controlled cohort is **`1.3.0-dock.1`**, release `dock-v1.3.0-dock.1` at `18cc8ac83cfdffabc9a34fc9d8bd70c68886faf4`, seven packages (pi-coding-agent no longer depends on chord). It replays the Dock changes on v1.3.0: selectable default prompt body, thinking preference kept on explicit model selection, Dock extension model preferences and the public readonly `getCompactionPromptTemplates()` getter; cache warming is off by default. Native compaction assembly, in-flight calls and extension hooks are unchanged; Dock reads the public templates rather than copying their bodies or intercepting provider requests. The previous cohort, `dock-v0.99.2-dock.1`, is the rollback target.
+
+Dock pins `undici` at 8.12.3 and overrides every copy to it (`"undici": "$undici"`): the October 2026 undici advisories let a malicious HTTPS server crash the process that fetches from it, and `1.3.0-dock.1` pins 8.10.2. The Worker, which loads the SDK and Dock's network bootstrap, uses 8.12.3. The `pi` CLI bundle inlines its own 8.10.2, so `pi` processes started from a Work (for example subagents) keep it until the next Pi release carries a fixed undici; drop the override then.
 
 ## Build Pi only when Pi changes
 

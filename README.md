@@ -61,7 +61,7 @@ Alu Dock 是你自己的电脑与工作站上的 **Agent 工作港口**。启动
 
 ### Linux Host / SSH
 
-需要 **Node.js ≥ 24** 和可用的 `systemd --user`。从源码安装：
+需要 **Node.js ≥ 24.22.1** 和可用的 `systemd --user`。从源码安装：
 
 ```bash
 git clone https://github.com/aruru-project/alu-dock.git
@@ -82,7 +82,7 @@ aludock
 
 正常退出旧版 Alu Dock 后运行 Setup，按安装器提示安装或更新，再从开始菜单打开 **Alu Dock**。
 
-客户端默认启动本机 Dock。只有启用本机 Host 时才需要 **Node.js ≥ 24**；在托盘取消“随客户端启动本机 Dock”后，可作为纯客户端连接远程。Pi 随 Alu Dock 提供，不需要另装系统 Pi。
+客户端默认启动本机 Dock。只有启用本机 Host 时才需要 **Node.js ≥ 24.22.1**；在托盘取消“随客户端启动本机 Dock”后，可作为纯客户端连接远程。Pi 随 Alu Dock 提供，不需要另装系统 Pi。
 
 第一次配置 Pi 或连接 SubHost，可从托盘的 **打开终端设置** 进入同一套 Hub 设置。窗口关闭与退出的区别见下方[工作会在什么时候停止](#工作会在什么时候停止)。
 
@@ -190,7 +190,7 @@ docs/                接入、架构、验证与部署文档
 <details>
 <summary><strong>从源码运行开发 Host 与 CLI</strong></summary>
 
-准备 Node.js ≥ 24，在仓库根目录执行 `npm ci`。两个终端连接同一个开发 socket：
+准备 Node.js ≥ 24.22.1，在仓库根目录执行 `npm ci`。两个终端连接同一个开发 socket：
 
 ```bash
 # terminal 1
@@ -221,7 +221,7 @@ npm run test:sdk-upgrade          # 升级 Pi 依赖时的独立兼容检查
 <details>
 <summary><strong>开发、预览与构建官方客户端</strong></summary>
 
-需要 Node.js ≥ 24、Corepack / pnpm 10、Rust 1.88，以及当前平台的 Tauri 2 构建依赖，详见[客户端开发环境](./clients/official/README.md#开发环境)。
+需要 Node.js ≥ 24.22.1、Corepack / pnpm 10、Rust 1.88，以及当前平台的 Tauri 2 构建依赖，详见[客户端开发环境](./clients/official/README.md#开发环境)。
 
 ```bash
 npm run client:install

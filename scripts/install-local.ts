@@ -12,6 +12,7 @@ import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { defaultSocketPath } from "../src/control/socket-path.js";
 import {
   assertLocalInstallAllowed,
+  assertSupportedNode,
   isAluDockGeneratedContent,
   localInstallInspectionMayAssumeHostAbsent,
   localInstallLayout,
@@ -26,6 +27,8 @@ async function main(): Promise<void> {
   }
   const options = parseLocalInstallArguments(process.argv.slice(2));
   const projectRoot = resolve(process.cwd());
+  const manifest = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8")) as { engines?: { node?: unknown } };
+  assertSupportedNode(manifest.engines?.node);
   if (process.platform === "win32") {
     await installWindowsPackage(projectRoot, options.replaceActive);
     return;
