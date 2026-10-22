@@ -25,6 +25,8 @@ const RECOVERY_PROMPT = "SDK_COMPAT_RECOVERY: prove the worker recovered";
 const TEMPLATE_COMMAND = "/queued-template";
 const TEMPLATE_PROMPT = "SDK_COMPAT_TEMPLATE_EXPANDED: consume this queued template";
 const HANDLED_PROMPT = "SDK_COMPAT_HANDLED: an input hook takes this over";
+const PREPARE_START_TEXT = "SDK_COMPAT_PREPARE_START: an extension starts this reply";
+const PREPARE_JOIN_PROMPT = "SDK_COMPAT_PREPARE_JOIN: sent while the reply was starting";
 const SETTLE_FIRST_PROMPT = "SDK_COMPAT_SETTLE_FIRST: finish while an extension holds settlement";
 const SETTLE_SECOND_PROMPT = "SDK_COMPAT_SETTLE_SECOND: sent before settlement finished";
 const SETTLE_TAKEBACK_PROMPT = "SDK_COMPAT_SETTLE_TAKEBACK: taken back before settlement finished";
@@ -52,6 +54,8 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
   const settleEntered = join(root, "settle-entered");
   const holdInput = join(root, "hold-input");
   const inputEntered = join(root, "input-entered");
+  const holdPreparation = join(root, "hold-preparation");
+  const preparationEntered = join(root, "preparation-entered");
   const continueAfterCompaction = join(root, "continue-after-compaction");
   const fixture = new LoopbackChatFixture();
   const workerPids: number[] = [];
@@ -103,6 +107,17 @@ export default function (pi) {
     if (existsSync(${JSON.stringify(holdInput)})) writeFileSync(${JSON.stringify(inputEntered)}, "");
     for (let attempt = 0; attempt < 500 && existsSync(${JSON.stringify(holdInput)}); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
     return { action: "handled" };
+  });
+  pi.registerCommand("sdk-compat-start", {
+    description: "Start a reply from an extension",
+    handler: async () => {
+      pi.sendMessage({ customType: "sdk-compat-start", content: ${JSON.stringify(PREPARE_START_TEXT)}, display: true }, { triggerTurn: true });
+    },
+  });
+  pi.on("before_agent_start", async () => {
+    if (!existsSync(${JSON.stringify(holdPreparation)})) return;
+    writeFileSync(${JSON.stringify(preparationEntered)}, "");
+    for (let attempt = 0; attempt < 500 && existsSync(${JSON.stringify(holdPreparation)}); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   });
   pi.on("agent_settled", async () => {
     if (!existsSync(${JSON.stringify(holdSettle)})) return;
@@ -264,6 +279,24 @@ export default function (pi) {
     const recovered = await waitForEvent(events, recoveryEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-recovery-run");
     assert.equal(recovered.type, "run.settled");
     assert.equal(recovered.data.result, "succeeded");
+
+    // Since Pi 1.2 a reply is busy from the start of its preparation (extension
+    // before_agent_start). A message sent while a reply an extension started is still
+    // preparing joins that reply: it is reported as queued and no second run starts.
+    await writeFile(holdPreparation, "");
+    const prepareEvent = events.length;
+    await client.prompt(created.id, "/sdk-compat-start", "prompt", "sdk-prepare-start");
+    await waitForFile(preparationEntered);
+    const joined = await client.prompt(created.id, PREPARE_JOIN_PROMPT, "auto", "sdk-prepare-join");
+    assert.equal(joined.receipt.queued, true);
+    await Promise.all([rm(holdPreparation), rm(preparationEntered)]);
+    await waitForEvent(events, prepareEvent, (event) => event.type === "message.submitted" && event.data.operationId === "sdk-prepare-join");
+    await waitForEvent(events, prepareEvent, (event) => event.type === "run.settled");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(events.slice(prepareEvent).filter((event) => event.type === "run.settled").length, 1, "the queued message runs inside the reply it joined");
+    assert.equal(fixture.requests.filter((body) => JSON.stringify(body).includes(PREPARE_JOIN_PROMPT)).length, 1);
+    assert.ok(fixture.requests.some((body) => JSON.stringify(body).includes(PREPARE_START_TEXT) && JSON.stringify(body).includes(PREPARE_JOIN_PROMPT)));
+    assert.equal((await client.status(created.id)).pending.total, 0);
 
     // Pi 0.99 defers input that arrives while an extension still handles agent_settled.
     // Dock keeps it in its Queue meanwhile: Escape hands it back at once, and nothing starts afterwards.

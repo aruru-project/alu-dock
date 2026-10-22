@@ -644,9 +644,9 @@ function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Recor
 
 function parseAgentWorkerState(raw: unknown): AgentWorkerState {
   const value = record(raw, "Worker Agent state");
-  exactKeys(value, ["sessionId", "sessionFile", "durableSessionFile", "isStreaming", "isCompacting", "gitBranch", "modelState", "metrics", "extensionCommands"], "Worker Agent state");
+  exactKeys(value, ["sessionId", "sessionFile", "durableSessionFile", "isStreaming", "isPreparing", "isCompacting", "gitBranch", "modelState", "metrics", "extensionCommands"], "Worker Agent state");
   boundedString(value.sessionId, 128, "Agent session ID"); optionalString(value.sessionFile, 16_384); optionalString(value.durableSessionFile, 16_384); optionalString(value.gitBranch, 256);
-  if (typeof value.isStreaming !== "boolean" || typeof value.isCompacting !== "boolean") throw new Error("Worker Agent lifecycle state is invalid");
+  if (typeof value.isStreaming !== "boolean" || typeof value.isCompacting !== "boolean" || (value.isPreparing !== undefined && typeof value.isPreparing !== "boolean")) throw new Error("Worker Agent lifecycle state is invalid");
   if (!Array.isArray(value.extensionCommands)) throw new Error("Worker Agent projection state is invalid");
   validateJsonValue(value.modelState); validateJsonValue(value.metrics);
   stringArray(value.extensionCommands, 2_000, 256, "Worker extension commands");

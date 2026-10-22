@@ -244,6 +244,8 @@ interface Binding {
   runOperationId?: string;
   /** Pi published agent_start and has not yet published the matching agent_settled. */
   awaitingSettled: boolean;
+  /** A run was stopped while extensions still prepared it; Pi publishes agent_settled once they return. */
+  stoppedBeforeStart: boolean;
   settledWaiters: Array<() => void>;
   conversationReadState?: ConversationReadState;
   /** User shell commands (bash.run) still executing against this session, with what bash.started announced. */
@@ -310,14 +312,30 @@ export class PiAgentAdapter {
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
-    if (options.planGoalPort) options.planGoalPort.prompt = async (text, mayStart) => {
+    if (options.planGoalPort) options.planGoalPort.prompt = async (text, mayStart, stopped) => {
       let started = false;
-      await this.requireActive().session.prompt(text, {
+      const binding = this.requireActive();
+      // Pi defers a prompt made while extensions handle agent_settled and reports
+      // nothing about it then; a Goal started from that handler waits for it here.
+      await this.waitForSettledBoundary(binding);
+      const { session } = binding;
+      await session.prompt(text, {
         source: "extension", expandPromptTemplates: false,
         preflightResult: (disposition: PiPromptDisposition) => {
           if (disposition !== "started") return;
-          if (!mayStart()) throw new Error("当前请求已取消或预算已用尽，请按最新请求继续。");
-          started = true;
+          if (mayStart()) {
+            started = true;
+            return;
+          }
+          // Stopped or superseded while Pi prepared it. Pi stops a run whose abort
+          // arrives before its first request, so this prompt never reaches the model;
+          // Pi still records it, and the extension that asked keeps it out of later
+          // requests. The session may have been replaced meanwhile; only the
+          // extension instance and session of this request are told.
+          stopped();
+          const binding = this.active;
+          if (binding?.session === session && binding.token.active) binding.stoppedBeforeStart = true;
+          void session.abort().catch(() => {});
         },
       } as PromptOptions);
       return started;
@@ -350,6 +368,7 @@ export class PiAgentAdapter {
   get sessionId(): string { return this.requireActive().session.sessionId; }
   get sessionFile(): string | undefined { return this.requireActive().session.sessionFile; }
   get isStreaming(): boolean { return this.active?.session.isStreaming ?? false; }
+  get isPreparing(): boolean { return this.active !== undefined && piIsPreparing(this.active); }
   get isCompacting(): boolean { return this.active?.session.isCompacting ?? false; }
   getDurableSessionFile(): string | undefined {
     const path = this.active?.session.sessionFile;
@@ -455,7 +474,7 @@ export class PiAgentAdapter {
         // agent_settled and reports nothing about it until much later. Decide only
         // now, after every read above, and hand the input to Pi without waiting
         // in between: a reply can finish while attachments are being read.
-        if ((context?.type === "command" || context?.type === "host_queue") && piIsSettling(binding)) {
+        if ((context?.type === "command" || context?.type === "host_queue") && (piIsSettling(binding) || piIsFinishingStoppedStart(binding))) {
           // Like input during compaction, the Host keeps it in its Queue, where it
           // can be taken back, and hands it over once Pi publishes agent_settled.
           // A Host Queue hand-off goes back the same way: waiting here would make
@@ -478,7 +497,9 @@ export class PiAgentAdapter {
           attachments,
         });
         const reportPreflight = (disposition: PiPromptDisposition): void => {
-          const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
+          // Pi 1.2+ counts the session as busy from the start of a run's preparation,
+          // so a prompt that started its own run reports "started" while isStreaming is true.
+          const actualDelivery = disposition === "started" ? "prompt" : binding.session.isStreaming ? delivery : "prompt";
           if (disposition === "handled") {
             // An extension input hook took the input over. It never becomes a Pi
             // message or queue item, so it must not claim the next run either.
@@ -1182,8 +1203,9 @@ export class PiAgentAdapter {
   }
   async abort(): Promise<void> {
     this.options.planGoalPort?.cancelPending?.();
-    const session = this.active?.session;
-    if (!session) return;
+    const binding = this.active;
+    if (!binding) return;
+    const { session } = binding;
     const navigation = this.treeNavigation;
     if (navigation) {
       session.abortBranchSummary();
@@ -1194,7 +1216,16 @@ export class PiAgentAdapter {
     // compaction and also ends the run, so a queued message or an extension's
     // agent_before_settle continuation cannot call the model after this abort.
     // Cancelling only the compaction would let the run continue.
-    await session.abort();
+    const stopping = session.abort();
+    if (piIsPreparing(binding)) {
+      binding.stoppedBeforeStart = true;
+      // Since Pi 1.2 a run is busy while extensions prepare it (before_agent_start),
+      // and Pi's abort waits for them. The stop is already recorded: Pi stops the run
+      // before its first request. Like Pi's own Esc, do not wait for the extensions.
+      void stopping.catch(() => {});
+      return;
+    }
+    await stopping;
   }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
@@ -1548,6 +1579,7 @@ export class PiAgentAdapter {
       bufferEvents: true,
       conversation: new PiConversationProjector(this.options.attachmentContextKey),
       awaitingSettled: false,
+      stoppedBeforeStart: false,
       settledWaiters: [],
       runningBash: new Map(),
       bashTasks: new Set(),
@@ -1578,6 +1610,7 @@ export class PiAgentAdapter {
       if (event.type === "agent_settled") {
         binding.runOperationId = undefined;
         binding.awaitingSettled = false;
+        binding.stoppedBeforeStart = false;
         releaseSettledWaiters(binding);
       }
     });
@@ -2179,8 +2212,14 @@ export class PiConversationProjector {
       return [{
         type: "agent_settled",
         ...(typeof event.operationId === "string" ? { operationId: event.operationId } : {}),
-        ...(outcome?.stopReason === undefined ? {} : { stopReason: outcome.stopReason }),
-        ...(outcome?.error === undefined ? {} : { error: outcome.error }),
+        // Pi marks a stopped run on agent_settled. One stopped before its first request
+        // ends with an error reply ("This operation was aborted"), which is not a failure.
+        ...(event.aborted === true
+          ? { stopReason: "aborted" }
+          : {
+            ...(outcome?.stopReason === undefined ? {} : { stopReason: outcome.stopReason }),
+            ...(outcome?.error === undefined ? {} : { error: outcome.error }),
+          }),
       }];
     }
     if (event.type === "message_start") return this.projectMessageStart(event);
@@ -2417,6 +2456,20 @@ export class PiConversationProjector {
 
 function releaseSettledWaiters(binding: Binding): void {
   for (const resolve of binding.settledWaiters.splice(0)) resolve();
+}
+
+/** Pi counts a run as busy from the start of its preparation; agent_start follows the preparation. */
+function piIsPreparing(binding: Binding): boolean {
+  return binding.token.active && binding.session.isStreaming && !binding.awaitingSettled;
+}
+
+/**
+ * A run stopped during its preparation still runs until its extensions return; input given
+ * to Pi meanwhile would join that stopped run and never be answered. The Host keeps it
+ * instead, like input during agent_settled, and hands it over once Pi publishes agent_settled.
+ */
+function piIsFinishingStoppedStart(binding: Binding): boolean {
+  return binding.token.active && binding.stoppedBeforeStart && binding.session.isStreaming;
 }
 
 /** Pi finished the run and extensions still handle agent_settled; it defers new input until then. */

@@ -92,7 +92,8 @@ function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMa
     case "showHardwareCursor": return manager.getShowHardwareCursor();
     case "clearOnShrink": return manager.getClearOnShrink();
     case "showTerminalProgress": return manager.getShowTerminalProgress();
-    case "quietStartup": return manager.getQuietStartup();
+    // Pi 1.2 added "header" (keep only the startup header); Dock's setting stays boolean and reads it as quiet.
+    case "quietStartup": return manager.getQuietStartup() !== false;
     case "collapseChangelog": return manager.getCollapseChangelog();
     case "enableInstallTelemetry": return manager.getEnableInstallTelemetry();
     case "steeringMode": return manager.getSteeringMode();

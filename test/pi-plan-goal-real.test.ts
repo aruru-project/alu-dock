@@ -394,9 +394,11 @@ test("Stopping while a Goal is still preparing its first request keeps the model
     const objective = `Inspect fixture.txt (stopped by ${stop})`;
     await h.start(`/dock-goal --rounds 1 ${objective}`);
     await waitFor(async () => readFile(h.preparing).then(() => true, () => false), "The Goal did not reach its preparation step");
+    // The stop returns while the preparation still runs (card #615: since Pi 1.2 it is
+    // part of the reply), and a message sent meanwhile is kept and answered afterwards.
     await h.dock[stop](h.work.id);
+    assert.equal((await h.submit(`Answer normally after ${stop}.`)).receipt.queued, true);
     await rm(h.hold);
-    await h.submit(`Answer normally after ${stop}.`);
     const next = await h.request();
     assert.equal(JSON.stringify(next.body.messages).includes(objective), false, `After ${stop}, the stopped Goal does not reach the model`);
     next.text("Answering normally.");
@@ -404,6 +406,21 @@ test("Stopping while a Goal is still preparing its first request keeps the model
     assert.match(await h.surface(), /已暂停/);
     assert.match(await h.surface(), /0\s*\/\s*1/);
   }
+
+  // Review of card #615: a new Goal given right after the stop waits for the stopped
+  // start to end, then starts instead of being paused with it.
+  await writeFile(h.hold, "");
+  await rm(h.preparing, { force: true });
+  await h.start("/dock-goal --rounds 1 Inspect fixture.txt (stopped before a new Goal)");
+  await waitFor(async () => readFile(h.preparing).then(() => true, () => false), "The Goal did not reach its preparation step");
+  await h.dock.abort(h.work.id);
+  await h.start("/dock-goal --rounds 1 Summarize fixture.txt (the new Goal)");
+  await rm(h.hold);
+  const newGoal = await h.request();
+  assert.match(JSON.stringify(newGoal.body.messages), /the new Goal/);
+  assert.equal(JSON.stringify(newGoal.body.messages).includes("stopped before a new Goal"), false);
+  newGoal.text("Summarized.");
+  await h.idle();
 });
 
 test("Reopening or going back in history keeps spent rounds and the right tools, and never restarts work by itself", { timeout: 40_000 }, async (context) => {

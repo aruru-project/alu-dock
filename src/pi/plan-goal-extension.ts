@@ -44,8 +44,11 @@ type GoalStatus = "active" | "paused" | "blocked" | "budget_limited";
 interface Plan { id: string; revision: number; content: string }
 interface Goal { id: string; objective: string; status: GoalStatus; maxRounds: number; rounds: number; summary: string; evidence: string[] }
 interface State { mode: Mode; plan?: Plan; goal?: Goal; readsAddedByPlan?: string[] }
-/** One session record holds only what changed since the previous record. */
-interface StateRecord { version: 1; mode?: Mode; plan?: Plan | null; goal?: Partial<Goal> | null; readsAddedByPlan?: string[] | null }
+/**
+ * One session record holds only what changed since the previous record.
+ * `stoppedPrompt` is the timestamp of a Goal prompt stopped before it reached the model.
+ */
+interface StateRecord { version: 1; mode?: Mode; plan?: Plan | null; goal?: Partial<Goal> | null; readsAddedByPlan?: string[] | null; stoppedPrompt?: number }
 interface PlanSubmitParams { content: string }
 interface PlanQuestionParams { question: string; options?: string[] }
 interface GoalUpdateParams { status: "progress" | "blocked" | "complete"; summary: string; evidence?: string[] }
@@ -54,10 +57,12 @@ interface GoalUpdateParams { status: "progress" | "blocked" | "complete"; summar
  * The Worker-local link between this extension and Dock's Pi adapter.
  *
  * Pi's `sendUserMessage` reports neither a failure before the run starts nor
- * input taken over by another extension, and Esc during preparation does not
- * stop it. The adapter fills `prompt`, which reports whether the run really
- * started and calls `mayStart` at the last moment; the extension sets
- * `cancelPending` so the adapter's abort can drop a request still being prepared.
+ * input taken over by another extension. The adapter fills `prompt`, which
+ * reports whether the run really started and calls `mayStart` at the last
+ * moment; the extension sets `cancelPending` so the adapter's abort can drop a
+ * request still being prepared. Pi records a prompt it stopped before its first
+ * request, so the adapter calls the request's `stopped` just before Pi records it,
+ * and the extension keeps that prompt out of later requests.
  *
  * The extension also sets `isPlanning`. Dock's built-in codemode reads it so
  * that while planning, codemode stops hiding the other tools, as its "only"
@@ -67,7 +72,7 @@ interface GoalUpdateParams { status: "progress" | "blocked" | "complete"; summar
  * Pi does not report to extensions.
  */
 export interface PlanGoalPort {
-  prompt?: (text: string, mayStart: () => boolean) => Promise<boolean>;
+  prompt?: (text: string, mayStart: () => boolean, stopped: () => void) => Promise<boolean>;
   cancelPending?: () => void;
   isPlanning?: () => boolean;
   toolsChosen?: () => void;
@@ -85,6 +90,15 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
     let runningGoalId: string | undefined;
     // Bumped whenever automatic work stops, so a start still being prepared is dropped.
     let requestVersion = 0;
+    // Goal prompts Pi recorded although they were stopped before reaching the model.
+    let stoppedPrompts = new Set<number>();
+    let stoppedStartRecording = false;
+    // The run now ending is such a stopped start, not a Goal round the person stopped.
+    let stoppedStartSettling = false;
+    const startStopped = (): void => {
+      stoppedStartRecording = true;
+      stoppedStartSettling = true;
+    };
 
     const goalActive = (): boolean => state.goal?.status === "active";
 
@@ -215,7 +229,7 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
         notStarted("规划与目标没有连接到当前工作，无法开始。请重新打开这个工作后再试。", "error");
         return;
       }
-      void port.prompt(text, current).then((started) => {
+      void port.prompt(text, current, startStopped).then((started) => {
         if (!started && goalId && current()) notStarted("这条请求被其他扩展接管，目标没有开始。查看结果后用 /dock-goal 继续。", "warning");
       }).catch((error: unknown) => {
         if (current()) notStarted(`无法开始：${error instanceof Error ? error.message : String(error)}。处理问题后重试。`, "error");
@@ -272,6 +286,11 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
           state.readsAddedByPlan = lastReadsAddedByPlan = record.readsAddedByPlan;
         }
       }
+      stoppedPrompts = new Set(ctx.sessionManager.getBranch().flatMap((entry) => (
+        entry.type === "custom" && entry.customType === STATE_TYPE && Number.isSafeInteger((entry.data as Partial<StateRecord> | undefined)?.stoppedPrompt)
+          ? [(entry.data as StateRecord).stoppedPrompt!]
+          : []
+      )));
       recorded = structuredClone(state);
       // Pi records the tool list only with the next request. At a history point
       // between leaving Plan and that request, Pi restores the planning tools.
@@ -323,10 +342,29 @@ export function planGoalExtension(port: PlanGoalPort): ExtensionFactory {
       };
     });
 
+    // The first user message of a start the adapter stopped is its Goal prompt.
+    pi.on("message_end", (event) => {
+      if (!stoppedStartRecording || event.message.role !== "user") return;
+      stoppedStartRecording = false;
+      stoppedPrompts.add(event.message.timestamp);
+      pi.appendEntry(STATE_TYPE, { version: 1, stoppedPrompt: event.message.timestamp } satisfies StateRecord);
+    });
+
+    // A stopped Goal never reaches the model, also not as history of later requests.
+    pi.on("context", (event) => stoppedPrompts.size === 0 ? undefined : {
+      messages: event.messages.filter((message) => !(message.role === "user" && stoppedPrompts.has(message.timestamp))),
+    });
+
     // Esc skips the settle boundary; the run still ends here.
     pi.on("agent_settled", (_event, ctx) => {
       context = ctx;
-      if (goalActive()) pause("当前回复已停止。用 /dock-goal 选择“继续”。", ctx);
+      const stoppedStart = stoppedStartSettling;
+      stoppedStartSettling = false;
+      stoppedStartRecording = false;
+      // A Goal still active after a stopped start was started after that stop and
+      // has been waiting for it to end ("目标已就绪…"): it starts now.
+      if (goalActive() && stoppedStart) resumeGoal(ctx);
+      else if (goalActive()) pause("当前回复已停止。用 /dock-goal 选择“继续”。", ctx);
       else render(ctx);
     });
 

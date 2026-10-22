@@ -266,6 +266,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
     ...(runtime.sessionFile === undefined ? {} : { sessionFile: runtime.sessionFile }),
     ...(runtime.getDurableSessionFile() === undefined ? {} : { durableSessionFile: runtime.getDurableSessionFile() }),
     isStreaming: runtime.isStreaming,
+    ...(runtime.isPreparing ? { isPreparing: true } : {}),
     isCompacting: runtime.isCompacting,
     ...(runtime.getGitBranch() === undefined ? {} : { gitBranch: runtime.getGitBranch() }),
     modelState: runtime.getModelState(),
