@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let unique = sessions
         .iter()
-        .map(|session| session.session_id.as_str())
+        .map(|session| session.session_file.as_str())
         .collect::<std::collections::HashSet<_>>()
         .len();
     let Some(saved) = sessions

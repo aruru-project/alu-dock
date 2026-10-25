@@ -42,16 +42,18 @@ pub(crate) struct SafeSavedSessionPage {
 }
 
 /// Replaces private session paths with list-scoped tokens for the WebView.
-fn saved_session_rows(
+/// A saved Session is its file: an imported copy keeps the Session ID, so only
+/// the Work's own file is current.
+pub(crate) fn saved_session_rows(
     sessions: Vec<SessionInfo>,
-    current_session_id: Option<&str>,
+    current_session_file: Option<&str>,
 ) -> (Vec<SafeSavedSession>, HashMap<String, String>) {
     let mut tokens = HashMap::new();
     let rows = sessions
         .into_iter()
         .map(|session| {
             let token = uuid::Uuid::new_v4().to_string();
-            let current = current_session_id == Some(session.session_id.as_str());
+            let current = current_session_file == Some(session.session_file.as_str());
             tokens.insert(token.clone(), session.session_file);
             SafeSavedSession {
                 token,
@@ -132,7 +134,7 @@ pub(crate) async fn list_sessions(
         std::mem::take(&mut result.sessions),
         current
             .as_ref()
-            .map(|current| current.executor.pi_session_id.as_str()),
+            .and_then(|current| current.executor.session_file.as_deref()),
     );
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;

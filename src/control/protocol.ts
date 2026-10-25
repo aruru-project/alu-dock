@@ -1973,7 +1973,8 @@ function parseSessionDtos(input: unknown): SessionDto[] {
       ...(session.costTotal === undefined ? {} : { costTotal: finiteNumber(session.costTotal, `sessions[${index}].costTotal`) }),
     };
   });
-  if (new Set(sessions.map((session) => session.sessionId)).size !== sessions.length) throw validation("invalid_response", "Session IDs must be unique");
+  // A saved Session is its file. Pi's /import copies a file with its Session ID, so two
+  // files may share one ID; each file is still listed once.
   if (new Set(sessions.map((session) => session.sessionFile)).size !== sessions.length) throw validation("invalid_response", "Session files must be unique");
   return sessions;
 }

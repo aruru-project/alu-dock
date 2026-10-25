@@ -232,6 +232,7 @@ try {
 
   // #318: Resume lists the Work's directory from the Host, one row per Session
   // (title, then time · cost), and keeps reading pages until every Session is shown.
+  // #616: rows carry absent values as null, as the native layer sends them.
   {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4, cwd: '/project', hostId: 'machine-a' })
     const store = await createStore(work)
@@ -241,8 +242,8 @@ try {
       assert.equal(command, 'list_sessions')
       reads.push(args)
       return args.cursor === null
-        ? { ...page, nextCursor: 'page-2', sessions: [{ token: 'current', name: 'Current work', cwd: '/project', lastActivityAt: '2026-09-29T12:00:00.000Z', costTotal: 1.5, current: true }] }
-        : { ...page, sessions: [{ token: 'older', firstUserMessage: '整理发布清单', cwd: '/project', lastActivityAt: '2026-09-28T12:00:00.000Z', current: false }] }
+        ? { ...page, nextCursor: 'page-2', sessions: [{ token: 'current', name: 'Current work', firstUserMessage: null, cwd: '/project', lastActivityAt: '2026-09-29T12:00:00.000Z', costTotal: 1.5, current: true }] }
+        : { ...page, nextCursor: null, sessions: [{ token: 'older', name: null, firstUserMessage: '整理发布清单', cwd: '/project', lastActivityAt: '2026-09-28T12:00:00.000Z', costTotal: null, current: false }] }
     } }
     const container = node('root')
     const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode: 'sessions', compactionPending: false }) })
