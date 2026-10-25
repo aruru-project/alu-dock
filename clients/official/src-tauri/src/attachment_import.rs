@@ -428,44 +428,7 @@ pub(crate) async fn pick_attachments(
     for file in files {
         let local_path = file.clone().into_path();
         let (source, name, media_type) = match local_path {
-            Ok(path) => {
-                let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-                    attachment_command_error(
-                        "attachment_source_unavailable",
-                        MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
-                    )
-                })?;
-                if !metadata.file_type().is_file() {
-                    return Err(attachment_command_error(
-                        "invalid_attachment_source",
-                        MSG_ATTACHMENT_NOT_PLAIN_FILE,
-                    ));
-                }
-                if metadata.len() > MAX_ATTACHMENT_BYTES {
-                    return Err(attachment_command_error(
-                        "attachment_too_large",
-                        &msg_attachment_too_large(),
-                    ));
-                }
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| valid_attachment_name(name))
-                    .ok_or_else(|| {
-                        attachment_command_error("invalid_attachment_name", "附件名称无效。")
-                    })?
-                    .to_owned();
-                let media_type = mime_guess::from_path(&path).first_raw().map(str::to_owned);
-                let content = state.content.clone();
-                let source = tokio::task::spawn_blocking(move || {
-                    content
-                        .import_attachment_file(&path)
-                        .map_err(CommandError::from)
-                })
-                .await
-                .map_err(|_| lifecycle_error())??;
-                (source, name, media_type)
-            }
+            Ok(path) => import_local_file(&state, path).await?,
             Err(_) => {
                 #[cfg(target_os = "android")]
                 {
@@ -496,6 +459,84 @@ pub(crate) async fn pick_attachments(
         selection_generation,
         prepared,
         &attachment_authority(&runtime, &connection_id)?,
+    )
+}
+
+/// Copies one local file into private staging under the picker's checks.
+pub(crate) async fn import_local_file(
+    state: &AttachmentState,
+    path: std::path::PathBuf,
+) -> Result<(Arc<AttachmentSource>, String, Option<String>), CommandError> {
+    let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
+        attachment_command_error(
+            "attachment_source_unavailable",
+            MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(attachment_command_error(
+            "invalid_attachment_source",
+            MSG_ATTACHMENT_NOT_PLAIN_FILE,
+        ));
+    }
+    if metadata.len() > MAX_ATTACHMENT_BYTES {
+        return Err(attachment_command_error(
+            "attachment_too_large",
+            &msg_attachment_too_large(),
+        ));
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| valid_attachment_name(name))
+        .ok_or_else(|| attachment_command_error("invalid_attachment_name", "附件名称无效。"))?
+        .to_owned();
+    let media_type = mime_guess::from_path(&path).first_raw().map(str::to_owned);
+    let content = state.content.clone();
+    let source = tokio::task::spawn_blocking(move || {
+        content
+            .import_attachment_file(&path)
+            .map_err(CommandError::from)
+    })
+    .await
+    .map_err(|_| lifecycle_error())??;
+    Ok((source, name, media_type))
+}
+
+/// Stages local files that the system handed over (a drop or a copied file list)
+/// exactly as if they had been picked.
+pub(crate) async fn stage_local_files(
+    runtime: &ConnectionRuntimeState,
+    state: &AttachmentState,
+    connection_id: String,
+    selection_generation: u64,
+    work_id: String,
+    paths: Vec<std::path::PathBuf>,
+) -> Result<Vec<SelectedAttachment>, CommandError> {
+    if paths.len() > MAX_ATTACHMENTS_PER_MESSAGE {
+        return Err(attachment_command_error(
+            "attachment_limit_exceeded",
+            &msg_attachment_selection_full(),
+        ));
+    }
+    let mut prepared = Vec::with_capacity(paths.len());
+    for path in paths {
+        let (source, name, media_type) = import_local_file(state, path).await?;
+        prepared.push(prepare_native_attachment(
+            source,
+            connection_id.clone(),
+            work_id.clone(),
+            name,
+            media_type,
+        ));
+    }
+    publish_selected_attachments(
+        runtime.lifecycle.as_ref(),
+        state,
+        &connection_id,
+        selection_generation,
+        prepared,
+        &attachment_authority(runtime, &connection_id)?,
     )
 }
 

@@ -20,6 +20,7 @@ mod desktop_shell;
 mod errors;
 mod extension;
 mod file_delivery;
+mod file_handoff;
 mod media;
 #[cfg(test)]
 mod native_tests;
@@ -81,6 +82,7 @@ pub fn run() {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window.state::<PairingTaskState>().cancel_all();
             }
+            file_handoff::handle_window_event(window, event);
         })
         .register_asynchronous_uri_scheme_protocol(
             "aludock-media",
@@ -143,6 +145,7 @@ pub fn run() {
             Ok(())
         })
         .manage(ExtensionControlState::default())
+        .manage(file_handoff::DroppedFiles::default())
         .manage(PairingTaskState::default())
         .manage(SessionTokenState::default())
         .manage(CommandReferenceState::default())
@@ -186,6 +189,8 @@ pub fn run() {
             extension::set_shared_widget_viewport,
             attachment_import::pick_attachments,
             attachment_import::stage_clipboard_image,
+            file_handoff::stage_dropped_files,
+            file_handoff::stage_clipboard_files,
             attachment_import::attachment_preview,
             attachment_import::upload_attachment,
             attachment_import::attachment_snapshot,

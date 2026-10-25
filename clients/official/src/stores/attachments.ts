@@ -3,7 +3,7 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import {
   attachmentSnapshot, cancelAttachmentUpload, clearRestoredImages, isTauri, loadAttachmentPreview, nativeMediaUrl, pickAttachments, removeAttachment,
-  restoredImageCount as nativeRestoredImageCount, stageClipboardImage, uploadAttachment,
+  restoredImageCount as nativeRestoredImageCount, stageClipboardFiles, stageClipboardImage, stageDroppedFiles, uploadAttachment,
 } from '../lib/bridge'
 import { attachmentUploadMatches, attachmentUploadTarget, bindLocalAttachment, moveAttachmentPreviewResource } from '../lib/attachmentDraft'
 import { isRasterImageMimeType, rasterImageMimeType } from '../lib/rasterImage'
@@ -16,6 +16,7 @@ import { useHostStore } from './host'
 import { useObservationStore } from './observation'
 import { useSurfacesStore } from './surfaces'
 type AttachmentPreviewResource = { handle: string; url: string; mediaType: string }
+type FileDrag = { state: 'over' | 'left' } | { state: 'dropped'; dropId: number }
 /** The editor's attachment selection, uploads and previews. Failures go to the editor's message line. */
 export const useAttachmentsStore = defineStore('attachments', () => {
   const app = useAppStore()
@@ -190,16 +191,20 @@ export const useAttachmentsStore = defineStore('attachments', () => {
       if (completed && draftAttachments.value.some(attachment => attachment.fileId === completed.attachment.fileId)) moveAttachmentPreview(item.token, completed.attachment.fileId)
     } catch (cause) { reportViewError(view, cause) }
   }
-  async function chooseAttachments() {
+  function canAddAttachments() {
     const work = selected.value
-    if (!work || !isTauri || work.lifecycle !== 'active' || host.pairingInProgress || attachmentPicking.value) return
+    return !!work && isTauri && work.lifecycle === 'active' && !host.pairingInProgress && !attachmentPicking.value
+  }
+  /** Picked, dropped and copied files: native staged them; this Work's draft takes them or they are discarded. `null`: native had none. */
+  async function addLocalFiles(stage: (view: NonNullable<AttachmentView>) => Promise<SelectedAttachment[] | null>) {
     const view = captureView()
-    if (!viewMatches(view)) return
+    if (!viewMatches(view)) return true
     const pendingKey = attachmentWorkKey.value
     pickingWorks.value.add(pendingKey)
     reportError(null)
     try {
-      const picked = await pickAttachments(view.workId, view.context)
+      const picked = await stage(view)
+      if (!picked) return null
       if (viewMatches(view)) await refreshJobs(view)
       if (acceptSelections(picked, view)) {
         for (const item of picked) void launchAttachmentUpload(item, view)
@@ -208,15 +213,32 @@ export const useAttachmentsStore = defineStore('attachments', () => {
       }
     } catch (cause) { reportViewError(view, cause) }
     finally { pickingWorks.value.delete(pendingKey) }
+    return true
+  }
+  async function chooseAttachments() {
+    if (canAddAttachments()) await addLocalFiles(view => pickAttachments(view.workId, view.context))
+  }
+  // Files dragged over the window, while a Work's editor is showing.
+  const fileDragOver = ref(false)
+  async function addDroppedFiles(dropId: number) {
+    fileDragOver.value = false
+    if (selected.value?.lifecycle !== 'active') return
+    if (!canAddAttachments()) { reportError('当前暂时不能添加拖入的文件，请稍后重试。'); return }
+    await addLocalFiles(view => stageDroppedFiles(view.workId, dropId, view.context))
   }
   async function handleComposerPaste(event: ClipboardEvent) {
     if (!isTauri) return
-    const images = [...(event.clipboardData?.items ?? [])].filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    const files = [...(event.clipboardData?.items ?? [])].filter(item => item.kind === 'file')
+    if (!files.length) return
+    // Read now: the event's clipboard data is gone after the first await.
+    const images = files.filter(item => item.type.startsWith('image/'))
       .map(item => item.getAsFile()).filter((file): file is File => file !== null)
-    if (!images.length) return
     event.preventDefault()
-    const work = selected.value
-    if (!work || work.lifecycle !== 'active' || host.pairingInProgress || attachmentPicking.value) { reportError('当前暂时不能添加剪贴板图片，请稍后重试。'); return }
+    if (!canAddAttachments()) { reportError('当前暂时不能添加剪贴板里的文件，请稍后重试。'); return }
+    // Files copied in a file manager keep their names and types; a screenshot is only image data.
+    if (await addLocalFiles(view => stageClipboardFiles(view.workId, view.context))) return
+    if (!images.length) { reportError('无法读取剪贴板里的文件，请重新复制或使用附件按钮。'); return }
+    if (!canAddAttachments()) return
     if (images.length + draftAttachments.value.length + app.currentPendingAttachments.length > maxMessageAttachments.value) {
       reportError(`一条消息最多可附加 ${maxMessageAttachments.value} 个文件，请减少选择后重试。`); return
     }
@@ -311,19 +333,24 @@ export const useAttachmentsStore = defineStore('attachments', () => {
   let disposed = false
   async function listenNative() {
     if (unlisten) return
-    const release = await listen<AttachmentJobSnapshot>('aludock://attachment-progress', ({ payload }) => {
+    const releaseProgress = await listen<AttachmentJobSnapshot>('aludock://attachment-progress', ({ payload }) => {
       if (payload.connectionId === app.activeConnectionId && payload.workId === selected.value?.id) {
         // Resolve authority through the scoped query, not an event from an old local endpoint.
         void refreshCurrentJobs()
       }
     })
+    const releaseDrag = await listen<FileDrag>('aludock://file-drag', ({ payload }) => {
+      if (payload.state === 'dropped') void addDroppedFiles(payload.dropId)
+      else fileDragOver.value = payload.state === 'over' && selected.value?.lifecycle === 'active'
+    })
+    const release = () => { releaseProgress(); releaseDrag() }
     if (disposed) release(); else { unlisten = release; await refreshCurrentJobs() }
   }
   // A replaced Session may have dropped the images returned from its Queue.
   const offReplaced = observation.onReplaced(() => { void refreshRestoredImageCount() })
   onScopeDispose(() => { disposed = true; viewEpoch++; unlisten?.(); offReplaced(); resetAttachmentPreviews() })
   return {
-    draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount,
+    draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, fileDragOver,
     maxMessageAttachments, onError: errorReported.on, refreshRestoredImageCount, clearQueueImages, chooseAttachments, handleComposerPaste,
     launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, removeAttachmentPreview, listenNative,
     previewFailed: () => reportError('这个图片附件无法预览，原附件仍保持不变。'),
