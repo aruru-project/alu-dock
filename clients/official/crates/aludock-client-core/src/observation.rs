@@ -1818,6 +1818,48 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 
+    // Card #616: Resume marks the current saved Session by its file. After the
+    // Work switches Session, the new file is current, not the one it left.
+    #[test]
+    fn switching_session_makes_the_new_file_the_current_saved_session() {
+        let directory =
+            std::env::temp_dir().join(format!("replaced-file-{}", uuid::Uuid::new_v4()));
+        let content = SessionContent::in_directory(directory.clone()).unwrap();
+        let owner = content.claim("work");
+        let mut opened = read();
+        opened["instance"]["executor"]["sessionFile"] = json!("/sessions/old.jsonl");
+        content
+            .commit(
+                "work",
+                owner,
+                SessionUpdate::Read(serde_json::from_value(opened).unwrap()),
+            )
+            .unwrap();
+        content
+            .commit(
+                "work",
+                owner,
+                SessionUpdate::Event(crate::DockEvent {
+                    scope: "instance".into(),
+                    instance_id: "work".into(),
+                    runtime_generation: 2,
+                    sequence: 1,
+                    occurred_at: "now".into(),
+                    event_type: "session.replaced".into(),
+                    data: json!({"reason":"resume","previousSessionFile":"/sessions/old.jsonl","sessionFile":"/sessions/new.jsonl",
+                        "runtimeGeneration":2,"cwd":"/isolated","piSessionId":"session-new","displayName":"Work"}),
+                }),
+            )
+            .unwrap();
+        let target = content.check_target("work", "epoch", 2).unwrap().unwrap();
+        assert_eq!(
+            target.executor.session_file.as_deref(),
+            Some("/sessions/new.jsonl")
+        );
+        drop(content);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn recovery_read_prioritizes_new_identity_over_unread_tail() {
         for (generation, session_id) in [(2, "session-2"), (1, "other-session")] {

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DockClient } from "../src/control/dock-client.js";
+import { DockHost } from "../src/control/dock-host.js";
+import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiSessionInventory } from "../src/pi/session-inventory.js";
 
 test("Pi session inventory provides the first user message without copying conversation content into its cache", async (context) => {
@@ -91,4 +94,37 @@ test("saved session shows its latest conversation time and recorded cost; renami
   await writeFile(paid, migrated, "utf8");
   sessions = await byId();
   assert.equal(sessions.get("paid")?.costTotal, 0.875, "a rewritten file is summarized again, not counted twice");
+});
+
+// Card #616: one imported copy made the TUI's Pi Sessions list fail to load as a whole.
+test("an imported copy of a saved Session is listed beside the original, each as its own file", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-session-import-"));
+  await chmod(root, 0o700);
+  context.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const cwd = join(root, "project");
+  const sessionsRoot = join(root, "sessions");
+  await mkdir(cwd, { recursive: true });
+  await mkdir(join(sessionsRoot, "original-project"), { recursive: true });
+  await mkdir(join(sessionsRoot, "other-project"), { recursive: true });
+  const original = join(sessionsRoot, "original-project", "planning.jsonl");
+  await writeFile(original, [
+    JSON.stringify({ type: "session", version: 3, id: "imported-session", timestamp: "2026-10-20T00:00:00.000Z", cwd }),
+    JSON.stringify({ type: "message", id: "u1", parentId: null, timestamp: "2026-10-20T00:00:01.000Z", message: { role: "user", content: "整理发布清单" } }),
+    "",
+  ].join("\n"), "utf8");
+  // Pi's /import copies the file as it is, Session ID included.
+  const imported = join(sessionsRoot, "other-project", "planning.jsonl");
+  await copyFile(original, imported);
+
+  const host = new DockHost({
+    socketPath: join(root, "dock.sock"),
+    registry: new DockRegistry(async () => { throw new Error("listing saved sessions must not start a Worker"); }),
+    sessionInventory: createPiSessionInventory({ sessionsRoot }),
+  });
+  context.after(async () => { await host.stop().catch(() => {}); });
+  await host.start();
+
+  const listed = await new DockClient({ socketPath: join(root, "dock.sock") }).sessionInventory(cwd, "all");
+  assert.deepEqual(listed.sessions.map((session) => session.sessionFile).sort(), [imported, original].sort());
+  assert.deepEqual(listed.sessions.map((session) => session.sessionId), ["imported-session", "imported-session"]);
 });

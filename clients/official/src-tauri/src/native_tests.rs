@@ -6,6 +6,7 @@ use crate::errors::*;
 use crate::file_delivery::*;
 use crate::media::*;
 use crate::observation::*;
+use crate::sessions::saved_session_rows;
 use crate::workspace_files::*;
 use aludock_client_core::*;
 use serde_json::Value;
@@ -942,4 +943,31 @@ fn start_dispatch_registers_pairing_before_the_next_page_exit() {
         "start acceptance must not remain queued beyond the page exit"
     );
     fs::remove_dir_all(path).unwrap();
+}
+
+// Card #616: Pi's /import copies a saved Session with its ID; the copy and the
+// original were both shown as the current Session of the Work.
+#[test]
+fn only_the_works_own_file_is_the_current_saved_session() {
+    let saved = |file: &str| -> SessionInfo {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "imported-session",
+            "sessionFile": file,
+            "cwd": "/project",
+        }))
+        .unwrap()
+    };
+    let (rows, tokens) = saved_session_rows(
+        vec![
+            saved("/sessions/a/planning.jsonl"),
+            saved("/sessions/b/planning.jsonl"),
+        ],
+        Some("/sessions/b/planning.jsonl"),
+    );
+    let current: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.current)
+        .map(|row| tokens[&row.token].as_str())
+        .collect();
+    assert_eq!(current, ["/sessions/b/planning.jsonl"]);
 }

@@ -12,7 +12,7 @@ export function savedSessionSearchText(session: SavedSession): string {
 }
 
 /** Compact local time: the year is shown only when it is not the current one. */
-export function savedSessionTime(value: string | undefined, now = new Date()): string {
+export function savedSessionTime(value: string | null | undefined, now = new Date()): string {
   if (!value) return ''
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return ''
@@ -24,8 +24,8 @@ export function savedSessionTime(value: string | undefined, now = new Date()): s
 }
 
 /** A locating aid, not billing: `-$` means the Session recorded no cost. */
-export function savedSessionCost(cost: number | undefined): string {
-  if (cost === undefined) return '-$'
+export function savedSessionCost(cost: number | null | undefined): string {
+  if (cost == null) return '-$'
   if (cost > 0 && cost < 0.01) return '<$0.01'
   return `$${cost.toFixed(2)}`
 }

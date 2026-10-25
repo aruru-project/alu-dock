@@ -32,7 +32,7 @@ Host 自己处理：
 
 这些状态属于 Dock，不交给 Agent runtime 决定。Persisted-session inventory 的 response 可附带有界 `firstUserMessage`，供人类选择器在无 session name 时展示；它是可忽略的新增 response 字段，不改变 session file 作为采用目标的语义。
 
-Inventory 是官方客户端 Resume 与“从保存的 Session 新建 Work”共用的列表来源，二者只差范围（Work 所在目录 / 所选机器全部）和最终动作；Resume 不再向 Worker 取列表。每条附带可忽略的 `lastActivityAt`（最后一条 user/assistant 消息时间，无消息时为 session 开始时间；改名、复制文件不改变它）和 `costTotal`（文件内全部调用已记录费用之和，只作辨认参考，分叉复制来的记录照算；没有记录时省略）。Host 按 `lastActivityAt` 倒序分页：不带 `cursor` 的请求就是第一页，内容与旧客户端读到的一致；还有后续时返回 `nextCursor`，带上它（并在 hello 要求 `session.inventory.pages.v1`）继续读。保存格式读取在 Pi adapter 的 `src/pi/session-inventory.ts`，其持久缓存只存时间、费用等数字和续读位置，不存对话文字；文件只追加时只读新增部分。
+Inventory 是官方客户端 Resume 与“从保存的 Session 新建 Work”共用的列表来源，二者只差范围（Work 所在目录 / 所选机器全部）和最终动作；Resume 不再向 Worker 取列表。每条附带可忽略的 `lastActivityAt`（最后一条 user/assistant 消息时间，无消息时为 session 开始时间；改名、复制文件不改变它）和 `costTotal`（文件内全部调用已记录费用之和，只作辨认参考，分叉复制来的记录照算；没有记录时省略）。每条以 `sessionFile` 区分，同一份列表里文件不重复；`sessionId` 可以重复（Pi `/import` 原样复制文件、保留原 ID），客户端选择、恢复和标记“当前”都按文件。Host 按 `lastActivityAt` 倒序分页：不带 `cursor` 的请求就是第一页，内容与旧客户端读到的一致；还有后续时返回 `nextCursor`，带上它（并在 hello 要求 `session.inventory.pages.v1`）继续读。保存格式读取在 Pi adapter 的 `src/pi/session-inventory.ts`，其持久缓存只存时间、费用等数字和续读位置，不存对话文字；文件只追加时只读新增部分。
 
 ### Session gateway
 

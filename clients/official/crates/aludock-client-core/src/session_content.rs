@@ -495,6 +495,9 @@ impl SessionContent {
                         if let Some(id) = event.data["piSessionId"].as_str() {
                             target.executor.pi_session_id = id.into();
                         }
+                        // Resume marks the current saved Session by this file.
+                        target.executor.session_file =
+                            event.data["sessionFile"].as_str().map(str::to_owned);
                         target.name = event.data["name"].as_str().map(str::to_owned);
                         target.pending = crate::PendingCounts {
                             steering: 0,

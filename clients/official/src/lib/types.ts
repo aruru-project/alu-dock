@@ -453,16 +453,16 @@ export type InteractionResponse =
   | { method: 'select' | 'input' | 'editor'; value: string }
   | { method: 'confirm'; confirmed: boolean }
 
-/** One saved Session in the list shared by Resume and "new Work from a saved Session". */
+/** One saved Session in the list shared by Resume and "new Work from a saved Session"; native sends an absent value as `null`. */
 export interface SavedSession {
   token: string
-  name?: string
-  firstUserMessage?: string
+  name?: string | null
+  firstUserMessage?: string | null
   cwd: string
   /** Latest conversation time (older Hosts: last file change). */
-  lastActivityAt?: string
+  lastActivityAt?: string | null
   /** Recorded call costs summed over the Session; absent when none were recorded. */
-  costTotal?: number
+  costTotal?: number | null
   current: boolean
 }
 export interface SavedSessionPage extends ConnectionContext {
