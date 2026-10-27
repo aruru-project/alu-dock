@@ -971,3 +971,87 @@ fn only_the_works_own_file_is_the_current_saved_session() {
         .collect();
     assert_eq!(current, ["/sessions/b/planning.jsonl"]);
 }
+
+// Card #650: files dropped on the window were swallowed by the window and never
+// reached the attachments.
+#[test]
+fn a_file_dropped_on_the_window_becomes_an_attachment_with_its_own_name() {
+    use tauri::Listener;
+    let (path, runtime, host_id) = endpoint_runtime("file-drop");
+    let dropped = path.join("角色立绘.gif");
+    fs::write(&dropped, b"GIF89a-test-art").unwrap();
+    let app = tauri::test::mock_builder()
+        .manage(runtime)
+        .manage(AttachmentState::default())
+        .manage(crate::file_handoff::DroppedFiles::default())
+        .invoke_handler(tauri::generate_handler![
+            crate::file_handoff::stage_dropped_files
+        ])
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .unwrap();
+    let announced = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let seen = announced.clone();
+    app.listen_any(crate::file_handoff::FILE_DRAG_EVENT, move |event| {
+        seen.lock()
+            .unwrap()
+            .push(serde_json::from_str(event.payload()).unwrap());
+    });
+
+    let window = webview.as_ref().window();
+    let position = tauri::PhysicalPosition::new(10.0, 10.0);
+    crate::file_handoff::handle_window_event(
+        &window,
+        &tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Enter {
+            paths: vec![dropped.clone()],
+            position,
+        }),
+    );
+    crate::file_handoff::handle_window_event(
+        &window,
+        &tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop {
+            paths: vec![dropped.clone()],
+            position,
+        }),
+    );
+    let announced = announced.lock().unwrap().clone();
+    assert_eq!(announced[0], serde_json::json!({ "state": "over" }));
+    assert_eq!(announced[1]["state"], "dropped");
+    assert!(
+        !announced[1].to_string().contains("角色立绘"),
+        "the page learns that files were dropped, not where they are"
+    );
+
+    let staged: Value = tauri::test::get_ipc_response(
+        &webview,
+        tauri::webview::InvokeRequest {
+            cmd: "stage_dropped_files".into(),
+            callback: tauri::ipc::CallbackFn(0),
+            error: tauri::ipc::CallbackFn(1),
+            url: if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            }
+            .parse()
+            .unwrap(),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({
+                "connectionId": host_id, "selectionGeneration": 1, "workId": "work",
+                "dropId": announced[1]["dropId"],
+            })),
+            headers: Default::default(),
+            invoke_key: tauri::test::INVOKE_KEY.into(),
+        },
+    )
+    .unwrap()
+    .deserialize()
+    .unwrap();
+    assert_eq!(staged[0]["name"], "角色立绘.gif");
+    assert_eq!(staged[0]["sizeBytes"], 15);
+    assert_eq!(staged[0]["mediaType"], "image/gif");
+    drop(webview);
+    drop(app);
+    fs::remove_dir_all(path).unwrap();
+}

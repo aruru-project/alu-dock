@@ -24,7 +24,7 @@ const input = useInputStore()
 const { draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
 const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, runQuickButton, quickButtonDisabled } = input
 const attachments = useAttachmentsStore()
-const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, maxMessageAttachments } = storeToRefs(attachments)
+const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, maxMessageAttachments, fileDragOver } = storeToRefs(attachments)
 const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, chooseAttachments } = attachments
 const surfaces = useSurfacesStore()
 const { modalOpen, composerExpanded, workspaceBrowserOpen } = storeToRefs(surfaces)
@@ -118,12 +118,39 @@ const applyExtensionTitle = (title: string) => { document.title = title }
     </div>
   </Transition>
 
+  <!-- Native takes the drop anywhere in the window; this only tells the user so. -->
+  <Teleport to="body">
+    <div v-if="fileDragOver" class="alu-file-drop" role="status"><span><Paperclip :size="20" aria-hidden="true" />松开添加附件</span></div>
+  </Teleport>
+
 </template>
 
 <style scoped>
 /* ═══════════════════════════════════════════════════════
    输入区
    ═══════════════════════════════════════════════════════ */
+.alu-file-drop {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(4, 6, 13, 0.6);
+  pointer-events: none;
+}
+.alu-file-drop span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 18px 28px;
+  border: 2px dashed var(--alu-blue-border);
+  border-radius: 12px;
+  background: var(--alu-bg-raised);
+  color: var(--alu-blue);
+  font-size: 16px;
+}
 .alu-input-section {
   position: relative;
   z-index: 10;

@@ -16,7 +16,7 @@ const filesOnly = process.argv.includes('--files-reading')
 const listeners = new Map(), storage = new Map(), calls = []
 const consumeFailures = new Set()
 const nativeJobs = new Map()
-let pickedJobs = [], failStorage = false, jobsRevision = 0, deferJobSnapshot = false, releaseJobSnapshot, uploadNative
+let pickedJobs = [], droppedJobs = [], clipboardFiles = null, failStorage = false, jobsRevision = 0, deferJobSnapshot = false, releaseJobSnapshot, uploadNative
 const context = { connectionId: 'host', selectionGeneration: 1 }
 const work = { id: 'work', displayName: 'Work', name: 'Old Session', cwd: '/work', lifecycle: 'active', extensionStatus: {}, execution: 'idle', compacting: false,
   ownerHostEpoch: 'epoch', runtimeGeneration: 1, executor: { kind: 'pi', piSessionId: 'old' }, pending: { steering: 0, followUp: 0, total: 0 }, updatedAt: '2026-09-19',
@@ -146,6 +146,8 @@ const invoke = async (command, args = {}) => {
     return cut
   }
   if (command === 'pick_attachments' || command === 'stage_clipboard_image') return structuredClone(command === 'pick_attachments' ? pickedJobs : pickedJobs[0])
+  if (command === 'stage_dropped_files') return structuredClone(droppedJobs)
+  if (command === 'stage_clipboard_files') return structuredClone(clipboardFiles)
   if (command === 'upload_attachment') {
     if (uploadNative) return uploadNative(args)
     const job = nativeJobs.get(args.token)
@@ -1700,6 +1702,44 @@ try {
     await rebuildUploadView()
   }
   console.log('PASS: picker/paste held query and late upload rejection stay with original Work; A/B/A cannot revive handoff or feedback; unaccepted imports discarded')
+  // #650: dropping files on the window, or pasting files copied in a file
+  // manager, adds them like picked files. Native holds the paths; the page only
+  // names the drop.
+  {
+    const dropHint = () => find(teleport, item => item.props.class === 'alu-file-drop')
+    const uploadedTokens = () => calls.filter(call => call.command === 'upload_attachment').map(call => call.args.token)
+    emit('aludock://file-drag', { state: 'over' }); await settle()
+    assert.ok(text(dropHint() ?? element('none')).includes('松开添加附件'), 'dragging files over the window says they can be dropped')
+    emit('aludock://file-drag', { state: 'left' }); await settle()
+    assert.equal(dropHint(), undefined, 'the hint goes away when the drag leaves the window')
+    const art = { ...job('art'), name: '角色立绘.gif', mediaType: 'image/gif' }, scene = { ...job('scene'), name: 'scene.psd', mediaType: 'image/vnd.adobe.photoshop' }
+    nativeJobs.set('art', art); nativeJobs.set('scene', scene); droppedJobs = [art, scene]
+    emit('aludock://file-drag', { state: 'over' }); await settle()
+    emit('aludock://file-drag', { state: 'dropped', dropId: 7 }); await settle()
+    assert.equal(dropHint(), undefined)
+    const dropped = calls.findLast(call => call.command === 'stage_dropped_files')?.args
+    assert.equal(dropped?.workId, 'work'); assert.equal(dropped?.dropId, 7)
+    for (const name of ['角色立绘.gif', 'scene.psd']) assert.ok(text(uploadContainer).includes(name), `dropped ${name} is in the attachment tray`)
+    assert.deepEqual(uploadedTokens().slice(-2).sort(), ['art', 'scene'], 'dropped files start uploading like picked files')
+    uploadApp.setPendingAttachments([]); nativeJobs.clear(); await rebuildUploadView()
+
+    // Explorer's Ctrl+C on a sound and a picture: both come in under their own
+    // names, the picture as a file rather than as pasted image data.
+    const sound = { ...job('sound'), name: 'theme.ogg', mediaType: 'audio/ogg' }, picture = { ...job('picture'), name: '立绘.png', mediaType: 'image/png' }
+    nativeJobs.set('sound', sound); nativeJobs.set('picture', picture); clipboardFiles = [sound, picture]
+    const imagePastesBefore = calls.filter(call => call.command === 'stage_clipboard_image').length
+    let prevented = false
+    await uploadEditor().props.onPaste({ preventDefault() { prevented = true }, clipboardData: { items: [
+      { kind: 'file', type: '', getAsFile: () => new File([new Uint8Array([79, 103, 103, 83])], 'theme.ogg') },
+      { kind: 'file', type: 'image/png', getAsFile: () => new File([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], '立绘.png', { type: 'image/png' }) },
+    ] } }); await settle()
+    assert.ok(prevented, 'the copied files are not pasted into the text')
+    for (const name of ['theme.ogg', '立绘.png']) assert.ok(text(uploadContainer).includes(name), `pasted ${name} is in the attachment tray`)
+    assert.equal(calls.filter(call => call.command === 'stage_clipboard_image').length, imagePastesBefore, 'a copied picture keeps its file, not a re-encoded paste')
+    assert.deepEqual(uploadedTokens().slice(-2).sort(), ['picture', 'sound'])
+    clipboardFiles = null; uploadApp.setPendingAttachments([]); nativeJobs.clear(); await rebuildUploadView()
+  }
+  console.log('PASS: dropped files and files copied in a file manager become attachments under their own names')
   // Upload-state review P1: storage failure blocked unrelated control buttons.
   // These actions freeze the real target, but never claim or clear this editor.
   const countCalls = command => calls.filter(call => call.command === command).length

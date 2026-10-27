@@ -242,6 +242,16 @@ export async function pickAttachments(workId: string, context: ConnectionContext
   return native('pick_attachments', { ...context, workId })
 }
 
+/** Native reads the paths from the drop it recorded; the page only names the drop. */
+export async function stageDroppedFiles(workId: string, dropId: number, context: ConnectionContext): Promise<SelectedAttachment[]> {
+  return native('stage_dropped_files', { ...context, workId, dropId })
+}
+
+/** Files copied in a file manager, read from the system clipboard; `null` when it holds none. */
+export async function stageClipboardFiles(workId: string, context: ConnectionContext): Promise<SelectedAttachment[] | null> {
+  return native('stage_clipboard_files', { ...context, workId })
+}
+
 export async function stageClipboardImage(workId: string, bytes: Uint8Array, imageIndex: number, context: ConnectionContext): Promise<SelectedAttachment> {
   return native<SelectedAttachment>('stage_clipboard_image', bytes, {
     headers: {
