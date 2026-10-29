@@ -313,6 +313,8 @@ function clearError() {
 
 function setError(cause: unknown, action?: string, request?: string) {
   error.value = userErrorPresentation(cause, undefined, action && request ? { action, request } : undefined)
+  // A failed save or creation said here is not repeated by the Work list's result entry.
+  app.failureShown(cause)
 }
 
 async function copyErrorDiagnostic() {

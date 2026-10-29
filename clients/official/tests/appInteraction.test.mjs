@@ -168,7 +168,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'list_models') return { instance: atHost(work), models: [{ provider: 'fixture', id: 'model', name: 'model' }], availableThinkingLevels: ['off'], total: 1, truncated: false }
   if (command === 'set_model') {
     if (modelNative) return modelNative(args)
-    const error = { code: 'busy', outcomeUnknown: false, message: '这次模型设置没有完成，请重试。' }
+    const error = { code: 'busy', outcomeUnknown: false, message: '这次模型设置没有完成，请重试。', operationId: args.operationId }
     const operation = { ...nativeResults.get('set_model'), operationId: args.operationId, editor: args.operationEditor, state: 'failed', error }
     nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation)
     throw error
@@ -455,9 +455,12 @@ try {
   await find(container, item => item.props.id === 'cc-opt-0').props.onClick(); await settle()
   assertSameReference(resultEntry(), undefined, 'do not stack a second error surface on the open operation panel')
   assert.ok(text(container).includes('这次模型设置没有完成'))
-  assert.equal(calls.filter(call => call.command === 'consume_operation').length, initialAcknowledgements)
+  // User decision 2026-10-29: what the panel said is not said again after it closes.
+  const panelFailure = calls.filter(call => call.command === 'set_model').at(-1).args.operationId
+  assert.equal(nativeResults.has(panelFailure), false, 'the failure the panel showed is released')
   find(container, item => item.props['aria-label'] === '关闭').props.onClick(); await settle()
-  assert.ok(resultEntry())
+  assert.ok(resultEntry(), 'results kept from before the restart still have their entry')
+  assert.equal(text(resultEntry()).split('切换模型没有完成').length - 1, 1, 'only the kept model failure, not the one the panel showed')
   app.selectWork('other'); await settle()
   assert.equal(app.currentDraft, 'other draft')
   assert.equal(text(resultEntry()).includes('新建 Session'), false)
@@ -823,8 +826,9 @@ try {
       await find(palette, item => item.type === 'button' && String(item.props.class).includes('cmd-palette-item') && text(item).includes('Compact Context')).props.onClick(); await settle()
       await find(container, item => item.type === 'button' && text(item) === '开始压缩').props.onClick(); await settle()
     }
-    // The core reports the result first, then the call rejects, as the native layer does.
-    const answer = (args, state, error) => {
+    // The core reports the result first, then the call rejects with the same error, naming its operation.
+    const answer = (args, state, reason) => {
+      const error = { ...reason, operationId: args.operationId }
       const operation = { ...base, operationId: args.operationId, kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state, error }
       nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation)
       throw error

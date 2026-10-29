@@ -232,7 +232,7 @@ try {
 
   // User report 2026-10-29 (see the compaction case in appInteraction): whether these took
   // effect shows in the conversation, so a lost reply closes the dialog without an error.
-  for (const operation of ['new', 'switch', 'reload', 'fork', 'clone']) {
+  for (const operation of ['new', 'switch', 'reload', 'navigate', 'fork', 'clone']) {
     const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
     const store = await createStore(work)
     const nodes = [{ entryId: 'selected-user', kind: 'message', role: 'user', displayClass: 'content', summary: 'Selected user', depth: 0 }]
@@ -250,14 +250,14 @@ try {
     else if (operation === 'reload') find(container, item => item.type === 'button' && 'data-modal-initial' in item.props).props.onClick()
     else if (operation !== 'new') {
       find(container, item => item.props['data-tree-node'] !== undefined && text(item).includes('Selected user')).props.onClick(); await nextTick()
-      find(container, item => item.type === 'button' && text(item) === (operation === 'fork' ? 'Fork' : 'Clone')).props.onClick()
+      find(container, item => item.type === 'button' && text(item) === { navigate: '直接切换', fork: 'Fork', clone: 'Clone' }[operation]).props.onClick()
     }
     await settle()
     assert.equal(closed.length, 1, `${operation}: the dialog hands over to the conversation`)
     assertSameReference(find(container, hasClass('alu-dialog-error')), undefined, `${operation}: no error for a lost reply`)
     mounted.unmount()
   }
-  console.log('PASS: a lost New/Switch/Reload/Fork/Clone reply closes the dialog without an error')
+  console.log('PASS: a lost New/Switch/Reload/branch switch/Fork/Clone reply closes the dialog without an error')
 
   // #318: Resume lists the Work's directory from the Host, one row per Session
   // (title, then time · cost), and keeps reading pages until every Session is shown.

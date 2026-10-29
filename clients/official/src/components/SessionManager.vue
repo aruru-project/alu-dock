@@ -415,7 +415,7 @@ async function navigate(summarize: boolean) {
   if (!node || pending.value) return
   pending.value = summarize ? 'navigate-summary' : 'navigate'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(app.captureOperation(scope, scope.instanceId), node.entryId, summarize, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
-  catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
+  catch (cause) { if (!handOverLostReply(cause, 'navigate_session')) mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function fork() {
   const node = selectedNode.value
@@ -432,8 +432,8 @@ async function clone() {
   catch (cause) { if (!handOverLostReply(cause, 'clone_session')) mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 
-/** Whether a lost New/Switch/Reload/Fork/Clone took effect shows in the conversation,
- * so the dialog closes and hands over to it without an error. */
+/** Whether a lost New/Switch/Reload/branch switch/Fork/Clone took effect shows in the
+ * conversation, so the dialog closes and hands over to it without an error. */
 function handOverLostReply(cause: unknown, kind: string) {
   if (!lostReplyIsSilent(kind) || !(cause instanceof SessionCallFailure) || !cause.current || !replyLost(cause.original)) return false
   emit('finished')
@@ -446,6 +446,8 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
     if (!cause.current) return
     cause = cause.original
   }
+  // Said here, so the Work result entry does not say it again.
+  app.failureShown(cause)
   const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
   if (domain === 'tree' && code === 'invalid_tree_target') {
     selectedNodeId.value = ''

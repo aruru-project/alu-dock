@@ -12,6 +12,9 @@ use tokio::sync::broadcast;
 pub trait OperationFailure: Send + 'static {
     fn outcome_unknown(&self) -> bool;
     fn presentation(&self) -> Value;
+    /// Names the operation this failure ended, so the control that shows it can
+    /// release the retained result instead of leaving a second notice.
+    fn identify(&mut self, _operation_id: &str) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,19 +102,20 @@ impl OperationAssociations {
         tokio::spawn(async move {
             // The coordinator survives both a dropped IPC waiter and an operation panic.
             let result = tokio::spawn(operation).await;
-            let result = match result {
+            let mut result = match result {
                 Ok(result) => Ok(result),
                 Err(_) => Err(crate::ClientError::EffectUnknown {
                     operation_id: association.operation_id.clone(),
                     message: "操作中断，没收到结果。请稍后再试。".into(),
                 }),
             };
-            match &result {
+            match &mut result {
                 Ok(Ok(value)) => {
                     association.state = OperationState::Succeeded;
                     association.result = serde_json::to_value(value).ok();
                 }
                 Ok(Err(error)) => {
+                    error.identify(&association.operation_id);
                     let value = error.presentation();
                     association.state = if !error.outcome_unknown() {
                         OperationState::Failed
@@ -183,6 +187,42 @@ mod tests {
         assert!(
             operations.pending().is_empty(),
             "a shown lost reply is released like a failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_names_its_operation_so_the_control_showing_it_can_release_it() {
+        struct Refused(Option<String>);
+        impl OperationFailure for Refused {
+            fn outcome_unknown(&self) -> bool {
+                false
+            }
+            fn presentation(&self) -> Value {
+                serde_json::json!({ "operationId": self.0 })
+            }
+            fn identify(&mut self, operation_id: &str) {
+                self.0 = Some(operation_id.into());
+            }
+        }
+        let operations = OperationAssociations::default();
+        let association = operation_association(
+            "model",
+            "set_model",
+            "local",
+            "work",
+            "epoch",
+            1,
+            Value::Null,
+        );
+        let result: crate::Result<Result<(), Refused>> = operations
+            .execute(association, async { Err(Refused(None)) })
+            .await;
+        let returned = result.unwrap().err().unwrap();
+        assert_eq!(returned.0.as_deref(), Some("model"), "the caller's error");
+        assert_eq!(
+            operations.pending()[0].error.as_ref().unwrap()["operationId"],
+            "model",
+            "the retained result"
         );
     }
 }

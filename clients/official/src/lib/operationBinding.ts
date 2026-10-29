@@ -45,8 +45,12 @@ export function replyLost(cause: unknown): boolean {
 }
 
 // Whether these took effect shows in the conversation: a compaction notice, the new
-// Session or branch, the Reload notice. A lost reply adds nothing to it, so it is not told.
-const OUTCOME_IN_CONVERSATION = new Set(['compact_session', 'new_session', 'switch_session', 'reload_session', 'fork_session', 'clone_session'])
+// Session or branch, the Reload notice, the shell command's row. A lost reply adds
+// nothing to it, so it is not told.
+const OUTCOME_IN_CONVERSATION = new Set([
+  'compact_session', 'new_session', 'switch_session', 'reload_session', 'navigate_session', 'fork_session', 'clone_session',
+  'run_shell_command', 'abort_shell_commands',
+])
 export function lostReplyIsSilent(kind: string): boolean {
   return OUTCOME_IN_CONVERSATION.has(kind)
 }

@@ -287,8 +287,10 @@ export const useInputStore = defineStore('input', () => {
         : '没有可取回的消息。')
       return true
     } catch (cause) {
-
-      if (app.contextMatches(context) && submitViewRevision === viewRevision) submissionError.value = errorMessage(cause)
+      if (app.contextMatches(context) && submitViewRevision === viewRevision) {
+        submissionError.value = errorMessage(cause)
+        app.failureShown(cause)
+      }
       return false
     } finally {
       pendingQueueRestores.value.delete(pendingKey)
@@ -534,7 +536,7 @@ export const useInputStore = defineStore('input', () => {
   }
 
   const offAttachmentError = attachments.onError((message) => { submissionError.value = message })
-  const offFailurePresenter = operations.setFailurePresenter('submit_message', presentSubmitFailure)
+  const offFailurePresenter = operations.setFailurePresenter(presentSubmitFailure)
   onScopeDispose(() => {
     window.clearTimeout(composerCompletionTimer); clearQueueNotice()
     if (listeningShortcuts) window.removeEventListener('keydown', handleDesktopShortcut)
