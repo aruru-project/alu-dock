@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { pendingOperations, consumeOperation } from '../lib/bridge'
-import { operationWork, type NativeOperation } from '../lib/operationBinding'
+import { lostReplyIsSilent, operationWork, type NativeOperation } from '../lib/operationBinding'
 import { useAppStore } from './app'
 import { useAttachmentsStore } from './attachments'
 import { useObservationStore } from './observation'
@@ -14,13 +14,15 @@ export const useOperationsStore = defineStore('operations', () => {
   const app = useAppStore()
   const observation = useObservationStore()
   const attachments = useAttachmentsStore()
-  // The editor shows a failed send inline when it is still on screen; otherwise
-  // the failure stays in its Work/list result entry.
-  let presentFailure: FailurePresenter | null = null
-  function setFailurePresenter(presenter: FailurePresenter) {
-    presentFailure = presenter
-    return () => { if (presentFailure === presenter) presentFailure = null }
+  // The control that started an action shows its failure in place while it is on
+  // screen (the editor for a send, the composer for a compaction); otherwise the
+  // failure stays in its Work/list result entry.
+  const failurePresenters = new Map<string, FailurePresenter>()
+  function setFailurePresenter(kind: string, presenter: FailurePresenter) {
+    failurePresenters.set(kind, presenter)
+    return () => { if (failurePresenters.get(kind) === presenter) failurePresenters.delete(kind) }
   }
+  const silentLostReply = (operation: NativeOperation) => operation.state === 'unknown' && lostReplyIsSilent(operation.kind)
   const selected = computed(() => app.selectedWork)
   // Local application and an in-flight acknowledgement are different facts.
   // Durable editor claims cover only the pending native acknowledgement window.
@@ -36,7 +38,7 @@ export const useOperationsStore = defineStore('operations', () => {
     && !appliedOperations.value.has(operation.operationId) && hasReturnedContent(operation)))
   const visibleResults = computed(() => [...app.nativeOperations.values()].filter(operation => (operation.state === 'failed' || operation.state === 'unknown'
     || (operation.state === 'succeeded' && acknowledgementErrors.value.has(operation.operationId)))
-    && !inlineFailureClaims.value.has(operation.operationId) && operation.connectionId === app.activeConnectionId
+    && !inlineFailureClaims.value.has(operation.operationId) && !silentLostReply(operation) && operation.connectionId === app.activeConnectionId
     && (!operation.hostEpoch || operation.hostEpoch === app.payload?.host.hostEpoch)))
   const workResults = computed(() => visibleResults.value.filter(operation => operation.instanceId === selected.value?.id))
   const listResults = computed(() => visibleResults.value.filter(operation => operation.instanceId === 'global'
@@ -94,10 +96,16 @@ export const useOperationsStore = defineStore('operations', () => {
     // A terminal failure is not a UI acknowledgement. Keep it in native state
     // until the corresponding Work/list result entry is explicitly acknowledged.
     // A lost reply is the same kind of failure: nothing is checked or retried, it
-    // is only told once — inline if its send is on screen, otherwise in the entry.
+    // is only told once — inline if its control is on screen, otherwise in the entry.
+    // Actions whose outcome the conversation shows are the exception: nothing is told.
     if (operation.state === 'failed' || operation.state === 'unknown') {
-      const presenter = presentFailure
-      if (operation.kind === 'submit_message' && presenter && !inlineFailureClaims.value.has(operation.operationId)) {
+      if (silentLostReply(operation)) {
+        // If releasing fails the core keeps it, still hidden, until the next start retries.
+        try { await acknowledge(operation) } catch { /* Not shown either way. */ }
+        return
+      }
+      const presenter = failurePresenters.get(operation.kind)
+      if (presenter && !inlineFailureClaims.value.has(operation.operationId)) {
         inlineFailureClaims.value.add(operation.operationId)
         try { await presenter(operation, consumeNativeOperation) }
         finally { inlineFailureClaims.value.delete(operation.operationId) }

@@ -39,7 +39,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
 let startPairingNative, cancelPairingNative, downloadNative
-let abortNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
+let abortNative, compactNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
@@ -104,6 +104,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'get_settings') return { settings: [] }
   if (command === 'respond_extension_interaction') return respondNative(args)
   if (command === 'abort_run') return abortNative(args)
+  if (command === 'compact_session') return compactNative(args)
   if (command === 'stop_work') return stopNative(args)
   if (command === 'dequeue_messages') return dequeueNative(args)
   if (command === 'submit_message') return submitNative(args)
@@ -812,6 +813,41 @@ try {
     remoteSequence += 10
   }
   console.log('PASS: a late reply in the same millisecond keeps the running Work and its Abort control')
+  // User report 2026-10-29: after starting a compaction, leaving and coming back showed
+  // '压缩上下文没收到结果' twice and asked to acknowledge it, although the conversation
+  // already said the compaction was done. Whether it compacted is the conversation's to say.
+  {
+    const startCompaction = async () => {
+      find(container, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+      const palette = find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
+      await find(palette, item => item.type === 'button' && String(item.props.class).includes('cmd-palette-item') && text(item).includes('Compact Context')).props.onClick(); await settle()
+      await find(container, item => item.type === 'button' && text(item) === '开始压缩').props.onClick(); await settle()
+    }
+    // The core reports the result first, then the call rejects, as the native layer does.
+    const answer = (args, state, error) => {
+      const operation = { ...base, operationId: args.operationId, kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state, error }
+      nativeResults.set(operation.operationId, operation); emit('aludock://operation', operation)
+      throw error
+    }
+    let lostId
+    compactNative = args => { lostId = args.operationId; return answer(args, 'unknown', { code: 'effect_unknown', outcomeUnknown: true, message: '操作中断，没收到结果。' }) }
+    await startCompaction()
+    assert.equal(text(container).includes('没收到结果'), false, 'a lost compaction reply is told nowhere')
+    assert.equal(nativeResults.has(lostId), false, 'nothing is left waiting for 知道了')
+    const refused = '这次压缩没有开始，请稍后重试。'
+    compactNative = args => answer(args, 'failed', { code: 'busy', outcomeUnknown: false, message: refused })
+    await startCompaction()
+    assert.equal(text(container).split(refused).length - 1, 1, 'a refused compaction is said once, above the composer')
+    assert.equal(text(container).includes('压缩上下文没有完成'), false, 'with no Work result entry repeating it')
+    compactNative = undefined
+    // A later compaction in the conversation replaces that line.
+    for (const eventType of ['compaction.started', 'compaction.completed']) {
+      observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType, data: { reason: 'manual', aborted: false, willRetry: false } } })
+    }
+    await settle()
+    remoteSequence += 10
+  }
+  console.log('PASS: a lost compaction reply is not told; a refused compaction is told once')
   // #326: Abort takes the waiting Queue back in the same native call and inserts it like retrieval.
   // #357: the abort control only exists while the Work is running.
   {
@@ -822,11 +858,10 @@ try {
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
     observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
     compact.props['onUpdate:modelValue']('editor at abort')
-    // A lost compaction reply is an ordinary failed result: no refresh-to-confirm action, and Abort stays usable.
+    // A lost compaction reply leaves no refresh-to-confirm action, and Abort stays usable.
     const unconfirmedCompaction = { ...base, operationId: 'unconfirmed-compaction', kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '压缩结果尚未确认。', outcomeUnknown: true } }
     emit('aludock://operation', unconfirmedCompaction)
     await settle()
-    assert.ok(text(container).includes('压缩上下文没收到结果'), 'it is told once in the Work result entry, like a failure')
     assertSameReference(find(container, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined, 'no refresh-to-confirm action')
     const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
     assert.equal(abortButton.props.disabled, false, 'a lost reply elsewhere does not disable Abort')

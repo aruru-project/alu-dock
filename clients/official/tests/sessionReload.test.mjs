@@ -230,6 +230,35 @@ try {
     console.log(`PASS: ${operation} / event-before-reply / initiating surface completion`)
   }
 
+  // User report 2026-10-29 (see the compaction case in appInteraction): whether these took
+  // effect shows in the conversation, so a lost reply closes the dialog without an error.
+  for (const operation of ['new', 'switch', 'reload', 'fork', 'clone']) {
+    const work = reactive({ id: 'work-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 4 })
+    const store = await createStore(work)
+    const nodes = [{ entryId: 'selected-user', kind: 'message', role: 'user', displayClass: 'content', summary: 'Selected user', depth: 0 }]
+    globalThis[stateKey] = { store, invoke: async (command) => {
+      if (command === 'list_sessions') return { sessions: [{ token: 'saved', name: 'Saved session', cwd: '/project', current: false }], total: 1, incomplete: false }
+      if (command === 'session_tree') return { nodes, leafId: 'selected-user', instance: { ...work } }
+      throw { code: 'effect_unknown', outcomeUnknown: true, message: '操作中断，没收到结果。' }
+    } }
+    const closed = []
+    const container = node('root')
+    const mode = { new: 'new-session', switch: 'sessions', reload: 'reload-session' }[operation] ?? 'tree'
+    const mounted = renderer.createApp({ render: () => h(SessionManager, { work, mode, compactionPending: false, onFinished: () => closed.push(true) }) })
+    mounted.mount(container); await settle()
+    if (operation === 'switch') find(container, hasClass('ui-dialog-option')).props.onClick()
+    else if (operation === 'reload') find(container, item => item.type === 'button' && 'data-modal-initial' in item.props).props.onClick()
+    else if (operation !== 'new') {
+      find(container, item => item.props['data-tree-node'] !== undefined && text(item).includes('Selected user')).props.onClick(); await nextTick()
+      find(container, item => item.type === 'button' && text(item) === (operation === 'fork' ? 'Fork' : 'Clone')).props.onClick()
+    }
+    await settle()
+    assert.equal(closed.length, 1, `${operation}: the dialog hands over to the conversation`)
+    assertSameReference(find(container, hasClass('alu-dialog-error')), undefined, `${operation}: no error for a lost reply`)
+    mounted.unmount()
+  }
+  console.log('PASS: a lost New/Switch/Reload/Fork/Clone reply closes the dialog without an error')
+
   // #318: Resume lists the Work's directory from the Host, one row per Session
   // (title, then time · cost), and keeps reading pages until every Session is shown.
   // #616: rows carry absent values as null, as the native layer sends them.

@@ -5,12 +5,14 @@ import {
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { subhostMachineName } from '../lib/machines'
+import { replyLost, type NativeOperation } from '../lib/operationBinding'
 import { stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { ConnectionContext, MachineDto, Work } from '../lib/types'
 import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
+import { useOperationsStore } from './operations'
 import { useSurfacesStore } from './surfaces'
 
 /** Work buttons, the Work list and New Work, with their local feedback. Results are claimed by the operations store. */
@@ -19,6 +21,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const page = useSurfacesStore()
   const observation = useObservationStore()
   const host = useHostStore()
+  const operations = useOperationsStore()
   const selected = computed(() => app.selectedWork)
 
   const compactionWorkIds = ref<Set<string>>(new Set())
@@ -45,9 +48,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
   function reportAction(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
     if (feedbackMatches(scope)) feedback.value = { scope, message, tone }
-  }
-  function outcomeUnknown(cause: unknown) {
-    return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true
   }
   // A lost reply is reported once like any failure; the conversation and Work state show what happened.
   function reportFailure(scope: FeedbackScope, cause: unknown) {
@@ -188,7 +188,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
       // the native known-failure result visible; never infer a trust decision.
       reportFailure(feedbackScope, cause)
-      if (outcomeUnknown(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
+      if (replyLost(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
     } finally {
       pendingWorkActions.value.delete(feedbackScope.identity)
     }
@@ -256,20 +256,35 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     try {
       await compactSession(app.captureOperationTarget(scope, work.id), customInstructions?.trim() || undefined, crypto.randomUUID())
     } catch (cause) {
-      reportFailure(feedbackScope, cause)
-      const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
-      const followed = observation.active
-      const matchingFollow = observation.connected
-        && followed?.connectionId === capturedHost.connectionId
-        && followed.selectionGeneration === capturedHost.selectionGeneration
-        && followed.instanceId === work.id
-      const reportedByConversation = matchingFollow
-        && ['compaction_cancelled', 'compaction_not_needed', 'compaction_failed'].includes(code)
-      if (feedbackMatches(feedbackScope) && !reportedByConversation && !outcomeUnknown(cause)) setCompactionError(capturedHost.connectionId, work.id, errorMessage(cause))
+      if (feedbackMatches(feedbackScope)) showCompactionFailure(capturedHost.connectionId, work.id, cause)
     } finally {
       setCompactionPending(work.id, false)
     }
   }
+
+  /** One line above the composer, whether the reply or the core's result arrives first.
+   * The conversation already tells whether it compacted, so a lost reply and a failure
+   * it reports add nothing. */
+  function showCompactionFailure(connectionId: string, workId: string, cause: unknown) {
+    if (replyLost(cause)) return
+    const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
+    const followed = observation.active
+    const reportedByConversation = observation.connected
+      && followed?.connectionId === connectionId
+      && followed.selectionGeneration === app.connectionContext?.selectionGeneration
+      && followed.instanceId === workId
+      && ['compaction_cancelled', 'compaction_not_needed', 'compaction_failed'].includes(code)
+    if (!reportedByConversation) setCompactionError(connectionId, workId, errorMessage(cause))
+  }
+
+  // While its Work is on screen the composer says it, and the Work's result entry stays away.
+  onScopeDispose(operations.setFailurePresenter('compact_session', async (operation: NativeOperation, consume) => {
+    const work = selected.value
+    if (operation.connectionId !== app.activeConnectionId || operation.hostEpoch !== app.payload?.host.hostEpoch
+      || operation.instanceId !== work?.id || operation.runtimeGeneration !== work.runtimeGeneration) return
+    showCompactionFailure(operation.connectionId, operation.instanceId, operation.error)
+    try { await consume(operation) } catch { /* The result entry then offers to acknowledge it. */ }
+  }))
 
   // A compaction event reported by the conversation replaces this button's earlier failure.
   onScopeDispose(observation.onCompactionSettled((connectionId, instanceId) => setCompactionError(connectionId, instanceId)))

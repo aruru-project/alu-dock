@@ -534,7 +534,7 @@ export const useInputStore = defineStore('input', () => {
   }
 
   const offAttachmentError = attachments.onError((message) => { submissionError.value = message })
-  const offFailurePresenter = operations.setFailurePresenter(presentSubmitFailure)
+  const offFailurePresenter = operations.setFailurePresenter('submit_message', presentSubmitFailure)
   onScopeDispose(() => {
     window.clearTimeout(composerCompletionTimer); clearQueueNotice()
     if (listeningShortcuts) window.removeEventListener('keydown', handleDesktopShortcut)
