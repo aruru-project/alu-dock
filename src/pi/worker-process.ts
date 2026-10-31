@@ -219,8 +219,8 @@ async function processGroupExists(pid: number): Promise<boolean> {
   // still have live threads, however, so inspect its tasks before releasing it.
   let foundGroup = false;
   try {
-    for (const entry of await readdir("/proc")) {
-      if (!/^\d+$/u.test(entry)) continue;
+    const entries = (await readdir("/proc")).filter((entry) => /^\d+$/u.test(entry));
+    for (const entry of entries) {
       const stat = await readProcessStat(`/proc/${entry}/stat`);
       if (!stat || stat.group !== pid) continue;
       foundGroup = true;
@@ -234,7 +234,15 @@ async function processGroupExists(pid: number): Promise<boolean> {
       }
     }
     // If procfs did not expose this group, do not infer that it is dead.
-    if (foundGroup) return false;
+    if (foundGroup) {
+      // A descendant can fork after the snapshot and exit before its stat is
+      // read. Do not release ownership while that new PID escaped this scan.
+      // This is not an atomic procfs snapshot: unrelated PID churn also keeps
+      // cleanup pending, and PID reuse remains subject to the OS identity race.
+      const confirmed = (await readdir("/proc")).filter((entry) => /^\d+$/u.test(entry));
+      const original = new Set(entries);
+      return confirmed.length !== entries.length || confirmed.some((entry) => !original.has(entry));
+    }
     try { process.kill(-pid, 0); return true; }
     catch (error) { return !processDisappeared(error); }
   } catch { return true; } // Unreadable procfs cannot prove termination.
