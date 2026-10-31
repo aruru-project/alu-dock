@@ -967,7 +967,10 @@ def main() -> int:
                 fork_start = len(output)
                 os.write(fd, b"/fork\r")
                 fork_picker_deadline = time.monotonic() + 5
-                while (b"Start from an earlier prompt" not in output[fork_start:] or b"second prompt" not in output[fork_start:]) and time.monotonic() < fork_picker_deadline:
+                # The editor behind the loading picker also contains "second
+                # prompt". Wait for the actual selectable row, or Enter can
+                # arrive while targets are still loading (2026-10-31 full run).
+                while (b"Start from an earlier prompt" not in output[fork_start:] or "You · second prompt".encode() not in output[fork_start:]) and time.monotonic() < fork_picker_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"second prompt\r")

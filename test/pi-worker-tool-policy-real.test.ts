@@ -126,10 +126,19 @@ export default function (pi) {
   await idle();
   await assertCeiling();
 
-  await dock.prompt(work.id, "/reload", "auto", "policy-reload");
+  // Reload is a client control operation; sending the literal text as a prompt
+  // asks the model to answer it and does not exercise runtime reloading.
+  await dock.reloadSession(work.id, "policy-reload");
   await idle();
   await assertCeiling();
   await dock.newSession(work.id, undefined, "policy-new");
+  await assertCeiling();
+  // Pi persists a new session only once it has conversation content. Exercise
+  // the grant again in that session before testing its crash/reopen boundary.
+  const nextRequest = provider.requests.length;
+  await dock.prompt(work.id, "Review again in the new session.", "auto", "policy-new-review");
+  await probeNestedTools(provider, nextRequest);
+  await idle();
   await assertCeiling();
   process.kill(workerPids.at(-1)!, "SIGKILL");
   await waitFor(async () => (await dock.status(work.id)).lifecycle === "runtime_error", "Worker loss was not recorded");
@@ -137,11 +146,11 @@ export default function (pi) {
   await assertCeiling();
 });
 
-async function probeNestedTools(provider: PlanGoalProvider): Promise<void> {
-  const first = await provider.request(0);
+async function probeNestedTools(provider: PlanGoalProvider, firstRequest = 0): Promise<void> {
+  const first = await provider.request(firstRequest);
   assert.deepEqual(first.toolNames.sort(), ["nested_probe", "read"]);
   first.tools({ id: "nested", name: "nested_probe", arguments: {} });
-  const followup = await provider.request(1);
+  const followup = await provider.request(firstRequest + 1);
   const transcript = JSON.stringify(followup.body.messages);
   for (const name of ["opaque_write", "mcp__fixture__write", "read_mcp_resource", "late_write"]) assert.ok(transcript.includes(`${name}:blocked`));
   followup.text("Review complete.");
