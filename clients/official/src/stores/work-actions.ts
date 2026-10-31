@@ -290,6 +290,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const newWorkMachinesLoading = ref(false)
   const machineSettingsLoading = ref(false)
   const newWorkCompact = ref(true)
+  const newWorkParent = ref<Work | null>(null)
   let machineLoadEpoch = 0
 
   watch(() => Boolean(app.payload && !app.needsPairing && !selected.value), (showList) => {
@@ -375,6 +376,16 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
 
   async function openDirectory() {
+    newWorkParent.value = null
+    await openNewWorkDirectory()
+  }
+
+  async function openChildDirectory() {
+    newWorkParent.value = app.selectedWork ?? null
+    await openNewWorkDirectory()
+  }
+
+  async function openNewWorkDirectory() {
     if (host.pairingInProgress) return
     page.openDirectory()
     newWorkMachinesLoading.value = true
@@ -406,7 +417,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     }
   }
 
-  function acceptCreatedWork(work: Work) {
+  function acceptCreatedWork(work: Work, notice?: string) {
     page.directoryBusy = false
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
     if (machine && work.hostId) app.rememberCreatedWorkspace(work.hostId, work.cwd, machine.platform)
@@ -414,6 +425,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     app.addCreatedWork(work)
     observation.acceptWork(work)
     app.selectWork(work.id)
+    if (notice) reportAction(captureFeedback(), notice, 'notice')
     void app.refreshWorksQuietly()
     page.closeDirectory()
   }
@@ -422,6 +434,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact, newWorkParent, openChildDirectory, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, acceptCreatedWork,
   }
 })

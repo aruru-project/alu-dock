@@ -167,7 +167,7 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   const nativePeer = registry.list().find((item) => item.name === "Native fallback")!;
   assert.ok(nativePeer);
   assert.equal((await client.resources(nativePeer.id)).resources.some((item) => item.path?.endsWith("chosen.json")), false);
-  assert.equal(registry.dockToolsEnabled(peer.id), false);
+  assert.equal(registry.dockToolsEnabled(peer.id), true);
   const texts = received.flatMap((request) => request.messages.filter((message) => message.role === "tool").map((message) => message.content ?? "")).join("\n");
   assert.match(texts, /Dock systems/u);
   assert.match(texts, /│ .*ignore the owner/u);

@@ -8,6 +8,8 @@ export interface MachineRouteIdentity {
   mainHostEpoch: string;
   nativeHostEpoch: string;
   mainKey?: string;
+  /** Projection-only same-machine native -> Main relationship identities. */
+  parentIds?: ReadonlyMap<string, string>;
 }
 
 /** The sole Main/native identity translation boundary. Opaque payloads are never visited. */
@@ -24,7 +26,7 @@ export function requestForNativeHost(request: ControlRequest, route: MachineRout
   return copy;
 }
 
-export function snapshotForMain(snapshot: InstanceSnapshot, hostId: string, mainInstanceId: string, mainHostEpoch: string, mainKey: string | undefined): InstanceSnapshot {
+export function snapshotForMain(snapshot: InstanceSnapshot, hostId: string, mainInstanceId: string, mainHostEpoch: string, mainKey: string | undefined, parentIds?: ReadonlyMap<string, string>): InstanceSnapshot {
   const nativeHostEpoch = snapshot.ownerHostEpoch ?? snapshot.eventCursor.hostEpoch;
   return mapSnapshot(structuredClone(snapshot), {
     hostId,
@@ -32,6 +34,7 @@ export function snapshotForMain(snapshot: InstanceSnapshot, hostId: string, main
     nativeInstanceId: snapshot.id,
     mainHostEpoch,
     nativeHostEpoch,
+    parentIds,
     ...(mainKey === undefined ? {} : { mainKey }),
   });
 }
@@ -91,6 +94,7 @@ function mapFrameRoot(frame: Record<string, unknown>, route: MachineRouteIdentit
 function mapSnapshot(source: InstanceSnapshot, route: MachineRouteIdentity): InstanceSnapshot {
   const snapshot = structuredClone(source);
   snapshot.hostId = route.hostId;
+  if (snapshot.parentId !== undefined) snapshot.parentId = parentIdForMain(snapshot.parentId, route.parentIds);
   if (snapshot.id === route.nativeInstanceId) snapshot.id = route.mainInstanceId;
   if (snapshot.ownerHostEpoch === route.nativeHostEpoch) snapshot.ownerHostEpoch = route.mainHostEpoch;
   snapshot.eventCursor = mapCursor(snapshot.eventCursor, route);
@@ -113,9 +117,10 @@ function mapCursor<T extends { hostEpoch: string; instanceId: string }>(source: 
   return cursor;
 }
 
-function mapObservedStatus<T extends { id: string }>(source: T, route: MachineRouteIdentity): T {
+function mapObservedStatus<T extends { id: string; parentId?: string }>(source: T, route: MachineRouteIdentity): T {
   const status = structuredClone(source);
   if (status.id === route.nativeInstanceId) status.id = route.mainInstanceId;
+  if (status.parentId !== undefined) status.parentId = parentIdForMain(status.parentId, route.parentIds);
   return status;
 }
 
@@ -129,4 +134,10 @@ function isCursor(value: unknown): value is { hostEpoch: string; instanceId: str
 function isEvent(value: unknown): value is Record<string, unknown> { return isRecord(value) && typeof value.type === "string" && typeof value.instanceId === "string" && "data" in value; }
 function isObservedStatus(value: unknown): value is { id: string; cwd: string; lifecycle: string; execution: string } {
   return isRecord(value) && typeof value.id === "string" && typeof value.cwd === "string" && typeof value.lifecycle === "string" && typeof value.execution === "string";
+}
+
+/** Global parent references from connected delegation must not be remapped again. */
+export function parentIdForMain(parentId: string, ids: ReadonlyMap<string, string> | undefined): string {
+  if (!ids || [...ids.values()].includes(parentId)) return parentId;
+  return ids.get(parentId) ?? parentId;
 }

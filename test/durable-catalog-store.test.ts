@@ -48,18 +48,47 @@ async function temporaryCatalog(): Promise<{ root: string; path: string }> {
   return { root, path };
 }
 
-test("legacy observation grants reset to Dock tools off and normalize execution timing", async () => {
+test("legacy collaboration policy migrates once, including old false, and new opt-outs persist", async () => {
   const { path } = await temporaryCatalog();
   const store = new FileCatalogStore(path);
-  await store.commit(projection(1, [record("legacy")]), { kind: "legacy-fixture", effect: "pre_effect" });
+  await store.commit(projection(1, [record("legacy"), record("legacy-off", { dockToolsEnabled: false }), record("legacy-on", { dockToolsEnabled: true })]), { kind: "legacy-fixture", effect: "pre_effect" });
   const legacyProjection = JSON.parse(await readFile(path, "utf8")) as { instances: Array<Record<string, unknown>> };
   legacyProjection.instances[0]!.observationGrant = true;
   await writeFile(path, JSON.stringify(legacyProjection), { mode: 0o600 });
   const loaded = await store.load();
   const legacy = loaded?.instances[0];
-  assert.equal(legacy?.dockToolsEnabled, false);
+  assert.equal(legacy?.dockToolsEnabled, true);
+  assert.ok(loaded);
+  for (const migrated of loaded.instances) {
+    assert.equal(migrated.dockToolsEnabled, true);
+    assert.equal(migrated.collaborationVersion, 1);
+  }
+  // The migration marker is durable, so a subsequent explicit off is not reset.
+  loaded.instances[1]!.dockToolsEnabled = false;
+  await store.commit({ ...loaded, revision: 2 }, { kind: "dock-tools-off", effect: "pre_effect" });
+  const reopened = await new FileCatalogStore(path).load();
+  assert.equal(reopened?.instances[1]?.collaborationVersion, 1);
+  assert.equal(reopened?.instances[1]?.dockToolsEnabled, false);
   assert.equal(legacy?.executionChangedAt, "2026-07-15T00:00:00.000Z");
   assert.equal(legacy?.runStartedAt, undefined);
+});
+
+test("catalog rejects invalid collaboration versions rather than re-enabling tools", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  await store.commit(projection(1, [record("one")]), { kind: "fixture", effect: "pre_effect" });
+  const original = JSON.parse(await readFile(path, "utf8")) as { instances: Array<Record<string, unknown>> };
+  for (const version of [0, 2, "1", null, false]) {
+    original.instances[0]!.collaborationVersion = version;
+    await writeFile(path, JSON.stringify(original), { mode: 0o600 });
+    await assert.rejects(store.load(), /collaborationVersion/u);
+  }
+  delete original.instances[0]!.collaborationVersion;
+  original.instances[0]!.dockToolsEnabled = "false";
+  await writeFile(path, JSON.stringify(original), { mode: 0o600 });
+  await assert.rejects(store.load(), /dockToolsEnabled/u, "legacy migration does not hide corrupt boolean input");
+  await assert.rejects(store.commit(projection(2, [record("one", { collaborationVersion: 2 as 1 })]),
+    { kind: "invalid-marker", effect: "pre_effect" }), /collaboration version/u);
 });
 
 test("durable catalog rejects duplicate and unsafe instance keys", async () => {

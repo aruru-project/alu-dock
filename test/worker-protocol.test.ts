@@ -374,7 +374,7 @@ test("a cancelled image reply cannot kill the replacement Worker or overwrite it
           npm_config_cache: join(root, "npm-cache"), npm_config_userconfig: join(root, "npmrc"), npm_config_globalconfig: join(root, "global-npmrc"),
           TMPDIR: root, TMP: root, TEMP: root, REPLY_MODE: mode },
         initialDockToolsEnabled: false,
-        dockToolsHostPort: { dockToolsEnabled: () => false, configureDockTools: async () => ({ enabled: false }),
+        dockToolsHostPort: { authorizeDockToolRequest: (_source, request) => request, dockToolsEnabled: () => false, configureDockTools: async () => ({ enabled: false }),
           invokeDockTool: async () => { throw new Error("unused fixture capability"); }, attachObservationSink: () => () => {} },
         attachmentHostPort: { accessAttachments: async () => { throw new Error("unused fixture capability"); } },
       });

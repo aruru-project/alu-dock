@@ -18,9 +18,14 @@ export async function readDockSystem(port: SystemPort, input: SystemToolRequest,
 export async function createDockSystem(port: SystemPort, input: SystemCreateRequest, hostId?: string): Promise<DockToolsResult> {
   if (input.saveDefault && input.systemId === undefined) throw new Error("Saving requires an explicit systemId.");
   // The starting model rides in the same Worker configuration as the system; the target Host still applies its directory default.
-  const modelConfig: JsonObject | undefined = input.model === undefined ? undefined : { model: { provider: input.model.provider, id: input.model.id } };
+  const modelConfig: JsonObject = {
+    ...(input.model === undefined ? {} : { model: { provider: input.model.provider, id: input.model.id } }),
+    ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+    ...(input.allowedTools === undefined ? {} : { toolPolicy: { allowedTools: input.allowedTools } }),
+    ...(input.parentId === undefined ? {} : { collaboration: { parentId: input.parentId, parentName: input.parentName ?? input.parentId } }),
+  };
   if (input.systemId === undefined) {
-    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig);
+    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig, input.parentId);
     return { type: "create", instance: observationStatus(instance) };
   }
   let page = await port.systemCatalog(input.cwd, hostId);
@@ -37,7 +42,7 @@ export async function createDockSystem(port: SystemPort, input: SystemCreateRequ
     saved = true;
   }
   try {
-    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig });
+    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig }, input.parentId);
     return { type: "create", instance: observationStatus(instance), ...(saved ? { defaultSaved: true } : {}) };
   } catch (error) {
     if (saved && error instanceof Error) error.message = `Directory default saved. Work creation did not return success; check Dock before trying again. ${error.message}`;

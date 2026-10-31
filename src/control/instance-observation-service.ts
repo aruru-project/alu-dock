@@ -410,6 +410,7 @@ export class InstanceObservationService {
 export function observationStatus(snapshot: InstanceSnapshot): ObservedInstanceStatus {
   return {
     id: snapshot.id,
+    ...(snapshot.parentId === undefined ? {} : { parentId: snapshot.parentId }),
     ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
     ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
     cwd: snapshot.cwd,

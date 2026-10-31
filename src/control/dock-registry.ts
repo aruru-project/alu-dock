@@ -1,3 +1,7 @@
+import { systemToolOperation } from "./system-tools.js";
+import { constrainDelegatedTools } from "./delegation-tool-policy.js";
+import { spawnDockWorker } from "./native-collaboration.js";
+import { OperationLedger } from "./operation-ledger.js";
 import { randomUUID } from "node:crypto";
 import type { SystemService } from "./system-service.js";
 import { realpath, stat } from "node:fs/promises";
@@ -37,6 +41,8 @@ import type {
 } from "./project-trust.js";
 
 export interface InstanceFactoryInput {
+  /** Persistent Dock parent; children remain independently visible and controllable. */
+  parentId?: string;
   id: string;
   creationOperationId: string;
   hostEpoch: string;
@@ -58,6 +64,8 @@ export interface InstanceFactoryInput {
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
 
 export interface CreateRegistryInstanceInput {
+  /** Persistent Dock parent; children remain independently visible and controllable. */
+  parentId?: string;
   operationId: string;
   cwd: string;
   name?: string;
@@ -143,10 +151,12 @@ function newestInstanceFirst(left: InstanceSnapshot, right: InstanceSnapshot): n
 }
 
 export class DockRegistry implements DockToolsHostPort {
+  private readonly collaborationOperations = new OperationLedger();
   readonly hostEpoch: string;
   readonly startedAt: string;
   readonly systemService: SystemService | undefined;
   private readonly instances = new Map<string, ManagedInstance>();
+  private readonly delegationTrustSources = new Map<string, ManagedInstance>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, string>();
@@ -270,7 +280,7 @@ export class DockRegistry implements DockToolsHostPort {
     if (this.catalog.current().instances.some((record) => record.creationOperationId === input.operationId)) {
       throw new CatalogOperationRecordedError(input.operationId);
     }
-    const resolution = await this.resolveProjectTrust({
+    const resolution = await this.resolveDelegatedProjectTrust({
       operationType: "instance.create",
       operationId: input.operationId,
       cwd: input.cwd,
@@ -282,15 +292,17 @@ export class DockRegistry implements DockToolsHostPort {
     const resolvedConfig = this.systemService
       ? await this.systemService.resolveWorkerConfig(cwd, input.workerConfig)
       : input.workerConfig;
-    const workerConfig = resolvedConfig === undefined
-      ? undefined
-      : cloneWorkerConfig(resolvedConfig, "Worker configuration");
+    const configured = input.parentId === undefined ? resolvedConfig : {
+      ...resolvedConfig,
+      collaboration: { parentId: input.parentId, parentName: this.list().find((item) => item.id === input.parentId)?.displayName ?? input.parentId },
+    };
+    const workerConfig = configured === undefined ? undefined : cloneWorkerConfig(configured, "Worker configuration");
 
     const id = this.createId();
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: false, ...(workerConfig === undefined ? {} : { workerConfig }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, parentId: input.parentId, dockToolsEnabled: true, ...(workerConfig === undefined ? {} : { workerConfig }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -313,6 +325,7 @@ export class DockRegistry implements DockToolsHostPort {
       throw error;
     }
     instance.markCatalogCommitted();
+    instance.setResolvedProjectTrust(resolution);
     this.instances.set(id, instance);
     this.trackInstanceForObservation(instance);
     return instance;
@@ -359,7 +372,7 @@ export class DockRegistry implements DockToolsHostPort {
       sessionFile,
       dockToolsHostPort: this.dockToolsHostPort,
       attachmentHostPort: this.attachmentHostPort,
-      dockToolsEnabled: false,
+      dockToolsEnabled: true,
     });
     if (
       instance.id !== id
@@ -383,6 +396,7 @@ export class DockRegistry implements DockToolsHostPort {
       throw error;
     }
     instance.markCatalogCommitted();
+    instance.setResolvedProjectTrust(trust);
     this.instances.set(id, instance);
     this.trackInstanceForObservation(instance);
     return instance;
@@ -466,7 +480,8 @@ export class DockRegistry implements DockToolsHostPort {
       reopenedFrom: previousLifecycle,
       dockToolsHostPort: this.dockToolsHostPort,
       attachmentHostPort: this.attachmentHostPort,
-      dockToolsEnabled: record.dockToolsEnabled ?? false,
+      dockToolsEnabled: record.dockToolsEnabled ?? true,
+      parentId: record.parentId,
       ...(record.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration") }),
     });
     if (
@@ -493,6 +508,7 @@ export class DockRegistry implements DockToolsHostPort {
       throw error;
     }
     candidate.markCatalogCommitted();
+    candidate.setResolvedProjectTrust(trust);
     const previous = this.instances.get(record.id);
     this.instances.set(record.id, candidate);
     this.trackInstanceForObservation(candidate);
@@ -512,7 +528,7 @@ export class DockRegistry implements DockToolsHostPort {
 
   dockToolsEnabled(sourceInstanceId: string): boolean {
     this.assertCatalogReady();
-    return this.catalogRecord(sourceInstanceId).dockToolsEnabled ?? false;
+    return this.catalogRecord(sourceInstanceId).dockToolsEnabled ?? true;
   }
 
   async configureDockTools(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }> {
@@ -526,7 +542,20 @@ export class DockRegistry implements DockToolsHostPort {
     return this.observationService.attachSink(sourceInstanceId, sink);
   }
 
+  authorizeDockToolRequest(sourceInstanceId: string, request: DockToolsRequest): DockToolsRequest {
+    this.assertDockToolsSource(sourceInstanceId);
+    const authorized = constrainDelegatedTools(request, this.catalogRecord(sourceInstanceId).workerConfig?.toolPolicy);
+    if (authorized.type === "create" || authorized.type === "spawn") {
+      const operationId = authorized.type === "spawn" ? systemToolOperation(authorized.operationId, "create") : authorized.operationId;
+      this.delegationTrustSources.set(operationId, this.get(sourceInstanceId));
+      // Failed or remotely targeted requests cannot accumulate unbounded grants.
+      while (this.delegationTrustSources.size > 1_024) this.delegationTrustSources.delete(this.delegationTrustSources.keys().next().value!);
+    }
+    return authorized;
+  }
+
   async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
+    request = this.authorizeDockToolRequest(sourceInstanceId, request);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
       return this.observationService.observe(sourceInstanceId, request);
     }
@@ -542,9 +571,17 @@ export class DockRegistry implements DockToolsHostPort {
       return request.type === "create" ? mutations.create(request) : mutations.system(request);
     }
     const source = this.getSnapshot(sourceInstanceId);
+    if (request.type === "models") return { type: "models", result: await mutations.models(sourceInstanceId) };
+    if (request.type === "spawn") return this.collaborationOperations.run(request.operationId, "dock.spawn", { sourceInstanceId, request }, () => spawnDockWorker(source, request, {
+      create: (input) => mutations.create(input), send: (input) => mutations.send(input),
+      watch: (target) => this.observationService.observe(sourceInstanceId, { type: "watch", target }),
+    }));
     const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
+    if (request.type === "interrupt" || request.type === "stop") return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
+    if (request.type !== "send") throw new Error("Unknown collaboration action");
     const result = await mutations.send({
       operationId: request.operationId,
+      delivery: request.delivery ?? "followUp",
       instanceId: target.id,
       message: dockMessageText(source.displayName, request.message),
     });
@@ -733,6 +770,21 @@ export class DockRegistry implements DockToolsHostPort {
   catalogRevision(): number {
     this.assertCatalogReady();
     return this.catalog.revision;
+  }
+
+  private async resolveDelegatedProjectTrust(input: ProjectTrustRequest): Promise<ProjectTrustResolution> {
+    const source = this.delegationTrustSources.get(input.operationId);
+    this.delegationTrustSources.delete(input.operationId);
+    if (source && input.trustChallengeId === undefined && input.projectTrustDecision === undefined
+      && this.instances.get(source.id) === source && source.snapshot().lifecycle === "active") {
+      const canonicalCwd = await canonicalDirectory(input.cwd);
+      const trust = source.resolvedProjectTrust();
+      // Object identity binds the grant to the originating runtime generation.
+      // Canonical equality grants neither subdirectories nor another machine.
+      if (trust && this.instances.get(source.id) === source && source.snapshot().lifecycle === "active"
+        && trust.canonicalCwd === canonicalCwd && source.snapshot().cwd === canonicalCwd) return { ...trust };
+    }
+    return this.resolveProjectTrust(input);
   }
 
   async resolveProjectTrust(input: ProjectTrustRequest): Promise<ProjectTrustResolution> {

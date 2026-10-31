@@ -6,6 +6,7 @@ import DeliveryTray from './components/DeliveryTray.vue'
 import OperationResults from './components/OperationResults.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import WorkTopbar from './components/WorkTopbar.vue'
+import CollaborationPanel from './components/CollaborationPanel.vue'
 import InputRegion from './components/InputRegion.vue'
 import ConversationRegion from './components/ConversationRegion.vue'
 import ConnectionLanding from './components/ConnectionLanding.vue'
@@ -79,6 +80,7 @@ onUnmounted(() => {
 <template>
   <div class="alu-client-shell">
     <WorkTopbar />
+    <CollaborationPanel />
 
     <ConversationRegion>
       <ConnectionLanding />

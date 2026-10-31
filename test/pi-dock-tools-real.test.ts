@@ -40,7 +40,7 @@ test("real Pi Worker toggles Dock tools and exposes its readable usage guide", a
 
   let enabled = false;
   const dockToolsHostPort: DockToolsHostPort = {
-    dockToolsEnabled: () => enabled,
+    authorizeDockToolRequest: (_source, request) => request, dockToolsEnabled: () => enabled,
     configureDockTools: async (_source, next) => { enabled = next; return { enabled }; },
     invokeDockTool: async () => ({
       type: "list",
@@ -86,7 +86,7 @@ test("real Pi Worker toggles Dock tools and exposes its readable usage guide", a
     }
     const guidePath = active.tools.find((tool) => tool.name === "dock_list")?.description.split("Usage guide (read when needed): ")[1];
     assert.ok(guidePath, "enabled tools must point to their usage guide");
-    assert.match(await readFile(guidePath, "utf8"), /^# Dock tools usage guide/u);
+    assert.match(await readFile(guidePath, "utf8"), /^# Native Dock collaboration/u);
     assert.equal((await instance.getResources()).resources.some((resource) => resource.kind === "skill" && resource.name === "dock-tools"), false);
 
     await instance.reloadSession("dock-tools-reload");

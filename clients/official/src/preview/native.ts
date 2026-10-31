@@ -98,7 +98,7 @@ function sampleData() {
     hiddenStopped: 1,
     works: [
       previewWork('Alu Dock Official Client', '/workshop/alu_dock/clients/official', 'running', 'active', 'main'),
-      previewWork('Alubot Admin', '/workshop/alubot_admin', 'idle', 'active', 'master', { provider: 'anthropic', id: 'claude-sonnet-4-5-20250929' }),
+      { ...previewWork('独立代码审查', '/workshop/alu_dock/clients/official', 'idle', 'active', 'main', { provider: 'anthropic', id: 'claude-sonnet-4-6' }), parentId: 'preview-Alu Dock Official Client' },
       previewWork('Alu Workstation', '/workshop/alu_workstation', 'unavailable', 'host_lost', undefined, null),
       previewWork('alu_dock', '/workshop/alu_dock', 'idle', 'active', 'main', { provider: 'openrouter', id: 'anthropic/claude-opus-4.1-20250805-thinking-preview' }),
     ],

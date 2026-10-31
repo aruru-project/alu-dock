@@ -167,8 +167,8 @@ export function parseCatalogProjection(input: unknown): CatalogProjection {
 function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecord {
   const value = object(input, field);
   exact(value, [
-    "id", "creationOperationId", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
-    "observationGrant", "dockToolsEnabled", "workerConfig", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
+    "id", "creationOperationId", "parentId", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
+    "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
     "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
@@ -182,6 +182,12 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const interruptionValue = value.interruption === undefined ? undefined : object(value.interruption, `${field}.interruption`);
   if (interruptionValue) exact(interruptionValue, ["reason", "at"], `${field}.interruption`);
 
+  if (value.collaborationVersion !== undefined && value.collaborationVersion !== 1) {
+    throw new Error(`${field}.collaborationVersion is unsupported`);
+  }
+  // Validate old booleans too: migration must not conceal corrupt input. Old false
+  // values cannot distinguish the former default from an explicit opt-out.
+  const configuredDockTools = value.dockToolsEnabled === undefined ? true : boolean(value.dockToolsEnabled, `${field}.dockToolsEnabled`);
   const record: CatalogInstanceRecord = {
     id: text(value.id, `${field}.id`, 128),
     creationOperationId: text(value.creationOperationId, `${field}.creationOperationId`, 128),
@@ -191,8 +197,9 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]),
     execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]),
     lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]),
-    // The old read-only observation grant intentionally resets off when the broader Dock tools switch first appears.
-    dockToolsEnabled: value.dockToolsEnabled === undefined ? false : boolean(value.dockToolsEnabled, `${field}.dockToolsEnabled`),
+    collaborationVersion: 1,
+    dockToolsEnabled: value.collaborationVersion === undefined ? true : configuredDockTools,
+    ...(value.parentId === undefined ? {} : { parentId: text(value.parentId, `${field}.parentId`, 128) }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, `${field}.workerConfig`) }),
     executionChangedAt: value.executionChangedAt === undefined
       ? timestamp(value.createdAt, `${field}.createdAt`)

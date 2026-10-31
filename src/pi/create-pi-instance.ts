@@ -22,6 +22,8 @@ import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerProcessTimeouts } from "./worker-process.js";
 
 export interface CreatePiInstanceOptions {
+  /** Persistent Dock parent; children remain independently visible and controllable. */
+  parentId?: string;
   id?: string;
   creationOperationId?: string;
   hostEpoch?: string;
@@ -61,7 +63,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const extensionUiBroker = new ExtensionUiBroker();
   const dockToolsHostPort = options.dockToolsHostPort ?? unavailableDockToolsHostPort;
   const attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
-  const dockToolsEnabled = options.dockToolsEnabled ?? false;
+  const dockToolsEnabled = options.dockToolsEnabled ?? options.dockToolsHostPort !== undefined;
   const created = await AgentWorkerConnection.create({
     identity: {
       hostEpoch,
@@ -102,6 +104,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     const instance = new ManagedInstance({
       id: instanceId,
       creationOperationId: options.creationOperationId,
+      parentId: options.parentId,
       hostEpoch,
       key: options.key,
       name: initialName,
@@ -141,6 +144,7 @@ const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
 };
 
 const unavailableDockToolsHostPort: DockToolsHostPort = {
+  authorizeDockToolRequest: () => { throw new Error("Dock tools are not connected to a Host."); },
   dockToolsEnabled: () => false,
   configureDockTools: async () => { throw new Error("Dock tools require a managed Registry instance"); },
   invokeDockTool: async () => { throw new Error("Dock tools require a managed Registry instance"); },

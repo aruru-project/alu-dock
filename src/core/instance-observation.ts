@@ -12,6 +12,7 @@ export const MAX_OBSERVATION_MESSAGE_LIMIT = 20;
 export type ObservationMessageType = "user" | "assistant" | "other";
 
 export interface ObservedInstanceStatus {
+  parentId?: string;
   id: string;
   key?: string;
   name?: string;

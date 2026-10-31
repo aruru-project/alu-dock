@@ -37,6 +37,8 @@ export interface CatalogInterruption {
 export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
 
 export interface CatalogInstanceRecord {
+  /** Persistent Dock parent; children remain independently visible and controllable. */
+  parentId?: string;
   id: string;
   creationOperationId: string;
   key?: string;
@@ -45,6 +47,8 @@ export interface CatalogInstanceRecord {
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
   lastRun: LastRunResult;
+  /** Catalog-only marker: legacy default-off policy has been migrated once. */
+  collaborationVersion?: 1;
   /** Durable switch that advertises Agent-facing Dock tools to this instance. */
   dockToolsEnabled?: boolean;
   /** Opaque, adapter-owned Worker creation input. */
@@ -177,7 +181,9 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.admissionOperationId !== undefined) requiredBoundedText(record.admissionOperationId, 128, "Catalog admission operation ID");
   if (!["never", "succeeded", "failed", "aborted", "interrupted"].includes(record.lastRun)) throw new Error("Catalog last-run result is invalid");
   if (!Number.isSafeInteger(record.runtimeGeneration) || record.runtimeGeneration < 1) throw new Error("Catalog runtime generation must be positive");
+  if (record.collaborationVersion !== undefined && record.collaborationVersion !== 1) throw new Error("Catalog collaboration version is unsupported");
   if (record.dockToolsEnabled !== undefined && typeof record.dockToolsEnabled !== "boolean") throw new Error("Catalog Dock tools switch must be boolean");
+  if (record.parentId !== undefined) requiredBoundedText(record.parentId, 128, "Catalog parent ID");
   if (record.workerConfig !== undefined) cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration");
   timestamp(record.createdAt, "Catalog createdAt");
   timestamp(record.updatedAt, "Catalog updatedAt");

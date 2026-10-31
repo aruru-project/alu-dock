@@ -201,6 +201,8 @@ interface AgentEventTransition {
 }
 
 export interface ManagedInstanceOptions {
+  /** Persistent Dock parent; children remain independently visible and controllable. */
+  parentId?: string;
   id?: string;
   key?: string;
   name?: string;
@@ -343,6 +345,17 @@ export class RuntimeEffectUnknownError extends Error {
 }
 
 export class ManagedInstance {
+  // Runtime-only: trust_once must never become a persisted permission grant.
+  private resolvedProjectTrustValue: AgentProjectTrust | undefined;
+
+  setResolvedProjectTrust(trust: AgentProjectTrust): void {
+    this.resolvedProjectTrustValue = { ...trust };
+  }
+
+  resolvedProjectTrust(): AgentProjectTrust | undefined {
+    return this.resolvedProjectTrustValue === undefined ? undefined : { ...this.resolvedProjectTrustValue };
+  }
+
   readonly id: string;
   readonly creationOperationId: string;
   readonly hostEpoch: string;
@@ -382,6 +395,7 @@ export class ManagedInstance {
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
   private readonly workerConfigValue: JsonObject | undefined;
+  private readonly parentId: string | undefined;
   private readonly deliverables = new InstanceDeliverables();
   private executionChangedAtValue!: string;
   private runStartedAtValue: string | undefined;
@@ -443,7 +457,8 @@ export class ManagedInstance {
     this.now = options.now ?? (() => new Date());
     this.createCommandId = options.commandId ?? randomUUID;
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
-    this.dockToolsEnabledValue = options.dockToolsEnabled ?? false;
+    this.dockToolsEnabledValue = options.dockToolsEnabled ?? true;
+    this.parentId = options.parentId;
     this.workerConfigValue = options.workerConfig === undefined
       ? undefined
       : cloneWorkerConfig(options.workerConfig, "Worker configuration");
@@ -559,12 +574,14 @@ export class ManagedInstance {
     const record: CatalogInstanceRecord = {
       id: snapshot.id,
       creationOperationId: snapshot.creationOperationId,
+      ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
       ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
       ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
       cwd: snapshot.cwd,
       lifecycle: snapshot.lifecycle,
       execution: snapshot.execution,
       lastRun: snapshot.lastRun,
+      collaborationVersion: 1,
       dockToolsEnabled: this.dockToolsEnabledValue,
       ...(this.workerConfigValue === undefined ? {} : { workerConfig: cloneJson(this.workerConfigValue) }),
       executionChangedAt: snapshot.executionChangedAt,
@@ -773,6 +790,7 @@ export class ManagedInstance {
     return {
       id: this.id,
       creationOperationId: this.creationOperationId,
+      ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
       key: this.key,
       name: this.name,
       displayName: this.projectedDisplayName(),
@@ -1135,9 +1153,11 @@ export class ManagedInstance {
     trust: AgentProjectTrust,
   ): Promise<AgentReplacementResult> {
     return this.replaceRuntime("switching session", operationId, "switch", { requestedSessionFile: sessionFile }, async () => {
-      return this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
+      const result = await this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
         context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
       });
+      if (!result.cancelled) this.setResolvedProjectTrust(trust);
+      return result;
     });
   }
 

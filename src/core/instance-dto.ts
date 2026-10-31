@@ -353,6 +353,8 @@ export interface EventCursor {
 }
 
 export interface InstanceSnapshot {
+  /** Persistent Dock parent; children remain independently visible and controllable. */
+  parentId?: string;
   id: string;
   creationOperationId: string;
   /** Stable Machine identity from machine.list; supplied by the Main Host boundary. */

@@ -698,7 +698,7 @@ test("a stalled flooded stream resets alone while heartbeat and another stream r
 test("SubHost file delivery remains local while Main is offline", async () => {
   let delivered = false;
   const local = {
-    dockToolsEnabled: () => true,
+    authorizeDockToolRequest: (_source, request) => request, dockToolsEnabled: () => true,
     configureDockTools: async () => ({ enabled: true }),
     invokeDockTool: async (_source: string, request: { type: string }) => { delivered = request.type === "deliver"; return { type: "deliver" as const, deliverable: { deliveryRef: "delivery", name: "file.txt", sizeBytes: 1 } }; },
     attachObservationSink: () => () => {},
@@ -708,4 +708,47 @@ test("SubHost file delivery remains local while Main is offline", async () => {
   const result = await port.invokeDockTool("native", { type: "deliver", path: "/tmp/file.txt" });
   assert.equal(result.type, "deliver");
   assert.equal(delivered, true);
+});
+
+test("offline SubHost children retain global parent relationships through inventory ordering and reconnect", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-parent-ids-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  const { state, machineId } = await joinedState(root);
+  const machine = await state.get(machineId);
+  assert.ok(machine);
+  const controller = new MainMachineController({ state, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
+  const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
+  const internals = controller as unknown as {
+    completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
+    reconcileInventoryFromConnection(candidate: unknown, values: InstanceSnapshot[]): Promise<void>;
+    markOffline(machineId: string): Promise<void>;
+    mapRemoteStreamRecord(candidate: unknown, response: unknown): Promise<unknown[]>;
+  };
+  const parent = snapshot("native-parent");
+  const child = { ...snapshot("native-child"), parentId: parent.id };
+  await internals.completeInitialInventory(connection, "subhost-epoch", [child, parent]);
+  const first = (await state.get(machineId))!.routes;
+  const parentRoute = first.find((route) => route.nativeInstanceId === parent.id)!;
+  const childRoute = first.find((route) => route.nativeInstanceId === child.id)!;
+  assert.notEqual(parentRoute.mainInstanceId, parent.id);
+  assert.equal(childRoute.snapshot.parentId, parentRoute.mainInstanceId);
+
+  // A connected Main-created child already records the global parent namespace.
+  const connectedChild = { ...snapshot("native-connected-child"), parentId: parentRoute.mainInstanceId };
+  await internals.reconcileInventoryFromConnection(connection, [connectedChild, parent, child]);
+  await internals.markOffline(machineId);
+  const offline = (await state.get(machineId))!.routes;
+  assert.equal(offline.find((route) => route.nativeInstanceId === child.id)!.snapshot.parentId, parentRoute.mainInstanceId);
+  await internals.reconcileInventoryFromConnection(connection, [child, connectedChild, parent]);
+  const reconnected = (await state.get(machineId))!.routes;
+  assert.equal(reconnected.find((route) => route.nativeInstanceId === parent.id)!.mainInstanceId, parentRoute.mainInstanceId);
+  for (const id of [child.id, connectedChild.id]) assert.equal(reconnected.find((route) => route.nativeInstanceId === id)!.snapshot.parentId, parentRoute.mainInstanceId);
+
+  // The response projection must agree with inventory, not restore a native parent ID.
+  const stream = { requestId: "get-child", requestType: "instance.get", connection,
+    route: { hostId: machineId, mainInstanceId: childRoute.mainInstanceId, nativeInstanceId: child.id,
+      mainHostEpoch: "main-epoch", nativeHostEpoch: "subhost-epoch" } };
+  const mapped = await internals.mapRemoteStreamRecord(stream, { kind: "response", version: 2, requestId: "get-child", hostEpoch: "subhost-epoch", ok: true, result: { instance: child } });
+  assert.equal((mapped[0] as { result: { instance: InstanceSnapshot } }).result.instance.parentId, parentRoute.mainInstanceId);
 });
