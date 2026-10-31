@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DockClient } from "../src/control/dock-client.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
+import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
+import { createPiInstance, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { PlanGoalProvider, waitFor } from "./support/plan-goal-provider.js";
 
@@ -36,18 +38,28 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   };
   await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: models }));
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "coordinator", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false } }));
-  const registry = new DockRegistry((input) => createPiInstance({
-    ...input, agentDir, sessionDir, projectTrusted: true,
-    workerEnvironment: isolatedProcessEnvironment(home, {
-      PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
-      npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
-    }),
-  }));
   const socketPath = join(root, "dock.sock");
-  host = new DockHost({ socketPath, registry });
-  await host.start();
-  const client = dock = new DockClient({ socketPath, timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
-  const parent = await client.create(cwd, "Coordinator", "team-create");
+  const workerPids: number[] = [];
+  const startHost = async () => {
+    const registry = new DockRegistry((input) => createPiInstance({
+      ...input, agentDir, sessionDir,
+      onWorkerSpawn: (pid) => workerPids.push(pid),
+      workerEnvironment: isolatedProcessEnvironment(home, {
+        PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
+        npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
+      }),
+    }), undefined, {
+      catalogStore: new FileCatalogStore(join(root, "catalog.json")),
+      reopenTargetResolver: { resolve: resolvePiReopenTarget },
+      trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
+        defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
+    });
+    host = new DockHost({ socketPath, registry, initialize: () => registry.initializeCatalog() });
+    await host.start();
+    return dock = new DockClient({ socketPath, timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
+  };
+  let client = await startHost();
+  const parent = await trustOnce((trust) => client.create(cwd, "Coordinator", "team-create", trust));
   await client.prompt(parent.id, "Delegate implementation and independent review of sum.js.", "auto", "team-start");
   const spawnImplementer = await coordinator.request(0);
   assert.ok(spawnImplementer.toolNames.includes("dock_spawn"));
@@ -67,6 +79,8 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   const team = await client.list();
   const implementerWork = team.find((work) => work.displayName === "Implementer")!;
   const reviewerWork = team.find((work) => work.displayName === "Reviewer")!;
+  assert.equal(new Set(workerPids).size, 3, "Each team member runs in its own OS process");
+  assert.ok(workerPids.every((pid) => pid !== process.pid));
   for (const [work, provider] of [[implementerWork, "implementer"], [reviewerWork, "reviewer"]] as const) {
     assert.ok(work);
     assert.equal(work.parentId, parent.id);
@@ -158,7 +172,32 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   busyReviewer.text("Separate review investigation complete.");
   await waitFor(async () => (await client.read(reviewerWork.id)).instance.execution === "idle", "Sibling did not settle");
 
+  // A real Host restart must retain relationships, sessions and explicit grants
+  // without persisting trust_once or replaying the team's completed model work.
+  await client.prompt(reviewerWork.id, "/dock-tools off", "auto", "reviewer-opt-out");
+  await waitFor(async () => !(await client.tools(reviewerWork.id)).tools.some((tool) => tool.name === "dock_send" && tool.active), "Reviewer opt-out did not take effect");
   const countsBeforeStop = Object.values(providers).map((provider) => provider.requests.length);
+  client.closeActiveConnections();
+  await host!.stop();
+  client = await startHost();
+  for (const work of [parent, implementerWork, reviewerWork]) {
+    assert.equal((await client.status(work.id)).lifecycle, "host_lost");
+    await trustOnce((trust) => client.reopen(work.id, `reopen-${work.id}`, undefined, trust));
+  }
+  assert.equal(new Set(workerPids).size, 6);
+  for (const child of [implementerWork, reviewerWork]) {
+    const restored = await client.status(child.id);
+    assert.equal(restored.parentId, parent.id);
+    assert.deepEqual(restored.executor.model, child.executor.model);
+    assert.equal(restored.executor.thinkingLevel, child.executor.thinkingLevel);
+  }
+  assert.deepEqual((await client.tools(implementerWork.id)).tools.map((tool) => tool.name).sort(), ["dock_send", "read", "write"]);
+  assert.deepEqual((await client.tools(reviewerWork.id)).tools.filter((tool) => tool.active).map((tool) => tool.name), ["read"]);
+  await client.prompt(reviewerWork.id, "/dock-tools on", "auto", "reviewer-opt-in");
+  await waitFor(async () => (await client.tools(reviewerWork.id)).tools.some((tool) => tool.name === "dock_send" && tool.active), "Reviewer opt-in did not take effect");
+  assert.deepEqual((await client.tools(reviewerWork.id)).tools.filter((tool) => tool.active).map((tool) => tool.name).sort(), ["dock_send", "read"]);
+  assert.ok(JSON.stringify((await client.history(reviewerWork.id)).entries).includes("a + b"));
+  assert.deepEqual(Object.values(providers).map((provider) => provider.requests.length), countsBeforeStop);
   const parentStopped = await client.stop(parent.id, "team-stop-parent");
   assert.equal(parentStopped.instance.lifecycle, "stopped");
   for (const child of [implementerWork, reviewerWork]) {
@@ -174,3 +213,15 @@ test("native coordinator, implementer and independent reviewer collaborate throu
     "Interrupt and explicit stop cleanup must not replay completed tasks or start another model turn");
   assert.equal(await readFile(bugPath, "utf8"), "export const sum = (a, b) => a + b;\n");
 });
+
+async function trustOnce<T>(operation: (trust?: { challengeId: string; decision: "trust_once" }) => Promise<T>): Promise<T> {
+  let challengeId: string | undefined;
+  await assert.rejects(operation(), (error: unknown) => {
+    assert.ok(error instanceof ControlClientError);
+    assert.equal(error.code, "project_trust_required");
+    assert.equal(typeof error.details?.challengeId, "string");
+    challengeId = error.details!.challengeId as string;
+    return true;
+  });
+  return operation({ challengeId: challengeId!, decision: "trust_once" });
+}
