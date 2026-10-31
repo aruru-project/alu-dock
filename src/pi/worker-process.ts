@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { WORKER_INCIDENT_STDERR_MAX_BYTES } from "../core/worker-incident.js";
@@ -196,20 +197,62 @@ function signalGroup(pid: number, child: ChildProcess, signal: NodeJS.Signals): 
 }
 
 async function waitForGroupGone(pid: number, timeoutMs: number): Promise<void> {
-  if (!processGroupExists(pid)) return;
+  if (!await processGroupExists(pid)) return;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-    if (!processGroupExists(pid)) return;
+    if (!await processGroupExists(pid)) return;
   }
   throw new Error("Pi worker process group did not exit before the process deadline");
 }
 
-function processGroupExists(pid: number): boolean {
-  try { process.kill(-pid, 0); return true; }
+async function processGroupExists(pid: number): Promise<boolean> {
+  try { process.kill(-pid, 0); }
   catch (error) {
     return !(error instanceof Error && "code" in error && error.code === "ESRCH");
   }
+  if (process.platform !== "linux") return true;
+
+  // 2026-10-31: a container's PID 1 retained killed extension descendants as
+  // zombies, so kill(-pgid, 0) prevented Host from publishing Worker loss.
+  // Zombies cannot own a session or execute work. A zombie group leader can
+  // still have live threads, however, so inspect its tasks before releasing it.
+  let foundGroup = false;
+  try {
+    for (const entry of await readdir("/proc")) {
+      if (!/^\d+$/u.test(entry)) continue;
+      const stat = await readProcessStat(`/proc/${entry}/stat`);
+      if (!stat || stat.group !== pid) continue;
+      foundGroup = true;
+      if (stat.state !== "Z" && stat.state !== "X") return true;
+      let tasks: string[];
+      try { tasks = await readdir(`/proc/${entry}/task`); }
+      catch (error) { if (processDisappeared(error)) continue; throw error; }
+      for (const task of tasks) {
+        const thread = await readProcessStat(`/proc/${entry}/task/${task}/stat`);
+        if (thread && thread.state !== "Z" && thread.state !== "X") return true;
+      }
+    }
+    // If procfs did not expose this group, do not infer that it is dead.
+    if (foundGroup) return false;
+    try { process.kill(-pid, 0); return true; }
+    catch (error) { return !processDisappeared(error); }
+  } catch { return true; } // Unreadable procfs cannot prove termination.
+}
+
+async function readProcessStat(path: string): Promise<{ state: string; group: number } | undefined> {
+  let text: string;
+  try { text = await readFile(path, "utf8"); }
+  catch (error) { if (processDisappeared(error)) return undefined; throw error; }
+  // comm is parenthesized and may itself contain spaces and closing parentheses.
+  const fields = text.slice(text.lastIndexOf(")") + 2).trim().split(/\s+/u);
+  const group = Number(fields[2]);
+  if (fields[0]?.length !== 1 || !Number.isSafeInteger(group)) throw new Error("Cannot read Linux process state");
+  return { state: fields[0], group };
+}
+
+function processDisappeared(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ESRCH");
 }
 
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
