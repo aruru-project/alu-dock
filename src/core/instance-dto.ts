@@ -353,7 +353,7 @@ export interface EventCursor {
 }
 
 export interface InstanceSnapshot {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work; native children are temporary and retire with their parent. */
   parentId?: string;
   id: string;
   creationOperationId: string;

@@ -143,7 +143,7 @@ export class InstanceObservationService {
   }
 
   private list(sourceInstanceId: string, includeHistory: boolean): ObservationResult {
-    const all = this.port.listSnapshots().filter((item) => item.id !== sourceInstanceId);
+    const all = this.visibleTargets(sourceInstanceId);
     const selected = includeHistory
       ? all
       : all.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
@@ -355,7 +355,8 @@ export class InstanceObservationService {
   }
 
   resolveTarget(sourceInstanceId: string, selector: string): InstanceSnapshot {
-    const candidates = this.port.listSnapshots();
+    if (selector === sourceInstanceId) throw new Error("An instance cannot observe itself");
+    const candidates = this.visibleTargets(sourceInstanceId);
     const exactId = candidates.find((item) => item.id === selector);
     if (exactId) return this.assertNotSelf(sourceInstanceId, exactId);
     const live = candidates.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
@@ -367,6 +368,11 @@ export class InstanceObservationService {
     }
     if (matches.size !== 1) throw new Error(`Observation target is missing or ambiguous among live siblings: ${selector}`);
     return this.assertNotSelf(sourceInstanceId, [...matches.values()][0]!);
+  }
+
+  private visibleTargets(sourceInstanceId: string): InstanceSnapshot[] {
+    const source = this.port.getSnapshot(sourceInstanceId);
+    return this.port.listSnapshots().filter((target) => dockTargetVisible(source, target));
   }
 
   private assertNotSelf(sourceInstanceId: string, target: InstanceSnapshot): InstanceSnapshot {
@@ -545,4 +551,11 @@ function truncateText(value: string, max: number): { text: string; truncated: bo
 
 function cloneCursorState(state: ObservationCursorState): ObservationCursorState {
   return { ...state, pending: state.pending.map((message) => ({ ...message })) };
+}
+
+/** Native children communicate through their parent; top-level peers stay unrestricted. */
+export function dockTargetVisible(source: InstanceSnapshot, target: InstanceSnapshot): boolean {
+  if (source.id === target.id) return false;
+  if (source.parentId !== undefined) return target.id === source.parentId;
+  return target.parentId === undefined || target.parentId === source.id;
 }

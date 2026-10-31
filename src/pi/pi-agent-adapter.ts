@@ -1,6 +1,7 @@
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { piSystemPromptResolver } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
-import { parseWorkerToolPolicy, withoutLegacySubagents, workerToolSelection } from "./worker-tool-policy.js";
+import { parseWorkerToolPolicy, workerToolSelection } from "./worker-tool-policy.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, open, realpath } from "node:fs/promises";
@@ -3601,8 +3602,8 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
           ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
-        extensionsOverride: (base) => withoutLegacySubagents(ownCanonicalShowImage(base)),
-        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.workerConfig?.collaboration ? [`This is a Dock child worker. Parent: ${JSON.stringify(options.workerConfig.collaboration)}. Collaborate using dock_send; report useful findings and the final result to your parent. Other workers are independently visible in Dock. Use dock_spawn for delegation, not Pi subagents. Do not send acknowledgment-only replies that create message loops.`] : [])],
+        extensionsOverride: (base) => ownCanonicalShowImage(base),
+        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.workerConfig?.collaboration ? [`This is a Dock child worker. Parent: ${JSON.stringify(options.workerConfig.collaboration)}. Collaborate using dock_send; report useful findings and the final result to your parent. Use Dock only to communicate with your parent. Native Dock children cannot create more workers. Do not send acknowledgment-only replies that create message loops.`] : [])],
         ...(options.dockAttachmentPort === undefined ? {} : {
           additionalSkillPaths: [dockAttachmentSkillPath()],
         }),
@@ -3611,7 +3612,12 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
     const { toolPolicy: _toolPolicy, collaboration: _collaboration, ...workerConfig } = options.workerConfig ?? {};
     const { model: requestedModel, ...piCreateOptions } = workerConfig as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
+    const freshChild = Boolean(options.workerConfig?.collaboration) && sessionManager.getBranch().length === 0;
     const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager);
+    if (options.workerConfig?.collaboration && startingModel && piCreateOptions.thinkingLevel !== undefined
+      && !getSupportedThinkingLevels(startingModel).includes(piCreateOptions.thinkingLevel)) {
+      throw new Error(`Model ${startingModel.id} does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
+    }
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
       ...(startingModel === undefined ? {} : { model: startingModel }),
@@ -3625,6 +3631,11 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       // Preserve existing plugin preferences; wire JSON cannot disable this contract.
       extensionModelMutationPolicy: "legacy-defaults",
     });
+    if (freshChild && !startingModel && piCreateOptions.thinkingLevel !== undefined
+      && !result.session.getAvailableThinkingLevels().includes(piCreateOptions.thinkingLevel)) {
+      result.session.dispose();
+      throw new Error(`The selected model does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
+    }
     return { ...result, services, diagnostics: services.diagnostics };
   };
   const sessionManager = options.sessionManager

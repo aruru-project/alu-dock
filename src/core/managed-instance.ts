@@ -201,7 +201,7 @@ interface AgentEventTransition {
 }
 
 export interface ManagedInstanceOptions {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work; native children are temporary and retire with their parent. */
   parentId?: string;
   id?: string;
   key?: string;

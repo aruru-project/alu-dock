@@ -609,6 +609,12 @@ export class MainMachineController implements RemoteInstanceDirectory {
       nativeHostEpoch: connection.hostEpoch,
       ...(route.snapshot.key === undefined ? {} : { mainKey: route.snapshot.key }),
     } : undefined;
+    const nativeRequest = requestForNativeHost(request, identity);
+    if (nativeRequest.type === "instance.create" && nativeRequest.params.parentId !== undefined) {
+      const parent = [...this.parentIdsForMachine(machine.id)].find(([, mainId]) => mainId === nativeRequest.params.parentId);
+      if (!parent) throw new Error("The parent is no longer available on this machine.");
+      nativeRequest.params.parentId = parent[0];
+    }
     const streamId = randomUUID();
     if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine is busy right now. Try again shortly.");
     const stream: MainStream = {
@@ -628,7 +634,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       emit,
       ended,
       helloSeen: false,
-      nativeRequest: requestForNativeHost(request, identity),
+      nativeRequest,
       requiredCapabilities: [...new Set([...requiredCapabilities(capabilityForRequest(request.type)), ...requestOptionCapabilities(request), ...(fileMode ? [FILE_TRANSFER_CAPABILITY] : [])])],
       acceptingInput: true,
       inputTail: Promise.resolve(),
@@ -878,7 +884,9 @@ export class MainMachineController implements RemoteInstanceDirectory {
       const invokeDockTool = this.options.invokeDockTool;
       void (async () => {
         try {
-          const result = await invokeDockTool(source.mainInstanceId, connection.machine.id, record.request);
+          const request = structuredClone(record.request);
+          if ("target" in request) request.target = this.parentIdsForMachine(connection.machine.id).get(request.target) ?? request.target;
+          const result = await invokeDockTool(source.mainInstanceId, connection.machine.id, request);
           await writeMachine(connection.socket, { kind: "machine_tool_response", requestId: record.requestId, ok: true, result });
         } catch (error) {
           await writeMachine(connection.socket, { kind: "machine_tool_response", requestId: record.requestId, ok: false, error: error instanceof Error ? error.message : String(error) }).catch(() => {});

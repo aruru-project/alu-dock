@@ -49,7 +49,7 @@ export interface RemoteInstanceDirectory {
 }
 
 export interface CreateInstanceMutation {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work on this Host; native children are temporary. */
   parentId?: string;
   operationId: string;
   cwd: string;

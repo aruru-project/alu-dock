@@ -55,7 +55,7 @@ export default function (pi) {
 }
 `);
   // This models the canonical legacy extension's entry point. Its startup hook
-  // must not run alongside Dock's owner of children; other extensions stay loaded.
+  // stays loaded; explicit tool permissions still govern its registered tool.
   const legacyMarker = join(cwd, "legacy-started.txt");
   await writeFile(join(agentDir, "extensions", "legacy-children.ts"), `
 import { writeFile } from "node:fs/promises";
@@ -77,7 +77,7 @@ export default function (pi) {
     const assertCeiling = async () => {
       assert.deepEqual((await adapter!.listTools()).tools.map((tool) => tool.name).sort(), ["nested_probe", "read"]);
       await assert.rejects(access(marker));
-      await assert.rejects(access(legacyMarker));
+      await access(legacyMarker);
     };
     await assertCeiling();
     await assert.rejects(adapter.setActiveTools(["read", "write"]));
@@ -97,6 +97,10 @@ export default function (pi) {
       workerConfig: { toolPolicy: { allowedTools: ["mcp__fixture__write"] } } });
     assert.deepEqual((await adapter.listTools()).tools.map((tool) => tool.name), ["mcp__fixture__write"]);
     await assert.rejects(access(marker));
+    await adapter.control({ type: "dispose" });
+    adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true,
+      workerConfig: { toolPolicy: { allowedTools: ["subagent"] } } });
+    assert.deepEqual((await adapter.listTools()).tools.map(tool => tool.name), ["subagent"], "The user's legacy extension remains available when explicitly permitted");
     return;
   }
   const registry = new DockRegistry((input) => createPiInstance({
@@ -117,7 +121,7 @@ export default function (pi) {
     const names = (await dock.tools(work.id)).tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, ["nested_probe", "read"]);
     await assert.rejects(access(marker));
-    await assert.rejects(access(legacyMarker));
+    await access(legacyMarker);
   };
   await assertCeiling();
   await assert.rejects(dock.setActiveTools(work.id, ["read", "write"], "policy-widen"));

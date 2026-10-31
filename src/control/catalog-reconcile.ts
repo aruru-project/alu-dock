@@ -32,7 +32,8 @@ export function reconcileCatalogProjection(
 
   validateCatalogProjection(loaded);
   let normalizedCount = 0;
-  const instances = loaded.instances.map((record) => {
+  // Retire temporary child identities at boot; their Pi session files are untouched.
+  const instances = loaded.instances.filter((record) => record.parentId === undefined).map((record) => {
     if (record.lifecycle === "active" || record.lifecycle === "stopping") {
       normalizedCount += 1;
       return normalizePriorLiveRecord(record, timestamp);

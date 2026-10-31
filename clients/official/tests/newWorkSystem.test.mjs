@@ -80,11 +80,10 @@ try {
   }
 
   // A missing optional Host feature must not block the existing creation contract.
-  for (const scenario of ['legacy-child', 'legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
+  for (const scenario of ['legacy', 'legacy-trust', 'legacy-unknown', 'partial-unsupported', 'catalog-failure', 'catalog-empty', 'other-capability-missing', 'refresh-unsupported', 'late-unsupported', 'once', 'read-failure', 'save-trust', 'save-default-changed', 'save-failure', 'save-create-failure', 'default', 'bad-default', 'late-directory', 'late-machine', 'late-connection', 'late-close', 'save-unknown', 'save-create-unknown', 'body-back', 'body-close', 'body-connection', 'model']) {
     const store = await createStore()
-    const calls = [], created = [], notices = []
+    const calls = [], created = []
     const props = reactive({ machines: [{ hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }], machinesLoading: false })
-    if (scenario === 'legacy-child') props.parentWork = { id: 'coordinator', displayName: '协调任务', hostId: 'target', cwd: '/project' }
     let lateResolve, lateReject
     let currentDefault = scenario === 'default' ? template : undefined
     let machineModels = [fastModel, hiddenModel]
@@ -132,17 +131,11 @@ try {
       throw new Error(`Unexpected IPC ${command}`)
     } }
     const container = node('root')
-    const app = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated: (work, notice) => { created.push(work); notices.push(notice) }, onClose: () => app.unmount() }) })
+    const app = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated: work => created.push(work), onClose: () => app.unmount() }) })
     app.mount(container)
     const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} enabled`); target.props.onClick(); await settle() }
     await settle()
-    if (scenario === 'legacy-child') {
-      assert.ok(text(container).includes('协调任务'))
-      assert.ok(!button('恢复保存的 Pi Session'))
-      await click('思考强度'); await click('high')
-      await click('工具许可'); await click('只读审查与协作通信')
-    }
     if (scenario === 'model') {
       // Card 361: the model is chosen on the first screen; hidden models stay out of the list.
       await click('选择模型')
@@ -170,13 +163,7 @@ try {
     if (scenario.startsWith('legacy')) {
       assert.ok(!button('选择模型'), 'an old Host without a machine model list shows no model choice; creation proceeds as before')
       assert.equal(calls.filter(c => c.command === 'create_work').length, 1, 'new Client uses ordinary creation when old Host lacks system selection')
-      if (scenario === 'legacy-child') {
-        const args = calls.find(c => c.command === 'create_work').args
-        assert.equal(args.parentId, 'coordinator')
-        assert.equal(args.workerConfig.thinkingLevel, 'high')
-        assert.match(notices[0], /思考强度请求 high，实际为 未提供/, 'created task exposes effective-setting mismatch before any task is sent')
-        assert.deepEqual(args.workerConfig.toolPolicy.allowedTools, ['read', 'grep', 'find', 'ls', 'dock_send', 'dock_list', 'dock_inspect', 'dock_watch', 'dock_cancel_watch'])
-      } else assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null)
+      assert.equal(calls.find(c => c.command === 'create_work').args.workerConfig, null)
       assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
       assert.ok(!text(container).includes('没有可用的 system'), 'unsupported feature is not an empty file list')
       if (scenario === 'legacy-trust') {

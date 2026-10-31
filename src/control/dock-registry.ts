@@ -41,7 +41,7 @@ import type {
 } from "./project-trust.js";
 
 export interface InstanceFactoryInput {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work on this Host; native children are temporary. */
   parentId?: string;
   id: string;
   creationOperationId: string;
@@ -64,7 +64,7 @@ export interface InstanceFactoryInput {
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
 
 export interface CreateRegistryInstanceInput {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work on this Host; native children are temporary. */
   parentId?: string;
   operationId: string;
   cwd: string;
@@ -156,6 +156,8 @@ export class DockRegistry implements DockToolsHostPort {
   readonly startedAt: string;
   readonly systemService: SystemService | undefined;
   private readonly instances = new Map<string, ManagedInstance>();
+  private readonly childCreations = new Map<string, Set<Promise<ManagedInstance>>>();
+  private readonly childCleanup = new Map<string, Promise<void>>();
   private readonly delegationTrustSources = new Map<string, ManagedInstance>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
@@ -251,7 +253,15 @@ export class DockRegistry implements DockToolsHostPort {
   }
 
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
-    return this.createNew(input);
+    const creation = this.createNew(input);
+    if (input.parentId === undefined) return creation;
+    const pending = this.childCreations.get(input.parentId) ?? new Set<Promise<ManagedInstance>>();
+    this.childCreations.set(input.parentId, pending);
+    pending.add(creation);
+    try { return await creation; } finally {
+      pending.delete(creation);
+      if (pending.size === 0) this.childCreations.delete(input.parentId);
+    }
   }
 
   async ensure(input: EnsureRegistryInstanceInput): Promise<{ created: boolean; instance: InstanceSnapshot }> {
@@ -280,6 +290,13 @@ export class DockRegistry implements DockToolsHostPort {
     if (this.catalog.current().instances.some((record) => record.creationOperationId === input.operationId)) {
       throw new CatalogOperationRecordedError(input.operationId);
     }
+    const parent = input.parentId === undefined ? undefined : this.get(input.parentId);
+    const assertParent = () => {
+      if (parent && (this.instances.get(parent.id) !== parent || parent.snapshot().lifecycle !== "active" || parent.snapshot().parentId !== undefined)) {
+        throw new Error("Child workers require an active top-level parent.");
+      }
+    };
+    assertParent();
     const resolution = await this.resolveDelegatedProjectTrust({
       operationType: "instance.create",
       operationId: input.operationId,
@@ -294,7 +311,7 @@ export class DockRegistry implements DockToolsHostPort {
       : input.workerConfig;
     const configured = input.parentId === undefined ? resolvedConfig : {
       ...resolvedConfig,
-      collaboration: { parentId: input.parentId, parentName: this.list().find((item) => item.id === input.parentId)?.displayName ?? input.parentId },
+      collaboration: resolvedConfig?.collaboration ?? { parentId: input.parentId, parentName: parent!.snapshot().displayName },
     };
     const workerConfig = configured === undefined ? undefined : cloneWorkerConfig(configured, "Worker configuration");
 
@@ -314,6 +331,7 @@ export class DockRegistry implements DockToolsHostPort {
     }
     instance.bindCatalogPort(this.catalog.forInstance(id));
     try {
+      assertParent();
       await this.catalog.create(instance.catalogRecord(), {
         kind: key === undefined ? "instance.create" : "instance.ensure",
         effect: "rollback_contained",
@@ -328,6 +346,10 @@ export class DockRegistry implements DockToolsHostPort {
     instance.setResolvedProjectTrust(resolution);
     this.instances.set(id, instance);
     this.trackInstanceForObservation(instance);
+    try { assertParent(); } catch (error) {
+      await this.stop(instance.id, randomUUID());
+      throw error;
+    }
     return instance;
   }
 
@@ -429,6 +451,7 @@ export class DockRegistry implements DockToolsHostPort {
     if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
     this.reopenInFlight.set(input.instanceId, input.operationId);
     try {
+      await this.stopChildren(input.instanceId);
       return await this.performReopen(input);
     } finally {
       if (this.reopenInFlight.get(input.instanceId) === input.operationId) this.reopenInFlight.delete(input.instanceId);
@@ -544,7 +567,11 @@ export class DockRegistry implements DockToolsHostPort {
 
   authorizeDockToolRequest(sourceInstanceId: string, request: DockToolsRequest): DockToolsRequest {
     this.assertDockToolsSource(sourceInstanceId);
-    const authorized = constrainDelegatedTools(request, this.catalogRecord(sourceInstanceId).workerConfig?.toolPolicy);
+    const sourceRecord = this.catalogRecord(sourceInstanceId);
+    if (sourceRecord.parentId !== undefined && (request.type === "create" || request.type === "spawn")) {
+      throw new Error("A child worker cannot create work. Ask its parent to delegate.");
+    }
+    const authorized = constrainDelegatedTools(request, sourceRecord.workerConfig?.toolPolicy);
     if (authorized.type === "create" || authorized.type === "spawn") {
       const operationId = authorized.type === "spawn" ? systemToolOperation(authorized.operationId, "create") : authorized.operationId;
       this.delegationTrustSources.set(operationId, this.get(sourceInstanceId));
@@ -603,7 +630,12 @@ export class DockRegistry implements DockToolsHostPort {
     const detachSink = this.attachObservationSink(instance.id, (notification) => instance.deliverObservation(notification));
     this.instanceObservationSinkDetachments.set(instance.id, detachSink);
     this.instanceObservationSubscriptions.set(instance.id, instance.subscribe(() => {
+      if (this.instances.get(instance.id) !== instance) return;
       const snapshot = instance.snapshot();
+      if (snapshot.lifecycle === "stopping" || snapshot.lifecycle === "runtime_error") {
+        // The owning Host observes real runtime lifecycle, never Main's offline projection.
+        void this.stopChildren(instance.id).catch(() => {});
+      }
       if (snapshot.lifecycle === "stopping" || snapshot.lifecycle === "stopped") void this.observationService.cancelSource(instance.id);
       if (snapshot.lifecycle === "stopped" || snapshot.lifecycle === "host_lost" || snapshot.lifecycle === "runtime_error") {
         detachSink();
@@ -634,6 +666,7 @@ export class DockRegistry implements DockToolsHostPort {
   async stop(instanceId: string, operationId: string): Promise<{ receipt: StopReceipt; instance: InstanceSnapshot }> {
     const instance = this.get(instanceId);
     const receipt = await instance.stop(operationId);
+    await this.stopChildren(instanceId);
     const snapshot = instance.snapshot();
     if (this.instances.get(instanceId) === instance) {
       this.instances.delete(instanceId);
@@ -643,6 +676,22 @@ export class DockRegistry implements DockToolsHostPort {
       });
     }
     return { receipt, instance: snapshot };
+  }
+
+  private stopChildren(parentId: string): Promise<void> {
+    const pending = this.childCleanup.get(parentId);
+    if (pending) return pending;
+    const creations = [...(this.childCreations.get(parentId) ?? [])];
+    const task = (async () => {
+      // A child already starting must either publish under a live parent or
+      // dispose itself before the parent's stop can report completion.
+      await Promise.allSettled(creations);
+      const children = [...this.instances.values()].filter((child) => child.snapshot().parentId === parentId);
+      await Promise.all(children.map((child) => this.stop(child.id, randomUUID())));
+    })();
+    this.childCleanup.set(parentId, task);
+    void task.then(() => this.childCleanup.delete(parentId), () => this.childCleanup.delete(parentId));
+    return task;
   }
 
   getSnapshot(instanceId: string): InstanceSnapshot {

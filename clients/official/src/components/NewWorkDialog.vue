@@ -51,11 +51,10 @@ const props = defineProps<{
   machines: readonly MachineDto[]
   machinesLoading: boolean
   machineError?: string
-  parentWork?: Work
 }>()
 const emit = defineEmits<{
   close: []
-  created: [work: Work, notice?: string]
+  created: [work: Work]
   busy: [busy: boolean]
   view: [view: View]
 }>()
@@ -83,11 +82,6 @@ const savedDefaultId = ref('')
 const saveFailed = ref(false)
 // The model the new Work starts with; null leaves the choice to Pi on that Machine.
 const modelChoice = ref<ModelRef | null>(null)
-const workName = ref('')
-const thinkingLevel = ref('')
-const toolMode = ref('default')
-const allowedTools = ref('')
-const reviewerTools = ['read', 'grep', 'find', 'ls', 'dock_send', 'dock_list', 'dock_inspect', 'dock_watch', 'dock_cancel_watch']
 let systemEpoch = 0
 let inventoryEpoch = 0
 
@@ -132,7 +126,7 @@ const modelOptions = computed(() => [
   })),
 ])
 const modelChoiceValue = computed(() => modelChoice.value ? modelKey(modelChoice.value) : PI_DEFAULT_MODEL)
-const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : props.parentWork ? '创建子任务' : '新建 Work')
+const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
   if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
   if (view.value === 'browse') return workspacePath.value
@@ -143,7 +137,7 @@ const actionBusy = computed(() => props.machinesLoading || !!pending.value || !!
 
 watch(() => props.machines, (machines) => {
   if (machines.some((candidate) => candidate.hostId === machineHostId.value && candidate.available)) return
-  const nextMachineHostId = machines.find(candidate => candidate.hostId === props.parentWork?.hostId && candidate.available)?.hostId ?? defaultMachineHostId(machines)
+  const nextMachineHostId = defaultMachineHostId(machines)
   if (nextMachineHostId !== machineHostId.value) clearError()
   machineHostId.value = nextMachineHostId
 }, { immediate: true })
@@ -190,11 +184,8 @@ function selectModel(value: string) {
 /** The chosen model rides with the system choice; without a choice the Host and Pi decide as before. */
 function workerConfigWithModel(workerConfig?: Record<string, unknown>) {
   const model = modelChoice.value
-  const config = { ...workerConfig }
-  if (model) config.model = { provider: model.provider, id: model.id }
-  if (thinkingLevel.value) config.thinkingLevel = thinkingLevel.value
-  if (toolMode.value !== 'default') config.toolPolicy = { allowedTools: toolMode.value === 'reviewer' ? reviewerTools : [...new Set(allowedTools.value.split(/[\s,]+/u).filter(Boolean))] }
-  return Object.keys(config).length ? config : undefined
+  if (!model) return workerConfig
+  return { ...workerConfig, model: { provider: model.provider, id: model.id } }
 }
 
 function resetSystems() {
@@ -427,15 +418,10 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const work = await createWork(path, app.captureHostOperation(context), workName.value.trim() || undefined, continuation, machineId, workerConfig, props.parentWork?.id)
+    const work = await createWork(path, app.captureHostOperation(context), undefined, continuation, machineId, workerConfig)
     if (!app.contextMatches(context) || epoch !== systemEpoch) return
     trust.value = null
-    const requestedThinking = workerConfig?.thinkingLevel
-    const requestedModel = workerConfig?.model as ModelRef | undefined
-    const adjustments: string[] = []
-    if (typeof requestedThinking === 'string' && work.executor?.thinkingLevel !== requestedThinking) adjustments.push(`思考强度请求 ${requestedThinking}，实际为 ${work.executor?.thinkingLevel || '未提供'}`)
-    if (requestedModel && (work.executor?.model?.provider !== requestedModel.provider || work.executor?.model?.id !== requestedModel.id)) adjustments.push(`模型请求 ${requestedModel.provider}/${requestedModel.id}，实际为 ${work.executor?.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '未提供'}`)
-    emit('created', work, adjustments.length ? `任务已创建，但执行配置有差异：${adjustments.join('；')}。请确认顶部配置后再发送任务。` : undefined)
+    emit('created', work)
   } catch (cause) {
     if (epoch === systemEpoch) {
       if (systemCatalogState.value !== 'unsupported') view.value = 'systems'
@@ -541,16 +527,6 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         <span v-if="modelListState === 'failed'" class="new-work-model-note">读不到这台机器的模型列表，将使用 Pi 默认。改过模型或登录后，点右侧刷新。</span>
       </label>
       <section v-if="view === 'launcher'" class="new-work-launcher">
-        <p v-if="parentWork" class="collaboration-note">主任务：{{ parentWork.displayName }}。创建后可在新任务中发送指令；各任务独立运行。</p>
-        <fieldset class="worker-settings" :disabled="actionBusy">
-          <legend>执行配置</legend>
-          <label v-if="parentWork">任务名称 <input v-model="workName" aria-label="任务名称" placeholder="例如：独立代码审查" maxlength="200" /></label>
-          <label>思考强度 <AluSelect :value="thinkingLevel" :options="[{ value: '', label: '模型默认' }, ...['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(value => ({ value, label: value }))]" label="思考强度" @select="thinkingLevel = $event" /></label>
-          <label>工具许可 <AluSelect :value="toolMode" :options="[{ value: 'default', label: '不额外限制' }, { value: 'reviewer', label: '只读审查与协作通信' }, { value: 'custom', label: '指定工具' }]" label="工具许可" @select="toolMode = $event" /></label>
-          <label v-if="toolMode === 'custom'">允许的工具名称 <textarea v-model="allowedTools" aria-label="允许的工具名称" placeholder="read, grep, dock_send" /></label>
-          <small v-if="toolMode !== 'default'">只开放指定工具，不是文件系统沙箱。空列表表示不开放任何工具。</small>
-        </fieldset>
-        <button v-if="parentWork && machine.hostId === parentWork.hostId" type="button" class="ui-dialog-option" :disabled="actionBusy" @click="chooseDirectory(parentWork.cwd)">使用主任务目录 · {{ parentWork.cwd }}</button>
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
           <button v-for="path in recentWorkspaces" :key="path" type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="chooseDirectory(path)">
@@ -564,7 +540,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
             <span class="ui-dialog-option-marker"><FolderOpen :size="16" /></span>
             <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">选择其他目录…</span><span class="ui-dialog-option-detail"><span>浏览这台机器上的目录</span></span></span>
           </button>
-          <button v-if="!parentWork" type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="loadInventory">
+          <button type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="loadInventory">
             <span class="ui-dialog-option-marker"><RotateCcw :size="16" /></span>
             <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">恢复保存的 Pi Session…</span><span class="ui-dialog-option-detail"><span>从已有 Session 创建新的 Work</span></span></span>
           </button>
@@ -642,11 +618,6 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 </template>
 
 <style scoped>
-.worker-settings { display: flex; flex-direction: column; gap: 10px; margin: 0 0 12px; padding: 12px; border: 1px solid var(--alu-border); border-radius: 10px; }
-.worker-settings label { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
-.worker-settings select, .worker-settings textarea, .worker-settings input { max-width: 65%; color: var(--alu-text); background: var(--alu-bg); border: 1px solid var(--alu-border); border-radius: 6px; padding: 6px; }
-.worker-settings small, .collaboration-note { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
-
 .alu-directory-machine {
   position: relative;
   z-index: 1;

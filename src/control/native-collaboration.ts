@@ -21,9 +21,6 @@ export async function spawnDockWorker(
     ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
   });
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
-  if (request.thinkingLevel !== undefined && created.instance.thinkingLevel !== request.thinkingLevel) {
-    return { type: "spawn", instance: created.instance, taskStatus: "failed", error: `Worker created with effective thinking ${created.instance.thinkingLevel ?? "off"}, not requested ${request.thinkingLevel}. Its model does not support that effort. No task was sent; select supported settings or send a task to this worker explicitly.` };
-  }
   let target;
   try {
     target = (await port.send({ operationId: systemToolOperation(request.operationId, "task"), instanceId: created.instance.id, message: dockMessageText(source.displayName, request.task), delivery: "followUp" })).target;

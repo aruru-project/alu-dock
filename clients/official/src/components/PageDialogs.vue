@@ -22,7 +22,7 @@ const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, control
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const { refreshCurrent } = useObservationStore()
 const workActions = useWorkActionsStore()
-const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact, newWorkParent } = storeToRefs(workActions)
+const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
 const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
@@ -81,7 +81,6 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
       <section :ref="element => bindSurface('machine-settings', element)" class="machine-settings-surface" role="dialog" aria-modal="true" aria-labelledby="machine-settings-title" tabindex="-1" @wheel="handleModalWheel">
         <MachineSettings
           :machines="hostMachines"
-          :parent-work="newWorkParent ?? undefined"
           :machines-loading="machineSettingsLoading"
           :machine-error="machineListError"
           :initial-host-id="machineSettingsHostId"
@@ -98,7 +97,6 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
         <NewWorkDialog
           v-if="directoryOpen"
           :machines="hostMachines"
-          :parent-work="newWorkParent ?? undefined"
           :machines-loading="newWorkMachinesLoading"
           :machine-error="machineListError"
           @close="closeModal"

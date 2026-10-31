@@ -51,10 +51,10 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <div v-if="machineListError" class="alu-sidebar-error">{{ machineListError }}</div>
       <section v-for="group in (['current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group">
         <div class="alu-instance-group-title">{{ group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作' }}<span>{{ groupedWorks[group].length }}</span></div>
-        <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id }">
+        <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
           <button class="alu-instance-link" @click="selectWork(work.id)">
             <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
-            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="work.parentId" class="alu-instance-cwd">↳ {{ app.works.find(parent => parent.id === work.parentId)?.displayName ?? '子任务' }}</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
+            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
             <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
           </button>
           <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && workMutating)" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
@@ -141,6 +141,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   border-radius: 9px;
   overflow: hidden;
 }
+.alu-instance-row.is-child { margin-left: 18px; }
 .alu-instance-row:hover { background: var(--alu-hover); }
 .alu-instance-row.is-selected { background: var(--alu-pink-bg); border-color: var(--alu-pink-border); }
 .alu-instance-link { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px 8px; padding-right: 48px; }

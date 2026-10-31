@@ -20,6 +20,7 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
   const coordinator = new PlanGoalProvider(), implementer = new PlanGoalProvider(), reviewer = new PlanGoalProvider();
   const providers = { coordinator, implementer, reviewer };
+  const implementerTools = ["read", "write", "dock_send", "dock_list", "dock_inspect", "dock_watch", "dock_cancel_watch", "dock_create", "dock_spawn", "dock_stop", "dock_interrupt"];
   let host: DockHost | undefined, dock: DockClient | undefined;
   context.after(async () => {
     dock?.closeActiveConnections();
@@ -40,15 +41,20 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "coordinator", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false } }));
   const socketPath = join(root, "dock.sock");
   const workerPids: number[] = [];
+  let pauseChild: (() => Promise<void>) | undefined;
   const startHost = async () => {
-    const registry = new DockRegistry((input) => createPiInstance({
+    const registry = new DockRegistry(async (input) => {
+      const instance = await createPiInstance({
       ...input, agentDir, sessionDir,
       onWorkerSpawn: (pid) => workerPids.push(pid),
       workerEnvironment: isolatedProcessEnvironment(home, {
         PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
         npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
       }),
-    }), undefined, {
+      });
+      if (input.parentId && pauseChild) { const pause = pauseChild; pauseChild = undefined; await pause(); }
+      return instance;
+    }, undefined, {
       catalogStore: new FileCatalogStore(join(root, "catalog.json")),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
@@ -66,16 +72,16 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   assert.ok(!spawnImplementer.toolNames.includes("subagent"));
   spawnImplementer.tools({ id: "spawn-implementer", name: "dock_spawn", arguments: {
     name: "Implementer", task: "Wait for independent review before fixing sum.js.",
-    model: { provider: "implementer", id: "fixture" }, thinkingLevel: "off", allowedTools: ["read", "write", "dock_send"],
+    model: { provider: "implementer", id: "fixture" }, thinkingLevel: "off", allowedTools: implementerTools,
   } });
   const implementerFirst = await implementer.request(0);
   const spawnReviewer = await coordinator.request(1);
   spawnReviewer.tools({ id: "spawn-reviewer", name: "dock_spawn", arguments: {
-    name: "Reviewer", task: "Independently inspect sum.js. Send the finding to Implementer and Coordinator.",
+    name: "Reviewer", task: "Independently inspect sum.js and report to Coordinator.",
     model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read", "dock_send"],
   } });
   const reviewerFirst = await reviewer.request(0);
-  const parentWaiting = await coordinator.request(2);
+  let parentWaiting = await coordinator.request(2);
   const team = await client.list();
   const implementerWork = team.find((work) => work.displayName === "Implementer")!;
   const reviewerWork = team.find((work) => work.displayName === "Reviewer")!;
@@ -88,7 +94,7 @@ test("native coordinator, implementer and independent reviewer collaborate throu
     assert.equal(work.executor.thinkingLevel, provider === "reviewer" ? "low" : "off");
   }
   assert.deepEqual(reviewerFirst.toolNames.sort(), ["dock_send", "read"]);
-  assert.deepEqual(implementerFirst.toolNames.sort(), ["dock_send", "read", "write"]);
+  assert.deepEqual(implementerFirst.toolNames.sort(), [...implementerTools].sort());
   assert.ok(JSON.stringify(reviewerFirst.body.messages).includes(parent.id));
   reviewerFirst.tools({ id: "review-read", name: "read", arguments: { path: bugPath } });
   const reviewResult = await reviewer.request(1);
@@ -97,23 +103,32 @@ test("native coordinator, implementer and independent reviewer collaborate throu
     target: implementerWork.id, message: "REVIEW_FINDING: sum subtracts; change a - b to a + b.",
   } });
   const reviewSent = await reviewer.request(2);
-  assert.equal(implementerFirst.closed, false, "An ordinary peer message must not interrupt active work");
-  reviewSent.tools({ id: "parent-finding", name: "dock_send", arguments: { target: parent.id, message: "REVIEW_FINDING: subtraction bug found; implementer notified." } });
+  assert.ok(JSON.stringify(reviewSent.body.messages).includes("missing or ambiguous"), "A child cannot send directly to its sibling");
+  assert.equal(implementerFirst.closed, false, "A rejected sibling message must not interrupt work");
+  reviewSent.tools({ id: "parent-finding", name: "dock_send", arguments: { target: parent.id, message: "REVIEW_FINDING: sum subtracts; change a - b to a + b." } });
   (await reviewer.request(3)).text("Independent review complete.");
+  parentWaiting.text("Waiting for the independent review.");
+  const parentFinding = await coordinator.request(3);
+  assert.ok(JSON.stringify(parentFinding.body.messages).includes("REVIEW_FINDING"));
+  parentFinding.tools({ id: "relay-finding", name: "dock_send", arguments: {
+    target: implementerWork.id, message: "REVIEW_FINDING: approved the review; change a - b to a + b.",
+  } });
+  parentWaiting = await coordinator.request(4);
+  assert.equal(implementerFirst.closed, false, "The parent's follow-up queues behind active work");
   implementerFirst.text("Ready to apply the independent finding.");
   const implementerFollowup = await implementer.request(1);
   assert.ok(JSON.stringify(implementerFollowup.body.messages).includes("REVIEW_FINDING"));
-  assert.ok(JSON.stringify(implementerFollowup.body.messages).includes("Reviewer"));
+  assert.ok(JSON.stringify(implementerFollowup.body.messages).includes("Coordinator"));
   implementerFollowup.tools({ id: "fix", name: "write", arguments: { path: bugPath, content: "export const sum = (a, b) => a + b;\n" } });
   (await implementer.request(2)).tools({ id: "report-fix", name: "dock_send", arguments: { target: parent.id, message: "FIX_COMPLETE: sum.js now adds; independent reviewer identified the bug." } });
   (await implementer.request(3)).text("Implementation complete.");
   assert.equal(await readFile(bugPath, "utf8"), "export const sum = (a, b) => a + b;\n");
   parentWaiting.text("Collecting the team's findings.");
   let sawFinding = false, sawFix = false;
-  let coordinatorIndex = 3;
+  let coordinatorIndex = 5;
   // Messages and completion watches may arrive in different orders. Request a
   // second independent read only after both actual reports reached the coordinator.
-  for (; coordinatorIndex < 9 && !(sawFinding && sawFix);) {
+  for (; coordinatorIndex < 11 && !(sawFinding && sawFix);) {
     const request = await coordinator.request(coordinatorIndex++);
     const transcript = JSON.stringify(request.body.messages);
     sawFinding ||= transcript.includes("REVIEW_FINDING");
@@ -172,45 +187,120 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   busyReviewer.text("Separate review investigation complete.");
   await waitFor(async () => (await client.read(reviewerWork.id)).instance.execution === "idle", "Sibling did not settle");
 
-  // A real Host restart must retain relationships, sessions and explicit grants
-  // without persisting trust_once or replaying the team's completed model work.
-  await client.prompt(reviewerWork.id, "/dock-tools off", "auto", "reviewer-opt-out");
-  await waitFor(async () => !(await client.tools(reviewerWork.id)).tools.some((tool) => tool.name === "dock_send" && tool.active), "Reviewer opt-out did not take effect");
-  const countsBeforeStop = Object.values(providers).map((provider) => provider.requests.length);
+  // The child has all relevant tools, so these checks exercise Host scope,
+  // not a missing tool grant. User clients can still inspect both children.
+  await client.prompt(implementerWork.id, "Check native collaboration scope.", "auto", "scope-probe");
+  (await implementer.request(5)).tools({ id: "scope-list", name: "dock_list", arguments: {} });
+  const scopeList = await implementer.request(6);
+  const listed = JSON.stringify(scopeList.body.messages?.filter(message => message.role === "tool").at(-1));
+  assert.ok(listed.includes(parent.id));
+  assert.ok(!listed.includes(reviewerWork.id));
+  scopeList.tools(
+    ...["dock_inspect", "dock_watch", "dock_stop", "dock_interrupt", "dock_send"].map((name, index) => ({
+      id: `scope-target-${index}`, name, arguments: { target: reviewerWork.id, ...(name === "dock_send" ? { message: "SHOULD_NOT_DELIVER" } : {}) },
+    })),
+    { id: "scope-create", name: "dock_create", arguments: { cwd, name: "ForbiddenTopLevel" } },
+    { id: "scope-spawn", name: "dock_spawn", arguments: { name: "ForbiddenGrandchild", task: "Do not run" } },
+  );
+  const scopeResults = await implementer.request(7);
+  const failures = scopeResults.body.messages?.filter(message => message.role === "tool").slice(-7) ?? [];
+  assert.equal(failures.length, 7);
+  for (const failure of failures.slice(0, 5)) assert.match(JSON.stringify(failure), /missing or ambiguous/);
+  for (const failure of failures.slice(5)) assert.match(JSON.stringify(failure), /cannot create/);
+  scopeResults.tools({ id: "scope-parent", name: "dock_inspect", arguments: { target: parent.id } });
+  const parentRead = await implementer.request(8);
+  assert.ok(JSON.stringify(parentRead.body.messages?.filter(message => message.role === "tool").at(-1)).includes(parent.id));
+  parentRead.text("Native child scope verified.");
+  await waitFor(async () => (await client.status(implementerWork.id)).execution === "idle", "Scope probe did not settle");
+  assert.equal((await client.status(reviewerWork.id)).lifecycle, "active");
+  assert.equal((await client.list()).length, 3);
+  await assert.rejects(client.create(cwd, "NestedChild", "nested-client-create", undefined, undefined, undefined, implementerWork.id));
+
+  await client.prompt(parent.id, "Try an unsupported child effort.", "auto", "invalid-effort");
+  (await coordinator.request(coordinatorIndex++)).tools({ id: "invalid-effort-spawn", name: "dock_spawn", arguments: {
+    name: "InvalidEffort", task: "Should not start", model: { provider: "implementer", id: "fixture" }, thinkingLevel: "high",
+  } });
+  const invalidEffort = await coordinator.request(coordinatorIndex++);
+  assert.match(JSON.stringify(invalidEffort.body.messages?.filter(message => message.role === "tool").at(-1)), /does not support thinking/);
+  invalidEffort.text("Invalid configuration was rejected before publishing a child.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "Parent did not settle after invalid configuration");
+  assert.equal((await client.list()).length, 3, "Invalid thinking must not leave an empty child");
+  await waitFor(() => exited(workerPids.at(-1)!), "Invalid configuration left a bootstrap process alive");
+
+  await client.setModel(reviewerWork.id, "implementer", "fixture", "reviewer-switch-model");
+  await client.reloadSession(reviewerWork.id, "reviewer-reload-model");
+  assert.equal((await client.status(reviewerWork.id)).executor.model?.provider, "implementer",
+    "Creation-time thinking validation must not reapply the original setting after a model switch and reload");
+
+  const sessions = await Promise.all([implementerWork, reviewerWork].map(async child => (await client.status(child.id)).executor.sessionFile!));
+  const unrelated = await trustOnce(trust => client.create(cwd, "Unrelated", "unrelated-create", trust, undefined, { model: { provider: "coordinator", id: "fixture" } }));
+  const unrelatedPid = workerPids.at(-1)!;
+  let releaseCreation!: () => void;
+  let creationPaused = false;
+  const gate = new Promise<void>(resolve => { releaseCreation = resolve; });
+  pauseChild = async () => { creationPaused = true; await gate; };
+  const racingChild = trustOnce(trust => client.create(cwd, "StopRace", "stop-race-child", trust, undefined, undefined, parent.id));
+  void racingChild.catch(() => {});
+  await waitFor(() => creationPaused, "Child did not pause during real Worker creation");
+  const racingPid = workerPids.at(-1)!;
+  let stopSettled = false;
+  const stopping = client.stop(parent.id, "team-stop-parent").finally(() => { stopSettled = true; });
+  await waitFor(() => exited(workerPids[0]!), "Parent process did not stop");
+  assert.equal(stopSettled, false, "Parent stop must await its in-flight child creation");
+  releaseCreation();
+  await assert.rejects(racingChild);
+  const parentStopped = await stopping;
+  await waitFor(() => exited(racingPid), "A child created during stop leaked its process");
+  assert.equal(parentStopped.instance.lifecycle, "stopped");
+  for (const pid of workerPids.slice(0, 3)) await waitFor(() => exited(pid), "Stopped team process is still alive");
+  for (const child of [implementerWork, reviewerWork]) {
+    assert.ok(!(await client.list()).some(work => work.id === child.id), "Collected children disappear from the catalog");
+    await assert.rejects(client.reopen(child.id, `reopen-${child.id}`));
+  }
+  assert.ok((await readFile(sessions[1]!, "utf8")).includes("a + b"));
+  assert.equal((await client.status(unrelated.id)).lifecycle, "active");
+  assert.equal(exited(unrelatedPid), false);
+
+  // Exercise a real parent crash, then reopen that same Work identity. Old
+  // child cleanup must finish before the new generation can delegate again.
+  const makeChild = (name: string) => trustOnce(trust => client.create(cwd, name, `create-${name}`, trust, undefined,
+    { model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", toolPolicy: { allowedTools: ["read"] } }, unrelated.id));
+  // Persist the parent's session so reopen uses the real saved conversation.
+  await client.prompt(unrelated.id, "Persist this parent session.", "auto", "persist-parent");
+  (await coordinator.request(coordinatorIndex++)).text("Parent session saved.");
+  await waitFor(async () => (await client.status(unrelated.id)).execution === "idle", "Unrelated parent did not settle");
+  creationPaused = false;
+  const crashGate = new Promise<void>(resolve => { releaseCreation = resolve; });
+  pauseChild = async () => { creationPaused = true; await crashGate; };
+  const crashCreation = makeChild("CrashChild");
+  void crashCreation.catch(() => {});
+  await waitFor(() => creationPaused, "Crash child did not enter creation");
+  const crashChildPid = workerPids.at(-1)!;
+  process.kill(unrelatedPid, "SIGKILL");
+  await waitFor(async () => (await client.status(unrelated.id)).lifecycle === "runtime_error", "Parent crash was not observed");
+  releaseCreation();
+  await assert.rejects(crashCreation);
+  await waitFor(() => exited(crashChildPid), "Crashed parent's child process survived");
+  await trustOnce(trust => client.reopen(unrelated.id, "reopen-parent", undefined, trust));
+  const restartChild = await makeChild("RestartChild");
+  const restartChildPid = workerPids.at(-1)!;
+  await client.prompt(restartChild.id, "Keep a conversation for later diagnosis.", "auto", "persist-child");
+  (await reviewer.request(8)).text("RESTART_CHILD_HISTORY");
+  await waitFor(async () => (await client.status(restartChild.id)).execution === "idle", "Restart child did not settle");
+  const restartSession = (await client.status(restartChild.id)).executor.sessionFile!;
+  assert.equal(exited(restartChildPid), false, "Old generation cleanup must not kill the new child");
+  assert.ok(!(await client.list()).some(work => work.displayName === "CrashChild"));
+  const countsBeforeStop = Object.values(providers).map(provider => provider.requests.length);
   client.closeActiveConnections();
   await host!.stop();
+  await waitFor(() => exited(restartChildPid), "Host shutdown left the child process alive");
   client = await startHost();
-  for (const work of [parent, implementerWork, reviewerWork]) {
-    assert.equal((await client.status(work.id)).lifecycle, "host_lost");
-    await trustOnce((trust) => client.reopen(work.id, `reopen-${work.id}`, undefined, trust));
-  }
-  assert.equal(new Set(workerPids).size, 6);
-  for (const child of [implementerWork, reviewerWork]) {
-    const restored = await client.status(child.id);
-    assert.equal(restored.parentId, parent.id);
-    assert.deepEqual(restored.executor.model, child.executor.model);
-    assert.equal(restored.executor.thinkingLevel, child.executor.thinkingLevel);
-  }
-  assert.deepEqual((await client.tools(implementerWork.id)).tools.map((tool) => tool.name).sort(), ["dock_send", "read", "write"]);
-  assert.deepEqual((await client.tools(reviewerWork.id)).tools.filter((tool) => tool.active).map((tool) => tool.name), ["read"]);
-  await client.prompt(reviewerWork.id, "/dock-tools on", "auto", "reviewer-opt-in");
-  await waitFor(async () => (await client.tools(reviewerWork.id)).tools.some((tool) => tool.name === "dock_send" && tool.active), "Reviewer opt-in did not take effect");
-  assert.deepEqual((await client.tools(reviewerWork.id)).tools.filter((tool) => tool.active).map((tool) => tool.name).sort(), ["dock_send", "read"]);
-  assert.ok(JSON.stringify((await client.history(reviewerWork.id)).entries).includes("a + b"));
-  assert.deepEqual(Object.values(providers).map((provider) => provider.requests.length), countsBeforeStop);
-  const parentStopped = await client.stop(parent.id, "team-stop-parent");
-  assert.equal(parentStopped.instance.lifecycle, "stopped");
-  for (const child of [implementerWork, reviewerWork]) {
-    const snapshot = (await client.read(child.id)).instance;
-    assert.equal(snapshot.lifecycle, "active", "Stopping a parent does not silently stop an independent child");
-    assert.equal(snapshot.execution, "idle");
-  }
-  for (const child of [implementerWork, reviewerWork]) {
-    const stopped = await client.stop(child.id, `team-stop-${child.id}`);
-    assert.equal(stopped.instance.lifecycle, "stopped");
-  }
-  assert.deepEqual(Object.values(providers).map((provider) => provider.requests.length), countsBeforeStop,
-    "Interrupt and explicit stop cleanup must not replay completed tasks or start another model turn");
+  await assert.rejects(client.status(restartChild.id));
+  await assert.rejects(client.reopen(restartChild.id, "reopen-retired-child"));
+  assert.ok(!(await client.list()).some(work => work.parentId));
+  assert.ok((await readFile(restartSession, "utf8")).includes("RESTART_CHILD_HISTORY"));
+  assert.equal((await client.status(unrelated.id)).lifecycle, "host_lost");
+  assert.deepEqual(Object.values(providers).map(provider => provider.requests.length), countsBeforeStop);
   assert.equal(await readFile(bugPath, "utf8"), "export const sum = (a, b) => a + b;\n");
 });
 
@@ -224,4 +314,11 @@ async function trustOnce<T>(operation: (trust?: { challengeId: string; decision:
     return true;
   });
   return operation({ challengeId: challengeId!, decision: "trust_once" });
+}
+
+function exited(pid: number): boolean {
+  try { process.kill(pid, 0); return false; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+    throw error;
+  }
 }

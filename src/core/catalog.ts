@@ -37,7 +37,7 @@ export interface CatalogInterruption {
 export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
 
 export interface CatalogInstanceRecord {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work; native children are temporary and retire with their parent. */
   parentId?: string;
   id: string;
   creationOperationId: string;

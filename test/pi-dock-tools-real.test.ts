@@ -267,14 +267,19 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   const reviewer = (await client.list()).find((work) => work.displayName === "Routed reviewer");
   assert.ok(reviewer);
   assert.equal(reviewer.parentId, remote.id, "Main must expose the global source identity as parent");
+  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, sentinel.id),
+    "A parent on Main cannot own a physical child on SubHost");
   assert.equal(typeof ready.nativeInstanceId, "string");
   assert.notEqual(remote.id, ready.nativeInstanceId);
   assert.deepEqual(reviewer.executor.model, { provider: "routed-reviewer", id: "fixture" });
   assert.equal(reviewer.executor.thinkingLevel, "low");
   assert.deepEqual(reviewing.toolNames.sort(), ["dock_send", "read"]);
   assert.ok(JSON.stringify(reviewing.body.messages).includes(remote.id));
-  reviewing.tools({ id: "routed-report", name: "dock_send", arguments: { target: remote.id, message: "ROUTED_REVIEW_FINDING" } });
-  (await reviewerProvider.request(1)).text("Remote review complete.");
+  reviewing.tools({ id: "routed-forbidden", name: "dock_send", arguments: { target: sentinel.id, message: "SHOULD_NOT_DELIVER" } });
+  const forbidden = await reviewerProvider.request(1);
+  assert.match(JSON.stringify(forbidden.body.messages?.filter(message => message.role === "tool").at(-1)), /No work named/);
+  forbidden.tools({ id: "routed-report", name: "dock_send", arguments: { target: String(ready.nativeInstanceId), message: "ROUTED_REVIEW_FINDING" } });
+  (await reviewerProvider.request(2)).text("Remote review complete.");
   assert.equal(waiting.closed, false, "A routed message must not interrupt its busy recipient");
   waiting.text("Waiting for the independent report.");
   let next = 2, received = false;
@@ -288,8 +293,18 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
     while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
     return (await client.status(remote.id)).execution === "idle";
   }, "Routed coordinator did not settle");
-  await client.stop(reviewer.id, "routed-reviewer-stop");
-  assert.equal((await client.status(remote.id)).lifecycle, "active");
+  const spawned = childStdout.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line) as { kind: string; parentId?: string; pid?: number });
+  const childPid = spawned.find(record => record.kind === "worker_started" && record.parentId === ready.nativeInstanceId)?.pid;
+  assert.equal(typeof childPid, "number", "Child ownership is stored using the SubHost's native parent identity");
+  await client.stop(remote.id, "routed-parent-stop");
+  await waitFor(() => {
+    for (const pid of [Number(ready.workerPid), childPid!]) {
+      try { process.kill(pid, 0); return false; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+    }
+    return true;
+  }, "Routed parent stop must terminate both real SubHost Worker processes");
+  await waitFor(async () => !(await client.list()).some(work => work.id === reviewer.id), "Retired SubHost child remained in Main's inventory");
+  assert.equal((await client.status(sentinel.id)).lifecycle, "active");
 });
 
 class DockListLoopbackProvider {

@@ -46,9 +46,13 @@ test("source Host enforces create/spawn ceiling locally and before Main/SubHost 
     await assert.rejects(registry.invokeDockTool(parent.id, { ...request, allowedTools: ["write"] }), /permission ceiling/);
     const created = await registry.invokeDockTool(parent.id, request);
     assert.ok(created.type === "create" || created.type === "spawn");
-    const inherited = registry.authorizeDockToolRequest(created.instance.id, { type: "create", operationId: "grandchild", cwd: root });
-    assert.ok(inherited.type === "create");
-    assert.deepEqual(inherited.allowedTools, grants, "child's persisted Host policy retains the ceiling");
+    if (type === "spawn") {
+      assert.throws(() => registry.authorizeDockToolRequest(created.instance.id, { type: "create", operationId: "grandchild", cwd: root }), /cannot create/);
+    } else {
+      const inherited = registry.authorizeDockToolRequest(created.instance.id, { type: "create", operationId: "another-top-level", cwd: root });
+      assert.ok(inherited.type === "create");
+      assert.deepEqual(inherited.allowedTools, grants);
+    }
   }
   const seen: DockToolsRequest[] = [];
   const routed = async (_source: string, request: DockToolsRequest) => { seen.push(parseDockToolsRequest(JSON.parse(JSON.stringify(request)))); return { type: "machines" as const, machines: [] }; };
@@ -65,7 +69,7 @@ test("source Host enforces create/spawn ceiling locally and before Main/SubHost 
     assert.equal(seen.length, before + 1);
     assert.deepEqual(seen.at(-1), { ...request, allowedTools: grants });
   }
-  const userChild = await registry.create({ operationId: "user-child", cwd: root, parentId: parent.id, workerConfig: { toolPolicy: { allowedTools: ["write"] } } });
+  const userChild = await registry.create({ operationId: "user-child", cwd: root, workerConfig: { toolPolicy: { allowedTools: ["write"] } } });
   const userGrant = registry.authorizeDockToolRequest(userChild.id, { type: "create", operationId: "user-grandchild", cwd: root });
   assert.ok(userGrant.type === "create");
   assert.deepEqual(userGrant.allowedTools, ["write"], "explicit owner-created work is not constrained by another worker");

@@ -303,7 +303,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
   return (pi) => {
     pi.registerTool({
       name: "dock_spawn", label: "Delegate a Dock task",
-      description: toolDescription("Create a real child worker and start its task. It inherits your workspace, current model and thinking unless specified. Choose another configured model with dock_models. The child is visible in all Dock clients and can communicate or delegate using native Dock tools. Completion notifies you automatically; use dock_inspect for the result. If creation succeeded but task submission was not confirmed, inspect the returned worker before retrying. For independent review grant only read/grep/find/ls and required dock messaging tools."),
+      description: toolDescription("Create a real child worker and start its task. It inherits your workspace, current model and thinking unless specified. Choose another configured model with dock_models. The child appears under you in Dock and communicates only with you. It cannot create more Dock workers. You choose when to stop it; it also exits when you stop or crash. Completion notifies you automatically; use dock_inspect for the result. If creation succeeded but task submission was not confirmed, inspect the returned worker before retrying. For independent review grant only read/grep/find/ls and required dock messaging tools."),
       parameters: SPAWN_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() })),
     } as never);
@@ -314,7 +314,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     } as never);
     for (const action of ["interrupt", "stop"] as const) pi.registerTool({
       name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a worker" : "Stop a worker",
-      description: toolDescription(action === "interrupt" ? "Interrupt another worker's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Dock worker. Its history remains readable; this does not stop its children. Use dock_list to inspect the team first."),
+      description: toolDescription(action === "interrupt" ? "Interrupt another worker's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Dock worker. Its children also stop and exit. Collected children leave the work list; their conversation files remain on disk. Use dock_list to inspect the team first."),
       parameters: REQUIRED_TARGET_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string }) => toolResult(await bridge.invoke({ type: action, operationId: randomUUID(), target: params.target })),
     } as never);

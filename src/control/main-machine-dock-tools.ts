@@ -1,3 +1,4 @@
+import { requireHumanTarget } from "../human-target.js";
 import { spawnDockWorker } from "./native-collaboration.js";
 import { OperationLedger } from "./operation-ledger.js";
 import { createDockSystem, readDockSystem } from "./system-tools.js";
@@ -5,10 +6,9 @@ import type { DockToolsHostPort, DockToolsRequest, DockToolsResult, ObservationD
 import { dockMessageText } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
-import { requireHumanTarget } from "../human-target.js";
 import { DockClient } from "./dock-client.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
-import { observationStatus } from "./instance-observation-service.js";
+import { dockTargetVisible, observationStatus } from "./instance-observation-service.js";
 import type { InstanceManager } from "./instance-manager.js";
 import type { MainMachineController } from "./machine-transport.js";
 import type { InstanceReadResult, MachineDto } from "./protocol.js";
@@ -53,6 +53,9 @@ export class MainMachineDockToolsAuthority {
     const source = snapshots.find((item) => item.id === sourceMainId);
     if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
     if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot create or message other work. Open active work and try again.");
+    if (source.parentId !== undefined && (request.type === "create" || request.type === "spawn")) {
+      throw new Error("A child worker cannot create work. Ask its parent to delegate.");
+    }
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
     if (request.type === "models") return { type: "models", result: await this.options.localClient.models(sourceMainId) };
@@ -62,7 +65,7 @@ export class MainMachineDockToolsAuthority {
       watch: (target) => this.observation.observe(sourceMainId, { type: "watch", target }),
     }));
     if (request.type === "interrupt" || request.type === "stop") {
-      const target = requireHumanTarget(snapshots.filter((item) => item.id !== sourceMainId), request.target);
+      const target = requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), request.target);
       const result = request.type === "interrupt" ? await this.options.localClient.abort(target.id, request.operationId) : await this.options.localClient.stop(target.id, request.operationId);
       return { type: request.type, instance: observationStatus(result.instance) };
     }
@@ -78,7 +81,7 @@ export class MainMachineDockToolsAuthority {
       return request.type === "create" ? this.toolOperations.run(request.operationId, "dock.create", { sourceMainId, request }, execute) : execute();
     }
     if (request.type === "send") {
-      const target = requireHumanTarget(snapshots.filter((item) => item.id !== sourceMainId), request.target);
+      const target = requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), request.target);
       const message = dockMessageText(source.displayName, request.message);
       const result = await this.options.localClient.prompt(target.id, message, request.delivery ?? "followUp", request.operationId);
       return { type: "send", target: observationStatus(target), receipt: { delivery: result.receipt.delivery, queued: result.receipt.queued, acceptedAt: result.receipt.acceptedAt } };

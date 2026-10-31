@@ -8,7 +8,7 @@ const source = { id: "parent", displayName: "Coordinator", cwd: "/project", exec
 const child: ObservedInstanceStatus = { id: "child", parentId: "parent", cwd: "/project", lifecycle: "active", execution: "idle", compacting: false, executionChangedAt: "2026-10-31T00:00:00Z", runtimeGeneration: 1, thinkingLevel: "low" };
 const request = { type: "spawn", operationId: "op", name: "Reviewer", task: "Review changes" } as const;
 
-test("spawn persists a child then admits its task and registers nonblocking completion", async () => {
+test("spawn creates a child then admits its task and registers nonblocking completion", async () => {
   const calls: unknown[] = [];
   const result = await spawnDockWorker(source, request, {
     create: async input => { calls.push(input); return { type: "create", instance: child }; },
@@ -41,15 +41,6 @@ test("failed completion watch does not misreport an accepted task as failed", as
   });
   assert.equal(result.taskStatus, "accepted"); assert.equal(result.watchStatus, "failed");
   assert.match(result.error!, /do not resend/);
-});
-
-test("unsupported explicit thinking leaves child visible without sending a task", async () => {
-  const result = await spawnDockWorker(source, { ...request, thinkingLevel: "max" }, {
-    create: async () => ({ type: "create", instance: child }),
-    send: async () => { throw new Error("must not send"); },
-    watch: async () => { throw new Error("must not watch"); },
-  });
-  assert.equal(result.taskStatus, "failed"); assert.match(result.error!, /No task was sent/);
 });
 
 test("delegated task is agent-attributed text, never an owner slash command", async () => {

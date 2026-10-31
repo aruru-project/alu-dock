@@ -1,5 +1,3 @@
-import type { LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
-
 import type { WorkerToolPolicy } from "../core/worker-tool-policy.js";
 export { parseWorkerToolPolicy, type WorkerToolPolicy } from "../core/worker-tool-policy.js";
 
@@ -20,18 +18,4 @@ export function workerToolSelection(policy: WorkerToolPolicy | undefined, exclud
     denies.push("mcp__*", ...MCP_RESOURCE_TOOLS.filter((name) => !policy.allowedTools.includes(name)));
   }
   return { tools: [...policy.allowedTools], excludeTools: [...new Set(denies)] };
-}
-
-/** Native Dock workers replace the legacy extension rather than running two child owners. */
-export function withoutLegacySubagents(base: LoadExtensionsResult): LoadExtensionsResult {
-  const removed = base.extensions.filter((extension) => extension.tools.has("subagent"));
-  if (removed.length === 0) return base;
-  return {
-    ...base,
-    extensions: base.extensions.filter((extension) => !extension.tools.has("subagent")),
-    warnings: [...(base.warnings ?? []), ...removed.map((extension) => ({
-      path: extension.path,
-      warning: "Dock manages child workers directly. This legacy subagent extension is disabled in Dock; standalone Pi is unchanged.",
-    }))],
-  };
 }

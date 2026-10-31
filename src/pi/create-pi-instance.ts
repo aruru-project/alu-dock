@@ -22,7 +22,7 @@ import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerProcessTimeouts } from "./worker-process.js";
 
 export interface CreatePiInstanceOptions {
-  /** Persistent Dock parent; children remain independently visible and controllable. */
+  /** Owning top-level Work on this Host; native children are temporary. */
   parentId?: string;
   id?: string;
   creationOperationId?: string;
