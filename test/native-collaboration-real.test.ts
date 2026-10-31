@@ -52,6 +52,14 @@ test("native coordinator, implementer and independent reviewer collaborate throu
         npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
       }),
       });
+      if (input.name === "CleanupFailure") {
+        // Inject one supervisor failure without terminating the real Worker.
+        const connection = (instance as unknown as { session: { control: (...args: unknown[]) => Promise<unknown>; process: { terminate: () => Promise<void> } } }).session;
+        const control = connection.control.bind(connection);
+        connection.control = async (...args) => { connection.control = control; throw new Error("Injected graceful cleanup failure"); };
+        const terminate = connection.process.terminate.bind(connection.process);
+        connection.process.terminate = async () => { connection.process.terminate = terminate; throw new Error("Injected supervisor cleanup failure"); };
+      }
       if (input.parentId && pauseChild) { const pause = pauseChild; pauseChild = undefined; await pause(); }
       return instance;
     }, undefined, {
@@ -177,6 +185,13 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   const busyReviewer = await reviewer.request(7);
   assert.equal(busyImplementer.closed, false);
   assert.equal(busyReviewer.closed, false);
+  // Review regression: a rejected reopen of an active parent must have no
+  // side effects on either child's genuine in-flight model request.
+  await assert.rejects(client.reopen(parent.id, "invalid-active-parent-reopen"));
+  assert.equal(busyImplementer.closed, false, "Invalid parent reopen must not terminate its implementer");
+  assert.equal(busyReviewer.closed, false, "Invalid parent reopen must not terminate its reviewer");
+  assert.equal((await client.status(implementerWork.id)).lifecycle, "active");
+  assert.equal((await client.status(reviewerWork.id)).lifecycle, "active");
   const interrupted = await client.abort(implementerWork.id, "team-interrupt-child");
   assert.equal(interrupted.instance.lifecycle, "active");
   await waitFor(() => busyImplementer.closed, "Interrupted child did not close its model stream");
@@ -233,8 +248,17 @@ test("native coordinator, implementer and independent reviewer collaborate throu
     "Creation-time thinking validation must not reapply the original setting after a model switch and reload");
 
   const sessions = await Promise.all([implementerWork, reviewerWork].map(async child => (await client.status(child.id)).executor.sessionFile!));
+  process.kill(workerPids[2]!, "SIGKILL");
+  await waitFor(async () => (await client.status(reviewerWork.id)).lifecycle === "runtime_error", "Child crash was not observed");
+  assert.equal((await client.status(reviewerWork.id)).reopenable, false, "A temporary child must not offer Continue");
+  const pidsBeforeChildReopen = workerPids.length;
+  await assert.rejects(client.reopen(reviewerWork.id, "reopen-crashed-child"));
+  assert.equal(workerPids.length, pidsBeforeChildReopen, "Child reopen must be rejected before creating a replacement process");
+  assert.equal((await client.status(parent.id)).lifecycle, "active");
   const unrelated = await trustOnce(trust => client.create(cwd, "Unrelated", "unrelated-create", trust, undefined, { model: { provider: "coordinator", id: "fixture" } }));
   const unrelatedPid = workerPids.at(-1)!;
+  const failedChild = await trustOnce(trust => client.create(cwd, "CleanupFailure", "create-cleanup-failure", trust, undefined, undefined, parent.id));
+  const failedChildPid = workerPids.at(-1)!;
   let releaseCreation!: () => void;
   let creationPaused = false;
   const gate = new Promise<void>(resolve => { releaseCreation = resolve; });
@@ -245,13 +269,21 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   const racingPid = workerPids.at(-1)!;
   let stopSettled = false;
   const stopping = client.stop(parent.id, "team-stop-parent").finally(() => { stopSettled = true; });
+  void stopping.catch(() => {});
   await waitFor(() => exited(workerPids[0]!), "Parent process did not stop");
   assert.equal(stopSettled, false, "Parent stop must await its in-flight child creation");
+  await assert.rejects(client.reopen(reviewerWork.id, "child-reopen-during-parent-stop"));
   releaseCreation();
   await assert.rejects(racingChild);
-  const parentStopped = await stopping;
+  await assert.rejects(stopping);
   await waitFor(() => exited(racingPid), "A child created during stop leaked its process");
-  assert.equal(parentStopped.instance.lifecycle, "stopped");
+  await assert.rejects(client.status(parent.id));
+  assert.equal((await client.status(failedChild.id)).lifecycle, "stopping");
+  assert.equal(exited(failedChildPid), false, "Failed cleanup must not claim a live process exited");
+  assert.ok((await client.list()).some(work => work.id === failedChild.id), "The uncollected child remains discoverable after parent retirement");
+  await client.stop(failedChild.id, "retry-child-cleanup");
+  await waitFor(() => exited(failedChildPid), "Explicit cleanup retry must really reap the child");
+  assert.ok(!(await client.list()).some(work => work.id === failedChild.id));
   for (const pid of workerPids.slice(0, 3)) await waitFor(() => exited(pid), "Stopped team process is still alive");
   for (const child of [implementerWork, reviewerWork]) {
     assert.ok(!(await client.list()).some(work => work.id === child.id), "Collected children disappear from the catalog");
@@ -301,6 +333,19 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   assert.ok((await readFile(restartSession, "utf8")).includes("RESTART_CHILD_HISTORY"));
   assert.equal((await client.status(unrelated.id)).lifecycle, "host_lost");
   assert.deepEqual(Object.values(providers).map(provider => provider.requests.length), countsBeforeStop);
+  // Compatibility evidence only: the user has not decided whether this action
+  // should remain exposed. A child stopping its owner must finish real cleanup.
+  await trustOnce(trust => client.reopen(unrelated.id, "reopen-for-child-stop", undefined, trust));
+  const ownerPid = workerPids.at(-1)!;
+  await makeChild("StopSibling");
+  const siblingPid = workerPids.at(-1)!;
+  const stopper = await trustOnce(trust => client.create(cwd, "StopOwner", "create-stop-owner", trust, undefined,
+    { model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", toolPolicy: { allowedTools: ["dock_stop"] } }, unrelated.id));
+  const stopperPid = workerPids.at(-1)!;
+  await client.prompt(stopper.id, "Stop your owner through Dock.", "auto", "child-stops-owner");
+  (await reviewer.request(9)).tools({ id: "stop-owner", name: "dock_stop", arguments: { target: unrelated.id } });
+  await waitFor(() => [ownerPid, siblingPid, stopperPid].every(exited), "Child-initiated parent stop did not reap the whole team");
+  await waitFor(async () => !(await client.list()).some(work => work.id === unrelated.id || work.parentId === unrelated.id), "Child-initiated parent stop left catalog entries behind");
   assert.equal(await readFile(bugPath, "utf8"), "export const sum = (a, b) => a + b;\n");
 });
 

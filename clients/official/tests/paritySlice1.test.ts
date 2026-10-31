@@ -366,7 +366,7 @@ assert.equal(conversationReadMatches({ connectionId: 'host-a', selectionGenerati
 assert.equal(stopCanStart(work, false), true)
 assert.equal(stopCanStart(work, true), false, 'pending mutation locks Stop')
 // master-side review: unrelated unknown controls must not permanently block a new Stop intent.
-assert.equal(stopCanStart({ ...work, lifecycle: 'stopping' }, false), false, 'a Work already stopping cannot start Stop again')
+assert.equal(stopCanStart({ ...work, lifecycle: 'stopping' }, false), true, 'an explicit retry can finish previously failed process cleanup')
 const confirmation = stopConfirmationText(work)
 assert.match(confirmation, /共享 Work/)
 assert.match(confirmation, /当前运行/)

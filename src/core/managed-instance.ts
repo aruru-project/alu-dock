@@ -800,7 +800,7 @@ export class ManagedInstance {
       execution: this.state.execution,
       compacting: this.state.compacting,
       lastRun: this.state.lastRun,
-      reopenable: !this.ownerReleaseUnconfirmed
+      reopenable: this.parentId === undefined && !this.ownerReleaseUnconfirmed
         && (this.state.lifecycle === "host_lost" || this.state.lifecycle === "runtime_error")
         && (this.recoverySessionFile !== undefined || this.durableSessionFileValue !== undefined),
       runtimeGeneration: this.runtimeGeneration,
@@ -2381,7 +2381,7 @@ export class ManagedInstance {
     }
     const terminal = this.requireCommandStart(decision, "stopping this work");
     const task = this.beginStop(operationId).catch((error: unknown) => {
-      if (this.state.lifecycle === "active") {
+      if (this.state.lifecycle === "active" || (this.state.lifecycle === "stopping" && error instanceof RuntimeEffectUnknownError)) {
         terminal.release();
         this.stopCompletion = undefined;
       }
@@ -2402,6 +2402,9 @@ export class ManagedInstance {
         // entry immediately. Cleanup continues by instance ID and must not
         // block a fresh keyed instance in a corrected or moved workspace.
         this.keyValue = undefined;
+        this.recoverySessionFile = undefined;
+        this.lastKnownValue = undefined;
+        this.interruptionValue = undefined;
         this.state.lifecycle = "stopping";
         // Direct cleanup of an already unavailable runtime still traverses
         // the live `stopping` lifecycle; keep that intermediate projection
@@ -2537,6 +2540,10 @@ export class ManagedInstance {
     if (!this.runtimeDisposePromise) {
       try { this.runtimeDisposePromise = Promise.resolve(this.session.dispose()); }
       catch (error) { this.runtimeDisposePromise = Promise.reject(error); }
+      this.runtimeDisposePromise = this.runtimeDisposePromise.catch(error => {
+        this.runtimeDisposePromise = undefined;
+        throw error;
+      });
     }
     return this.runtimeDisposePromise;
   }

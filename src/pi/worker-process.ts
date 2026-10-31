@@ -119,7 +119,7 @@ export class PiWorkerProcess {
 
   terminate(): Promise<void> {
     if (this.terminating) return this.terminating;
-    this.terminating = this.performTerminate();
+    this.terminating = this.performTerminate().catch(error => { this.terminating = undefined; throw error; });
     return this.terminating;
   }
 

@@ -97,7 +97,7 @@ export function catalogSnapshotFromRecord(
   record: CatalogInstanceRecord,
   currentHostEpoch: string,
 ): InstanceSnapshot {
-  const reopenable = catalogReopenSessionFile(record) !== undefined
+  const reopenable = record.parentId === undefined && catalogReopenSessionFile(record) !== undefined
     && (record.lifecycle === "host_lost" || record.lifecycle === "runtime_error");
   return {
     id: record.id,

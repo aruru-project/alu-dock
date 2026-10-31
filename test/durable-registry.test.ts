@@ -343,3 +343,46 @@ test("catalog startup failure preserves evidence and removes only the Host-owned
   await assert.rejects(lstat(socketPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
   assert.equal(await readFile(catalogPath, "utf8"), evidence);
 });
+
+test("Stop cancels an in-flight parent reopen and waits for its candidate cleanup", async (context) => {
+  const { cwd } = await fixturePath();
+  const runtimes: DelayedAgentWorkerConnection[] = [];
+  let releaseCandidate!: () => void, releaseStop!: () => void;
+  const candidateGate = new Promise<void>(resolve => { releaseCandidate = resolve; });
+  const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
+  let candidateStarted = false, stopStarted = false;
+  const registry = new DockRegistry(async input => {
+    const instance = createFixtureInstance(input, runtimes);
+    if (input.initialRuntimeGeneration === 2) {
+      candidateStarted = true;
+      await candidateGate;
+    }
+    return instance;
+  }, undefined, { reopenTargetResolver: { resolve: async () => ({ cwd }) } });
+  context.after(async () => { releaseCandidate(); releaseStop(); await registry.stopAll(); });
+  const parent = await registry.create({ operationId: "create-race-parent", cwd });
+  const old = runtimes[0]!;
+  const dispose = old.dispose.bind(old);
+  old.dispose = async () => { stopStarted = true; await stopGate; return dispose(); };
+  old.emit({ type: "dock_runtime_error", kind: "reload", error: "injected failed reload", recoverySessionFile: old.sessionFile });
+  const until = async (predicate: () => boolean) => {
+    for (let n = 0; n < 100 && !predicate(); n++) await new Promise(resolve => setTimeout(resolve, 2));
+    assert.ok(predicate());
+  };
+  await until(() => registry.getSnapshot(parent.id).lifecycle === "runtime_error");
+  const reopening = registry.reopen({ instanceId: parent.id, operationId: "reopen-race-parent" });
+  const rejected = assert.rejects(reopening, InstanceNotReopenableError);
+  await until(() => candidateStarted);
+  const stopping = registry.stop(parent.id, "stop-race-parent");
+  releaseCandidate();
+  await rejected;
+  await until(() => stopStarted);
+  assert.equal(runtimes[1]!.disposeCalls, 1, "The unpublished replacement is disposed before Stop proceeds");
+  releaseStop();
+  await stopping;
+  assert.equal(registry.list().length, 0);
+  assert.equal(runtimes[0]!.disposeCalls, 1);
+  // The registry remains writable; stale cleanup must not poison its catalog.
+  const fresh = await registry.create({ operationId: "after-stop-race", cwd });
+  assert.equal(fresh.snapshot().lifecycle, "active");
+});

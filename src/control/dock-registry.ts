@@ -161,7 +161,7 @@ export class DockRegistry implements DockToolsHostPort {
   private readonly delegationTrustSources = new Map<string, ManagedInstance>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
-  private readonly reopenInFlight = new Map<string, string>();
+  private readonly reopenInFlight = new Map<string, { operationId: string; cancelled: boolean; completion: Promise<void> }>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private readonly keyEnsureTails = new Map<string, Promise<void>>();
   private catalogMaintenancePending = false;
@@ -449,28 +449,38 @@ export class DockRegistry implements DockToolsHostPort {
     this.assertCatalogReady();
     this.catalog.assertWritable();
     if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
-    this.reopenInFlight.set(input.instanceId, input.operationId);
+    const reopening = { operationId: input.operationId, cancelled: false, completion: Promise.resolve() };
+    this.reopenInFlight.set(input.instanceId, reopening);
+    const result = this.performReopen(input);
+    reopening.completion = result.then(() => {}, () => {});
     try {
-      await this.stopChildren(input.instanceId);
-      return await this.performReopen(input);
+      return await result;
     } finally {
-      if (this.reopenInFlight.get(input.instanceId) === input.operationId) this.reopenInFlight.delete(input.instanceId);
+      if (this.reopenInFlight.get(input.instanceId) === reopening) this.reopenInFlight.delete(input.instanceId);
     }
   }
 
   private async performReopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     const record = this.catalogRecord(input.instanceId);
-    if (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") throw new InstanceNotReopenableError(input.instanceId);
+    if (record.parentId !== undefined || (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error")) throw new InstanceNotReopenableError(input.instanceId);
     if (record.ownerReleaseUnconfirmed) throw new InstanceNotReopenableError(input.instanceId);
     const previousLifecycle = record.lifecycle;
     const sessionFile = input.sessionFile ?? catalogReopenSessionFile(record);
     if (!sessionFile || !this.reopenTargetResolver) throw new InstanceNotReopenableError(input.instanceId);
+    // Validate first: an invalid reopen must not affect active children.
+    await this.stopChildren(input.instanceId);
+    this.assertReopenPending(input);
     const releaseClaim = this.claimSessionFile(record.id, input.operationId, sessionFile);
     try {
       return await this.performClaimedReopen(input, record, previousLifecycle, sessionFile);
     } finally {
       releaseClaim();
     }
+  }
+
+  private assertReopenPending(input: ReopenRegistryInstanceInput): void {
+    const pending = this.reopenInFlight.get(input.instanceId);
+    if (!pending || pending.operationId !== input.operationId || pending.cancelled) throw new InstanceNotReopenableError(input.instanceId);
   }
 
   private async performClaimedReopen(
@@ -488,6 +498,7 @@ export class DockRegistry implements DockToolsHostPort {
       trustChallengeId: input.trustChallengeId,
       projectTrustDecision: input.projectTrustDecision,
     });
+    this.assertReopenPending(input);
     const nextGeneration = record.runtimeGeneration + 1;
     const candidate = await this.factory({
       id: record.id,
@@ -520,6 +531,7 @@ export class DockRegistry implements DockToolsHostPort {
     }
     candidate.bindCatalogPort(this.catalog.forInstance(record.id));
     try {
+      this.assertReopenPending(input);
       await this.catalog.forInstance(record.id).commit(candidate.catalogRecord(), {
         kind: "instance.reopen",
         effect: "rollback_contained",
@@ -664,6 +676,13 @@ export class DockRegistry implements DockToolsHostPort {
   }
 
   async stop(instanceId: string, operationId: string): Promise<{ receipt: StopReceipt; instance: InstanceSnapshot }> {
+    const reopening = this.reopenInFlight.get(instanceId);
+    if (reopening) {
+      reopening.cancelled = true;
+      // A candidate already committing must finish publication before Stop
+      // chooses its runtime; otherwise the old runtime can retire the new one.
+      await reopening.completion;
+    }
     const instance = this.get(instanceId);
     const receipt = await instance.stop(operationId);
     await this.stopChildren(instanceId);
