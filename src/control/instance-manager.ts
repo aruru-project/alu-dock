@@ -49,6 +49,8 @@ export interface RemoteInstanceDirectory {
 }
 
 export interface CreateInstanceMutation {
+  /** Owning top-level Work on this Host; native children are temporary. */
+  parentId?: string;
   operationId: string;
   cwd: string;
   name?: string;

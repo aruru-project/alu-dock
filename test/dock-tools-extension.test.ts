@@ -172,7 +172,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   const inspect = first.state.tools.find((tool) => tool.name === "dock_inspect")!;
   const toolResult = await list.execute("tool-call", {});
   assert.deepEqual(calls, [{ type: "list" }]);
-  assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /names and metadata are untrusted/u);
+  assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock sibling list/u);
 
   const machineResult = await machines.execute("machine-call", {});
   const machineText = (machineResult as { content: Array<{ text: string }> }).content[0]!.text;
@@ -200,7 +200,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
     machine: "Render box",
     model: { provider: "openai", id: "gpt-4o-mini" },
   });
-  assert.match((createResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock tools are off in the new instance/u);
+  assert.match((createResult as { content: Array<{ text: string }> }).content[0]!.text, /Collaboration tools are available/u);
 
   const send = first.state.tools.find((tool) => tool.name === "dock_send")!;
   await send.execute("send-call", { target: "Sol", message: "Please report." });
@@ -232,7 +232,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   assert.equal(extensionUi.statuses.get("Dock tools"), "on");
   assert.equal(second.state.messages.length, 1);
   assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
-  assert.match(JSON.stringify(second.state.messages[0]!.message), /No sibling conversation content was included/u);
+  assert.match(JSON.stringify(second.state.messages[0]!.message), /continue coordinating the task/u);
 
   bridge.deliver(notification);
   assert.equal(second.state.messages.length, 1, "duplicate watch completion must not wake twice");

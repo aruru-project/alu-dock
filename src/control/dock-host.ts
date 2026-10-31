@@ -1,3 +1,4 @@
+import { observationStatus } from "./instance-observation-service.js";
 import { InstanceRecordChannel, recordEvent } from "./instance-record-delivery.js";
 import { usesInstanceRecords, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
 import { writeTransferBytes } from "./file-channel.js";
@@ -217,13 +218,16 @@ export class DockHost {
       systemCatalog: (cwd: string, _hostId?: string, cursor?: import("./protocol.js").SystemCatalogCursor, limit?: number) => requireSystems().catalog(cwd, cursor, limit),
       systemContent: (cwd: string, id: string, _hostId?: string, offset?: number, revision?: string) => requireSystems().content(cwd, id, offset, revision),
       setSystemDefault: (cwd: string, id: string, _hostId?: string, operationId = randomUUID()) => this.operationLedger.run(operationId, "system.default.set", { cwd, id, operationId }, () => requireSystems().setDefault(cwd, id)),
-      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig })).instance,
+      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject, parentId?: string) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig, parentId })).instance,
     };
     const requireSystems = () => {
       if (!this.systemService) throw new ProtocolValidationError("capability_missing", "This Host does not provide system selection. Update the Host and retry.");
       return this.systemService;
     };
     this.registry.bindDockToolsMutationPort({
+      models: async (instanceId) => ({ ...await this.registry.get(instanceId).listModels(), instance: this.registry.getSnapshot(instanceId) }),
+      interrupt: async (instanceId, operationId) => { await this.registry.get(instanceId).abort(operationId); return this.registry.observationStatus(instanceId); },
+      stop: async (instanceId, operationId) => { const result = await this.registry.stop(instanceId, operationId); return observationStatus(result.instance); },
       create: (input) => this.operationLedger.run(systemToolOperation(input.operationId, "intent"), "dock.create", input, () => createDockSystem(systemPort, input)),
       system: (input) => readDockSystem(systemPort, input),
       send: async (input) => {
@@ -231,7 +235,7 @@ export class DockHost {
           operationId: input.operationId,
           instanceId: input.instanceId,
           message: input.message,
-          delivery: "auto",
+          delivery: input.delivery ?? "followUp",
         });
         return {
           target: this.registry.observationStatus(result.instance.id),

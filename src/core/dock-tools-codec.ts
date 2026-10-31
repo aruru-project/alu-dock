@@ -1,4 +1,4 @@
-import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelsResult, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
 import {
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
@@ -26,6 +26,25 @@ import { MACHINE_PLATFORMS, type MachinePlatform } from "./machine-dto.js";
 export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   const value = record(raw, "Dock tools request");
   if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) return parseObservationRequest(value);
+  if (value.type === "models") { exactKeys(value, ["type"], "Model catalog request"); return { type: "models" }; }
+  if (value.type === "interrupt" || value.type === "stop") {
+    exactKeys(value, ["type", "operationId", "target"], "Worker control request");
+    return { type: value.type, operationId: boundedString(value.operationId, 128, "Operation ID"), target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Target") };
+  }
+  if (value.type === "spawn") {
+    exactKeys(value, ["type", "operationId", "task", "name", "cwd", "model", "thinkingLevel", "allowedTools"], "Spawn request");
+    const cwd = value.cwd === undefined ? undefined : boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Working directory");
+    if (cwd !== undefined && !isPortableAbsoluteLocalPath(cwd)) throw new Error("Working directory must be absolute");
+    return {
+      type: "spawn", operationId: boundedString(value.operationId, 128, "Operation ID"),
+      task: boundedString(value.task, MAX_DOCK_TOOL_MESSAGE_CHARS, "Task"),
+      name: boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Worker name"),
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(value.model === undefined ? {} : { model: parseModelRef(value.model, "Worker model", "invalid_request") }),
+      ...(value.thinkingLevel === undefined ? {} : { thinkingLevel: oneOf(value.thinkingLevel, THINKING_LEVELS, "Thinking level") }),
+      ...(value.allowedTools === undefined ? {} : { allowedTools: stringArray(value.allowedTools, 1000, 256, "Allowed tools") }),
+    };
+  }
   if (value.type === "machines") { exactKeys(value, ["type"], "Dock Machines request"); return { type: "machines" }; }
   if (value.type === "deliver") {
     exactKeys(value, ["type", "path"], "Dock deliver request");
@@ -45,7 +64,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: "system", ...input, ...(machine === undefined ? {} : { machine }) };
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model", "allowedTools"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
@@ -56,6 +75,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     const model = value.model === undefined ? undefined : parseModelRef(value.model, "Dock create model", "invalid_request");
     return {
       type: "create",
+      ...(value.allowedTools === undefined ? {} : { allowedTools: stringArray(value.allowedTools, 1000, 256, "Allowed tools") }),
       ...(systemId === undefined ? {} : { systemId }),
       ...(value.saveDefault === undefined ? {} : { saveDefault: value.saveDefault }),
       ...(model === undefined ? {} : { model }),
@@ -65,13 +85,14 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       ...(machine === undefined ? {} : { machine }),
     };
   }
-  exactKeys(value, ["type", "operationId", "target", "message"], "Dock send request");
+  exactKeys(value, ["type", "operationId", "target", "message", "delivery"], "Dock send request");
   if (value.type !== "send") throw new Error("Dock tools request type is invalid");
   return {
     type: "send",
     operationId: boundedString(value.operationId, 128, "Dock send operation ID"),
     target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Dock send target"),
     message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
+    ...(value.delivery === undefined ? {} : { delivery: oneOf(value.delivery, ["followUp", "steer"] as const, "Message delivery") }),
   };
 }
 
@@ -112,6 +133,16 @@ export function parseDockToolsResult(raw: unknown): void {
     parseObservationResult(value);
     return;
   }
+  if (value.type === "models") { exactKeys(value, ["type", "result"], "Model catalog result"); parseModelsResult(value.result); return; }
+  if (value.type === "spawn") {
+    exactKeys(value, ["type", "instance", "taskStatus", "watchStatus", "error"], "Spawn result");
+    validateObservedStatus(value.instance);
+    oneOf(value.taskStatus, ["accepted", "failed"] as const, "Task status");
+    if (value.watchStatus !== undefined) oneOf(value.watchStatus, ["watching", "completed", "failed"] as const, "Watch status");
+    if (value.error !== undefined && typeof value.error !== "string") throw new Error("Spawn error must be text");
+    return;
+  }
+  if (value.type === "interrupt" || value.type === "stop") { exactKeys(value, ["type", "instance"], "Worker control result"); validateObservedStatus(value.instance); return; }
   if (value.type === "system_catalog") {
     exactKeys(value, ["type", "result"], "Dock system catalog result");
     parseSystemCatalogResult(value.result); return;
@@ -212,7 +243,7 @@ function validateMachine(raw: unknown): void {
  */
 function validateObservedStatus(raw: unknown): void {
   const value = record(raw, "Observed instance status");
-  boundedString(value.id, 128, "Observed instance ID"); optionalString(value.key, 128); optionalString(value.name, 256); boundedString(value.cwd, 16_384, "Observed workspace");
+  boundedString(value.id, 128, "Observed instance ID"); optionalString(value.parentId, 128); optionalString(value.key, 128); optionalString(value.name, 256); boundedString(value.cwd, 16_384, "Observed workspace");
   oneOf(value.lifecycle, ["active", "stopping", "stopped", "host_lost", "runtime_error"], "Observed lifecycle"); oneOf(value.execution, ["idle", "running", "failed", "unavailable"], "Observed execution");
   if (typeof value.compacting !== "boolean") throw new Error("Observed compacting state is invalid");
   timestampString(value.executionChangedAt, "Observed execution timestamp"); if (value.runStartedAt !== undefined) timestampString(value.runStartedAt, "Observed run timestamp"); positiveInteger(value.runtimeGeneration, "Observed generation"); optionalString(value.lastError, 2_000);

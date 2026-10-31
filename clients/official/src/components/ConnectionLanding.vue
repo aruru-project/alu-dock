@@ -25,6 +25,7 @@ const { workMutating } = storeToRefs(workActions)
 const { reopenSelectedWork } = workActions
 function inactiveState(work: Work) {
   if (work.lifecycle === 'host_lost') return { label: '连接已中断', message: '这个 Work 的运行进程已经离线。继续后会恢复同一个 Work。', action: '继续这个 Work' }
+  if (work.parentId && work.lifecycle === 'runtime_error') return { label: '子任务出现故障', message: '可以停止这个子任务，再由父工作创建新的帮手。', action: '' }
   if (work.lifecycle === 'runtime_error') return { label: '工作出现故障', message: '这个 Work 已停止运行，可以重新启动后继续。', action: '重新启动这个 Work' }
   if (work.lifecycle === 'stopping') return { label: '正在停止', message: 'Dock 正在结束这个 Work，请稍后刷新状态。', action: '' }
   if (work.lifecycle === 'stopped') return { label: 'Work 已停止', message: '这是一个已经结束的历史 Work。', action: '' }

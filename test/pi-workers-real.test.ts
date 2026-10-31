@@ -558,6 +558,10 @@ test("malformed success after Worker mutation acceptance remains effect_unknown 
 });
 
 test("stuck extension disposal is bounded, reaps the process tree, and self-terminates after Host IPC loss", async (context) => {
+  // 2026-10-31 cloud validation: PID 1 retained dead descendants as zombies.
+  // Work must report runtime loss once no descendant can execute, even when
+  // those dead processes await reaping; living SIGTERM-resistant children must
+  // still be killed before cleanup succeeds.
   if (process.platform !== "linux") { context.skip("process-group proof requires Linux"); return; }
   const root = await mkdtemp(join(tmpdir(), "alu-dock-worker-reap-"));
   const agentDir = join(root, "agent");
@@ -565,13 +569,17 @@ test("stuck extension disposal is bounded, reaps the process tree, and self-term
   const descendantFile = join(root, "descendant.pid");
   await mkdir(join(agentDir, "extensions"), { recursive: true });
   await mkdir(sessionDir, { recursive: true });
+  const descendantScript = `
+process.title = "worker ) child";
+process.on('SIGTERM', () => {});
+setInterval(() => {}, 1000);
+require('node:fs').writeFileSync(${JSON.stringify(descendantFile)}, String(process.pid));
+`;
   await writeFile(join(agentDir, "extensions", "stuck-dispose.ts"), `
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
 export default function (pi) {
   pi.on("session_start", () => {
-    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
-    writeFileSync(${JSON.stringify(descendantFile)}, String(child.pid));
+    spawn(process.execPath, ["-e", ${JSON.stringify(descendantScript)}], { stdio: "ignore" });
   });
   pi.on("session_shutdown", () => new Promise(() => {}));
 }
@@ -587,13 +595,14 @@ export default function (pi) {
   });
   context.after(() => instance.disposeUnpublished().catch(() => {}));
   const descendantPid = await waitForPidFile(descendantFile);
+  assert.equal(await descendantCanRun(descendantPid), true);
   process.kill(workerPid, "SIGKILL");
   for (let attempt = 0; attempt < 200 && instance.snapshot().lifecycle !== "runtime_error"; attempt += 1) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
   }
   assert.equal(instance.snapshot().lifecycle, "runtime_error");
   assert.equal(processExists(workerPid), false);
-  assert.equal(processExists(descendantPid), false, "unexpected Worker exit must still reap extension descendants before runtime_lost");
+  assert.equal(await descendantCanRun(descendantPid), false, "unexpected Worker exit must terminate extension descendants before runtime_lost");
 
   await rm(descendantFile, { force: true });
   let disposeWorkerPid = 0;
@@ -605,11 +614,12 @@ export default function (pi) {
   });
   context.after(() => disposeInstance.disposeUnpublished().catch(() => {}));
   const disposeDescendantPid = await waitForPidFile(descendantFile);
+  assert.equal(await descendantCanRun(disposeDescendantPid), true);
   const startedAt = Date.now();
   await disposeInstance.disposeUnpublished();
   assert.ok(Date.now() - startedAt < 2_500, "stuck disposal must be bounded by supervisor deadlines");
   assert.equal(processExists(disposeWorkerPid), false);
-  assert.equal(processExists(disposeDescendantPid), false, "Worker process-group termination must SIGKILL descendants that ignore SIGTERM");
+  assert.equal(await descendantCanRun(disposeDescendantPid), false, "Worker process-group termination must SIGKILL descendants that ignore SIGTERM");
 
   await rm(descendantFile, { force: true });
   const orphanIdentity: WorkerIdentity = { hostEpoch: "orphan-host", instanceId: "orphan-instance", runtimeGeneration: 1, workerIncarnation: "orphan-incarnation" };
@@ -636,13 +646,26 @@ export default function (pi) {
   context.after(() => orphan.terminate().catch(() => {}));
   const orphanPid = orphan.child.pid!;
   const orphanDescendantPid = await waitForPidFile(descendantFile);
+  assert.equal(await descendantCanRun(orphanDescendantPid), true);
   orphan.child.disconnect();
   for (let attempt = 0; attempt < 100 && processExists(orphanPid); attempt += 1) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
   }
   assert.equal(processExists(orphanPid), false, "detached Worker must self-terminate when Host IPC disappears");
-  assert.equal(processExists(orphanDescendantPid), false, "Host-loss watchdog must terminate extension descendants");
+  assert.equal(await descendantCanRun(orphanDescendantPid), false, "Host-loss watchdog must terminate extension descendants");
 });
+
+async function descendantCanRun(pid: number): Promise<boolean> {
+  try {
+    const status = await readFile(`/proc/${pid}/status`, "utf8");
+    const state = /^State:\s+(\S)/mu.exec(status)?.[1];
+    assert.ok(state, "Linux must report the extension descendant's state");
+    return state !== "Z" && state !== "X";
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 async function waitForPidFile(path: string): Promise<number> {
   for (let attempt = 0; attempt < 200; attempt += 1) {

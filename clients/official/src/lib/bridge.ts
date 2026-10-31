@@ -310,8 +310,8 @@ export async function submitMessage(instanceId: string, message: string, attachm
 
 /** Sends this text alone (a quick button): it claims no editor, and the editor's attachments and retrieved images stay for its own send.
  *  It still names its Session, which the pending and unconfirmed-send checks match on, like an editor send's capture does. */
-export async function submitText(instanceId: string, message: string, sessionId: string, context: OperationTarget): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
-  return native('submit_message', { ...context, operationEditor: null, sessionId, instanceId, message, attachmentFileIds: [], textOnly: true, operationId: crypto.randomUUID() })
+export async function submitText(instanceId: string, message: string, sessionId: string, context: OperationTarget, followUp = false): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
+  return native('submit_message', { ...context, operationEditor: null, sessionId, instanceId, message, attachmentFileIds: [], textOnly: true, followUp, operationId: crypto.randomUUID() })
 }
 
 /** Stops the reply and takes the waiting Queue back in the same Host step. */
@@ -648,10 +648,12 @@ export async function createWork(
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
   workerConfig?: Record<string, unknown>,
+  parentId?: string,
 ): Promise<Work> {
   return native<Work>('create_work', {
     ...context, cwd,
     workerConfig: workerConfig ?? null,
+    parentId: parentId ?? null,
     name: name || null,
     targetHostId: targetHostId ?? null,
     operationId: continuation?.operationId ?? null,

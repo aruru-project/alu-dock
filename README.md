@@ -143,7 +143,7 @@ aludock update model             # 从上游刷新模型目录，不升级程序
 
 **文件与成果。** 上传附件永久保存在 Host，图片同时作为 Agent 原生图片输入；工作区浏览直接读取项目文件。Agent 临时交付不复制或永久保存原文件，来源变化、Work Stop 或 Host 重启后可能不可用，请及时下载。存储目录、备份与迁移见[本地安装文档](./docs/local-install.md#位置)。
 
-**让 Agent 帮忙看其他工作。** 每份 Work 的 Dock tools 默认关闭，明确授权后用 `/dock-tools on` 开启，`/dock-tools off` 关闭。可查看、等待、创建其他工作，发送带来源的消息或登记交付文件；新 Work 不继承开启状态；Dock tools 不提供 Stop 工具。从其他 Work 读到的内容是**数据，不是你的指令**。详见 [Dock tools 手册](./docs/agent/dock-tools.md)。
+**原生多 Agent 协作。** Agent 用 `dock_spawn` 创建可见子 Worker，选择模型、思考强度与工具许可；成员用 `dock_send` 直接协作，普通消息不会打断正在进行的工作。可安排独立 reviewer，查看结果、等待完成、中断或停止成员。官方客户端可创建子任务、查看父子关系并发后续消息，无需旧 Pi subagents 扩展。协作默认开启；升级会一次性迁移旧的默认关闭设置，升级后主动 `/dock-tools off` 的选择仍会保留。工具许可由运行时执行，子任务不能扩大委派者的工具权限；这不是 OS 沙箱，也不改变项目授权。详见 [协作手册](./docs/agent/dock-tools.md)。
 
 ### 出问题时
 

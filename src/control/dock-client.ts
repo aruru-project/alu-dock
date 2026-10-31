@@ -34,6 +34,7 @@ import {
   ATTACHMENTS_CAPABILITY,
   MACHINES_CAPABILITY,
   WORKER_CONFIG_CAPABILITY,
+  COLLABORATION_CAPABILITY,
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
   GIT_BRANCH_CAPABILITY,
@@ -390,7 +391,7 @@ export class DockClient {
     });
   }
 
-  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string,workerConfig?:JsonObject):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision,workerConfig},workerConfig===undefined?"instance.catalog":WORKER_CONFIG_CAPABILITY,parseCreateResult);return result.instance;}
+  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string,workerConfig?:JsonObject,parentId?:string):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision,workerConfig,parentId},parentId!==undefined?[COLLABORATION_CAPABILITY,WORKER_CONFIG_CAPABILITY]:workerConfig===undefined?"instance.catalog":WORKER_CONFIG_CAPABILITY,parseCreateResult);return result.instance;}
   ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
   async getByKey(key:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
   adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}

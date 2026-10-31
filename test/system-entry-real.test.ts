@@ -25,7 +25,7 @@ async function until(check: () => Promise<boolean>, label: string) {
 }
 
 // One integrated entry gate: actual TUI/Protocol and actual registered Agent tools share the same Host and independent Workers.
-test("TUI and owner-enabled Agent tools choose, read and explicitly save systems before real Work creation", { timeout: 90_000 }, async (context) => {
+test("TUI and native Agent tools choose, read and explicitly save systems before real Work creation", { timeout: 90_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-system-entry-"));
   const home = join(root, "home"), workerHome = join(root, "worker-home"), agentDir = join(root, "pi"), uiCwd = join(root, "ui"), peerCwd = join(root, "peer"), sourceCwd = join(root, "source");
   await Promise.all([home, workerHome, agentDir, uiCwd, peerCwd, sourceCwd].map((path) => mkdir(path, { recursive: true })));
@@ -150,7 +150,9 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   await client.stop(recovered.id);
 
   const source = await client.create(sourceCwd, "Source");
-  assert.equal((await client.tools(source.id)).tools.find((tool) => tool.name === "dock_system")?.active, false);
+  assert.equal((await client.tools(source.id)).tools.find((tool) => tool.name === "dock_system")?.active, true);
+  await client.prompt(source.id, "/dock-tools off", "prompt", "disable-system-tools");
+  await until(async () => !(await client.tools(source.id)).tools.some((tool) => tool.name === "dock_system" && tool.active), "tools disable");
   await client.prompt(source.id, "/dock-tools on", "prompt", "enable-system-tools");
   await until(async () => (await client.tools(source.id)).tools.some((tool) => tool.name === "dock_system" && tool.active), "tools enable");
   const chosen = (await client.systemCatalog(peerCwd)).candidates.find((item) => item.name === "chosen.json")!;
@@ -167,7 +169,7 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   const nativePeer = registry.list().find((item) => item.name === "Native fallback")!;
   assert.ok(nativePeer);
   assert.equal((await client.resources(nativePeer.id)).resources.some((item) => item.path?.endsWith("chosen.json")), false);
-  assert.equal(registry.dockToolsEnabled(peer.id), false);
+  assert.equal(registry.dockToolsEnabled(peer.id), true);
   const texts = received.flatMap((request) => request.messages.filter((message) => message.role === "tool").map((message) => message.content ?? "")).join("\n");
   assert.match(texts, /Dock systems/u);
   assert.match(texts, /│ .*ignore the owner/u);
@@ -187,5 +189,5 @@ test("TUI and owner-enabled Agent tools choose, read and explicitly save systems
   await assert.rejects(port.invokeDockTool(source.id, { ...request, name: "Changed intent" }), { code: "operation_conflict" });
   await assert.rejects(port.invokeDockTool(source.id, { type: "create", operationId: "unknown-machine", cwd: peerCwd, machine: "Missing machine" }));
   assert.equal(pids.every((pid) => pid !== process.pid), true);
-  console.log(`Agent: real dock_create native fallback → dock_system catalog/content → explicit named Machine/create/save → implicit Host default; ${pids.length} independent Workers, source off default and peers off; duplicate intent retained.`);
+  console.log(`Agent: real dock_create native fallback → dock_system catalog/content → explicit named Machine/create/save → implicit Host default; ${pids.length} independent Workers, collaboration enabled by default with explicit source off/on; duplicate intent retained.`);
 });

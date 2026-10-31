@@ -353,6 +353,8 @@ export interface EventCursor {
 }
 
 export interface InstanceSnapshot {
+  /** Owning top-level Work; native children are temporary and retire with their parent. */
+  parentId?: string;
   id: string;
   creationOperationId: string;
   /** Stable Machine identity from machine.list; supplied by the Main Host boundary. */

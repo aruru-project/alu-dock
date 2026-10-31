@@ -202,3 +202,37 @@ mod tests {
 
 pub(crate) const SYSTEM_TEMPLATES: &[&str] = &[CORE_V2, "system.templates.v1"];
 pub(crate) const MODEL_VISIBILITY: &[&str] = &[CORE_V2, "model.visibility.v1"];
+
+/// Creation-only capabilities are negotiated before sending optional new fields.
+pub(crate) fn instance_create(worker_config: bool, collaboration: bool) -> Vec<&'static str> {
+    let mut required = INSTANCE_CATALOG.to_vec();
+    if worker_config {
+        required.push("instance.worker-config.v1");
+    }
+    if collaboration {
+        required.push("instance.collaboration.v1");
+    }
+    required
+}
+
+#[cfg(test)]
+mod instance_creation_tests {
+    use super::*;
+
+    #[test]
+    fn optional_creation_features_require_explicit_host_support() {
+        assert_eq!(instance_create(false, false), INSTANCE_CATALOG);
+        let configured = instance_create(true, false);
+        assert!(configured.contains(&"instance.worker-config.v1"));
+        assert!(!configured.contains(&"instance.collaboration.v1"));
+        let child = instance_create(true, true);
+        assert!(child.contains(&"instance.worker-config.v1"));
+        assert!(child.contains(&"instance.collaboration.v1"));
+        assert!(
+            INSTANCE_CATALOG
+                .iter()
+                .all(|capability| child.contains(capability))
+        );
+        assert!(instance_create(false, true).contains(&"instance.collaboration.v1"));
+    }
+}

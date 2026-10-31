@@ -986,6 +986,22 @@ try {
   assert.equal(binding.instanceId, 'work')
   assert.notEqual(binding.subscriptionId, followedBeforeLeaving.subscriptionId, 'returning follows the Work again')
   extraListed = []; await app.refreshWorksQuietly(); await settle()
+  // Native helpers use the existing work list and conversation entry.
+  extraListed = [{ ...otherWork, id: 'native-child', parentId: 'work', displayName: 'Native reviewer' }]
+  await app.refreshWorksQuietly(); await settle()
+  const childRow = find(container, item => String(item.props.class ?? '').includes('is-child') && text(item).includes('Native reviewer'))
+  assert.ok(childRow, 'the child is an indented row in the existing list')
+  const siblings = childRow.parent.children.filter(item => String(item.props.class ?? '').includes('alu-instance-row'))
+  assert.ok(text(siblings[siblings.indexOf(childRow) - 1]).includes('Work'), 'the child follows its parent')
+  assert.equal(find(container, item => String(item.props.class ?? '').includes('collaboration-panel')), undefined, 'there is no second message panel')
+  extraListed = [{ ...otherWork, id: 'native-child', parentId: 'retired-parent', displayName: 'Native reviewer', lifecycle: 'stopping', execution: 'failed', reopenable: false }]
+  await app.refreshWorksQuietly(); await settle()
+  const orphan = find(container, item => String(item.props.class ?? '').includes('is-child') && text(item).includes('Native reviewer'))
+  assert.ok(orphan, 'a child whose cleanup failed remains visible after its parent disappears')
+  assert.ok(text(orphan).includes('仍可查看或停止'))
+  assert.ok(find(orphan, item => item.type === 'button' && text(item) === '停止'), 'the remaining child has a cleanup control')
+  extraListed = []; await app.refreshWorksQuietly(); await settle()
+  assert.equal(find(container, item => String(item.props.class ?? '').includes('is-child') && text(item).includes('Native reviewer')), undefined, 'a retired child disappears with the Host list update')
   // #313: when updates for the current Work cannot start or stop arriving, the page says so; nothing claims to retry.
   {
     const followNotice = () => find(container, item => item.props.class === 'alu-follow-failed')

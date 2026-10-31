@@ -609,6 +609,12 @@ export class MainMachineController implements RemoteInstanceDirectory {
       nativeHostEpoch: connection.hostEpoch,
       ...(route.snapshot.key === undefined ? {} : { mainKey: route.snapshot.key }),
     } : undefined;
+    const nativeRequest = requestForNativeHost(request, identity);
+    if (nativeRequest.type === "instance.create" && nativeRequest.params.parentId !== undefined) {
+      const parent = [...this.parentIdsForMachine(machine.id)].find(([, mainId]) => mainId === nativeRequest.params.parentId);
+      if (!parent) throw new Error("The parent is no longer available on this machine.");
+      nativeRequest.params.parentId = parent[0];
+    }
     const streamId = randomUUID();
     if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine is busy right now. Try again shortly.");
     const stream: MainStream = {
@@ -628,7 +634,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       emit,
       ended,
       helloSeen: false,
-      nativeRequest: requestForNativeHost(request, identity),
+      nativeRequest,
       requiredCapabilities: [...new Set([...requiredCapabilities(capabilityForRequest(request.type)), ...requestOptionCapabilities(request), ...(fileMode ? [FILE_TRANSFER_CAPABILITY] : [])])],
       acceptingInput: true,
       inputTail: Promise.resolve(),
@@ -878,7 +884,9 @@ export class MainMachineController implements RemoteInstanceDirectory {
       const invokeDockTool = this.options.invokeDockTool;
       void (async () => {
         try {
-          const result = await invokeDockTool(source.mainInstanceId, connection.machine.id, record.request);
+          const request = structuredClone(record.request);
+          if ("target" in request) request.target = this.parentIdsForMachine(connection.machine.id).get(request.target) ?? request.target;
+          const result = await invokeDockTool(source.mainInstanceId, connection.machine.id, request);
           await writeMachine(connection.socket, { kind: "machine_tool_response", requestId: record.requestId, ok: true, result });
         } catch (error) {
           await writeMachine(connection.socket, { kind: "machine_tool_response", requestId: record.requestId, ok: false, error: error instanceof Error ? error.message : String(error) }).catch(() => {});
@@ -965,7 +973,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
         const logical=await stream.recordInput.consume(raw);
         if(logical===undefined)return;
         stream.recordInput.quiescent();
-        const mapped=recordForMainHost(logical,stream.route);
+        const mapped=recordForMainHost(logical,this.routeWithParentIds(stream.route));
         await stream.recordOutput.send(mapped);
         if((logical as {kind?:unknown})?.kind==="instance_ready") {
           await stream.recordOutput.drained();
@@ -1035,7 +1043,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       const decoded = decodeResponseTransfer(stream.transfer.chunks);
       await this.assignRouteFromResponse(stream, decoded);
       await this.retireSuccessfulRouteMutation(stream, decoded);
-      const response = recordForMainHost(decoded, stream.route) as Record<string, unknown>;
+      const response = recordForMainHost(decoded, this.routeWithParentIds(stream.route)) as Record<string, unknown>;
       response.hostEpoch = this.options.mainHostEpoch;
       const bytes = Buffer.from(JSON.stringify(response), "utf8");
       if (bytes.byteLength > MAX_DOCK_TRANSFER_BYTES) throw new ProtocolValidationError("response_too_large", "Routed response exceeds the transport safety bound");
@@ -1049,7 +1057,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     }
     await this.assignRouteFromResponse(stream, raw);
     await this.retireSuccessfulRouteMutation(stream, raw);
-    const mapped = recordForMainHost(raw, stream.route) as Record<string, unknown>;
+    const mapped = recordForMainHost(raw, this.routeWithParentIds(stream.route)) as Record<string, unknown>;
     if (mapped && typeof mapped === "object" && "hostEpoch" in mapped) mapped.hostEpoch = this.options.mainHostEpoch;
     return [mapped];
   }
@@ -1067,7 +1075,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       const nativeStopped = parseInstanceSnapshot((result as Record<string, unknown>).instance, "online stop response instance");
       if (nativeStopped.id !== stream.route.nativeInstanceId || nativeStopped.lifecycle !== "stopped") throw new Error("Successful online stop response has an invalid instance snapshot");
       stopGeneration = nativeStopped.runtimeGeneration;
-      mappedStopped = snapshotForMain(nativeStopped, stream.route.hostId, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey);
+      mappedStopped = snapshotForMain(nativeStopped, stream.route.hostId, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey, this.parentIdsForMachine(stream.route.hostId));
     } else {
       const forgotten = parseForgetResult(envelope.result);
       if (forgotten.receipt.forgottenId !== stream.route.nativeInstanceId) throw new Error("Successful online forget response has an invalid native identity");
@@ -1116,7 +1124,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     await this.options.state.updateMachine(machineId, (machine, { usedMainInstanceIds }) => {
       const existing = machine.routes.find((route) => route.nativeInstanceId === snapshot.id);
       mainInstanceId = existing?.mainInstanceId ?? uniqueMainInstanceId(usedMainInstanceIds);
-      mapped = this.normalizeRouteSnapshot(snapshot, machineId, mainInstanceId, claims, reservation?.key, reservation);
+      mapped = this.normalizeRouteSnapshot(snapshot, machineId, mainInstanceId, claims, reservation?.key, reservation, new Map(machine.routes.map((route) => [route.nativeInstanceId, route.mainInstanceId])));
       machine.routes = [
         ...machine.routes.filter((route) => route.nativeInstanceId !== snapshot.id),
         { mainInstanceId, nativeInstanceId: snapshot.id, snapshot: mapped },
@@ -1180,18 +1188,21 @@ export class MainMachineController implements RemoteInstanceDirectory {
         const reported = reportedByNative.get(retirement.nativeInstanceId);
         return !reported || reported.runtimeGeneration <= retirement.runtimeGeneration;
       });
-      routes = snapshots.filter((snapshot) => {
+      const admitted = snapshots.filter((snapshot) => {
         const retirement = retiredByNative.get(snapshot.id);
         return !retirement || snapshot.runtimeGeneration > retirement.runtimeGeneration;
-      }).map((snapshot) => {
-        const existing = byNative.get(snapshot.id);
-        const mainInstanceId = existing?.mainInstanceId ?? uniqueMainInstanceId(usedMainIds);
+      });
+      // Allocate the complete identity set first: offline inventories may list a child before its parent.
+      const parentIds = new Map<string, string>();
+      for (const snapshot of admitted) {
+        const mainInstanceId = byNative.get(snapshot.id)?.mainInstanceId ?? uniqueMainInstanceId(usedMainIds);
         usedMainIds.add(mainInstanceId);
-        return {
-          mainInstanceId,
-          nativeInstanceId: snapshot.id,
-          snapshot: this.normalizeRouteSnapshot(snapshot, machineId, mainInstanceId, claims),
-        };
+        parentIds.set(snapshot.id, mainInstanceId);
+      }
+      routes = admitted.map((snapshot) => {
+        const mainInstanceId = parentIds.get(snapshot.id)!;
+        return { mainInstanceId, nativeInstanceId: snapshot.id,
+          snapshot: this.normalizeRouteSnapshot(snapshot, machineId, mainInstanceId, claims, snapshot.key, undefined, parentIds) };
       });
       machine.routes = routes;
       machine.retiredRoutes = retiredRoutes;
@@ -1269,6 +1280,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     claims: Map<string, string>,
     requestedKey = native.key,
     reservation?: KeyReservation,
+    parentIds = this.parentIdsForMachine(machineId),
   ): InstanceSnapshot {
     const claim = routeClaim(machineId, mainInstanceId);
     const owner = requestedKey === undefined ? undefined : claims.get(requestedKey);
@@ -1278,7 +1290,16 @@ export class MainMachineController implements RemoteInstanceDirectory {
       || (reservation !== undefined && owner === reservationClaim(reservation) && this.keyReservations.get(reservation.key) === reservation)
     );
     if (ownsKey) claims.set(requestedKey, claim);
-    return snapshotForMain(native, machineId, mainInstanceId, this.options.mainHostEpoch, ownsKey ? requestedKey : undefined);
+    return snapshotForMain(native, machineId, mainInstanceId, this.options.mainHostEpoch, ownsKey ? requestedKey : undefined, parentIds);
+  }
+
+  private parentIdsForMachine(machineId: string): Map<string, string> {
+    return new Map([...this.instanceBindings.values()].filter((binding) => binding.machineId === machineId)
+      .map((binding) => [binding.route.nativeInstanceId, binding.route.mainInstanceId]));
+  }
+
+  private routeWithParentIds(route: MachineRouteIdentity): MachineRouteIdentity {
+    return { ...route, parentIds: this.parentIdsForMachine(route.hostId) };
   }
 
   private async serializeAuthority<T>(work: () => Promise<T>): Promise<T> {
@@ -1612,7 +1633,11 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     if (!result.enabled) await this.options.upstream.disableDockToolsSource(sourceInstanceId);
     return result;
   }
-  invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
+  authorizeDockToolRequest(sourceInstanceId: string, request: DockToolsRequest): DockToolsRequest {
+    return this.options.local().authorizeDockToolRequest(sourceInstanceId, request);
+  }
+  async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
+    request = this.authorizeDockToolRequest(sourceInstanceId, request);
     if (request.type === "deliver") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
     return this.options.upstream.invokeDockTool(sourceInstanceId, request);

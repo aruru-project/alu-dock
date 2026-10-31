@@ -65,7 +65,10 @@ registry = new DockRegistry(async (input) => realPiDockTools
       sessionDir: sessionDir!,
       workerEnvironment: sanitizedWorkerEnvironment(homeDir!),
       workerTimeouts: { mutationMs: 10_000 },
-      onWorkerSpawn: (pid) => { realWorkerPid = pid; },
+      onWorkerSpawn: (pid) => {
+        realWorkerPid = pid;
+        process.stdout.write(`${JSON.stringify({ kind: "worker_started", nativeInstanceId: input.id, parentId: input.parentId, pid })}\n`);
+      },
     })
   : (() => {
       const session = new DelayedAgentWorkerConnection(`worker-${input.id}`);
