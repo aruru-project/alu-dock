@@ -287,8 +287,10 @@ export const useInputStore = defineStore('input', () => {
         : '没有可取回的消息。')
       return true
     } catch (cause) {
-
-      if (app.contextMatches(context) && submitViewRevision === viewRevision) submissionError.value = errorMessage(cause)
+      if (app.contextMatches(context) && submitViewRevision === viewRevision) {
+        submissionError.value = errorMessage(cause)
+        app.failureShown(cause)
+      }
       return false
     } finally {
       pendingQueueRestores.value.delete(pendingKey)

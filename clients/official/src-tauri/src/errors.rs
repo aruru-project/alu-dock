@@ -19,6 +19,10 @@ impl aludock_client_core::OperationFailure for CommandError {
     fn presentation(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
+    fn identify(&mut self, operation_id: &str) {
+        self.operation_id
+            .get_or_insert_with(|| operation_id.to_owned());
+    }
 }
 
 impl From<ClientError> for CommandError {

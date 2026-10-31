@@ -496,6 +496,16 @@ export const useAppStore = defineStore('app', () => {
   function forgetNativeOperation(operationId: string, state: NativeOperation['state']) {
     if (operations.value.get(operationId)?.state === state) operations.value.delete(operationId)
   }
+  // Failures the control that started them has put on screen. The operations store
+  // releases their results instead of telling them again in a result entry.
+  const shownFailures = ref(new Set<string>())
+  /** Call when a control shows this failure now. A trust question is not a shown
+   * failure: its continuation reuses the operation. */
+  function failureShown(cause: unknown) {
+    const operationId = cause && typeof cause === 'object' && 'operationId' in cause && typeof cause.operationId === 'string' ? cause.operationId : ''
+    if (operationId) shownFailures.value.add(operationId)
+  }
+  function shownFailureReleased(operationId: string) { shownFailures.value.delete(operationId) }
   // Only receipts applied locally but not yet confirmed natively survive F5.
   function operationWasApplied(operationId: string) { return localUiState.value.appliedOperationIds.includes(operationId) }
   function retainAppliedOperations(operationIds: string[]) {
@@ -589,7 +599,7 @@ export const useAppStore = defineStore('app', () => {
     catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, currentPendingAttachments, currentRestoredImageCount, hasRestoredImages, setRestoredImageCount, setPendingAttachments, completeAttachmentSelection, operationResultsReady, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, removeOtherHost, contextMatches, applyHostProfile, applyWorkSnapshot, addCreatedWork, dropStoppedWork, removeWorkSnapshot, selectWork,
-    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, applyReturnedDraft, restoreOperationQueue, appendOperationText, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, recentWorkspaces, rememberCreatedWorkspace,
+    operationWasApplied, retainAppliedOperations, confirmAppliedOperation, captureOperation, captureOperationTarget, captureHostOperation, nativeOperations, bindNativeOperation, forgetNativeOperation, shownFailures, failureShown, shownFailureReleased, applyReturnedDraft, restoreOperationQueue, appendOperationText, flushLocalState, setCurrentDraft, setCurrentAttachments, captureSubmitDraft, completeSubmitDraft, invalidateSubmitDraft, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

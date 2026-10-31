@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia'
-import { computed, onScopeDispose, ref } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { pendingOperations, consumeOperation } from '../lib/bridge'
-import { operationWork, type NativeOperation } from '../lib/operationBinding'
+import { lostReplyIsSilent, operationWork, type NativeOperation } from '../lib/operationBinding'
 import { useAppStore } from './app'
 import { useAttachmentsStore } from './attachments'
 import { useObservationStore } from './observation'
@@ -21,6 +21,22 @@ export const useOperationsStore = defineStore('operations', () => {
     presentFailure = presenter
     return () => { if (presentFailure === presenter) presentFailure = null }
   }
+  const silentLostReply = (operation: NativeOperation) => operation.state === 'unknown' && lostReplyIsSilent(operation.kind)
+  // A failure its control has already shown is released, not told again by an entry.
+  const shownByControl = (operation: NativeOperation) => app.shownFailures.has(operation.operationId)
+  async function release(operation: NativeOperation) {
+    try {
+      await acknowledge(operation)
+      app.shownFailureReleased(operation.operationId)
+    } catch { /* Still hidden; the core keeps it until the next start retries. */ }
+  }
+  // The control may show it before or after the core's result arrives.
+  watch(() => [...app.shownFailures], (operationIds) => {
+    for (const operationId of operationIds) {
+      const operation = app.nativeOperations.get(operationId)
+      if (operation && (operation.state === 'failed' || operation.state === 'unknown')) void release(operation)
+    }
+  })
   const selected = computed(() => app.selectedWork)
   // Local application and an in-flight acknowledgement are different facts.
   // Durable editor claims cover only the pending native acknowledgement window.
@@ -36,7 +52,8 @@ export const useOperationsStore = defineStore('operations', () => {
     && !appliedOperations.value.has(operation.operationId) && hasReturnedContent(operation)))
   const visibleResults = computed(() => [...app.nativeOperations.values()].filter(operation => (operation.state === 'failed' || operation.state === 'unknown'
     || (operation.state === 'succeeded' && acknowledgementErrors.value.has(operation.operationId)))
-    && !inlineFailureClaims.value.has(operation.operationId) && operation.connectionId === app.activeConnectionId
+    && !inlineFailureClaims.value.has(operation.operationId) && !silentLostReply(operation) && !shownByControl(operation)
+    && operation.connectionId === app.activeConnectionId
     && (!operation.hostEpoch || operation.hostEpoch === app.payload?.host.hostEpoch)))
   const workResults = computed(() => visibleResults.value.filter(operation => operation.instanceId === selected.value?.id))
   const listResults = computed(() => visibleResults.value.filter(operation => operation.instanceId === 'global'
@@ -94,8 +111,14 @@ export const useOperationsStore = defineStore('operations', () => {
     // A terminal failure is not a UI acknowledgement. Keep it in native state
     // until the corresponding Work/list result entry is explicitly acknowledged.
     // A lost reply is the same kind of failure: nothing is checked or retried, it
-    // is only told once — inline if its send is on screen, otherwise in the entry.
+    // is only told once — inline if its control is on screen, otherwise in the entry.
+    // Actions whose outcome the conversation shows are the exception: nothing is told.
+    // Nor is a failure its control has already shown.
     if (operation.state === 'failed' || operation.state === 'unknown') {
+      if (silentLostReply(operation) || shownByControl(operation)) {
+        await release(operation)
+        return
+      }
       const presenter = presentFailure
       if (operation.kind === 'submit_message' && presenter && !inlineFailureClaims.value.has(operation.operationId)) {
         inlineFailureClaims.value.add(operation.operationId)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { OperationContext } from '../lib/operationBinding'
+import { lostReplyIsSilent, replyLost, type OperationContext } from '../lib/operationBinding'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { ArrowLeft, BookOpen, ChevronRight } from '@lucide/vue'
 import {
@@ -357,7 +357,7 @@ async function createNew() {
   if (pending.value) return
   pending.value = 'new'; error.value = ''; status.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消新建 Session。' }
-  catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
+  catch (cause) { if (!handOverLostReply(cause, 'new_session')) mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
 async function resumeSelected(selected: Pick<SavedSession, 'token' | 'current'>, continuation?: SessionTrustContinuation) {
@@ -373,6 +373,7 @@ async function resumeSelected(selected: Pick<SavedSession, 'token' | 'current'>,
     trust.value = null
     if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消切换。'
   } catch (cause) {
+    if (handOverLostReply(cause, 'switch_session')) return
     if (cause instanceof SessionCallFailure && !cause.current) { mutationFailure(cause, 'sessions'); return }
     const failure = (cause instanceof SessionCallFailure ? cause.original : cause) as { code?: string; details?: Record<string, unknown> }
     if (failure.code === 'project_trust_required') {
@@ -406,7 +407,7 @@ async function reload() {
     status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
     emit('finished')
   }
-  catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
+  catch (cause) { if (!handOverLostReply(cause, 'reload_session')) mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
 async function navigate(summarize: boolean) {
@@ -414,21 +415,29 @@ async function navigate(summarize: boolean) {
   if (!node || pending.value) return
   pending.value = summarize ? 'navigate-summary' : 'navigate'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => navigateSession(app.captureOperation(scope, scope.instanceId), node.entryId, summarize, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = result.aborted ? '切换已中止。' : 'Extension 已取消切换。' }
-  catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
+  catch (cause) { if (!handOverLostReply(cause, 'navigate_session')) mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function fork() {
   const node = selectedNode.value
   if (!node || node.role !== 'user' || pending.value) return
   pending.value = 'fork'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => forkSession(app.captureOperation(scope, scope.instanceId), node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消 Fork。' }
-  catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
+  catch (cause) { if (!handOverLostReply(cause, 'fork_session')) mutationFailure(cause, 'tree') } finally { pending.value = '' }
 }
 async function clone() {
   const node = selectedNode.value
   if (!node || pending.value) return
   pending.value = 'clone'; error.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => cloneSession(app.captureOperation(scope, scope.instanceId), node.entryId, operationId()), (reply) => reply.instance.runtimeGeneration); if (!result.cancelled) emit('finished'); else status.value = 'Extension 已取消 Clone。' }
-  catch (cause) { mutationFailure(cause, 'tree') } finally { pending.value = '' }
+  catch (cause) { if (!handOverLostReply(cause, 'clone_session')) mutationFailure(cause, 'tree') } finally { pending.value = '' }
+}
+
+/** Whether a lost New/Switch/Reload/branch switch/Fork/Clone took effect shows in the
+ * conversation, so the dialog closes and hands over to it without an error. */
+function handOverLostReply(cause: unknown, kind: string) {
+  if (!lostReplyIsSilent(kind) || !(cause instanceof SessionCallFailure) || !cause.current || !replyLost(cause.original)) return false
+  emit('finished')
+  return true
 }
 
 function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
@@ -437,6 +446,8 @@ function mutationFailure(cause: unknown, domain: 'sessions' | 'tree') {
     if (!cause.current) return
     cause = cause.original
   }
+  // Said here, so the Work result entry does not say it again.
+  app.failureShown(cause)
   const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
   if (domain === 'tree' && code === 'invalid_tree_target') {
     selectedNodeId.value = ''

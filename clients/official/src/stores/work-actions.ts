@@ -5,6 +5,7 @@ import {
 } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { subhostMachineName } from '../lib/machines'
+import { replyLost } from '../lib/operationBinding'
 import { stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { ConnectionContext, MachineDto, Work } from '../lib/types'
@@ -46,12 +47,13 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   function reportAction(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
     if (feedbackMatches(scope)) feedback.value = { scope, message, tone }
   }
-  function outcomeUnknown(cause: unknown) {
-    return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true
-  }
   // A lost reply is reported once like any failure; the conversation and Work state show what happened.
+  // The message shows above the composer; once it is on screen there, the Work result
+  // entry does not say it again. A stopped Work has no composer: its entry says it.
   function reportFailure(scope: FeedbackScope, cause: unknown) {
+    if (!feedbackMatches(scope)) return
     reportAction(scope, errorMessage(cause))
+    if (selected.value?.lifecycle === 'active') app.failureShown(cause)
   }
   const currentFeedback = computed(() => feedback.value && feedbackMatches(feedback.value.scope) ? feedback.value : null)
   const actionError = computed(() => currentFeedback.value?.tone === 'error' ? currentFeedback.value.message : null)
@@ -104,6 +106,12 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   function reportShell(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
     if (feedbackMatches(scope)) shellFeedback.value = message === null ? null : { scope, message, tone }
   }
+  /** Whether the command ran shows as its row in the conversation, so a lost reply is not told. */
+  function reportShellFailure(scope: FeedbackScope, cause: unknown, fallback: string) {
+    if (replyLost(cause) || !feedbackMatches(scope)) return
+    reportShell(scope, errorMessage(cause, fallback))
+    if (page.workspaceBrowserOpen) app.failureShown(cause)
+  }
 
   /** Returns true once the Host says the command started. */
   async function runShell(command: string, excludeFromContext: boolean): Promise<boolean> {
@@ -117,7 +125,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       await runShellCommand(work.id, command, excludeFromContext, app.captureOperationTarget(capturedHost, work.id))
       return app.contextMatches(capturedHost)
     } catch (cause) {
-      if (app.contextMatches(capturedHost)) reportShell(feedbackScope, errorMessage(cause, '命令没有开始执行。请检查连接后重试。'))
+      if (app.contextMatches(capturedHost)) reportShellFailure(feedbackScope, cause, '命令没有开始执行。请检查连接后重试。')
       return false
     } finally {
       pendingShellStarts.value.delete(feedbackScope.identity)
@@ -135,7 +143,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     try {
       await abortShellCommands(work.id, app.captureOperationTarget(capturedHost, work.id))
     } catch (cause) {
-      if (app.contextMatches(capturedHost)) reportShell(feedbackScope, errorMessage(cause, '没有停下正在运行的命令。请重试。'))
+      if (app.contextMatches(capturedHost)) reportShellFailure(feedbackScope, cause, '没有停下正在运行的命令。请重试。')
     } finally {
       pendingShellAborts.value.delete(feedbackScope.identity)
     }
@@ -188,7 +196,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       // TODO (#304): Reopen's project-trust confirmation UI was never wired up. Keep
       // the native known-failure result visible; never infer a trust decision.
       reportFailure(feedbackScope, cause)
-      if (outcomeUnknown(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
+      if (replyLost(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
     } finally {
       pendingWorkActions.value.delete(feedbackScope.identity)
     }
@@ -256,16 +264,18 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     try {
       await compactSession(app.captureOperationTarget(scope, work.id), customInstructions?.trim() || undefined, crypto.randomUUID())
     } catch (cause) {
-      reportFailure(feedbackScope, cause)
+      // Whether it compacted is the conversation's to say: a lost reply and a failure it
+      // reports add nothing. Anything else is said once, above the composer.
+      if (!feedbackMatches(feedbackScope)) return
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
       const followed = observation.active
-      const matchingFollow = observation.connected
+      const reportedByConversation = observation.connected
         && followed?.connectionId === capturedHost.connectionId
         && followed.selectionGeneration === capturedHost.selectionGeneration
         && followed.instanceId === work.id
-      const reportedByConversation = matchingFollow
         && ['compaction_cancelled', 'compaction_not_needed', 'compaction_failed'].includes(code)
-      if (feedbackMatches(feedbackScope) && !reportedByConversation && !outcomeUnknown(cause)) setCompactionError(capturedHost.connectionId, work.id, errorMessage(cause))
+      if (!reportedByConversation && !replyLost(cause)) setCompactionError(capturedHost.connectionId, work.id, errorMessage(cause))
+      app.failureShown(cause)
     } finally {
       setCompactionPending(work.id, false)
     }

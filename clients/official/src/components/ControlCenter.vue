@@ -48,6 +48,13 @@ const { models, tools, resources, settings, loading, loadErrors } = storeToRefs(
 const { loadSection } = panel
 const catalog = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
+// Once this panel shows a failure, the Work result entry does not repeat it.
+let panelMounted = true
+onUnmounted(() => { panelMounted = false })
+function showFailure(cause: unknown) {
+  error.value = errorMessage(cause)
+  if (panelMounted) app.failureShown(cause)
+}
 const quickButtons = useQuickButtonsStore()
 const { runQuickButton, quickButtonDisabled } = useInputStore()
 const { openMachineSettings } = useWorkActionsStore()
@@ -427,6 +434,7 @@ async function executeCatalogCommand(command: CommandInfo, argumentsText: string
   } catch (cause) {
     if (commandConsole.operationSucceeded(operationId)) return true
     commandConsole.failOperation(operationId, errorMessage(cause))
+    if (panelMounted) app.failureShown(cause)
     return false
   } finally {
     pending.value = ''
@@ -454,7 +462,7 @@ async function chooseModel(model: ModelInfo) {
     if (models.value) models.value.instance = snapshot
     emit('close')
   } catch (cause) {
-    error.value = errorMessage(cause)
+    showFailure(cause)
   } finally {
     pending.value = ''
   }
@@ -469,7 +477,7 @@ async function chooseThinking(level: ThinkingLevel) {
     if (models.value) models.value.instance = snapshot
     emit('close')
   } catch (cause) {
-    error.value = errorMessage(cause)
+    showFailure(cause)
   } finally {
     pending.value = ''
   }
@@ -485,7 +493,7 @@ async function toggleTool(tool: ToolInfo) {
     tools.value = result
     emit('close')
   } catch (cause) {
-    error.value = errorMessage(cause)
+    showFailure(cause)
   } finally {
     pending.value = ''
   }
@@ -540,7 +548,7 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
     if (index >= 0) settings.value.settings[index] = result.setting
     emit('close')
   } catch (cause) {
-    error.value = errorMessage(cause)
+    showFailure(cause)
   } finally {
     pending.value = ''
   }

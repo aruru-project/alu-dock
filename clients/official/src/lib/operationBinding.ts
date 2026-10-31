@@ -39,6 +39,22 @@ export interface HostOperationContext {
   expectedHostEpoch: string
 }
 
+/** The reply was lost on the way back (core `unknown`). A Host-reported `effect_unknown` is a Host fact, not this. */
+export function replyLost(cause: unknown): boolean {
+  return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true
+}
+
+// Whether these took effect shows in the conversation: a compaction notice, the new
+// Session or branch, the Reload notice, the shell command's row. A lost reply adds
+// nothing to it, so it is not told.
+const OUTCOME_IN_CONVERSATION = new Set([
+  'compact_session', 'new_session', 'switch_session', 'reload_session', 'navigate_session', 'fork_session', 'clone_session',
+  'run_shell_command', 'abort_shell_commands',
+])
+export function lostReplyIsSilent(kind: string): boolean {
+  return OUTCOME_IN_CONVERSATION.has(kind)
+}
+
 export function operationWork(operation: NativeOperation): Work | undefined {
   const result = operation.result
   return result ? ('instance' in result ? result.instance : 'id' in result ? result : undefined) : undefined
