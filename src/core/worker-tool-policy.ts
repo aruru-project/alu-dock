@@ -16,4 +16,3 @@ export function parseWorkerToolPolicy(value: unknown): WorkerToolPolicy | undefi
   if (new Set(names).size !== names.length) throw new Error("Worker tool permissions contain duplicate names.");
   return { allowedTools: [...names] as string[] };
 }
-
