@@ -136,8 +136,7 @@ function isObservedStatus(value: unknown): value is { id: string; cwd: string; l
   return isRecord(value) && typeof value.id === "string" && typeof value.cwd === "string" && typeof value.lifecycle === "string" && typeof value.execution === "string";
 }
 
-/** Global parent references from connected delegation must not be remapped again. */
-export function parentIdForMain(parentId: string, ids: ReadonlyMap<string, string> | undefined): string {
-  if (!ids || [...ids.values()].includes(parentId)) return parentId;
-  return ids.get(parentId) ?? parentId;
+/** A SubHost records its own ID for a child's parent; Main shows the parent's Main ID. */
+function parentIdForMain(parentId: string, ids: ReadonlyMap<string, string> | undefined): string {
+  return ids?.get(parentId) ?? parentId;
 }

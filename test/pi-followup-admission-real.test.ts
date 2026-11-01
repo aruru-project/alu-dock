@@ -21,7 +21,7 @@ test("real Pi starts idle followUp as prompt and queues busy followUp without st
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   } } }));
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false } }));
-  adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: false, workerConfig: { toolPolicy: { allowedTools: [] } } });
+  adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: false, allowedTools: [] });
   const admitted: AgentCommandPreflightResult[] = [];
   const run = adapter.dispatch({ kind: "request", version: 2, requestId: "fixture", type: "command.submit", params: { instanceId: "fixture", operationId: "initial-task", message: "INITIAL_TASK", delivery: "followUp" } },
     { type: "command", queueAvailable: true }, (result) => admitted.push(result));

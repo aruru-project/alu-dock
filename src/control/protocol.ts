@@ -20,6 +20,7 @@ import { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type Machines
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_OMITTED_FIELDS, MAX_JSON_STRING_CHARS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
+import { parseAllowedTools } from "../core/worker-tool-policy.js";
 import {
   MAX_DELIVERY_REF_CHARS,
   MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
@@ -316,7 +317,7 @@ export type ControlRequest =
   | Request<"machine.list", Record<string, never>>
   | Request<"machine.remove", { operationId: string; hostId: string }>
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; parentId?: string }>
+  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; parentId?: string; allowedTools?: string[] }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
@@ -806,6 +807,7 @@ export function requestOptionCapabilities(request: ControlRequest): string[] {
   }
   if ((request.type === "interaction.respond" || request.type === "extension.widget_viewport.set") && request.params.leaseToken === undefined) return [SHARED_INTERACTIONS_CAPABILITY];
   if (request.type === "session.inventory" && request.params.cursor !== undefined) return [SESSION_INVENTORY_PAGES_CAPABILITY];
+  if (request.type === "instance.create" && request.params.parentId !== undefined) return [COLLABORATION_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
@@ -1014,7 +1016,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...(uploadInstanceId === undefined ? {} : { instanceId: uploadInstanceId }), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
-      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "parentId"], "invalid_request");
+      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "parentId", "allowedTools"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
@@ -1024,7 +1026,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
         try { workerConfig = cloneWorkerConfig(params.workerConfig, "params.workerConfig"); }
         catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.workerConfig is invalid"); }
       }
-      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(params.parentId === undefined ? {} : { parentId: id(params.parentId, "params.parentId", "invalid_request") }) } };
+      if (params.allowedTools !== undefined && params.parentId === undefined) throw validation("invalid_request", "Tool permissions can only be chosen for a child Work");
+      let allowedTools: string[] | undefined;
+      if (params.allowedTools !== undefined) {
+        try { allowedTools = parseAllowedTools(params.allowedTools); }
+        catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.allowedTools is invalid"); }
+      }
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(params.parentId === undefined ? {} : { parentId: id(params.parentId, "params.parentId", "invalid_request") }), ...(allowedTools === undefined ? {} : { allowedTools }) } };
     }
     case "instance.ensure": {
       exact(params, ["operationId", "key", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");

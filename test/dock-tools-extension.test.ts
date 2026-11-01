@@ -232,7 +232,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   assert.equal(extensionUi.statuses.get("Dock tools"), "on");
   assert.equal(second.state.messages.length, 1);
   assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
-  assert.match(JSON.stringify(second.state.messages[0]!.message), /continue coordinating the task/u);
+  assert.match(JSON.stringify(second.state.messages[0]!.message), /Sol/u, "the notice names the Work that finished");
 
   bridge.deliver(notification);
   assert.equal(second.state.messages.length, 1, "duplicate watch completion must not wake twice");

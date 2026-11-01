@@ -53,7 +53,6 @@ pub(crate) async fn submit_message(
     message: String,
     attachment_file_ids: Option<Vec<String>>,
     text_only: Option<bool>,
-    follow_up: Option<bool>,
     session_id: Option<String>,
 ) -> Result<SubmitResult, CommandError> {
     let text_only = text_only.unwrap_or(false);
@@ -103,11 +102,7 @@ pub(crate) async fn submit_message(
                     .submit_message(
                         &instance_id,
                         &message,
-                        if follow_up.unwrap_or(false) {
-                            DeliveryMode::FollowUp
-                        } else {
-                            DeliveryMode::Auto
-                        },
+                        DeliveryMode::Auto,
                         Some(&operation_id),
                     )
                     .await
@@ -717,7 +712,6 @@ pub(crate) async fn create_work(
     name: Option<String>,
     target_host_id: Option<String>,
     worker_config: Option<serde_json::Map<String, Value>>,
-    parent_id: Option<String>,
     operation_id: Option<String>,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
@@ -749,7 +743,6 @@ pub(crate) async fn create_work(
                     operation_id.as_deref(),
                     target_host_id.as_deref(),
                     worker_config.as_ref(),
-                    parent_id.as_deref(),
                 )
                 .await
                 .map_err(CommandError::from)

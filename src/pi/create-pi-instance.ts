@@ -24,6 +24,8 @@ import type { WorkerProcessTimeouts } from "./worker-process.js";
 export interface CreatePiInstanceOptions {
   /** Owning top-level Work on this Host; native children are temporary. */
   parentId?: string;
+  /** A child's exact tool ceiling, chosen by its parent. */
+  allowedTools?: string[];
   id?: string;
   creationOperationId?: string;
   hostEpoch?: string;
@@ -77,6 +79,8 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
       ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
+      ...(options.parentId === undefined ? {} : { child: true }),
+      ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
       projectTrusted: options.projectTrusted,
       ...(options.sessionFile === undefined ? {} : { sessionFile: resolve(options.sessionFile) }),
       ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
@@ -105,6 +109,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       id: instanceId,
       creationOperationId: options.creationOperationId,
       parentId: options.parentId,
+      projectTrusted: options.projectTrusted,
       hostEpoch,
       key: options.key,
       name: initialName,
@@ -144,7 +149,6 @@ const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
 };
 
 const unavailableDockToolsHostPort: DockToolsHostPort = {
-  authorizeDockToolRequest: () => { throw new Error("Dock tools are not connected to a Host."); },
   dockToolsEnabled: () => false,
   configureDockTools: async () => { throw new Error("Dock tools require a managed Registry instance"); },
   invokeDockTool: async () => { throw new Error("Dock tools require a managed Registry instance"); },

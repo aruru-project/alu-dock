@@ -12,6 +12,7 @@ import {
   MAX_OBSERVATION_CURSOR_CHARS,
   MAX_OBSERVATION_LIST_ITEMS,
   MAX_OBSERVATION_MESSAGE_LIMIT,
+  MAX_OBSERVATION_REPLY_CHARS,
   OBSERVATION_DATA_NOTICE,
   type ObservationMessageType,
   type ObservationNotification,
@@ -21,6 +22,7 @@ import { MAX_SOURCE_FILE_PATH_CHARS } from "./source-file.js";
 import { THINKING_LEVELS } from "./agent-worker.js";
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "./local-path.js";
 import { MACHINE_PLATFORMS, type MachinePlatform } from "./machine-dto.js";
+import { parseAllowedTools } from "./worker-tool-policy.js";
 
 /** Canonical Agent-neutral validation for Dock-tools transport records. */
 export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
@@ -42,7 +44,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       ...(cwd === undefined ? {} : { cwd }),
       ...(value.model === undefined ? {} : { model: parseModelRef(value.model, "Worker model", "invalid_request") }),
       ...(value.thinkingLevel === undefined ? {} : { thinkingLevel: oneOf(value.thinkingLevel, THINKING_LEVELS, "Thinking level") }),
-      ...(value.allowedTools === undefined ? {} : { allowedTools: stringArray(value.allowedTools, 1000, 256, "Allowed tools") }),
+      ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
     };
   }
   if (value.type === "machines") { exactKeys(value, ["type"], "Dock Machines request"); return { type: "machines" }; }
@@ -64,7 +66,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: "system", ...input, ...(machine === undefined ? {} : { machine }) };
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model", "allowedTools"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
@@ -75,7 +77,6 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     const model = value.model === undefined ? undefined : parseModelRef(value.model, "Dock create model", "invalid_request");
     return {
       type: "create",
-      ...(value.allowedTools === undefined ? {} : { allowedTools: stringArray(value.allowedTools, 1000, 256, "Allowed tools") }),
       ...(systemId === undefined ? {} : { systemId }),
       ...(value.saveDefault === undefined ? {} : { saveDefault: value.saveDefault }),
       ...(model === undefined ? {} : { model }),
@@ -90,7 +91,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   return {
     type: "send",
     operationId: boundedString(value.operationId, 128, "Dock send operation ID"),
-    target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Dock send target"),
+    ...(value.target === undefined ? {} : { target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Dock send target") }),
     message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
     ...(value.delivery === undefined ? {} : { delivery: oneOf(value.delivery, ["followUp", "steer"] as const, "Message delivery") }),
   };
@@ -135,10 +136,9 @@ export function parseDockToolsResult(raw: unknown): void {
   }
   if (value.type === "models") { exactKeys(value, ["type", "result"], "Model catalog result"); parseModelsResult(value.result); return; }
   if (value.type === "spawn") {
-    exactKeys(value, ["type", "instance", "taskStatus", "watchStatus", "error"], "Spawn result");
+    exactKeys(value, ["type", "instance", "taskStatus", "error"], "Spawn result");
     validateObservedStatus(value.instance);
     oneOf(value.taskStatus, ["accepted", "failed"] as const, "Task status");
-    if (value.watchStatus !== undefined) oneOf(value.watchStatus, ["watching", "completed", "failed"] as const, "Watch status");
     if (value.error !== undefined && typeof value.error !== "string") throw new Error("Spawn error must be text");
     return;
   }
@@ -168,9 +168,10 @@ export function parseDockToolsResult(raw: unknown): void {
     validateObservedStatus(value.instance);
     return;
   }
-  exactKeys(value, ["type", "target", "receipt"], "Dock send result");
+  exactKeys(value, ["type", "target", "receipt", "error"], "Dock send result");
   if (value.type !== "send") throw new Error("Dock tools result type is invalid");
   validateObservedStatus(value.target);
+  if (value.error !== undefined && typeof value.error !== "string") throw new Error("Dock send error must be text");
   const receipt = record(value.receipt, "Dock send receipt");
   exactKeys(receipt, ["delivery", "queued", "acceptedAt"], "Dock send receipt");
   oneOf(receipt.delivery, ["prompt", "steer", "followUp"], "Dock send delivery");
@@ -252,6 +253,7 @@ function validateObservedStatus(raw: unknown): void {
     boundedString(model.provider, MAX_MODEL_PROVIDER_CHARS, "Observed model provider"); boundedString(model.id, MAX_MODEL_ID_CHARS, "Observed model ID");
   }
   if (value.thinkingLevel !== undefined) oneOf(value.thinkingLevel, THINKING_LEVELS, "Observed thinking level");
+  optionalString(value.reply, MAX_OBSERVATION_REPLY_CHARS);
 }
 
 function validateWatchReceipt(raw: unknown): void {

@@ -24,10 +24,10 @@ test("machine identity projection leaves Agent event data and error details byte
 });
 
 
-test("routed child creation preserves global parent identity and policy through the real request codec", () => {
+test("a child creation request keeps its parent and tool permissions through the request codec Main forwards", () => {
   const request = parseControlRequest({ kind: "request", version: 2, requestId: "child-create", type: "instance.create", params: {
     operationId: "child-operation", cwd: "/workspace/project", hostId: "machine-1", parentId: "global-parent",
-    workerConfig: { toolPolicy: { allowedTools: ["read", "dock_send"] }, collaboration: { parentId: "global-parent", parentName: "Coordinator" } },
+    allowedTools: ["read", "grep"], workerConfig: { thinkingLevel: "low" },
   } });
   const wire = JSON.parse(JSON.stringify(requestForNativeHost(request, undefined)));
   const native = parseControlRequest(wire);
@@ -36,5 +36,6 @@ test("routed child creation preserves global parent identity and policy through 
   assert.equal(native.params.hostId, undefined);
   assert.equal(native.params.parentId, "global-parent");
   assert.equal(native.params.operationId, "child-operation");
-  assert.deepEqual(native.params.workerConfig, { toolPolicy: { allowedTools: ["read", "dock_send"] }, collaboration: { parentId: "global-parent", parentName: "Coordinator" } });
+  assert.deepEqual(native.params.allowedTools, ["read", "grep"]);
+  assert.deepEqual(native.params.workerConfig, { thinkingLevel: "low" });
 });

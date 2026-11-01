@@ -203,6 +203,8 @@ interface AgentEventTransition {
 export interface ManagedInstanceOptions {
   /** Owning top-level Work; native children are temporary and retire with their parent. */
   parentId?: string;
+  /** The trust decision this runtime started with; a child in the same directory reuses it. */
+  projectTrusted?: boolean;
   id?: string;
   key?: string;
   name?: string;
@@ -345,17 +347,6 @@ export class RuntimeEffectUnknownError extends Error {
 }
 
 export class ManagedInstance {
-  // Runtime-only: trust_once must never become a persisted permission grant.
-  private resolvedProjectTrustValue: AgentProjectTrust | undefined;
-
-  setResolvedProjectTrust(trust: AgentProjectTrust): void {
-    this.resolvedProjectTrustValue = { ...trust };
-  }
-
-  resolvedProjectTrust(): AgentProjectTrust | undefined {
-    return this.resolvedProjectTrustValue === undefined ? undefined : { ...this.resolvedProjectTrustValue };
-  }
-
   readonly id: string;
   readonly creationOperationId: string;
   readonly hostEpoch: string;
@@ -395,7 +386,9 @@ export class ManagedInstance {
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
   private readonly workerConfigValue: JsonObject | undefined;
-  private readonly parentId: string | undefined;
+  readonly parentId: string | undefined;
+  // Runtime-only: trust_once must never become a persisted permission grant.
+  private projectTrustedValue: boolean | undefined;
   private readonly deliverables = new InstanceDeliverables();
   private executionChangedAtValue!: string;
   private runStartedAtValue: string | undefined;
@@ -443,6 +436,12 @@ export class ManagedInstance {
   get key(): string | undefined { return this.keyValue; }
   get name(): string | undefined { return this.nameValue; }
   get cwd(): string { return this.cwdValue; }
+  get lifecycle(): InstanceLifecycle { return this.state.lifecycle; }
+
+  /** The current runtime's project trust, as started or last switched; never persisted. */
+  projectTrust(): AgentProjectTrust | undefined {
+    return this.projectTrustedValue === undefined ? undefined : { canonicalCwd: this.cwdValue, projectTrusted: this.projectTrustedValue };
+  }
 
   constructor(options: ManagedInstanceOptions) {
     this.id = options.id ?? randomUUID();
@@ -459,6 +458,7 @@ export class ManagedInstance {
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
     this.dockToolsEnabledValue = options.dockToolsEnabled ?? true;
     this.parentId = options.parentId;
+    this.projectTrustedValue = options.projectTrusted;
     this.workerConfigValue = options.workerConfig === undefined
       ? undefined
       : cloneWorkerConfig(options.workerConfig, "Worker configuration");
@@ -1156,7 +1156,7 @@ export class ManagedInstance {
       const result = await this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
         context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
       });
-      if (!result.cancelled) this.setResolvedProjectTrust(trust);
+      if (!result.cancelled) this.projectTrustedValue = trust.projectTrusted;
       return result;
     });
   }
@@ -2402,6 +2402,8 @@ export class ManagedInstance {
         // entry immediately. Cleanup continues by instance ID and must not
         // block a fresh keyed instance in a corrected or moved workspace.
         this.keyValue = undefined;
+        // A crashed child is collected by Stop; its recovery facts are valid only
+        // while it is unavailable, never on a stopping record.
         this.recoverySessionFile = undefined;
         this.lastKnownValue = undefined;
         this.interruptionValue = undefined;

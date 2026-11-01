@@ -4,32 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DockClient } from "../src/control/dock-client.js";
-import { DockHost } from "../src/control/dock-host.js";
-import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiAgentAdapter, type PiAgentAdapter } from "../src/pi/pi-agent-adapter.js";
-import { createPiInstance, resolvePiReopenTarget } from "../src/pi/create-pi-instance.js";
-import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
-import { PlanGoalProvider, waitFor } from "./support/plan-goal-provider.js";
+import { PlanGoalProvider } from "./support/plan-goal-provider.js";
 
 // A parent-selected permission ceiling must cover direct, deferred and nested tools,
-// including tools loaded after startup. The real Host, Worker and Pi are exercised;
-// only provider replies and the third-party extension are deterministic fixtures.
-for (const transport of ["sdk", "host"] as const) test(`a review worker cannot regain write tools through extensions, nested calls or lifecycle changes (${transport})`, { timeout: 40_000 }, async (context) => {
+// including tools loaded after startup. Real Pi is exercised; only provider replies
+// and the third-party extension are deterministic fixtures. The Host path that hands a
+// child its grant is covered by native-collaboration-real.
+test("a review worker cannot regain write tools through extensions, nested calls or lifecycle changes", { timeout: 40_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-worker-policy-"));
-  const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
+  const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions");
   const marker = join(cwd, "unauthorized-write.txt");
   const provider = new PlanGoalProvider();
-  let host: DockHost | undefined, client: DockClient | undefined, adapter: PiAgentAdapter | undefined;
-  const workerPids: number[] = [];
+  let adapter: PiAgentAdapter | undefined;
   context.after(async () => {
     await adapter?.control({ type: "dispose" });
-    client?.closeActiveConnections();
-    await host?.stop().catch(() => {});
     await provider.stop();
     await rm(root, { recursive: true, force: true });
   });
-  await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
+  await Promise.all([cwd, agentDir, sessionDir].map((path) => mkdir(path)));
   await mkdir(join(agentDir, "extensions"));
   await writeFile(join(agentDir, "extensions", "permission-probes.ts"), `
 import { writeFile } from "node:fs/promises";
@@ -71,83 +64,32 @@ export default function (pi) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   } } }));
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "policy-loopback", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false } }));
-  const policy = { toolPolicy: { allowedTools: ["read", "nested_probe"] } };
-  if (transport === "sdk") {
-    adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true, workerConfig: policy });
-    const assertCeiling = async () => {
-      assert.deepEqual((await adapter!.listTools()).tools.map((tool) => tool.name).sort(), ["nested_probe", "read"]);
-      await assert.rejects(access(marker));
-      await access(legacyMarker);
-    };
-    await assertCeiling();
-    await assert.rejects(adapter.setActiveTools(["read", "write"]));
-    const run = adapter.prompt("Review using nested_probe.");
-    await probeNestedTools(provider);
-    await run;
-    await assertCeiling();
-    await adapter.reload("policy-reload");
-    await assertCeiling();
-    await adapter.newSession("policy-new");
-    await assertCeiling();
-    await adapter.control({ type: "dispose" });
-    adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true, workerConfig: { toolPolicy: { allowedTools: [] } } });
-    assert.deepEqual((await adapter.listTools()).tools, []);
-    await adapter.control({ type: "dispose" });
-    adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true,
-      workerConfig: { toolPolicy: { allowedTools: ["mcp__fixture__write"] } } });
-    assert.deepEqual((await adapter.listTools()).tools.map((tool) => tool.name), ["mcp__fixture__write"]);
-    await assert.rejects(access(marker));
-    await adapter.control({ type: "dispose" });
-    adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true,
-      workerConfig: { toolPolicy: { allowedTools: ["subagent"] } } });
-    assert.deepEqual((await adapter.listTools()).tools.map(tool => tool.name), ["subagent"], "The user's legacy extension remains available when explicitly permitted");
-    return;
-  }
-  const registry = new DockRegistry((input) => createPiInstance({
-    ...input, agentDir, sessionDir, projectTrusted: true,
-    workerEnvironment: isolatedProcessEnvironment(home, {
-      PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
-      npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
-    }),
-    onWorkerSpawn: (pid) => workerPids.push(pid),
-  }), undefined, { reopenTargetResolver: { resolve: resolvePiReopenTarget } });
-  const socketPath = join(root, "dock.sock");
-  host = new DockHost({ socketPath, registry });
-  await host.start();
-  const dock = client = new DockClient({ socketPath, timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
-  const work = await dock.create(cwd, "Reviewer", "policy-create", undefined, undefined, policy);
-  const idle = () => waitFor(async () => (await dock.read(work.id)).instance.execution === "idle", "Reviewer did not become idle");
+  adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true, allowedTools: ["read", "nested_probe"] });
   const assertCeiling = async () => {
-    const names = (await dock.tools(work.id)).tools.map((tool) => tool.name).sort();
-    assert.deepEqual(names, ["nested_probe", "read"]);
+    assert.deepEqual((await adapter!.listTools()).tools.map((tool) => tool.name).sort(), ["nested_probe", "read"]);
     await assert.rejects(access(marker));
     await access(legacyMarker);
   };
   await assertCeiling();
-  await assert.rejects(dock.setActiveTools(work.id, ["read", "write"], "policy-widen"));
-  await dock.prompt(work.id, "Review with nested tools.", "auto", "policy-review");
+  await assert.rejects(adapter.setActiveTools(["read", "write"]));
+  const run = adapter.prompt("Review using nested_probe.");
   await probeNestedTools(provider);
-  await idle();
+  await run;
   await assertCeiling();
-
-  // Reload is a client control operation; sending the literal text as a prompt
-  // asks the model to answer it and does not exercise runtime reloading.
-  await dock.reloadSession(work.id, "policy-reload");
-  await idle();
+  await adapter.reload("policy-reload");
   await assertCeiling();
-  await dock.newSession(work.id, undefined, "policy-new");
+  await adapter.newSession("policy-new");
   await assertCeiling();
-  // Pi persists a new session only once it has conversation content. Exercise
-  // the grant again in that session before testing its crash/reopen boundary.
-  const nextRequest = provider.requests.length;
-  await dock.prompt(work.id, "Review again in the new session.", "auto", "policy-new-review");
-  await probeNestedTools(provider, nextRequest);
-  await idle();
-  await assertCeiling();
-  process.kill(workerPids.at(-1)!, "SIGKILL");
-  await waitFor(async () => (await dock.status(work.id)).lifecycle === "runtime_error", "Worker loss was not recorded");
-  await dock.reopen(work.id, "policy-reopen");
-  await assertCeiling();
+  await adapter.control({ type: "dispose" });
+  adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true, allowedTools: [] });
+  assert.deepEqual((await adapter.listTools()).tools, []);
+  await adapter.control({ type: "dispose" });
+  adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true, allowedTools: ["mcp__fixture__write"] });
+  assert.deepEqual((await adapter.listTools()).tools.map((tool) => tool.name), ["mcp__fixture__write"]);
+  await assert.rejects(access(marker));
+  await adapter.control({ type: "dispose" });
+  adapter = await createPiAgentAdapter({ cwd, agentDir, sessionDir, projectTrusted: true, allowedTools: ["subagent"] });
+  assert.deepEqual((await adapter.listTools()).tools.map(tool => tool.name), ["subagent"], "The user's legacy extension remains available when explicitly permitted");
 });
 
 async function probeNestedTools(provider: PlanGoalProvider, firstRequest = 0): Promise<void> {

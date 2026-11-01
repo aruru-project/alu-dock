@@ -12,7 +12,7 @@ import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "../control/protoco
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult): string {
   if (result.type === "models") return result.result.models.map((model) => `${model.provider}/${model.id} · ${model.reasoning ? "reasoning" : "no reasoning"}`).join("\n") || "No configured model is available. Configure a provider in Dock settings.";
-  if (result.type === "spawn") return `Created child ${statusLine(result.instance, new Date().toISOString())}. ${result.watchStatus === "failed" ? result.error : result.taskStatus === "accepted" ? `Task accepted; ${result.watchStatus === "completed" ? "already settled, inspect its result" : "completion will notify you"}.` : result.error} Use dock_inspect to read progress and dock_send for follow-up.`;
+  if (result.type === "spawn") return `Created helper ${statusLine(result.instance, new Date().toISOString())}. ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
   if (result.type === "interrupt" || result.type === "stop") return `${result.type === "interrupt" ? "Interrupted current turn of" : "Stopped"} ${identity(result.instance)}.`;
   if (result.type === "system_catalog") {
     const catalog = result.result;
@@ -48,7 +48,7 @@ export function renderDockToolsResult(result: DockToolsResult): string {
     return `${result.defaultSaved ? "Directory default saved. " : ""}Created ${identity(result.instance)} in ${inline(result.instance.cwd, 180)}. Collaboration tools are available in the new work.`;
   }
   if (result.type === "send") {
-    return `Sent a Dock message to ${identity(result.target)}${result.receipt.queued ? "; it is waiting in that instance’s Queue" : ""}. The message carries your worker identity.`;
+    return `Sent a Dock message to ${identity(result.target)}${result.receipt.queued ? "; it is waiting in that instance’s Queue" : ""}. The message carries your worker identity.${result.error !== undefined ? ` ${result.error}` : result.target.parentId === undefined ? "" : " Its reply will be delivered to you when it finishes."}`;
   }
   return renderObservationResult(result);
 }
@@ -76,8 +76,10 @@ export function renderObservationResult(result: ObservationResult): string {
 
 export function renderObservationNotification(notification: ObservationNotification, wake = true): string {
   const prefix = wake ? "Dock watch completed" : "Dock watch already complete";
-  return `[${prefix} · target=${quotedIdentity(notification.target)} · reason=${notification.reason} · fired=${notification.firedAt}]\n`
-    + "Use dock_inspect to read the result, then continue coordinating the task.";
+  const header = `[${prefix} · target=${quotedIdentity(notification.target)} · reason=${notification.reason} · fired=${notification.firedAt}]`;
+  return notification.target.reply === undefined
+    ? `${header}\nUse dock_inspect to read what it said.`
+    : `${header}\nIts final reply:\n${notification.target.reply}`;
 }
 
 function renderObservation(observation: InstanceObservation): string {

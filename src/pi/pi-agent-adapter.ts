@@ -1,7 +1,6 @@
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { piSystemPromptResolver } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
-import { parseWorkerToolPolicy, workerToolSelection } from "./worker-tool-policy.js";
+import { workerToolSelection } from "./worker-tool-policy.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, open, realpath } from "node:fs/promises";
@@ -32,7 +31,7 @@ import {
 
 import { ResourceContentError } from "../core/resource-content.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
-import { dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
+import { CHILD_DOCK_TOOL_NAMES, dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
 import {
   dockAttachmentsExtension,
   DOCK_ATTACHMENT_RESOLVE_TOOL,
@@ -179,6 +178,8 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
 
 export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker managed by Alu Dock. Your work can continue after a terminal disconnects, and Alu Dock clients may observe or control this Work through Dock protocols. Pi remains authoritative for its settings, credentials, extensions, project resources, and Session history. Use \`aludock pi:install <source>\` when the user asks you to install a Pi package through the bundled Pi runtime; do not require a separate system Pi installation.`;
 
+export const ALU_DOCK_CHILD_GUIDANCE = "You are a helper Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments. You cannot reach any other Work.";
+
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
   "setBeforeSessionInvalidate" | "setRebindSession" | "newSession" | "switchSession" | "fork" | "dispose"
@@ -223,6 +224,10 @@ export interface CreatePiAgentAdapterOptions {
   excludeTools?: string[];
   /** Pi owns the meaning of these JSON-safe createAgentSession fields. */
   workerConfig?: JsonObject;
+  /** A helper Work that reports only to the Work that created it. */
+  child?: boolean;
+  /** Exact tools this Work may ever use, enforced in Pi's tool registry. */
+  allowedTools?: string[];
   projectTrusted: boolean;
   extensionUiBroker?: PiExtensionUiLifecyclePort;
   extensionUiContextPortFactory?: () => PiExtensionUiPort;
@@ -3569,7 +3574,9 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
-  const toolPolicy = parseWorkerToolPolicy(options.workerConfig?.toolPolicy);
+  // A child can always report to its parent, whatever else it was allowed.
+  const allowedTools = options.allowedTools === undefined ? undefined
+    : options.child ? [...new Set([...options.allowedTools, ...CHILD_DOCK_TOOL_NAMES])] : options.allowedTools;
   const planGoalPort: PlanGoalPort = {};
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const publishedFiles = new TransientFileRegistry();
@@ -3602,28 +3609,23 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
           ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
-        extensionsOverride: (base) => ownCanonicalShowImage(base),
-        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.workerConfig?.collaboration ? [`This is a Dock child worker. Parent: ${JSON.stringify(options.workerConfig.collaboration)}. Collaborate using dock_send; report useful findings and the final result to your parent. Use Dock only to communicate with your parent. Native Dock children cannot create more workers. Do not send acknowledgment-only replies that create message loops.`] : [])],
+        extensionsOverride: ownCanonicalShowImage,
+        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.child ? [ALU_DOCK_CHILD_GUIDANCE] : [])],
         ...(options.dockAttachmentPort === undefined ? {} : {
           additionalSkillPaths: [dockAttachmentSkillPath()],
         }),
       },
     });
     // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
-    const { toolPolicy: _toolPolicy, collaboration: _collaboration, ...workerConfig } = options.workerConfig ?? {};
-    const { model: requestedModel, ...piCreateOptions } = workerConfig as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
-    const freshChild = Boolean(options.workerConfig?.collaboration) && sessionManager.getBranch().length === 0;
+    const { model: requestedModel, ...piCreateOptions } = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
+    const freshChild = options.child === true && sessionManager.getBranch().length === 0;
     const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager);
-    if (options.workerConfig?.collaboration && startingModel && piCreateOptions.thinkingLevel !== undefined
-      && !getSupportedThinkingLevels(startingModel).includes(piCreateOptions.thinkingLevel)) {
-      throw new Error(`Model ${startingModel.id} does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
-    }
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
       ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
-      ...workerToolSelection(toolPolicy, options.excludeTools ?? piCreateOptions.excludeTools),
+      ...workerToolSelection(allowedTools, options.excludeTools ?? piCreateOptions.excludeTools),
       // Worker-owned services and Session continuity cannot be replaced by wire JSON.
       services,
       sessionManager,
@@ -3631,10 +3633,11 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       // Preserve existing plugin preferences; wire JSON cannot disable this contract.
       extensionModelMutationPolicy: "legacy-defaults",
     });
-    if (freshChild && !startingModel && piCreateOptions.thinkingLevel !== undefined
+    // A parent that names a thinking level the child's model lacks gets an error, not a child at another level.
+    if (freshChild && piCreateOptions.thinkingLevel !== undefined
       && !result.session.getAvailableThinkingLevels().includes(piCreateOptions.thinkingLevel)) {
       result.session.dispose();
-      throw new Error(`The selected model does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
+      throw new Error(`Model ${result.session.model?.id ?? "selected for this child"} does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
     }
     return { ...result, services, diagnostics: services.diagnostics };
   };

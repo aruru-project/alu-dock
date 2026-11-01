@@ -884,9 +884,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       const invokeDockTool = this.options.invokeDockTool;
       void (async () => {
         try {
-          const request = structuredClone(record.request);
-          if ("target" in request) request.target = this.parentIdsForMachine(connection.machine.id).get(request.target) ?? request.target;
-          const result = await invokeDockTool(source.mainInstanceId, connection.machine.id, request);
+          const result = await invokeDockTool(source.mainInstanceId, connection.machine.id, record.request);
           await writeMachine(connection.socket, { kind: "machine_tool_response", requestId: record.requestId, ok: true, result });
         } catch (error) {
           await writeMachine(connection.socket, { kind: "machine_tool_response", requestId: record.requestId, ok: false, error: error instanceof Error ? error.message : String(error) }).catch(() => {});
@@ -1633,11 +1631,7 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     if (!result.enabled) await this.options.upstream.disableDockToolsSource(sourceInstanceId);
     return result;
   }
-  authorizeDockToolRequest(sourceInstanceId: string, request: DockToolsRequest): DockToolsRequest {
-    return this.options.local().authorizeDockToolRequest(sourceInstanceId, request);
-  }
-  async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    request = this.authorizeDockToolRequest(sourceInstanceId, request);
+  invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
     if (request.type === "deliver") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
     return this.options.upstream.invokeDockTool(sourceInstanceId, request);

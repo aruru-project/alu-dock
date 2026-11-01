@@ -269,8 +269,6 @@ struct WorkspaceListParams<'a> {
 #[serde(rename_all = "camelCase")]
 struct CreateInstanceParams<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    parent_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     worker_config: Option<&'a serde_json::Map<String, Value>>,
     operation_id: &'a str,
     cwd: &'a str,
@@ -523,7 +521,7 @@ impl DockClient {
         continuation: Option<(&str, ProjectTrustDecision)>,
         operation_id: Option<&str>,
     ) -> Result<InstanceSnapshot> {
-        self.create_instance_for_machine(cwd, name, continuation, operation_id, None, None, None)
+        self.create_instance_for_machine(cwd, name, continuation, operation_id, None, None)
             .await
     }
 
@@ -535,20 +533,16 @@ impl DockClient {
         operation_id: Option<&str>,
         target_host_id: Option<&str>,
         worker_config: Option<&serde_json::Map<String, Value>>,
-        parent_id: Option<&str>,
     ) -> Result<InstanceSnapshot> {
         let generated_operation_id = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated_operation_id);
         let (trust_challenge_id, project_trust_decision) = continuation
             .map(|(challenge, decision)| (Some(challenge), Some(decision)))
             .unwrap_or((None, None));
-        let required_capabilities =
-            crate::capabilities::instance_create(worker_config.is_some(), parent_id.is_some());
         let result: InstanceResult = self
             .request(
                 "instance.create",
                 &CreateInstanceParams {
-                    parent_id,
                     operation_id,
                     worker_config,
                     cwd,
@@ -557,7 +551,7 @@ impl DockClient {
                     trust_challenge_id,
                     project_trust_decision,
                 },
-                &required_capabilities,
+                INSTANCE_CAPABILITIES,
                 Some(operation_id),
             )
             .await?;
@@ -569,7 +563,6 @@ impl DockClient {
                 message: error.to_string(),
             })?;
         if result.instance.creation_operation_id != operation_id
-            || result.instance.parent_id.as_deref() != parent_id
             || target_host_id
                 .is_some_and(|target| result.instance.host_id.as_deref() != Some(target))
         {
@@ -872,7 +865,6 @@ mod tests {
         );
 
         let creation = serde_json::to_value(CreateInstanceParams {
-            parent_id: Some("coordinator"),
             operation_id: "operation-a",
             cwd: "/project",
             name: None,
@@ -886,7 +878,6 @@ mod tests {
             creation,
             serde_json::json!({
                 "operationId": "operation-a",
-                "parentId": "coordinator",
                 "cwd": "/project",
                 "hostId": "subhost-a"
             })

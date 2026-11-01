@@ -91,8 +91,10 @@ export function stopConfirmationText(work: Work): string {
   return `停止整个 Work“${work.displayName}”？\n\n这会停止共享 Work、当前运行，并清空所有客户端已经获准的 Queue 项目。此设备上的本地草稿会保留。此操作不同于“中止当前回复”。`
 }
 
+/** A crashed or stuck child can still be collected; a top-level Work offers Continue or Remove instead. */
 export function stopCanStart(work: Work | null, workMutating: boolean): boolean {
-  return !!work && ['active', 'stopping', 'runtime_error'].includes(work.lifecycle) && !workMutating
+  return !!work && !workMutating && (work.lifecycle === 'active'
+    || (!!work.parentId && (work.lifecycle === 'stopping' || work.lifecycle === 'runtime_error')))
 }
 
 export function stoppedResultIsCorrelated(result: StopResult, instanceId: string): boolean {

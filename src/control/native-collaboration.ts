@@ -1,37 +1,62 @@
 import { dockMessageText } from "../core/dock-tools.js";
-import type { DockToolsRequest, DockToolsResult, DockToolsMutationPort } from "../core/dock-tools.js";
+import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
-import type { ObservationResult } from "../core/instance-observation.js";
+import type { ObservedInstanceStatus } from "../core/instance-observation.js";
 import { systemToolOperation } from "./system-tools.js";
 
-/** One orchestration path for local and Main-routed children. The normal Host owns each effect. */
+/** A child Work talks only to its parent: the one Dock request it may make is a message. */
+export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">, request: DockToolsRequest): void {
+  if (source.parentId !== undefined && request.type !== "send") {
+    throw new Error("A helper Work can only message the Work that created it. Finish the task and reply, or use dock_send to ask it something.");
+  }
+}
+
+/** Who a message goes to: a child always reaches its parent; a top-level Work names its target. */
+export function messageTarget(source: Pick<InstanceSnapshot, "parentId">, target: string | undefined): { parentId: string } | { target: string } {
+  if (source.parentId !== undefined) return { parentId: source.parentId };
+  if (target === undefined) throw new Error("Name the Work to message with target.");
+  return { target };
+}
+
+/**
+ * After work reaches a helper: arrange for its reply to come back, or say plainly that it
+ * will not. The work itself was accepted, so the caller must not send it again.
+ */
+export async function arrangeReply(notifyWhenDone: () => Promise<void>): Promise<string | undefined> {
+  try {
+    await notifyWhenDone();
+    return undefined;
+  } catch (error) {
+    return `It was accepted, but Dock cannot deliver the helper's reply to you. Read it later with dock_inspect; do not send it again. ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/** One orchestration path for local and Main-routed children. The owning Host performs each effect. */
 export async function spawnDockWorker(
   source: InstanceSnapshot,
   request: Extract<DockToolsRequest, { type: "spawn" }>,
   port: Pick<DockToolsMutationPort, "create" | "send"> & {
-    watch(target: string): Promise<ObservationResult>;
+    /** Delivers the child's reply to the parent once the task it was just handed is finished. */
+    notifyWhenDone(handedTo: ObservedInstanceStatus): Promise<void>;
   },
 ): Promise<Extract<DockToolsResult, { type: "spawn" }>> {
+  // Another model may not support the parent's thinking level, so it starts at that model's default.
+  const thinkingLevel = request.thinkingLevel ?? (request.model === undefined ? source.executor.thinkingLevel : undefined);
   const created = await port.create({
     type: "create", operationId: systemToolOperation(request.operationId, "create"),
     cwd: request.cwd ?? source.cwd, name: request.name,
-    parentId: source.id, parentName: source.displayName,
     model: request.model ?? source.executor.model,
-    thinkingLevel: request.thinkingLevel ?? source.executor.thinkingLevel,
-    ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
+    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+    child: { parentId: source.id, ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }) },
   });
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
-  let target;
+  let target: ObservedInstanceStatus;
   try {
     target = (await port.send({ operationId: systemToolOperation(request.operationId, "task"), instanceId: created.instance.id, message: dockMessageText(source.displayName, request.task), delivery: "followUp" })).target;
   } catch (error) {
     // The child exists; an interrupted response cannot prove the task was never accepted.
     return { type: "spawn", instance: created.instance, taskStatus: "failed", error: `Worker created, but task acceptance was not confirmed. Inspect this worker before sending the task again. ${error instanceof Error ? error.message : String(error)}` };
   }
-  try {
-    const watch = await port.watch(created.instance.id);
-    return { type: "spawn", instance: target, taskStatus: "accepted", watchStatus: watch.type === "watch" ? watch.status : undefined };
-  } catch (error) {
-    return { type: "spawn", instance: target, taskStatus: "accepted", watchStatus: "failed", error: `Task accepted, but completion notification registration failed. Inspect this worker or register dock_watch; do not resend the task. ${error instanceof Error ? error.message : String(error)}` };
-  }
+  const replyError = await arrangeReply(() => port.notifyWhenDone(target));
+  return { type: "spawn", instance: target, taskStatus: "accepted", ...(replyError === undefined ? {} : { error: replyError }) };
 }

@@ -12,12 +12,12 @@ import {
   type DockToolsResult,
 } from "../core/dock-tools.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
+import { MAX_ALLOWED_TOOLS, MAX_ALLOWED_TOOL_NAME_CHARS } from "../core/worker-tool-policy.js";
 import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef } from "../control/protocol.js";
 import {
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
   MAX_OBSERVATION_CURSOR_CHARS,
   MAX_OBSERVATION_MESSAGE_LIMIT,
-  OBSERVATION_DATA_NOTICE,
   type ObservationMessageType,
   type ObservationNotification,
 } from "../core/instance-observation.js";
@@ -38,6 +38,8 @@ export const DOCK_TOOL_NAMES = [
   "dock_create",
   "dock_send",
 ] as const;
+/** A child Work reports to its parent and reaches nothing else. */
+export const CHILD_DOCK_TOOL_NAMES = ["dock_send"] as const;
 const DOCK_TOOLS_EXTENSION_PATH = "<inline:alu-dock-tools>";
 const DOCK_TOOLS_STATUS_KEY = "Dock tools";
 const DOCK_TOOLS_GUIDE_PATH = fileURLToPath(new URL("../../../docs/agent/dock-tools.md", import.meta.url));
@@ -47,7 +49,6 @@ function toolDescription(description: string): string {
 }
 const DOCK_TOOLS_ACTIONS = ["on", "off", "status"] as const;
 type DockToolsAction = typeof DOCK_TOOLS_ACTIONS[number];
-const TOOL_NAMES = new Set<string>(DOCK_TOOL_NAMES);
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
 const LIST_SCHEMA = {
   type: "object",
@@ -125,6 +126,12 @@ const SEND_SCHEMA = {
   required: ["target", "message"],
   additionalProperties: false,
 };
+const CHILD_SEND_SCHEMA = {
+  type: "object",
+  properties: { message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS } },
+  required: ["message"],
+  additionalProperties: false,
+};
 
 const SPAWN_SCHEMA = {
   type: "object",
@@ -134,7 +141,7 @@ const SPAWN_SCHEMA = {
     cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
     model: CREATE_SCHEMA.properties.model,
     thinkingLevel: { type: "string", enum: THINKING_LEVELS },
-    allowedTools: { type: "array", items: { type: "string", minLength: 1, maxLength: 256 }, uniqueItems: true, description: "Exact tool names. Omit for normal full tool access; [] grants no tools. Include needed dock_* tools explicitly. This is not an OS sandbox." },
+    allowedTools: { type: "array", maxItems: MAX_ALLOWED_TOOLS, items: { type: "string", minLength: 1, maxLength: MAX_ALLOWED_TOOL_NAME_CHARS }, uniqueItems: true, description: "Exact Pi tool names such as read, grep, find, ls, edit, write, bash. Omit for normal full tool access; [] grants none. The child can always message you; it never gets other Dock tools. This limits tools, not what a granted shell can do." },
   },
   required: ["name", "task"], additionalProperties: false,
 };
@@ -153,9 +160,11 @@ export class DockToolsBridge {
   private readonly suppressedWatchIds = new Set<string>();
   private readonly fencedNotifications = new Map<string, ObservationNotification>();
   private deliveryFenceDepth = 0;
+  readonly toolNames: readonly string[];
 
-  constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort) {
+  constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort, readonly child = false) {
     this.enabledValue = initiallyEnabled;
+    this.toolNames = child ? CHILD_DOCK_TOOL_NAMES : DOCK_TOOL_NAMES;
   }
 
   get enabled(): boolean { return this.enabledValue; }
@@ -294,16 +303,21 @@ export class DockToolsBridge {
   }
 
   private applyToolVisibility(api: ExtensionAPI): void {
-    const unrelated = api.getActiveTools().filter((name) => !TOOL_NAMES.has(name));
-    api.setActiveTools(this.enabledValue ? [...unrelated, ...DOCK_TOOL_NAMES] : unrelated);
+    const unrelated = api.getActiveTools().filter((name) => !this.toolNames.includes(name));
+    api.setActiveTools(this.enabledValue ? [...unrelated, ...this.toolNames] : unrelated);
   }
 }
 
 export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
   return (pi) => {
+    registerDockToolsSwitch(pi, bridge);
+    if (bridge.child) {
+      registerChildTools(pi, bridge);
+      return;
+    }
     pi.registerTool({
       name: "dock_spawn", label: "Delegate a Dock task",
-      description: toolDescription("Create a real child worker and start its task. It inherits your workspace, current model and thinking unless specified. Choose another configured model with dock_models. The child appears under you in Dock and communicates only with you. It cannot create more Dock workers or stop/interrupt you; it can inspect, watch and message you. You choose when to stop it; it also exits when you stop or crash. Completion notifies you automatically; use dock_inspect for the result. If creation succeeded but task submission was not confirmed, inspect the returned worker before retrying. For independent review grant only read/grep/find/ls and required dock messaging tools."),
+      description: toolDescription("Create a helper Work for a task of yours and start it. It works in your workspace with your current model and thinking unless you choose others; dock_models lists the models. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes; send further instructions with dock_send and stop it with dock_stop when you no longer need it. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
       parameters: SPAWN_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() })),
     } as never);
@@ -314,7 +328,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     } as never);
     for (const action of ["interrupt", "stop"] as const) pi.registerTool({
       name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a worker" : "Stop a worker",
-      description: toolDescription("Only top-level workers can use this control; child workers should message their parent instead. " + (action === "interrupt" ? "Interrupt another worker's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Dock worker. Its children also stop and exit. Collected children leave the work list; their conversation files remain on disk. Use dock_list to inspect the team first.")),
+      description: toolDescription(action === "interrupt" ? "Interrupt another worker's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Dock worker. Its children also stop and exit. Collected children leave the work list; their conversation files remain on disk. Use dock_list to inspect the team first."),
       parameters: REQUIRED_TARGET_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string }) => toolResult(await bridge.invoke({ type: action, operationId: randomUUID(), target: params.target })),
     } as never);
@@ -331,7 +345,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_machines",
       label: "List Dock Machines",
-      description: toolDescription("List current Machines with their names, availability, platform, Home, and workspace roots. "),
+      description: toolDescription("List current Machines with their names, availability, platform, Home, and workspace roots."),
       parameters: EMPTY_SCHEMA,
       execute: async () => toolResult(await bridge.invoke({ type: "machines" })),
     } as never);
@@ -372,7 +386,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_system",
       label: "Read Dock systems",
-      description: toolDescription("Discover systems for an absolute cwd, or read a candidate using id. Follow nextCursor for catalog pages; use nextOffset and revision for content pages. Omitted machine means this work's Machine. "),
+      description: toolDescription("Discover systems for an absolute cwd, or read a candidate using id. Follow nextCursor for catalog pages; use nextOffset and revision for content pages. Omitted machine means this work's Machine."),
       parameters: SYSTEM_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "system" }>, "type">) => toolResult(await bridge.invoke({ type: "system", ...params })),
     } as never);
@@ -395,7 +409,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_send",
       label: "Send a Dock message",
-      description: toolDescription("Send a message to another worker with your authenticated sender identity. By default it starts an idle worker or queues behind its current turn. Use delivery=steer only for deliberate mid-turn guidance."),
+      description: toolDescription("Send a message to another worker with your authenticated sender identity. By default it starts an idle worker or queues behind its current turn. Use delivery=steer only for deliberate mid-turn guidance. A helper you created replies to you when it finishes. Do not send acknowledgment-only messages: each one wakes the other worker."),
       parameters: SEND_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string; message: string; delivery?: "followUp" | "steer" }) => toolResult(await bridge.invoke({
         type: "send",
@@ -405,48 +419,60 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
         ...(params.delivery === undefined ? {} : { delivery: params.delivery }),
       })),
     } as never);
+  };
+}
 
-    pi.registerCommand("dock-tools", {
-      description: "Turn Agent-facing Dock tools on or off, or show their status",
-      getArgumentCompletions: (prefix) => DOCK_TOOLS_ACTIONS
-        .filter((action) => action.startsWith(prefix))
-        .map((action) => ({ value: action, label: action })),
-      handler: async (args, ctx) => {
-        const action = args.trim() || "status";
-        if (!isDockToolsAction(action)) {
-          ctx.ui.notify("Use /dock-tools on, /dock-tools off, or /dock-tools status.", "warning");
-          return;
-        }
-        const enabled = await bridge.configure(action);
-        const collision = findDockToolCollision(pi);
-        ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, enabled ? collision === undefined ? "on" : "unavailable" : undefined);
-        ctx.ui.notify(`Dock tools are ${enabled ? "on" : "off"}.`, "info");
-      },
-    });
-
-    let detach = (): void => {};
-    pi.on("session_start", (_event, ctx) => {
-      detach();
-      const collision = findDockToolCollision(pi);
-      if (collision) {
-        pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.has(name)));
-        ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "unavailable" : undefined);
-        ctx.ui.notify(`Dock tools are unavailable because ${collision.name} is already registered.`, "error");
+function registerDockToolsSwitch(pi: ExtensionAPI, bridge: DockToolsBridge): void {
+  pi.registerCommand("dock-tools", {
+    description: "Turn Agent-facing Dock tools on or off, or show their status",
+    getArgumentCompletions: (prefix) => DOCK_TOOLS_ACTIONS
+      .filter((action) => action.startsWith(prefix))
+      .map((action) => ({ value: action, label: action })),
+    handler: async (args, ctx) => {
+      const action = args.trim() || "status";
+      if (!isDockToolsAction(action)) {
+        ctx.ui.notify("Use /dock-tools on, /dock-tools off, or /dock-tools status.", "warning");
         return;
       }
-      detach = bridge.attach(pi);
-      ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "on" : undefined);
-    });
-    pi.on("session_shutdown", () => detach());
-  };
+      const enabled = await bridge.configure(action);
+      const collision = findDockToolCollision(pi, bridge);
+      ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, enabled ? collision === undefined ? "on" : "unavailable" : undefined);
+      ctx.ui.notify(`Dock tools are ${enabled ? "on" : "off"}.`, "info");
+    },
+  });
+
+  let detach = (): void => {};
+  pi.on("session_start", (_event, ctx) => {
+    detach();
+    const collision = findDockToolCollision(pi, bridge);
+    if (collision) {
+      pi.setActiveTools(pi.getActiveTools().filter((name) => !bridge.toolNames.includes(name)));
+      ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "unavailable" : undefined);
+      ctx.ui.notify(`Dock tools are unavailable because ${collision.name} is already registered.`, "error");
+      return;
+    }
+    detach = bridge.attach(pi);
+    ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "on" : undefined);
+  });
+  pi.on("session_shutdown", () => detach());
+}
+
+function registerChildTools(pi: ExtensionAPI, bridge: DockToolsBridge): void {
+  pi.registerTool({
+    name: "dock_send",
+    label: "Message your parent",
+    description: toolDescription("Send a message to the Work that created you. When you finish work it handed you, your final reply already reaches it, so use this only for something it must know before then, such as a question that blocks you. Do not send acknowledgments."),
+    parameters: CHILD_SEND_SCHEMA,
+    execute: async (_toolCallId: string, params: { message: string }) => toolResult(await bridge.invoke({ type: "send", operationId: randomUUID(), message: params.message })),
+  } as never);
 }
 
 function isDockToolsAction(value: string): value is DockToolsAction {
   return (DOCK_TOOLS_ACTIONS as readonly string[]).includes(value);
 }
 
-function findDockToolCollision(pi: ExtensionAPI): ReturnType<ExtensionAPI["getAllTools"]>[number] | undefined {
-  return pi.getAllTools().find((tool) => TOOL_NAMES.has(tool.name)
+function findDockToolCollision(pi: ExtensionAPI, bridge: DockToolsBridge): ReturnType<ExtensionAPI["getAllTools"]>[number] | undefined {
+  return pi.getAllTools().find((tool) => bridge.toolNames.includes(tool.name)
     && tool.sourceInfo.path !== DOCK_TOOLS_EXTENSION_PATH);
 }
 

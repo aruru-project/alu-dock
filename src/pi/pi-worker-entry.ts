@@ -25,6 +25,7 @@ import {
 import type { PiWorkerInitOptions } from "./worker-process.js";
 import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
+import { parseAllowedTools } from "../core/worker-tool-policy.js";
 import type { DockToolsResult } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
 import { DockToolsBridge } from "./dock-tools-extension.js";
@@ -131,7 +132,7 @@ async function runWorker(): Promise<void> {
       validateDockCapabilityResult(capability, result);
       return result as DockToolsResult;
     },
-  });
+  }, init.child === true);
 
   const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
   let reopened: Awaited<ReturnType<typeof openValidatedPiSession>> | undefined;
@@ -147,6 +148,8 @@ async function runWorker(): Promise<void> {
       ...(init.tools === undefined ? {} : { tools: init.tools }),
       ...(init.excludeTools === undefined ? {} : { excludeTools: init.excludeTools }),
       ...(init.workerConfig === undefined ? {} : { workerConfig: init.workerConfig }),
+      ...(init.child === undefined ? {} : { child: init.child }),
+      ...(init.allowedTools === undefined ? {} : { allowedTools: init.allowedTools }),
       projectTrusted: init.projectTrusted,
       extensionUiBroker: ui,
       extensionUiContextPortFactory: () => ui.createGenerationPort(),
@@ -283,7 +286,7 @@ function parseEnvJson(name: string): unknown { const value = process.env[name]; 
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
-  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "projectTrusted", "sessionFile", "initialName"]);
+  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "child", "allowedTools", "projectTrusted", "sessionFile", "initialName"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`Worker init contains unknown field ${key}`);
   const text = (input: unknown, limit: number, label: string, optional = false): string | undefined => {
     if (input === undefined && optional) return undefined;
@@ -296,6 +299,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     return input.map((item) => text(item, 256, label) as string);
   };
   if (typeof value.projectTrusted !== "boolean") throw new Error("Worker init project trust is invalid");
+  if (value.child !== undefined && value.child !== true) throw new Error("Worker init child role is invalid");
   return {
     cwd: text(value.cwd, 16_384, "Worker cwd") as string,
     agentDir: text(value.agentDir, 16_384, "Worker agent directory") as string,
@@ -303,6 +307,8 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(list(value.tools, "Worker tools") === undefined ? {} : { tools: list(value.tools, "Worker tools") }),
     ...(list(value.excludeTools, "Worker excluded tools") === undefined ? {} : { excludeTools: list(value.excludeTools, "Worker excluded tools") }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, "Worker configuration") }),
+    ...(value.child === undefined ? {} : { child: true as const }),
+    ...(value.allowedTools === undefined ? {} : { allowedTools: parseAllowedTools(value.allowedTools) }),
     projectTrusted: value.projectTrusted,
     ...(text(value.sessionFile, 16_384, "Worker session file", true) === undefined ? {} : { sessionFile: value.sessionFile as string }),
     ...(text(value.initialName, 256, "Worker initial name", true) === undefined ? {} : { initialName: value.initialName as string }),

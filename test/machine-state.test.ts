@@ -698,7 +698,7 @@ test("a stalled flooded stream resets alone while heartbeat and another stream r
 test("SubHost file delivery remains local while Main is offline", async () => {
   let delivered = false;
   const local = {
-    authorizeDockToolRequest: (_source, request) => request, dockToolsEnabled: () => true,
+    dockToolsEnabled: () => true,
     configureDockTools: async () => ({ enabled: true }),
     invokeDockTool: async (_source: string, request: { type: string }) => { delivered = request.type === "deliver"; return { type: "deliver" as const, deliverable: { deliveryRef: "delivery", name: "file.txt", sizeBytes: 1 } }; },
     attachObservationSink: () => () => {},
@@ -734,16 +734,13 @@ test("offline SubHost children retain global parent relationships through invent
   assert.notEqual(parentRoute.mainInstanceId, parent.id);
   assert.equal(childRoute.snapshot.parentId, parentRoute.mainInstanceId);
 
-  // A connected Main-created child already records the global parent namespace.
-  const connectedChild = { ...snapshot("native-connected-child"), parentId: parentRoute.mainInstanceId };
-  await internals.reconcileInventoryFromConnection(connection, [connectedChild, parent, child]);
   await internals.markOffline(machineId);
   const offline = (await state.get(machineId))!.routes;
   assert.equal(offline.find((route) => route.nativeInstanceId === child.id)!.snapshot.parentId, parentRoute.mainInstanceId);
-  await internals.reconcileInventoryFromConnection(connection, [child, connectedChild, parent]);
+  await internals.reconcileInventoryFromConnection(connection, [child, parent]);
   const reconnected = (await state.get(machineId))!.routes;
   assert.equal(reconnected.find((route) => route.nativeInstanceId === parent.id)!.mainInstanceId, parentRoute.mainInstanceId);
-  for (const id of [child.id, connectedChild.id]) assert.equal(reconnected.find((route) => route.nativeInstanceId === id)!.snapshot.parentId, parentRoute.mainInstanceId);
+  assert.equal(reconnected.find((route) => route.nativeInstanceId === child.id)!.snapshot.parentId, parentRoute.mainInstanceId);
 
   // The response projection must agree with inventory, not restore a native parent ID.
   const stream = { requestId: "get-child", requestType: "instance.get", connection,

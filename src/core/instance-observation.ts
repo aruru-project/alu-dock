@@ -8,6 +8,8 @@ export const MAX_OBSERVATION_CURSOR_CHARS = 128;
 export const MAX_OBSERVATION_LIST_ITEMS = 64;
 export const MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE = 64;
 export const MAX_OBSERVATION_MESSAGE_LIMIT = 20;
+/** A finished Work's last reply carried in its watch completion; dock_inspect reads longer replies whole. */
+export const MAX_OBSERVATION_REPLY_CHARS = 16_000;
 
 export type ObservationMessageType = "user" | "assistant" | "other";
 
@@ -27,6 +29,12 @@ export interface ObservedInstanceStatus {
   /** The model the sibling is using now; for stopped work, the one it last used. */
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * Watch completions only: the Work's final reply when it became idle. It rides in the
+   * status because an older SubHost ignores unknown status fields but rejects unknown
+   * notification fields, which would drop its whole Main connection.
+   */
+  reply?: string;
 }
 
 export interface ObservationMessage {

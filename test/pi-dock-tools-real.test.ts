@@ -41,7 +41,7 @@ test("real Pi Worker toggles Dock tools and exposes its readable usage guide", a
 
   let enabled = false;
   const dockToolsHostPort: DockToolsHostPort = {
-    authorizeDockToolRequest: (_source, request) => request, dockToolsEnabled: () => enabled,
+    dockToolsEnabled: () => enabled,
     configureDockTools: async (_source, next) => { enabled = next; return { enabled }; },
     invokeDockTool: async () => ({
       type: "list",
@@ -259,52 +259,42 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   await client.setModel(remote.id, "routed-coordinator", "fixture", "routed-team-model");
   await client.prompt(remote.id, "Delegate an independent review.", "auto", "routed-team-start");
   (await coordinatorProvider.request(0)).tools({ id: "routed-spawn", name: "dock_spawn", arguments: {
-    name: "Routed reviewer", task: "Review the workspace and report to the coordinator.",
-    model: { provider: "routed-reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read", "dock_send", "dock_stop", "dock_interrupt", "dock_inspect", "dock_watch"],
+    name: "Routed reviewer", task: "Review the workspace.",
+    model: { provider: "routed-reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],
   } });
   const reviewing = await reviewerProvider.request(0);
   const waiting = await coordinatorProvider.request(1);
   const reviewer = (await client.list()).find((work) => work.displayName === "Routed reviewer");
   assert.ok(reviewer);
   assert.equal(reviewer.parentId, remote.id, "Main must expose the global source identity as parent");
-  // Exercise Main's authority itself as well as the source-Host path below.
+  // User decision 2026-10-31: Main's authority holds a helper to messaging its parent.
   for (const type of ["stop", "interrupt"] as const) {
-    await assert.rejects(dockTools.invoke(reviewer.id, remote.hostId!, { type, target: remote.id, operationId: `main-denied-${type}` }), /cannot stop or interrupt its parent/);
+    await assert.rejects(dockTools.invoke(reviewer.id, remote.hostId!, { type, target: remote.id, operationId: `main-denied-${type}` }), /can only message/);
     assert.equal(waiting.closed, false);
   }
-  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, sentinel.id),
+  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, { parentId: sentinel.id }),
     "A parent on Main cannot own a physical child on SubHost");
   assert.equal(typeof ready.nativeInstanceId, "string");
   assert.notEqual(remote.id, ready.nativeInstanceId);
   assert.deepEqual(reviewer.executor.model, { provider: "routed-reviewer", id: "fixture" });
   assert.equal(reviewer.executor.thinkingLevel, "low");
-  assert.deepEqual(reviewing.toolNames.sort(), ["dock_inspect", "dock_interrupt", "dock_send", "dock_stop", "dock_watch", "read"]);
-  assert.ok(JSON.stringify(reviewing.body.messages).includes(remote.id));
-  reviewing.tools({ id: "routed-forbidden", name: "dock_send", arguments: { target: sentinel.id, message: "SHOULD_NOT_DELIVER" } });
-  const forbidden = await reviewerProvider.request(1);
-  assert.match(JSON.stringify(forbidden.body.messages?.filter(message => message.role === "tool").at(-1)), /No work named/);
-  forbidden.tools({ id: "routed-report", name: "dock_send", arguments: { target: String(ready.nativeInstanceId), message: "ROUTED_REVIEW_FINDING" } });
-  let childRequest = await reviewerProvider.request(2);
-  for (const [index, name] of ["dock_stop", "dock_interrupt", "dock_inspect", "dock_watch"].entries()) {
-    childRequest.tools({ id: `routed-${name}`, name, arguments: { target: index % 2 ? remote.id : String(ready.nativeInstanceId) } });
-    childRequest = await reviewerProvider.request(3 + index);
-    const result = JSON.stringify(childRequest.body.messages?.filter(message => message.role === "tool").at(-1));
-    if (index < 2) assert.match(result, /cannot stop or interrupt its parent/);
-    else { assert.match(result, index === 2 ? /Dock sibling excerpt/ : /Watching/); assert.ok(result.includes(remote.id)); }
-    assert.equal(waiting.closed, false, "Child controls must not interrupt the routed parent");
-    assert.equal((await client.status(remote.id)).lifecycle, "active");
-    assert.equal((await client.status(reviewer.id)).lifecycle, "active");
-  }
-  childRequest.text("Remote review complete.");
+  assert.deepEqual(reviewing.toolNames.sort(), ["dock_send", "read"]);
+  // The helper's message and its final reply both find the parent through Main.
+  reviewing.tools({ id: "routed-note", name: "dock_send", arguments: { message: "ROUTED_NOTE" } });
+  const noted = await reviewerProvider.request(1);
+  assert.match(JSON.stringify(noted.body.messages?.filter(message => message.role === "tool").at(-1)), /Sent a Dock message/);
+  noted.text("ROUTED_REVIEW_FINDING");
   assert.equal(waiting.closed, false, "A routed message must not interrupt its busy recipient");
   waiting.text("Waiting for the independent report.");
-  let next = 2, received = false;
-  while (next < 7 && !received) {
+  let next = 2, sawNote = false, sawReply = false;
+  while (next < 8 && !(sawNote && sawReply)) {
     const request = await coordinatorProvider.request(next++);
-    received = JSON.stringify(request.body.messages).includes("ROUTED_REVIEW_FINDING");
-    request.text(received ? "Received independent routed review." : "Waiting for the routed report.");
+    const transcript = JSON.stringify(request.body.messages);
+    sawNote ||= transcript.includes("ROUTED_NOTE");
+    sawReply ||= transcript.includes("ROUTED_REVIEW_FINDING");
+    request.text("Received the routed report.");
   }
-  assert.equal(received, true);
+  assert.ok(sawNote && sawReply, "The routed parent must receive its helper's message and final reply");
   await waitFor(async () => {
     while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
     return (await client.status(remote.id)).execution === "idle";

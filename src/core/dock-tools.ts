@@ -24,13 +24,26 @@ export type DockToolsRequest =
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
-  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; parentId?: string; parentName?: string }
-  | { type: "send"; operationId: string; target: string; message: string; delivery?: "followUp" | "steer" };
+  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }
+  /** A child Work omits target: it can only message its parent. */
+  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer" };
+
+/** What the Host creates for dock_create, plus what dock_spawn chooses for a child. */
+export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
+  thinkingLevel?: ThinkingLevel;
+  child?: DockChildSelection;
+};
+
+/** A child belongs to a top-level Work on the same Host; its tools never exceed what the parent named. */
+export interface DockChildSelection {
+  parentId: string;
+  allowedTools?: string[];
+}
 
 export type DockToolsResult =
   | ObservationResult
   | { type: "models"; result: ModelsResult }
-  | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; watchStatus?: "watching" | "completed" | "failed"; error?: string }
+  | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; error?: string }
   | { type: "interrupt"; instance: ObservedInstanceStatus }
   | { type: "stop"; instance: ObservedInstanceStatus }
   | { type: "machines"; machines: MachineDto[] }
@@ -42,11 +55,11 @@ export type DockToolsResult =
     type: "send";
     target: ObservedInstanceStatus;
     receipt: Pick<CommandReceipt, "delivery" | "queued" | "acceptedAt">;
+    /** The message was delivered, but its helper's reply will not come back. */
+    error?: string;
   };
 
 export interface DockToolsHostPort {
-  /** Source Host-owned delegation ceiling, applied before any local or remote routing. */
-  authorizeDockToolRequest(sourceInstanceId: string, request: DockToolsRequest): DockToolsRequest;
   dockToolsEnabled(sourceInstanceId: string): boolean;
   configureDockTools(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }>;
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult>;
@@ -57,7 +70,7 @@ export interface DockToolsMutationPort {
   models(instanceId: string): Promise<ModelsResult>;
   interrupt(instanceId: string, operationId: string): Promise<ObservedInstanceStatus>;
   stop(instanceId: string, operationId: string): Promise<ObservedInstanceStatus>;
-  create(input: Extract<DockToolsRequest, { type: "create" }>): Promise<DockToolsResult>;
+  create(input: DockCreateInput): Promise<DockToolsResult>;
   system(input: Extract<DockToolsRequest, { type: "system" }>): Promise<DockToolsResult>;
   send(input: { operationId: string; instanceId: string; message: string; delivery?: "followUp" | "steer" }): Promise<{
     target: ObservedInstanceStatus;
