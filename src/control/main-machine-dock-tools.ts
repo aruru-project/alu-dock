@@ -53,6 +53,9 @@ export class MainMachineDockToolsAuthority {
     const source = snapshots.find((item) => item.id === sourceMainId);
     if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
     if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot create or message other work. Open active work and try again.");
+    if (source.parentId !== undefined && (request.type === "stop" || request.type === "interrupt")) {
+      throw new Error("A child worker cannot stop or interrupt its parent. Send a message to report progress or request help.");
+    }
     if (source.parentId !== undefined && (request.type === "create" || request.type === "spawn")) {
       throw new Error("A child worker cannot create work. Ask its parent to delegate.");
     }

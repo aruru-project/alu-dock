@@ -220,7 +220,7 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   const scopeResults = await implementer.request(7);
   const failures = scopeResults.body.messages?.filter(message => message.role === "tool").slice(-7) ?? [];
   assert.equal(failures.length, 7);
-  for (const failure of failures.slice(0, 5)) assert.match(JSON.stringify(failure), /missing or ambiguous/);
+  for (const [index, failure] of failures.slice(0, 5).entries()) assert.match(JSON.stringify(failure), index === 2 || index === 3 ? /cannot stop or interrupt its parent/ : /missing or ambiguous/);
   for (const failure of failures.slice(5)) assert.match(JSON.stringify(failure), /cannot create/);
   scopeResults.tools({ id: "scope-parent", name: "dock_inspect", arguments: { target: parent.id } });
   const parentRead = await implementer.request(8);
@@ -333,19 +333,43 @@ test("native coordinator, implementer and independent reviewer collaborate throu
   assert.ok((await readFile(restartSession, "utf8")).includes("RESTART_CHILD_HISTORY"));
   assert.equal((await client.status(unrelated.id)).lifecycle, "host_lost");
   assert.deepEqual(Object.values(providers).map(provider => provider.requests.length), countsBeforeStop);
-  // Compatibility evidence only: the user has not decided whether this action
-  // should remain exposed. A child stopping its owner must finish real cleanup.
+  // Even explicitly granted control tools cannot let a child stop its owner.
   await trustOnce(trust => client.reopen(unrelated.id, "reopen-for-child-stop", undefined, trust));
   const ownerPid = workerPids.at(-1)!;
-  await makeChild("StopSibling");
+  const stopSibling = await makeChild("StopSibling");
   const siblingPid = workerPids.at(-1)!;
   const stopper = await trustOnce(trust => client.create(cwd, "StopOwner", "create-stop-owner", trust, undefined,
-    { model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", toolPolicy: { allowedTools: ["dock_stop"] } }, unrelated.id));
+    { model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", toolPolicy: { allowedTools: ["dock_stop", "dock_interrupt", "dock_inspect", "dock_watch", "dock_send"] } }, unrelated.id));
   const stopperPid = workerPids.at(-1)!;
   await client.prompt(stopper.id, "Stop your owner through Dock.", "auto", "child-stops-owner");
-  (await reviewer.request(9)).tools({ id: "stop-owner", name: "dock_stop", arguments: { target: unrelated.id } });
-  await waitFor(() => [ownerPid, siblingPid, stopperPid].every(exited), "Child-initiated parent stop did not reap the whole team");
-  await waitFor(async () => !(await client.list()).some(work => work.id === unrelated.id || work.parentId === unrelated.id), "Child-initiated parent stop left catalog entries behind");
+  await client.prompt(unrelated.id, "Keep working while the child reports.", "auto", "owner-busy");
+  const ownerBusy = await coordinator.request(coordinatorIndex++);
+  let childRequest = await reviewer.request(9);
+  for (const [index, name] of ["dock_stop", "dock_interrupt"].entries()) {
+    childRequest.tools({ id: `denied-${name}`, name, arguments: { target: unrelated.id } });
+    childRequest = await reviewer.request(10 + index);
+    assert.match(JSON.stringify(childRequest.body.messages?.filter(message => message.role === "tool").at(-1)), /cannot stop or interrupt its parent/);
+    assert.equal(ownerBusy.closed, false, "Denied child control must not interrupt the parent model stream");
+    for (const pid of [ownerPid, siblingPid, stopperPid]) assert.equal(exited(pid), false);
+  }
+  for (const [index, name] of ["dock_inspect", "dock_watch", "dock_send"].entries()) {
+    childRequest.tools({ id: `allowed-${name}`, name, arguments: { target: unrelated.id, ...(name === "dock_send" ? { message: "CHILD_REPORT_AFTER_DENIED_CONTROL" } : {}) } });
+    childRequest = await reviewer.request(12 + index);
+    const result = JSON.stringify(childRequest.body.messages?.filter(message => message.role === "tool").at(-1));
+    assert.match(result, name === "dock_inspect" ? /Dock sibling excerpt/ : name === "dock_watch" ? /Watching/ : /Sent a Dock message/);
+    assert.ok(result.includes(unrelated.id));
+  }
+  childRequest.text("Reported to parent.");
+  assert.equal(ownerBusy.closed, false);
+  ownerBusy.tools({ id: "parent-stops-child", name: "dock_stop", arguments: { target: stopSibling.id } });
+  const parentControlled = await coordinator.request(coordinatorIndex++);
+  await waitFor(() => exited(siblingPid), "Parent must retain control of its own child");
+  assert.equal(exited(ownerPid), false);
+  assert.equal(exited(stopperPid), false);
+  parentControlled.text("Child collected.");
+  await client.stop(unrelated.id, "user-stops-owner");
+  await waitFor(() => [ownerPid, siblingPid, stopperPid].every(exited), "User parent stop must still reap the whole team");
+  await waitFor(async () => !(await client.list()).some(work => work.id === unrelated.id || work.parentId === unrelated.id), "User parent stop left catalog entries behind");
   assert.equal(await readFile(bugPath, "utf8"), "export const sum = (a, b) => a + b;\n");
 });
 

@@ -580,6 +580,9 @@ export class DockRegistry implements DockToolsHostPort {
   authorizeDockToolRequest(sourceInstanceId: string, request: DockToolsRequest): DockToolsRequest {
     this.assertDockToolsSource(sourceInstanceId);
     const sourceRecord = this.catalogRecord(sourceInstanceId);
+    if (sourceRecord.parentId !== undefined && (request.type === "stop" || request.type === "interrupt")) {
+      throw new Error("A child worker cannot stop or interrupt its parent. Send a message to report progress or request help.");
+    }
     if (sourceRecord.parentId !== undefined && (request.type === "create" || request.type === "spawn")) {
       throw new Error("A child worker cannot create work. Ask its parent to delegate.");
     }
