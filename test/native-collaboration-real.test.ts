@@ -22,7 +22,9 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   const coordinator = new PlanGoalProvider(), implementer = new PlanGoalProvider(), reviewer = new PlanGoalProvider();
   const providers = { coordinator, implementer, reviewer };
   let host: DockHost | undefined, dock: DockClient | undefined, registry: DockRegistry | undefined;
+  let releaseHeldHelper: (() => void) | undefined;
   context.after(async () => {
+    releaseHeldHelper?.();
     dock?.closeActiveConnections();
     await host?.stop().catch(() => {});
     await Promise.all(Object.values(providers).map((provider) => provider.stop()));
@@ -41,15 +43,23 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "coordinator", defaultModel: "fixture", defaultThinkingLevel: "high", compaction: { enabled: false }, retry: { enabled: false } }));
   const socketPath = join(root, "dock.sock");
   const workerPids: number[] = [];
+  // Holds one helper after its Worker process started, before Dock lists it.
+  let holdNextHelper: (() => Promise<void>) | undefined;
   const startHost = async () => {
-    registry = new DockRegistry((input) => createPiInstance({
-      ...input, agentDir, sessionDir,
-      onWorkerSpawn: (pid) => workerPids.push(pid),
-      workerEnvironment: isolatedProcessEnvironment(home, {
-        PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
-        npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
-      }),
-    }), undefined, {
+    registry = new DockRegistry(async (input) => {
+      const instance = await createPiInstance({
+        ...input, agentDir, sessionDir,
+        onWorkerSpawn: (pid) => workerPids.push(pid),
+        workerEnvironment: isolatedProcessEnvironment(home, {
+          PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
+          npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
+        }),
+      });
+      const hold = input.parentId === undefined ? undefined : holdNextHelper;
+      holdNextHelper = undefined;
+      await hold?.();
+      return instance;
+    }, undefined, {
       catalogStore: new FileCatalogStore(join(root, "catalog.json")),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
@@ -178,7 +188,21 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   assert.equal((await client.status(reviewerWork.id)).reopenable, false);
   await assert.rejects(client.reopen(reviewerWork.id, "reopen-crashed-child"));
   assert.equal(workerPids.length, 4, "Rejected helper reopen must not start a replacement process");
-  await client.stop(parent.id, "team-stop-parent");
+  // Cloud verification of e12df25 (2026-11-01): a helper still starting outlived its parent's Stop.
+  let held = false;
+  holdNextHelper = () => new Promise<void>((resolve) => { held = true; releaseHeldHelper = resolve; });
+  const lateHelper = client.create(cwd, "LateHelper", "create-late-helper", undefined, undefined, undefined, { parentId: parent.id });
+  void lateHelper.catch(() => {});
+  await waitFor(() => held, "The late helper did not start");
+  const lateHelperPid = workerPids.at(-1)!;
+  const stopping = client.stop(parent.id, "team-stop-parent");
+  await waitFor(() => [workerPids[0]!, workerPids[1]!].every(exited), "The parent and its listed helper did not stop");
+  const stopReturned = await Promise.race([stopping.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500))]);
+  releaseHeldHelper!();
+  assert.equal(stopReturned, false, "The parent's Stop waits for a helper that is still starting");
+  await stopping;
+  assert.ok(exited(lateHelperPid), "No helper process outlives its parent's Stop");
+  await assert.rejects(lateHelper);
   for (const pid of workerPids.slice(0, 3)) await waitFor(() => exited(pid), "A stopped team process is still alive");
   assert.deepEqual((await client.list()).map((work) => `${work.displayName}:${work.lifecycle}`), ["Unrelated:active"]);
   assert.ok((await readFile(sessions[0]!, "utf8")).includes("FIX_COMPLETE"));

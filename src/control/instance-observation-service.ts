@@ -65,7 +65,7 @@ interface ObservationWatch {
   sourceInstanceId: string;
   targetInstanceId: string;
   unsubscribe: () => void;
-  /** Work handed over at this time is finished only by a later execution change. */
+  /** When the work being waited for was accepted; an earlier idle belongs to earlier work. */
   after?: string;
 }
 
@@ -107,14 +107,13 @@ export class InstanceObservationService {
   }
 
   /**
-   * For work a source just handed to a target: the source hears the target's final reply
-   * once it finishes that work, even if it already has. A state from before the handoff
-   * does not count; Main's routed copy of a SubHost Work can lag behind it.
+   * For work a target accepted at `acceptedAt`: the source hears the target's final reply
+   * once it finishes that work, even if it already has by now.
    */
-  notifyWhenDone(sourceInstanceId: string, handedTo: Pick<ObservedInstanceStatus, "id" | "executionChangedAt">): Promise<void> {
+  notifyWhenDone(sourceInstanceId: string, targetInstanceId: string, acceptedAt: string): Promise<void> {
     return this.withSource(sourceInstanceId, async () => {
       this.assertSourceAuthorized(sourceInstanceId);
-      const result = await this.watchLocked(sourceInstanceId, this.port.getSnapshot(handedTo.id), handedTo.executionChangedAt);
+      const result = await this.watchLocked(sourceInstanceId, this.port.getSnapshot(targetInstanceId), acceptedAt);
       if (result.type === "watch" && result.status === "completed") await this.deliverLocked(sourceInstanceId, result.completion);
     });
   }
@@ -481,8 +480,9 @@ function observationTerminalReason(snapshot: InstanceSnapshot, after?: string): 
   if (snapshot.lifecycle === "stopped") return "stopped";
   if (snapshot.lifecycle === "host_lost") return "host_lost";
   if (snapshot.lifecycle === "runtime_error") return "runtime_error";
-  // Work handed over at `after` is not finished until its execution changes again.
-  if (after !== undefined && snapshot.executionChangedAt <= after) return undefined;
+  // Work accepted at `after` ends in an idle that began then or later; an older idle is the
+  // previous work's, which Main's copy of a SubHost Work can still show.
+  if (after !== undefined && snapshot.executionChangedAt < after) return undefined;
   if (snapshot.execution === "failed") return "execution_failed";
   if (snapshot.execution === "unavailable") return "execution_unavailable";
   // Queued input starts another run, so the Work is not done while any is waiting.

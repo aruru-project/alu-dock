@@ -57,7 +57,7 @@ export class MainMachineDockToolsAuthority {
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
     if (request.type === "models") return { type: "models", result: await this.options.localClient.models(sourceMainId) };
-    const notifyWhenDone = (handedTo: { id: string; executionChangedAt: string }) => this.observation.notifyWhenDone(sourceMainId, handedTo);
+    const notifyWhenDone = (childId: string, acceptedAt: string) => this.observation.notifyWhenDone(sourceMainId, childId, acceptedAt);
     if (request.type === "spawn") return spawnDockWorker(source, request, {
       create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
       send: async (input) => { const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery ?? "followUp", input.operationId); return { target: observationStatus(result.instance), receipt: result.receipt }; },
@@ -89,7 +89,7 @@ export class MainMachineDockToolsAuthority {
       const result = await this.options.localClient.prompt(target.id, message, request.delivery ?? "followUp", request.operationId);
       const delivered = observationStatus(result.instance);
       // A parent hears back from its child each time it hands the child more work.
-      const replyError = target.parentId === sourceMainId ? await arrangeReply(() => notifyWhenDone(delivered)) : undefined;
+      const replyError = target.parentId === sourceMainId ? await arrangeReply(() => notifyWhenDone(target.id, result.receipt.acceptedAt)) : undefined;
       return { type: "send", target: delivered, receipt: { delivery: result.receipt.delivery, queued: result.receipt.queued, acceptedAt: result.receipt.acceptedAt }, ...(replyError === undefined ? {} : { error: replyError }) };
     }
     throw new Error("File delivery is owned by the source Host");

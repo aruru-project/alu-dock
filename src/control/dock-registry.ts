@@ -157,6 +157,8 @@ export class DockRegistry implements DockToolsHostPort {
   private readonly instances = new Map<string, ManagedInstance>();
   /** Per parent runtime: a parent continued after a crash retires its own new children. */
   private readonly childRetirements = new WeakMap<ManagedInstance, Promise<void>>();
+  /** Children whose Worker is still starting, per parent runtime. */
+  private readonly childStarts = new WeakMap<ManagedInstance, Set<Promise<unknown>>>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, string>();
@@ -251,7 +253,17 @@ export class DockRegistry implements DockToolsHostPort {
   }
 
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
-    return this.createNew(input);
+    const creation = this.createNew(input);
+    // Same tick as createNew's parent check, so a parent that starts stopping later sees this child.
+    const parent = input.parentId === undefined ? undefined : this.instances.get(input.parentId);
+    if (parent) {
+      const starting = this.childStarts.get(parent) ?? new Set<Promise<unknown>>();
+      this.childStarts.set(parent, starting);
+      starting.add(creation);
+      const settled = () => { starting.delete(creation); };
+      void creation.then(settled, settled);
+    }
+    return creation;
   }
 
   async ensure(input: EnsureRegistryInstanceInput): Promise<{ created: boolean; instance: InstanceSnapshot }> {
@@ -572,7 +584,7 @@ export class DockRegistry implements DockToolsHostPort {
       return request.type === "create" ? mutations.create(request) : mutations.system(request);
     }
     if (request.type === "models") return { type: "models", result: await mutations.models(sourceInstanceId) };
-    const notifyWhenDone = (handedTo: { id: string; executionChangedAt: string }) => this.observationService.notifyWhenDone(sourceInstanceId, handedTo);
+    const notifyWhenDone = (childId: string, acceptedAt: string) => this.observationService.notifyWhenDone(sourceInstanceId, childId, acceptedAt);
     if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input), notifyWhenDone });
     if (request.type === "interrupt" || request.type === "stop") {
       const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
@@ -588,7 +600,7 @@ export class DockRegistry implements DockToolsHostPort {
       message: dockMessageText(source.displayName, request.message),
     });
     // A parent hears back from its child each time it hands the child more work.
-    const replyError = target.parentId === sourceInstanceId ? await arrangeReply(() => notifyWhenDone(result.target)) : undefined;
+    const replyError = target.parentId === sourceInstanceId ? await arrangeReply(() => notifyWhenDone(target.id, result.receipt.acceptedAt)) : undefined;
     return { type: "send", target: result.target, receipt: result.receipt, ...(replyError === undefined ? {} : { error: replyError }) };
   }
 
@@ -666,7 +678,10 @@ export class DockRegistry implements DockToolsHostPort {
     const pending = this.childRetirements.get(parent);
     if (pending) return pending;
     const children = [...this.instances.values()].filter((child) => child.parentId === parent.id);
-    const task = Promise.allSettled(children.map((child) => this.stop(child.id, randomUUID()))).then(() => {
+    // A child still starting stops itself once it sees this parent gone; wait for that too,
+    // so no child process outlives its parent's Stop.
+    const starting = [...(this.childStarts.get(parent) ?? [])];
+    const task = Promise.allSettled([...children.map((child) => this.stop(child.id, randomUUID())), ...starting]).then(() => {
       if (this.childRetirements.get(parent) === task) this.childRetirements.delete(parent);
     });
     this.childRetirements.set(parent, task);

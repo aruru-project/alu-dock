@@ -1,7 +1,6 @@
 import { dockMessageText } from "../core/dock-tools.js";
 import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
-import type { ObservedInstanceStatus } from "../core/instance-observation.js";
 import { systemToolOperation } from "./system-tools.js";
 
 /** A child Work talks only to its parent: the one Dock request it may make is a message. */
@@ -36,8 +35,8 @@ export async function spawnDockWorker(
   source: InstanceSnapshot,
   request: Extract<DockToolsRequest, { type: "spawn" }>,
   port: Pick<DockToolsMutationPort, "create" | "send"> & {
-    /** Delivers the child's reply to the parent once the task it was just handed is finished. */
-    notifyWhenDone(handedTo: ObservedInstanceStatus): Promise<void>;
+    /** Delivers the child's reply to the parent once it finishes the work it accepted at `acceptedAt`. */
+    notifyWhenDone(childId: string, acceptedAt: string): Promise<void>;
   },
 ): Promise<Extract<DockToolsResult, { type: "spawn" }>> {
   // Another model may not support the parent's thinking level, so it starts at that model's default.
@@ -50,13 +49,13 @@ export async function spawnDockWorker(
     child: { parentId: source.id, ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }) },
   });
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
-  let target: ObservedInstanceStatus;
+  let sent: Awaited<ReturnType<typeof port.send>>;
   try {
-    target = (await port.send({ operationId: systemToolOperation(request.operationId, "task"), instanceId: created.instance.id, message: dockMessageText(source.displayName, request.task), delivery: "followUp" })).target;
+    sent = await port.send({ operationId: systemToolOperation(request.operationId, "task"), instanceId: created.instance.id, message: dockMessageText(source.displayName, request.task), delivery: "followUp" });
   } catch (error) {
     // The child exists; an interrupted response cannot prove the task was never accepted.
     return { type: "spawn", instance: created.instance, taskStatus: "failed", error: `Worker created, but task acceptance was not confirmed. Inspect this worker before sending the task again. ${error instanceof Error ? error.message : String(error)}` };
   }
-  const replyError = await arrangeReply(() => port.notifyWhenDone(target));
-  return { type: "spawn", instance: target, taskStatus: "accepted", ...(replyError === undefined ? {} : { error: replyError }) };
+  const replyError = await arrangeReply(() => port.notifyWhenDone(created.instance.id, sent.receipt.acceptedAt));
+  return { type: "spawn", instance: sent.target, taskStatus: "accepted", ...(replyError === undefined ? {} : { error: replyError }) };
 }

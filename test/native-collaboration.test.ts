@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { DockHost } from "../src/control/dock-host.js";
+import { DockRegistry } from "../src/control/dock-registry.js";
 import { spawnDockWorker } from "../src/control/native-collaboration.js";
 import type { InstanceSnapshot } from "../src/core/instance-dto.js";
 import type { ObservedInstanceStatus } from "../src/core/instance-observation.js";
+import { ManagedInstance } from "../src/core/managed-instance.js";
+import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 
 const source = { id: "parent", displayName: "Coordinator", cwd: "/project", executor: { model: { provider: "local", id: "model" }, thinkingLevel: "low" } } as InstanceSnapshot;
 const child: ObservedInstanceStatus = { id: "child", parentId: "parent", cwd: "/project", lifecycle: "active", execution: "running", compacting: false, executionChangedAt: "2026-10-31T00:00:00Z", runtimeGeneration: 1, thinkingLevel: "low" };
@@ -66,4 +73,40 @@ test("native collaboration wire validates tool selections, delivery and terminal
   assert.throws(() => parseDockToolsRequest({ type: "create", operationId: "top-level", cwd: "/project", allowedTools: ["read"] }), /unknown/i);
   assert.throws(() => parseDockToolsRequest({ ...spawn, cwd: "relative" }), /absolute/);
   assert.doesNotThrow(() => parseDockToolsResult({ type: "spawn", instance: child, taskStatus: "accepted", error: "Reply unavailable; inspect child" }));
+});
+
+test("a helper that finishes the instant it gets work still hands its reply to the parent", async (context) => {
+  // Cloud verification of e12df25 (2026-11-01): a helper that finished before its reply was
+  // arranged, or in the same millisecond its task was accepted, never reported back.
+  const root = await mkdtemp(join(tmpdir(), "alu-helper-reply-"));
+  const runtimes: DelayedAgentWorkerConnection[] = [];
+  const sameInstant = new Date("2026-11-02T00:00:00.000Z");
+  const registry = new DockRegistry(async (input) => {
+    const runtime = new DelayedAgentWorkerConnection(input.id);
+    runtimes.push(runtime);
+    if (input.parentId !== undefined) {
+      const prompt = runtime.prompt.bind(runtime);
+      runtime.prompt = (text, options, operationId) => {
+        const run = prompt(text, options, operationId);
+        setImmediate(() => runtime.settle(`REPLY: ${text.split("\n").at(-1)}`));
+        return run;
+      };
+    }
+    return new ManagedInstance({ ...input, session: runtime, initialHistory: runtime.getHistory(), now: () => sameInstant });
+  });
+  context.after(async () => { await registry.stopAll(); await rm(root, { recursive: true, force: true }); });
+  new DockHost({ socketPath: join(root, "unused.sock"), registry });
+  const parent = await registry.create({ operationId: "parent", cwd: root });
+  const replies = () => runtimes[0]!.observationNotifications.map((notification) => notification.target.reply);
+  const waitForReplies = async (count: number) => {
+    for (let attempt = 0; attempt < 200 && replies().length < count; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+  };
+
+  const spawned = await registry.invokeDockTool(parent.id, { type: "spawn", operationId: "spawn", name: "Helper", task: "FIRST_TASK" });
+  assert.ok(spawned.type === "spawn" && spawned.taskStatus === "accepted");
+  await waitForReplies(1);
+  assert.deepEqual(replies(), ["REPLY: FIRST_TASK"], "the reply to the spawned task reaches the parent");
+  await registry.invokeDockTool(parent.id, { type: "send", operationId: "more", target: spawned.instance.id, message: "SECOND_TASK" });
+  await waitForReplies(2);
+  assert.deepEqual(replies(), ["REPLY: FIRST_TASK", "REPLY: SECOND_TASK"], "the reply to work sent later reaches the parent too");
 });
