@@ -15,6 +15,7 @@ import { DockRegistry } from "./control/dock-registry.js";
 import { AttachmentService } from "./control/attachment-service.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { ModelVisibilityService, ModelVisibilityStore, modelVisibilityStateRoot } from "./control/model-visibility.js";
+import { HelperModelsStore } from "./control/helper-models.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultLocalEndpoint } from "./control/local-endpoint.js";
@@ -278,6 +279,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       createPiModelCatalogReader(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
     )
     : undefined;
+  const helperModels = catalogPath ? new HelperModelsStore(modelVisibilityStateRoot(catalogPath)) : undefined;
   const incidentRecorder = catalogPath
     ? new WorkerIncidentStore(workerIncidentStoreRoot(catalogPath)).recorder(options.machineName ?? "This computer")
     : undefined;
@@ -337,6 +339,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       sessionInventory,
       attachmentService,
       modelVisibility,
+      helperModels,
       listen: false,
     });
   } else {
@@ -380,6 +383,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       attachmentService,
       remoteInstances,
       modelVisibility,
+      helperModels,
     });
   }
 

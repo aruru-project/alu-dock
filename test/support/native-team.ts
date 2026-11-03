@@ -8,6 +8,7 @@ import { ControlClientError, DockClient } from "../../src/control/dock-client.js
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
+import { HelperModelsStore } from "../../src/control/helper-models.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
@@ -51,7 +52,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog() });
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), helperModels: new HelperModelsStore(root) });
       await team.host.start();
       return team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
     },

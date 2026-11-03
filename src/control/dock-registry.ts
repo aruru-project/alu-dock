@@ -588,7 +588,8 @@ export class DockRegistry implements DockToolsHostPort {
       if (request.machine !== undefined) throw new Error("Machine selection requires a connection to Main. No local fallback was used.");
       return request.type === "create" ? mutations.create(request) : mutations.system(request);
     }
-    if (request.type === "models") return { type: "models", result: await mutations.models(sourceInstanceId) };
+    // The list belongs to this Host's machine, where the source's helpers run.
+    if (request.type === "models") return { type: "models", ...await mutations.helperModels() };
     const notifyWhenDone = (childId: string, acceptedAt: string) => this.observationService.notifyWhenDone(sourceInstanceId, childId, acceptedAt);
     if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input), notifyWhenDone });
     if (request.type === "interrupt" || request.type === "stop") {

@@ -5,13 +5,28 @@ import {
   type ObservationResult,
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
-import type { DockToolsResult } from "../core/dock-tools.js";
+import type { DockToolsResult, HelperModelList } from "../core/dock-tools.js";
 import { modelLabel } from "../core/instance-display-name.js";
 import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "../control/protocol.js";
 
+/** What the Worker's Pi knows about a model it can run now. */
+export interface DescribedModel {
+  provider: string;
+  id: string;
+  thinkingLevels: readonly string[];
+  contextWindow?: number;
+  images: boolean;
+}
+
+/** The Worker's own model and how to look up any other model it can run. */
+export interface ModelFacts {
+  current?: DescribedModel;
+  describe(model: { provider: string; id: string }): DescribedModel | undefined;
+}
+
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
-export function renderDockToolsResult(result: DockToolsResult): string {
-  if (result.type === "models") return result.result.models.map((model) => `${model.provider}/${model.id} · ${model.reasoning ? "reasoning" : "no reasoning"}`).join("\n") || "No configured model is available. Configure a provider in Dock settings.";
+export function renderDockToolsResult(result: DockToolsResult, facts: ModelFacts = { describe: () => undefined }): string {
+  if (result.type === "models") return renderHelperModels(result, facts);
   if (result.type === "spawn") return `Created helper ${statusLine(result.instance, new Date().toISOString())}. ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
   if (result.type === "interrupt" || result.type === "stop") return `${result.type === "interrupt" ? "Interrupted current turn of" : "Stopped"} ${identity(result.instance)}.`;
   if (result.type === "system_catalog") {
@@ -101,6 +116,39 @@ export function renderHelperWait(result: HelperWaitResult): string {
   }[result.ended];
   const still = result.waiting.length === 0 ? "" : `\nStill working: ${result.waiting.map(quotedIdentity).join(", ")}`;
   return [head + still, ...result.replies.map((notification) => renderObservationNotification(notification))].join("\n\n");
+}
+
+/** Your own model first, then the user's list with the user's notes and what each model supports. */
+function renderHelperModels(list: HelperModelList, facts: ModelFacts): string {
+  const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
+  const notes = new Map(list.models.map((model) => [key(model), model.note]));
+  const lines: string[] = [];
+  if (facts.current) {
+    lines.push(`Your model, which a helper uses when you omit model: ${describeModel(facts.current, notes.get(key(facts.current)))}`);
+  }
+  const listed = list.models.filter((model) => !facts.current || key(model) !== key(facts.current));
+  const available = listed.flatMap((model) => { const described = facts.describe(model); return described ? [{ described, note: model.note }] : []; });
+  const unavailable = listed.filter((model) => !facts.describe(model)).map(key);
+  if (available.length > 0) {
+    lines.push("", "Models the user lists for helpers:");
+    for (const { described, note } of available) lines.push(`- ${describeModel(described, note)}`);
+  }
+  if (unavailable.length > 0) lines.push("", `Listed but not available on this machine now: ${unavailable.join(", ")}.`);
+  if (list.problem) lines.push("", `The user's list of models for helpers could not be used: ${list.problem}. Tell the user if they expect one.`);
+  else if (list.models.length === 0) lines.push("", "The user has not listed models for helpers.");
+  lines.push("", "Usually omit model. Choose a listed model when its note fits the task or the user asks for it; a model the user names also works.");
+  return lines.join("\n");
+}
+
+function describeModel(model: DescribedModel, note: string | undefined): string {
+  const thinking = model.thinkingLevels.length === 1 && model.thinkingLevels[0] === "off" ? "no thinking levels" : `thinking ${model.thinkingLevels.join(", ")}`;
+  const context = model.contextWindow === undefined ? "" : ` · context ${tokenCount(model.contextWindow)}`;
+  return `${model.provider}/${model.id}${note ? ` · note: ${JSON.stringify(note)}` : ""} · ${thinking}${context} · ${model.images ? "reads images" : "text only"}`;
+}
+
+function tokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(2))}M tokens`;
+  return `${Math.round(tokens / 1_000)}K tokens`;
 }
 
 function renderObservation(observation: InstanceObservation): string {

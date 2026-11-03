@@ -1,9 +1,11 @@
-import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelsResult, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
 import {
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
   MAX_DOCK_TOOL_NAME_CHARS,
   MAX_DOCK_TOOL_TARGET_CHARS,
+  MAX_HELPER_MODEL_PROBLEM_CHARS,
+  parseHelperModelEntries,
   type DockToolsRequest,
 } from "./dock-tools.js";
 import { parseDeliverableDto } from "./instance-deliverables.js";
@@ -136,7 +138,12 @@ export function parseDockToolsResult(raw: unknown): void {
     parseObservationResult(value);
     return;
   }
-  if (value.type === "models") { exactKeys(value, ["type", "result"], "Model catalog result"); parseModelsResult(value.result); return; }
+  if (value.type === "models") {
+    exactKeys(value, ["type", "models", "problem"], "Helper model list");
+    parseHelperModelEntries(value.models);
+    if (value.problem !== undefined) boundedString(value.problem, MAX_HELPER_MODEL_PROBLEM_CHARS, "Helper model list problem");
+    return;
+  }
   if (value.type === "spawn") {
     exactKeys(value, ["type", "instance", "taskStatus", "error"], "Spawn result");
     validateObservedStatus(value.instance);

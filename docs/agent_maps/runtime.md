@@ -179,6 +179,8 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 `dock_wait` 只在 Worker 内等待，不经过 Host：bridge 记下本 Work 交过任务、还没回复也没停止的帮手；等待期间这些帮手的完成通知直接作为工具结果返回，不再另外送达。有消息排队给这个 Work（用户的或帮手的）、用户取消或超时即返回，所以等待不会把用户挡在外面。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等帮手会白白耗掉轮数。
 
+`dock_models` 的事实由 Worker 读：Host 只返回本机 `helper-models.json` 里用户列出的模型和备注（SubHost 上的 Work 也由本机 Host 回答，不经 Main），Worker 用当前 Pi 的模型和可用模型补上思考档位（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
+
 `dock_spawn(withContext:true)` 让帮手从父 Work 当前对话的副本开始。请求里只有这个开关，没有会话路径：Host 用私有 `branch_for_child` control 让父 Work 自己的 Worker 用 Pi `createBranchedSession` 把当前分支写成帮手目录下的新会话文件（Pi 在文件头记下来源会话），再以这个文件创建帮手。分叉点在仍有工具调用未返回的那条回复之前，帮手不会看到“创建自己”的调用以无结果结束。帮手仍用父 Work 为它选的模型；换模型而没指定思考档位时用该模型自己的默认档位。Pi 只为新会话记录模型和思考档位，所以 adapter 在帮手启动后补记一次，reload 时恢复的是帮手自己的设置。
 
 ## Extension UI

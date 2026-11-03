@@ -1,6 +1,5 @@
-import type { ModelRef, SystemCatalogResult, SystemCatalogCursor, ResourceContentResult } from "../control/protocol.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef, type SystemCatalogResult, type SystemCatalogCursor, type ResourceContentResult } from "../control/protocol.js";
 import type { ThinkingLevel } from "./agent-worker.js";
-import type { ModelsResult } from "../control/protocol.js";
 import type { CommandReceipt } from "./instance-dto.js";
 import type { DeliverableDto } from "./instance-deliverables.js";
 import type { MachineDto } from "./machine-dto.js";
@@ -15,6 +14,38 @@ export const MAX_DOCK_TOOL_TARGET_CHARS = 256;
 export const MAX_DOCK_TOOL_CWD_CHARS = 16_384;
 export const MAX_DOCK_TOOL_NAME_CHARS = 256;
 export const MAX_DOCK_TOOL_MESSAGE_CHARS = 254_000;
+/** The user's list of models shown to Agents for helpers: a short hand-picked list, not a catalog. */
+export const MAX_HELPER_MODELS = 50;
+export const MAX_HELPER_MODEL_NOTE_CHARS = 500;
+export const MAX_HELPER_MODEL_PROBLEM_CHARS = 1_024;
+
+/** One model the user lists for helpers, with the user's own note. */
+export interface HelperModelEntry extends ModelRef {
+  note?: string;
+}
+
+/** The user's list as this machine's Host read it; `problem` explains a file it could not use. */
+export interface HelperModelList {
+  models: HelperModelEntry[];
+  problem?: string;
+}
+
+/** Shared by the Host's file reader and the Worker boundary; throws a message naming the bad entry. */
+export function parseHelperModelEntries(input: unknown): HelperModelEntry[] {
+  if (!Array.isArray(input)) throw new Error('"models" must be a list');
+  if (input.length > MAX_HELPER_MODELS) throw new Error(`"models" can list at most ${MAX_HELPER_MODELS} models`);
+  return input.map((item, index) => {
+    const entry = item as Record<string, unknown> | null;
+    const valid = entry !== null && typeof entry === "object" && !Array.isArray(entry)
+      && Object.keys(entry).every((key) => key === "provider" || key === "id" || key === "note")
+      && typeof entry.provider === "string" && entry.provider.length > 0 && entry.provider.length <= MAX_MODEL_PROVIDER_CHARS
+      && typeof entry.id === "string" && entry.id.length > 0 && entry.id.length <= MAX_MODEL_ID_CHARS
+      && (entry.note === undefined || (typeof entry.note === "string" && entry.note.length <= MAX_HELPER_MODEL_NOTE_CHARS));
+    if (!valid) throw new Error(`entry ${index + 1} must be {"provider": "…", "id": "…", "note": "…"} with a note of at most ${MAX_HELPER_MODEL_NOTE_CHARS} characters`);
+    const note = typeof entry.note === "string" ? entry.note.trim() : "";
+    return { provider: entry.provider as string, id: entry.id as string, ...(note ? { note } : {}) };
+  });
+}
 
 export type DockToolsRequest =
   | ObservationRequest
@@ -44,7 +75,7 @@ export interface DockChildSelection {
 
 export type DockToolsResult =
   | ObservationResult
-  | { type: "models"; result: ModelsResult }
+  | ({ type: "models" } & HelperModelList)
   | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; error?: string }
   | { type: "interrupt"; instance: ObservedInstanceStatus }
   | { type: "stop"; instance: ObservedInstanceStatus }
@@ -69,7 +100,8 @@ export interface DockToolsHostPort {
 }
 
 export interface DockToolsMutationPort {
-  models(instanceId: string): Promise<ModelsResult>;
+  /** This machine's list of models for helpers. */
+  helperModels(): Promise<HelperModelList>;
   interrupt(instanceId: string, operationId: string): Promise<ObservedInstanceStatus>;
   stop(instanceId: string, operationId: string): Promise<ObservedInstanceStatus>;
   create(input: DockCreateInput): Promise<DockToolsResult>;

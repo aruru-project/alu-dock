@@ -1632,7 +1632,8 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     return result;
   }
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    if (request.type === "deliver") return this.options.local().invokeDockTool(sourceInstanceId, request);
+    // File delivery and the helper model list belong to this machine.
+    if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
     return this.options.upstream.invokeDockTool(sourceInstanceId, request);
   }

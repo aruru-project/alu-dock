@@ -56,7 +56,6 @@ export class MainMachineDockToolsAuthority {
     assertChildMayRequest(source, request);
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
-    if (request.type === "models") return { type: "models", result: await this.options.localClient.models(sourceMainId) };
     const notifyWhenDone = (childId: string, acceptedAt: string) => this.observation.notifyWhenDone(sourceMainId, childId, acceptedAt);
     if (request.type === "spawn") return spawnDockWorker(source, request, {
       create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
@@ -92,7 +91,7 @@ export class MainMachineDockToolsAuthority {
       const replyError = target.parentId === sourceMainId ? await arrangeReply(() => notifyWhenDone(target.id, result.receipt.acceptedAt)) : undefined;
       return { type: "send", target: delivered, receipt: { delivery: result.receipt.delivery, queued: result.receipt.queued, acceptedAt: result.receipt.acceptedAt }, ...(replyError === undefined ? {} : { error: replyError }) };
     }
-    throw new Error("File delivery is owned by the source Host");
+    throw new Error("File delivery and the helper model list are answered by the source Host");
   }
 
   async cancelSource(sourceMainId: string): Promise<void> {
@@ -142,7 +141,7 @@ export class MainMachineDockToolsPort implements DockToolsHostPort {
     return result;
   }
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    if (request.type === "deliver") return this.options.local().invokeDockTool(sourceInstanceId, request);
+    if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
     return this.options.mainHostId().then((hostId) => this.options.authority().invoke(sourceInstanceId, hostId, request));
   }

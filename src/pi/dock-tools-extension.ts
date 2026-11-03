@@ -22,7 +22,8 @@ import {
   type ObservationNotification,
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
-import { renderDockToolsResult, renderHelperWait, renderObservationNotification, type HelperWaitResult } from "./dock-tools-client.js";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { renderDockToolsResult, renderHelperWait, renderObservationNotification, type DescribedModel, type HelperWaitResult, type ModelFacts } from "./dock-tools-client.js";
 
 export const DOCK_TOOL_NAMES = [
   "dock_spawn",
@@ -420,9 +421,10 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
       },
     } as never);
     pi.registerTool({
-      name: "dock_models", label: "List configured models",
-      description: toolDescription("List models available to this worker's Pi configuration. Use exact provider and model IDs when delegating."),
-      parameters: EMPTY_SCHEMA, execute: async () => toolResult(await bridge.invoke({ type: "models" })),
+      name: "dock_models", label: "Models for helpers",
+      description: toolDescription("Show your own model, which a helper uses when you omit model, and the models the user lists for helpers with the user's notes and what each supports. Use it before choosing a model for dock_spawn; usually omit model."),
+      parameters: EMPTY_SCHEMA,
+      execute: async (_toolCallId: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: PiModelContext) => toolResult(await bridge.invoke({ type: "models" }), modelFacts(ctx)),
     } as never);
     for (const action of ["interrupt", "stop"] as const) pi.registerTool({
       name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a worker" : "Stop a worker",
@@ -574,9 +576,31 @@ function findDockToolCollision(pi: ExtensionAPI, bridge: DockToolsBridge): Retur
     && tool.sourceInfo.path !== DOCK_TOOLS_EXTENSION_PATH);
 }
 
-function toolResult(value: DockToolsResult): { content: Array<{ type: "text"; text: string }>; details?: DockToolsResult } {
+/** The part of Pi's tool context that knows this Worker's models. */
+interface PiModelContext {
+  model: PiModel | undefined;
+  modelRegistry: { getAvailable(): PiModel[] };
+}
+type PiModel = Parameters<typeof getSupportedThinkingLevels>[0];
+
+/** Facts come from this Worker's Pi, the same configuration a helper on this machine starts with. */
+function modelFacts(ctx: PiModelContext): ModelFacts {
+  const describe = (model: PiModel): DescribedModel => ({
+    provider: model.provider, id: model.id,
+    thinkingLevels: getSupportedThinkingLevels(model),
+    ...(typeof model.contextWindow === "number" && model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
+    images: model.input.includes("image"),
+  });
+  const available = new Map(ctx.modelRegistry.getAvailable().map((model) => [`${model.provider}/${model.id}`, model]));
   return {
-    content: [{ type: "text", text: renderDockToolsResult(value) }],
+    ...(ctx.model ? { current: describe(ctx.model) } : {}),
+    describe: (ref) => { const model = available.get(`${ref.provider}/${ref.id}`); return model ? describe(model) : undefined; },
+  };
+}
+
+function toolResult(value: DockToolsResult, facts?: ModelFacts): { content: Array<{ type: "text"; text: string }>; details?: DockToolsResult } {
+  return {
+    content: [{ type: "text", text: renderDockToolsResult(value, facts) }],
     ...(value.type === "machines" ? {} : { details: value }),
   };
 }

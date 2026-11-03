@@ -240,3 +240,36 @@ test("a coordinator in a Goal hands a helper its conversation, waits for it in t
   (await coordinator.request(5)).text("The review is complete.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
 });
+
+// User decision 2026-11-04: dock_models showed every model this machine can run (432 on the
+// user's). An Agent now sees its own model, which helpers use by default, and only the models
+// the user lists for helpers, with the user's notes and what each supports.
+test("a coordinator sees its own model and only the models the user lists for helpers", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "reviewer", "implementer"], { prefix: "alu-native-models-" });
+  const { coordinator } = team.providers;
+  const client = await team.startHost();
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "models-create", trust));
+  await client.prompt(parent.id, "Which models can helpers use?", "auto", "models-ask");
+  (await coordinator.request(0)).tools({ id: "models-unlisted", name: "dock_models", arguments: {} });
+  const unlisted = await coordinator.request(1);
+  const before = JSON.stringify(unlisted.body.messages);
+  assert.ok(before.includes("Your model, which a helper uses when you omit model: coordinator/fixture"));
+  assert.ok(before.includes("has not listed models for helpers"));
+  assert.ok(!before.includes("reviewer/fixture") && !before.includes("implementer/fixture"), "Models the user did not list stay out of view");
+
+  // An edit applies on the next call, without a restart.
+  await writeFile(join(team.root, "helper-models.json"), JSON.stringify({ models: [
+    { provider: "coordinator", id: "fixture", note: "MAIN_NOTE" },
+    { provider: "implementer", id: "fixture", note: "CHEAP_NOTE" },
+    { provider: "ghost", id: "none" },
+  ] }));
+  unlisted.tools({ id: "models-listed", name: "dock_models", arguments: {} });
+  const listed = await coordinator.request(2);
+  const after = JSON.stringify(listed.body.messages!.at(-1));
+  assert.match(after, /Your model, which a helper uses when you omit model: coordinator\/fixture · note: \\"MAIN_NOTE\\" · thinking off, minimal, low, medium, high · context 32K tokens · text only/);
+  assert.match(after, /- implementer\/fixture · note: \\"CHEAP_NOTE\\" · no thinking levels · context 32K tokens · text only/);
+  assert.ok(after.includes("not available on this machine now: ghost/none"));
+  assert.ok(!after.includes("reviewer/fixture"), "An available model the user did not list stays out of view");
+  listed.text("Helpers can use the listed models.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
+});

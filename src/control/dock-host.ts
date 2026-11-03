@@ -14,6 +14,7 @@ import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
 import { ModelVisibilityError, type ModelVisibilityService } from "./model-visibility.js";
+import type { HelperModelsStore } from "./helper-models.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -161,6 +162,8 @@ export interface DockHostOptions {
   remoteInstances?: RemoteInstanceDirectory;
   /** This machine's hidden-model list; without it model lists are returned unchanged. */
   modelVisibility?: ModelVisibilityService;
+  /** The models the user shows Agents for helpers; without it the list is empty. */
+  helperModels?: HelperModelsStore;
   listen?: boolean;
 }
 
@@ -192,6 +195,7 @@ export class DockHost {
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
   private readonly modelVisibility: ModelVisibilityService | undefined;
+  private readonly helperModels: HelperModelsStore | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -225,7 +229,7 @@ export class DockHost {
       return this.systemService;
     };
     this.registry.bindDockToolsMutationPort({
-      models: async (instanceId) => ({ ...await this.registry.get(instanceId).listModels(), instance: this.registry.getSnapshot(instanceId) }),
+      helperModels: async () => this.helperModels ? await this.helperModels.read() : { models: [] },
       interrupt: async (instanceId, operationId) => { await this.registry.get(instanceId).abort(operationId); return this.registry.observationStatus(instanceId); },
       stop: async (instanceId, operationId) => { const result = await this.registry.stop(instanceId, operationId); return observationStatus(result.instance); },
       create: (input) => this.operationLedger.run(systemToolOperation(input.operationId, "intent"), "dock.create", input, () => createDockSystem(systemPort, input)),
@@ -253,6 +257,7 @@ export class DockHost {
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.attachmentService = options.attachmentService;
     this.modelVisibility = options.modelVisibility;
+    this.helperModels = options.helperModels;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);

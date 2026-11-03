@@ -258,12 +258,16 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   await waitFor(async () => (await client.status(remote.id)).execution === "idle", "Remote list did not settle");
   await client.setModel(remote.id, "routed-coordinator", "fixture", "routed-team-model");
   await client.prompt(remote.id, "Delegate an independent review.", "auto", "routed-team-start");
-  (await coordinatorProvider.request(0)).tools({ id: "routed-spawn", name: "dock_spawn", arguments: {
+  // The helper model list belongs to the source's own machine, so the SubHost answers it.
+  (await coordinatorProvider.request(0)).tools({ id: "routed-models", name: "dock_models", arguments: {} });
+  const choosing = await coordinatorProvider.request(1);
+  assert.match(JSON.stringify(choosing.body.messages?.at(-1)), /Your model, which a helper uses when you omit model: routed-coordinator\/fixture/);
+  choosing.tools({ id: "routed-spawn", name: "dock_spawn", arguments: {
     name: "Routed reviewer", task: "Review the workspace.",
     model: { provider: "routed-reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],
   } });
   const reviewing = await reviewerProvider.request(0);
-  const waiting = await coordinatorProvider.request(1);
+  const waiting = await coordinatorProvider.request(2);
   const reviewer = (await client.list()).find((work) => work.displayName === "Routed reviewer");
   assert.ok(reviewer);
   assert.equal(reviewer.parentId, remote.id, "Main must expose the global source identity as parent");
@@ -286,8 +290,8 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   noted.text("ROUTED_REVIEW_FINDING");
   assert.equal(waiting.closed, false, "A routed message must not interrupt its busy recipient");
   waiting.text("Waiting for the independent report.");
-  let next = 2, sawNote = false, sawReply = false;
-  while (next < 8 && !(sawNote && sawReply)) {
+  let next = 3, sawNote = false, sawReply = false;
+  while (next < 9 && !(sawNote && sawReply)) {
     const request = await coordinatorProvider.request(next++);
     const transcript = JSON.stringify(request.body.messages);
     sawNote ||= transcript.includes("ROUTED_NOTE");
