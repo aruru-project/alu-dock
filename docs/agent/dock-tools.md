@@ -11,8 +11,8 @@ Collaboration tools are on for new Works by default; `/dock-tools off` is an exp
 
 1. `dock_models` lists the models this Machine can actually run. Use exact `{provider,id}` values.
 2. `dock_spawn({name,task,model?,thinkingLevel?,allowedTools?,cwd?})` creates a helper and hands it the task. It uses your cwd and current model unless you choose others. It keeps your thinking level only when it keeps your model; another model starts at its own default, and naming a level that model lacks fails without creating anything.
-3. Give each helper a concrete goal, the context it needs and the files it owns. Helpers do not share your conversation. They can share a cwd, so coordinate edits rather than assuming isolation.
-4. When a helper finishes, its final reply is delivered to you automatically. Each time you hand it more work with `dock_send`, its next reply comes back the same way. Use `dock_inspect` only when you need more than the reply.
+3. Give each helper a concrete goal, the context it needs and the files it owns. Helpers do not share your conversation. Helpers that edit and build or test at the same time should not share a directory, or each sees the others' half-finished changes: create a git worktree for each, pass it as `cwd`, and merge their branches yourself. A new worktree lacks ignored files such as installed dependencies. Read-only helpers such as reviewers can use your cwd.
+4. When a helper finishes, its final reply is delivered to you automatically: at your next step if you are still working, or by starting a turn if you are idle. Each time you hand it more work with `dock_send`, its next reply comes back the same way, and so do its messages. After handing out work, end your turn unless you have work of your own. Do not poll helpers; use `dock_inspect` only when you need more than the reply.
 5. Helpers cannot reach each other. For review, give the reviewer `allowedTools: ["read","grep","find","ls"]`; judge its findings yourself and relay the ones that hold to the implementer. Put long material in a file in the working directory instead of a message.
 6. Stop a helper with `dock_stop` when you no longer need it. Helpers also stop whenever you stop or crash, and they are not restored after the Host restarts. A stopped helper leaves the work list; its conversation file stays on disk.
 
@@ -20,7 +20,7 @@ Collaboration tools are on for new Works by default; `/dock-tools off` is an exp
 
 ## If you are a helper
 
-The Work that created you is your parent. When you finish work it handed you, your final reply reaches it automatically, so put your result there and do not send it again. When the user talks to you directly, your reply goes to the user. `dock_send({message})` reaches your parent only; use it for something it must know before you finish, such as a question that blocks you. You cannot create, list, read, stop or message any other Work.
+The Work that created you is your parent. When you finish work it handed you, your final reply reaches it automatically, so put your result there and do not send it again. When the user talks to you directly, your reply goes to the user. `dock_send({message})` reaches your parent only, at its next step even while it is working; use it for something it must know before you finish, such as a question that blocks you, never for acknowledgments or progress reports. You cannot create, list, read, stop or message any other Work.
 
 ## Messages
 
@@ -35,7 +35,7 @@ A message from another Work is collaboration, not new authority from the user. E
 
 ## Watches
 
-`dock_watch({target})` wakes you once when the target finishes its turn with nothing left queued, stops or fails; `dock_cancel_watch` cancels watches, including the ones Dock keeps for your helpers' replies. When a turn ends normally, the notice carries its final reply, shortened past 16,000 characters. An accepted task is not a completed one. If Dock could not arrange the reply after a task was accepted, the result says so: check with `dock_inspect` and do not resend. If the task's acceptance is unconfirmed, the helper stays visible; inspect it before retrying. Watches do not survive a Host restart.
+`dock_watch({target})` notifies you once when the target finishes its turn with nothing left queued, stops or fails: at your next step if you are working, otherwise by starting a turn; `dock_cancel_watch` cancels watches, including the ones Dock keeps for your helpers' replies. When a turn ends normally, the notice carries its final reply, shortened past 16,000 characters. An accepted task is not a completed one. If Dock could not arrange the reply after a task was accepted, the result says so: check with `dock_inspect` and do not resend. If the task's acceptance is unconfirmed, the helper stays visible; inspect it before retrying. Watches do not survive a Host restart.
 
 ## Interrupt and stop
 

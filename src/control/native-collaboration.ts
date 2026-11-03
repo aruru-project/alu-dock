@@ -10,11 +10,18 @@ export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">
   }
 }
 
-/** Who a message goes to: a child always reaches its parent; a top-level Work names its target. */
-export function messageTarget(source: Pick<InstanceSnapshot, "parentId">, target: string | undefined): { parentId: string } | { target: string } {
-  if (source.parentId !== undefined) return { parentId: source.parentId };
-  if (target === undefined) throw new Error("Name the Work to message with target.");
-  return { target };
+/**
+ * Who a message goes to, and when. A child always reaches its parent at the parent's next
+ * step, even mid-turn: it sends only what the parent must know before the child finishes.
+ * A top-level Work names its target and by default lets the target's current turn finish.
+ */
+export function messageTarget(
+  source: Pick<InstanceSnapshot, "parentId">,
+  request: { target?: string; delivery?: "followUp" | "steer" },
+): { parentId: string; delivery: "auto" } | { target: string; delivery: "followUp" | "steer" } {
+  if (source.parentId !== undefined) return { parentId: source.parentId, delivery: "auto" };
+  if (request.target === undefined) throw new Error("Name the Work to message with target.");
+  return { target: request.target, delivery: request.delivery ?? "followUp" };
 }
 
 /**

@@ -151,14 +151,22 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   }
 
   // A helper's one Dock tool reaches its parent, whoever started the helper's turn.
+  // Real-model trial 2026-11-03: a parent busy for 20 minutes got its helpers' messages
+  // only after its turn, all stale by then. A busy parent now gets one at its next step.
+  await client.prompt(parent.id, "Keep checking the workspace.", "auto", "parent-busy");
+  const parentBusy = await coordinator.request(8);
   await client.prompt(implementerWork.id, "Ask your coordinator whether tests are needed.", "auto", "child-question");
   (await implementer.request(3)).tools({ id: "ask-parent", name: "dock_send", arguments: { message: "CHILD_QUESTION: add tests too?" } });
-  const question = await coordinator.request(8);
-  assert.ok(JSON.stringify(question.body.messages).includes("CHILD_QUESTION"));
+  const asked = await implementer.request(4);
+  parentBusy.tools({ id: "parent-keeps-working", name: "read", arguments: { path: bugPath } });
+  const question = await coordinator.request(9);
+  assert.ok(JSON.stringify(question.body.messages).includes("CHILD_QUESTION"), "A helper's message reaches its busy parent at the parent's next step");
   assert.ok(JSON.stringify(question.body.messages).includes("Agent message from \\\"Implementer\\\""));
   question.text("No tests are needed.");
-  (await implementer.request(4)).text("Asked the coordinator.");
-  await waitFor(async () => (await client.status(implementerWork.id)).execution === "idle", "Implementer did not settle after asking");
+  asked.text("Asked the coordinator.");
+  for (const work of [parent, implementerWork]) {
+    await waitFor(async () => (await client.status(work.id)).execution === "idle", `${work.displayName} did not settle after the question`);
+  }
 
   // User decision 2026-10-31: a helper talks only to its parent. Whatever a helper's
   // Worker asks of the Host, it cannot stop, interrupt, list, read or create Work.
@@ -212,7 +220,7 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   // A helper made in its parent's directory inherits the parent's trust_once without a
   // new question. When the parent crashes, the helper ends with it.
   await client.prompt(unrelated.id, "Remember this workspace.", "auto", "persist-parent");
-  (await coordinator.request(9)).text("Noted.");
+  (await coordinator.request(10)).text("Noted.");
   await waitFor(async () => (await client.status(unrelated.id)).execution === "idle", "Unrelated did not settle");
   const crashChild = await client.create(cwd, "CrashChild", "create-crash-child", undefined, undefined,
     { model: { provider: "reviewer", id: "fixture" } }, { parentId: unrelated.id, allowedTools: ["read"] });

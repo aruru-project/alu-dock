@@ -80,13 +80,13 @@ export class MainMachineDockToolsAuthority {
       return request.type === "create" ? this.toolOperations.run(request.operationId, "dock.create", { sourceMainId, request }, execute) : execute();
     }
     if (request.type === "send") {
-      const recipient = messageTarget(source, request.target);
+      const recipient = messageTarget(source, request);
       const target = "parentId" in recipient
         ? snapshots.find((item) => item.id === recipient.parentId)
         : requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), recipient.target);
       if (!target) throw new Error("The Work that created you is no longer available.");
       const message = dockMessageText(source.displayName, request.message);
-      const result = await this.options.localClient.prompt(target.id, message, request.delivery ?? "followUp", request.operationId);
+      const result = await this.options.localClient.prompt(target.id, message, recipient.delivery, request.operationId);
       const delivered = observationStatus(result.instance);
       // A parent hears back from its child each time it hands the child more work.
       const replyError = target.parentId === sourceMainId ? await arrangeReply(() => notifyWhenDone(target.id, result.receipt.acceptedAt)) : undefined;

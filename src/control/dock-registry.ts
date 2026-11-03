@@ -591,11 +591,11 @@ export class DockRegistry implements DockToolsHostPort {
       return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
     }
     if (request.type !== "send") throw new Error("Unknown Dock tool request");
-    const recipient = messageTarget(source, request.target);
+    const recipient = messageTarget(source, request);
     const target = "parentId" in recipient ? this.getSnapshot(recipient.parentId) : this.observationService.resolveTarget(sourceInstanceId, recipient.target);
     const result = await mutations.send({
       operationId: request.operationId,
-      delivery: request.delivery ?? "followUp",
+      delivery: recipient.delivery,
       instanceId: target.id,
       message: dockMessageText(source.displayName, request.message),
     });

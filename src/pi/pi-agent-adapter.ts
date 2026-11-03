@@ -178,7 +178,7 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
 
 export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker managed by Alu Dock. Your work can continue after a terminal disconnects, and Alu Dock clients may observe or control this Work through Dock protocols. Pi remains authoritative for its settings, credentials, extensions, project resources, and Session history. Use \`aludock pi:install <source>\` when the user asks you to install a Pi package through the bundled Pi runtime; do not require a separate system Pi installation.`;
 
-export const ALU_DOCK_CHILD_GUIDANCE = "You are a helper Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments. You cannot reach any other Work.";
+export const ALU_DOCK_CHILD_GUIDANCE = "You are a helper Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments or progress reports. You cannot reach any other Work.";
 
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |

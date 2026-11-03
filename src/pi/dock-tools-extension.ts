@@ -288,7 +288,9 @@ export class DockToolsBridge {
       content: renderObservationNotification(notification),
       display: true,
       details: notification,
-    }, { triggerTurn: true, deliverAs: "followUp" });
+      // The watcher asked to hear this. While it works the notice joins its next step;
+      // queued behind the whole turn it arrived only after the watcher had moved on.
+    }, { triggerTurn: true, deliverAs: "steer" });
     this.deliveredWatchIds.add(notification.watchId);
     while (this.deliveredWatchIds.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       this.deliveredWatchIds.delete(this.deliveredWatchIds.values().next().value!);
@@ -317,7 +319,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     }
     pi.registerTool({
       name: "dock_spawn", label: "Delegate a Dock task",
-      description: toolDescription("Create a helper Work for a task of yours and start it. It works in your workspace with your current model and thinking unless you choose others; dock_models lists the models. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes; send further instructions with dock_send and stop it with dock_stop when you no longer need it. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
+      description: toolDescription("Create a helper Work for a task of yours and start it. It works in your workspace with your current model and thinking unless you choose others; dock_models lists the models. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes, at your next step if you are still working; send further instructions with dock_send and stop it with dock_stop when you no longer need it. Helpers that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting helpers, end your turn unless you have work of your own; do not poll them. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
       parameters: SPAWN_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() })),
     } as never);
@@ -365,7 +367,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_watch",
       label: "Watch a Dock sibling",
-      description: toolDescription("Get a notification when another worker becomes idle, stops or fails. Returns immediately; continue other work while waiting."),
+      description: toolDescription("Get a notification when another worker becomes idle, stops or fails. Returns immediately; continue other work while waiting. The notification reaches you at your next step if you are still working."),
       parameters: REQUIRED_TARGET_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string }) => toolResult(await bridge.invoke({ type: "watch", target: params.target })),
     } as never);
@@ -461,7 +463,7 @@ function registerChildTools(pi: ExtensionAPI, bridge: DockToolsBridge): void {
   pi.registerTool({
     name: "dock_send",
     label: "Message your parent",
-    description: toolDescription("Send a message to the Work that created you. When you finish work it handed you, your final reply already reaches it, so use this only for something it must know before then, such as a question that blocks you. Do not send acknowledgments."),
+    description: toolDescription("Send a message to the Work that created you. When you finish work it handed you, your final reply already reaches it, so use this only for something it must know before then, such as a question that blocks you. It reaches your parent at its next step, even while it is working. Do not send acknowledgments or progress reports."),
     parameters: CHILD_SEND_SCHEMA,
     execute: async (_toolCallId: string, params: { message: string }) => toolResult(await bridge.invoke({ type: "send", operationId: randomUUID(), message: params.message })),
   } as never);
