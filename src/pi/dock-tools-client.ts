@@ -82,6 +82,27 @@ export function renderObservationNotification(notification: ObservationNotificat
     : `${header}\nIts final reply:\n${notification.target.reply}`;
 }
 
+/** What dock_wait saw: the replies it took, and why it stopped waiting. */
+export interface HelperWaitResult {
+  replies: ObservationNotification[];
+  /** Helpers that still owe a reply. */
+  waiting: ObservedInstanceStatus[];
+  ended: "replied" | "nothing_pending" | "message" | "timeout" | "cancelled";
+  timeoutSeconds?: number;
+}
+
+export function renderHelperWait(result: HelperWaitResult): string {
+  const head = {
+    replied: `${result.replies.length === 1 ? "A helper replied" : `${result.replies.length} helpers replied`}.`,
+    nothing_pending: "No helper reply is pending: every helper you handed work to has already replied or stopped.",
+    message: "Stopped waiting because a message reached you; it follows this result.",
+    timeout: `Stopped waiting after ${result.timeoutSeconds} seconds.`,
+    cancelled: "Stopped waiting.",
+  }[result.ended];
+  const still = result.waiting.length === 0 ? "" : `\nStill working: ${result.waiting.map(quotedIdentity).join(", ")}`;
+  return [head + still, ...result.replies.map((notification) => renderObservationNotification(notification))].join("\n\n");
+}
+
 function renderObservation(observation: InstanceObservation): string {
   const lines = [
     `[Dock sibling excerpt · source=${quotedIdentity(observation.status)}]`,

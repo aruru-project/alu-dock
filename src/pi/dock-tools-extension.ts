@@ -20,11 +20,13 @@ import {
   MAX_OBSERVATION_MESSAGE_LIMIT,
   type ObservationMessageType,
   type ObservationNotification,
+  type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
-import { renderDockToolsResult, renderObservationNotification } from "./dock-tools-client.js";
+import { renderDockToolsResult, renderHelperWait, renderObservationNotification, type HelperWaitResult } from "./dock-tools-client.js";
 
 export const DOCK_TOOL_NAMES = [
   "dock_spawn",
+  "dock_wait",
   "dock_models",
   "dock_interrupt",
   "dock_stop",
@@ -42,6 +44,10 @@ export const DOCK_TOOL_NAMES = [
 export const CHILD_DOCK_TOOL_NAMES = ["dock_send"] as const;
 const DOCK_TOOLS_EXTENSION_PATH = "<inline:alu-dock-tools>";
 const DOCK_TOOLS_STATUS_KEY = "Dock tools";
+const DEFAULT_WAIT_SECONDS = 1_800;
+const MAX_WAIT_SECONDS = 7_200;
+/** How often a wait checks whether a message is waiting for this Work. */
+const WAIT_POLL_MS = 200;
 const DOCK_TOOLS_GUIDE_PATH = fileURLToPath(new URL("../../../docs/agent/dock-tools.md", import.meta.url));
 
 function toolDescription(description: string): string {
@@ -126,6 +132,15 @@ const SEND_SCHEMA = {
   required: ["target", "message"],
   additionalProperties: false,
 };
+const WAIT_SCHEMA = {
+  type: "object",
+  properties: {
+    target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS, description: "One helper's name or id. Omit to wait for any helper that owes you a reply." },
+    all: { type: "boolean", description: "Wait until every awaited helper has replied instead of the first." },
+    timeoutSeconds: { type: "integer", minimum: 1, maximum: MAX_WAIT_SECONDS, description: `Default ${DEFAULT_WAIT_SECONDS}.` },
+  },
+  additionalProperties: false,
+};
 const CHILD_SEND_SCHEMA = {
   type: "object",
   properties: { message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS } },
@@ -160,6 +175,9 @@ export class DockToolsBridge {
   private readonly suppressedWatchIds = new Set<string>();
   private readonly fencedNotifications = new Map<string, ObservationNotification>();
   private deliveryFenceDepth = 0;
+  /** Helpers that owe this Work a reply: handed work, not yet replied or stopped. */
+  private readonly awaitedHelpers = new Map<string, ObservedInstanceStatus>();
+  private waiter: { ids: ReadonlySet<string>; all: boolean; replies: ObservationNotification[]; finish(ended: HelperWaitResult["ended"]): void } | undefined;
   readonly toolNames: readonly string[];
 
   constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort, readonly child = false) {
@@ -188,7 +206,10 @@ export class DockToolsBridge {
     try {
       const result = await this.port.configure(action);
       this.enabledValue = result.enabled;
-      if (!result.enabled) this.suppressEveryPendingNotification();
+      if (!result.enabled) {
+        this.suppressEveryPendingNotification();
+        this.waiter?.finish("cancelled");
+      }
       if (this.api) this.applyToolVisibility(this.api);
       return result.enabled;
     } catch (error) {
@@ -216,7 +237,54 @@ export class DockToolsBridge {
         this.endDeliveryFence();
       }
     }
-    return this.port.invoke(request);
+    const result = await this.port.invoke(request);
+    this.noteHelperWork(result);
+    return result;
+  }
+
+  /**
+   * Waits in the current turn until awaited helpers reply, a message reaches this Work, the
+   * user cancels, or time runs out. Replies it takes are returned instead of sent separately.
+   */
+  async waitForHelpers(
+    request: { target?: string; all?: boolean; timeoutSeconds?: number },
+    signal: AbortSignal | undefined,
+    hasPendingMessages: () => boolean,
+  ): Promise<HelperWaitResult> {
+    if (this.waiter) throw new Error("dock_wait is already waiting in another call.");
+    const awaited = [...this.awaitedHelpers.values()];
+    const chosen = request.target === undefined ? awaited : awaited.filter((status) => status.id === request.target || status.name === request.target);
+    if (chosen.length > 1 && request.target !== undefined) throw new Error(`More than one helper is named ${request.target}; use its id.`);
+    if (chosen.length === 0) return { replies: [], waiting: [], ended: "nothing_pending" };
+    const timeoutSeconds = request.timeoutSeconds ?? DEFAULT_WAIT_SECONDS;
+    let ended: HelperWaitResult["ended"] | undefined;
+    let wake!: () => void;
+    const woken = new Promise<void>((resolve) => { wake = resolve; });
+    const waiter = {
+      ids: new Set(chosen.map((status) => status.id)), all: request.all === true, replies: [] as ObservationNotification[],
+      finish: (reason: HelperWaitResult["ended"]) => { ended ??= reason; wake(); },
+    };
+    this.waiter = waiter;
+    const timer = setTimeout(() => waiter.finish("timeout"), timeoutSeconds * 1_000);
+    const poll = setInterval(() => { if (hasPendingMessages()) waiter.finish("message"); }, WAIT_POLL_MS);
+    const cancel = (): void => waiter.finish("cancelled");
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    if (hasPendingMessages()) waiter.finish("message");
+    try {
+      await woken;
+    } finally {
+      clearTimeout(timer);
+      clearInterval(poll);
+      signal?.removeEventListener("abort", cancel);
+      if (this.waiter === waiter) this.waiter = undefined;
+    }
+    return {
+      replies: waiter.replies,
+      waiting: chosen.filter((status) => this.awaitedHelpers.has(status.id)),
+      ended: ended!,
+      ...(ended === "timeout" ? { timeoutSeconds } : {}),
+    };
   }
 
   deliver(notification: ObservationNotification): void {
@@ -227,6 +295,13 @@ export class DockToolsBridge {
     }
     if (!this.enabledValue) {
       this.suppressAndRemove(notification.watchId);
+      return;
+    }
+    const waiter = this.waiter;
+    if (waiter?.ids.has(notification.target.id)) {
+      this.markDelivered(notification);
+      waiter.replies.push(notification);
+      if (!waiter.all || waiter.replies.length === waiter.ids.size) waiter.finish("replied");
       return;
     }
     if (!this.api) {
@@ -291,10 +366,21 @@ export class DockToolsBridge {
       // The watcher asked to hear this. While it works the notice joins its next step;
       // queued behind the whole turn it arrived only after the watcher had moved on.
     }, { triggerTurn: true, deliverAs: "steer" });
+    this.markDelivered(notification);
+  }
+
+  private markDelivered(notification: ObservationNotification): void {
+    this.awaitedHelpers.delete(notification.target.id);
     this.deliveredWatchIds.add(notification.watchId);
     while (this.deliveredWatchIds.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       this.deliveredWatchIds.delete(this.deliveredWatchIds.values().next().value!);
     }
+  }
+
+  private noteHelperWork(result: DockToolsResult): void {
+    if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) this.awaitedHelpers.set(result.instance.id, result.instance);
+    else if (result.type === "send" && result.target.parentId !== undefined && result.error === undefined) this.awaitedHelpers.set(result.target.id, result.target);
+    else if (result.type === "stop") this.awaitedHelpers.delete(result.instance.id);
   }
 
   private suppress(watchId: string): void {
@@ -319,9 +405,18 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     }
     pi.registerTool({
       name: "dock_spawn", label: "Delegate a Dock task",
-      description: toolDescription("Create a helper Work for a task of yours and start it. It works in your workspace with your current model and thinking unless you choose others; dock_models lists the models. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes, at your next step if you are still working; send further instructions with dock_send and stop it with dock_stop when you no longer need it. Helpers that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting helpers, end your turn unless you have work of your own; do not poll them. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
+      description: toolDescription("Create a helper Work for a task of yours and start it. It works in your workspace with your current model and thinking unless you choose others; dock_models lists the models. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes, at your next step if you are still working; send further instructions with dock_send and stop it with dock_stop when you no longer need it. Helpers that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting helpers, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
       parameters: SPAWN_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() })),
+    } as never);
+    pi.registerTool({
+      name: "dock_wait", label: "Wait for helpers",
+      description: toolDescription("Wait in this turn until a helper you handed work to replies; all=true waits for every one of them, target for one. Their final replies come back here instead of arriving separately. Returns early when a message reaches you, such as the user's or a helper's question, or when the user cancels. Use it only when your turn must not end, such as during a Dock Goal, whose next round would start as soon as your turn ends; otherwise end your turn and the replies wake you."),
+      parameters: WAIT_SCHEMA,
+      execute: async (_toolCallId: string, params: { target?: string; all?: boolean; timeoutSeconds?: number }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: { hasPendingMessages(): boolean }) => {
+        const result = await bridge.waitForHelpers(params, signal, () => ctx.hasPendingMessages());
+        return { content: [{ type: "text", text: renderHelperWait(result) }], details: result };
+      },
     } as never);
     pi.registerTool({
       name: "dock_models", label: "List configured models",

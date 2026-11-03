@@ -177,6 +177,8 @@ Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久�
 
 watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 含 target/reason/time，目标正常结束一轮时还带它最后一条回复，不携带其余 conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "steer" })` 送达：Agent 正在工作时并入它的下一步，空闲时开始一轮。排到整轮之后会让通知在 Agent 早已另作处理后才到；回复过长或需要更多上下文时 Agent 再 inspect。watch completion 使用上述独立投递路径，不走用户消息的 `command.submit`。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
 
+`dock_wait` 只在 Worker 内等待，不经过 Host：bridge 记下本 Work 交过任务、还没回复也没停止的帮手；等待期间这些帮手的完成通知直接作为工具结果返回，不再另外送达。有消息排队给这个 Work（用户的或帮手的）、用户取消或超时即返回，所以等待不会把用户挡在外面。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等帮手会白白耗掉轮数。
+
 ## Extension UI
 
 Pi Worker 自动加载 `alu-dock-plan-goal`。`/dock-plan` 只读调查并提交完整计划，由用户在编辑器审阅修改后选择执行或继续讨论；`/dock-goal` 用轮数预算自动推进，`agent_before_settle` 是唯一次轮入口。业务状态只存在 Pi 当前分支 custom entries，恢复后暂停。模型工具按模式启用：规划时补上内置读取工具，并由 `plan_submit` 的 `prepareLoadout` 把非只读工具从请求中隐藏，不改动用户的工具开关；结束规划时只收回自己补上的读取工具，用户在规划期间设置过工具（adapter 经 `PlanGoalPort.toolsChosen` 告知）则保留其选择，不再收回；codemode 在 `only` 模式下会隐藏其余所有直接工具，所以 Dock 内置的 codemode 规划期间改用 `on` 模式（经 `PlanGoalPort.isPlanning` 读取），不改它的开关和用户设置；调用时再按只读声明拦截（含嵌套调用）；第三方工具的 `readOnlyHint` 需要可信，这不是系统沙箱。计划正文只在变化时保存。薄启动回调处理 Pi 扩展消息在开始前失败/被接管及准备期间取消（准备期间被取消的请求在即将开始时由 adapter 交给 Pi 的 abort 截住，不调用模型；Pi 仍记下这条 Goal 提示，扩展把它的时间记在状态里，并用 `context` hook 让它不进入之后的普通请求；压缩仍会带上它，见[已知技术债](../technical-debt.md#准备阶段被停掉的-goal-提示仍会进入压缩摘要)。停止后、旧准备结束前交的新 Goal 等旧准备结束后启动，不随它一起暂停）；运行中 abort 与 settled 由 Pi 负责。Host 不增加目标状态、预算或协议。见[使用说明](../agent/plan-goal.md)。
