@@ -66,6 +66,8 @@ export interface CreateRegistryInstanceInput {
   /** Owning top-level Work on this Host; native children are temporary. */
   parentId?: string;
   allowedTools?: string[];
+  /** Start the child from a copy of its parent's conversation, branched by the parent's Worker. */
+  withParentContext?: boolean;
   operationId: string;
   cwd: string;
   name?: string;
@@ -74,7 +76,7 @@ export interface CreateRegistryInstanceInput {
   workerConfig?: JsonObject;
 }
 
-export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "parentId" | "allowedTools"> {
+export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "parentId" | "allowedTools" | "withParentContext"> {
   key: string;
 }
 
@@ -293,6 +295,7 @@ export class DockRegistry implements DockToolsHostPort {
       throw new CatalogOperationRecordedError(input.operationId);
     }
     if (input.allowedTools !== undefined && input.parentId === undefined) throw new Error("Tool permissions can only be chosen for a child Work.");
+    if (input.withParentContext && input.parentId === undefined) throw new Error("Only a child Work can start from its parent's conversation.");
     const parent = input.parentId === undefined ? undefined : this.get(input.parentId);
     const parentActive = () => parent === undefined || (this.instances.get(parent.id) === parent
       && parent.parentId === undefined && parent.lifecycle === "active");
@@ -305,12 +308,14 @@ export class DockRegistry implements DockToolsHostPort {
     const workerConfig = resolvedConfig === undefined
       ? undefined
       : cloneWorkerConfig(resolvedConfig, "Worker configuration");
+    // The parent's Worker owns its conversation and writes the copy for the child's directory.
+    const sessionFile = input.withParentContext ? await parent!.branchConversationForChild(cwd) : undefined;
 
     const id = this.createId();
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.parentId === undefined ? {} : { parentId: input.parentId }), ...(input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools }), ...(workerConfig === undefined ? {} : { workerConfig }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.parentId === undefined ? {} : { parentId: input.parentId }), ...(input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId

@@ -317,7 +317,7 @@ export type ControlRequest =
   | Request<"machine.list", Record<string, never>>
   | Request<"machine.remove", { operationId: string; hostId: string }>
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; parentId?: string; allowedTools?: string[] }>
+  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; parentId?: string; allowedTools?: string[]; withParentContext?: boolean }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
@@ -1016,7 +1016,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...(uploadInstanceId === undefined ? {} : { instanceId: uploadInstanceId }), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
-      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "parentId", "allowedTools"], "invalid_request");
+      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "parentId", "allowedTools", "withParentContext"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
@@ -1027,12 +1027,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
         catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.workerConfig is invalid"); }
       }
       if (params.allowedTools !== undefined && params.parentId === undefined) throw validation("invalid_request", "Tool permissions can only be chosen for a child Work");
+      if (params.withParentContext !== undefined && (params.withParentContext !== true || params.parentId === undefined)) throw validation("invalid_request", "Only a child Work can start from its parent's conversation");
       let allowedTools: string[] | undefined;
       if (params.allowedTools !== undefined) {
         try { allowedTools = parseAllowedTools(params.allowedTools); }
         catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.allowedTools is invalid"); }
       }
-      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(params.parentId === undefined ? {} : { parentId: id(params.parentId, "params.parentId", "invalid_request") }), ...(allowedTools === undefined ? {} : { allowedTools }) } };
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(params.parentId === undefined ? {} : { parentId: id(params.parentId, "params.parentId", "invalid_request") }), ...(allowedTools === undefined ? {} : { allowedTools }), ...(params.withParentContext === true ? { withParentContext: true } : {}) } };
     }
     case "instance.ensure": {
       exact(params, ["operationId", "key", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");

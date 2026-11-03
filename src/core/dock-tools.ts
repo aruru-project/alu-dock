@@ -20,7 +20,7 @@ export type DockToolsRequest =
   | ObservationRequest
   | { type: "machines" }
   | { type: "models" }
-  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[] }
+  | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
@@ -38,6 +38,8 @@ export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
 export interface DockChildSelection {
   parentId: string;
   allowedTools?: string[];
+  /** Start from a copy of the parent's conversation so far instead of an empty one. */
+  withParentContext?: boolean;
 }
 
 export type DockToolsResult =

@@ -206,29 +206,37 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
 
 // Real-model trial review 2026-11-03: in a Dock Goal, ending the turn to wait for a helper
 // started the next round at once; three rounds were spent before the helper said anything.
-test("a coordinator in a Goal waits for its helper in the same round, and the user can still reach it", { timeout: 60_000 }, async (context) => {
+test("a coordinator in a Goal hands a helper its conversation, waits for it in the same round, and the user can still reach it", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "reviewer"], { prefix: "alu-native-wait-" });
   const { coordinator, reviewer } = team.providers;
   const client = await team.startHost();
   const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "goal-create", trust));
+  await client.prompt(parent.id, "USER_DECISION: every review names the file it read.", "auto", "user-decision");
+  (await coordinator.request(0)).text("Noted.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
   await client.prompt(parent.id, "/dock-goal --rounds 2 Get an independent review of the workspace.", "auto", "goal-start");
-  const round = await coordinator.request(0);
-  round.tools({ id: "spawn", name: "dock_spawn", arguments: { name: "Reviewer", task: "Review the workspace.", model: { provider: "reviewer", id: "fixture" }, allowedTools: ["read"] } });
+  const round = await coordinator.request(1);
+  round.tools({ id: "spawn", name: "dock_spawn", arguments: { name: "Reviewer", task: "Review the workspace.", model: { provider: "reviewer", id: "fixture" }, allowedTools: ["read"], withContext: true } });
+
+  // The helper starts from the coordinator's conversation, ending before the call creating it.
   const review = await reviewer.request(0);
-  (await coordinator.request(1)).tools({ id: "wait", name: "dock_wait", arguments: {} });
+  const inherited = JSON.stringify(review.body.messages);
+  assert.ok(inherited.includes("USER_DECISION") && inherited.includes("Review the workspace."));
+  assert.ok(!inherited.includes("No result provided"), "The helper does not see its own creation without a result");
+  (await coordinator.request(2)).tools({ id: "wait", name: "dock_wait", arguments: {} });
 
   // A message from the user ends the wait rather than queueing behind it.
   await client.prompt(parent.id, "USER_NOTE: also check the naming.", "auto", "user-note");
-  const interrupted = await coordinator.request(2);
+  const interrupted = await coordinator.request(3);
   const seen = JSON.stringify(interrupted.body.messages);
   assert.ok(seen.includes("USER_NOTE") && seen.includes("a message reached you"));
   interrupted.tools({ id: "wait-again", name: "dock_wait", arguments: {} });
 
   review.text("REVIEW_DONE: naming is fine.");
-  const replied = JSON.stringify((await coordinator.request(3)).body.messages);
+  const replied = JSON.stringify((await coordinator.request(4)).body.messages);
   assert.equal(replied.split("REVIEW_DONE").length - 1, 1, "The reply arrives once, as the wait's result");
   assert.doesNotMatch(replied, /Dock Goal: 2\/2/, "Waiting did not spend another Goal round");
-  coordinator.requests[3]!.tools({ id: "done", name: "goal_update", arguments: { status: "complete", summary: "Reviewed", evidence: ["REVIEW_DONE"] } });
-  (await coordinator.request(4)).text("The review is complete.");
+  coordinator.requests[4]!.tools({ id: "done", name: "goal_update", arguments: { status: "complete", summary: "Reviewed", evidence: ["REVIEW_DONE"] } });
+  (await coordinator.request(5)).text("The review is complete.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
 });

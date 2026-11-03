@@ -214,6 +214,8 @@ export interface PiAgentAdapterOptions {
   attachmentContextKey: Uint8Array;
   publishedFiles: TransientFileRegistry;
   dockAttachmentPort?: DockAttachmentCallPort;
+  /** Explicit Pi session directory; otherwise Pi's default for each cwd. */
+  sessionDir?: string;
 }
 
 export interface CreatePiAgentAdapterOptions {
@@ -582,6 +584,19 @@ export class PiAgentAdapter {
     }
   }
 
+  /** A copy of this conversation so far, saved as a new session for a child working in `cwd`. */
+  private branchForChild(cwd: string): { sessionFile: string } {
+    const manager = this.requireActive().session.sessionManager;
+    const file = manager.getSessionFile();
+    if (!file || !existsSync(file)) throw new Error("This Work's conversation is not saved yet, so a helper cannot start from it.");
+    const forkPoint = childForkPoint(manager.getBranch());
+    if (forkPoint === undefined) throw new Error("This Work has no conversation to give a helper yet.");
+    const sessionDir = this.options.sessionDir ?? SessionManager.create(cwd).getSessionDir();
+    const sessionFile = SessionManager.open(file, sessionDir, cwd).createBranchedSession(forkPoint);
+    if (!sessionFile || !existsSync(sessionFile)) throw new Error("The copy of this conversation for the helper was not saved.");
+    return { sessionFile };
+  }
+
   async control(request: AgentWorkerControl): Promise<unknown> {
     switch (request.type) {
       case "activate": this.activateInitial(); return null;
@@ -597,6 +612,7 @@ export class PiAgentAdapter {
       }
       case "wait_for_idle": await this.waitForIdle(); return null;
       case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
+      case "branch_for_child": return this.branchForChild(request.cwd);
       case "dispose": return this.dispose();
     }
   }
@@ -3550,6 +3566,22 @@ function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
   };
 }
 
+/**
+ * Where a child's copy of the conversation ends: before the reply whose tool calls are still
+ * running, which includes the call creating the child. Otherwise the child would see its own
+ * creation end without a result.
+ */
+function childForkPoint(branch: ReturnType<SessionManager["getBranch"]>): string | undefined {
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index]!;
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    const answered = new Set(branch.slice(index + 1).flatMap((later) => later.type === "message" && later.message.role === "toolResult" ? [later.message.toolCallId] : []));
+    const running = entry.message.content.some((block) => block.type === "toolCall" && !answered.has(block.id));
+    return running ? entry.parentId ?? undefined : branch.at(-1)!.id;
+  }
+  return branch.at(-1)?.id;
+}
+
 async function refreshSessionModels(session: AgentSession, services: AgentSessionServices): Promise<void> {
   // Reload adopts local models.json and saved catalogs without waiting on pi.dev
   // (cards #222/#330). Pi owns loading, merging and provider availability.
@@ -3588,6 +3620,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
   const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
+  let childStarting = options.child === true;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
     const settingsManager = SettingsManager.create(canonicalCwd, agentDir, {
@@ -3618,10 +3651,18 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     });
     // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
     const { model: requestedModel, ...piCreateOptions } = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
-    const freshChild = options.child === true && sessionManager.getBranch().length === 0;
-    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager);
+    // A child is created once; reloads restore what its session recorded.
+    const childStart = childStarting;
+    const inheritedConversation = childStart && sessionManager.getBranch().length > 0;
+    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager, childStart);
+    // A child given its parent's conversation still starts on its own model; another model
+    // starts at that model's own thinking level rather than the parent's recorded one.
+    const thinkingLevel = piCreateOptions.thinkingLevel ?? (inheritedConversation && startingModel
+      ? settingsManager.getModelThinkingLevel(startingModel.provider, startingModel.id) ?? settingsManager.getDefaultThinkingLevel()
+      : undefined);
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
+      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
@@ -3634,11 +3675,17 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       extensionModelMutationPolicy: "legacy-defaults",
     });
     // A parent that names a thinking level the child's model lacks gets an error, not a child at another level.
-    if (freshChild && piCreateOptions.thinkingLevel !== undefined
+    if (childStart && piCreateOptions.thinkingLevel !== undefined
       && !result.session.getAvailableThinkingLevels().includes(piCreateOptions.thinkingLevel)) {
       result.session.dispose();
       throw new Error(`Model ${result.session.model?.id ?? "selected for this child"} does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
     }
+    if (inheritedConversation) {
+      // Pi records these only for new sessions; without them a reload would restore the parent's.
+      if (result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);
+      sessionManager.appendThinkingLevelChange(result.session.thinkingLevel);
+    }
+    childStarting = false;
     return { ...result, services, diagnostics: services.diagnostics };
   };
   const sessionManager = options.sessionManager
@@ -3659,6 +3706,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     initialProcessCwd: options.cwd,
     attachmentContextKey,
     publishedFiles,
+    ...(options.sessionDir === undefined ? {} : { sessionDir: options.sessionDir }),
     ...(options.dockAttachmentPort === undefined ? {} : { dockAttachmentPort: options.dockAttachmentPort }),
     ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });

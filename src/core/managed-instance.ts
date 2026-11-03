@@ -648,6 +648,13 @@ export class ManagedInstance {
     }
   }
 
+  /** The parent's Worker copies its conversation so far for a child; the copy's session file. */
+  async branchConversationForChild(cwd: string): Promise<string> {
+    const result = await this.session.control({ type: "branch_for_child", cwd }) as { sessionFile?: unknown };
+    if (typeof result?.sessionFile !== "string" || result.sessionFile.length === 0) throw new Error("The parent's Worker did not return the copied conversation.");
+    return result.sessionFile;
+  }
+
   deliverObservation(notification: ObservationNotification): Promise<void> {
     return this.session.control({ type: "observation_delivery", notification }).then(() => undefined);
   }

@@ -53,6 +53,8 @@ export interface CreateInstanceMutation {
   parentId?: string;
   /** A child's exact tool ceiling, chosen by its parent. */
   allowedTools?: string[];
+  /** A child that starts from a copy of its parent's conversation. */
+  withParentContext?: boolean;
   operationId: string;
   cwd: string;
   name?: string;

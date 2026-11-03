@@ -53,7 +53,11 @@ export async function spawnDockWorker(
     cwd: request.cwd ?? source.cwd, name: request.name,
     model: request.model ?? source.executor.model,
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-    child: { parentId: source.id, ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }) },
+    child: {
+      parentId: source.id,
+      ...(request.allowedTools === undefined ? {} : { allowedTools: request.allowedTools }),
+      ...(request.withContext ? { withParentContext: true } : {}),
+    },
   });
   if (created.type !== "create") throw new Error("Worker creation returned an unexpected result. Inspect Dock before retrying.");
   let sent: Awaited<ReturnType<typeof port.send>>;
