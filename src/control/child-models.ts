@@ -1,15 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { MAX_CHILD_MODEL_NOTE_CHARS, MAX_CHILD_MODELS, parseChildModelEntries, type ChildModelList } from "../core/dock-tools.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "./protocol.js";
+import { MAX_CHILD_MODELS, parseChildModelEntries, type ChildModelList } from "../core/dock-tools.js";
 
 /** Hand-edited list in the Host state directory; documented in docs/local-install.md. */
 export const CHILD_MODELS_FILE = "child-models.json";
 // Room for hand formatting around the largest accepted list.
-const MAX_FILE_BYTES = 4 * MAX_CHILD_MODELS * (MAX_CHILD_MODEL_NOTE_CHARS * 4 + 1_024);
+const MAX_FILE_BYTES = 4 * MAX_CHILD_MODELS * ((MAX_MODEL_PROVIDER_CHARS + MAX_MODEL_ID_CHARS) * 4 + 64);
 
 /**
- * The models the user shows Agents for child Works on this machine, with the user's notes.
+ * The models the user shows Agents for child Works on this machine.
  * Problems are worded for the Agent reading dock_models, which tells the user.
  * It guides what an Agent picks; it does not limit which model a child Work may use.
  * Read on every request, so an edit applies without a restart.

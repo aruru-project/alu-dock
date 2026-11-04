@@ -262,7 +262,7 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   // The child Work model list belongs to the source's own machine, so the SubHost answers it.
   (await coordinatorProvider.request(0)).tools({ id: "routed-models", name: "dock_models", arguments: {} });
   const choosing = await coordinatorProvider.request(1);
-  assert.match(JSON.stringify(choosing.body.messages?.at(-1)), /Your model, which a child Work uses when you omit model: routed-coordinator\/fixture/);
+  assert.match(JSON.stringify(choosing.body.messages?.at(-1)), /Your model, which child Works use unless you are asked for another: routed-coordinator\/fixture/);
   choosing.tools({ id: "routed-spawn", name: "dock_spawn", arguments: {
     name: "Routed reviewer", task: "Review the workspace.",
     model: { provider: "routed-reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],

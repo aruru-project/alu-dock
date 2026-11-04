@@ -74,8 +74,9 @@ export async function spawnDockWorker(
   request: Extract<DockToolsRequest, { type: "spawn" }>,
   port: Pick<DockToolsMutationPort, "create" | "send"> & { notifyWhenDone: NotifyWhenDone },
 ): Promise<Extract<DockToolsResult, { type: "spawn" }>> {
-  // Another model may not support the parent's thinking level, so it starts at that model's default.
-  const thinkingLevel = request.thinkingLevel ?? (request.model === undefined ? source.executor.thinkingLevel : undefined);
+  // User decision 2026-11-04: a child Work keeps its parent's thinking level, on another model too.
+  // A model without that level starts at the nearest one it has, as Pi does when a Work changes model.
+  const thinkingLevel = request.thinkingLevel ?? source.executor.thinkingLevel;
   const created = await port.create({
     type: "create", operationId: systemToolOperation(request.operationId, "create"),
     cwd: request.cwd ?? source.cwd, name: request.name,

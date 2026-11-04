@@ -14,36 +14,31 @@ export const MAX_DOCK_TOOL_TARGET_CHARS = 256;
 export const MAX_DOCK_TOOL_CWD_CHARS = 16_384;
 export const MAX_DOCK_TOOL_NAME_CHARS = 256;
 export const MAX_DOCK_TOOL_MESSAGE_CHARS = 254_000;
-/** The user's list of models shown to Agents for child Works: a short hand-picked list, not a catalog. */
+/**
+ * The user's list of models shown to Agents for child Works: a short hand-picked list, not a catalog.
+ * It only names models; a note on when to use one would be followed as a rule (user decision 2026-11-04).
+ */
 export const MAX_CHILD_MODELS = 50;
-export const MAX_CHILD_MODEL_NOTE_CHARS = 500;
 export const MAX_CHILD_MODEL_PROBLEM_CHARS = 1_024;
-
-/** One model the user lists for child Works, with the user's own note. */
-export interface ChildModelEntry extends ModelRef {
-  note?: string;
-}
 
 /** The user's list as this machine's Host read it; `problem` explains a file it could not use. */
 export interface ChildModelList {
-  models: ChildModelEntry[];
+  models: ModelRef[];
   problem?: string;
 }
 
 /** Shared by the Host's file reader and the Worker boundary; throws a message naming the bad entry. */
-export function parseChildModelEntries(input: unknown): ChildModelEntry[] {
+export function parseChildModelEntries(input: unknown): ModelRef[] {
   if (!Array.isArray(input)) throw new Error('"models" must be a list');
   if (input.length > MAX_CHILD_MODELS) throw new Error(`"models" can list at most ${MAX_CHILD_MODELS} models`);
   return input.map((item, index) => {
     const entry = item as Record<string, unknown> | null;
     const valid = entry !== null && typeof entry === "object" && !Array.isArray(entry)
-      && Object.keys(entry).every((key) => key === "provider" || key === "id" || key === "note")
+      && Object.keys(entry).every((key) => key === "provider" || key === "id")
       && typeof entry.provider === "string" && entry.provider.length > 0 && entry.provider.length <= MAX_MODEL_PROVIDER_CHARS
-      && typeof entry.id === "string" && entry.id.length > 0 && entry.id.length <= MAX_MODEL_ID_CHARS
-      && (entry.note === undefined || (typeof entry.note === "string" && entry.note.length <= MAX_CHILD_MODEL_NOTE_CHARS));
-    if (!valid) throw new Error(`entry ${index + 1} must be {"provider": "…", "id": "…", "note": "…"} with a note of at most ${MAX_CHILD_MODEL_NOTE_CHARS} characters`);
-    const note = typeof entry.note === "string" ? entry.note.trim() : "";
-    return { provider: entry.provider as string, id: entry.id as string, ...(note ? { note } : {}) };
+      && typeof entry.id === "string" && entry.id.length > 0 && entry.id.length <= MAX_MODEL_ID_CHARS;
+    if (!valid) throw new Error(`entry ${index + 1} must be {"provider": "…", "id": "…"}`);
+    return { provider: entry.provider as string, id: entry.id as string };
   });
 }
 

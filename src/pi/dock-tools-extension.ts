@@ -22,7 +22,7 @@ import {
   type ObservationNotification,
 } from "../core/instance-observation.js";
 import { THINKING_LEVELS } from "../core/agent-worker.js";
-import { renderChildWait, renderDockToolsResult, renderObservationNotification, type DescribedModel, type ModelFacts } from "./dock-tools-client.js";
+import { renderChildWait, renderDockToolsResult, renderObservationNotification, type DescribedModel, type ModelFacts, type RenderContext } from "./dock-tools-client.js";
 import { ChildReplies, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./child-replies.js";
 
 export const DOCK_TOOL_NAMES = [
@@ -353,9 +353,12 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     }
     pi.registerTool({
       name: "dock_spawn", label: "Start a child Work",
-      description: toolDescription("Create a child Work for a task of yours and start it. It works in your workspace with your current model and thinking unless you choose others; dock_models lists the models. It starts with only the task unless withContext gives it a copy of your conversation. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes, at your next step if you are still working; send further instructions with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
+      description: toolDescription("Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so. It starts with only the task unless withContext gives it a copy of your conversation. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes, at your next step if you are still working; send further instructions with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
       parameters: SPAWN_SCHEMA,
-      execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() })),
+      execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => {
+        const thinkingAsked = params.thinkingLevel ?? pi.getThinkingLevel();
+        return toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() }), { thinkingAsked });
+      },
     } as never);
     pi.registerTool({
       name: "dock_wait", label: "Wait for child Works",
@@ -368,9 +371,9 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     } as never);
     pi.registerTool({
       name: "dock_models", label: "Models for child Works",
-      description: toolDescription("Show your own model, which a child Work uses when you omit model, and the models the user lists for child Works with the user's notes and what each supports. Use it before choosing a model for dock_spawn; usually omit model."),
+      description: toolDescription("Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
       parameters: EMPTY_SCHEMA,
-      execute: async (_toolCallId: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: PiModelContext) => toolResult(await bridge.invoke({ type: "models" }), modelFacts(ctx)),
+      execute: async (_toolCallId: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: PiModelContext) => toolResult(await bridge.invoke({ type: "models" }), { facts: modelFacts(ctx) }),
     } as never);
     for (const action of ["interrupt", "stop"] as const) pi.registerTool({
       name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a Work" : "Stop a Work",
@@ -544,9 +547,9 @@ function modelFacts(ctx: PiModelContext): ModelFacts {
   };
 }
 
-function toolResult(value: DockToolsResult, facts?: ModelFacts): { content: Array<{ type: "text"; text: string }>; details?: DockToolsResult } {
+function toolResult(value: DockToolsResult, context?: RenderContext): { content: Array<{ type: "text"; text: string }>; details?: DockToolsResult } {
   return {
-    content: [{ type: "text", text: renderDockToolsResult(value, facts) }],
+    content: [{ type: "text", text: renderDockToolsResult(value, context) }],
     ...(value.type === "machines" ? {} : { details: value }),
   };
 }

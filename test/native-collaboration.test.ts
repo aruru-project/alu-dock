@@ -15,8 +15,9 @@ const source = { id: "parent", displayName: "Coordinator", cwd: "/project", exec
 const child: ObservedInstanceStatus = { id: "child", parentId: "parent", cwd: "/project", lifecycle: "active", execution: "running", compacting: false, executionChangedAt: "2026-10-31T00:00:00Z", runtimeGeneration: 1, thinkingLevel: "low" };
 const request = { type: "spawn", operationId: "op", name: "Reviewer", task: "Review changes" } as const;
 
-test("a child Work keeps the parent's thinking level only on the parent's model", async () => {
-  // A non-reasoning model rejects the parent's "low"; asking for it made dock_spawn fail.
+// User decision 2026-11-04: a child Work keeps its parent's thinking level, on another model too.
+// It used to start at the other model's default, which was whatever level the user set last.
+test("a child Work keeps the parent's thinking level, on another model too", async () => {
   const created: Array<{ thinkingLevel?: string }> = [];
   const port = {
     create: async (input: { thinkingLevel?: string }) => { created.push(input); return { type: "create" as const, instance: child }; },
@@ -25,7 +26,7 @@ test("a child Work keeps the parent's thinking level only on the parent's model"
   };
   await spawnDockWorker(source, request, port);
   await spawnDockWorker(source, { ...request, model: { provider: "other", id: "plain" } }, port);
-  assert.deepEqual(created.map((input) => input.thinkingLevel), ["low", undefined]);
+  assert.deepEqual(created.map((input) => input.thinkingLevel), ["low", "low"]);
 });
 
 test("spawn preserves a visible child and never sends an unconfirmed task twice", async () => {

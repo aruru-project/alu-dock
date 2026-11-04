@@ -17,8 +17,8 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   await writeFile(bugPath, "export const sum = (a, b) => a - b;\n");
   const client = await team.startHost();
 
-  // The user's coordinator runs a reasoning model at high thinking. A child Work on another
-  // model starts at that model's own level instead of failing on the parent's.
+  // The user's coordinator runs a reasoning model at high thinking. A child Work on a model
+  // without thinking levels keeps the parent's level as nearly as it can, and the parent is told.
   const parent = await trustOnce((trust) => client.create(cwd, "Coordinator", "team-create", trust));
   assert.equal(parent.executor.thinkingLevel, "high");
   await client.prompt(parent.id, "Delegate implementation and independent review of sum.js.", "auto", "team-start");
@@ -30,6 +30,7 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   } });
   const implementerFirst = await implementer.request(0);
   const spawnReviewer = await coordinator.request(1);
+  assert.ok(JSON.stringify(spawnReviewer.body.messages).includes("Its model has no thinking level high, so it runs at off"));
   spawnReviewer.tools({ id: "spawn-reviewer", name: "dock_spawn", arguments: {
     name: "Reviewer", task: "Independently review sum.js.",
     model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],
@@ -233,14 +234,8 @@ test("a top-level Work's child Works end with it and do not come back after a Ho
   await waitFor(() => exited(orphaned.pid), "The crashed parent's child process survived");
   await waitFor(async () => !(await client.list()).some((work) => work.id === orphaned.id), "The crashed parent's child stayed listed");
 
-  // Continuing the parent lets it delegate again. A thinking level the child's model lacks
-  // is refused without leaving a child behind; the same model without it starts.
+  // Continuing the parent lets it delegate again.
   await trustOnce((trust) => client.reopen(other.id, "reopen-other", undefined, trust));
-  const beforeRefusal = workerPids.length;
-  await assert.rejects(client.create(cwd, "InvalidEffort", "invalid-effort", undefined, undefined,
-    { model: { provider: "implementer", id: "fixture" }, thinkingLevel: "high" }, { parentId: other.id }));
-  await waitFor(() => workerPids.slice(beforeRefusal).every(exited), "A refused child left a process alive");
-  assert.deepEqual((await client.list()).map((work) => work.displayName), ["Other"]);
   const restarted = await startChild(other.id, "Restarted", "implementer");
   const restartedSession = await converse(restarted.id, implementer, "RESTARTED_HISTORY");
 
@@ -298,7 +293,8 @@ test("a coordinator in a Goal hands a child Work its conversation, waits for it 
 
 // User decision 2026-11-04: dock_models showed every model this machine can run (432 on the
 // user's). An Agent now sees its own model, which child Works use by default, and only the models
-// the user lists for child Works, with the user's notes and what each supports.
+// the user picked for child Works, with what each supports. The list carries no notes on when to
+// use a model: an Agent follows such a note as a rule.
 test("a coordinator sees its own model and only the models the user lists for child Works", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "reviewer", "implementer"], { prefix: "alu-native-models-" });
   const { coordinator } = team.providers;
@@ -308,21 +304,21 @@ test("a coordinator sees its own model and only the models the user lists for ch
   (await coordinator.request(0)).tools({ id: "models-unlisted", name: "dock_models", arguments: {} });
   const unlisted = await coordinator.request(1);
   const before = JSON.stringify(unlisted.body.messages);
-  assert.ok(before.includes("Your model, which a child Work uses when you omit model: coordinator/fixture"));
+  assert.ok(before.includes("Your model, which child Works use unless you are asked for another: coordinator/fixture"));
   assert.ok(before.includes("has not listed models for child Works"));
   assert.ok(!before.includes("reviewer/fixture") && !before.includes("implementer/fixture"), "Models the user did not list stay out of view");
 
   // An edit applies on the next call, without a restart.
   await writeFile(join(team.root, "child-models.json"), JSON.stringify({ models: [
-    { provider: "coordinator", id: "fixture", note: "MAIN_NOTE" },
-    { provider: "implementer", id: "fixture", note: "CHEAP_NOTE" },
+    { provider: "coordinator", id: "fixture" },
+    { provider: "implementer", id: "fixture" },
     { provider: "ghost", id: "none" },
   ] }));
   unlisted.tools({ id: "models-listed", name: "dock_models", arguments: {} });
   const listed = await coordinator.request(2);
   const after = JSON.stringify(listed.body.messages!.at(-1));
-  assert.match(after, /Your model, which a child Work uses when you omit model: coordinator\/fixture · note: \\"MAIN_NOTE\\" · thinking off, minimal, low, medium, high · context 32K tokens · text only/);
-  assert.match(after, /- implementer\/fixture · note: \\"CHEAP_NOTE\\" · no thinking levels · context 32K tokens · text only/);
+  assert.match(after, /Your model, which child Works use unless you are asked for another: coordinator\/fixture · thinking off, minimal, low, medium, high · context 32K tokens · text only/);
+  assert.match(after, /- implementer\/fixture · no thinking levels · context 32K tokens · text only/);
   assert.ok(after.includes("not available on this machine now: ghost/none"));
   assert.ok(!after.includes("reviewer/fixture"), "An available model the user did not list stays out of view");
   listed.text("Child Works can use the listed models.");
