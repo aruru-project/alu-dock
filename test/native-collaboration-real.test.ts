@@ -136,10 +136,14 @@ test("a child Work can only message its parent, and other top-level Works cannot
     { type: "interrupt", operationId: "child-interrupts-parent", target: parent.id },
     { type: "list" },
     { type: "inspect", target: parent.id },
-    { type: "create", operationId: "child-creates", cwd },
     { type: "spawn", operationId: "child-spawns", name: "Grandchild", task: "Do not run" },
   ];
   for (const request of denied) await assert.rejects(registry.invokeDockTool(child.id, request), `the child's ${request.type} is refused`);
+  // A top-level Work's create goes on to ask the user to trust the directory. A child's is
+  // refused before that, so it never reaches the user.
+  const asksTrust = (error: unknown) => (error as { code?: unknown }).code === "project_trust_required";
+  await assert.rejects(registry.invokeDockTool(parent.id, { type: "create", operationId: "parent-creates", cwd }), asksTrust);
+  await assert.rejects(registry.invokeDockTool(child.id, { type: "create", operationId: "child-creates", cwd }), (error) => !asksTrust(error));
   await assert.rejects(client.create(cwd, "Nested", "nested-child", undefined, undefined, undefined, { parentId: child.id }), "a child has no children");
   assert.deepEqual((await client.list()).map((work) => `${work.displayName}:${work.lifecycle}`).sort(),
     ["Coordinator:active", "Reviewer:active", "Unrelated:active"], "nothing was stopped or created");
@@ -167,13 +171,13 @@ test("a child Work can only message its parent, and other top-level Works cannot
 test("a top-level Work's child Works end with it and do not come back after a Host restart", { timeout: 90_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "reviewer", "implementer"], { prefix: "alu-native-life-" });
   const { cwd, workerPids } = team;
-  const { coordinator, reviewer } = team.providers;
+  const { coordinator, reviewer, implementer } = team.providers;
   let releaseHeldChild: (() => void) | undefined;
   team.onCleanup = () => releaseHeldChild?.();
   let client = await team.startHost();
-  const startChild = async (parentId: string, name: string) => {
+  const startChild = async (parentId: string, name: string, provider = "reviewer") => {
     const child = await client.create(cwd, name, `create-${name}`, undefined, undefined,
-      { model: { provider: "reviewer", id: "fixture" } }, { parentId, allowedTools: ["read"] });
+      { model: { provider, id: "fixture" } }, { parentId, allowedTools: ["read"] });
     return { ...child, pid: workerPids.at(-1)! };
   };
   /** Gives a Work a saved conversation: one prompt and the given reply. */
@@ -230,15 +234,15 @@ test("a top-level Work's child Works end with it and do not come back after a Ho
   await waitFor(async () => !(await client.list()).some((work) => work.id === orphaned.id), "The crashed parent's child stayed listed");
 
   // Continuing the parent lets it delegate again. A thinking level the child's model lacks
-  // is refused without leaving a child behind.
+  // is refused without leaving a child behind; the same model without it starts.
   await trustOnce((trust) => client.reopen(other.id, "reopen-other", undefined, trust));
   const beforeRefusal = workerPids.length;
   await assert.rejects(client.create(cwd, "InvalidEffort", "invalid-effort", undefined, undefined,
     { model: { provider: "implementer", id: "fixture" }, thinkingLevel: "high" }, { parentId: other.id }));
   await waitFor(() => workerPids.slice(beforeRefusal).every(exited), "A refused child left a process alive");
   assert.deepEqual((await client.list()).map((work) => work.displayName), ["Other"]);
-  const restarted = await startChild(other.id, "Restarted");
-  const restartedSession = await converse(restarted.id, reviewer, "RESTARTED_HISTORY");
+  const restarted = await startChild(other.id, "Restarted", "implementer");
+  const restartedSession = await converse(restarted.id, implementer, "RESTARTED_HISTORY");
 
   // After a Host restart, children are not restored; their conversations stay on disk.
   client.closeActiveConnections();
