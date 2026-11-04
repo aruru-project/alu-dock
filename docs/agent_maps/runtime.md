@@ -177,7 +177,7 @@ Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久�
 
 watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 含 target/reason/time，目标正常结束一轮时还带它最后一条回复，不携带其余 conversation。adapter 写入可见的 `dock-tools-watch` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "steer" })` 送达：Agent 正在工作时并入它的下一步，空闲时开始一轮。排到整轮之后会让通知在 Agent 早已另作处理后才到；回复过长或需要更多上下文时 Agent 再 inspect。watch completion 使用上述独立投递路径，不走用户消息的 `command.submit`。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
 
-`dock_wait` 只在 Worker 内等待，不经过 Host：bridge 记下本 Work 交过任务、还没回复也没停止的帮手；等待期间这些帮手的完成通知直接作为工具结果返回，不再另外送达。有消息排队给这个 Work（用户的或帮手的）、用户取消或超时即返回，所以等待不会把用户挡在外面。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等帮手会白白耗掉轮数。
+`dock_wait` 只在 Worker 内等待，不经过 Host：bridge 记下本 Work 交过任务、还没回复也没停止的帮手；等待期间这些帮手的完成通知直接作为工具结果返回，不再另外送达。有消息排队给这个 Work（用户的或帮手的）、用户取消或超时即返回，所以等待不会把用户挡在外面。回复比派活结果先到（帮手立刻失败或做完）的帮手不记入；取消全部 watch 或关闭 Dock tools 时清空，因为 Host 上的回复 watch 已一起取消。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等帮手会白白耗掉轮数。
 
 `dock_models` 的事实由 Worker 读：Host 只返回本机 `helper-models.json` 里用户列出的模型和备注（SubHost 上的 Work 也由本机 Host 回答，不经 Main），Worker 用当前 Pi 的模型和可用模型补上思考档位（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
 

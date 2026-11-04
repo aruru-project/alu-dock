@@ -239,6 +239,12 @@ test("a coordinator in a Goal hands a helper its conversation, waits for it in t
   coordinator.requests[4]!.tools({ id: "done", name: "goal_update", arguments: { status: "complete", summary: "Reviewed", evidence: ["REVIEW_DONE"] } });
   (await coordinator.request(5)).text("The review is complete.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
+
+  // Cloud review of abb061b: the copied conversation carried the coordinator's name, so
+  // after a reload the helper was called Coordinator and could not be reached as Reviewer.
+  const helper = (await client.list()).find((work) => work.parentId === parent.id)!;
+  await client.reloadSession(helper.id, "reload-helper");
+  assert.equal((await client.status(helper.id)).displayName, "Reviewer");
 });
 
 // User decision 2026-11-04: dock_models showed every model this machine can run (432 on the

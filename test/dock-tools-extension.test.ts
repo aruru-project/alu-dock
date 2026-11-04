@@ -286,3 +286,48 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   offBridge.attach(afterOffFailure.api as never);
   assert.equal(afterOffFailure.state.messages.length, 1, "failed off must restore the completion buffered behind its acknowledgement fence");
 });
+
+// Cloud review of abb061b: dock_wait waited up to 30 minutes for a helper that would never
+// reply, when its reply came before its task's result, or after its watches were cancelled.
+test("dock_wait waits only for helpers whose reply is still to come", async () => {
+  const helper = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
+  // The Host makes a new watch each time it hands a helper work.
+  let watches = 0;
+  const reply = (id: string) => ({ ...notification, watchId: `watch-${++watches}`, target: helper(id) });
+  let bridge!: DockToolsBridge;
+  let deliverBeforeReturning: string | undefined;
+  let enabled = true;
+  bridge = new DockToolsBridge(true, {
+    configure: async (action) => ({ enabled: action === "status" ? enabled : (enabled = action === "on") }),
+    invoke: async (request) => {
+      if (request.type === "cancel") return { type: "cancel", cancelledWatchIds: [] };
+      const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
+      // The Host delivers a helper's reply as soon as it has one, even before its call returns.
+      if (deliverBeforeReturning === id) bridge.deliver(reply(id));
+      return request.type === "spawn"
+        ? { type: "spawn", instance: helper(id), taskStatus: "accepted" }
+        : { type: "send", target: helper(id), receipt: { delivery: "followUp", queued: false, acceptedAt: notification.firedAt } };
+    },
+  });
+  bridge.attach(fakeApi().api as never);
+  const wait = () => bridge.waitForHelpers({ timeoutSeconds: 1 }, undefined, () => false);
+
+  deliverBeforeReturning = "failed-at-once";
+  await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "failed-at-once", task: "Review." });
+  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the spawn result is not awaited");
+
+  deliverBeforeReturning = "failed-at-once";
+  await bridge.invoke({ type: "send", operationId: "send-fast", target: "failed-at-once", message: "Again." });
+  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the send result is not awaited");
+
+  deliverBeforeReturning = undefined;
+  await bridge.invoke({ type: "spawn", operationId: "spawn-cancelled", name: "cancelled", task: "Review." });
+  await bridge.invoke({ type: "cancel" });
+  assert.equal((await wait()).ended, "nothing_pending", "cancelling every watch leaves no reply to wait for");
+
+  await bridge.invoke({ type: "spawn", operationId: "spawn-off", name: "switched-off", task: "Review." });
+  await bridge.configure("off");
+  await bridge.configure("on");
+  assert.equal((await wait()).ended, "nothing_pending", "turning Dock tools off cancels the replies being waited for");
+});
+

@@ -83,7 +83,9 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       ...(options.allowedTools === undefined ? {} : { allowedTools: options.allowedTools }),
       projectTrusted: options.projectTrusted,
       ...(options.sessionFile === undefined ? {} : { sessionFile: resolve(options.sessionFile) }),
-      ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
+      // A reopened session keeps its own name. A helper's session file is a copy of its
+      // parent's conversation, which carries the parent's name, so the helper names it.
+      ...(options.name === undefined || (options.sessionFile !== undefined && options.parentId === undefined) ? {} : { initialName: options.name }),
     },
     extensionUiBroker,
     dockToolsHostPort,

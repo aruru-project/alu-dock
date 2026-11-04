@@ -164,7 +164,7 @@ async function runWorker(): Promise<void> {
     await sender.sendEnvelope({ kind: "fatal", error: encodeWorkerError(error) }).catch(() => {});
     throw error;
   }
-  if (init.initialName !== undefined && !reopened) runtime!.currentSession().setSessionName(init.initialName);
+  if (init.initialName !== undefined && (!reopened || init.child)) runtime!.currentSession().setSessionName(init.initialName);
   runtime.subscribe((event) => {
     const envelope: WorkerEnvelope = { kind: "event", event, state: captureState(runtime!) };
     forwardWorkerEvent(sender, envelope, () => process.exit(1));

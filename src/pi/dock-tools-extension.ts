@@ -179,6 +179,9 @@ export class DockToolsBridge {
   private deliveryFenceDepth = 0;
   /** Helpers that owe this Work a reply: handed work, not yet replied or stopped. */
   private readonly awaitedHelpers = new Map<string, ObservedInstanceStatus>();
+  /** When each helper's reply last reached this Work, on a counter that orders replies and calls. */
+  private readonly lastReplies = new Map<string, number>();
+  private replyCount = 0;
   private waiter: { ids: ReadonlySet<string>; all: boolean; replies: ObservationNotification[]; finish(ended: HelperWaitResult["ended"]): void } | undefined;
   readonly toolNames: readonly string[];
 
@@ -209,7 +212,9 @@ export class DockToolsBridge {
       const result = await this.port.configure(action);
       this.enabledValue = result.enabled;
       if (!result.enabled) {
+        // Off cancels every watch on the Host, so no awaited reply will come.
         this.suppressEveryPendingNotification();
+        this.awaitedHelpers.clear();
         this.waiter?.finish("cancelled");
       }
       if (this.api) this.applyToolVisibility(this.api);
@@ -230,7 +235,12 @@ export class DockToolsBridge {
       try {
         const result = await this.port.invoke(request);
         if (result.type === "cancel") {
-          if (request.watchId === undefined) this.suppressEveryPendingNotification();
+          if (request.watchId === undefined) {
+            // Cancelling every watch includes the ones that bring helpers' replies back.
+            this.suppressEveryPendingNotification();
+            this.awaitedHelpers.clear();
+            this.waiter?.finish("cancelled");
+          }
           else this.suppressAndRemove(request.watchId);
           for (const watchId of result.cancelledWatchIds) this.suppressAndRemove(watchId);
         }
@@ -239,8 +249,9 @@ export class DockToolsBridge {
         this.endDeliveryFence();
       }
     }
+    const repliesBefore = this.replyCount;
     const result = await this.port.invoke(request);
-    this.noteHelperWork(result);
+    this.noteHelperWork(result, repliesBefore);
     return result;
   }
 
@@ -373,16 +384,25 @@ export class DockToolsBridge {
 
   private markDelivered(notification: ObservationNotification): void {
     this.awaitedHelpers.delete(notification.target.id);
+    this.lastReplies.delete(notification.target.id);
+    this.lastReplies.set(notification.target.id, ++this.replyCount);
+    if (this.lastReplies.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) this.lastReplies.delete(this.lastReplies.keys().next().value!);
     this.deliveredWatchIds.add(notification.watchId);
     while (this.deliveredWatchIds.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       this.deliveredWatchIds.delete(this.deliveredWatchIds.values().next().value!);
     }
   }
 
-  private noteHelperWork(result: DockToolsResult): void {
-    if (result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined) this.awaitedHelpers.set(result.instance.id, result.instance);
-    else if (result.type === "send" && result.target.parentId !== undefined && result.error === undefined) this.awaitedHelpers.set(result.target.id, result.target);
-    else if (result.type === "stop") this.awaitedHelpers.delete(result.instance.id);
+  private noteHelperWork(result: DockToolsResult, repliesBefore: number): void {
+    if (result.type === "stop") {
+      this.awaitedHelpers.delete(result.instance.id);
+      return;
+    }
+    const helper = result.type === "spawn" && result.taskStatus === "accepted" && result.error === undefined ? result.instance
+      : result.type === "send" && result.target.parentId !== undefined && result.error === undefined ? result.target
+        : undefined;
+    // A helper that failed or finished at once may have replied before this call returned.
+    if (helper && (this.lastReplies.get(helper.id) ?? 0) <= repliesBefore) this.awaitedHelpers.set(helper.id, helper);
   }
 
   private suppress(watchId: string): void {
