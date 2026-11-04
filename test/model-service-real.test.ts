@@ -25,9 +25,11 @@ const PROBE_EXTENSION = `export default function (pi) {
   });
 }
 `;
-// Like pi-alu-sol-tuner's /codex-fast: it edits the request the Work sends.
+// Like pi-alu-sol-tuner's /codex-fast it edits the request the Work sends, and it adds a header to
+// a provider that Main defines.
 const PAYLOAD_HOOK = `export default function (pi) {
   pi.on("before_provider_request", (event) => ({ ...event.payload, service_tier: "priority" }));
+  pi.registerProvider("coordinator", { headers: { "x-from-extension": "yes" } });
 }
 `;
 
@@ -49,6 +51,7 @@ test("a Work sends its own model requests with Main's models and credentials", {
   await client.prompt(work.id, "Write the marker.", "auto", "service-write");
   const first = await coordinator.request(0);
   assert.equal(first.headers.authorization, "Bearer key-from-main");
+  assert.equal(first.headers["x-from-extension"], "yes");
   assert.equal((first.body as { service_tier?: string }).service_tier, "priority");
   first.tools({ id: "write-marker", name: "write", arguments: { path: join(team.cwd, "marker.txt"), content: "MODEL_SERVICE" } });
   (await coordinator.request(1)).tools({ id: "probe", name: "probe_credentials", arguments: {} });

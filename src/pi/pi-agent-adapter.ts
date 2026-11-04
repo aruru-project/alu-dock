@@ -220,8 +220,8 @@ export interface PiAgentAdapterOptions {
 }
 
 export interface CreatePiAgentAdapterOptions {
-  /** Models whose configuration and credentials another process owns; by default Pi reads this machine's. */
-  modelRuntime?: ModelRuntime;
+  /** Creates each session's models when another process owns their configuration and credentials; by default Pi reads this machine's. */
+  createModelRuntime?: () => Promise<ModelRuntime>;
   cwd: string;
   agentDir: string;
   sessionDir?: string;
@@ -3631,7 +3631,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     });
     configurePiNetwork(settingsManager);
     const services = await createAgentSessionServices({
-      ...(options.modelRuntime === undefined ? {} : { modelRuntime: options.modelRuntime }),
+      ...(options.createModelRuntime === undefined ? {} : { modelRuntime: await options.createModelRuntime() }),
       cwd: canonicalCwd,
       agentDir,
       settingsManager,

@@ -23,7 +23,7 @@ export interface ModelServiceProcessOptions {
   /** Test seam; production captures the owner's login shell like Workers do, so key variables match. */
   environment?: NodeJS.ProcessEnv;
   entry?: string;
-  /** How long a question waits for a starting or restarting service. */
+  /** How long a question waits for a starting or restarting service; a Work's start must fit in it. */
   readyWaitMs?: number;
   /** A service that has not said it is ready by then is stopped and started again. */
   startTimeoutMs?: number;
@@ -50,6 +50,8 @@ export class ModelServiceProcess implements ModelHostPort {
   private firstStart: Promise<void> | undefined;
   private readonly pending = new Map<string, Pending>();
   private stopped = false;
+  /** Set when a wait for the service ran out; questions then fail at once until it is ready again. */
+  private unavailable = false;
   private restarts = 0;
   private restartTimer: NodeJS.Timeout | undefined;
   private readonly waiters = new Set<() => void>();
@@ -76,7 +78,7 @@ export class ModelServiceProcess implements ModelHostPort {
     this.readyChild = undefined;
     this.wakeWaiters();
     this.failPending(new ModelServiceUnavailableError("The Dock Host stopped the model service"));
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
     await new Promise<void>((resolve) => {
       const kill = setTimeout(() => child.kill("SIGKILL"), 5_000);
       child.once("exit", () => { clearTimeout(kill); resolve(); });
@@ -103,7 +105,13 @@ export class ModelServiceProcess implements ModelHostPort {
     const child = await this.running(signal);
     const id = randomUUID();
     return new Promise<unknown>((resolve, reject) => {
-      const cancel = () => { void this.send(child, { type: "cancel", id }).catch(() => {}); };
+      // The caller is released at once; a late answer is dropped. Main may still finish a login
+      // refresh it started, so a rotated token is kept.
+      const cancel = () => {
+        this.pending.delete(id);
+        reject(new Error("Model request cancelled"));
+        void this.send(child, { type: "cancel", id }).catch(() => {});
+      };
       const settle = <T>(done: (value: T) => void) => (value: T) => { signal.removeEventListener("abort", cancel); done(value); };
       this.pending.set(id, { child, resolve: settle(resolve), reject: settle(reject) });
       signal.addEventListener("abort", cancel, { once: true });
@@ -116,13 +124,16 @@ export class ModelServiceProcess implements ModelHostPort {
 
   /** A question not yet sent waits for a start or restart, until its deadline or its cancel. */
   private async running(signal?: AbortSignal): Promise<ChildProcess> {
-    const deadline = Date.now() + (this.options.readyWaitMs ?? 30_000);
+    const deadline = Date.now() + (this.options.readyWaitMs ?? 15_000);
     while (true) {
       if (this.stopped) throw new ModelServiceUnavailableError("The model service on Main is stopped");
       if (signal?.aborted) throw new Error("Model request cancelled");
       if (this.readyChild?.connected) return this.readyChild;
       const left = deadline - Date.now();
-      if (left <= 0) throw new ModelServiceUnavailableError("The model service on Main is not running. Check the Dock Host log on Main.");
+      if (left <= 0 || this.unavailable) {
+        this.unavailable = true;
+        throw new ModelServiceUnavailableError("The model service on Main is not running. Check the Dock Host log on Main.");
+      }
       await new Promise<void>((resolve) => {
         const done = () => {
           clearTimeout(timer);
@@ -147,19 +158,38 @@ export class ModelServiceProcess implements ModelHostPort {
         return;
       }
       if (this.stopped) return;
-      const child = fork(this.options.entry ?? DEFAULT_ENTRY, [], {
-        env: { ...environment, [MODEL_SERVICE_AGENT_DIR_ENV]: this.options.agentDir },
-        stdio: ["ignore", "inherit", "inherit", "ipc"],
-      });
+      let child: ChildProcess;
+      try {
+        child = fork(this.options.entry ?? DEFAULT_ENTRY, [], {
+          env: { ...environment, [MODEL_SERVICE_AGENT_DIR_ENV]: this.options.agentDir },
+          stdio: ["ignore", "inherit", "inherit", "ipc"],
+        });
+      } catch (error) {
+        this.startFailed(new ModelServiceUnavailableError(`The model service on Main could not start: ${error instanceof Error ? error.message : String(error)}`));
+        return;
+      }
       this.child = child;
       let started = false;
+      let ended = false;
       const startTimer = setTimeout(() => { if (!started) child.kill("SIGKILL"); }, this.options.startTimeoutMs ?? 60_000);
+      // A process that could not be created reports "error" and may never report "exit".
+      const end = (how: string) => {
+        if (ended) return;
+        ended = true;
+        clearTimeout(startTimer);
+        if (this.child === child) this.child = undefined;
+        if (this.readyChild === child) this.readyChild = undefined;
+        this.failPending(new ModelServiceUnavailableError(`The model service on Main stopped while answering (${how}).`), child);
+        if (started) this.scheduleRestart();
+        else this.startFailed(new ModelServiceUnavailableError(`The model service on Main could not start (${how}). Check the Dock Host log on Main.`));
+      };
       child.on("message", (message: ServiceOutbound) => {
         if (message?.type === "ready") {
           if (started) return;
           started = true;
           clearTimeout(startTimer);
           this.restarts = 0;
+          this.unavailable = false;
           this.readyChild = child;
           this.onFirstStart?.resolve();
           this.onFirstStart = undefined;
@@ -168,16 +198,8 @@ export class ModelServiceProcess implements ModelHostPort {
         }
         this.receive(message);
       });
-      child.once("error", () => { /* "exit" follows and handles it. */ });
-      child.once("exit", (code, signal) => {
-        clearTimeout(startTimer);
-        if (this.child === child) this.child = undefined;
-        if (this.readyChild === child) this.readyChild = undefined;
-        const how = signal ?? `exit ${code}`;
-        this.failPending(new ModelServiceUnavailableError(`The model service on Main stopped while answering (${how}).`), child);
-        if (started) this.scheduleRestart();
-        else this.startFailed(new ModelServiceUnavailableError(`The model service on Main could not start (${how}). Check the Dock Host log on Main.`));
-      });
+      child.on("error", (error) => { if (child.pid === undefined) end(error.message); });
+      child.once("exit", (code, signal) => end(signal ?? `exit ${code}`));
     })();
   }
 

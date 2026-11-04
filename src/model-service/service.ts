@@ -39,6 +39,7 @@ export class ModelServiceCore {
     return {
       providers,
       checks: Object.fromEntries(checks.filter((entry): entry is readonly [string, AuthCheck] => entry[1] !== undefined)),
+      models: this.runtime.getAllModels().map((model) => ({ provider: model.provider, id: model.id })),
       available: (await this.runtime.getAllAvailable()).map((model) => ({ provider: model.provider, id: model.id })),
       stored: (await this.runtime.listCredentials()).map((credential) => credential.providerId),
     };

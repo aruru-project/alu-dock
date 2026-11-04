@@ -75,8 +75,12 @@ async function runWorker(): Promise<void> {
     return new Promise<unknown>((resolveCall, rejectCall) => {
       const abort = !signal ? undefined
         : capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); }
-        // A question to Main, such as a login refresh, goes on there until the Host cancels it.
-        : capability === "dock.models" ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "dock.models", args: { op: "cancel", callId } }).catch(() => {}); }
+        // A cancelled question to Main releases its caller at once; the Host cancels it there.
+        : capability === "dock.models" ? (): void => {
+          hostCalls.delete(callId);
+          rejectCall(new Error("Model request cancelled"));
+          void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "dock.models", args: { op: "cancel", callId } }).catch(() => {});
+        }
         : undefined;
       if (signal && abort) signal.addEventListener("abort", abort, { once: true });
       hostCalls.set(callId, {
@@ -124,9 +128,9 @@ async function runWorker(): Promise<void> {
   } : undefined;
   // With Main's model service the Work takes its model configuration and credentials from Main and
   // reads none of this machine's; it still sends and handles its own requests. There is no local fallback.
-  const modelRuntime = hostCapabilities.has("dock.models")
-    ? await ModelRuntime.create({ owner: mainModelOwner((args, signal) => callHost("dock.models", args, signal)) })
-    : undefined;
+  // Each session gets its own runtime, so providers one session's extensions registered do not outlive it.
+  const modelOwner = hostCapabilities.has("dock.models") ? mainModelOwner((args, signal) => callHost("dock.models", args, signal)) : undefined;
+  const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
   dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
     configure: async (action) => {
       if (action === "status") return { enabled: dockToolsBridge!.enabled };
@@ -168,7 +172,7 @@ async function runWorker(): Promise<void> {
       ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
       dockToolsBridge,
       ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
-      ...(modelRuntime === undefined ? {} : { modelRuntime }),
+      ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
     });
   } catch (error) {
     // The Host learns why this Work could not start (an unavailable chosen model, an
