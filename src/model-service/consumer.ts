@@ -1,10 +1,14 @@
-import type { Api, AssistantMessage, AuthCheck, Context, Model } from "@earendil-works/pi-ai";
+import type { AnyModel, Api, AssistantMessage, AuthCheck, AuthResult, Context, Model } from "@earendil-works/pi-ai";
 import { type AssistantMessageEventStream, createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import type { ModelConsumer } from "@earendil-works/pi-coding-agent";
 
 import {
   failedModelEvent,
+  type ModelAuthOverrides,
+  type ModelAuthRequest,
+  type ModelAuthResult,
   type ModelCatalogSnapshot,
+  type ModelRequestAuthResult,
   ModelEventOrder,
   modelRequestOptions,
   type ModelRouteRequest,
@@ -20,6 +24,8 @@ export interface ModelServiceChannel {
   catalog(): Promise<ModelCatalogSnapshot>;
   resolve(request: ModelRouteRequest, signal?: AbortSignal): Promise<ModelRouteResult>;
   stream(request: ModelStreamRequest, onEvent: (wire: WireModelEvent) => void, signal: AbortSignal): Promise<void>;
+  auth(request: ModelAuthRequest, signal?: AbortSignal): Promise<ModelAuthResult>;
+  requestAuth(model: Model<Api>, signal?: AbortSignal): Promise<ModelRequestAuthResult>;
 }
 
 export interface RemoteModels extends ModelConsumer {
@@ -107,6 +113,17 @@ export async function connectRemoteModels(channel: ModelServiceChannel): Promise
     },
     stream: (model, context, options) => request(model as Model<Api>, context, options, "raw"),
     streamSimple: (model, context, options) => request(model, context, options, "simple"),
+    // An extension calling a model itself gets the credential from Main's runtime, which alone refreshes it.
+    getAuth: async (providerOrModel: string | AnyModel, overrides?: ModelAuthOverrides & { signal?: AbortSignal }): Promise<AuthResult | undefined> => {
+      const data: ModelAuthOverrides = {
+        ...(overrides?.apiKey === undefined ? {} : { apiKey: overrides.apiKey }),
+        ...(overrides?.env === undefined ? {} : { env: overrides.env }),
+        ...(overrides?.minOAuthValidityMs === undefined ? {} : { minOAuthValidityMs: overrides.minOAuthValidityMs }),
+      };
+      const target = typeof providerOrModel === "string" ? providerOrModel : providerOrModel as Model<Api>;
+      return await channel.auth({ target, ...(Object.keys(data).length === 0 ? {} : { overrides: data }) }, overrides?.signal) ?? undefined;
+    },
+    getRequestAuth: (model) => channel.requestAuth(model),
   };
   return consumer;
 }

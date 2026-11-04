@@ -41,3 +41,21 @@ test("a reply that grows in place arrives as the same reply, sending only what c
   }
   assert.ok(wireBytes < 40_000, `Only changes cross the wire (${wireBytes} bytes)`);
 });
+
+// Cloud review of e7c5da2: the model writes tool arguments, so "__proto__" is an ordinary key there.
+// Decoding it as a property assignment dropped it and changed the prototype of every object in the Worker.
+test("tool arguments named like object internals arrive as plain fields", () => {
+  const partial = { role: "assistant", content: [{ type: "toolCall", id: "c", name: "write", arguments: {} }] } as unknown as AssistantMessage & { content: Array<{ arguments: unknown }> };
+  const encoder = new PartialEncoder();
+  const decoder = new PartialDecoder();
+  const send = (event: AssistantMessageEvent) => decoder.decode(JSON.parse(JSON.stringify(encoder.encode(event)))) as AssistantMessageEvent & { partial: AssistantMessage };
+  send({ type: "start", partial });
+  let decoded: AssistantMessage | undefined;
+  for (const text of ['{"__proto__": {"polluted": "yes"}, "path": "/a"}', '{"__proto__": {"polluted": "yes", "more": "z"}, "constructor": {"prototype": {"x": 1}}, "path": "/ab"}']) {
+    partial.content[0]!.arguments = JSON.parse(text);
+    decoded = send({ type: "toolcall_delta", contentIndex: 0, delta: "x", partial } as AssistantMessageEvent).partial;
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(decoded)), JSON.parse(JSON.stringify(partial)));
+  assert.ok(Object.hasOwn((decoded as unknown as { content: Array<{ arguments: object }> }).content[0]!.arguments, "__proto__"));
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+});

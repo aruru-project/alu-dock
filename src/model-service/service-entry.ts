@@ -18,7 +18,10 @@ async function main(): Promise<void> {
     modelsPath: join(agentDir, "models.json"),
     allowModelNetwork: false,
   });
-  const core = new ModelServiceCore(runtime);
+  const core = new ModelServiceCore(runtime, async () => {
+    await settings.reload();
+    configurePiNetwork(settings);
+  });
   const active = new Map<string, AbortController>();
 
   const send = (message: ServiceOutbound): Promise<void> => new Promise((resolve, reject) => {
@@ -33,6 +36,8 @@ async function main(): Promise<void> {
       let result: unknown = null;
       if (request.op === "catalog") result = await core.catalog();
       else if (request.op === "resolve") result = await core.resolve(request, controller.signal);
+      else if (request.op === "auth") result = await core.auth(request, controller.signal);
+      else if (request.op === "request_auth") result = await core.requestAuth(request.model);
       else await core.stream(request, async (wire) => {
         encodeBounded(wire, MAX_MODEL_EVENT_BYTES, "Model event");
         await send({ type: "event", id, wire });

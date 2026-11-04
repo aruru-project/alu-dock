@@ -26,6 +26,12 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   modelService?: boolean;
   /** Pi settings merged over the defaults below. */
   settings?: Record<string, unknown>;
+  /** The providers' apiKey in models.json; `${NAME}` reads an environment variable. */
+  apiKey?: string;
+  /** Variables only the model service gets, such as a key no Worker may hold. */
+  serviceEnvironment?: Record<string, string>;
+  /** Overrides for every process, such as NO_PROXY. */
+  environment?: Record<string, string>;
 }) {
   const root = await mkdtemp(join(tmpdir(), options.prefix));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
@@ -34,8 +40,9 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   const environment = isolatedProcessEnvironment(home, {
     PI_CODING_AGENT_DIR: agentDir, XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root,
     npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
+    ...options.environment,
   });
-  const modelService = options.modelService ? new ModelServiceProcess({ agentDir, environment }) : undefined;
+  const modelService = options.modelService ? new ModelServiceProcess({ agentDir, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
   const team = {
     root, cwd, agentDir, providers, workerPids, modelService,
     registry: undefined as DockRegistry | undefined,
@@ -80,7 +87,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));
   const models: Record<string, unknown> = {};
   for (const name of names) models[name] = {
-    baseUrl: await providers[name].start(), api: "openai-completions", apiKey: "local-fixture-key",
+    baseUrl: await providers[name].start(), api: "openai-completions", apiKey: options.apiKey ?? "local-fixture-key",
     models: [{ id: "fixture", name, reasoning: name !== "implementer", input: ["text"], contextWindow: 32_000, maxTokens: 2_000,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
   };

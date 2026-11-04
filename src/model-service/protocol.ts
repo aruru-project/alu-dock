@@ -1,4 +1,5 @@
-import type { Api, AssistantMessage, AssistantMessageEvent, AuthCheck, Context, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, AssistantMessageEvent, AuthCheck, AuthResult, Context, Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { ModelRef } from "../control/protocol.js";
 import { MAX_DOCK_TRANSFER_BYTES } from "../core/transport-bounds.js";
@@ -55,10 +56,32 @@ export interface ModelStreamRequest {
   options: Record<string, unknown>;
 }
 
+/** Overrides an extension may pass to getAuth; the signal is relayed as a cancel. */
+export interface ModelAuthOverrides {
+  apiKey?: string;
+  env?: Record<string, string>;
+  minOAuthValidityMs?: number;
+}
+
+/**
+ * A credential for an extension that calls a model itself (user decision 2026-11-05). Main's
+ * runtime resolves and refreshes it; a subscription yields a short-lived token, never its refresh token.
+ */
+export interface ModelAuthRequest {
+  /** A provider, or the model being called, whose own headers take part. */
+  target: string | Model<Api>;
+  overrides?: ModelAuthOverrides;
+}
+
+export type ModelAuthResult = AuthResult | null;
+export type ModelRequestAuthResult = Awaited<ReturnType<ModelRuntime["getRequestAuth"]>>;
+
 export type ModelServiceRequest =
   | { op: "catalog" }
   | ({ op: "resolve" } & ModelRouteRequest)
-  | ({ op: "stream" } & ModelStreamRequest);
+  | ({ op: "stream" } & ModelStreamRequest)
+  | ({ op: "auth" } & ModelAuthRequest)
+  | { op: "request_auth"; model: Model<Api> };
 
 /** Options a caller cannot hand to the model service: credentials and transport belong to Main. */
 export const SERVICE_OWNED_OPTIONS = ["apiKey", "env", "fetch"] as const;
@@ -132,11 +155,21 @@ export interface WireModelEvent { event: Record<string, unknown>; changes?: Part
 
 type Shadow = string | number | boolean | null | undefined | Shadow[] | { [key: string]: Shadow };
 
+/*
+ * Tool arguments are whatever JSON the model wrote, so keys such as "__proto__" or "constructor"
+ * are data. Reading and writing them as plain properties would reach the object's prototype and
+ * from there every object in the process (cloud review of e7c5da2). Only own properties are used.
+ */
+const own = (value: object, key: string | number): unknown => (Object.hasOwn(value, key) ? (value as Record<string | number, unknown>)[key] : undefined);
+const define = (target: object, key: string | number, value: unknown): void => {
+  Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+};
+
 /** Structure-only copy: strings are shared, so remembering a reply costs its node count, not its size. */
 function shadowOf(value: unknown): Shadow {
   if (Array.isArray(value)) return value.map(shadowOf);
   if (value !== null && typeof value === "object") {
-    const copy: { [key: string]: Shadow } = {};
+    const copy = Object.create(null) as { [key: string]: Shadow };
     for (const [key, item] of Object.entries(value)) if (item !== undefined) copy[key] = shadowOf(item);
     return copy;
   }
@@ -159,10 +192,10 @@ function diff(previous: Shadow, current: unknown, path: Path, changes: PartialCh
     return;
   }
   if (isRecord(current) && isRecord(previous) && !Array.isArray(previous)) {
-    for (const key of Object.keys(previous)) if (current[key] === undefined) changes.push({ path: [...path, key], delete: true });
+    for (const key of Object.keys(previous)) if (own(current, key) === undefined) changes.push({ path: [...path, key], delete: true });
     for (const [key, item] of Object.entries(current)) {
       if (item === undefined) continue;
-      if (key in previous) diff(previous[key] as Shadow, item, [...path, key], changes);
+      if (Object.hasOwn(previous, key)) diff(previous[key] as Shadow, item, [...path, key], changes);
       else changes.push({ path: [...path, key], set: item });
     }
     return;
@@ -206,16 +239,16 @@ export class PartialDecoder {
     }
     let target: unknown = this.partial;
     for (const key of change.path.slice(0, -1)) {
-      target = (target as Record<string | number, unknown> | undefined)?.[key];
+      target = target !== null && typeof target === "object" ? own(target, key) : undefined;
       if (target === null || typeof target !== "object") throw new Error("Model event changes a missing part of the reply");
     }
-    const container = target as Record<string | number, unknown>;
+    const container = target as object;
     const key = change.path[change.path.length - 1]!;
     if ("append" in change) {
-      const existing = container[key];
+      const existing = own(container, key);
       if (typeof existing !== "string") throw new Error("Model event appends to text that does not exist");
-      container[key] = existing + change.append;
-    } else if ("delete" in change) delete container[key];
-    else container[key] = change.set;
+      define(container, key, existing + change.append);
+    } else if ("delete" in change) delete (container as Record<string | number, unknown>)[key];
+    else define(container, key, change.set);
   }
 }

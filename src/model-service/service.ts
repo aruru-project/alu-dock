@@ -1,8 +1,11 @@
-import type { Api, Message, ModelsApiStreamOptions, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { AnyModel, Api, Message, Model, ModelsApiStreamOptions, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import {
+  type ModelAuthRequest,
+  type ModelAuthResult,
   type ModelCatalogSnapshot,
+  type ModelRequestAuthResult,
   ModelEventOrder,
   type ModelRouteRequest,
   type ModelRouteResult,
@@ -19,11 +22,15 @@ import {
 export class ModelServiceCore {
   private refreshing: Promise<unknown> | undefined;
 
-  constructor(private readonly runtime: ModelRuntime) {}
+  /** `reloadSettings` re-reads the Pi settings the requests use, such as the HTTP proxy. */
+  constructor(private readonly runtime: ModelRuntime, private readonly reloadSettings: () => Promise<void> = async () => {}) {}
 
   async catalog(): Promise<ModelCatalogSnapshot> {
-    // Adopt models.json and login changes made since the last read; Workers ask on start, reload and model lists.
-    this.refreshing ??= this.runtime.refresh({ allowNetwork: false }).finally(() => { this.refreshing = undefined; });
+    // Adopt settings, models.json and login changes made since the last read; Workers ask on start,
+    // on reload and for model lists, so a Work's /reload applies a changed proxy as it did locally.
+    this.refreshing ??= this.reloadSettings()
+      .then(() => this.runtime.refresh({ allowNetwork: false }))
+      .finally(() => { this.refreshing = undefined; });
     await this.refreshing;
     const models = [...this.runtime.getModels()];
     const providers = [...new Set(models.map((model) => model.provider))];
@@ -67,6 +74,18 @@ export class ModelServiceCore {
       if (order.terminal) return;
     }
     if (!signal.aborted) throw new Error("The provider stream ended without a final event");
+  }
+
+  async auth(request: ModelAuthRequest, signal: AbortSignal): Promise<ModelAuthResult> {
+    const overrides = { ...request.overrides, signal };
+    const result = typeof request.target === "string"
+      ? await this.runtime.getAuth(request.target, overrides)
+      : await this.runtime.getAuth(request.target as AnyModel, overrides);
+    return result ?? null;
+  }
+
+  requestAuth(model: Model<Api>): Promise<ModelRequestAuthResult> {
+    return this.runtime.getRequestAuth(model);
   }
 
   private requireModel(ref: { provider: string; id: string }) {

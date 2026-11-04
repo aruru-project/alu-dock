@@ -526,7 +526,7 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
     case "dock.tools": keys("request"); parseDockToolsRequest(args.request); return;
     case "dock.attachments": keys("request"); parseAttachmentAccessRequest(args.request); return;
     case "dock.models": {
-      const op = oneOf(args.op, ["catalog", "resolve", "stream", "cancel"] as const, "Model call");
+      const op = oneOf(args.op, ["catalog", "resolve", "stream", "auth", "request_auth", "cancel"] as const, "Model call");
       if (op === "catalog") keys("op");
       else if (op === "cancel") { keys("op", "callId"); boundedString(args.callId, 128, "Model call ID"); }
       else { keys("op", "request"); record(args.request, "Model request"); }

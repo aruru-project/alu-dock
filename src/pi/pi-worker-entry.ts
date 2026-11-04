@@ -32,7 +32,7 @@ import { DockToolsBridge } from "./dock-tools-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 import { connectRemoteModels } from "../model-service/consumer.js";
-import type { ModelCatalogSnapshot, ModelRouteResult, WireModelEvent } from "../model-service/protocol.js";
+import type { ModelAuthResult, ModelCatalogSnapshot, ModelRequestAuthResult, ModelRouteResult, WireModelEvent } from "../model-service/protocol.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -132,6 +132,8 @@ async function runWorker(): Promise<void> {
     stream: async (request, onEvent, signal) => {
       await callHost("dock.models", { op: "stream", request }, signal, (event) => onEvent(event as unknown as WireModelEvent));
     },
+    auth: async (request, signal) => await callHost("dock.models", { op: "auth", request }, signal) as ModelAuthResult,
+    requestAuth: async (model, signal) => await callHost("dock.models", { op: "request_auth", request: model }, signal) as ModelRequestAuthResult,
   }) : undefined;
   dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
     configure: async (action) => {

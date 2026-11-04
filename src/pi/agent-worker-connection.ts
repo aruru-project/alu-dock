@@ -6,7 +6,8 @@ import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js"
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentModelStateObservation, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
-import type { ModelRouteRequest, ModelStreamRequest } from "../model-service/protocol.js";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ModelAuthRequest, ModelRouteRequest, ModelStreamRequest } from "../model-service/protocol.js";
 import type { ModelHostPort } from "../model-service/service-process.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -284,6 +285,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     this.modelCalls.set(callId, controller);
     try {
       if (args.op === "resolve") return await port.resolve(args.request as ModelRouteRequest, controller.signal);
+      if (args.op === "auth") return await port.auth(args.request as ModelAuthRequest, controller.signal);
+      if (args.op === "request_auth") return await port.requestAuth(args.request as Model<Api>, controller.signal);
       await port.stream(args.request as ModelStreamRequest, (wire) => this.sender.sendEnvelope({ kind: "call_event", callId, event: wire as unknown as Record<string, unknown> }), controller.signal);
       return null;
     } finally {
