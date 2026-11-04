@@ -6,8 +6,7 @@ import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js"
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentModelStateObservation, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ModelAuthRequest, ModelRouteRequest, ModelStreamRequest } from "../model-service/protocol.js";
+import type { ModelAuthRequest } from "../model-service/protocol.js";
 import type { ModelHostPort } from "../model-service/service-process.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -38,7 +37,7 @@ export interface CreateAgentWorkerConnectionOptions {
   onWorkerSpawn?: (pid: number) => void;
   dockToolsHostPort: DockToolsHostPort;
   attachmentHostPort: InstanceAttachmentHostPort;
-  /** Main's model service; with it the Worker holds no providers or credentials. */
+  /** Main's model service; with it the Worker takes its model configuration and credentials from Main. */
   modelHostPort?: ModelHostPort;
   initialDockToolsEnabled: boolean;
   workName?: string;
@@ -275,20 +274,17 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     }
   }
 
-  /** Relays one model call to Main's model service; the Host does not read the requests or replies. */
+  /** Relays one question to Main's model service; the Host does not read the questions or answers. */
   private async handleModelCall(callId: string, args: Record<string, unknown>): Promise<unknown> {
     const port = this.options.modelHostPort;
     if (!port) throw new Error("This Host does not offer model access");
-    if (args.op === "catalog") return port.catalog();
     if (args.op === "cancel") { this.modelCalls.get(args.callId as string)?.abort(); return null; }
     const controller = new AbortController();
     this.modelCalls.set(callId, controller);
     try {
-      if (args.op === "resolve") return await port.resolve(args.request as ModelRouteRequest, controller.signal);
-      if (args.op === "auth") return await port.auth(args.request as ModelAuthRequest, controller.signal);
-      if (args.op === "request_auth") return await port.requestAuth(args.request as Model<Api>, controller.signal);
-      await port.stream(args.request as ModelStreamRequest, (wire) => this.sender.sendEnvelope({ kind: "call_event", callId, event: wire as unknown as Record<string, unknown> }), controller.signal);
-      return null;
+      if (args.op === "configuration") return await port.configuration(controller.signal);
+      if (args.op === "auth_state") return await port.authState(controller.signal);
+      return await port.auth(args.request as ModelAuthRequest, controller.signal);
     } finally {
       this.modelCalls.delete(callId);
     }

@@ -1,79 +1,47 @@
-import type { AnyModel, Api, Message, Model, ModelsApiStreamOptions, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { readFile } from "node:fs/promises";
 
-import {
-  type ModelAuthRequest,
-  type ModelAuthResult,
-  type ModelCatalogSnapshot,
-  type ModelRequestAuthResult,
-  ModelEventOrder,
-  type ModelRouteRequest,
-  type ModelRouteResult,
-  type ModelStreamRequest,
-  PartialEncoder,
-  SERVICE_OWNED_OPTIONS,
-  type WireModelEvent,
-} from "./protocol.js";
+import type { AnyModel, AuthCheck, ModelsStoreEntry } from "@earendil-works/pi-ai";
+import type { FileModelsStore, ModelRuntime } from "@earendil-works/pi-coding-agent";
+
+import type { ModelAuthRequest, ModelAuthResult, ModelAuthState, ModelConfiguration } from "./protocol.js";
 
 /**
- * Main's one model runtime, shared by every Work in the cluster. Pi's ModelRuntime owns providers,
- * credentials, login refresh and catalogs; this class only answers requests and keeps their lifetimes.
+ * Main's model configuration and credentials, kept by Pi's own ModelRuntime over Main's files. It
+ * answers what Works need to send requests themselves and alone refreshes subscriptions.
  */
 export class ModelServiceCore {
   private refreshing: Promise<unknown> | undefined;
 
-  /** `reloadSettings` re-reads the Pi settings the requests use, such as the HTTP proxy. */
-  constructor(private readonly runtime: ModelRuntime, private readonly reloadSettings: () => Promise<void> = async () => {}) {}
+  /** `reloadSettings` re-reads the Pi settings Main's own requests use, such as the proxy for login refreshes. */
+  constructor(
+    private readonly runtime: ModelRuntime,
+    private readonly files: { modelsPath: string; store: FileModelsStore },
+    private readonly reloadSettings: () => Promise<void> = async () => {},
+  ) {}
 
-  async catalog(): Promise<ModelCatalogSnapshot> {
-    // Adopt settings, models.json and login changes made since the last read; Workers ask on start,
-    // on reload and for model lists, so a Work's /reload applies a changed proxy as it did locally.
-    this.refreshing ??= this.reloadSettings()
-      .then(() => this.runtime.refresh({ allowNetwork: false }))
-      .finally(() => { this.refreshing = undefined; });
-    await this.refreshing;
-    const models = [...this.runtime.getModels()];
-    const providers = [...new Set(models.map((model) => model.provider))];
+  async configuration(): Promise<ModelConfiguration> {
+    await this.refresh();
+    const modelsJson = await readFile(this.files.modelsPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    const stored = await Promise.all(this.runtime.getProviders().map(async (provider) => [provider.id, await this.files.store.read(provider.id)] as const));
     return {
-      models,
-      available: [...await this.runtime.getAvailable()],
-      virtual: models.filter((model) => !this.runtime.getPhysicalModel(model.provider, model.id)).map((model) => ({ provider: model.provider, id: model.id })),
-      providers: await Promise.all(providers.map(async (provider) => {
-        const check = await this.runtime.checkAuth(provider).catch(() => undefined);
-        return { provider, configured: this.runtime.hasConfiguredAuth(provider), oauth: this.runtime.isUsingOAuth(provider), ...(check ? { check } : {}) };
-      })),
-      ...(this.runtime.getError() === undefined ? {} : { error: this.runtime.getError() }),
+      ...(modelsJson === undefined ? {} : { modelsJson }),
+      modelsStore: Object.fromEntries(stored.filter((entry): entry is readonly [string, ModelsStoreEntry] => entry[1] !== undefined)),
     };
   }
 
-  async resolve(request: ModelRouteRequest, signal: AbortSignal): Promise<ModelRouteResult> {
-    const model = this.requireModel(request.model);
-    const route = await this.runtime.resolveModel(model, request.messages as readonly Message[], {
-      reason: request.reason,
-      thinkingLevel: request.thinkingLevel,
-      signal,
-      ...(request.failed === undefined ? {} : { failed: request.failed }),
-      ...(request.state === undefined ? {} : { state: request.state }),
-    });
-    return { model: { provider: route.model.provider, id: route.model.id }, thinkingLevel: route.thinkingLevel, ...(route.state === undefined ? {} : { state: route.state }) };
-  }
-
-  /** Emits every event of one provider stream; the caller learns of an early end by the returned promise. */
-  async stream(request: ModelStreamRequest, emit: (wire: WireModelEvent) => Promise<void>, signal: AbortSignal): Promise<void> {
-    const model = this.requireModel(request.model);
-    for (const key of SERVICE_OWNED_OPTIONS) if (key in request.options) throw new Error(`${key} belongs to the model service on Main`);
-    const options = { ...request.options, signal };
-    const events = request.mode === "raw"
-      ? this.runtime.stream(model, request.context, options as ModelsApiStreamOptions<Api>)
-      : this.runtime.streamSimple(model, request.context, options as ModelsSimpleStreamOptions);
-    const order = new ModelEventOrder();
-    const encoder = new PartialEncoder();
-    for await (const event of events) {
-      order.accept(event);
-      await emit(encoder.encode(event));
-      if (order.terminal) return;
-    }
-    if (!signal.aborted) throw new Error("The provider stream ended without a final event");
+  async authState(): Promise<ModelAuthState> {
+    await this.refresh();
+    const providers = this.runtime.getProviders().map((provider) => provider.id);
+    const checks = await Promise.all(providers.map(async (id) => [id, await this.runtime.checkAuth(id)] as const));
+    return {
+      providers,
+      checks: Object.fromEntries(checks.filter((entry): entry is readonly [string, AuthCheck] => entry[1] !== undefined)),
+      available: (await this.runtime.getAllAvailable()).map((model) => ({ provider: model.provider, id: model.id })),
+      stored: (await this.runtime.listCredentials()).map((credential) => credential.providerId),
+    };
   }
 
   async auth(request: ModelAuthRequest, signal: AbortSignal): Promise<ModelAuthResult> {
@@ -84,13 +52,11 @@ export class ModelServiceCore {
     return result ?? null;
   }
 
-  requestAuth(model: Model<Api>): Promise<ModelRequestAuthResult> {
-    return this.runtime.getRequestAuth(model);
-  }
-
-  private requireModel(ref: { provider: string; id: string }) {
-    const model = this.runtime.getModel(ref.provider, ref.id);
-    if (!model) throw new Error(`Model ${ref.provider}/${ref.id} is not configured on Main`);
-    return model;
+  /** Adopt settings, models.json and login changes made since the last read; Works ask on start and reload. */
+  private async refresh(): Promise<void> {
+    this.refreshing ??= this.reloadSettings()
+      .then(() => this.runtime.refresh({ allowNetwork: false }))
+      .finally(() => { this.refreshing = undefined; });
+    await this.refreshing;
   }
 }

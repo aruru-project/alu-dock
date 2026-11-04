@@ -72,7 +72,7 @@ export type UiCapability =
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
   | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.runtimeReload";
 
-/** dock.models is granted only by a Host that offers model access; its Workers then hold no providers. */
+/** dock.models is granted only by a Host that offers model access; its Workers then take the model configuration and credentials from Main. */
 export type DockCapability = "dock.identity" | "dock.tools.configure" | "dock.tools" | "dock.attachments" | "dock.models";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
@@ -108,8 +108,6 @@ export type WorkerEnvelope =
   | { kind: "agent_request"; callId: string; request: AgentRequest; context?: AgentInvokeContext }
   | { kind: "agent_control"; callId: string; control: AgentWorkerControl }
   | { kind: "call"; callId: string; capability: WorkerCapability; args: unknown }
-  /** One streamed part of a call's answer, before its response; only dock.models streams. */
-  | { kind: "call_event"; callId: string; event: Record<string, unknown> }
   | { kind: "accepted"; callId: string }
   | { kind: "response"; callId: string; ok: true; result: unknown; state?: AgentWorkerState }
   | { kind: "response"; callId: string; ok: false; error: WorkerErrorDto; state?: AgentWorkerState }
@@ -292,9 +290,6 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       validateUiCapabilityArgs(capability, value.args);
       return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), capability, args: value.args };
     }
-    case "call_event":
-      exactKeys(value, ["kind", "callId", "event"], "Worker call event envelope");
-      return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), event: record(value.event, "Worker call event") };
     case "accepted":
       exactKeys(value, ["kind", "callId"], "Worker accepted envelope");
       return { kind, callId: boundedString(value.callId, 128, "Worker call ID") };
@@ -526,8 +521,8 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
     case "dock.tools": keys("request"); parseDockToolsRequest(args.request); return;
     case "dock.attachments": keys("request"); parseAttachmentAccessRequest(args.request); return;
     case "dock.models": {
-      const op = oneOf(args.op, ["catalog", "resolve", "stream", "auth", "request_auth", "cancel"] as const, "Model call");
-      if (op === "catalog") keys("op");
+      const op = oneOf(args.op, ["configuration", "auth_state", "auth", "cancel"] as const, "Model call");
+      if (op === "configuration" || op === "auth_state") keys("op");
       else if (op === "cancel") { keys("op", "callId"); boundedString(args.callId, 128, "Model call ID"); }
       else { keys("op", "request"); record(args.request, "Model request"); }
       return;

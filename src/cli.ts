@@ -285,8 +285,9 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   const incidentRecorder = catalogPath
     ? new WorkerIncidentStore(workerIncidentStoreRoot(catalogPath)).recorder(options.machineName ?? "This computer")
     : undefined;
-  // Main runs the cluster's one model runtime; its Workers hold no providers or credentials (card #303).
-  // A service that cannot start leaves the Host running; new model requests then fail with a reason.
+  // Main keeps the cluster's model configuration and credentials; Works send their own requests
+  // with them (card #303). A service that cannot start leaves the Host running; Works then cannot
+  // get a credential and say why.
   if (options.role !== "subhost") {
     const { ModelServiceProcess } = await import("./model-service/service-process.js");
     const { getAgentDir } = await import("@earendil-works/pi-coding-agent");

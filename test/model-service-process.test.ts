@@ -16,9 +16,9 @@ test("a model service whose start hangs is restarted, and requests waiting for i
   await waitFor(() => service.pid !== undefined, "The service did not start");
   const first = service.pid!;
 
-  await assert.rejects(service.catalog(), ModelServiceUnavailableError);
+  await assert.rejects(service.configuration(new AbortController().signal), ModelServiceUnavailableError);
   const controller = new AbortController();
-  const cancelled = service.stream({ mode: "simple", model: { provider: "p", id: "m" }, context: { messages: [] }, options: {} }, async () => {}, controller.signal);
+  const cancelled = service.auth({ target: "p" }, controller.signal);
   setTimeout(() => controller.abort(), 50);
   const startedAt = Date.now();
   await assert.rejects(cancelled);

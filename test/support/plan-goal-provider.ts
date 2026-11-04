@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createServer, type ServerResponse } from "node:http";
+import { createServer, type IncomingHttpHeaders, type ServerResponse } from "node:http";
 
 export interface ChatRequest {
   messages?: Array<{ role: string; content?: unknown }>;
@@ -12,7 +12,7 @@ export class PlanGoalProvider {
   private readonly server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    this.requests.push(new HeldChatRequest(JSON.parse(Buffer.concat(chunks).toString("utf8")) as ChatRequest, response));
+    this.requests.push(new HeldChatRequest(JSON.parse(Buffer.concat(chunks).toString("utf8")) as ChatRequest, response, request.headers));
   });
 
   async start(): Promise<string> {
@@ -34,7 +34,7 @@ export class PlanGoalProvider {
 }
 
 export class HeldChatRequest {
-  constructor(readonly body: ChatRequest, private readonly response: ServerResponse) {}
+  constructor(readonly body: ChatRequest, private readonly response: ServerResponse, readonly headers: IncomingHttpHeaders = {}) {}
 
   get closed(): boolean { return this.response.destroyed; }
   get toolNames(): string[] { return (this.body.tools ?? []).map((tool) => tool.function.name); }
