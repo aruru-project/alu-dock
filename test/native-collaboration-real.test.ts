@@ -116,7 +116,7 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
 });
 
 // User decision 2026-10-31: a child Work talks only to its parent, and the runtime holds it
-// there rather than its prompt (STORY.md: 有边界). Other top-level Works neither see nor reach it.
+// there rather than its prompt. Other top-level Works neither see nor reach it.
 test("a child Work can only message its parent, and other top-level Works cannot see it", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "reviewer"], { prefix: "alu-native-bounds-" });
   const { cwd, workerPids } = team;
