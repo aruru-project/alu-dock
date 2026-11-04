@@ -31,12 +31,16 @@ import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/in
 import { DockToolsBridge } from "./dock-tools-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
+import { connectRemoteModels } from "../model-service/consumer.js";
+import type { ModelCatalogSnapshot, ModelRouteResult, WireModelEvent } from "../model-service/protocol.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
   resolve(value: unknown): void;
   reject(error: unknown): void;
   abort?: () => void;
+  /** Streamed parts of the answer, before the response. */
+  onEvent?: (event: Record<string, unknown>) => void;
 }
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
@@ -64,17 +68,22 @@ async function runWorker(): Promise<void> {
   let dockToolsBridge: DockToolsBridge | undefined;
   let attachmentPort: DockAttachmentCallPort | undefined;
 
-  const callHost = (capability: UiCapability | DockCapability, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
+  const callHost = (capability: UiCapability | DockCapability, args: Record<string, unknown>, signal?: AbortSignal, onEvent?: (event: Record<string, unknown>) => void): Promise<unknown> => {
     const callId = `child-${++nextHostCall}`;
     if (!hostCapabilities.has(capability as ReverseWorkerCapability)) {
       return Promise.reject(new Error(`Host capability is not authorized for this Worker: ${capability}`));
     }
     if (signal?.aborted) return Promise.resolve(undefined);
     return new Promise<unknown>((resolveCall, rejectCall) => {
-      const abort = signal && capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); } : undefined;
+      const abort = !signal ? undefined
+        : capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); }
+        // A model request goes on at the provider until the Host cancels it there.
+        : capability === "dock.models" ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "dock.models", args: { op: "cancel", callId } }).catch(() => {}); }
+        : undefined;
       if (signal && abort) signal.addEventListener("abort", abort, { once: true });
       hostCalls.set(callId, {
         capability,
+        ...(onEvent === undefined ? {} : { onEvent }),
         resolve: (value) => { if (signal && abort) signal.removeEventListener("abort", abort); resolveCall(value); },
         reject: (error) => { if (signal && abort) signal.removeEventListener("abort", abort); rejectCall(error); },
       });
@@ -116,6 +125,14 @@ async function runWorker(): Promise<void> {
       return result as AttachmentAccessResult;
     },
   } : undefined;
+  // With Main's model service the Work holds no providers or credentials, and there is no local fallback.
+  const remoteModels = hostCapabilities.has("dock.models") ? await connectRemoteModels({
+    catalog: async () => await callHost("dock.models", { op: "catalog" }) as ModelCatalogSnapshot,
+    resolve: async (request, signal) => await callHost("dock.models", { op: "resolve", request }, signal) as ModelRouteResult,
+    stream: async (request, onEvent, signal) => {
+      await callHost("dock.models", { op: "stream", request }, signal, (event) => onEvent(event as unknown as WireModelEvent));
+    },
+  }) : undefined;
   dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
     configure: async (action) => {
       if (action === "status") return { enabled: dockToolsBridge!.enabled };
@@ -157,6 +174,7 @@ async function runWorker(): Promise<void> {
       ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
       dockToolsBridge,
       ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
+      ...(remoteModels === undefined ? {} : { modelConsumer: remoteModels }),
     });
   } catch (error) {
     // The Host learns why this Work could not start (an unavailable chosen model, an
@@ -187,6 +205,10 @@ async function runWorker(): Promise<void> {
   });
 
   async function handleHostEnvelope(envelope: WorkerEnvelope): Promise<void> {
+    if (envelope.kind === "call_event") {
+      hostCalls.get(envelope.callId)?.onEvent?.(envelope.event);
+      return;
+    }
     if (envelope.kind === "response") {
       const pending = hostCalls.get(envelope.callId);
       if (!pending) return;
@@ -331,7 +353,8 @@ function verifyDockContext(raw: unknown, expected: WorkerIdentity, runtimeGenera
   if (!Array.isArray(value.capabilities) || !value.capabilities.includes("dock.identity")) {
     throw new Error("Dock Worker identity capability was not authorized by Host");
   }
-  const known = new Set<string>(ORDINARY_REVERSE_WORKER_CAPABILITIES);
+  // dock.models is not ordinary: only a Host that offers model access grants it.
+  const known = new Set<string>([...ORDINARY_REVERSE_WORKER_CAPABILITIES, "dock.models"]);
   const capabilities = new Set<ReverseWorkerCapability>();
   for (const capability of value.capabilities) {
     if (typeof capability !== "string" || !known.has(capability)) throw new Error("Host advertised an unknown Worker capability");

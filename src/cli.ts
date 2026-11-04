@@ -16,6 +16,7 @@ import { AttachmentService } from "./control/attachment-service.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { ModelVisibilityService, ModelVisibilityStore, modelVisibilityStateRoot } from "./control/model-visibility.js";
 import { ChildModelsStore } from "./control/child-models.js";
+import type { ModelServiceProcess } from "./model-service/service-process.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultLocalEndpoint } from "./control/local-endpoint.js";
@@ -205,6 +206,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   let registry!: DockRegistry;
   let host!: DockHost;
   let upstream: SubHostMachineConnection | undefined;
+  let modelService: ModelServiceProcess | undefined;
   let subHostStatus: { state: MachineSettingsState; hostEpoch: string; reporter: SubHostStatusReporter } | undefined;
   try {
   let options = parseServeOptions(args);
@@ -283,8 +285,19 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   const incidentRecorder = catalogPath
     ? new WorkerIncidentStore(workerIncidentStoreRoot(catalogPath)).recorder(options.machineName ?? "This computer")
     : undefined;
+  // Main runs the cluster's one model runtime; its Workers hold no providers or credentials (card #303).
+  // A service that cannot start leaves the Host running; new model requests then fail with a reason.
+  if (options.role !== "subhost") {
+    const { ModelServiceProcess } = await import("./model-service/service-process.js");
+    const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+    modelService = new ModelServiceProcess({ agentDir: managedPiAgentDir ?? getAgentDir() });
+    modelService.start().catch((error: unknown) => {
+      process.stderr.write(`Alu Dock: the model service could not start; Works on this machine cannot call models until it does. ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  }
   const createManagedPiInstance = (input: Parameters<typeof createPiInstance>[0]) => createPiInstance({
     ...input,
+    ...(modelService === undefined ? {} : { modelHostPort: modelService }),
     ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
     ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
   });
@@ -437,6 +450,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   } finally {
     await upstream?.stop();
     await host?.stop();
+    await modelService?.stop();
     if (subHostStatus) {
       await subHostStatus.reporter.stop();
       await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});

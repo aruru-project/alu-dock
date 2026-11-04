@@ -1,3 +1,4 @@
+import type { RemoteModels } from "../model-service/consumer.js";
 import { piSystemPromptResolver } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
 import { workerToolSelection } from "./worker-tool-policy.js";
@@ -219,6 +220,8 @@ export interface PiAgentAdapterOptions {
 }
 
 export interface CreatePiAgentAdapterOptions {
+  /** Main's models; without them Pi reads this machine's own model configuration. */
+  modelConsumer?: RemoteModels;
   cwd: string;
   agentDir: string;
   sessionDir?: string;
@@ -669,7 +672,7 @@ export class PiAgentAdapter {
   async listModels(): Promise<AgentModelListBody> {
     const binding = this.requireActive();
     return {
-      ...projectPiModelList(await binding.services.modelRuntime.getAvailable()),
+      ...projectPiModelList(await binding.services.getAvailableModels()),
       availableThinkingLevels: [...binding.session.getAvailableThinkingLevels()],
     };
   }
@@ -732,12 +735,15 @@ export class PiAgentAdapter {
         ...(path ? { path } : {}), source: projectSource(extension.sourceInfo, "extension"),
       });
     }
-    const modelError = binding.services.modelRuntime.getError();
+    const modelError = binding.services.getModelError();
     const diagnostics: DiagnosticDto[] = [
       ...extensions.errors.map((failure) => ({ severity: "error" as const, message: safeRequiredText(failure.error, 2_048, "Extension load failure omitted"), source: boundedString(failure.path, 256, "extension") })),
       ...skills.diagnostics.map(projectDiagnostic),
       ...prompts.diagnostics.map(projectDiagnostic),
       ...(modelError ? [{ severity: "error" as const, message: safeRequiredText(modelError, 2_048, "Model configuration error omitted"), source: "models.json" }] : []),
+      // Pi's session services report extension parts that cannot work here, such as provider hooks
+      // when Main's model service runs the requests; they stay visible for as long as they apply.
+      ...binding.services.diagnostics.map((item) => ({ severity: item.type, message: safeRequiredText(item.message, 2_048, "Extension diagnostic omitted"), source: "extension" })),
     ];
     const sortedResources = resources.sort(compareResourceDtos);
     const sortedDiagnostics = diagnostics.sort(compareDiagnosticDtos);
@@ -1167,8 +1173,8 @@ export class PiAgentAdapter {
 
   async selectModel(provider: string, modelId: string): Promise<AgentModelState> {
     const binding = this.requireActive();
-    const model = binding.services.modelRuntime.getModel(provider, modelId);
-    if (!model || !(await binding.services.modelRuntime.checkAuth(provider))) throw new AgentModelNotFoundError(provider, modelId);
+    const model = binding.services.models.getModel(provider, modelId);
+    if (!model || !(await binding.services.models.checkAuth(provider))) throw new AgentModelNotFoundError(provider, modelId);
     this.assertCleanSettingsBaseline(binding, "model");
     const previousThinking = binding.session.thinkingLevel;
     await binding.session.setModel(model, { preserveThinkingLevel: true });
@@ -3585,16 +3591,16 @@ function childForkPoint(branch: ReturnType<SessionManager["getBranch"]>): string
 async function refreshSessionModels(session: AgentSession, services: AgentSessionServices): Promise<void> {
   // Reload adopts local models.json and saved catalogs without waiting on pi.dev
   // (cards #222/#330). Pi owns loading, merging and provider availability.
-  await services.modelRuntime.refresh({ allowNetwork: false });
+  await services.refreshModels();
   const current = session.model;
   if (current) {
-    const refreshed = services.modelRuntime.getModel(current.provider, current.id);
+    const refreshed = services.models.getModel(current.provider, current.id);
     if (refreshed) session.agent.state.model = refreshed;
   }
   if (session.scopedModels.length > 0) {
     session.setScopedModels(session.scopedModels.map((scoped) => ({
       ...scoped,
-      model: services.modelRuntime.getModel(scoped.model.provider, scoped.model.id) ?? scoped.model,
+      model: services.models.getModel(scoped.model.provider, scoped.model.id) ?? scoped.model,
     })));
   }
 }
@@ -3627,7 +3633,9 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       projectTrusted: trustByCwd.get(canonicalCwd) ?? false,
     });
     configurePiNetwork(settingsManager);
+    const remoteModels = options.modelConsumer;
     const services = await createAgentSessionServices({
+      ...(remoteModels === undefined ? {} : { modelConsumer: remoteModels, refreshModelConsumer: () => remoteModels.refresh() }),
       cwd: canonicalCwd,
       agentDir,
       settingsManager,
@@ -3655,7 +3663,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     const childStart = childStarting;
     const inheritedConversation = childStart && sessionManager.getBranch().length > 0;
     // A child given its parent's conversation still starts on its own model.
-    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager, childStart);
+    const startingModel = await resolvePiStartingModel(requestedModel, services.models, sessionManager, childStart);
     // Pi starts a model that lacks the requested thinking level at the nearest level it has.
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
