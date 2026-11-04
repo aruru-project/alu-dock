@@ -122,10 +122,14 @@ test("instance observation is source-authorized, excludes self, watches once, an
   await waitFor(() => target.snapshot().execution === "running", "cursor-changing target run did not start");
   runtimes[1]!.settle("cursor change complete");
   await cursorChangingRun;
+  const earlier = await registry.invokeDockTool(source.id, { type: "inspect", target: "sol", limit: 1, types: ["user"], cursor });
+  if (earlier.type !== "inspect") assert.fail("expected continued inspect result");
+  assert.equal(earlier.result.conversation?.messages[0]?.text, "older question", "messages the target adds meanwhile do not move an earlier page");
+  runtimes[1]!.conversationRevision = "another-branch";
   await assert.rejects(
     registry.invokeDockTool(source.id, { type: "inspect", target: "sol", limit: 1, types: ["user"], cursor }),
     /cursor is stale because the target conversation changed/u,
-    "a checkpoint must invalidate a cursor even when it still has buffered messages",
+    "another session or branch is another conversation",
   );
 
   const refreshedUsers = await registry.invokeDockTool(source.id, { type: "inspect", target: "sol", limit: 1, types: ["user"] });
@@ -187,11 +191,10 @@ test("instance observation is source-authorized, excludes self, watches once, an
   await assert.rejects(registry.invokeDockTool(source.id, { type: "list" }), /off for this instance/u);
 });
 
-test("dock_inspect returns one long sibling message intact to the Agent", async () => {
+test("dock_inspect reads a message whole when history holds only its preview, a page at a time", async () => {
+  // As in a real Worker: history entries carry an 8,000-character preview, the rest is read by content reference (#263).
   const cwd = await mkdtemp(join(tmpdir(), "alu-dock-observation-long-message-"));
-  const firstBlock = `begin-${"a".repeat(7_000)}`;
-  const secondBlock = `${"b".repeat(7_000)}-end`;
-  const completeMessage = `${firstBlock}\n${secondBlock}`;
+  const whole = `begin-${"a".repeat(50_000)}${"b".repeat(50_000)}-end`;
   const runtimes: DelayedAgentWorkerConnection[] = [];
   const ids = ["long-source", "long-target"];
   const registry = new DockRegistry(
@@ -201,7 +204,7 @@ test("dock_inspect returns one long sibling message intact to the Agent", async 
       kind: "message",
       source: "assistant",
       visibility: "conversation",
-      content: [{ type: "text", text: firstBlock }, { type: "text", text: secondBlock }],
+      content: [{ type: "text", text: whole.slice(0, 8_000) }],
     }]),
     () => ids.shift()!,
     { hostEpoch: "observation-long-message-host" },
@@ -209,13 +212,24 @@ test("dock_inspect returns one long sibling message intact to the Agent", async 
   const source = await registry.create({ operationId: "create-long-source", cwd, name: "Alu" });
   await registry.create({ operationId: "create-long-target", cwd, name: "Sol" });
   await registry.configureDockTools(source.id, true, "long-message-grant");
+  runtimes[1]!.conversationContent.set("fixture-long-assistant", Array.from({ length: Math.ceil(whole.length / 32_000) }, (_, index) => {
+    const offset = index * 32_000;
+    return { blockIndex: 0, type: "text" as const, text: whole.slice(offset, offset + 32_000), offset, blockComplete: offset + 32_000 >= whole.length };
+  }));
 
-  const result = await registry.invokeDockTool(source.id, { type: "inspect", target: "Sol" });
-  if (result.type !== "inspect") assert.fail("expected inspect result");
-  assert.equal(result.result.conversation?.messages[0]?.text, completeMessage);
-  const modelVisible = renderDockToolsResult(result);
-  assert.ok(modelVisible.includes(firstBlock));
-  assert.ok(modelVisible.includes(secondBlock));
+  // The message is longer than one page: the first page shows its start and says so.
+  const first = await registry.invokeDockTool(source.id, { type: "inspect", target: "Sol" });
+  if (first.type !== "inspect") assert.fail("expected inspect result");
+  const start = first.result.conversation!.messages[0]!.text;
+  assert.match(renderDockToolsResult(first), /continues; dock_inspect with the continuation cursor shows the rest of this message/u);
+  const cursor = first.result.conversation!.nextCursor;
+  assert.ok(cursor);
+  const second = await registry.invokeDockTool(source.id, { type: "inspect", target: "Sol", cursor });
+  if (second.type !== "inspect") assert.fail("expected continued inspect result");
+  const rest = second.result.conversation!.messages[0]!.text;
+  assert.equal(second.result.conversation!.hasEarlier, false);
+  const withoutMarkers = (text: string) => text.replace(/\n\[…continues;[^\]]*\]$/u, "").replace(/^\[…continued from the page before\]\n/u, "");
+  assert.equal(withoutMarkers(start) + withoutMarkers(rest), whole);
 });
 
 test("dock_list shows the Agent each sibling's whole current model and thinking level", async () => {

@@ -371,7 +371,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   }
 
   async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
-    const chunks = this.conversationContent.get(contentRef);
+    const chunks = this.conversationContent.get(contentRef) ?? this.entryContent(contentRef);
     if (!chunks) throw new AgentConversationCursorError("Conversation content reference is stale");
     const paged = Buffer.byteLength(JSON.stringify(chunks), "utf8") > 64_000;
     const offset = cursor === undefined ? 0 : Number.parseInt(cursor, 10);
@@ -384,6 +384,18 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       complete: end >= chunks.length,
       ...(end >= chunks.length ? {} : { nextCursor: String(end) }),
     };
+  }
+
+  /** Without content set for it, a fixture entry's full content is its history entry. */
+  private entryContent(contentRef: string): AgentConversationContentChunk[] | undefined {
+    const entry = this.history.find((candidate) => `fixture-${candidate.entryId}` === contentRef);
+    return entry?.content.map((block, blockIndex): AgentConversationContentChunk => {
+      if (block.type === "text" || block.type === "thinking") return { blockIndex, type: block.type, text: block.text, offset: 0, blockComplete: true };
+      if (block.type === "image") return { blockIndex, type: "image_ref", mimeType: block.mimeType };
+      if (block.type === "tool_call") return { blockIndex, type: "tool_call", toolCallId: block.toolCallId, toolName: block.toolName, argumentsJson: JSON.stringify(block.args), offset: 0, blockComplete: true };
+      if (block.type === "tool_result") return { blockIndex, type: "tool_result", toolCallId: block.toolCallId, toolName: block.toolName, text: block.text, isError: block.isError, offset: 0, blockComplete: true };
+      return { blockIndex, ...block };
+    });
   }
 
   blockNextTreeRead(): { entered: Promise<void>; release: () => void } {

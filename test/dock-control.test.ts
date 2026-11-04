@@ -2846,7 +2846,9 @@ test("conversation content survives fresh clients through revision-bound Protoco
   const image = content.chunks.find((chunk) => chunk.type === "image");
   assert.deepEqual(image, { blockIndex: 2, type: "image", mimeType: "image/png", data: imageData, offset: 0, blockComplete: true });
 
+  // A reference to a record that is gone, as after a session switch, is refused.
   runtime.conversationContent.delete(contentRef);
+  runtime.history = runtime.history.filter((entry) => entry.entryId !== "h3");
   await assert.rejects(
     freshClient.conversationContent(created.id, contentRef),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
