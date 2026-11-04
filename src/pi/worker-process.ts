@@ -14,6 +14,10 @@ export interface PiWorkerInitOptions {
   tools?: string[];
   excludeTools?: string[];
   workerConfig?: JsonObject;
+  /** A child Work reports only to its parent. */
+  child?: true;
+  /** A child's exact tool ceiling, chosen by its parent. */
+  allowedTools?: string[];
   projectTrusted: boolean;
   sessionFile?: string;
   initialName?: string;
@@ -119,7 +123,7 @@ export class PiWorkerProcess {
 
   terminate(): Promise<void> {
     if (this.terminating) return this.terminating;
-    this.terminating = this.performTerminate();
+    this.terminating = this.performTerminate().catch(error => { this.terminating = undefined; throw error; });
     return this.terminating;
   }
 

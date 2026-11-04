@@ -35,6 +35,7 @@ export interface ActiveInteraction { id: string; method: InteractionMethod; expi
 export interface EventCursor { hostEpoch: string; instanceId: string; runtimeGeneration: number; sequence: number }
 
 export interface Work {
+  parentId?: string
   id: string
   hostId?: string
   key?: string

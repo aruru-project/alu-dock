@@ -148,7 +148,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   }
 
   async dispose(): Promise<AgentCleanupResult> {
-    if (this.expectedExit) return { cleanupErrors: [] };
+    if (this.expectedExit) { await this.process.terminate(); return { cleanupErrors: [] }; }
     this.expectedExit = true;
     let cleanup: AgentCleanupResult = { cleanupErrors: [] };
     if (!this.unavailable) {

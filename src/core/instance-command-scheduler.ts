@@ -123,7 +123,7 @@ export class InstanceCommandScheduler {
     const terminal = this.find("terminal");
     if (request.class === "terminal") {
       if (terminal) return { kind: "join", active: this.view(terminal) };
-      if (!facts.acceptingCommands) return { kind: "reject", reason: "not_active", lifecycle: facts.lifecycle };
+      if (!facts.acceptingCommands && facts.lifecycle !== "runtime_error" && facts.lifecycle !== "stopping") return { kind: "reject", reason: "not_active", lifecycle: facts.lifecycle };
       return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
     }
     if (terminal || !facts.acceptingCommands) {

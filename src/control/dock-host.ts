@@ -1,3 +1,4 @@
+import { observationStatus } from "./instance-observation-service.js";
 import { InstanceRecordChannel, recordEvent } from "./instance-record-delivery.js";
 import { usesInstanceRecords, INSTANCE_RECORDS_CAPABILITY } from "./protocol.js";
 import { writeTransferBytes } from "./file-channel.js";
@@ -13,6 +14,7 @@ import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
 import { ModelVisibilityError, type ModelVisibilityService } from "./model-visibility.js";
+import type { ChildModelsStore } from "./child-models.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -160,6 +162,8 @@ export interface DockHostOptions {
   remoteInstances?: RemoteInstanceDirectory;
   /** This machine's hidden-model list; without it model lists are returned unchanged. */
   modelVisibility?: ModelVisibilityService;
+  /** The models the user shows Agents for child Works; without it the list is empty. */
+  childModels?: ChildModelsStore;
   listen?: boolean;
 }
 
@@ -191,6 +195,7 @@ export class DockHost {
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
   private readonly modelVisibility: ModelVisibilityService | undefined;
+  private readonly childModels: ChildModelsStore | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -217,13 +222,16 @@ export class DockHost {
       systemCatalog: (cwd: string, _hostId?: string, cursor?: import("./protocol.js").SystemCatalogCursor, limit?: number) => requireSystems().catalog(cwd, cursor, limit),
       systemContent: (cwd: string, id: string, _hostId?: string, offset?: number, revision?: string) => requireSystems().content(cwd, id, offset, revision),
       setSystemDefault: (cwd: string, id: string, _hostId?: string, operationId = randomUUID()) => this.operationLedger.run(operationId, "system.default.set", { cwd, id, operationId }, () => requireSystems().setDefault(cwd, id)),
-      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig })).instance,
+      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject, child?: import("../core/dock-tools.js").DockChildSelection) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig, ...(child === undefined ? {} : { child }) })).instance,
     };
     const requireSystems = () => {
       if (!this.systemService) throw new ProtocolValidationError("capability_missing", "This Host does not provide system selection. Update the Host and retry.");
       return this.systemService;
     };
     this.registry.bindDockToolsMutationPort({
+      childModels: async () => this.childModels ? await this.childModels.read() : { models: [] },
+      interrupt: async (instanceId, operationId) => { await this.registry.get(instanceId).abort(operationId); return this.registry.observationStatus(instanceId); },
+      stop: async (instanceId, operationId) => { const result = await this.registry.stop(instanceId, operationId); return observationStatus(result.instance); },
       create: (input) => this.operationLedger.run(systemToolOperation(input.operationId, "intent"), "dock.create", input, () => createDockSystem(systemPort, input)),
       system: (input) => readDockSystem(systemPort, input),
       send: async (input) => {
@@ -231,7 +239,7 @@ export class DockHost {
           operationId: input.operationId,
           instanceId: input.instanceId,
           message: input.message,
-          delivery: "auto",
+          delivery: input.delivery ?? "followUp",
         });
         return {
           target: this.registry.observationStatus(result.instance.id),
@@ -249,6 +257,7 @@ export class DockHost {
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.attachmentService = options.attachmentService;
     this.modelVisibility = options.modelVisibility;
+    this.childModels = options.childModels;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);

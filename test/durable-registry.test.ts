@@ -74,7 +74,7 @@ async function seedStoppedCatalog(catalogPath: string, cwd: string, ids: readonl
   return records;
 }
 
-test("Dock tools switch persists across Host restart and explicit reopen", async () => {
+test("New explicit Dock tools opt-out persists across Host restart and explicit reopen", async () => {
   const { cwd, catalogPath } = await fixturePath();
   const firstRuntimes: DelayedAgentWorkerConnection[] = [];
   const first = new DockRegistry(
@@ -85,8 +85,10 @@ test("Dock tools switch persists across Host restart and explicit reopen", async
   await first.initializeCatalog();
   const workerConfig = { excludeTools: ["bash"], thinkingLevel: "low" };
   const source = await first.create({ operationId: "create-observer", cwd, workerConfig });
-  await first.configureDockTools(source.id, true, "dock-tools-on");
-  assert.equal(first.dockToolsEnabled(source.id), true);
+  await first.configureDockTools(source.id, false, "dock-tools-off");
+  assert.equal(first.dockToolsEnabled(source.id), false);
+
+  assert.equal((await new FileCatalogStore(catalogPath).load())?.instances[0]?.collaborationVersion, 1);
 
   let reopenInput: InstanceFactoryInput | undefined;
   const reopenedRuntimes: DelayedAgentWorkerConnection[] = [];
@@ -101,11 +103,11 @@ test("Dock tools switch persists across Host restart and explicit reopen", async
     },
   );
   await second.initializeCatalog();
-  assert.equal(second.dockToolsEnabled(source.id), true);
+  assert.equal(second.dockToolsEnabled(source.id), false);
   await second.reopen({ operationId: "reopen-observer", instanceId: source.id });
-  assert.equal(reopenInput?.dockToolsEnabled, true);
+  assert.equal(reopenInput?.dockToolsEnabled, false);
   assert.deepEqual(reopenInput?.workerConfig, workerConfig);
-  assert.equal(second.get(source.id).dockToolsEnabled(), true);
+  assert.equal(second.get(source.id).dockToolsEnabled(), false);
 });
 
 test("reopen catalog failure disposes its candidate and preserves unavailable facts", async () => {

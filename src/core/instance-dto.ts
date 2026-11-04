@@ -353,6 +353,8 @@ export interface EventCursor {
 }
 
 export interface InstanceSnapshot {
+  /** Set on a child Work: the top-level Work it belongs to. */
+  parentId?: string;
   id: string;
   creationOperationId: string;
   /** Stable Machine identity from machine.list; supplied by the Main Host boundary. */

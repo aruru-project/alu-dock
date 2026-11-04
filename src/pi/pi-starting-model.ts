@@ -13,12 +13,14 @@ export async function resolvePiStartingModel(
   input: unknown,
   modelRuntime: Pick<ModelRuntime, "getModel" | "checkAuth">,
   sessionManager: Pick<SessionManager, "getBranch">,
+  /** A child starting from its parent's conversation still takes the model chosen for it. */
+  creatingChild = false,
 ): Promise<ReturnType<ModelRuntime["getModel"]>> {
   if (input === undefined) return undefined;
   if (input === null || typeof input !== "object" || Array.isArray(input)) throw unreadable();
   const { provider, id } = input as { provider?: unknown; id?: unknown };
   if (typeof provider !== "string" || typeof id !== "string" || provider.length === 0 || id.length === 0) throw unreadable();
-  if (sessionHasRecordedModel(sessionManager)) return undefined;
+  if (!creatingChild && sessionHasRecordedModel(sessionManager)) return undefined;
   const model = modelRuntime.getModel(provider, id);
   // The same failure as `model.set`, so clients explain it the same way.
   if (!model || !(await modelRuntime.checkAuth(provider))) throw new AgentModelNotFoundError(provider, id);

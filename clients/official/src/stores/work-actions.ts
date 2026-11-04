@@ -155,7 +155,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     if (!isTauri || !capturedHost || !stopCanStart(work, workMutating.value) || !work) return false
     const feedbackScope = captureFeedback(false)
     if (!await page.askConfirm('停止当前工作？', stopConfirmationText(work))) return false
-    if (!feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return false
+    if (!feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || !stopCanStart(selected.value, false)) return false
     pendingWorkActions.value.add(feedbackScope.identity)
     reportAction(feedbackScope, null)
     try {
@@ -322,11 +322,17 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     return 'history'
   }
 
-  const groupedWorks = computed(() => ({
-    current: app.works.filter((work) => workGroup(work) === 'current'),
-    continue: app.works.filter((work) => workGroup(work) === 'continue'),
-    history: app.works.filter((work) => workGroup(work) === 'history'),
-  }))
+  const groupedWorks = computed(() => {
+    const groups: Record<'current' | 'continue' | 'history', Work[]> = { current: [], continue: [], history: [] }
+    for (const parent of app.works.filter(work => !work.parentId)) {
+      const group = groups[workGroup(parent)]
+      group.push(parent, ...app.works.filter(work => work.parentId === parent.id))
+    }
+    // A failed cleanup must stay visible even after its parent retired.
+    const parentIds = new Set(app.works.filter(work => !work.parentId).map(work => work.id))
+    for (const child of app.works.filter(work => work.parentId && !parentIds.has(work.parentId))) groups.current.push(child)
+    return groups
+  })
 
   function workMachineTag(work: Work) {
     return subhostMachineName(hostMachines.value, work.hostId)

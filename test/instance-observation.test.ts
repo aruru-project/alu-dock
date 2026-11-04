@@ -72,8 +72,9 @@ test("instance observation is source-authorized, excludes self, watches once, an
     return originalAttachProjection(...args);
   };
 
-  assert.equal(registry.dockToolsEnabled(source.id), false);
-  await assert.rejects(registry.invokeDockTool(source.id, { type: "list" }), /not granted/u);
+  assert.equal(registry.dockToolsEnabled(source.id), true);
+  await registry.configureDockTools(source.id, false, "explicit-opt-out");
+  await assert.rejects(registry.invokeDockTool(source.id, { type: "list" }), /off for this instance/u);
   await registry.configureDockTools(source.id, true, "grant-on");
 
   const listed = await registry.invokeDockTool(source.id, { type: "list" });
@@ -183,7 +184,7 @@ test("instance observation is source-authorized, excludes self, watches once, an
   await thirdRun;
   await new Promise<void>((resolve) => setTimeout(resolve, 10));
   assert.equal(runtimes[0]!.observationNotifications.length, 1);
-  await assert.rejects(registry.invokeDockTool(source.id, { type: "list" }), /not granted/u);
+  await assert.rejects(registry.invokeDockTool(source.id, { type: "list" }), /off for this instance/u);
 });
 
 test("dock_inspect returns one long sibling message intact to the Agent", async () => {

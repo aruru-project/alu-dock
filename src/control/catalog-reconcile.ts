@@ -32,7 +32,8 @@ export function reconcileCatalogProjection(
 
   validateCatalogProjection(loaded);
   let normalizedCount = 0;
-  const instances = loaded.instances.map((record) => {
+  // Retire temporary child identities at boot; their Pi session files are untouched.
+  const instances = loaded.instances.filter((record) => record.parentId === undefined).map((record) => {
     if (record.lifecycle === "active" || record.lifecycle === "stopping") {
       normalizedCount += 1;
       return normalizePriorLiveRecord(record, timestamp);
@@ -96,11 +97,12 @@ export function catalogSnapshotFromRecord(
   record: CatalogInstanceRecord,
   currentHostEpoch: string,
 ): InstanceSnapshot {
-  const reopenable = catalogReopenSessionFile(record) !== undefined
+  const reopenable = record.parentId === undefined && catalogReopenSessionFile(record) !== undefined
     && (record.lifecycle === "host_lost" || record.lifecycle === "runtime_error");
   return {
     id: record.id,
     creationOperationId: record.creationOperationId,
+    ...(record.parentId === undefined ? {} : { parentId: record.parentId }),
     ...(record.key === undefined ? {} : { key: record.key }),
     ...(record.name === undefined ? {} : { name: record.name }),
     displayName: projectInstanceDisplayName(record),

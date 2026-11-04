@@ -7,6 +7,7 @@ import {
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
   MAX_OBSERVATION_LIST_ITEMS,
   MAX_OBSERVATION_MESSAGE_LIMIT,
+  MAX_OBSERVATION_REPLY_CHARS,
   OBSERVATION_DATA_NOTICE,
   type InstanceObservation,
   type ObservationConversationPage,
@@ -64,6 +65,8 @@ interface ObservationWatch {
   sourceInstanceId: string;
   targetInstanceId: string;
   unsubscribe: () => void;
+  /** When the work being waited for was accepted; an earlier idle belongs to earlier work. */
+  after?: string;
 }
 
 export class InstanceObservationService {
@@ -103,6 +106,18 @@ export class InstanceObservationService {
     });
   }
 
+  /**
+   * For work a target accepted at `acceptedAt`: the source hears the target's final reply
+   * once it finishes that work, even if it already has by now.
+   */
+  notifyWhenDone(sourceInstanceId: string, targetInstanceId: string, acceptedAt: string): Promise<void> {
+    return this.withSource(sourceInstanceId, async () => {
+      this.assertSourceAuthorized(sourceInstanceId);
+      const result = await this.watchLocked(sourceInstanceId, this.port.getSnapshot(targetInstanceId), acceptedAt);
+      if (result.type === "watch" && result.status === "completed") await this.deliverLocked(sourceInstanceId, result.completion);
+    });
+  }
+
   cancelSource(sourceInstanceId: string): Promise<string[]> {
     return this.withSource(sourceInstanceId, async () => this.cancelLocked(sourceInstanceId));
   }
@@ -136,14 +151,14 @@ export class InstanceObservationService {
         runStartedAt: undefined,
       };
       completions.push(this.withSource(watch.sourceInstanceId, async () => {
-        await this.completeWatchLocked(watchId, "execution_unavailable", target, true);
+        await this.completeWatchLocked(watchId, "execution_unavailable", target, true, false);
       }));
     }
     await Promise.all(completions);
   }
 
   private list(sourceInstanceId: string, includeHistory: boolean): ObservationResult {
-    const all = this.port.listSnapshots().filter((item) => item.id !== sourceInstanceId);
+    const all = this.visibleTargets(sourceInstanceId);
     const selected = includeHistory
       ? all
       : all.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
@@ -241,7 +256,14 @@ export class InstanceObservationService {
     }
   }
 
-  private watchLocked(sourceInstanceId: string, target: InstanceSnapshot): Promise<ObservationResult> {
+  private async watchLocked(sourceInstanceId: string, target: InstanceSnapshot, after?: string): Promise<ObservationResult> {
+    // One watch per pair: a second one would wake the source twice for the same finish.
+    const existing = [...this.watches.values()].find((watch) => watch.sourceInstanceId === sourceInstanceId && watch.targetInstanceId === target.id);
+    if (existing) {
+      // A newer handoff moves the finish line, so an earlier finish no longer counts.
+      if (after !== undefined && (existing.after === undefined || after > existing.after)) existing.after = after;
+      return { type: "watch", status: "watching", receipt: existing.receipt };
+    }
     const activeForSource = [...this.watches.values()].filter((watch) => watch.sourceInstanceId === sourceInstanceId).length;
     if (activeForSource >= MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       throw new Error(`Dock observation is limited to ${MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE} active watches per source instance`);
@@ -252,30 +274,27 @@ export class InstanceObservationService {
       target: observationStatus(target),
       registeredAt: this.now(),
     };
-    const immediateReason = observationTerminalReason(target);
-    if (immediateReason) {
-      return Promise.resolve({ type: "watch", status: "completed", completion: notification(receipt, immediateReason, receipt.target, this.now()) });
-    }
+    const immediateReason = observationTerminalReason(target, after);
+    if (immediateReason) return { type: "watch", status: "completed", completion: await this.completion(receipt, immediateReason, receipt.target, finishedWithReply(target, immediateReason)) };
     const unsubscribe = this.port.subscribe(target.id, (snapshot) => {
-      const reason = observationTerminalReason(snapshot);
+      const reason = observationTerminalReason(snapshot, this.watches.get(watchId)?.after ?? after);
       if (!reason) return;
       const captured = observationStatus(snapshot);
+      const withReply = finishedWithReply(snapshot, reason);
       void this.withSource(sourceInstanceId, async () => {
-        await this.completeWatchLocked(watchId, reason, captured, true);
+        await this.completeWatchLocked(watchId, reason, captured, true, withReply);
       });
     });
     if (!unsubscribe) {
-      return Promise.resolve({ type: "watch", status: "completed", completion: notification(receipt, "execution_unavailable", unavailableStatus(receipt.target, this.now()), this.now()) });
+      return { type: "watch", status: "completed", completion: notification(receipt, "execution_unavailable", unavailableStatus(receipt.target, this.now()), this.now()) };
     }
-    this.watches.set(watchId, { receipt, sourceInstanceId, targetInstanceId: target.id, unsubscribe });
+    this.watches.set(watchId, { receipt, sourceInstanceId, targetInstanceId: target.id, unsubscribe, ...(after === undefined ? {} : { after }) });
     const afterSubscribe = this.port.getSnapshot(target.id);
-    const racedReason = observationTerminalReason(afterSubscribe);
-    if (!racedReason) return Promise.resolve({ type: "watch", status: "watching", receipt });
-    return this.completeWatchLocked(watchId, racedReason, observationStatus(afterSubscribe), false).then((completion) => ({
-      type: "watch" as const,
-      status: "completed" as const,
-      completion: completion ?? notification(receipt, racedReason, observationStatus(afterSubscribe), this.now()),
-    }));
+    const racedReason = observationTerminalReason(afterSubscribe, after);
+    if (!racedReason) return { type: "watch", status: "watching", receipt };
+    const withReply = finishedWithReply(afterSubscribe, racedReason);
+    const completion = await this.completeWatchLocked(watchId, racedReason, observationStatus(afterSubscribe), false, withReply);
+    return { type: "watch", status: "completed", completion: completion ?? await this.completion(receipt, racedReason, observationStatus(afterSubscribe), withReply) };
   }
 
   private async completeWatchLocked(
@@ -283,14 +302,35 @@ export class InstanceObservationService {
     reason: ObservationTerminalReason,
     target: ObservedInstanceStatus,
     deliver: boolean,
+    withReply: boolean,
   ): Promise<ObservationNotification | undefined> {
     const watch = this.watches.get(watchId);
     if (!watch) return undefined;
     this.watches.delete(watchId);
     watch.unsubscribe();
-    const completion = notification(watch.receipt, reason, target, this.now());
+    const completion = await this.completion(watch.receipt, reason, target, withReply);
     if (deliver) await this.deliverLocked(watch.sourceInstanceId, completion);
     return completion;
+  }
+
+  /** A Work that finished its turn hands its final reply along, so the watcher need not read it back. */
+  private async completion(receipt: ObservationWatchReceipt, reason: ObservationTerminalReason, target: ObservedInstanceStatus, withReply: boolean): Promise<ObservationNotification> {
+    const reply = withReply ? await this.finalReply(receipt.target.id) : undefined;
+    return notification(receipt, reason, reply === undefined ? target : { ...target, reply }, this.now());
+  }
+
+  private async finalReply(targetInstanceId: string): Promise<string | undefined> {
+    try {
+      const bootstrap = await this.port.readConversationBootstrap(targetInstanceId, HISTORY_SCAN_PAGE_ITEMS);
+      if (!bootstrap) return undefined;
+      // Only finished messages: text still streaming belongs to a run that started since.
+      const finished = bootstrap.liveEvents.filter((event) => event.type === "message.completed");
+      const replies = [...projectHistoryEntries(bootstrap.recentHistory, ["assistant"]), ...projectLiveEvents(finished, ["assistant"])];
+      const reply = replies.at(-1)?.text;
+      return reply === undefined ? undefined : boundedReply(reply);
+    } catch {
+      return undefined; // The completion still says it finished; dock_inspect can read the reply.
+    }
   }
 
   private async deliverLocked(sourceInstanceId: string, completion: ObservationNotification): Promise<void> {
@@ -355,7 +395,8 @@ export class InstanceObservationService {
   }
 
   resolveTarget(sourceInstanceId: string, selector: string): InstanceSnapshot {
-    const candidates = this.port.listSnapshots();
+    if (selector === sourceInstanceId) throw new Error("An instance cannot observe itself");
+    const candidates = this.visibleTargets(sourceInstanceId);
     const exactId = candidates.find((item) => item.id === selector);
     if (exactId) return this.assertNotSelf(sourceInstanceId, exactId);
     const live = candidates.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
@@ -365,8 +406,13 @@ export class InstanceObservationService {
     for (const item of live) {
       if (item.id.startsWith(selector) || item.name === selector) matches.set(item.id, item);
     }
-    if (matches.size !== 1) throw new Error(`Observation target is missing or ambiguous among live siblings: ${selector}`);
+    if (matches.size !== 1) throw new Error(`No single live Work you can see matches ${selector}; run dock_list and use its id.`);
     return this.assertNotSelf(sourceInstanceId, [...matches.values()][0]!);
+  }
+
+  private visibleTargets(sourceInstanceId: string): InstanceSnapshot[] {
+    const source = this.port.getSnapshot(sourceInstanceId);
+    return this.port.listSnapshots().filter((target) => dockTargetVisible(source, target));
   }
 
   private assertNotSelf(sourceInstanceId: string, target: InstanceSnapshot): InstanceSnapshot {
@@ -410,6 +456,7 @@ export class InstanceObservationService {
 export function observationStatus(snapshot: InstanceSnapshot): ObservedInstanceStatus {
   return {
     id: snapshot.id,
+    ...(snapshot.parentId === undefined ? {} : { parentId: snapshot.parentId }),
     ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
     ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
     cwd: snapshot.cwd,
@@ -429,14 +476,23 @@ function unavailableStatus(status: ObservedInstanceStatus, timestamp: string): O
   return { ...status, lifecycle: "stopped", execution: "unavailable", compacting: false, executionChangedAt: timestamp, runStartedAt: undefined };
 }
 
-function observationTerminalReason(snapshot: InstanceSnapshot): ObservationTerminalReason | undefined {
+function observationTerminalReason(snapshot: InstanceSnapshot, after?: string): ObservationTerminalReason | undefined {
   if (snapshot.lifecycle === "stopped") return "stopped";
   if (snapshot.lifecycle === "host_lost") return "host_lost";
   if (snapshot.lifecycle === "runtime_error") return "runtime_error";
+  // Work accepted at `after` ends in an idle that began then or later; an older idle is the
+  // previous work's, which Main's copy of a SubHost Work can still show.
+  if (after !== undefined && snapshot.executionChangedAt < after) return undefined;
   if (snapshot.execution === "failed") return "execution_failed";
   if (snapshot.execution === "unavailable") return "execution_unavailable";
-  if (snapshot.execution === "idle" && !snapshot.compacting) return "idle";
+  // Queued input starts another run, so the Work is not done while any is waiting.
+  if (snapshot.execution === "idle" && !snapshot.compacting && snapshot.pending.total === 0) return "idle";
   return undefined;
+}
+
+/** Only a turn that ended normally has a final reply; an interrupted one would show an older answer. */
+function finishedWithReply(snapshot: InstanceSnapshot, reason: ObservationTerminalReason): boolean {
+  return reason === "idle" && snapshot.lastRun === "succeeded";
 }
 
 function notification(
@@ -534,6 +590,16 @@ function cleanText(value: string): string {
   return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, "�");
 }
 
+const REPLY_SHORTENED = "\n[…shortened; dock_inspect shows the whole reply]";
+
+function boundedReply(text: string): string {
+  if (text.length <= MAX_OBSERVATION_REPLY_CHARS) return text;
+  let end = MAX_OBSERVATION_REPLY_CHARS - REPLY_SHORTENED.length;
+  const high = text.charCodeAt(end - 1);
+  if (high >= 0xd800 && high <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}${REPLY_SHORTENED}`;
+}
+
 function truncateText(value: string, max: number): { text: string; truncated: boolean } {
   if (value.length <= max) return { text: value, truncated: false };
   const end = max > 20 ? max - 14 : max;
@@ -544,4 +610,11 @@ function truncateText(value: string, max: number): { text: string; truncated: bo
 
 function cloneCursorState(state: ObservationCursorState): ObservationCursorState {
   return { ...state, pending: state.pending.map((message) => ({ ...message })) };
+}
+
+/** Native children communicate through their parent; top-level peers stay unrestricted. */
+export function dockTargetVisible(source: InstanceSnapshot, target: InstanceSnapshot): boolean {
+  if (source.id === target.id) return false;
+  if (source.parentId !== undefined) return target.id === source.parentId;
+  return target.parentId === undefined || target.parentId === source.id;
 }

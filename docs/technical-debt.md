@@ -259,3 +259,21 @@ Pi 现有机制已覆盖 Dock 自带扩展的需要；没有任何一个真实�
 - 要在隔离工作台探索可回退的 harness 自修改。
 
 届时先取一个真实任务或事故作基线，在一个具体 extension 内比较 Chord 与 Cordis，验收回答：功能是否保持、未受影响插件是否继续、旧调用按哪一代完成、失败能否恢复、有无资源残留、外部效果是否恰好一次、要维护多少桥接代码。先验证工作台 extension 内的局部组合，不先改 Dock Host 或迁移 session authority；无论选哪个，工具、provider、命令和事件订阅都只能有一个注册者和撤销者。
+
+## 跨机子 Work：同一毫秒的上一轮结束可能被当成这一轮的回复
+
+**优先级：低；只在人为控制时序下复现过，跨机真实链路中没有自然出现。**
+
+### 已知边界
+
+父 Work 把任务交给子 Work 后，Host 用“任务被接受的时间”判断子 Work 是否做完：在这一刻或之后开始的空闲才算这一轮做完（`src/control/instance-observation-service.ts` 的 `observationTerminalReason`）。这样即使子 Work 在同一毫秒内做完，回复也能送回父 Work。代价是时间只精确到毫秒：如果子 Work 上一轮恰好在任务被接受的同一毫秒结束，而 Main 手里的 SubHost 子 Work 状态还没更新，Main 会把上一轮的空闲当成这一轮已经做完，父 Work 收到上一轮的回复，而这一轮真正做完时不再通知。只在父 Work 位于 SubHost、经 Main 观察子 Work 时可能出现；本机的子 Work 状态在任务被接受时已经更新。
+
+2026-11-04 云端审查（PR #3，abb061b）用受控时序复现。
+
+### 为什么现在接受
+
+需要父 Work 在 SubHost 上、交任务与子 Work 上一轮结束落在同一毫秒、Main 状态尚未同步三者同时成立。发生时父 Work 仍可用 `dock_inspect` 读子 Work 的对话。根治要把判断从时间改成“这条消息所在的那一轮”（例如按任务的 operationId 对应的 `run.settled`），需要同时改观察服务和 Main 保存的子 Work 状态。
+
+### 何时重访
+
+实际出现父 Work 收到子 Work 上一轮回复、或这一轮回复没有送达，并能确认子 Work 位于 SubHost 时，由主人决定是否改为按任务那一轮判断。

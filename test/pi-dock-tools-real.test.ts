@@ -20,6 +20,8 @@ import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
+import { exited } from "./support/native-team.js";
+import { PlanGoalProvider } from "./support/plan-goal-provider.js";
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
@@ -86,7 +88,7 @@ test("real Pi Worker toggles Dock tools and exposes its readable usage guide", a
     }
     const guidePath = active.tools.find((tool) => tool.name === "dock_list")?.description.split("Usage guide (read when needed): ")[1];
     assert.ok(guidePath, "enabled tools must point to their usage guide");
-    assert.match(await readFile(guidePath, "utf8"), /^# Dock tools usage guide/u);
+    assert.match(await readFile(guidePath, "utf8"), /^# Native Dock collaboration/u);
     assert.equal((await instance.getResources()).resources.some((resource) => resource.kind === "skill" && resource.name === "dock-tools"), false);
 
     await instance.reloadSession("dock-tools-reload");
@@ -113,7 +115,7 @@ const CROSS_MACHINE_MODEL = "dock-tools-model";
 const CROSS_MACHINE_PROMPT = "Use dock_list once to find the Main sentinel.";
 const MAIN_SENTINEL = "Main-owned sentinel";
 
-test("a real Pi Worker executes dock_list through its SubHost and encrypted Main authority", { timeout: 50_000 }, async (context) => {
+test("real Pi Workers discover, delegate and exchange findings through SubHost and encrypted Main authority", { timeout: 50_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-cross-machine-dock-tools-"));
   await chmod(root, 0o700);
   const workspace = join(root, "workspace");
@@ -124,9 +126,17 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
 
   const provider = new DockListLoopbackProvider();
   await provider.start();
+  const coordinatorProvider = new PlanGoalProvider(), reviewerProvider = new PlanGoalProvider();
+  const collaborationModels: Record<string, unknown> = {};
+  for (const [name, localProvider] of [["routed-coordinator", coordinatorProvider], ["routed-reviewer", reviewerProvider]] as const) {
+    collaborationModels[name] = { baseUrl: await localProvider.start(), api: "openai-completions", apiKey: "fixture-only",
+      models: [{ id: "fixture", name, reasoning: true, input: ["text"], contextWindow: 32_000, maxTokens: 2_000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] };
+  }
   await Promise.all([
     writeFile(join(agentDir, "models.json"), JSON.stringify({
       providers: {
+        ...collaborationModels,
         [CROSS_MACHINE_PROVIDER]: {
           baseUrl: `${provider.origin}/v1`,
           api: "openai-completions",
@@ -195,6 +205,8 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
     if (child) await stopChild(child);
     await mainHost.stop().catch(() => {});
     await provider.stop();
+    await coordinatorProvider.stop();
+    await reviewerProvider.stop();
     await rm(root, { recursive: true, force: true });
   });
   await mainHost.start();
@@ -240,6 +252,67 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
   assert.ok(provider.requests.some(requestAdvertisesDockList), "the real Worker must advertise the registered dock_list tool to its provider");
   assert.ok(provider.requests.some(requestContainsSentinelToolResult), "the provider continuation must contain dock_list's real Main-owned sentinel result");
   assert.equal(provider.error, undefined);
+
+  // Both workers below are real separate processes on the SubHost. Creation
+  // and messages travel through the encrypted Main authority and back, so
+  // native/global identity mismatches cannot hide behind a fake route map.
+  await waitFor(async () => (await client.status(remote.id)).execution === "idle", "Remote list did not settle");
+  await client.setModel(remote.id, "routed-coordinator", "fixture", "routed-team-model");
+  await client.prompt(remote.id, "Delegate an independent review.", "auto", "routed-team-start");
+  // The child Work model list belongs to the source's own machine, so the SubHost answers it.
+  (await coordinatorProvider.request(0)).tools({ id: "routed-models", name: "dock_models", arguments: {} });
+  const choosing = await coordinatorProvider.request(1);
+  assert.match(JSON.stringify(choosing.body.messages?.at(-1)), /Your model, which a child Work uses when you omit model: routed-coordinator\/fixture/);
+  choosing.tools({ id: "routed-spawn", name: "dock_spawn", arguments: {
+    name: "Routed reviewer", task: "Review the workspace.",
+    model: { provider: "routed-reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],
+  } });
+  const reviewing = await reviewerProvider.request(0);
+  const waiting = await coordinatorProvider.request(2);
+  const reviewer = (await client.list()).find((work) => work.displayName === "Routed reviewer");
+  assert.ok(reviewer);
+  assert.equal(reviewer.parentId, remote.id, "Main must expose the global source identity as parent");
+  // User decision 2026-10-31: Main's authority holds a child Work to messaging its parent.
+  // The parent's turn goes on and it later hears from its child, so neither request took effect.
+  for (const type of ["stop", "interrupt"] as const) {
+    await assert.rejects(dockTools.invoke(reviewer.id, remote.hostId!, { type, target: remote.id, operationId: `main-denied-${type}` }), `the child's ${type} is refused`);
+    assert.equal(waiting.closed, false);
+  }
+  // A child runs on its parent's machine: a parent on Main cannot own a child on a SubHost.
+  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, { parentId: sentinel.id }));
+  assert.ok(!(await client.list()).some((work) => work.displayName === "CrossHostChild"));
+  assert.equal(typeof ready.nativeInstanceId, "string");
+  assert.notEqual(remote.id, ready.nativeInstanceId);
+  assert.deepEqual(reviewer.executor.model, { provider: "routed-reviewer", id: "fixture" });
+  assert.equal(reviewer.executor.thinkingLevel, "low");
+  assert.deepEqual(reviewing.toolNames.sort(), ["dock_send", "read"]);
+  // The child Work's message and its final reply both find the parent through Main.
+  reviewing.tools({ id: "routed-note", name: "dock_send", arguments: { message: "ROUTED_NOTE" } });
+  const noted = await reviewerProvider.request(1);
+  assert.match(JSON.stringify(noted.body.messages?.filter(message => message.role === "tool").at(-1)), /Sent a Dock message/);
+  noted.text("ROUTED_REVIEW_FINDING");
+  assert.equal(waiting.closed, false, "A routed message must not interrupt its busy recipient");
+  waiting.text("Waiting for the independent report.");
+  let next = 3, sawNote = false, sawReply = false;
+  while (next < 9 && !(sawNote && sawReply)) {
+    const request = await coordinatorProvider.request(next++);
+    const transcript = JSON.stringify(request.body.messages);
+    sawNote ||= transcript.includes("ROUTED_NOTE");
+    sawReply ||= transcript.includes("ROUTED_REVIEW_FINDING");
+    request.text("Received the routed report.");
+  }
+  assert.ok(sawNote && sawReply, "The routed parent must receive its child Work's message and final reply");
+  await waitFor(async () => {
+    while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
+    return (await client.status(remote.id)).execution === "idle";
+  }, "Routed coordinator did not settle");
+  const spawned = childStdout.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line) as { kind: string; parentId?: string; pid?: number });
+  const childPid = spawned.find(record => record.kind === "worker_started" && record.parentId === ready.nativeInstanceId)?.pid;
+  assert.equal(typeof childPid, "number", "Child ownership is stored using the SubHost's native parent identity");
+  await client.stop(remote.id, "routed-parent-stop");
+  await waitFor(() => [Number(ready.workerPid), childPid!].every(exited), "Routed parent stop must terminate both real SubHost Worker processes");
+  await waitFor(async () => !(await client.list()).some(work => work.id === reviewer.id), "Retired SubHost child remained in Main's inventory");
+  assert.equal((await client.status(sentinel.id)).lifecycle, "active");
 });
 
 class DockListLoopbackProvider {
@@ -315,12 +388,12 @@ async function waitForRemotePi(client: DockClient): Promise<Awaited<ReturnType<D
   throw new Error("real Pi SubHost instance did not become ready");
 }
 
-async function waitForFixtureReady(stdout: () => string): Promise<{ workerPid?: number }> {
+async function waitForFixtureReady(stdout: () => string): Promise<{ workerPid?: number; nativeInstanceId?: string }> {
   for (let attempt = 0; attempt < 400; attempt += 1) {
     for (const line of stdout().split("\n")) {
       if (!line.trim()) continue;
       try {
-        const value = JSON.parse(line) as { kind?: unknown; workerPid?: number };
+        const value = JSON.parse(line) as { kind?: unknown; workerPid?: number; nativeInstanceId?: string };
         if (value.kind === "ready") return value;
       } catch { /* wait for a complete line */ }
     }

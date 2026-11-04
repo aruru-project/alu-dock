@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
-import type { DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
+import type { DockCreateInput, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { JsonObject } from "../core/json-value.js";
 import type { DockClient } from "./dock-client.js";
 import { observationStatus } from "./instance-observation-service.js";
 
 type SystemPort = Pick<DockClient, "systemCatalog" | "systemContent" | "setSystemDefault" | "create">;
 export type SystemToolRequest = Extract<DockToolsRequest, { type: "system" }>;
-export type SystemCreateRequest = Extract<DockToolsRequest, { type: "create" }>;
 
 export async function readDockSystem(port: SystemPort, input: SystemToolRequest, hostId?: string): Promise<DockToolsResult> {
   return input.id === undefined
@@ -15,12 +14,16 @@ export async function readDockSystem(port: SystemPort, input: SystemToolRequest,
 }
 
 /** Both local and Main tools use the canonical catalog/default and create application boundaries. */
-export async function createDockSystem(port: SystemPort, input: SystemCreateRequest, hostId?: string): Promise<DockToolsResult> {
+export async function createDockSystem(port: SystemPort, input: DockCreateInput, hostId?: string): Promise<DockToolsResult> {
   if (input.saveDefault && input.systemId === undefined) throw new Error("Saving requires an explicit systemId.");
-  // The starting model rides in the same Worker configuration as the system; the target Host still applies its directory default.
-  const modelConfig: JsonObject | undefined = input.model === undefined ? undefined : { model: { provider: input.model.provider, id: input.model.id } };
+  // The starting model and thinking level ride in the same Worker configuration as the system; the target Host still applies its directory default.
+  const starting: JsonObject = {
+    ...(input.model === undefined ? {} : { model: { provider: input.model.provider, id: input.model.id } }),
+    ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+  };
+  const modelConfig = Object.keys(starting).length === 0 ? undefined : starting;
   if (input.systemId === undefined) {
-    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig);
+    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig, input.child);
     return { type: "create", instance: observationStatus(instance) };
   }
   let page = await port.systemCatalog(input.cwd, hostId);
@@ -37,7 +40,7 @@ export async function createDockSystem(port: SystemPort, input: SystemCreateRequ
     saved = true;
   }
   try {
-    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig });
+    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig }, input.child);
     return { type: "create", instance: observationStatus(instance), ...(saved ? { defaultSaved: true } : {}) };
   } catch (error) {
     if (saved && error instanceof Error) error.message = `Directory default saved. Work creation did not return success; check Dock before trying again. ${error.message}`;

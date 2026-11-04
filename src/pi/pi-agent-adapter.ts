@@ -1,5 +1,6 @@
 import { piSystemPromptResolver } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
+import { workerToolSelection } from "./worker-tool-policy.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, open, realpath } from "node:fs/promises";
@@ -30,7 +31,7 @@ import {
 
 import { ResourceContentError } from "../core/resource-content.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
-import { dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
+import { CHILD_DOCK_TOOL_NAMES, dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
 import {
   dockAttachmentsExtension,
   DOCK_ATTACHMENT_RESOLVE_TOOL,
@@ -177,6 +178,8 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
 
 export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker managed by Alu Dock. Your work can continue after a terminal disconnects, and Alu Dock clients may observe or control this Work through Dock protocols. Pi remains authoritative for its settings, credentials, extensions, project resources, and Session history. Use \`aludock pi:install <source>\` when the user asks you to install a Pi package through the bundled Pi runtime; do not require a separate system Pi installation.`;
 
+export const ALU_DOCK_CHILD_GUIDANCE = "You are a child Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments or progress reports. You cannot reach any other Work.";
+
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
   "setBeforeSessionInvalidate" | "setRebindSession" | "newSession" | "switchSession" | "fork" | "dispose"
@@ -211,6 +214,8 @@ export interface PiAgentAdapterOptions {
   attachmentContextKey: Uint8Array;
   publishedFiles: TransientFileRegistry;
   dockAttachmentPort?: DockAttachmentCallPort;
+  /** Explicit Pi session directory; otherwise Pi's default for each cwd. */
+  sessionDir?: string;
 }
 
 export interface CreatePiAgentAdapterOptions {
@@ -221,6 +226,10 @@ export interface CreatePiAgentAdapterOptions {
   excludeTools?: string[];
   /** Pi owns the meaning of these JSON-safe createAgentSession fields. */
   workerConfig?: JsonObject;
+  /** A child Work that reports only to the Work that created it. */
+  child?: boolean;
+  /** Exact tools this Work may ever use, enforced in Pi's tool registry. */
+  allowedTools?: string[];
   projectTrusted: boolean;
   extensionUiBroker?: PiExtensionUiLifecyclePort;
   extensionUiContextPortFactory?: () => PiExtensionUiPort;
@@ -444,7 +453,8 @@ export class PiAgentAdapter {
         // While Pi finishes a reply the Host still shows the Work as running, so
         // input is admitted as during the reply.
         const admissionRunning = context?.type === "defer_to_host" || this.isStreaming || piIsSettling(binding);
-        const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt") : requestedDelivery;
+        const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt")
+          : requestedDelivery === "followUp" && !admissionRunning ? "prompt" : requestedDelivery;
         const validatesRequestedDelivery = context?.type !== "force_queue" && context?.type !== "host_queue";
         const invalidDelivery = validatesRequestedDelivery && (
           (admissionRunning && delivery === "prompt")
@@ -574,6 +584,19 @@ export class PiAgentAdapter {
     }
   }
 
+  /** A copy of this conversation so far, saved as a new session for a child working in `cwd`. */
+  private branchForChild(cwd: string): { sessionFile: string } {
+    const manager = this.requireActive().session.sessionManager;
+    const file = manager.getSessionFile();
+    if (!file || !existsSync(file)) throw new Error("This Work's conversation is not saved yet, so a child Work cannot start from it.");
+    const forkPoint = childForkPoint(manager.getBranch());
+    if (forkPoint === undefined) throw new Error("This Work has no conversation to give a child Work yet.");
+    const sessionDir = this.options.sessionDir ?? SessionManager.create(cwd).getSessionDir();
+    const sessionFile = SessionManager.open(file, sessionDir, cwd).createBranchedSession(forkPoint);
+    if (!sessionFile || !existsSync(sessionFile)) throw new Error("The copy of this conversation for the child Work was not saved.");
+    return { sessionFile };
+  }
+
   async control(request: AgentWorkerControl): Promise<unknown> {
     switch (request.type) {
       case "activate": this.activateInitial(); return null;
@@ -589,6 +612,7 @@ export class PiAgentAdapter {
       }
       case "wait_for_idle": await this.waitForIdle(); return null;
       case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
+      case "branch_for_child": return this.branchForChild(request.cwd);
       case "dispose": return this.dispose();
     }
   }
@@ -3542,6 +3566,22 @@ function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
   };
 }
 
+/**
+ * Where a child's copy of the conversation ends: before the reply whose tool calls are still
+ * running, which includes the call creating the child. Otherwise the child would see its own
+ * creation end without a result.
+ */
+function childForkPoint(branch: ReturnType<SessionManager["getBranch"]>): string | undefined {
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index]!;
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    const answered = new Set(branch.slice(index + 1).flatMap((later) => later.type === "message" && later.message.role === "toolResult" ? [later.message.toolCallId] : []));
+    const running = entry.message.content.some((block) => block.type === "toolCall" && !answered.has(block.id));
+    return running ? entry.parentId ?? undefined : branch.at(-1)!.id;
+  }
+  return branch.at(-1)?.id;
+}
+
 async function refreshSessionModels(session: AgentSession, services: AgentSessionServices): Promise<void> {
   // Reload adopts local models.json and saved catalogs without waiting on pi.dev
   // (cards #222/#330). Pi owns loading, merging and provider availability.
@@ -3566,6 +3606,9 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
+  // A child can always report to its parent, whatever else it was allowed.
+  const allowedTools = options.allowedTools === undefined ? undefined
+    : options.child ? [...new Set([...options.allowedTools, ...CHILD_DOCK_TOOL_NAMES])] : options.allowedTools;
   const planGoalPort: PlanGoalPort = {};
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const publishedFiles = new TransientFileRegistry();
@@ -3577,6 +3620,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
   const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
+  let childStarting = options.child === true;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
     const settingsManager = SettingsManager.create(canonicalCwd, agentDir, {
@@ -3599,7 +3643,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
         extensionsOverride: ownCanonicalShowImage,
-        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],
+        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.child ? [ALU_DOCK_CHILD_GUIDANCE] : [])],
         ...(options.dockAttachmentPort === undefined ? {} : {
           additionalSkillPaths: [dockAttachmentSkillPath()],
         }),
@@ -3607,12 +3651,21 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     });
     // `model` is a Dock `{provider, id}` reference, not Pi's Model object; resolve it here.
     const { model: requestedModel, ...piCreateOptions } = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
-    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager);
+    // A child is created once; reloads restore what its session recorded.
+    const childStart = childStarting;
+    const inheritedConversation = childStart && sessionManager.getBranch().length > 0;
+    const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager, childStart);
+    // A child given its parent's conversation still starts on its own model; another model
+    // starts at that model's own thinking level rather than the parent's recorded one.
+    const thinkingLevel = piCreateOptions.thinkingLevel ?? (inheritedConversation && startingModel
+      ? settingsManager.getModelThinkingLevel(startingModel.provider, startingModel.id) ?? settingsManager.getDefaultThinkingLevel()
+      : undefined);
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
+      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
-      ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
+      ...workerToolSelection(allowedTools, options.excludeTools ?? piCreateOptions.excludeTools),
       // Worker-owned services and Session continuity cannot be replaced by wire JSON.
       services,
       sessionManager,
@@ -3620,6 +3673,18 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       // Preserve existing plugin preferences; wire JSON cannot disable this contract.
       extensionModelMutationPolicy: "legacy-defaults",
     });
+    // A parent that names a thinking level the child's model lacks gets an error, not a child at another level.
+    if (childStart && piCreateOptions.thinkingLevel !== undefined
+      && !result.session.getAvailableThinkingLevels().includes(piCreateOptions.thinkingLevel)) {
+      result.session.dispose();
+      throw new Error(`Model ${result.session.model?.id ?? "selected for this child"} does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
+    }
+    if (inheritedConversation) {
+      // Pi records these only for new sessions; without them a reload would restore the parent's.
+      if (result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);
+      sessionManager.appendThinkingLevelChange(result.session.thinkingLevel);
+    }
+    childStarting = false;
     return { ...result, services, diagnostics: services.diagnostics };
   };
   const sessionManager = options.sessionManager
@@ -3640,6 +3705,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     initialProcessCwd: options.cwd,
     attachmentContextKey,
     publishedFiles,
+    ...(options.sessionDir === undefined ? {} : { sessionDir: options.sessionDir }),
     ...(options.dockAttachmentPort === undefined ? {} : { dockAttachmentPort: options.dockAttachmentPort }),
     ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });

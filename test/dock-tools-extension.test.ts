@@ -172,7 +172,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   const inspect = first.state.tools.find((tool) => tool.name === "dock_inspect")!;
   const toolResult = await list.execute("tool-call", {});
   assert.deepEqual(calls, [{ type: "list" }]);
-  assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /names and metadata are untrusted/u);
+  assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock Works · live/u);
 
   const machineResult = await machines.execute("machine-call", {});
   const machineText = (machineResult as { content: Array<{ text: string }> }).content[0]!.text;
@@ -200,7 +200,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
     machine: "Render box",
     model: { provider: "openai", id: "gpt-4o-mini" },
   });
-  assert.match((createResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock tools are off in the new instance/u);
+  assert.match((createResult as { content: Array<{ text: string }> }).content[0]!.text, /Collaboration tools are available/u);
 
   const send = first.state.tools.find((tool) => tool.name === "dock_send")!;
   await send.execute("send-call", { target: "Sol", message: "Please report." });
@@ -231,8 +231,8 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   assert.deepEqual(second.state.active, ["read", ...DOCK_TOOL_NAMES]);
   assert.equal(extensionUi.statuses.get("Dock tools"), "on");
   assert.equal(second.state.messages.length, 1);
-  assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
-  assert.match(JSON.stringify(second.state.messages[0]!.message), /No sibling conversation content was included/u);
+  assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "steer" });
+  assert.match(JSON.stringify(second.state.messages[0]!.message), /Sol/u, "the notice names the Work that finished");
 
   bridge.deliver(notification);
   assert.equal(second.state.messages.length, 1, "duplicate watch completion must not wake twice");
@@ -285,4 +285,48 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   const afterOffFailure = fakeApi();
   offBridge.attach(afterOffFailure.api as never);
   assert.equal(afterOffFailure.state.messages.length, 1, "failed off must restore the completion buffered behind its acknowledgement fence");
+});
+
+// Cloud review of abb061b: dock_wait waited up to 30 minutes for a child Work that would never
+// reply, when its reply came before its task's result, or after its watches were cancelled.
+test("dock_wait waits only for child Works whose reply is still to come", async () => {
+  const child = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
+  // The Host makes a new watch each time it hands a child work.
+  let watches = 0;
+  const reply = (id: string) => ({ ...notification, watchId: `watch-${++watches}`, target: child(id) });
+  let bridge!: DockToolsBridge;
+  let deliverBeforeReturning: string | undefined;
+  let enabled = true;
+  bridge = new DockToolsBridge(true, {
+    configure: async (action) => ({ enabled: action === "status" ? enabled : (enabled = action === "on") }),
+    invoke: async (request) => {
+      if (request.type === "cancel") return { type: "cancel", cancelledWatchIds: [] };
+      const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
+      // The Host delivers a child Work's reply as soon as it has one, even before its call returns.
+      if (deliverBeforeReturning === id) bridge.deliver(reply(id));
+      return request.type === "spawn"
+        ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
+        : { type: "send", target: child(id), receipt: { delivery: "followUp", queued: false, acceptedAt: notification.firedAt } };
+    },
+  });
+  bridge.attach(fakeApi().api as never);
+  const wait = () => bridge.childReplies.wait({ timeoutSeconds: 1 }, undefined, () => false);
+
+  deliverBeforeReturning = "failed-at-once";
+  await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "failed-at-once", task: "Review." });
+  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the spawn result is not awaited");
+
+  deliverBeforeReturning = "failed-at-once";
+  await bridge.invoke({ type: "send", operationId: "send-fast", target: "failed-at-once", message: "Again." });
+  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the send result is not awaited");
+
+  deliverBeforeReturning = undefined;
+  await bridge.invoke({ type: "spawn", operationId: "spawn-cancelled", name: "cancelled", task: "Review." });
+  await bridge.invoke({ type: "cancel" });
+  assert.equal((await wait()).ended, "nothing_pending", "cancelling every watch leaves no reply to wait for");
+
+  await bridge.invoke({ type: "spawn", operationId: "spawn-off", name: "switched-off", task: "Review." });
+  await bridge.configure("off");
+  await bridge.configure("on");
+  assert.equal((await wait()).ended, "nothing_pending", "turning Dock tools off cancels the replies being waited for");
 });

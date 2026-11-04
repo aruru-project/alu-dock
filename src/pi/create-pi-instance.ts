@@ -11,7 +11,7 @@ import {
 import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
 import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
-import type { DockToolsHostPort } from "../core/dock-tools.js";
+import type { DockChildStart, DockToolsHostPort } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import type { JsonObject } from "../core/json-value.js";
@@ -22,6 +22,7 @@ import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerProcessTimeouts } from "./worker-process.js";
 
 export interface CreatePiInstanceOptions {
+  child?: DockChildStart;
   id?: string;
   creationOperationId?: string;
   hostEpoch?: string;
@@ -61,7 +62,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const extensionUiBroker = new ExtensionUiBroker();
   const dockToolsHostPort = options.dockToolsHostPort ?? unavailableDockToolsHostPort;
   const attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
-  const dockToolsEnabled = options.dockToolsEnabled ?? false;
+  const dockToolsEnabled = options.dockToolsEnabled ?? options.dockToolsHostPort !== undefined;
   const created = await AgentWorkerConnection.create({
     identity: {
       hostEpoch,
@@ -75,9 +76,13 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
       ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
+      ...(options.child === undefined ? {} : { child: true }),
+      ...(options.child?.allowedTools === undefined ? {} : { allowedTools: options.child.allowedTools }),
       projectTrusted: options.projectTrusted,
       ...(options.sessionFile === undefined ? {} : { sessionFile: resolve(options.sessionFile) }),
-      ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
+      // A reopened session keeps its own name. A child's session file is a copy of its
+      // parent's conversation, which carries the parent's name, so the child names it.
+      ...(options.name === undefined || (options.sessionFile !== undefined && options.child === undefined) ? {} : { initialName: options.name }),
     },
     extensionUiBroker,
     dockToolsHostPort,
@@ -102,6 +107,8 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     const instance = new ManagedInstance({
       id: instanceId,
       creationOperationId: options.creationOperationId,
+      parentId: options.child?.parentId,
+      projectTrusted: options.projectTrusted,
       hostEpoch,
       key: options.key,
       name: initialName,

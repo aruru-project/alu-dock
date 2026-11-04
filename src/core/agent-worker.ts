@@ -293,6 +293,8 @@ export type AgentWorkerControl =
   | { type: "resolve_file_source"; kind: AgentFileSource["kind"]; ref: string }
   | { type: "wait_for_idle" }
   | { type: "observation_delivery"; notification: ObservationNotification }
+  /** Copy the conversation so far into a new session for a child working in `cwd`; returns its file. */
+  | { type: "branch_for_child"; cwd: string }
   | { type: "dispose" };
 
 /** Minimal current-generation metadata needed by Host authority and snapshots. */

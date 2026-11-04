@@ -78,6 +78,7 @@ pub struct ExecutorSnapshot {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceSnapshot {
+    pub parent_id: Option<String>,
     pub id: String,
     pub creation_operation_id: String,
     pub host_id: Option<String>,
@@ -764,6 +765,7 @@ mod tests {
                 cleanup_errors,
             },
             instance: InstanceSnapshot {
+                parent_id: None,
                 id: "work".into(),
                 creation_operation_id: "created".into(),
                 host_id: None,

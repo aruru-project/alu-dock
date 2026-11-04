@@ -168,7 +168,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
           return this.prompt(p.message, undefined, p.operationId);
         }
         const admissionRunning = options?.context?.type === "defer_to_host" || this.isStreaming;
-        const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt") : requestedDelivery;
+        const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt")
+          : requestedDelivery === "followUp" && !admissionRunning ? "prompt" : requestedDelivery;
         const validatesRequestedDelivery = options?.context?.type !== "force_queue" && options?.context?.type !== "host_queue";
         const invalidDelivery = validatesRequestedDelivery && (
           (admissionRunning && delivery === "prompt")

@@ -68,6 +68,23 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 `provider` 与 `id` 和 Pi 的写法完全一致（Work TUI 的 `/model` 列表里 `provider/id` 两段）。文件不存在等于什么都不隐藏。Host 每次返回模型列表时现读这个文件，改完不用重启，下次打开模型选择就生效。文件格式写错时，这台机器暂时不隐藏任何模型，Host 设置页会指出问题；在页面上保存一次会写回正确的内容。
 
+## 给 Agent 看的模型
+
+Work 开子 Work 时可以给子 Work 换模型。父 Work 用 `dock_models` 查看可选的模型，看到的是这份名单，而不是这台机器上的全部模型。每台机器各有一份，放在 Host 私有状态目录中的 `child-models.json`，和 `model-visibility.json` 在同一个目录：
+
+```json
+{
+  "models": [
+    { "provider": "openai-codex", "id": "gpt-6.1-sol", "note": "主力，日常写代码" },
+    { "provider": "deepseek", "id": "deepseek-v4-pro", "note": "应急：主力额度用完时用" }
+  ]
+}
+```
+
+`provider` 与 `id` 的写法和隐藏列表一样；`note` 是写给 Agent 看的备注，可以不写，最多 500 字。名单最多 50 个模型。父 Work 自己的模型总排在第一位，不填模型时子 Work 就用它，不论它在不在名单里；名单里的每个模型还会自动附上它支持的 thinking level、上下文长度和能不能看图。这台机器当前用不了的模型会单独列出。
+
+名单只决定 Agent 平时看到哪些模型，不限制子 Work 能用哪个：你点名要的其他模型照样可以用。文件不存在时，父 Work 只会看到它自己的模型。Host 每次被问到时现读这个文件，改完不用重启；格式写错时，Agent 会看到错误原因并可以转告你。
+
 ## Service 命令
 
 ```bash
