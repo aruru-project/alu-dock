@@ -324,3 +324,31 @@ test("a coordinator sees its own model and only the models the user lists for ch
   listed.text("Child Works can use the listed models.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
 });
+
+test("a child Work's long final reply reaches its parent whole, and dock_inspect reads it whole", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "writer"], { prefix: "alu-native-long-reply-" });
+  const { coordinator, writer } = team.providers;
+  const client = await team.startHost();
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "long-reply-create", trust));
+  await client.prompt(parent.id, "Ask a child Work for the long brainstorm.", "auto", "long-reply-start");
+  (await coordinator.request(0)).tools({ id: "spawn-writer", name: "dock_spawn", arguments: {
+    name: "Writer", task: "Write the long brainstorm.", model: { provider: "writer", id: "fixture" },
+  } });
+  const writing = await writer.request(0);
+  const waiting = await coordinator.request(1);
+
+  // Longer than both the 8,000-character history preview and the earlier 16,000-character reply bound.
+  let reply = "BRAINSTORM_START";
+  for (let index = 0; reply.length < 20_000; index += 1) reply += ` idea-${index}`;
+  reply += " BRAINSTORM_END";
+  writing.text(reply);
+  waiting.text("Waiting for the brainstorm.");
+  const delivered = await coordinator.request(2);
+  assert.ok(JSON.stringify(delivered.body.messages).includes(reply), "The parent hears the child's whole final reply");
+
+  delivered.tools({ id: "inspect-writer", name: "dock_inspect", arguments: { target: "Writer" } });
+  const inspected = await coordinator.request(3);
+  assert.ok(JSON.stringify(inspected.body.messages!.at(-1)).includes(reply), "dock_inspect shows the whole reply");
+  inspected.text("Read the whole brainstorm.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
+});

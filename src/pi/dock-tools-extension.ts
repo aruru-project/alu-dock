@@ -401,7 +401,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_inspect",
       label: "Inspect a Work",
-      description: toolDescription("Read a page of another Work’s conversation without shortening selected messages. Source roles identify who said each message."),
+      description: toolDescription("Read a page of another Work’s conversation. Selected messages come whole; one too long for a page says so and continues on the next page. Source roles identify who said each message."),
       parameters: INSPECT_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string; limit?: number; types?: ObservationMessageType[]; cursor?: string }) => toolResult(await bridge.invoke({
         type: "inspect",

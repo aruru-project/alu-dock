@@ -204,22 +204,17 @@ export class DockRegistry implements DockToolsHostPort {
     this.observationService = new InstanceObservationService({
       listSnapshots: () => this.list(),
       getSnapshot: (instanceId) => this.getSnapshot(instanceId),
-      readConversationBootstrap: async (instanceId, historyLimit) => {
+      readLiveConversation: async (instanceId) => {
         const instance = this.instances.get(instanceId);
         if (!instance) return undefined;
-        const projection = await instance.getAttachProjection(undefined, historyLimit, "conversation_bootstrap");
-        return {
-          instance: projection.instance,
-          recentHistory: projection.recentHistory,
-          historyRevision: projection.historyRevision,
-          historyTruncated: projection.historyTruncated,
-          liveEvents: projection.page.events,
-        };
+        const projection = await instance.getAttachProjection(undefined, 1, "conversation_bootstrap");
+        return { instance: projection.instance, liveEvents: projection.page.events };
       },
-      readHistoryPage: async (instanceId, beforeEntryId, limit) => {
+      readConversationHistory: async (instanceId, cursor, limit) => {
         const instance = this.instances.get(instanceId);
-        return instance === undefined ? undefined : instance.getHistoryPage(beforeEntryId, limit);
+        return instance === undefined ? undefined : instance.getConversationHistory(cursor, limit, "references");
       },
+      readConversationContent: (instanceId, contentRef, cursor) => this.get(instanceId).getConversationContent(contentRef, cursor, "references"),
       subscribe: (instanceId, listener) => {
         const instance = this.instances.get(instanceId);
         if (!instance) return undefined;

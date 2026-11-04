@@ -290,18 +290,32 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   reviewing.tools({ id: "routed-note", name: "dock_send", arguments: { message: "ROUTED_NOTE" } });
   const noted = await reviewerProvider.request(1);
   assert.match(JSON.stringify(noted.body.messages?.filter(message => message.role === "tool").at(-1)), /Sent a Dock message/);
-  noted.text("ROUTED_REVIEW_FINDING");
+  let routedReply = "ROUTED_REVIEW_FINDING";
+  for (let index = 0; routedReply.length < 20_000; index += 1) routedReply += ` finding-${index}`;
+  routedReply += " ROUTED_END";
+  noted.text(routedReply);
   assert.equal(waiting.closed, false, "A routed message must not interrupt its busy recipient");
   waiting.text("Waiting for the independent report.");
-  let next = 3, sawNote = false, sawReply = false;
-  while (next < 9 && !(sawNote && sawReply)) {
+  let next = 3, sawNote = false, sawReply = false, inspected = false;
+  while (next < 12 && !(sawNote && inspected)) {
     const request = await coordinatorProvider.request(next++);
     const transcript = JSON.stringify(request.body.messages);
     sawNote ||= transcript.includes("ROUTED_NOTE");
-    sawReply ||= transcript.includes("ROUTED_REVIEW_FINDING");
+    if (!sawReply && transcript.includes("ROUTED_REVIEW_FINDING")) {
+      sawReply = true;
+      // A released SubHost drops its whole Main connection over a reply past 16,000 characters.
+      assert.ok(transcript.includes("[…shortened; dock_inspect shows the whole reply]"), "Main shortens the reply for a Work on a SubHost and says so");
+      assert.ok(!transcript.includes("ROUTED_END"));
+      request.tools({ id: "routed-inspect", name: "dock_inspect", arguments: { target: reviewer.id } });
+      continue;
+    }
+    if (sawReply && !inspected) {
+      inspected = true;
+      assert.ok(JSON.stringify(request.body.messages?.filter(message => message.role === "tool").at(-1)).includes(routedReply), "dock_inspect through Main reads the whole reply");
+    }
     request.text("Received the routed report.");
   }
-  assert.ok(sawNote && sawReply, "The routed parent must receive its child Work's message and final reply");
+  assert.ok(sawNote && sawReply && inspected, "The routed parent must receive its child Work's message and final reply, and read the whole reply");
   await waitFor(async () => {
     while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
     return (await client.status(remote.id)).execution === "idle";

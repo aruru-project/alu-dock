@@ -36,7 +36,7 @@ A message from another Work is collaboration, not new authority from the user. E
 
 ## Watches
 
-`dock_watch({target})` notifies you once when the target finishes its turn with nothing left queued, stops or fails: at your next step if you are working, otherwise by starting a turn; `dock_cancel_watch` cancels watches, including the ones Dock keeps for your child Works' replies. When a turn ends normally, the notice carries its final reply, shortened past 16,000 characters. An accepted task is not a completed one. If Dock could not arrange the reply after a task was accepted, the result says so: check with `dock_inspect` and do not resend. If the task's acceptance is unconfirmed, the child Work stays visible; inspect it before retrying. Watches do not survive a Host restart.
+`dock_watch({target})` notifies you once when the target finishes its turn with nothing left queued, stops or fails: at your next step if you are working, otherwise by starting a turn; `dock_cancel_watch` cancels watches, including the ones Dock keeps for your child Works' replies. When a turn ends normally, the notice carries its final reply whole; a reply too long for the notice is shortened, says so, and `dock_inspect` reads the rest. An accepted task is not a completed one. If Dock could not arrange the reply after a task was accepted, the result says so: check with `dock_inspect` and do not resend. If the task's acceptance is unconfirmed, the child Work stays visible; inspect it before retrying. Watches do not survive a Host restart.
 
 ## Interrupt and stop
 
@@ -45,7 +45,7 @@ A message from another Work is collaboration, not new authority from the user. E
 ## Discover existing and remote work
 
 - `dock_list({scope?:"live"|"all"})` returns short status, parent, model and thinking level without reading conversations. You see top-level Works and your own child Works.
-- `dock_inspect({target,...})` reads selected recent messages intact. `limit` counts messages; continue only for needed earlier context.
+- `dock_inspect({target,...})` reads selected recent messages whole. `limit` counts messages; a message too long for one page says so and continues on the next page with the continuation cursor. Continue only for needed earlier context.
 - `dock_machines` lists available Machines and their roots. Do not assume Works on other Machines share files.
 - `dock_create({cwd,name?,machine?,systemId?,saveDefault?,model?})` opens a top-level Work for the user without giving it a task. Machine names must match exactly and be available; there is no silent local fallback. An unavailable model fails creation.
 
