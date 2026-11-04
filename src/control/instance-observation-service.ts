@@ -1,12 +1,21 @@
 import { randomUUID } from "node:crypto";
 
 import { AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
-import type { ContentBlockDto, DockEvent, HistoryEntryDto, HistoryPageDto, InstanceSnapshot } from "../core/instance-dto.js";
+import type {
+  ContentBlockDto,
+  ConversationContentPageDto,
+  ConversationHistoryEntryDto,
+  ConversationHistoryPageDto,
+  DockEvent,
+  HistoryEntryDto,
+  InstanceSnapshot,
+} from "../core/instance-dto.js";
 import {
   CROSS_INSTANCE_TRUST,
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
   MAX_OBSERVATION_LIST_ITEMS,
   MAX_OBSERVATION_MESSAGE_LIMIT,
+  MAX_OBSERVATION_PAGE_CHARS,
   MAX_OBSERVATION_REPLY_CHARS,
   OBSERVATION_DATA_NOTICE,
   type InstanceObservation,
@@ -21,19 +30,22 @@ import {
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
 
-interface ObservationConversationBootstrap {
+interface ObservationLiveConversation {
   instance: InstanceSnapshot;
-  recentHistory: HistoryEntryDto[];
-  historyRevision: number;
-  historyTruncated: boolean;
+  /** Conversation frames the target has not saved yet, such as the reply it is writing. */
   liveEvents: DockEvent[];
 }
 
 interface InstanceObservationQueryPort {
   listSnapshots(): InstanceSnapshot[];
   getSnapshot(instanceId: string): InstanceSnapshot;
-  readConversationBootstrap(instanceId: string, historyLimit: number): Promise<ObservationConversationBootstrap | undefined>;
-  readHistoryPage(instanceId: string, beforeEntryId: string | undefined, limit: number): Promise<(HistoryPageDto & { instance: InstanceSnapshot }) | undefined>;
+  readLiveConversation(instanceId: string): Promise<ObservationLiveConversation | undefined>;
+  /**
+   * The target's saved conversation, newest page first. Entries carry previews; one whose
+   * preview is not the whole message is read whole through readConversationContent.
+   */
+  readConversationHistory(instanceId: string, cursor: string | undefined, limit: number): Promise<ConversationHistoryPageDto | undefined>;
+  readConversationContent(instanceId: string, contentRef: string, cursor: string | undefined): Promise<ConversationContentPageDto>;
   subscribe(instanceId: string, listener: (snapshot: InstanceSnapshot) => void): (() => void) | undefined;
   sourceAuthorized(instanceId: string): boolean;
 }
@@ -53,10 +65,14 @@ interface ObservationCursorState {
   sourceInstanceId: string;
   targetInstanceId: string;
   runtimeGeneration: number;
-  historyRevision: number;
+  /** The target's conversation revision; another one means it switched session or branch. */
+  revision: string;
   typesKey: string;
+  /** Messages read and not returned yet, oldest first. */
   pending: InternalObservationMessage[];
-  beforeEntryId?: string;
+  /** Saved entries fetched and not read yet, oldest first. */
+  entries: ConversationHistoryEntryDto[];
+  historyCursor?: string;
   hasEarlier: boolean;
 }
 
@@ -196,38 +212,36 @@ export class InstanceObservationService {
       if (saved.runtimeGeneration !== target.runtimeGeneration || saved.typesKey !== typesKey) {
         throw new Error("Observation cursor no longer matches the target generation or message filters");
       }
-      const boundary = await this.port.readHistoryPage(target.id, undefined, 1);
+      const boundary = await this.port.readConversationHistory(target.id, undefined, 1);
       if (!boundary
         || boundary.instance.runtimeGeneration !== saved.runtimeGeneration
-        || boundary.historyRevision !== saved.historyRevision) {
+        || boundary.revision !== saved.revision) {
         throw new Error("Observation cursor is stale because the target conversation changed");
       }
       status = observationStatus(boundary.instance);
       state = cloneCursorState(saved);
     } else {
-      const bootstrap = await this.port.readConversationBootstrap(target.id, HISTORY_SCAN_PAGE_ITEMS);
-      if (!bootstrap) return { trust: CROSS_INSTANCE_TRUST, observedAt, status };
-      status = observationStatus(bootstrap.instance);
+      // Unsaved frames first: a message saved between the two reads then shows twice, never not at all.
+      const live = await this.port.readLiveConversation(target.id);
+      const saved = live && await this.port.readConversationHistory(target.id, undefined, HISTORY_SCAN_PAGE_ITEMS);
+      if (!live || !saved) return { trust: CROSS_INSTANCE_TRUST, observedAt, status };
+      status = observationStatus(live.instance);
       state = {
         sourceInstanceId,
         targetInstanceId: target.id,
-        runtimeGeneration: bootstrap.instance.runtimeGeneration,
-        historyRevision: bootstrap.historyRevision,
+        runtimeGeneration: saved.instance.runtimeGeneration,
+        revision: saved.revision,
         typesKey,
-        pending: [
-          ...projectHistoryEntries(bootstrap.recentHistory, types),
-          ...projectLiveEvents(bootstrap.liveEvents, types),
-        ],
-        ...(bootstrap.recentHistory[0] === undefined ? {} : { beforeEntryId: bootstrap.recentHistory[0].entryId }),
-        hasEarlier: bootstrap.historyTruncated,
+        pending: projectUnsavedEvents(live.liveEvents, types),
+        entries: saved.entries,
+        ...(saved.nextCursor === undefined ? {} : { historyCursor: saved.nextCursor }),
+        hasEarlier: saved.hasEarlier,
       };
     }
 
     await this.fillFromHistory(state, types, limit);
-    const split = Math.max(0, state.pending.length - limit);
-    const selected = state.pending.slice(split);
-    state.pending = state.pending.slice(0, split);
-    const hasEarlier = state.pending.length > 0 || state.hasEarlier;
+    const selected = takePage(state.pending, limit);
+    const hasEarlier = state.pending.length > 0 || state.entries.length > 0 || state.hasEarlier;
     const nextCursor = hasEarlier ? this.storeCursor(state) : undefined;
     const conversation: ObservationConversationPage = {
       messages: selected.map((message) => ({ ...message })),
@@ -243,17 +257,65 @@ export class InstanceObservationService {
     requested: number,
   ): Promise<void> {
     let pages = 0;
-    while (state.pending.length < requested && state.hasEarlier && pages < MAX_HISTORY_SCAN_PAGES_PER_CALL) {
-      const page = await this.port.readHistoryPage(state.targetInstanceId, state.beforeEntryId, HISTORY_SCAN_PAGE_ITEMS);
+    while (state.pending.length < requested) {
+      const entry = state.entries.pop();
+      if (entry !== undefined) {
+        state.pending.unshift(...await this.readEntry(state.targetInstanceId, entry, types));
+        continue;
+      }
+      if (!state.hasEarlier || pages >= MAX_HISTORY_SCAN_PAGES_PER_CALL) return;
+      const page = await this.port.readConversationHistory(state.targetInstanceId, state.historyCursor, HISTORY_SCAN_PAGE_ITEMS);
       if (!page) throw new Error("Observation target no longer has readable conversation history");
-      if (page.instance.runtimeGeneration !== state.runtimeGeneration || page.historyRevision !== state.historyRevision) {
+      if (page.instance.runtimeGeneration !== state.runtimeGeneration || page.revision !== state.revision) {
         throw new Error("Observation cursor is stale because the target conversation changed");
       }
-      state.pending.unshift(...projectHistoryEntries(page.entries, types));
-      state.beforeEntryId = page.entries[0]?.entryId;
+      state.entries = page.entries;
+      if (page.nextCursor === undefined) delete state.historyCursor;
+      else state.historyCursor = page.nextCursor;
       state.hasEarlier = page.hasEarlier;
       pages += 1;
     }
+  }
+
+  /** One saved entry as messages. A preview that is not the whole message is read whole. */
+  private async readEntry(
+    targetInstanceId: string,
+    item: ConversationHistoryEntryDto,
+    types: readonly ObservationMessageType[],
+  ): Promise<InternalObservationMessage[]> {
+    const { entry } = item;
+    const allowed = new Set(types);
+    const type = recordDefaultType(entry);
+    if (!isConversationMessage(entry) || (!allowed.has(type) && !allowed.has("other"))) return [];
+    const blocks = item.contentComplete ? entry.content : await this.readWholeContent(targetInstanceId, item.contentRef);
+    return projectBlocks(type, blocks, entry.timestamp, allowed);
+  }
+
+  /** The blocks a message shows, its text whole; thinking and tool blocks are not shown. */
+  private async readWholeContent(targetInstanceId: string, contentRef: string): Promise<ContentBlockDto[]> {
+    const blocks: ContentBlockDto[] = [];
+    const texts = new Map<number, { type: "text"; text: string }>();
+    let cursor: string | undefined;
+    do {
+      const page = await this.port.readConversationContent(targetInstanceId, contentRef, cursor);
+      for (const chunk of page.chunks) {
+        if (chunk.type === "text") {
+          const block = texts.get(chunk.blockIndex);
+          if (block) block.text += chunk.text;
+          else {
+            const created = { type: "text" as const, text: chunk.text };
+            texts.set(chunk.blockIndex, created);
+            blocks.push(created);
+          }
+        } else if (chunk.type === "image_ref" || (chunk.type === "image" && chunk.offset === 0)) {
+          blocks.push({ type: "image", mimeType: chunk.mimeType });
+        } else if (chunk.type === "omitted") {
+          blocks.push({ type: "omitted", kind: chunk.kind, description: chunk.description });
+        }
+      }
+      cursor = page.complete ? undefined : page.nextCursor;
+    } while (cursor !== undefined);
+    return blocks;
   }
 
   private async watchLocked(sourceInstanceId: string, target: InstanceSnapshot, after?: string): Promise<ObservationResult> {
@@ -321,13 +383,13 @@ export class InstanceObservationService {
 
   private async finalReply(targetInstanceId: string): Promise<string | undefined> {
     try {
-      const bootstrap = await this.port.readConversationBootstrap(targetInstanceId, HISTORY_SCAN_PAGE_ITEMS);
-      if (!bootstrap) return undefined;
-      // Only finished messages: text still streaming belongs to a run that started since.
-      const finished = bootstrap.liveEvents.filter((event) => event.type === "message.completed");
-      const replies = [...projectHistoryEntries(bootstrap.recentHistory, ["assistant"]), ...projectLiveEvents(finished, ["assistant"])];
-      const reply = replies.at(-1)?.text;
-      return reply === undefined ? undefined : boundedReply(reply);
+      // Saved messages only: text still being written belongs to a run that started since.
+      const saved = await this.port.readConversationHistory(targetInstanceId, undefined, HISTORY_SCAN_PAGE_ITEMS);
+      for (const item of [...(saved?.entries ?? [])].reverse()) {
+        const reply = (await this.readEntry(targetInstanceId, item, ["assistant"])).at(-1)?.text;
+        if (reply !== undefined) return shortenReply(reply, MAX_OBSERVATION_REPLY_CHARS);
+      }
+      return undefined;
     } catch {
       return undefined; // The completion still says it finished; dock_inspect can read the reply.
     }
@@ -520,13 +582,10 @@ function normalizeTypes(value: readonly ObservationMessageType[] | undefined): O
   return types.sort();
 }
 
-function projectHistoryEntries(entries: readonly HistoryEntryDto[], types: readonly ObservationMessageType[]): InternalObservationMessage[] {
-  const allowed = new Set(types);
-  return entries.flatMap((entry) => entry.visibility === "conversation"
-      && (entry.kind === "message" || entry.kind === "custom_message")
-      && entry.source !== "tool"
-    ? projectBlocks(recordDefaultType(entry), entry.content, entry.timestamp, allowed)
-    : []);
+function isConversationMessage(entry: HistoryEntryDto): boolean {
+  return entry.visibility === "conversation"
+    && (entry.kind === "message" || entry.kind === "custom_message")
+    && entry.source !== "tool";
 }
 
 function recordDefaultType(entry: HistoryEntryDto): ObservationMessageType {
@@ -562,28 +621,24 @@ function blockText(block: ContentBlockDto): string {
   return "";
 }
 
-function projectLiveEvents(events: readonly DockEvent[], types: readonly ObservationMessageType[]): InternalObservationMessage[] {
+/**
+ * Messages the target has not finished, so has not saved: what a user just sent and the reply
+ * being written. A finished message is read from its saved entry, whole.
+ */
+function projectUnsavedEvents(events: readonly DockEvent[], types: readonly ObservationMessageType[]): InternalObservationMessage[] {
   const allowed = new Set(types);
-  const order: string[] = [];
-  const groups = new Map<string, InternalObservationMessage[]>();
-  const set = (key: string, messages: InternalObservationMessage[]): void => {
-    if (!groups.has(key)) order.push(key);
-    groups.set(key, messages.filter((item) => allowed.has(item.type) && item.text.length > 0));
-  };
+  const finished = new Set(events.flatMap((event) => event.type === "message.completed" ? [event.data.messageId] : []));
+  const messages = new Map<string, InternalObservationMessage>();
   for (const event of events) {
-    if (event.type === "message.submitted") {
-      set(`message:${event.data.messageId}`, [{ type: "user", text: cleanText(event.data.text), timestamp: event.occurredAt }]);
-    } else if (event.type === "message.delta" && event.data.block === "text") {
-      const key = `message:${event.data.messageId}`;
-      const current = groups.get(key)?.[0];
-      const text = `${current?.text ?? ""}${cleanText(event.data.delta)}`;
-      set(key, [{ type: "assistant", text, timestamp: current?.timestamp ?? event.occurredAt }]);
-    } else if (event.type === "message.completed" && event.data.role !== "tool") {
-      const type: ObservationMessageType = event.data.role === "user" ? "user" : event.data.role === "assistant" ? "assistant" : "other";
-      set(`message:${event.data.messageId}`, projectBlocks(type, event.data.content, event.occurredAt, allowed));
+    if (event.type === "message.submitted" && !finished.has(event.data.messageId)) {
+      messages.set(event.data.messageId, { type: "user", text: cleanText(event.data.text), timestamp: event.occurredAt });
+    } else if (event.type === "message.delta" && event.data.block === "text" && !finished.has(event.data.messageId)) {
+      const current = messages.get(event.data.messageId);
+      if (current) current.text += cleanText(event.data.delta);
+      else messages.set(event.data.messageId, { type: "assistant", text: cleanText(event.data.delta), timestamp: event.occurredAt });
     }
   }
-  return order.flatMap((key) => groups.get(key) ?? []);
+  return [...messages.values()].filter((message) => allowed.has(message.type) && message.text.length > 0);
 }
 
 function cleanText(value: string): string {
@@ -591,13 +646,50 @@ function cleanText(value: string): string {
 }
 
 const REPLY_SHORTENED = "\n[…shortened; dock_inspect shows the whole reply]";
+const MESSAGE_CONTINUES = "\n[…continues; dock_inspect with the continuation cursor shows the rest of this message]";
+const MESSAGE_CONTINUED = "[…continued from the page before]\n";
 
-function boundedReply(text: string): string {
-  if (text.length <= MAX_OBSERVATION_REPLY_CHARS) return text;
-  let end = MAX_OBSERVATION_REPLY_CHARS - REPLY_SHORTENED.length;
+/** At most `limit` characters of a reply; a longer one keeps its start and says where the rest is. */
+function shortenReply(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  return `${text.slice(0, safeEnd(text, limit - REPLY_SHORTENED.length))}${REPLY_SHORTENED}`;
+}
+
+/** The same completion, its reply at most `limit` characters. */
+export function withReplyShortened(notification: ObservationNotification, limit: number): ObservationNotification {
+  const reply = notification.target.reply;
+  if (reply === undefined || reply.length <= limit) return notification;
+  return { ...notification, target: { ...notification.target, reply: shortenReply(reply, limit) } };
+}
+
+/**
+ * Takes the newest pending messages that fit one page. A message that alone is too long for a
+ * page shows its start; the rest stays pending, so the next page begins with it.
+ */
+function takePage(pending: InternalObservationMessage[], limit: number): InternalObservationMessage[] {
+  const page: InternalObservationMessage[] = [];
+  let chars = 0;
+  while (page.length < limit && pending.length > 0) {
+    const next = pending.at(-1)!;
+    if (chars + next.text.length <= MAX_OBSERVATION_PAGE_CHARS) {
+      page.unshift(pending.pop()!);
+      chars += next.text.length;
+      continue;
+    }
+    if (page.length === 0) {
+      const end = safeEnd(next.text, MAX_OBSERVATION_PAGE_CHARS - MESSAGE_CONTINUES.length);
+      page.unshift({ ...next, text: `${next.text.slice(0, end)}${MESSAGE_CONTINUES}` });
+      pending[pending.length - 1] = { ...next, text: `${MESSAGE_CONTINUED}${next.text.slice(end)}` };
+    }
+    break;
+  }
+  return page;
+}
+
+/** `end`, moved back one if it would split a surrogate pair. */
+function safeEnd(text: string, end: number): number {
   const high = text.charCodeAt(end - 1);
-  if (high >= 0xd800 && high <= 0xdbff) end -= 1;
-  return `${text.slice(0, end)}${REPLY_SHORTENED}`;
+  return high >= 0xd800 && high <= 0xdbff ? end - 1 : end;
 }
 
 function truncateText(value: string, max: number): { text: string; truncated: boolean } {
@@ -609,7 +701,7 @@ function truncateText(value: string, max: number): { text: string; truncated: bo
 }
 
 function cloneCursorState(state: ObservationCursorState): ObservationCursorState {
-  return { ...state, pending: state.pending.map((message) => ({ ...message })) };
+  return { ...state, pending: state.pending.map((message) => ({ ...message })), entries: [...state.entries] };
 }
 
 /** Native children communicate through their parent; top-level peers stay unrestricted. */

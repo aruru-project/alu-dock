@@ -7,10 +7,16 @@ import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { DockClient } from "./dock-client.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
-import { dockTargetVisible, observationStatus } from "./instance-observation-service.js";
+import { dockTargetVisible, observationStatus, withReplyShortened } from "./instance-observation-service.js";
 import type { InstanceManager } from "./instance-manager.js";
 import type { MainMachineController } from "./machine-transport.js";
 import type { InstanceReadResult, MachineDto } from "./protocol.js";
+
+/**
+ * The longest final reply a released SubHost accepts. It rejects a longer one, and a rejected
+ * record drops its whole Main connection, so Main shortens replies for Works on SubHosts.
+ */
+const SUBHOST_REPLY_CHARS = 16_000;
 
 /** Main-owned global Dock-tool authority; observation semantics stay in InstanceObservationService. */
 export class MainMachineDockToolsAuthority {
@@ -35,12 +41,13 @@ export class MainMachineDockToolsAuthority {
     this.observation = new InstanceObservationService({
       listSnapshots: snapshots,
       getSnapshot: get,
-      readConversationBootstrap: async (instanceId, historyLimit) => {
+      readLiveConversation: async (instanceId) => {
         const read = await this.read(instanceId, "conversation_bootstrap") as InstanceReadResult;
-        void historyLimit;
-        return { instance: read.instance, recentHistory: read.recentHistory, historyRevision: read.historyRevision, historyTruncated: read.historyTruncated, liveEvents: read.page.events };
+        return { instance: read.instance, liveEvents: read.page.events };
       },
-      readHistoryPage: (instanceId, beforeEntryId, limit) => options.localClient.history(instanceId, beforeEntryId, limit),
+      // A context per read: a SubHost older than reference views gets the legacy view instead.
+      readConversationHistory: (instanceId, cursor, limit) => options.localClient.conversationHistory(instanceId, cursor, limit, {}),
+      readConversationContent: (instanceId, contentRef, cursor) => options.localClient.conversationContent(instanceId, contentRef, cursor, {}),
       subscribe: (instanceId, listener) => options.instances().subscribeSnapshot(instanceId, listener),
       sourceAuthorized: (instanceId) => this.authorizedSources.has(instanceId) && (() => { try { return get(instanceId).lifecycle === "active"; } catch { return false; } })(),
     });
@@ -54,7 +61,11 @@ export class MainMachineDockToolsAuthority {
     if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot act on other work. Open active work and try again.");
     assertChildMayRequest(source, request);
     this.ensureSource(sourceMainId, sourceMachineId);
-    if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
+    if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
+      const result = await this.observation.observe(sourceMainId, request);
+      if (result.type !== "watch" || result.status !== "completed" || !await this.onSubHost(sourceMachineId)) return result;
+      return { ...result, completion: withReplyShortened(result.completion, SUBHOST_REPLY_CHARS) };
+    }
     const notifyWhenDone = (childId: string, acceptedAt: string) => this.observation.notifyWhenDone(sourceMainId, childId, acceptedAt);
     const send: DockToolsMutationPort["send"] = async (input) => {
       const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery ?? "followUp", input.operationId);
@@ -119,12 +130,16 @@ export class MainMachineDockToolsAuthority {
     const detachSink = this.observation.attachSink(sourceMainId, async (notification) => {
       const mainId = await mainIdPromise;
       if (this.sourceMachines.get(sourceMainId) === mainId) await this.options.deliverLocalNotification(sourceMainId, notification);
-      else await this.options.controller().deliverDockToolNotification(sourceMachineId, sourceMainId, notification);
+      else await this.options.controller().deliverDockToolNotification(sourceMachineId, sourceMainId, withReplyShortened(notification, SUBHOST_REPLY_CHARS));
     });
     const detachSource = this.options.instances().subscribeSnapshot(sourceMainId, (snapshot) => {
       if (snapshot.lifecycle !== "active") void this.cancelSource(sourceMainId);
     });
     this.sourceCleanup.set(sourceMainId, () => { detachSink(); detachSource?.(); });
+  }
+
+  private async onSubHost(machineId: string): Promise<boolean> {
+    return (await this.options.controller().machines()).find((machine) => machine.kind === "main")?.hostId !== machineId;
   }
 
   private read(instanceId: string, replay: "event_log" | "conversation_bootstrap"): Promise<InstanceReadResult> {

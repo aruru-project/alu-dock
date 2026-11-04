@@ -8,8 +8,10 @@ export const MAX_OBSERVATION_CURSOR_CHARS = 128;
 export const MAX_OBSERVATION_LIST_ITEMS = 64;
 export const MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE = 64;
 export const MAX_OBSERVATION_MESSAGE_LIMIT = 20;
-/** A finished Work's last reply carried in its watch completion; dock_inspect reads longer replies whole. */
-export const MAX_OBSERVATION_REPLY_CHARS = 16_000;
+/** The most text of selected messages one dock_inspect page carries; a longer message continues on the next page. */
+export const MAX_OBSERVATION_PAGE_CHARS = 64_000;
+/** A finished Work's last reply carried in its watch completion: whole when it fits one dock_inspect page. */
+export const MAX_OBSERVATION_REPLY_CHARS = MAX_OBSERVATION_PAGE_CHARS;
 
 export type ObservationMessageType = "user" | "assistant" | "other";
 
