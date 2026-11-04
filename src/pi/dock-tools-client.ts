@@ -24,10 +24,21 @@ export interface ModelFacts {
   describe(model: { provider: string; id: string }): DescribedModel | undefined;
 }
 
+/** What the Worker knows beyond the Host's result: its models, and the thinking level a new child Work was meant to get. */
+export interface RenderContext {
+  facts?: ModelFacts;
+  thinkingAsked?: string;
+}
+
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
-export function renderDockToolsResult(result: DockToolsResult, facts: ModelFacts = { describe: () => undefined }): string {
-  if (result.type === "models") return renderChildModels(result, facts);
-  if (result.type === "spawn") return `Created child Work ${statusLine(result.instance, new Date().toISOString())}. ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
+export function renderDockToolsResult(result: DockToolsResult, context: RenderContext = {}): string {
+  if (result.type === "models") return renderChildModels(result, context.facts ?? { describe: () => undefined });
+  if (result.type === "spawn") {
+    const used = result.instance.thinkingLevel;
+    const nearest = context.thinkingAsked === undefined || used === undefined || used === context.thinkingAsked
+      ? "" : ` Its model has no thinking level ${context.thinkingAsked}, so it runs at ${used}, the nearest it has.`;
+    return `Created child Work ${statusLine(result.instance, new Date().toISOString())}.${nearest} ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
+  }
   if (result.type === "interrupt" || result.type === "stop") return `${result.type === "interrupt" ? "Interrupted current turn of" : "Stopped"} ${identity(result.instance)}.`;
   if (result.type === "system_catalog") {
     const catalog = result.result;
@@ -118,32 +129,29 @@ export function renderChildWait(result: ChildWaitResult): string {
   return [head + still, ...result.replies.map((notification) => renderObservationNotification(notification))].join("\n\n");
 }
 
-/** Your own model first, then the user's list with the user's notes and what each model supports. */
+/** Your own model first, then the models the user picked, with what each supports. */
 function renderChildModels(list: ChildModelList, facts: ModelFacts): string {
   const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
-  const notes = new Map(list.models.map((model) => [key(model), model.note]));
   const lines: string[] = [];
-  if (facts.current) {
-    lines.push(`Your model, which a child Work uses when you omit model: ${describeModel(facts.current, notes.get(key(facts.current)))}`);
-  }
+  if (facts.current) lines.push(`Your model, which child Works use unless you are asked for another: ${describeModel(facts.current)}`);
   const listed = list.models.filter((model) => !facts.current || key(model) !== key(facts.current));
-  const available = listed.flatMap((model) => { const described = facts.describe(model); return described ? [{ described, note: model.note }] : []; });
+  const available = listed.flatMap((model) => { const described = facts.describe(model); return described ? [described] : []; });
   const unavailable = listed.filter((model) => !facts.describe(model)).map(key);
   if (available.length > 0) {
-    lines.push("", "Models the user lists for child Works:");
-    for (const { described, note } of available) lines.push(`- ${describeModel(described, note)}`);
+    lines.push("", "Models the user picked for child Works:");
+    for (const described of available) lines.push(`- ${describeModel(described)}`);
   }
   if (unavailable.length > 0) lines.push("", `Listed but not available on this machine now: ${unavailable.join(", ")}.`);
   if (list.problem) lines.push("", `The user's list of models for child Works could not be used: ${list.problem}. Tell the user if they expect one.`);
   else if (list.models.length === 0) lines.push("", "The user has not listed models for child Works.");
-  lines.push("", "Usually omit model. Choose a listed model when its note fits the task or the user asks for it; a model the user names also works.");
+  lines.push("", "Set model only when the user or the project's instructions ask for one; this list gives its exact name. A model the user names that is not listed also works.");
   return lines.join("\n");
 }
 
-function describeModel(model: DescribedModel, note: string | undefined): string {
+function describeModel(model: DescribedModel): string {
   const thinking = model.thinkingLevels.length === 1 && model.thinkingLevels[0] === "off" ? "no thinking levels" : `thinking ${model.thinkingLevels.join(", ")}`;
   const context = model.contextWindow === undefined ? "" : ` · context ${tokenCount(model.contextWindow)}`;
-  return `${model.provider}/${model.id}${note ? ` · note: ${JSON.stringify(note)}` : ""} · ${thinking}${context} · ${model.images ? "reads images" : "text only"}`;
+  return `${model.provider}/${model.id} · ${thinking}${context} · ${model.images ? "reads images" : "text only"}`;
 }
 
 function tokenCount(tokens: number): string {

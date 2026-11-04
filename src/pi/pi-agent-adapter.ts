@@ -3654,15 +3654,11 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     // A child is created once; reloads restore what its session recorded.
     const childStart = childStarting;
     const inheritedConversation = childStart && sessionManager.getBranch().length > 0;
+    // A child given its parent's conversation still starts on its own model.
     const startingModel = await resolvePiStartingModel(requestedModel, services.modelRuntime, sessionManager, childStart);
-    // A child given its parent's conversation still starts on its own model; another model
-    // starts at that model's own thinking level rather than the parent's recorded one.
-    const thinkingLevel = piCreateOptions.thinkingLevel ?? (inheritedConversation && startingModel
-      ? settingsManager.getModelThinkingLevel(startingModel.provider, startingModel.id) ?? settingsManager.getDefaultThinkingLevel()
-      : undefined);
+    // Pi starts a model that lacks the requested thinking level at the nearest level it has.
     const result = await createAgentSessionFromServices({
       ...piCreateOptions,
-      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...workerToolSelection(allowedTools, options.excludeTools ?? piCreateOptions.excludeTools),
@@ -3673,12 +3669,6 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       // Preserve existing plugin preferences; wire JSON cannot disable this contract.
       extensionModelMutationPolicy: "legacy-defaults",
     });
-    // A parent that names a thinking level the child's model lacks gets an error, not a child at another level.
-    if (childStart && piCreateOptions.thinkingLevel !== undefined
-      && !result.session.getAvailableThinkingLevels().includes(piCreateOptions.thinkingLevel)) {
-      result.session.dispose();
-      throw new Error(`Model ${result.session.model?.id ?? "selected for this child"} does not support thinking level ${piCreateOptions.thinkingLevel}. No child work was created.`);
-    }
     if (inheritedConversation) {
       // Pi records these only for new sessions; without them a reload would restore the parent's.
       if (result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);

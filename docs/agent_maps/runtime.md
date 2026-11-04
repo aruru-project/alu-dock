@@ -179,9 +179,9 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 `dock_wait` 只在 Worker 内等待，不经过 Host：`src/pi/child-replies.ts` 记下本 Work 交过任务、还没回复也没停止的子 Work；等待期间这些子 Work 的完成通知直接作为工具结果返回，不再另外送达。有消息排队给这个 Work（用户的或子 Work 的）、用户取消或超时即返回，所以等待不会把用户挡在外面。回复比派活结果先到（子 Work 立刻失败或做完）的子 Work 不记入；取消全部 watch 或关闭 Dock tools 时清空，因为 Host 上的回复 watch 已一起取消。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等子 Work 会白白耗掉轮数。
 
-`dock_models` 的事实由 Worker 读：Host 只返回本机 `child-models.json` 里用户列出的模型和备注（SubHost 上的 Work 也由本机 Host 回答，不经 Main），Worker 用当前 Pi 的模型和可用模型补上 thinking level（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
+`dock_models` 的事实由 Worker 读：Host 只返回本机 `child-models.json` 里用户列出的模型（只有 `provider`/`id`，不带用途说明，SubHost 上的 Work 也由本机 Host 回答，不经 Main），Worker 用当前 Pi 的模型和可用模型补上 thinking level（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
 
-`dock_spawn(withContext:true)` 让子 Work 从父 Work 当前对话的副本开始。请求里只有这个开关，没有会话路径：Host 用私有 `branch_for_child` control 让父 Work 自己的 Worker 用 Pi `createBranchedSession` 把当前分支写成子 Work 目录下的新会话文件（Pi 在文件头记下来源会话），再以这个文件创建子 Work。分叉点在仍有工具调用未返回的那条回复之前，子 Work 不会看到“创建自己”的调用以无结果结束。子 Work 仍用父 Work 为它选的模型；换模型而没指定 thinking level 时用该模型自己的默认档位。Pi 只为新会话记录模型和 thinking level，所以 adapter 在子 Work 启动后补记一次，reload 时恢复的是子 Work 自己的设置。
+`dock_spawn(withContext:true)` 让子 Work 从父 Work 当前对话的副本开始。请求里只有这个开关，没有会话路径：Host 用私有 `branch_for_child` control 让父 Work 自己的 Worker 用 Pi `createBranchedSession` 把当前分支写成子 Work 目录下的新会话文件（Pi 在文件头记下来源会话），再以这个文件创建子 Work。分叉点在仍有工具调用未返回的那条回复之前，子 Work 不会看到“创建自己”的调用以无结果结束。子 Work 仍用父 Work 为它选的模型。Pi 只为新会话记录模型和 thinking level，所以 adapter 在子 Work 启动后补记一次，reload 时恢复的是子 Work 自己的设置。
 
 ## Extension UI
 
@@ -218,6 +218,8 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 `dock_system` 通过同一 Protocol 查询目录候选或分页读取原文件；返回正文以引用块呈现。`dock_create` 显式选择覆盖目录默认；未选择时交给创建 Host 应用目录默认，未配置才用 Pi 原生行为，已配置但损坏则明确报错，不创建首项。`saveDefault` 是独立明确保存，必须提供显式 ID。`model` 是新 Work 的起始模型，与 system 选择并入同一份 workerConfig，由目标 Worker 按上文规则解析；不开放 generic workerConfig。来源绑定仍由 Host 验证，新 Work 默认开启协作。
 
 ### 原生子 Work
+
+子 Work 没指定 thinking level 时沿用父 Work 当前那一档，换了模型也一样；模型没有这一档时由 Pi 取最接近的一档（`clampThinkingLevel`，与 Work 换模型时相同），父 Work 的 Worker 在 `dock_spawn` 结果里写明实际档位。
 
 `dock_spawn` 复用正常 instance.create、Queue 和 observation watch，父子关系 `parentId` 持久化到 catalog 并经 Protocol V2 投影，不另造调度器。先创建再提交任务；提交结果不确定时保留可见子 Work，不自动重放。只有沿用父 Work 模型时才沿用它的 thinking；父 Work 明确要求子模型不支持的 thinking 时，Worker 启动失败，不留下空的子 Work。子 Work 完成后最后一条回复随 watch completion 交给父 Work；父 Work 每次 `dock_send` 交给它新任务，Host 都再登记一次。父 Work 停止或崩溃时子 Work 一并停止；崩溃的子 Work 只能 Stop 收走，不能 Continue。
 
