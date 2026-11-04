@@ -1,9 +1,8 @@
 import { requireHumanTarget } from "../human-target.js";
-import { arrangeReply, assertChildMayRequest, messageTarget, spawnDockWorker } from "./native-collaboration.js";
+import { assertChildMayRequest, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { OperationLedger } from "./operation-ledger.js";
 import { createDockSystem, readDockSystem } from "./system-tools.js";
-import type { DockToolsHostPort, DockToolsRequest, DockToolsResult, ObservationDeliverySink } from "../core/dock-tools.js";
-import { dockMessageText } from "../core/dock-tools.js";
+import type { DockToolsHostPort, DockToolsMutationPort, DockToolsRequest, DockToolsResult, ObservationDeliverySink } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { DockClient } from "./dock-client.js";
@@ -52,14 +51,18 @@ export class MainMachineDockToolsAuthority {
     const snapshots = this.options.instances().snapshots();
     const source = snapshots.find((item) => item.id === sourceMainId);
     if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
-    if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot create or message other work. Open active work and try again.");
+    if ((["create", "send", "spawn", "interrupt", "stop"].includes(request.type)) && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot act on other work. Open active work and try again.");
     assertChildMayRequest(source, request);
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
     const notifyWhenDone = (childId: string, acceptedAt: string) => this.observation.notifyWhenDone(sourceMainId, childId, acceptedAt);
+    const send: DockToolsMutationPort["send"] = async (input) => {
+      const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery ?? "followUp", input.operationId);
+      return { target: observationStatus(result.instance), receipt: result.receipt };
+    };
     if (request.type === "spawn") return spawnDockWorker(source, request, {
       create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
-      send: async (input) => { const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery ?? "followUp", input.operationId); return { target: observationStatus(result.instance), receipt: result.receipt }; },
+      send,
       notifyWhenDone,
     });
     if (request.type === "interrupt" || request.type === "stop") {
@@ -78,20 +81,17 @@ export class MainMachineDockToolsAuthority {
       };
       return request.type === "create" ? this.toolOperations.run(request.operationId, "dock.create", { sourceMainId, request }, execute) : execute();
     }
-    if (request.type === "send") {
-      const recipient = messageTarget(source, request);
-      const target = "parentId" in recipient
-        ? snapshots.find((item) => item.id === recipient.parentId)
-        : requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), recipient.target);
-      if (!target) throw new Error("The Work that created you is no longer available.");
-      const message = dockMessageText(source.displayName, request.message);
-      const result = await this.options.localClient.prompt(target.id, message, recipient.delivery, request.operationId);
-      const delivered = observationStatus(result.instance);
-      // A parent hears back from its child each time it hands the child more work.
-      const replyError = target.parentId === sourceMainId ? await arrangeReply(() => notifyWhenDone(target.id, result.receipt.acceptedAt)) : undefined;
-      return { type: "send", target: delivered, receipt: { delivery: result.receipt.delivery, queued: result.receipt.queued, acceptedAt: result.receipt.acceptedAt }, ...(replyError === undefined ? {} : { error: replyError }) };
-    }
-    throw new Error("File delivery and the helper model list are answered by the source Host");
+    if (request.type === "send") return sendDockMessage(source, request, {
+      send,
+      resolveTarget: (target) => requireHumanTarget(snapshots.filter(item => dockTargetVisible(source, item)), target),
+      parent: (parentId) => {
+        const parent = snapshots.find((item) => item.id === parentId);
+        if (!parent) throw new Error("The Work that created you is no longer available.");
+        return parent;
+      },
+      notifyWhenDone,
+    });
+    throw new Error("File delivery and the model list for child Works are answered by the source Host");
   }
 
   async cancelSource(sourceMainId: string): Promise<void> {

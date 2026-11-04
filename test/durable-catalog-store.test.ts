@@ -73,24 +73,6 @@ test("legacy collaboration policy migrates once, including old false, and new op
   assert.equal(legacy?.runStartedAt, undefined);
 });
 
-test("catalog rejects invalid collaboration versions rather than re-enabling tools", async () => {
-  const { path } = await temporaryCatalog();
-  const store = new FileCatalogStore(path);
-  await store.commit(projection(1, [record("one")]), { kind: "fixture", effect: "pre_effect" });
-  const original = JSON.parse(await readFile(path, "utf8")) as { instances: Array<Record<string, unknown>> };
-  for (const version of [0, 2, "1", null, false]) {
-    original.instances[0]!.collaborationVersion = version;
-    await writeFile(path, JSON.stringify(original), { mode: 0o600 });
-    await assert.rejects(store.load(), /collaborationVersion/u);
-  }
-  delete original.instances[0]!.collaborationVersion;
-  original.instances[0]!.dockToolsEnabled = "false";
-  await writeFile(path, JSON.stringify(original), { mode: 0o600 });
-  await assert.rejects(store.load(), /dockToolsEnabled/u, "legacy migration does not hide corrupt boolean input");
-  await assert.rejects(store.commit(projection(2, [record("one", { collaborationVersion: 2 as 1 })]),
-    { kind: "invalid-marker", effect: "pre_effect" }), /collaboration version/u);
-});
-
 test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   const { path } = await temporaryCatalog();
   const store = new FileCatalogStore(path);

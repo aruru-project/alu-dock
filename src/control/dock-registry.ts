@@ -1,4 +1,3 @@
-import { arrangeReply, assertChildMayRequest, messageTarget, spawnDockWorker } from "./native-collaboration.js";
 import { randomUUID } from "node:crypto";
 import type { SystemService } from "./system-service.js";
 import { realpath, stat } from "node:fs/promises";
@@ -12,7 +11,8 @@ import {
 } from "../core/catalog.js";
 import type { ObservationDeliverySink } from "../core/instance-observation.js";
 import {
-  dockMessageText,
+  type DockChildSelection,
+  type DockChildStart,
   type DockToolsHostPort,
   type DockToolsMutationPort,
   type DockToolsRequest,
@@ -26,6 +26,7 @@ import { InstanceBusyError, InstanceNotActiveError, type InstanceLifecycle, type
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
+import { assertChildMayRequest, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import {
   catalogReopenSessionFile,
   catalogSnapshotFromRecord,
@@ -38,10 +39,8 @@ import type {
 } from "./project-trust.js";
 
 export interface InstanceFactoryInput {
-  /** Owning top-level Work on this Host; native children are temporary. */
-  parentId?: string;
-  /** A child's exact tool ceiling, chosen by its parent. Not persisted: a child is never reopened. */
-  allowedTools?: string[];
+  /** Not persisted: a child Work is never reopened. */
+  child?: DockChildStart;
   id: string;
   creationOperationId: string;
   hostEpoch: string;
@@ -63,11 +62,7 @@ export interface InstanceFactoryInput {
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
 
 export interface CreateRegistryInstanceInput {
-  /** Owning top-level Work on this Host; native children are temporary. */
-  parentId?: string;
-  allowedTools?: string[];
-  /** Start the child from a copy of its parent's conversation, branched by the parent's Worker. */
-  withParentContext?: boolean;
+  child?: DockChildSelection;
   operationId: string;
   cwd: string;
   name?: string;
@@ -76,7 +71,7 @@ export interface CreateRegistryInstanceInput {
   workerConfig?: JsonObject;
 }
 
-export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "parentId" | "allowedTools" | "withParentContext"> {
+export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "child"> {
   key: string;
 }
 
@@ -254,18 +249,8 @@ export class DockRegistry implements DockToolsHostPort {
     this.catalogReady = true;
   }
 
-  async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
-    const creation = this.createNew(input);
-    // Same tick as createNew's parent check, so a parent that starts stopping later sees this child.
-    const parent = input.parentId === undefined ? undefined : this.instances.get(input.parentId);
-    if (parent) {
-      const starting = this.childStarts.get(parent) ?? new Set<Promise<unknown>>();
-      this.childStarts.set(parent, starting);
-      starting.add(creation);
-      const settled = () => { starting.delete(creation); };
-      void creation.then(settled, settled);
-    }
-    return creation;
+  create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
+    return this.createNew(input);
   }
 
   async ensure(input: EnsureRegistryInstanceInput): Promise<{ created: boolean; instance: InstanceSnapshot }> {
@@ -294,12 +279,29 @@ export class DockRegistry implements DockToolsHostPort {
     if (this.catalog.current().instances.some((record) => record.creationOperationId === input.operationId)) {
       throw new CatalogOperationRecordedError(input.operationId);
     }
-    if (input.allowedTools !== undefined && input.parentId === undefined) throw new Error("Tool permissions can only be chosen for a child Work.");
-    if (input.withParentContext && input.parentId === undefined) throw new Error("Only a child Work can start from its parent's conversation.");
-    const parent = input.parentId === undefined ? undefined : this.get(input.parentId);
+    const parent = input.child === undefined ? undefined : this.get(input.child.parentId);
     const parentActive = () => parent === undefined || (this.instances.get(parent.id) === parent
       && parent.parentId === undefined && parent.lifecycle === "active");
     if (!parentActive()) throw new Error("A child Work needs an active top-level Work on this machine as its parent.");
+    if (parent === undefined) return this.startNew(input, key, undefined, parentActive);
+    // A parent that starts stopping from here on waits for this child, which then stops itself.
+    const starting = this.childStarts.get(parent) ?? new Set<Promise<unknown>>();
+    this.childStarts.set(parent, starting);
+    const creation = this.startNew(input, key, parent, parentActive);
+    starting.add(creation);
+    try {
+      return await creation;
+    } finally {
+      starting.delete(creation);
+    }
+  }
+
+  private async startNew(
+    input: CreateRegistryInstanceInput,
+    key: string | undefined,
+    parent: ManagedInstance | undefined,
+    parentActive: () => boolean,
+  ): Promise<ManagedInstance> {
     const resolution = await this.resolveCreationTrust(input, parent);
     const cwd = resolution.canonicalCwd;
     const resolvedConfig = this.systemService
@@ -309,13 +311,13 @@ export class DockRegistry implements DockToolsHostPort {
       ? undefined
       : cloneWorkerConfig(resolvedConfig, "Worker configuration");
     // The parent's Worker owns its conversation and writes the copy for the child's directory.
-    const sessionFile = input.withParentContext ? await parent!.branchConversationForChild(cwd) : undefined;
+    const sessionFile = input.child?.withParentContext ? await parent!.branchConversationForChild(cwd) : undefined;
 
     const id = this.createId();
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.parentId === undefined ? {} : { parentId: input.parentId }), ...(input.allowedTools === undefined ? {} : { allowedTools: input.allowedTools }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.child === undefined ? {} : { child: { parentId: input.child.parentId, ...(input.child.allowedTools === undefined ? {} : { allowedTools: input.child.allowedTools }) } }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -588,8 +590,8 @@ export class DockRegistry implements DockToolsHostPort {
       if (request.machine !== undefined) throw new Error("Machine selection requires a connection to Main. No local fallback was used.");
       return request.type === "create" ? mutations.create(request) : mutations.system(request);
     }
-    // The list belongs to this Host's machine, where the source's helpers run.
-    if (request.type === "models") return { type: "models", ...await mutations.helperModels() };
+    // The list belongs to this Host's machine, where the source's child Works run.
+    if (request.type === "models") return { type: "models", ...await mutations.childModels() };
     const notifyWhenDone = (childId: string, acceptedAt: string) => this.observationService.notifyWhenDone(sourceInstanceId, childId, acceptedAt);
     if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input), notifyWhenDone });
     if (request.type === "interrupt" || request.type === "stop") {
@@ -597,17 +599,12 @@ export class DockRegistry implements DockToolsHostPort {
       return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
     }
     if (request.type !== "send") throw new Error("Unknown Dock tool request");
-    const recipient = messageTarget(source, request);
-    const target = "parentId" in recipient ? this.getSnapshot(recipient.parentId) : this.observationService.resolveTarget(sourceInstanceId, recipient.target);
-    const result = await mutations.send({
-      operationId: request.operationId,
-      delivery: recipient.delivery,
-      instanceId: target.id,
-      message: dockMessageText(source.displayName, request.message),
+    return sendDockMessage(source, request, {
+      send: (input) => mutations.send(input),
+      resolveTarget: (target) => this.observationService.resolveTarget(sourceInstanceId, target),
+      parent: (parentId) => this.getSnapshot(parentId),
+      notifyWhenDone,
     });
-    // A parent hears back from its child each time it hands the child more work.
-    const replyError = target.parentId === sourceInstanceId ? await arrangeReply(() => notifyWhenDone(target.id, result.receipt.acceptedAt)) : undefined;
-    return { type: "send", target: result.target, receipt: result.receipt, ...(replyError === undefined ? {} : { error: replyError }) };
   }
 
   observationStatus(instanceId: string) {

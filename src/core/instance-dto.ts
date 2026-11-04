@@ -353,7 +353,7 @@ export interface EventCursor {
 }
 
 export interface InstanceSnapshot {
-  /** Owning top-level Work; native children are temporary and retire with their parent. */
+  /** Set on a child Work: the top-level Work it belongs to. */
   parentId?: string;
   id: string;
   creationOperationId: string;

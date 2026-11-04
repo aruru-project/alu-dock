@@ -201,7 +201,7 @@ interface AgentEventTransition {
 }
 
 export interface ManagedInstanceOptions {
-  /** Owning top-level Work; native children are temporary and retire with their parent. */
+  /** Set on a child Work: the top-level Work it belongs to. */
   parentId?: string;
   /** The trust decision this runtime started with; a child in the same directory reuses it. */
   projectTrusted?: boolean;

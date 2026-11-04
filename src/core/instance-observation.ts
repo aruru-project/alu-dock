@@ -26,7 +26,7 @@ export interface ObservedInstanceStatus {
   runStartedAt?: string;
   runtimeGeneration: number;
   lastError?: string;
-  /** The model the sibling is using now; for stopped work, the one it last used. */
+  /** The model the Work is using now; for stopped work, the one it last used. */
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;
   /**

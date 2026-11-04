@@ -4,8 +4,8 @@ import {
   MAX_DOCK_TOOL_MESSAGE_CHARS,
   MAX_DOCK_TOOL_NAME_CHARS,
   MAX_DOCK_TOOL_TARGET_CHARS,
-  MAX_HELPER_MODEL_PROBLEM_CHARS,
-  parseHelperModelEntries,
+  MAX_CHILD_MODEL_PROBLEM_CHARS,
+  parseChildModelEntries,
   type DockToolsRequest,
 } from "./dock-tools.js";
 import { parseDeliverableDto } from "./instance-deliverables.js";
@@ -139,9 +139,9 @@ export function parseDockToolsResult(raw: unknown): void {
     return;
   }
   if (value.type === "models") {
-    exactKeys(value, ["type", "models", "problem"], "Helper model list");
-    parseHelperModelEntries(value.models);
-    if (value.problem !== undefined) boundedString(value.problem, MAX_HELPER_MODEL_PROBLEM_CHARS, "Helper model list problem");
+    exactKeys(value, ["type", "models", "problem"], "Model list for child Works");
+    parseChildModelEntries(value.models);
+    if (value.problem !== undefined) boundedString(value.problem, MAX_CHILD_MODEL_PROBLEM_CHARS, "Model list problem");
     return;
   }
   if (value.type === "spawn") {

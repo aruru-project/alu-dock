@@ -406,7 +406,7 @@ export class InstanceObservationService {
     for (const item of live) {
       if (item.id.startsWith(selector) || item.name === selector) matches.set(item.id, item);
     }
-    if (matches.size !== 1) throw new Error(`Observation target is missing or ambiguous among live siblings: ${selector}`);
+    if (matches.size !== 1) throw new Error(`No single live Work you can see matches ${selector}; run dock_list and use its id.`);
     return this.assertNotSelf(sourceInstanceId, [...matches.values()][0]!);
   }
 

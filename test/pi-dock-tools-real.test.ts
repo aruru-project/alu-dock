@@ -20,6 +20,7 @@ import { DOCK_TOOL_NAMES } from "../src/pi/dock-tools-extension.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
+import { exited } from "./support/native-team.js";
 import { PlanGoalProvider } from "./support/plan-goal-provider.js";
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
@@ -258,10 +259,10 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   await waitFor(async () => (await client.status(remote.id)).execution === "idle", "Remote list did not settle");
   await client.setModel(remote.id, "routed-coordinator", "fixture", "routed-team-model");
   await client.prompt(remote.id, "Delegate an independent review.", "auto", "routed-team-start");
-  // The helper model list belongs to the source's own machine, so the SubHost answers it.
+  // The child Work model list belongs to the source's own machine, so the SubHost answers it.
   (await coordinatorProvider.request(0)).tools({ id: "routed-models", name: "dock_models", arguments: {} });
   const choosing = await coordinatorProvider.request(1);
-  assert.match(JSON.stringify(choosing.body.messages?.at(-1)), /Your model, which a helper uses when you omit model: routed-coordinator\/fixture/);
+  assert.match(JSON.stringify(choosing.body.messages?.at(-1)), /Your model, which a child Work uses when you omit model: routed-coordinator\/fixture/);
   choosing.tools({ id: "routed-spawn", name: "dock_spawn", arguments: {
     name: "Routed reviewer", task: "Review the workspace.",
     model: { provider: "routed-reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],
@@ -271,19 +272,21 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   const reviewer = (await client.list()).find((work) => work.displayName === "Routed reviewer");
   assert.ok(reviewer);
   assert.equal(reviewer.parentId, remote.id, "Main must expose the global source identity as parent");
-  // User decision 2026-10-31: Main's authority holds a helper to messaging its parent.
+  // User decision 2026-10-31: Main's authority holds a child Work to messaging its parent.
+  // The parent's turn goes on and it later hears from its child, so neither request took effect.
   for (const type of ["stop", "interrupt"] as const) {
-    await assert.rejects(dockTools.invoke(reviewer.id, remote.hostId!, { type, target: remote.id, operationId: `main-denied-${type}` }), /can only message/);
+    await assert.rejects(dockTools.invoke(reviewer.id, remote.hostId!, { type, target: remote.id, operationId: `main-denied-${type}` }), `the child's ${type} is refused`);
     assert.equal(waiting.closed, false);
   }
-  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, { parentId: sentinel.id }),
-    "A parent on Main cannot own a physical child on SubHost");
+  // A child runs on its parent's machine: a parent on Main cannot own a child on a SubHost.
+  await assert.rejects(client.create(workspace, "CrossHostChild", "cross-host-child", undefined, remote.hostId, undefined, { parentId: sentinel.id }));
+  assert.ok(!(await client.list()).some((work) => work.displayName === "CrossHostChild"));
   assert.equal(typeof ready.nativeInstanceId, "string");
   assert.notEqual(remote.id, ready.nativeInstanceId);
   assert.deepEqual(reviewer.executor.model, { provider: "routed-reviewer", id: "fixture" });
   assert.equal(reviewer.executor.thinkingLevel, "low");
   assert.deepEqual(reviewing.toolNames.sort(), ["dock_send", "read"]);
-  // The helper's message and its final reply both find the parent through Main.
+  // The child Work's message and its final reply both find the parent through Main.
   reviewing.tools({ id: "routed-note", name: "dock_send", arguments: { message: "ROUTED_NOTE" } });
   const noted = await reviewerProvider.request(1);
   assert.match(JSON.stringify(noted.body.messages?.filter(message => message.role === "tool").at(-1)), /Sent a Dock message/);
@@ -298,7 +301,7 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
     sawReply ||= transcript.includes("ROUTED_REVIEW_FINDING");
     request.text("Received the routed report.");
   }
-  assert.ok(sawNote && sawReply, "The routed parent must receive its helper's message and final reply");
+  assert.ok(sawNote && sawReply, "The routed parent must receive its child Work's message and final reply");
   await waitFor(async () => {
     while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
     return (await client.status(remote.id)).execution === "idle";
@@ -307,12 +310,7 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   const childPid = spawned.find(record => record.kind === "worker_started" && record.parentId === ready.nativeInstanceId)?.pid;
   assert.equal(typeof childPid, "number", "Child ownership is stored using the SubHost's native parent identity");
   await client.stop(remote.id, "routed-parent-stop");
-  await waitFor(() => {
-    for (const pid of [Number(ready.workerPid), childPid!]) {
-      try { process.kill(pid, 0); return false; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
-    }
-    return true;
-  }, "Routed parent stop must terminate both real SubHost Worker processes");
+  await waitFor(() => [Number(ready.workerPid), childPid!].every(exited), "Routed parent stop must terminate both real SubHost Worker processes");
   await waitFor(async () => !(await client.list()).some(work => work.id === reviewer.id), "Retired SubHost child remained in Main's inventory");
   assert.equal((await client.status(sentinel.id)).lifecycle, "active");
 });

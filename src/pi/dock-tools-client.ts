@@ -5,7 +5,7 @@ import {
   type ObservationResult,
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
-import type { DockToolsResult, HelperModelList } from "../core/dock-tools.js";
+import type { DockToolsResult, ChildModelList } from "../core/dock-tools.js";
 import { modelLabel } from "../core/instance-display-name.js";
 import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "../control/protocol.js";
 
@@ -26,8 +26,8 @@ export interface ModelFacts {
 
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult, facts: ModelFacts = { describe: () => undefined }): string {
-  if (result.type === "models") return renderHelperModels(result, facts);
-  if (result.type === "spawn") return `Created helper ${statusLine(result.instance, new Date().toISOString())}. ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
+  if (result.type === "models") return renderChildModels(result, facts);
+  if (result.type === "spawn") return `Created child Work ${statusLine(result.instance, new Date().toISOString())}. ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
   if (result.type === "interrupt" || result.type === "stop") return `${result.type === "interrupt" ? "Interrupted current turn of" : "Stopped"} ${identity(result.instance)}.`;
   if (result.type === "system_catalog") {
     const catalog = result.result;
@@ -70,8 +70,8 @@ export function renderDockToolsResult(result: DockToolsResult, facts: ModelFacts
 
 export function renderObservationResult(result: ObservationResult): string {
   if (result.type === "list") {
-    const scope = result.result.includesHistory ? "all catalog records" : "live siblings";
-    const lines = [`[Dock sibling list · ${scope}]`];
+    const scope = result.result.includesHistory ? "all catalog records" : "live";
+    const lines = [`[Dock Works · ${scope}]`];
     for (const status of result.result.instances) lines.push(`- ${statusLine(status, result.result.observedAt)}`);
     if (result.result.instances.length === 0) lines.push("- none");
     if (result.result.truncated) lines.push(`[… ${result.result.total - result.result.instances.length} more omitted]`);
@@ -98,18 +98,18 @@ export function renderObservationNotification(notification: ObservationNotificat
 }
 
 /** What dock_wait saw: the replies it took, and why it stopped waiting. */
-export interface HelperWaitResult {
+export interface ChildWaitResult {
   replies: ObservationNotification[];
-  /** Helpers that still owe a reply. */
+  /** Child Works that still owe a reply. */
   waiting: ObservedInstanceStatus[];
   ended: "replied" | "nothing_pending" | "message" | "timeout" | "cancelled";
   timeoutSeconds?: number;
 }
 
-export function renderHelperWait(result: HelperWaitResult): string {
+export function renderChildWait(result: ChildWaitResult): string {
   const head = {
-    replied: `${result.replies.length === 1 ? "A helper replied" : `${result.replies.length} helpers replied`}.`,
-    nothing_pending: "No helper reply is pending: every helper you handed work to has already replied or stopped.",
+    replied: `${result.replies.length === 1 ? "A child Work replied" : `${result.replies.length} child Works replied`}.`,
+    nothing_pending: "No child Work reply is pending: every child Work you handed work to has already replied or stopped.",
     message: "Stopped waiting because a message reached you; it follows this result.",
     timeout: `Stopped waiting after ${result.timeoutSeconds} seconds.`,
     cancelled: "Stopped waiting.",
@@ -119,23 +119,23 @@ export function renderHelperWait(result: HelperWaitResult): string {
 }
 
 /** Your own model first, then the user's list with the user's notes and what each model supports. */
-function renderHelperModels(list: HelperModelList, facts: ModelFacts): string {
+function renderChildModels(list: ChildModelList, facts: ModelFacts): string {
   const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
   const notes = new Map(list.models.map((model) => [key(model), model.note]));
   const lines: string[] = [];
   if (facts.current) {
-    lines.push(`Your model, which a helper uses when you omit model: ${describeModel(facts.current, notes.get(key(facts.current)))}`);
+    lines.push(`Your model, which a child Work uses when you omit model: ${describeModel(facts.current, notes.get(key(facts.current)))}`);
   }
   const listed = list.models.filter((model) => !facts.current || key(model) !== key(facts.current));
   const available = listed.flatMap((model) => { const described = facts.describe(model); return described ? [{ described, note: model.note }] : []; });
   const unavailable = listed.filter((model) => !facts.describe(model)).map(key);
   if (available.length > 0) {
-    lines.push("", "Models the user lists for helpers:");
+    lines.push("", "Models the user lists for child Works:");
     for (const { described, note } of available) lines.push(`- ${describeModel(described, note)}`);
   }
   if (unavailable.length > 0) lines.push("", `Listed but not available on this machine now: ${unavailable.join(", ")}.`);
-  if (list.problem) lines.push("", `The user's list of models for helpers could not be used: ${list.problem}. Tell the user if they expect one.`);
-  else if (list.models.length === 0) lines.push("", "The user has not listed models for helpers.");
+  if (list.problem) lines.push("", `The user's list of models for child Works could not be used: ${list.problem}. Tell the user if they expect one.`);
+  else if (list.models.length === 0) lines.push("", "The user has not listed models for child Works.");
   lines.push("", "Usually omit model. Choose a listed model when its note fits the task or the user asks for it; a model the user names also works.");
   return lines.join("\n");
 }
@@ -153,7 +153,7 @@ function tokenCount(tokens: number): string {
 
 function renderObservation(observation: InstanceObservation): string {
   const lines = [
-    `[Dock sibling excerpt · source=${quotedIdentity(observation.status)}]`,
+    `[Dock conversation excerpt · source=${quotedIdentity(observation.status)}]`,
     `status: ${statusLine(observation.status, observation.observedAt)}`,
   ];
   const page = observation.conversation;

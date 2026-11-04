@@ -986,7 +986,7 @@ try {
   assert.equal(binding.instanceId, 'work')
   assert.notEqual(binding.subscriptionId, followedBeforeLeaving.subscriptionId, 'returning follows the Work again')
   extraListed = []; await app.refreshWorksQuietly(); await settle()
-  // Native helpers use the existing work list and conversation entry.
+  // Child Works use the existing work list and conversation entry.
   extraListed = [{ ...otherWork, id: 'native-child', parentId: 'work', displayName: 'Native reviewer' }]
   await app.refreshWorksQuietly(); await settle()
   const childRow = find(container, item => String(item.props.class ?? '').includes('is-child') && text(item).includes('Native reviewer'))
@@ -998,7 +998,7 @@ try {
   await app.refreshWorksQuietly(); await settle()
   const orphan = find(container, item => String(item.props.class ?? '').includes('is-child') && text(item).includes('Native reviewer'))
   assert.ok(orphan, 'a child whose cleanup failed remains visible after its parent disappears')
-  assert.ok(text(orphan).includes('仍可查看或停止'))
+  assert.ok(text(orphan).includes('仍可查看或停止这个子 Work'))
   assert.ok(find(orphan, item => item.type === 'button' && text(item) === '停止'), 'the remaining child has a cleanup control')
   extraListed = []; await app.refreshWorksQuietly(); await settle()
   assert.equal(find(container, item => String(item.props.class ?? '').includes('is-child') && text(item).includes('Native reviewer')), undefined, 'a retired child disappears with the Host list update')

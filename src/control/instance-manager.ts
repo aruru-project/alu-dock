@@ -1,5 +1,6 @@
 import type { AttachmentService } from "./attachment-service.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
+import type { DockChildSelection } from "../core/dock-tools.js";
 import type { ImagePathDto } from "../core/instance-dto.js";
 import type { JsonObject } from "../core/json-value.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
@@ -49,12 +50,7 @@ export interface RemoteInstanceDirectory {
 }
 
 export interface CreateInstanceMutation {
-  /** Owning top-level Work on this Host; native children are temporary. */
-  parentId?: string;
-  /** A child's exact tool ceiling, chosen by its parent. */
-  allowedTools?: string[];
-  /** A child that starts from a copy of its parent's conversation. */
-  withParentContext?: boolean;
+  child?: DockChildSelection;
   operationId: string;
   cwd: string;
   name?: string;

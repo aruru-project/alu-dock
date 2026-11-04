@@ -610,10 +610,11 @@ export class MainMachineController implements RemoteInstanceDirectory {
       ...(route.snapshot.key === undefined ? {} : { mainKey: route.snapshot.key }),
     } : undefined;
     const nativeRequest = requestForNativeHost(request, identity);
-    if (nativeRequest.type === "instance.create" && nativeRequest.params.parentId !== undefined) {
-      const parent = [...this.parentIdsForMachine(machine.id)].find(([, mainId]) => mainId === nativeRequest.params.parentId);
+    if (nativeRequest.type === "instance.create" && nativeRequest.params.child !== undefined) {
+      const child = nativeRequest.params.child;
+      const parent = [...this.parentIdsForMachine(machine.id)].find(([, mainId]) => mainId === child.parentId);
       if (!parent) throw new Error("The parent is no longer available on this machine.");
-      nativeRequest.params.parentId = parent[0];
+      nativeRequest.params.child = { ...child, parentId: parent[0] };
     }
     const streamId = randomUUID();
     if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine is busy right now. Try again shortly.");
@@ -1632,7 +1633,7 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     return result;
   }
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    // File delivery and the helper model list belong to this machine.
+    // File delivery and the model list for child Works belong to this machine.
     if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
     return this.options.upstream.invokeDockTool(sourceInstanceId, request);

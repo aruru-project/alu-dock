@@ -67,7 +67,7 @@ registry = new DockRegistry(async (input) => realPiDockTools
       workerTimeouts: { mutationMs: 10_000 },
       onWorkerSpawn: (pid) => {
         realWorkerPid = pid;
-        process.stdout.write(`${JSON.stringify({ kind: "worker_started", nativeInstanceId: input.id, parentId: input.parentId, pid })}\n`);
+        process.stdout.write(`${JSON.stringify({ kind: "worker_started", nativeInstanceId: input.id, parentId: input.child?.parentId, pid })}\n`);
       },
     })
   : (() => {

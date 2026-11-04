@@ -172,7 +172,7 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   const inspect = first.state.tools.find((tool) => tool.name === "dock_inspect")!;
   const toolResult = await list.execute("tool-call", {});
   assert.deepEqual(calls, [{ type: "list" }]);
-  assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock sibling list/u);
+  assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock Works · live/u);
 
   const machineResult = await machines.execute("machine-call", {});
   const machineText = (machineResult as { content: Array<{ text: string }> }).content[0]!.text;
@@ -287,13 +287,13 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   assert.equal(afterOffFailure.state.messages.length, 1, "failed off must restore the completion buffered behind its acknowledgement fence");
 });
 
-// Cloud review of abb061b: dock_wait waited up to 30 minutes for a helper that would never
+// Cloud review of abb061b: dock_wait waited up to 30 minutes for a child Work that would never
 // reply, when its reply came before its task's result, or after its watches were cancelled.
-test("dock_wait waits only for helpers whose reply is still to come", async () => {
-  const helper = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
-  // The Host makes a new watch each time it hands a helper work.
+test("dock_wait waits only for child Works whose reply is still to come", async () => {
+  const child = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
+  // The Host makes a new watch each time it hands a child work.
   let watches = 0;
-  const reply = (id: string) => ({ ...notification, watchId: `watch-${++watches}`, target: helper(id) });
+  const reply = (id: string) => ({ ...notification, watchId: `watch-${++watches}`, target: child(id) });
   let bridge!: DockToolsBridge;
   let deliverBeforeReturning: string | undefined;
   let enabled = true;
@@ -302,15 +302,15 @@ test("dock_wait waits only for helpers whose reply is still to come", async () =
     invoke: async (request) => {
       if (request.type === "cancel") return { type: "cancel", cancelledWatchIds: [] };
       const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
-      // The Host delivers a helper's reply as soon as it has one, even before its call returns.
+      // The Host delivers a child Work's reply as soon as it has one, even before its call returns.
       if (deliverBeforeReturning === id) bridge.deliver(reply(id));
       return request.type === "spawn"
-        ? { type: "spawn", instance: helper(id), taskStatus: "accepted" }
-        : { type: "send", target: helper(id), receipt: { delivery: "followUp", queued: false, acceptedAt: notification.firedAt } };
+        ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
+        : { type: "send", target: child(id), receipt: { delivery: "followUp", queued: false, acceptedAt: notification.firedAt } };
     },
   });
   bridge.attach(fakeApi().api as never);
-  const wait = () => bridge.waitForHelpers({ timeoutSeconds: 1 }, undefined, () => false);
+  const wait = () => bridge.childReplies.wait({ timeoutSeconds: 1 }, undefined, () => false);
 
   deliverBeforeReturning = "failed-at-once";
   await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "failed-at-once", task: "Review." });
@@ -330,4 +330,3 @@ test("dock_wait waits only for helpers whose reply is still to come", async () =
   await bridge.configure("on");
   assert.equal((await wait()).ended, "nothing_pending", "turning Dock tools off cancels the replies being waited for");
 });
-

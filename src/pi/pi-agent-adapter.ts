@@ -178,7 +178,7 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
 
 export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker managed by Alu Dock. Your work can continue after a terminal disconnects, and Alu Dock clients may observe or control this Work through Dock protocols. Pi remains authoritative for its settings, credentials, extensions, project resources, and Session history. Use \`aludock pi:install <source>\` when the user asks you to install a Pi package through the bundled Pi runtime; do not require a separate system Pi installation.`;
 
-export const ALU_DOCK_CHILD_GUIDANCE = "You are a helper Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments or progress reports. You cannot reach any other Work.";
+export const ALU_DOCK_CHILD_GUIDANCE = "You are a child Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments or progress reports. You cannot reach any other Work.";
 
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
@@ -226,7 +226,7 @@ export interface CreatePiAgentAdapterOptions {
   excludeTools?: string[];
   /** Pi owns the meaning of these JSON-safe createAgentSession fields. */
   workerConfig?: JsonObject;
-  /** A helper Work that reports only to the Work that created it. */
+  /** A child Work that reports only to the Work that created it. */
   child?: boolean;
   /** Exact tools this Work may ever use, enforced in Pi's tool registry. */
   allowedTools?: string[];
@@ -588,12 +588,12 @@ export class PiAgentAdapter {
   private branchForChild(cwd: string): { sessionFile: string } {
     const manager = this.requireActive().session.sessionManager;
     const file = manager.getSessionFile();
-    if (!file || !existsSync(file)) throw new Error("This Work's conversation is not saved yet, so a helper cannot start from it.");
+    if (!file || !existsSync(file)) throw new Error("This Work's conversation is not saved yet, so a child Work cannot start from it.");
     const forkPoint = childForkPoint(manager.getBranch());
-    if (forkPoint === undefined) throw new Error("This Work has no conversation to give a helper yet.");
+    if (forkPoint === undefined) throw new Error("This Work has no conversation to give a child Work yet.");
     const sessionDir = this.options.sessionDir ?? SessionManager.create(cwd).getSessionDir();
     const sessionFile = SessionManager.open(file, sessionDir, cwd).createBranchedSession(forkPoint);
-    if (!sessionFile || !existsSync(sessionFile)) throw new Error("The copy of this conversation for the helper was not saved.");
+    if (!sessionFile || !existsSync(sessionFile)) throw new Error("The copy of this conversation for the child Work was not saved.");
     return { sessionFile };
   }
 
@@ -3665,7 +3665,6 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(startingModel === undefined ? {} : { model: startingModel }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
-      ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
       ...workerToolSelection(allowedTools, options.excludeTools ?? piCreateOptions.excludeTools),
       // Worker-owned services and Session continuity cannot be replaced by wire JSON.
       services,

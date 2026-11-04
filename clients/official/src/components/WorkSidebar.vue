@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Server, Settings, X } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
-import { workPresence } from '../lib/uiBoundaries'
+import { childNeedsStop, workPresence } from '../lib/uiBoundaries'
 import OperationResults from './OperationResults.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
@@ -54,10 +54,10 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
         <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
           <button class="alu-instance-link" @click="selectWork(work.id)">
             <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
-            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-cwd">父工作暂不在列表中；仍可查看或停止此子任务</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
+            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
             <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
           </button>
-          <button v-if="work.parentId && (work.lifecycle === 'stopping' || work.lifecycle === 'runtime_error')" class="alu-instance-action" :disabled="!isTauri || workMutating" @click="selectWork(work.id); stopSelectedWork()">停止</button>
+          <button v-if="childNeedsStop(work)" class="alu-instance-action" :disabled="!isTauri || workMutating" @click="selectWork(work.id); stopSelectedWork()">停止</button>
           <button v-else-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && workMutating)" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
           <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
         </div>
@@ -181,7 +181,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.alu-instance-cwd { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alu-instance-cwd, .alu-instance-note { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 模型名总是完整显示：provider 说明走哪家的钱，同一家的模型常常只差尾号。provider 保持灰色，模型名用冰蓝和目录区分。 */
 .alu-instance-model { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow-wrap: anywhere; }
 .alu-instance-model-id { color: var(--alu-blue-dim); }

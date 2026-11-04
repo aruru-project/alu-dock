@@ -8,7 +8,7 @@ import { ControlClientError, DockClient } from "../../src/control/dock-client.js
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
-import { HelperModelsStore } from "../../src/control/helper-models.js";
+import { ChildModelsStore } from "../../src/control/child-models.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
@@ -28,8 +28,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     registry: undefined as DockRegistry | undefined,
     host: undefined as DockHost | undefined,
     client: undefined as DockClient | undefined,
-    /** Runs after a helper's Worker process started, before Dock lists the helper. */
-    holdNextHelper: undefined as (() => Promise<void>) | undefined,
+    /** Runs after a child Work's Worker process started, before Dock lists the child Work. */
+    holdNextChild: undefined as (() => Promise<void>) | undefined,
     onCleanup: undefined as (() => void) | undefined,
     async startHost(): Promise<DockClient> {
       const registry = new DockRegistry(async (input) => {
@@ -41,8 +41,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
             npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
           }),
         });
-        const hold = input.parentId === undefined ? undefined : team.holdNextHelper;
-        team.holdNextHelper = undefined;
+        const hold = input.child === undefined ? undefined : team.holdNextChild;
+        team.holdNextChild = undefined;
         await hold?.();
         return instance;
       }, undefined, {
@@ -52,7 +52,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), helperModels: new HelperModelsStore(root) });
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root) });
       await team.host.start();
       return team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
     },
