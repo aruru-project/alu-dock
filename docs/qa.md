@@ -128,7 +128,7 @@ git diff --check
 
 ## 真实模型调用
 
-普通测试不得调用模型。只有任务明确需要并得到授权时，才运行 provider/model smoke；结果不能成为普通单元测试的前置条件。
+普通测试不得调用模型。只有任务明确需要并得到授权时，才运行 provider/model smoke；结果不能成为普通单元测试的前置条件。真实供应商和两台机器的检查脚本、做法与踩过的坑见 [`scripts/trials/README.md`](../scripts/trials/README.md)。
 
 ## 重构
 
