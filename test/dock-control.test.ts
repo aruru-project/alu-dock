@@ -905,7 +905,7 @@ test("installed aludock link opens the SSH Hub and returns to the shell", async 
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.ok(pty.resizedBytes > 0, "120x40 Hub resize must redraw");
   assert.match(output, /Alu Dock Hub/u);
-  assert.match(output, /◆   ◆/u, "standard Hub shows the large Alu mascot");
+  assert.match(output, /◕    ◕/u, "standard Hub shows the large Alu mascot");
   assert.match(output, /Project ·/u);
   assert.match(output, /Left Alu Dock Hub/u);
   assertHubPresentation(output, "Left Alu Dock Hub");
