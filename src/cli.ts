@@ -25,7 +25,7 @@ import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-acces
 import { WorkerIncidentStore, workerIncidentStoreRoot } from "./control/worker-incident-store.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
 import { MachineSettingsState, SubHostStatusReporter, machineSettingsStateRoot, machineStatePersistenceDiagnostic } from "./control/machine-settings-state.js";
-import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelPort } from "./control/machine-transport.js";
+import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "./control/machine-transport.js";
 import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./control/main-machine-dock-tools.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
 import { humanControlErrorText } from "./human-control-error.js";
@@ -338,6 +338,8 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     });
     upstream = upstreamConnection;
     subHostModels = new SubHostModelPort(upstreamConnection);
+    // The hidden list and the child Work list exist only on Main.
+    const mainModelLists = new SubHostModelLists(upstreamConnection);
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
     registry = new DockRegistry(createManagedPiInstance, undefined, {
       hostEpoch: subHostEpoch,
@@ -355,8 +357,8 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       initialize: () => registry.initializeCatalog(),
       sessionInventory,
       attachmentService,
-      modelVisibility,
-      childModels,
+      modelVisibility: mainModelLists,
+      childModels: mainModelLists,
       listen: false,
     });
   } else {
@@ -383,7 +385,11 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
         mainHostEpoch: registry.hostEpoch,
         invokeDockTool: (sourceMainId, sourceMachineId, request) => (dockToolsAuthority as MainMachineDockToolsAuthority).invoke(sourceMainId, sourceMachineId, request),
         dockToolsSourceOff: (sourceMainId) => (dockToolsAuthority as MainMachineDockToolsAuthority).cancelSource(sourceMainId),
-        ...(modelService === undefined ? {} : { models: modelService }),
+        models: {
+          ...(modelService === undefined ? {} : { service: modelService }),
+          ...(modelVisibility === undefined ? {} : { visibility: modelVisibility }),
+          ...(childModels === undefined ? {} : { childModels }),
+        },
         localSnapshots: () => registry.list(),
       });
       dockToolsAuthority = new MainMachineDockToolsAuthority({

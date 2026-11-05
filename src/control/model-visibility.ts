@@ -18,10 +18,17 @@ export const MODEL_VISIBILITY_FILE = "model-visibility.json";
 // Leaves room for hand formatting around the largest accepted list.
 const MAX_FILE_BYTES = 4 * MAX_HIDDEN_MODELS_BYTES;
 
-interface ModelList {
+export interface ModelList {
   models: AgentModelInfo[];
   total: number;
   truncated: boolean;
+}
+
+/** A Host's model lists. Main keeps the only hidden list; a SubHost asks Main for it (card #303). */
+export interface ModelVisibilityPort {
+  filterModelList<T extends ModelList>(list: T): Promise<T>;
+  get(): Promise<ModelVisibilityResult>;
+  set(hidden: readonly ModelRef[]): Promise<ModelVisibilitySetResult>;
 }
 
 /** The models a new Work on this machine can select, produced by the Agent adapter without a Work. */
@@ -119,14 +126,17 @@ export class ModelVisibilityStore {
   }
 }
 
-/** Host-owned model visibility for one machine: the catalog comes from the Agent adapter, the list from this Host. */
-export class ModelVisibilityService {
+/** Main's model visibility: the catalog comes from the Agent adapter, the list from this Host. */
+export class ModelVisibilityService implements ModelVisibilityPort {
   constructor(private readonly store: ModelVisibilityStore, private readonly catalog: ModelCatalogReader) {}
 
   /** A hidden model disappears from the list; it can still be selected by its exact provider and id. */
   async filterModelList<T extends ModelList>(list: T): Promise<T> {
-    const file = await this.store.read();
-    return file.problem === undefined ? withoutHiddenModels(list, file.hidden) : list;
+    return filterWithHiddenModels(list, await this.store.read());
+  }
+
+  hiddenModels(): Promise<HiddenModelsFile> {
+    return this.store.read();
   }
 
   async get(): Promise<ModelVisibilityResult> {
@@ -145,6 +155,11 @@ export class ModelVisibilityService {
       throw new ModelVisibilityError("model_catalog_unavailable", "暂时读不到这台机器上可选的模型。请稍后再试；如果一直这样，请确认这台机器上能正常新建 Work。", true, { cause: error });
     }
   }
+}
+
+/** A list that could not be read hides nothing until it is saved again. */
+export function filterWithHiddenModels<T extends ModelList>(list: T, file: HiddenModelsFile): T {
+  return file.problem === undefined ? withoutHiddenModels(list, file.hidden) : list;
 }
 
 export function withoutHiddenModels<T extends ModelList>(list: T, hidden: readonly ModelRef[]): T {

@@ -28,6 +28,10 @@ import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONS
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 import { MAX_MODEL_ANSWER_BYTES, parseModelServiceRequest, type ModelAuthRequest, type ModelAuthResult, type ModelAuthState, type ModelConfiguration, type ModelServiceRequest } from "../model-service/protocol.js";
 import { ModelServiceUnavailableError, type ModelHostPort } from "../model-service/service-process.js";
+import { ModelVisibilityError, filterWithHiddenModels, type HiddenModelsFile, type ModelList, type ModelVisibilityPort, type ModelVisibilityService } from "./model-visibility.js";
+import type { ChildModelsSource } from "./child-models.js";
+import { parseChildModelEntries, type ChildModelList } from "../core/dock-tools.js";
+import { parseModelRefs, parseModelVisibilityResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
 
 const MAX_MACHINE_LINE_BYTES = MAX_LINK_LINE_BYTES;
 const MAX_MACHINE_STREAMS = MAX_LINK_STREAMS;
@@ -61,12 +65,37 @@ type MachineWireRecord =
   | { kind: "machine_tool_source_off"; requestId: string; sourceNativeId: string }
   | { kind: "machine_tool_source_off_ack"; requestId: string }
   /* A SubHost's Works ask Main for model configuration and credentials (card #303). */
-  | { kind: "machine_model_request"; requestId: string; request: ModelServiceRequest }
+  | { kind: "machine_model_request"; requestId: string; request: MachineModelQuestion }
   | { kind: "machine_model_cancel"; requestId: string }
   | { kind: "machine_model_answer"; requestId: string; index: number; count: number; data: string }
   | { kind: "machine_model_failure"; requestId: string; error: string }
   | { kind: "machine_ping" }
   | { kind: "machine_pong" };
+
+/**
+ * What a SubHost asks Main about models: the model service's questions, and the model lists that
+ * exist only on Main (card #303, decision 3).
+ */
+type MachineModelQuestion =
+  | ModelServiceRequest
+  | { op: "hidden_models" }
+  | { op: "visibility_get" }
+  | { op: "visibility_set"; hidden: ModelRef[] }
+  | { op: "child_models" };
+
+/** Main's side of the SubHosts' model questions. */
+export interface MainModels {
+  service?: ModelHostPort;
+  visibility?: ModelVisibilityService;
+  childModels?: ChildModelsSource;
+}
+
+function parseMachineModelQuestion(raw: unknown): MachineModelQuestion {
+  const value = wireObject(raw, "model question");
+  if (value.op === "hidden_models" || value.op === "visibility_get" || value.op === "child_models") { wireExact(value, ["op"]); return { op: value.op }; }
+  if (value.op === "visibility_set") { wireExact(value, ["op", "hidden"]); return { op: "visibility_set", hidden: parseModelRefs(value.hidden, "hidden", "invalid_request") }; }
+  return parseModelServiceRequest(value);
+}
 
 export class MachineMutationEffectUnknownError extends Error {
   readonly queryHint = "Wait for that machine to reconnect and refresh the relevant work before any retry";
@@ -199,8 +228,8 @@ export class MainMachineController implements RemoteInstanceDirectory {
     bindAddress?: string;
     invokeDockTool?: (sourceMainId: string, sourceMachineId: string, request: DockToolsRequest) => Promise<DockToolsResult>;
     dockToolsSourceOff?: (sourceMainId: string) => Promise<void>;
-    /** Main's model service, which answers the SubHosts' Works too. */
-    models?: ModelHostPort;
+    /** Main's model service and model lists, which answer the SubHosts too. */
+    models?: MainModels;
     localSnapshots: () => InstanceSnapshot[];
   }) {}
 
@@ -829,20 +858,24 @@ export class MainMachineController implements RemoteInstanceDirectory {
   }
 
   /** Any joined SubHost may ask: the machine connection already proves which machine it is. */
-  private answerModelQuestion(connection: MainConnection, requestId: string, request: ModelServiceRequest): void {
+  private answerModelQuestion(connection: MainConnection, requestId: string, request: MachineModelQuestion): void {
     const socket = connection.socket;
     const fail = (error: unknown) => writeMachine(socket, { kind: "machine_model_failure", requestId, error: machineError(error) }).catch(() => {});
-    const port = this.options.models;
-    if (!port) { void fail("Main does not offer models"); return; }
+    const { service, visibility, childModels } = this.options.models ?? {};
     if (connection.modelQuestions.has(requestId)) return;
     if (connection.modelQuestions.size >= MAX_MODEL_QUESTIONS) { void fail("Main is answering too many model questions from this machine. Try again shortly."); return; }
     const controller = new AbortController();
     connection.modelQuestions.set(requestId, controller);
     void (async () => {
       try {
-        const result = request.op === "configuration" ? await port.configuration(controller.signal)
-          : request.op === "auth_state" ? await port.authState(controller.signal)
-          : await port.auth(request, controller.signal);
+        const missing = (what: string): never => { throw new Error(`Main does not offer ${what}`); };
+        const result = request.op === "hidden_models" ? await (visibility ?? missing("a hidden-model list")).hiddenModels()
+          : request.op === "visibility_get" ? await (visibility ?? missing("a hidden-model list")).get()
+          : request.op === "visibility_set" ? await (visibility ?? missing("a hidden-model list")).set(request.hidden)
+          : request.op === "child_models" ? await (childModels ?? missing("a child Work model list")).read()
+          : request.op === "configuration" ? await (service ?? missing("models")).configuration(controller.signal)
+          : request.op === "auth_state" ? await (service ?? missing("models")).authState(controller.signal)
+          : await (service ?? missing("models")).auth(request, controller.signal);
         await writeModelAnswer(socket, requestId, result);
       } catch (error) {
         await fail(error);
@@ -1479,7 +1512,7 @@ export class SubHostMachineConnection {
    * Asks Main's model service. A question waits for a connection that is being made, as when Works
    * reopen while this Host starts, and fails with a reason once Main stays away.
    */
-  async askModels(request: ModelServiceRequest, signal: AbortSignal): Promise<unknown> {
+  async askModels(request: MachineModelQuestion, signal: AbortSignal): Promise<unknown> {
     const deadline = Date.now() + MODEL_CONNECTION_WAIT_MS;
     while (!this.connected()) {
       if (this.stopped || Date.now() >= deadline) throw new ModelServiceUnavailableError("Main is offline, so this machine cannot use models. Reconnect it to Main.");
@@ -1736,6 +1769,45 @@ export class SubHostModelPort implements ModelHostPort {
   auth(request: ModelAuthRequest, signal: AbortSignal): Promise<ModelAuthResult> { return this.upstream.askModels({ op: "auth", ...request }, signal) as Promise<ModelAuthResult>; }
 }
 
+/** How long a SubHost waits for Main's model lists; a Work's model questions carry their own cancel. */
+const MODEL_LIST_WAIT_MS = 30_000;
+
+/**
+ * A SubHost's model lists are Main's: the hidden list and the child Work list. Seen and edited from
+ * either machine, they are the same list.
+ */
+export class SubHostModelLists implements ModelVisibilityPort, ChildModelsSource {
+  constructor(private readonly upstream: SubHostMachineConnection) {}
+
+  async filterModelList<T extends ModelList>(list: T): Promise<T> {
+    const file = await this.upstream.askModels({ op: "hidden_models" }, AbortSignal.timeout(MODEL_LIST_WAIT_MS)) as HiddenModelsFile;
+    return filterWithHiddenModels(list, { hidden: parseModelRefs(file.hidden, "hidden"), ...(typeof file.problem === "string" ? { problem: file.problem } : {}) });
+  }
+
+  async get(): Promise<ModelVisibilityResult> {
+    try { return parseModelVisibilityResult(await this.upstream.askModels({ op: "visibility_get" }, AbortSignal.timeout(MODEL_LIST_WAIT_MS))); }
+    catch (error) { throw new ModelVisibilityError("model_catalog_unavailable", `暂时读不到 Main 上可选的模型：${error instanceof Error ? error.message : String(error)}`, true, { cause: error }); }
+  }
+
+  async set(hidden: readonly ModelRef[]): Promise<ModelVisibilitySetResult> {
+    try {
+      const result = await this.upstream.askModels({ op: "visibility_set", hidden: [...hidden] }, AbortSignal.timeout(MODEL_LIST_WAIT_MS)) as ModelVisibilitySetResult;
+      return { hidden: parseModelRefs(result.hidden, "hidden") };
+    } catch (error) {
+      throw new ModelVisibilityError("model_visibility_write_failed", `隐藏列表没有保存到 Main，原来的设置不变：${error instanceof Error ? error.message : String(error)}`, true, { cause: error });
+    }
+  }
+
+  async read(): Promise<ChildModelList> {
+    try {
+      const list = await this.upstream.askModels({ op: "child_models" }, AbortSignal.timeout(MODEL_LIST_WAIT_MS)) as ChildModelList;
+      return { models: parseChildModelEntries(list.models), ...(typeof list.problem === "string" ? { problem: list.problem } : {}) };
+    } catch (error) {
+      return { models: [], problem: `The child Work model list on Main could not be read: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+}
+
 /** An answer of any size goes as base64 chunks that fit one machine record each. */
 async function writeModelAnswer(socket: TLSSocket, requestId: string, result: unknown): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(result ?? null), "utf8");
@@ -1862,7 +1934,7 @@ function parseMachineRecord(line: string): MachineWireRecord {
   if (kind === "machine_tool_source_off_ack") { wireExact(value, ["kind", "requestId"]); return { kind, requestId: wireText(value.requestId, "tool request ID", 128) }; }
   if (kind === "machine_model_request") {
     wireExact(value, ["kind", "requestId", "request"]);
-    return { kind, requestId: wireText(value.requestId, "model question ID", 128), request: parseModelServiceRequest(value.request) };
+    return { kind, requestId: wireText(value.requestId, "model question ID", 128), request: parseMachineModelQuestion(value.request) };
   }
   if (kind === "machine_model_cancel") { wireExact(value, ["kind", "requestId"]); return { kind, requestId: wireText(value.requestId, "model question ID", 128) }; }
   if (kind === "machine_model_answer") {

@@ -41,6 +41,10 @@ npm run install:local -- --replace-active
 
 Alu Dock 自带 Pi。运行 `aludock` 后可在 **Settings → Pi** 查看可用模型，保存 API key 或完成 OAuth 登录。配置继续使用 Pi 原生 `~/.pi/agent/`（或 `PI_CODING_AGENT_DIR`），会话仍保存在其中的 `sessions/`。
 
+模型和登录只在 Main 上配置：Main 的 `models.json`、`auth.json` 和登录，供所有机器上的 Work 使用。每个 Work 每次发请求前向 Main 取一次凭据，订阅账号的登录只在 Main 上刷新；请求本身从 Work 所在的机器发出，用那台机器自己的代理等网络设置。SubHost 上的 `models.json`、`auth.json` 不再被使用，它的 **Settings → Pi** 只管理这台机器的 Pi package。Main 或它的模型服务不可用时，新的请求会报错说明原因，不会改用 SubHost 本机的配置。
+
+两类凭据仍在 Work 所在的机器上读取：只由某个扩展自己定义、Main 上没有的供应商，用扩展自己的密钥（扩展读环境变量的，按扩展的说明在那台机器上配置）；Bedrock 和 Vertex 的云账号（AWS key/profile、Google ADC）由 Pi 在那台机器上读取。Dock 读一台机器的环境变量时用的是它的登录 shell，所以密钥和代理要写在登录 shell 会读的配置里。
+
 安装 Pi package 使用：
 
 ```bash
@@ -51,7 +55,7 @@ aludock pi:install <npm、git 或本地 source>
 
 ## 隐藏的模型
 
-每台机器（Main 和每台 SubHost）各有一份模型隐藏列表。列在里面的模型不会出现在这台机器上任何 Work 的模型选择列表和搜索结果里，但模型本身仍可用：Work TUI 输入完整的 `/model provider/模型id` 照样能切换。通常在官方客户端的 **Host 设置** 里管理；也可以直接编辑 Host 私有状态目录中的 `model-visibility.json`：
+模型隐藏列表只有 Main 上一份。列在里面的模型不会出现在任何机器上任何 Work 的模型选择列表和搜索结果里，但模型本身仍可用：Work TUI 输入完整的 `/model provider/模型id` 照样能切换。通常在官方客户端的 **Host 设置** 里管理，在哪台机器的设置页里改都是同一份；也可以直接编辑 Main 的 Host 私有状态目录中的 `model-visibility.json`：
 
 ```text
 Linux:   ~/.local/state/alu-dock/model-visibility.json（managed service 为 STATE_DIRECTORY 下同名文件）
@@ -72,7 +76,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 子 Work 默认和父 Work 用同一个模型、同一档 thinking。只有你在对话里点名，或者项目文件（如 `AGENTS.md`）里写明时，Agent 才给子 Work 换模型或 thinking；换了的模型没有这一档时，用它最接近的一档，开子 Work 的结果里会写明。
 
-你说"这次用 deepseek 审查"时，Agent 用 `dock_models` 在一份名单里找到准确的那个模型，而不是在这台机器的全部模型里猜。名单每台机器各有一份，放在 Host 私有状态目录中的 `child-models.json`，和 `model-visibility.json` 在同一个目录：
+你说"这次用 deepseek 审查"时，Agent 用 `dock_models` 在一份名单里找到准确的那个模型，而不是在全部模型里猜。名单只有 Main 上一份，SubHost 上的 Work 也读它，放在 Main 的 Host 私有状态目录中的 `child-models.json`，和 `model-visibility.json` 在同一个目录：
 
 ```json
 {

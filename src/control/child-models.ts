@@ -9,13 +9,18 @@ export const CHILD_MODELS_FILE = "child-models.json";
 // Room for hand formatting around the largest accepted list.
 const MAX_FILE_BYTES = 4 * MAX_CHILD_MODELS * ((MAX_MODEL_PROVIDER_CHARS + MAX_MODEL_ID_CHARS) * 4 + 64);
 
+/** Where a Host reads the child Work list; a SubHost reads Main's (card #303). */
+export interface ChildModelsSource {
+  read(): Promise<ChildModelList>;
+}
+
 /**
- * The models the user shows Agents for child Works on this machine.
+ * The models the user shows Agents for child Works, kept on Main.
  * Problems are worded for the Agent reading dock_models, which tells the user.
  * It guides what an Agent picks; it does not limit which model a child Work may use.
  * Read on every request, so an edit applies without a restart.
  */
-export class ChildModelsStore {
+export class ChildModelsStore implements ChildModelsSource {
   readonly filePath: string;
 
   constructor(stateRoot: string) {
