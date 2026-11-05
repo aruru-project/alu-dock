@@ -12,7 +12,7 @@ import type { ConnectionContext, MachineDto, Work } from '../lib/types'
 import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
-import { useSurfacesStore } from './surfaces'
+import { useSurfacesStore, type MachineSettingsSection } from './surfaces'
 
 /** Work buttons, the Work list and New Work, with their local feedback. Results are claimed by the operations store. */
 export const useWorkActionsStore = defineStore('work-actions', () => {
@@ -397,9 +397,9 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
 
   /** Host 设置 lists the Dock's machines; without a machine list it manages the connected Host itself. */
-  async function openMachineSettings(hostId?: string) {
+  async function openMachineSettings(hostId?: string, section?: MachineSettingsSection) {
     if (host.pairingInProgress) return
-    page.openMachineSettings(hostId)
+    page.openMachineSettings(hostId, section)
     machineSettingsLoading.value = true
     machineListError.value = ''
     try {

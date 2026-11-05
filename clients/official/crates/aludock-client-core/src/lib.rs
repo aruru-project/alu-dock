@@ -21,6 +21,7 @@ mod instance_records;
 mod instances;
 mod link;
 pub use instance_records::InstanceDeliveryContext;
+mod child_models;
 mod local_transport;
 mod model_visibility;
 mod observation;
@@ -144,6 +145,7 @@ pub use systems::{
     SystemSourceKind,
 };
 
+pub use child_models::{ChildModelsResult, ChildModelsSetResult};
 pub use model_visibility::{ModelRef, ModelVisibilityResult, ModelVisibilitySetResult};
 
 pub use actions::{

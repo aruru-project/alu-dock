@@ -6,12 +6,12 @@ use crate::errors::CommandError;
 use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
-    AttachmentState, BashRunResult, DeliveryMode, ExtensionControlState, InstanceSnapshot, Machine,
-    ModelRef, ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult,
-    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
-    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
-    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
-    restored_image_scope,
+    AttachmentState, BashRunResult, ChildModelsResult, ChildModelsSetResult, DeliveryMode,
+    ExtensionControlState, InstanceSnapshot, Machine, ModelRef, ModelVisibilityResult,
+    ModelVisibilitySetResult, ResourceContentResult, RestoredImageState, SafeQueueDequeueResult,
+    SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult,
+    SystemDefaultSetResult, WorkspaceCursor, WorkspacePage, operation_association,
+    project_queue_dequeue, resolve_machine_session_token, restored_image_scope,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -540,6 +540,35 @@ pub(crate) async fn set_model_visibility(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_model_visibility(&hidden, target_host_id.as_deref(), None)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Main's child Work model list; the connected Host answers, whichever machine the page shows.
+#[tauri::command]
+pub(crate) async fn child_models(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+) -> Result<ChildModelsResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .child_models()
+        .await
+        .map_err(CommandError::from)
+}
+
+/// A whole-list replace, settled like `set_model_visibility`.
+#[tauri::command]
+pub(crate) async fn set_child_models(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    models: Vec<ModelRef>,
+) -> Result<ChildModelsSetResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_child_models(&models, None)
         .await
         .map_err(CommandError::from)
 }

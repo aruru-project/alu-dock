@@ -25,7 +25,8 @@ import type {
 } from "../control/remote-access-state.js";
 import { MainMachineState, SubHostMachineState, readMachineJoinFile, writeMachineJoinFile } from "../control/machine-state.js";
 import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerStatus, type MachineSettings, type SubHostConnectionSettings } from "../control/machine-settings-state.js";
-import type { MachineDto } from "../control/protocol.js";
+import { MAX_CHILD_MODELS, type ChildModelsResult, type MachineDto, type ModelRef } from "../control/protocol.js";
+import { modelKey } from "../control/model-visibility.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import type { PiEnvironmentSnapshot, PiLoginInteraction } from "../pi/pi-environment.js";
 import { humanInstanceStatus, modelLabel } from "../core/instance-display-name.js";
@@ -169,7 +170,7 @@ export async function runDockHub(
         if (sessionAction) return sessionAction;
       }
       if (selected === SETTINGS) {
-        await chooseHubSettings(terminal, attachmentStorageState, machineSettingsState, subHostMachineState);
+        await chooseHubSettings(terminal, client, attachmentStorageState, machineSettingsState, subHostMachineState);
         if (signalRequested) return { kind: "exit" };
       }
       if (selected === DEVICES) {
@@ -534,6 +535,7 @@ async function chooseSessionAction(
 
 async function chooseHubSettings(
   terminal: HubProcessTerminal,
+  client: DockClient,
   attachmentState: AttachmentStorageState,
   machineSettingsState: MachineSettingsState,
   subHostMachineState: SubHostMachineState,
@@ -588,7 +590,7 @@ async function chooseHubSettings(
       continue;
     }
     if (selected === "pi") {
-      await choosePiEnvironment(terminal);
+      await choosePiEnvironment(terminal, { client });
       continue;
     }
     if (selected === "dock-role") {
@@ -597,9 +599,13 @@ async function chooseHubSettings(
   }
 }
 
-/** On a SubHost the Work uses Main's models and sign-ins (card #303), so only Pi packages are managed here. */
-async function choosePiEnvironment(terminal: HubProcessTerminal, options: { modelsFromMain?: boolean } = {}): Promise<void> {
+/**
+ * On a SubHost the Work uses Main's models and sign-ins (card #303), so only Pi packages are managed here.
+ * Main's Hub passes its client to edit the child Work model list, which exists only on Main.
+ */
+async function choosePiEnvironment(terminal: HubProcessTerminal, options: { modelsFromMain?: boolean; client?: DockClient } = {}): Promise<void> {
   let notice: string | undefined;
+  let focus: string | undefined;
   while (true) {
     let snapshot: PiEnvironmentSnapshot;
     try {
@@ -633,7 +639,11 @@ async function choosePiEnvironment(terminal: HubProcessTerminal, options: { mode
           description: snapshot.defaultModel
             ? `Default · ${terminalSafe(snapshot.defaultModel.provider)}/${terminalSafe(snapshot.defaultModel.id)}`
             : `${snapshot.providers.length} providers recognized by Pi`,
-        }, {
+        }, ...(options.client ? [{
+          value: "child-models",
+          label: "Models for child Works",
+          description: "The exact models Agents find when you ask for one by name",
+        }] : []), {
           value: "access",
           label: `Provider access · ${configured} configured`,
           description: "Configure an API key, sign in, or remove saved access through Pi",
@@ -647,9 +657,11 @@ async function choosePiEnvironment(terminal: HubProcessTerminal, options: { mode
         { value: BACK, label: "Back", description: "Return to Settings" },
       ],
       "↑↓ choose · Enter open · Esc back",
+      focus,
     );
     if (!selected || selected === BACK) return;
     notice = undefined;
+    focus = selected;
     if (selected === "from-main") {
       await selectMenu(
         terminal,
@@ -660,6 +672,7 @@ async function choosePiEnvironment(terminal: HubProcessTerminal, options: { mode
       );
     }
     if (selected === "models") await choosePiModels(terminal, snapshot);
+    if (selected === "child-models" && options.client) await chooseChildModels(terminal, options.client);
     if (selected === "access") await choosePiProviderAccess(terminal);
     if (selected === "diagnostics") await showPiDiagnostics(terminal, snapshot);
     if (selected === "install") {
@@ -670,6 +683,139 @@ async function choosePiEnvironment(terminal: HubProcessTerminal, options: { mode
         [{ value: BACK, label: "Back", description: "Existing Work can load changes with /reload" }],
         "Enter or Esc · back",
       );
+    }
+  }
+}
+
+/**
+ * Main's child Work model list (card #659): Agents look up exact names in it through dock_models.
+ * Every change is saved at once, like the other Hub settings.
+ */
+async function chooseChildModels(terminal: HubProcessTerminal, client: DockClient): Promise<void> {
+  const title = "Models for child Works";
+  terminal.write("Loading the models on Main…\n");
+  let state: ChildModelsResult;
+  try {
+    state = await client.childModels();
+  } catch (error) {
+    await selectMenu(terminal, title, `The list couldn’t be read: ${humanPiFailure(error)}`,
+      [{ value: BACK, label: "Back", description: "Return to Pi" }], "Enter or Esc · back");
+    return;
+  }
+  const names = new Map(state.models.map((model) => [modelKey(model), model.name]));
+  let listed = state.listed;
+  let notice = state.fileProblem === undefined
+    ? undefined
+    : `The saved list can’t be used (${terminalSafe(state.fileProblem)}); Agents see no list. Adding a model here writes a new file.`;
+  const toggle = async (model: ModelRef): Promise<void> => {
+    const key = modelKey(model);
+    const removing = listed.some((item) => modelKey(item) === key);
+    if (!removing && listed.length >= MAX_CHILD_MODELS) {
+      notice = `The list is full at ${MAX_CHILD_MODELS} models; remove one first.`;
+      return;
+    }
+    const label = `${terminalSafe(model.provider)}/${terminalSafe(model.id)}`;
+    terminal.write(`${removing ? "Removing" : "Adding"} ${label} on Main…\n`);
+    try {
+      listed = (await client.setChildModels(removing ? listed.filter((item) => modelKey(item) !== key) : [...listed, model])).listed;
+      notice = removing ? `Removed ${label}.` : `Added ${label}.`;
+    } catch (error) {
+      notice = (error as { code?: unknown }).code === "effect_unknown"
+        ? "The connection dropped before Main confirmed the change. Open this page again to see the list."
+        : `Not saved: ${humanPiFailure(error)}`;
+    }
+  };
+  let focus: string | undefined;
+  while (true) {
+    const selected = await selectMenu(
+      terminal,
+      title,
+      notice ?? `${listed.length} of ${MAX_CHILD_MODELS} · Agents use these exact names; a child Work can still use any model you name`,
+      [
+        ...listed.map((model) => ({
+          value: `listed:${modelKey(model)}`,
+          label: `● ${terminalSafe(names.get(modelKey(model)) ?? model.id)}`,
+          description: `${terminalSafe(model.provider)}/${terminalSafe(model.id)}${names.has(modelKey(model)) ? "" : " · hidden or not on Main"} · Enter removes`,
+        })),
+        { value: "add", label: "Add a model", description: `Choose from the ${state.models.length} models on Main` },
+        { value: BACK, label: "Back", description: "Return to Pi" },
+      ],
+      "↑↓ choose · Enter remove or add · Esc back",
+      focus,
+    );
+    if (!selected || selected === BACK) return;
+    notice = undefined;
+    if (selected === "add") {
+      await addChildModels(terminal, state, () => listed, async (model) => {
+        await toggle(model);
+        return notice;
+      });
+      notice = undefined;
+      focus = "add";
+      continue;
+    }
+    const index = listed.findIndex((item) => `listed:${modelKey(item)}` === selected);
+    if (index < 0) continue;
+    await toggle(listed[index]!);
+    // After a removal the cursor stays where it was, on the next model.
+    const next = listed[Math.min(index, listed.length - 1)];
+    focus = next ? `listed:${modelKey(next)}` : "add";
+  }
+}
+
+/** Providers first, then that provider's models; Enter adds or removes one and keeps the place. */
+async function addChildModels(
+  terminal: HubProcessTerminal,
+  state: ChildModelsResult,
+  listed: () => readonly ModelRef[],
+  toggle: (model: ModelRef) => Promise<string | undefined>,
+): Promise<void> {
+  const providers = [...new Set(state.models.map((model) => model.provider))];
+  let providerFocus: string | undefined;
+  while (true) {
+    const inList = new Set(listed().map(modelKey));
+    const provider = await selectMenu(
+      terminal,
+      "Add a model for child Works",
+      state.truncated ? `Main has more models than fit here; ${state.models.length} of ${state.total} are shown.` : `${listed().length} of ${MAX_CHILD_MODELS} listed`,
+      [
+        ...providers.map((item) => {
+          const models = state.models.filter((model) => model.provider === item);
+          const chosen = models.filter((model) => inList.has(modelKey(model))).length;
+          return { value: `provider:${item}`, label: `${terminalSafe(item)} · ${models.length}`, description: chosen > 0 ? `${chosen} listed` : "None listed" };
+        }),
+        { value: BACK, label: "Back", description: "Return to the list" },
+      ],
+      "↑↓ choose · Enter open · Esc back",
+      providerFocus,
+    );
+    if (!provider || provider === BACK) return;
+    providerFocus = provider;
+    const providerId = provider.slice("provider:".length);
+    const models = state.models.filter((model) => model.provider === providerId);
+    let notice: string | undefined;
+    let modelFocus: string | undefined;
+    while (true) {
+      const chosen = new Set(listed().map(modelKey));
+      const selected = await selectMenu(
+        terminal,
+        terminalSafe(providerId),
+        notice ?? `${listed().length} of ${MAX_CHILD_MODELS} listed · ● is in the list`,
+        [
+          ...models.map((model) => ({
+            value: `model:${modelKey(model)}`,
+            label: `${chosen.has(modelKey(model)) ? "●" : "○"} ${terminalSafe(model.name)}`,
+            description: terminalSafe(model.id),
+          })),
+          { value: BACK, label: "Back", description: "Return to providers" },
+        ],
+        "↑↓ choose · Enter add or remove · Esc back",
+        modelFocus,
+      );
+      if (!selected || selected === BACK) break;
+      modelFocus = selected;
+      const model = models.find((item) => `model:${modelKey(item)}` === selected);
+      if (model) notice = await toggle({ provider: model.provider, id: model.id });
     }
   }
 }
@@ -2056,6 +2202,8 @@ async function selectMenu(
   subtitle: string,
   entries: readonly DockHubEntry[],
   hint: string,
+  /** Keep the cursor on this entry when a menu is shown again after a change. */
+  preferredValue?: string,
 ): Promise<string | undefined> {
   const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const items: SelectItem[] = entries.map((entry) => ({
@@ -2065,6 +2213,8 @@ async function selectMenu(
   }));
   const maxVisible = Math.min(Math.max(items.length, 1), 12);
   const list = new SelectList(items, maxVisible, selectListTheme);
+  const preferredIndex = preferredValue === undefined ? -1 : items.findIndex((item) => item.value === preferredValue);
+  if (preferredIndex >= 0) list.setSelectedIndex(preferredIndex);
   const heading = new Text(`${paint.bold(paint.accent(terminalSafe(title)))}\n${paint.muted(terminalSafe(subtitle))}`, 1, 0);
   const footer = new Text(paint.muted(`  ${terminalSafe(hint)}`), 0, 0);
   const brand = new AluHubBrand();

@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
-import { Eye, EyeOff, Server, X } from '@lucide/vue'
+import { computed, reactive, ref, watch } from 'vue'
+import { Eye, EyeOff, ListChecks, Plus, Server, X } from '@lucide/vue'
+import { getChildModels } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { defaultMachineHostId, machineDisplayLabel, machineRequestTarget, machineSelectorVisible } from '../lib/machines'
-import { hideModels, modelRowMatches, modelVisibilityChanges, modelVisibilityColumns, showModels, type ModelVisibilityRow } from '../lib/modelVisibility'
-import type { MachineDto, ModelRef, ModelVisibilityResult } from '../lib/types'
-import { userErrorMessage } from '../lib/userError'
+import { useModelListEditor } from '../lib/modelListEditor'
+import { addModels, childModelColumns, modelRowMatches, modelVisibilityColumns, orderedListChanges, removeModels, type ModelListRow } from '../lib/modelLists'
+import type { MachineDto } from '../lib/types'
 import { useAppStore } from '../stores/app'
-import { useSurfacesStore } from '../stores/surfaces'
+import { useSurfacesStore, type MachineSettingsSection } from '../stores/surfaces'
 import { useModelCatalogStore } from '../stores/model-catalog'
-import { useModelVisibilityStore } from '../stores/model-visibility'
+import { useModelListsStore } from '../stores/model-lists'
 import AluSelect from './AluSelect.vue'
 import MachineSettingsResults from './MachineSettingsResults.vue'
 
@@ -23,25 +24,47 @@ const props = defineProps<{
 const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
 const app = useAppStore()
 const surfaces = useSurfacesStore()
-const submissions = useModelVisibilityStore()
+const submissions = useModelListsStore()
 const catalog = useModelCatalogStore()
 
+const section = ref<MachineSettingsSection>(surfaces.machineSettingsSection)
 /** Empty when the Dock has no machine list: the connected Host itself. */
 const hostId = ref('')
-const result = ref<ModelVisibilityResult | null>(null)
-const saved = ref<ModelRef[]>([])
-const draft = ref<ModelRef[]>([])
-const loading = ref(false)
-const loadError = ref('')
-const currentNotice = ref('')
+const machine = computed(() => props.machines.find((candidate) => candidate.hostId === hostId.value))
 const targetHostId = computed(() => machine.value ? machineRequestTarget(machine.value) : hostId.value || undefined)
-const submission = computed(() => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value))
-const saving = computed(() => submission.value?.state === 'pending')
 const shownQuery = ref('')
 const hiddenQuery = ref('')
-let loadEpoch = 0
+const availableQuery = ref('')
+const listedQuery = ref('')
 
-const machine = computed(() => props.machines.find((candidate) => candidate.hostId === hostId.value))
+const hidden = reactive(useModelListEditor({
+  submission: () => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value),
+  read: () => {
+    // This page always reads the Machine's current settings; the shared catalog follows that read.
+    const target = targetHostId.value
+    return currentConnectionCall(app, (context) => catalog.read(context, target, true))
+  },
+  listOf: (result) => result.hidden,
+  confirmed: (result, list) => ({ ...result, hidden: list, fileProblem: undefined }),
+  shown: () => surfaces.machineSettingsOpen && section.value === 'hidden',
+  markSuccessSeen: submissions.markSuccessSeen,
+  discardSubmission: submissions.discard,
+  loadFailure: '暂时读不到这台机器上的模型。请稍后重试。',
+}))
+const children = reactive(useModelListEditor({
+  submission: () => submissions.forChildren(app.activeConnectionId ?? ''),
+  read: () => currentConnectionCall(app, getChildModels),
+  listOf: (result) => result.listed,
+  confirmed: (result, list) => ({ ...result, listed: list, fileProblem: undefined }),
+  // The list keeps its order (dock_models shows it so), so reordering is a change to save.
+  changes: orderedListChanges,
+  shown: () => surfaces.machineSettingsOpen && section.value === 'children',
+  markSuccessSeen: submissions.markSuccessSeen,
+  discardSubmission: submissions.discard,
+  loadFailure: '暂时读不到 Main 上的模型。请稍后重试。',
+}))
+const active = computed(() => section.value === 'hidden' ? hidden : children)
+
 const showMachineSelector = computed(() => machineSelectorVisible(props.machines))
 const machineOptions = computed(() => props.machines.map((candidate) => ({
   value: candidate.hostId,
@@ -49,37 +72,16 @@ const machineOptions = computed(() => props.machines.map((candidate) => ({
   description: candidate.available ? undefined : '暂时连不上',
   disabled: !candidate.available,
 })))
-const columns = computed(() => modelVisibilityColumns(result.value?.models ?? [], draft.value))
+const columns = computed(() => modelVisibilityColumns(hidden.result?.models ?? [], hidden.draft))
 const shownRows = computed(() => columns.value.shown.filter((row) => modelRowMatches(row, shownQuery.value)))
 const hiddenRows = computed(() => columns.value.hidden.filter((row) => modelRowMatches(row, hiddenQuery.value)))
-const changes = computed(() => modelVisibilityChanges(saved.value, draft.value))
-const retained = computed(() => !!submission.value && submission.value.state !== 'succeeded'
-  && modelVisibilityChanges(submission.value.hidden, draft.value) === 0)
-const dirty = computed(() => !!result.value && !retained.value && (changes.value > 0 || submission.value?.state === 'unknown'))
-const canSave = computed(() => !!result.value && !saving.value && (changes.value > 0 || !!result.value.fileProblem || submission.value?.state === 'unknown'))
-const status = computed(() => {
-  const entry = submission.value
-  if (saving.value) return entry?.message
-  if (dirty.value) return changes.value ? `已改动 ${changes.value} 项，尚未保存` : '已改回上次读取的列表，点保存确认这份设置。'
-  if (result.value && (entry?.state === 'failed' || entry?.state === 'unknown')) return `${entry.message} 改动已保留，可以再点保存。`
-  return entry?.message ?? currentNotice.value
-})
+const childColumns = computed(() => childModelColumns(children.result?.models ?? [], children.draft))
+const availableRows = computed(() => childColumns.value.available.filter((row) => modelRowMatches(row, availableQuery.value)))
+const listedRows = computed(() => childColumns.value.listed.filter((row) => modelRowMatches(row, listedQuery.value)))
+const childLimit = computed(() => children.result?.limit ?? 0)
+const childListFull = computed(() => !!children.result && children.draft.length >= childLimit.value)
 
-watch(dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
-watch(() => submission.value?.state, (state) => {
-  if (state !== 'succeeded' || !result.value || !submission.value) return
-  saved.value = submission.value.hidden
-  draft.value = [...saved.value]
-  result.value = { ...result.value, hidden: saved.value, fileProblem: undefined }
-})
-// A success rendered in its own editor needs no second acknowledgement outside.
-// Keep its receipt while the editor reads, so an older read cannot undo it.
-watch([submission, () => submission.value?.state, loading, result], () => {
-  if (surfaces.machineSettingsOpen && !loading.value && result.value && submission.value?.state === 'succeeded') {
-    submissions.markSuccessSeen(submission.value.key)
-  }
-}, { flush: 'post' })
-onUnmounted(() => { loadEpoch++ })
+watch(() => hidden.dirty || children.dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
 
 watch(() => props.machines, (machines) => {
   // Without a machine list, stay on the machine the page was opened for rather than
@@ -93,74 +95,47 @@ watch([
   () => app.connectionContext?.selectionGeneration,
   hostId,
   () => props.machinesLoading,
-], () => { if (!props.machinesLoading) void load() }, { immediate: true })
+], () => { if (!props.machinesLoading) void hidden.load() }, { immediate: true })
 
-async function load() {
-  const epoch = ++loadEpoch
-  const target = targetHostId.value
-  const pendingAtStart = saving.value ? submission.value : undefined
-  const unknownAtStart = submission.value?.state === 'unknown' ? submission.value : undefined
-  loading.value = true
-  loadError.value = ''
-  currentNotice.value = ''
-  result.value = null
-  saved.value = []
-  draft.value = []
-  try {
-    // This page always reads the Machine's current settings; the shared catalog follows that read.
-    const value = await currentConnectionCall(app, (context) => catalog.read(context, target, true))
-    if (epoch !== loadEpoch) return
-    // A save can finish while the read is in flight. Its confirmed response wins
-    // over that older read; reopening later still reads current Host settings.
-    const completedDuringRead = pendingAtStart && pendingAtStart === submission.value && pendingAtStart.state === 'succeeded'
-    const hidden = completedDuringRead ? pendingAtStart.hidden : value.hidden
-    result.value = completedDuringRead ? { ...value, hidden, fileProblem: undefined } : value
-    saved.value = hidden
-    if (unknownAtStart && unknownAtStart === submission.value && !value.fileProblem
-      && modelVisibilityChanges(value.hidden, unknownAtStart.hidden) === 0) {
-      // This fresh read confirms the desired settings, not the old request's outcome.
-      // Retire only that submission's reminder; do not manufacture a success receipt.
-      submissions.discard(unknownAtStart.key)
-      currentNotice.value = '当前设置已与你提交的列表一致。'
-    }
-    draft.value = [...(submission.value && submission.value.state !== 'succeeded' ? submission.value.hidden : hidden)]
-  } catch (cause) {
-    if (epoch === loadEpoch) loadError.value = userErrorMessage(cause, '暂时读不到这台机器上的模型。请稍后重试。')
-  } finally {
-    if (epoch === loadEpoch) loading.value = false
-  }
-}
+// Main's child Work list is read the first time its section opens, and again after the connection changes.
+let childrenReadFor = ''
+watch([
+  () => app.connectionContext?.connectionId,
+  () => app.connectionContext?.selectionGeneration,
+  section,
+], ([connectionId, generation, current]) => {
+  const reading = JSON.stringify([connectionId ?? null, generation ?? null])
+  if (current !== 'children' || reading === childrenReadFor) return
+  childrenReadFor = reading
+  void children.load()
+}, { immediate: true })
+
+// A hidden model leaves the child Work choices too; the draft and its section stay as they are.
+watch(() => submissions.hiddenSaved.get(app.activeConnectionId ?? ''), () => { void children.refreshChoices() })
 
 async function chooseMachine(value: string) {
   if (value === hostId.value) return
-  if (dirty.value && !await surfaces.askConfirm('切换机器？', '这台机器的改动还没有保存，切换后会丢失。')) return
+  if (hidden.dirty && !await surfaces.askConfirm('切换机器？', '这台机器的改动还没有保存，切换后会丢失。')) return
   hostId.value = value
 }
 
 function save() {
-  if (!canSave.value) return
+  if (!active.value.canSave) return
   const connection = requireConnectionContext(app)
   const hostName = app.activeHost?.displayName ?? '本机'
+  if (section.value === 'children') {
+    void submissions.saveChildren(connection, `${hostName} · 子 Work 模型名单`, children.draft)
+    return
+  }
   const machineName = machine.value?.name ?? 'Host'
   const label = machineName === hostName ? hostName : `${hostName} · ${machineName}`
-  void submissions.save(connection, targetHostId.value, label, draft.value)
+  void submissions.save(connection, targetHostId.value, label, hidden.draft)
 }
 
-function edit(next: ModelRef[]) {
-  currentNotice.value = ''
-  draft.value = next
-  // Explicitly undoing a failed submission retires its retained draft. An unknown
-  // save is different: the user can still save this desired list to confirm it.
-  if (submission.value?.state === 'failed' && modelVisibilityChanges(saved.value, next) === 0) {
-    submissions.discard(submission.value.key)
-  }
-}
-function hide(rows: readonly ModelVisibilityRow[]) { edit(hideModels(draft.value, rows)) }
-function show(rows: readonly ModelVisibilityRow[]) { edit(showModels(draft.value, rows)) }
-function discard() {
-  if (submission.value) submissions.discard(submission.value.key)
-  edit([...saved.value])
-}
+function hide(rows: readonly ModelListRow[]) { hidden.edit(addModels(hidden.draft, rows)) }
+function show(rows: readonly ModelListRow[]) { hidden.edit(removeModels(hidden.draft, rows)) }
+function addChild(row: ModelListRow) { children.edit(addModels(children.draft, [row])) }
+function removeChild(row: ModelListRow) { children.edit(removeModels(children.draft, [row])) }
 </script>
 
 <template>
@@ -169,55 +144,57 @@ function discard() {
       <span class="machine-settings-mark"><Server :size="20" /></span>
       <div>
         <h2 id="machine-settings-title">Host 设置</h2>
-        <p>{{ machine ? machineDisplayLabel(machine) : hostId ? '当前 Work 所在的机器' : '当前连接的 AluDock' }}</p>
+        <p v-if="section === 'children'">所有机器共用 Main 上这一份</p>
+        <p v-else>{{ machine ? machineDisplayLabel(machine) : hostId ? '当前 Work 所在的机器' : '当前连接的 AluDock' }}</p>
       </div>
     </div>
     <button class="machine-settings-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
   </header>
 
   <div class="machine-settings-layout">
-    <aside class="machine-settings-nav" aria-label="设置分类">
+    <nav class="machine-settings-nav" aria-label="设置分类">
       <span class="machine-settings-nav-label">Host</span>
-      <div class="machine-settings-nav-item is-active"><EyeOff :size="16" /><span>模型显示</span></div>
-    </aside>
+      <button type="button" class="machine-settings-nav-item" :class="{ 'is-active': section === 'hidden' }" :aria-current="section === 'hidden' ? 'page' : undefined" @click="section = 'hidden'"><EyeOff :size="16" /><span>模型显示</span></button>
+      <button type="button" class="machine-settings-nav-item" :class="{ 'is-active': section === 'children' }" :aria-current="section === 'children' ? 'page' : undefined" @click="section = 'children'"><ListChecks :size="16" /><span>子 Work 模型</span></button>
+    </nav>
 
-    <main class="machine-settings-content">
+    <main v-if="section === 'hidden'" class="machine-settings-content">
       <div class="machine-settings-intro">
         <h3>模型显示</h3>
-        <p>移到右边的模型不会出现在这台机器上任何 Work 的模型选择和搜索里，模型本身照常可用。每台机器分别设置。</p>
+        <p>移到右边的模型不会出现在任何机器上任何 Work 的模型选择和搜索里，模型本身照常可用。所有机器共用 Main 上这一份。</p>
       </div>
 
       <label v-if="showMachineSelector" class="machine-settings-machine">
         <span>机器</span>
-        <AluSelect :value="hostId" :options="machineOptions" label="选择机器" :disabled="loading || machinesLoading" @select="chooseMachine" />
+        <AluSelect :value="hostId" :options="machineOptions" label="选择机器" :disabled="hidden.loading || machinesLoading" @select="chooseMachine" />
       </label>
       <p v-if="machineError" class="machine-settings-note is-warning" role="status">{{ machineError }}</p>
-      <MachineSettingsResults embedded :exclude-key="submission?.key" />
+      <MachineSettingsResults embedded :exclude-key="hidden.submission?.key" />
 
-      <div v-if="machinesLoading || loading" class="machine-settings-status" role="status">正在读取这台机器上的模型…</div>
-      <div v-else-if="loadError" class="machine-settings-error" role="alert"><span>{{ loadError }}</span><button type="button" class="button secondary" @click="load">重试</button></div>
-      <template v-else-if="result">
-        <p v-if="result.fileProblem" class="machine-settings-note is-warning" role="status">隐藏列表文件有问题：{{ result.fileProblem }}。现在这台机器没有隐藏任何模型。点保存会用这里的列表覆盖那个文件，文件里原来的内容不会保留。</p>
-        <p v-if="result.truncated" class="machine-settings-note">这台机器的模型太多，这里只列出了 {{ result.models.length }}/{{ result.total }} 个。</p>
+      <div v-if="machinesLoading || hidden.loading" class="machine-settings-status" role="status">正在读取这台机器上的模型…</div>
+      <div v-else-if="hidden.loadError" class="machine-settings-error" role="alert"><span>{{ hidden.loadError }}</span><button type="button" class="button secondary" @click="hidden.load">重试</button></div>
+      <template v-else-if="hidden.result">
+        <p v-if="hidden.result.fileProblem" class="machine-settings-note is-warning" role="status">隐藏列表文件有问题：{{ hidden.result.fileProblem }}。现在没有隐藏任何模型。点保存会用这里的列表覆盖那个文件，文件里原来的内容不会保留。</p>
+        <p v-if="hidden.result.truncated" class="machine-settings-note">这台机器的模型太多，这里只列出了 {{ hidden.result.models.length }}/{{ hidden.result.total }} 个。</p>
         <div class="model-columns">
           <section class="model-column" aria-label="显示中的模型">
             <header><strong>显示中</strong><span>{{ columns.shown.length }}</span></header>
             <input v-model="shownQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤显示中的模型" spellcheck="false" />
-            <button v-if="shownQuery.trim() && shownRows.length" type="button" class="model-column-bulk" :disabled="saving" @click="hide(shownRows)">隐藏筛选出的 {{ shownRows.length }} 个</button>
+            <button v-if="shownQuery.trim() && shownRows.length" type="button" class="model-column-bulk" :disabled="hidden.saving" @click="hide(shownRows)">隐藏筛选出的 {{ shownRows.length }} 个</button>
             <div class="model-list">
-              <button v-for="row in shownRows" :key="row.key" type="button" class="model-row" :title="`隐藏 ${row.provider}/${row.id}`" :disabled="saving" @click="hide([row])">
+              <button v-for="row in shownRows" :key="row.key" type="button" class="model-row" :title="`隐藏 ${row.provider}/${row.id}`" :disabled="hidden.saving" @click="hide([row])">
                 <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
                 <EyeOff :size="15" aria-hidden="true" />
               </button>
               <p v-if="!shownRows.length" class="model-list-empty">{{ columns.shown.length ? '没有匹配的模型' : '所有模型都已隐藏' }}</p>
             </div>
           </section>
-          <section class="model-column is-hidden" aria-label="已隐藏的模型">
+          <section class="model-column is-chosen" aria-label="已隐藏的模型">
             <header><strong>已隐藏</strong><span>{{ columns.hidden.length }}</span></header>
             <input v-model="hiddenQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤已隐藏的模型" spellcheck="false" />
-            <button v-if="hiddenQuery.trim() && hiddenRows.length" type="button" class="model-column-bulk" :disabled="saving" @click="show(hiddenRows)">恢复显示筛选出的 {{ hiddenRows.length }} 个</button>
+            <button v-if="hiddenQuery.trim() && hiddenRows.length" type="button" class="model-column-bulk" :disabled="hidden.saving" @click="show(hiddenRows)">恢复显示筛选出的 {{ hiddenRows.length }} 个</button>
             <div class="model-list">
-              <button v-for="row in hiddenRows" :key="row.key" type="button" class="model-row" :title="`恢复显示 ${row.provider}/${row.id}`" :disabled="saving" @click="show([row])">
+              <button v-for="row in hiddenRows" :key="row.key" type="button" class="model-row" :title="`恢复显示 ${row.provider}/${row.id}`" :disabled="hidden.saving" @click="show([row])">
                 <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
                 <span v-if="row.unavailable" class="model-row-badge">当前不可用</span>
                 <Eye :size="15" aria-hidden="true" />
@@ -228,12 +205,53 @@ function discard() {
         </div>
       </template>
     </main>
+
+    <main v-else class="machine-settings-content">
+      <div class="machine-settings-intro">
+        <h3>子 Work 模型</h3>
+        <p>你让 Agent 给子 Work 换模型时，它在这份名单里找准确的模型名。名单不限制子 Work 能用哪个模型。所有机器共用 Main 上这一份，最多 {{ childLimit }} 个。</p>
+      </div>
+      <MachineSettingsResults embedded :exclude-key="children.submission?.key" />
+
+      <div v-if="children.loading" class="machine-settings-status" role="status">正在读取 Main 上的模型…</div>
+      <div v-else-if="children.loadError" class="machine-settings-error" role="alert"><span>{{ children.loadError }}</span><button type="button" class="button secondary" @click="children.load">重试</button></div>
+      <template v-else-if="children.result">
+        <p v-if="children.result.fileProblem" class="machine-settings-note is-warning" role="status">名单文件有问题：{{ children.result.fileProblem }}。现在 Agent 看不到名单。点保存会用这里的名单覆盖那个文件，文件里原来的内容不会保留。</p>
+        <p v-if="children.result.truncated" class="machine-settings-note">Main 的模型太多，这里只列出了 {{ children.result.models.length }}/{{ children.result.total }} 个。</p>
+        <div class="model-columns">
+          <section class="model-column" aria-label="可以加入的模型">
+            <header><strong>可以加入</strong><span>{{ childColumns.available.length }}</span></header>
+            <input v-model="availableQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤可以加入的模型" spellcheck="false" />
+            <p v-if="childListFull" class="model-column-note">名单已满 {{ childLimit }} 个，先从右边移出一些。</p>
+            <div class="model-list">
+              <button v-for="row in availableRows" :key="row.key" type="button" class="model-row" :title="`加入名单 ${row.provider}/${row.id}`" :disabled="children.saving || childListFull" @click="addChild(row)">
+                <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
+                <Plus :size="15" aria-hidden="true" />
+              </button>
+              <p v-if="!availableRows.length" class="model-list-empty">{{ childColumns.available.length ? '没有匹配的模型' : 'Main 上的模型都已在名单里' }}</p>
+            </div>
+          </section>
+          <section class="model-column is-chosen" aria-label="子 Work 模型名单">
+            <header><strong>名单</strong><span>{{ childColumns.listed.length }}/{{ childLimit }}</span></header>
+            <input v-model="listedQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤名单里的模型" spellcheck="false" />
+            <div class="model-list">
+              <button v-for="row in listedRows" :key="row.key" type="button" class="model-row" :title="`移出名单 ${row.provider}/${row.id}`" :disabled="children.saving" @click="removeChild(row)">
+                <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
+                <span v-if="row.unavailable" class="model-row-badge">已隐藏或不可用</span>
+                <X :size="15" aria-hidden="true" />
+              </button>
+              <p v-if="!listedRows.length" class="model-list-empty">{{ childColumns.listed.length ? '没有匹配的模型' : '点左边的模型把它加进来' }}</p>
+            </div>
+          </section>
+        </div>
+      </template>
+    </main>
   </div>
 
   <footer class="machine-settings-footer">
-    <span class="machine-settings-footer-status" :class="{ 'machine-settings-error': submission?.state === 'failed' && !dirty }" :role="submission?.state === 'failed' && !dirty ? 'alert' : 'status'">{{ status }}</span>
-    <button type="button" class="button secondary" :disabled="saving || (!changes && submission?.state !== 'failed' && submission?.state !== 'unknown')" @click="discard">放弃改动</button>
-    <button type="button" class="button primary" :disabled="!canSave" @click="save">{{ saving ? '正在保存…' : '保存' }}</button>
+    <span class="machine-settings-footer-status" :class="{ 'machine-settings-error': active.submission?.state === 'failed' && !active.dirty }" :role="active.submission?.state === 'failed' && !active.dirty ? 'alert' : 'status'">{{ active.status }}</span>
+    <button type="button" class="button secondary" :disabled="active.saving || (!active.changes && active.submission?.state !== 'failed' && active.submission?.state !== 'unknown')" @click="active.discard">放弃改动</button>
+    <button type="button" class="button primary" :disabled="!active.canSave" @click="save">{{ active.saving ? '正在保存…' : '保存' }}</button>
   </footer>
 </template>
 
@@ -246,9 +264,11 @@ function discard() {
 .machine-settings-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .machine-settings-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
 .machine-settings-layout { display: grid; min-height: 0; grid-template-columns: 170px minmax(0, 1fr); }
-.machine-settings-nav { padding: 20px 12px; border-right: 1px solid var(--alu-border); background: #080d17; }
+.machine-settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 20px 12px; border-right: 1px solid var(--alu-border); background: #080d17; }
 .machine-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
-.machine-settings-nav-item { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid var(--alu-pink-border); border-radius: 9px; background: var(--alu-pink-bg); color: var(--alu-pink); font-size: var(--alu-meta-size); }
+.machine-settings-nav-item { display: flex; width: 100%; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; cursor: pointer; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-align: left; }
+.machine-settings-nav-item:hover:not(.is-active) { background: var(--alu-hover); color: var(--alu-text); }
+.machine-settings-nav-item.is-active { border-color: var(--alu-pink-border); background: var(--alu-pink-bg); color: var(--alu-pink); }
 .machine-settings-content { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 14px; padding: 22px 24px; overflow: hidden; }
 .machine-settings-intro h3 { margin: 0 0 6px; color: var(--alu-text); font-size: 18px; font-weight: 650; }
 .machine-settings-intro p { max-width: 620px; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
@@ -259,7 +279,8 @@ function discard() {
 .machine-settings-error { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0; padding: 9px 10px; border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); color: var(--alu-rose); font-size: var(--alu-meta-size); }
 .model-columns { display: grid; min-height: 0; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
 .model-column { display: flex; min-height: 0; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
-.model-column.is-hidden { border-color: var(--alu-pink-border); }
+.model-column.is-chosen { border-color: var(--alu-pink-border); }
+.model-column-note { margin: 0; color: var(--alu-amber); font-size: var(--alu-micro-size); }
 .model-column > header { display: flex; align-items: baseline; justify-content: space-between; color: var(--alu-text); font-size: var(--alu-ui-size); }
 .model-column > header span { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .model-column-bulk { align-self: flex-start; padding: 4px 8px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 7px; color: var(--alu-blue); font-size: var(--alu-micro-size); }
@@ -278,7 +299,9 @@ function discard() {
 .machine-settings-footer-status { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 @media (max-width: 640px) {
   .machine-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
-  .machine-settings-nav { display: none; }
+  .machine-settings-nav { flex-direction: row; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--alu-border); }
+  .machine-settings-nav-label { display: none; }
+  .machine-settings-nav-item { width: auto; min-height: 36px; }
   .machine-settings-content { padding: 16px 14px; overflow-y: auto; }
   .model-columns { grid-template-columns: 1fr; grid-template-rows: minmax(260px, 1fr) minmax(220px, 1fr); }
   .machine-settings-footer { flex-wrap: wrap; padding: 10px 14px; }

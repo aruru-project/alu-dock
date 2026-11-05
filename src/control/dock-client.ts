@@ -10,7 +10,7 @@ import { FileChannel } from "./file-channel.js";
 import { sendFile, FileReceiver, FileTransferSourceError } from "./file-transfer.js";
 import { FILE_TRANSFER_CAPABILITY, parseFileTransferFrame, parseFileDownloadResult, parsePublishedFileDto, parseDeliverableDto, parseWorkspaceEntryDto, type PublishedFileTransferResult, type DeliverableDownloadResult, ProtocolHelloRejectedError, type FileTransferRequest } from "./protocol.js";
 import { SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
-import { MODEL_VISIBILITY_CAPABILITY, parseModelVisibilityResult, parseModelVisibilitySetResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
+import { CHILD_MODELS_CAPABILITY, parseChildModelsResult, parseChildModelsSetResult, type ChildModelsResult, type ChildModelsSetResult, MODEL_VISIBILITY_CAPABILITY, parseModelVisibilityResult, parseModelVisibilitySetResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -643,6 +643,10 @@ export class DockClient {
   modelVisibility(hostId?:string):Promise<ModelVisibilityResult>{return this.request("model.visibility.get",{hostId},MODEL_VISIBILITY_CAPABILITY,parseModelVisibilityResult);}
   /** Replace one machine's hidden list; that Host leaves these models out of every Work's model list. */
   setModelVisibility(hidden:ModelRef[],hostId?:string,operationId=this.createRequestId()):Promise<ModelVisibilitySetResult>{return this.request("model.visibility.set",{operationId,hostId,hidden},MODEL_VISIBILITY_CAPABILITY,parseModelVisibilitySetResult);}
+  /** Main's child Work model list with the models to pick from; the connected Host answers. */
+  childModels():Promise<ChildModelsResult>{return this.request("model.children.get",{},CHILD_MODELS_CAPABILITY,parseChildModelsResult);}
+  /** Replace Main's child Work model list; Agents read it through dock_models. */
+  setChildModels(models:ModelRef[],operationId=this.createRequestId()):Promise<ChildModelsSetResult>{return this.request("model.children.set",{operationId,models},CHILD_MODELS_CAPABILITY,parseChildModelsSetResult);}
   /** Omit cursor for the first page; pass the previous page's nextCursor to continue. */
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd",hostId?:string,cursor?:string):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope,hostId,...(cursor===undefined?{}:{cursor})},["session.inventory.v1","session.inventory-diagnostics.v1",...(cursor===undefined?[]:[SESSION_INVENTORY_PAGES_CAPABILITY])],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS,hostId?:string):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit,hostId},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}

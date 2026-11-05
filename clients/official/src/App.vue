@@ -13,7 +13,7 @@ import WorkSidebar from './components/WorkSidebar.vue'
 import ImagePreviewDialog from './components/ImagePreviewDialog.vue'
 import PageDialogs from './components/PageDialogs.vue'
 import MachineSettingsResults from './components/MachineSettingsResults.vue'
-import { useModelVisibilityStore } from './stores/model-visibility'
+import { useModelListsStore } from './stores/model-lists'
 import { useAppStore } from './stores/app'
 import { useAttachmentsStore } from './stores/attachments'
 import { useControlPanelStore } from './stores/control-panel'
@@ -42,7 +42,7 @@ const input = useInputStore()
 const workActions = useWorkActionsStore()
 const controlPanel = useControlPanelStore()
 const conversation = useConversationStore()
-const modelVisibility = useModelVisibilityStore()
+const modelLists = useModelListsStore()
 // Created with the page so it sees a run from its first event.
 const turnSpeed = useTurnSpeedStore()
 const selected = computed(() => app.selectedWork)
@@ -69,7 +69,7 @@ onMounted(async () => {
 })
 // The page's stores stop their listeners and timers with the page; a later page starts from fresh state.
 onUnmounted(() => {
-  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelVisibility]) {
+  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelLists]) {
     store.$dispose()
     if (pinia) delete pinia.state.value[store.$id]
   }

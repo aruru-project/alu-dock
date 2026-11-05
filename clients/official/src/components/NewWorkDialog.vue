@@ -23,7 +23,7 @@ import {
   machineWorkspaceStart,
   workspaceChildPath,
 } from '../lib/machines'
-import { modelKey } from '../lib/modelVisibility'
+import { modelKey } from '../lib/modelLists'
 import { useSavedSessionPages } from '../lib/savedSessions'
 import type { DirectoryPage } from '../lib/workspaceBrowser'
 import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'

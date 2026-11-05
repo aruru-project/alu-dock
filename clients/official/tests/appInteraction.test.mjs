@@ -43,7 +43,7 @@ let abortNative, compactNative, stopNative, modelNative, dequeueNative, submitNa
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
-let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative
+let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, childModelsNative, saveChildModelsNative
 // The fake Host's Work list: extra records it lists, and Works it has retired.
 let extraListed = [], holdWorkCatalog, reopenNative
 const retiredWorks = new Set()
@@ -160,6 +160,8 @@ const invoke = async (command, args = {}) => {
   if (command === 'list_machines') return machinesFixture
   if (command === 'model_visibility') return modelVisibilityNative(args)
   if (command === 'set_model_visibility') return saveModelVisibilityNative(args)
+  if (command === 'child_models') return childModelsNative(args)
+  if (command === 'set_child_models') return saveChildModelsNative(args)
   if (command === 'consume_operation') {
     if (consumeFailures.has(args.operationId)) throw { code: 'io_error', message: 'fixture acknowledgement unavailable' }
     nativeResults.delete(args.operationId); return
@@ -1214,6 +1216,94 @@ try {
     app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
     await settle()
     console.log('PASS: Host settings real App wiring / pending close, Esc and Back / scoped late results / failed draft recovery')
+  }
+  // #659: Main's child Work model list is the second Host settings section, one list for every machine.
+  {
+    const dialog = () => find(container, item => item.props['aria-labelledby'] === 'machine-settings-title')
+    const results = () => find(container, item => item.props['aria-label'] === 'Host 设置保存结果')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || item.props.title === label || text(item).includes(label)))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(target, `button exists: ${label}`)
+      assert.equal(!!target.props.disabled, false, `${label} is available`)
+      target.props.onClick(); await settle()
+    }
+    const openList = async () => { await click(container, 'Host 设置'); await click(dialog(), '子 Work 模型') }
+    const rows = label => all(find(dialog(), item => item.props['aria-label'] === label), item => item.type === 'button' && String(item.props.class).includes('model-row'))
+    const reads = () => calls.filter(call => call.command === 'child_models').length
+    const haiku = { provider: 'claude-sub', id: 'claude-haiku-5-5' }, retired = { provider: 'retired', id: 'old' }, luna = { provider: 'openai-sub', id: 'gpt-6-luna' }
+    const models = [
+      { provider: 'openai-sub', id: 'gpt-6-astra', name: 'GPT-6 Astra' },
+      { ...luna, name: 'GPT-6 Luna' },
+      { ...haiku, name: 'Claude Haiku 5.5' },
+    ]
+    let listed = [haiku, retired], hiddenNow = [], finishSave, finishHidden
+    const offered = () => models.filter(model => !hiddenNow.some(item => item.provider === model.provider && item.id === model.id))
+    modelVisibilityNative = async () => ({ models, total: 3, truncated: false, hidden: hiddenNow })
+    childModelsNative = async () => ({ models: offered(), total: offered().length, truncated: false, listed, limit: 50 })
+    saveChildModelsNative = args => new Promise(resolve => { finishSave = () => { listed = args.models; resolve({ listed: args.models }) } })
+    saveModelVisibilityNative = args => new Promise(resolve => { finishHidden = () => { hiddenNow = args.hidden; resolve({ hidden: args.hidden }) } })
+    const titles = () => rows('子 Work 模型名单').map(row => row.props.title)
+
+    await openList()
+    assert.deepEqual(titles(), ['移出名单 claude-sub/claude-haiku-5-5', '移出名单 retired/old'], 'the list keeps its saved order')
+    assert.ok(text(dialog()).includes('已隐藏或不可用'))
+    assert.equal(rows('可以加入的模型').length, 2)
+    // The order is kept, so moving a model to the end is a change to save or discard.
+    await click(dialog(), '移出名单 claude-sub/claude-haiku-5-5'); await click(dialog(), '加入名单 claude-sub/claude-haiku-5-5')
+    assert.ok(text(dialog()).includes('已改动 1 项'))
+    await click(dialog(), '放弃改动')
+    assert.deepEqual(titles(), ['移出名单 claude-sub/claude-haiku-5-5', '移出名单 retired/old'])
+    await click(dialog(), '加入名单 openai-sub/gpt-6-luna')
+    assert.ok(text(dialog()).includes('已改动 1 项'))
+    // A model hidden meanwhile leaves the choices; the unsaved list stays, and its read is not repeated.
+    const readsBeforeSwitch = reads()
+    await click(dialog(), '模型显示')
+    await click(dialog(), '隐藏 openai-sub/gpt-6-astra'); await click(dialog(), '保存')
+    await click(dialog(), '子 Work 模型')
+    finishHidden(); await settle()
+    assert.equal(rows('可以加入的模型').length, 0, 'the newly hidden model is no longer offered')
+    assert.equal(rows('子 Work 模型名单').length, 3, 'switching sections keeps the draft')
+    assert.equal(calls.filter(call => call.command === 'child_models').length, readsBeforeSwitch + 1, 'only the choices were read again')
+    // Its success is shown when its section is shown again, so it is not told again after closing.
+    await click(dialog(), '模型显示'); await click(dialog(), '子 Work 模型')
+    await click(dialog(), '关闭')
+    assert.ok(text(container).includes('放弃未保存的修改？'), 'leaving with an unsaved list asks first')
+    await click(container, '取消')
+    await click(dialog(), '保存')
+    const saved = calls.filter(call => call.command === 'set_child_models').at(-1).args
+    assert.deepEqual(saved.models, [haiku, retired, luna], 'new models join the end of the list')
+    assert.equal('targetHostId' in saved, false, 'Main keeps the only list, so no machine is chosen')
+    // Closing does not cancel the save; the result is told outside and opens this list again.
+    await click(dialog(), '关闭')
+    assertSameReference(dialog(), undefined)
+    assert.ok(text(results()).includes('子 Work 模型名单') && text(results()).includes('正在保存'))
+    finishSave(); await settle()
+    assert.ok(text(results()).includes('Agent 下次查找模型时生效'))
+    await click(results(), '查看设置')
+    assert.equal(button(dialog(), '子 Work 模型').props['aria-current'], 'page')
+    assert.equal(rows('子 Work 模型名单').length, 3)
+    await click(dialog(), '关闭')
+    assertSameReference(results(), undefined, 'a success shown in its editor needs no second acknowledgement')
+
+    // The user's limit: a full list can lose models, not gain them.
+    listed = Array.from({ length: 50 }, (_, index) => ({ provider: 'fixture', id: `model-${index}` }))
+    await openList()
+    assert.ok(text(dialog()).includes('名单已满 50 个'))
+    assert.equal(button(dialog(), '加入名单 openai-sub/gpt-6-luna').props.disabled, true)
+    // A save Main could not write says so in Main's words.
+    saveChildModelsNative = async () => { throw { code: 'child_models_write_failed', message: '子 Work 模型名单没有保存成功，原来的名单不变。' } }
+    await click(dialog(), '移出名单 fixture/model-0'); await click(dialog(), '保存')
+    assert.ok(text(dialog()).includes('原来的名单不变'))
+    await click(dialog(), '放弃改动')
+    await click(dialog(), '关闭')
+    // A Main without this list asks for an update; the hidden models still work.
+    childModelsNative = async () => { throw { code: 'capability_missing', details: { missing: ['model.children.v1'] } } }
+    await openList()
+    assert.ok(text(dialog()).includes('请更新对应机器上的 Dock'))
+    await click(dialog(), '模型显示')
+    assert.equal(all(find(dialog(), item => item.props['aria-label'] === '显示中的模型'), item => item.type === 'button' && String(item.props.class).includes('model-row')).length, 2)
+    await click(dialog(), '关闭')
+    console.log('PASS: Host settings child Work models: second section keeps its draft, saves the list on Main, reports after closing, stops at 50')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.

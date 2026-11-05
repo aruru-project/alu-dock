@@ -15,7 +15,7 @@ import { DockRegistry } from "./control/dock-registry.js";
 import { AttachmentService } from "./control/attachment-service.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { ModelVisibilityService, ModelVisibilityStore, modelVisibilityStateRoot } from "./control/model-visibility.js";
-import { ChildModelsStore } from "./control/child-models.js";
+import { ChildModelsService, ChildModelsStore } from "./control/child-models.js";
 import type { ModelServiceProcess } from "./model-service/service-process.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
@@ -275,13 +275,13 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     ? new AttachmentService(new AttachmentStorageState(attachmentStorageStateRoot(catalogPath)))
     : undefined;
   const { createPiModelCatalogReader } = await import("./pi/pi-model-catalog.js");
+  const modelCatalog = createPiModelCatalogReader(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir });
   const modelVisibility = catalogPath
-    ? new ModelVisibilityService(
-      new ModelVisibilityStore(modelVisibilityStateRoot(catalogPath)),
-      createPiModelCatalogReader(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
-    )
+    ? new ModelVisibilityService(new ModelVisibilityStore(modelVisibilityStateRoot(catalogPath)), modelCatalog)
     : undefined;
-  const childModels = catalogPath ? new ChildModelsStore(modelVisibilityStateRoot(catalogPath)) : undefined;
+  const childModels = catalogPath
+    ? new ChildModelsService(new ChildModelsStore(modelVisibilityStateRoot(catalogPath)), modelCatalog, modelVisibility)
+    : undefined;
   const incidentRecorder = catalogPath
     ? new WorkerIncidentStore(workerIncidentStoreRoot(catalogPath)).recorder(options.machineName ?? "This computer")
     : undefined;
@@ -408,6 +408,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       remoteInstances,
       modelVisibility,
       childModels,
+      childModelsEditor: childModels,
     });
   }
 

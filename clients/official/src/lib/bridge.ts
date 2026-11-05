@@ -23,6 +23,8 @@ import type {
   ModelsResult,
   ModelVisibilityResult,
   ModelVisibilitySetResult,
+  ChildModelsResult,
+  ChildModelsSetResult,
   NativeMedia,
   PublishedFileDto,
   QueueDequeueResult,
@@ -592,6 +594,15 @@ export async function getModelVisibility(context: ConnectionContext, targetHostI
 
 export async function setModelVisibility(hidden: ModelRef[], context: ConnectionContext, targetHostId?: string): Promise<ModelVisibilitySetResult> {
   return native<ModelVisibilitySetResult>('set_model_visibility', { ...context, targetHostId: targetHostId ?? null, hidden })
+}
+
+/** The list exists only on Main, so there is no machine to choose. */
+export async function getChildModels(context: ConnectionContext): Promise<ChildModelsResult> {
+  return native<ChildModelsResult>('child_models', { ...context })
+}
+
+export async function setChildModels(models: ModelRef[], context: ConnectionContext): Promise<ChildModelsSetResult> {
+  return native<ChildModelsSetResult>('set_child_models', { ...context, models })
 }
 
 export async function listWorkspace(

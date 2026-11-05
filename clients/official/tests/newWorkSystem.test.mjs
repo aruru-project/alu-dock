@@ -57,7 +57,7 @@ const template = { id: 'chosen', name: '选择的模板', kind: 'dock-template',
 const original = '\uFEFF{"identity":"逐字复制中文"}\n'
 try {
   const entry = join(directory, 'entry.ts')
-  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app'; export { useModelVisibilityStore } from '../src/stores/model-visibility';`)
+  await writeFile(entry, `export { default } from '../src/components/NewWorkDialog.vue'; export { useAppStore } from '../src/stores/app'; export { useModelListsStore } from '../src/stores/model-lists';`)
   await build({ root, configFile: false, logLevel: 'silent',
     build: { outDir: directory, emptyOutDir: false, minify: false,
       lib: { entry, formats: ['es'], fileName: () => 'component.mjs' },
@@ -65,7 +65,7 @@ try {
     },
     plugins: [vue()],
   })
-  const { default: NewWorkDialog, useAppStore, useModelVisibilityStore } = await import(join(directory, 'component.mjs'))
+  const { default: NewWorkDialog, useAppStore, useModelListsStore } = await import(join(directory, 'component.mjs'))
   async function createStore() {
     setActivePinia(createPinia())
     const store = useAppStore()
@@ -230,7 +230,7 @@ try {
       await clickAgain('刷新模型列表')
       assert.ok(releaseRead, 'the refresh is in flight')
       let savedHidden = [{ provider: fastModel.provider, id: fastModel.id }]
-      await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      await useModelListsStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
       machineHidden = savedHidden
       holdModelRead = undefined
       releaseRead(new Error('fixture: read failed after the save')); await settle()
@@ -242,7 +242,7 @@ try {
       holdModelRead = release => { releaseRead = release }
       await clickAgain('刷新模型列表')
       savedHidden = [{ provider: fasterModel.provider, id: fasterModel.id }]
-      await useModelVisibilityStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      await useModelListsStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
       machineHidden = savedHidden
       holdModelRead = undefined
       releaseRead(); await settle()
