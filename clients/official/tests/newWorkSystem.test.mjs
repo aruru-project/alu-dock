@@ -94,7 +94,8 @@ try {
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
       if (command === 'model_visibility') {
         if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
-        assert.equal(args.targetHostId, null, 'the connected Host itself is addressed by omitting the target, like the hidden-model settings')
+        // The connected Host itself is addressed by omitting the target; a SubHost answers with Main's models and list.
+        assert.ok(args.targetHostId === null || args.targetHostId === 'laptop')
         const answer = { models: machineModels, total: machineModels.length, truncated: false, hidden: machineHidden }
         if (holdModelRead) return new Promise((resolve, reject) => { holdModelRead(error => error ? reject(error) : resolve(answer)) })
         return answer
@@ -230,7 +231,7 @@ try {
       await clickAgain('刷新模型列表')
       assert.ok(releaseRead, 'the refresh is in flight')
       let savedHidden = [{ provider: fastModel.provider, id: fastModel.id }]
-      await useModelListsStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      await useModelListsStore().saveHidden(store.connectionContext, '目标机器', savedHidden)
       machineHidden = savedHidden
       holdModelRead = undefined
       releaseRead(new Error('fixture: read failed after the save')); await settle()
@@ -242,7 +243,7 @@ try {
       holdModelRead = release => { releaseRead = release }
       await clickAgain('刷新模型列表')
       savedHidden = [{ provider: fasterModel.provider, id: fasterModel.id }]
-      await useModelListsStore().save(store.connectionContext, undefined, '目标机器', savedHidden)
+      await useModelListsStore().saveHidden(store.connectionContext, '目标机器', savedHidden)
       machineHidden = savedHidden
       holdModelRead = undefined
       releaseRead(); await settle()
@@ -250,6 +251,19 @@ try {
       assert.ok(!modelOption(fasterModel), 'the model hidden by the save stays hidden after the older read returns with the previous list')
       assert.ok(modelOption(fastModel) && modelOption(hiddenModel), 'models shown by the save stay shown')
       assert.ok(!text(reopened).includes('读不到这台机器的模型列表'), 'a successful read clears the earlier failure note')
+      // Card #660: Main keeps the one hidden list, so a save applies to every Machine's cached models, not only Main's.
+      props.machines = [...props.machines, { hostId: 'laptop', name: '笔记本', kind: 'subhost', available: true, platform: 'linux', homePath: '/home', workspaceRoots: ['/'] }]
+      await settle()
+      const openModels = async () => { if (!find(reopened, item => item.props.role === 'listbox' && item.props['aria-label'] === '选择模型')) await clickAgain('选择模型') }
+      await clickAgain('选择 Machine'); await clickAgain('笔记本 · SubHost')
+      await openModels(); assert.ok(modelOption(fastModel), 'the SubHost read shows the current list')
+      await clickAgain('Fast')
+      const readsBeforeSave = calls.filter(c => c.command === 'model_visibility').length
+      machineHidden = [{ provider: fastModel.provider, id: fastModel.id }]
+      await useModelListsStore().saveHidden(store.connectionContext, '目标机器', machineHidden)
+      await openModels()
+      assert.ok(!modelOption(fastModel), 'the SubHost\'s cached models follow the saved list without a refresh')
+      assert.equal(calls.filter(c => c.command === 'model_visibility').length, readsBeforeSave)
       again.unmount(); continue
     }
     await click('选择的模板')
