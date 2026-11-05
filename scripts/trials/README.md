@@ -47,7 +47,7 @@ umask 077; printf 'OPENAI_API_KEY=...\n' > /tmp/alu-trial-secrets.env
 
 # 2. 起机器，第二个参数是可选的出口代理，第三个是可选的 Main models.json：
 NODE_DIR=$HOME/.nvm/versions/node/v24.22.1 \
-  ssh root@127.0.0.1 bash "$PWD/scripts/trials/cross-machine-docker.sh" up /tmp/alu-trial-secrets.env http://192.168.1.195:7890
+  ssh root@127.0.0.1 bash "$PWD/scripts/trials/cross-machine-docker.sh" up /tmp/alu-trial-secrets.env http://<代理主机>:<端口>
 
 # 3. 在 Main 上驱动：SubHost 上的 Work 回一句话、调一次工具（MODEL=provider/id 可指定模型）：
 ssh root@127.0.0.1 bash "$PWD/scripts/trials/cross-machine-docker.sh" run
