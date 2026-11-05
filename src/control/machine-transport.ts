@@ -30,7 +30,7 @@ import { MAX_MODEL_ANSWER_BYTES, parseModelServiceRequest, type ModelAuthRequest
 import { ModelServiceUnavailableError, type ModelHostPort } from "../model-service/service-process.js";
 import { ModelVisibilityError, filterWithHiddenModels, type HiddenModelsFile, type ModelList, type ModelVisibilityPort, type ModelVisibilityService } from "./model-visibility.js";
 import type { ChildModelsSource } from "./child-models.js";
-import { parseChildModelEntries, type ChildModelList } from "../core/dock-tools.js";
+import { parseChildModelEntries, withCurrentMachine, type ChildModelList } from "../core/dock-tools.js";
 import { parseModelRefs, parseModelVisibilityResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
 
 const MAX_MACHINE_LINE_BYTES = MAX_LINK_LINE_BYTES;
@@ -1520,6 +1520,9 @@ export class SubHostMachineConnection {
 
   connected(): boolean { return this.ready && this.socket !== undefined && !this.socket.destroyed; }
 
+  /** This SubHost's ID in Main's Machines, once its join record is loaded. */
+  machineId(): string | undefined { return this.record?.machineId; }
+
   invokeDockTool(sourceNativeId: string, request: DockToolsRequest): Promise<DockToolsResult> {
     const socket = this.socket;
     if (!this.ready || !socket || socket.destroyed) return Promise.reject(new Error("Main is offline. Reconnect it before using Dock tools."));
@@ -1879,7 +1882,7 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     // File delivery and the model list for child Works belong to this machine.
     if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
-    return this.options.upstream.invokeDockTool(sourceInstanceId, request);
+    return this.options.upstream.invokeDockTool(sourceInstanceId, request).then((result) => withCurrentMachine(result, this.options.upstream.machineId()));
   }
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void {
     return this.options.upstream.attachObservationSink(sourceInstanceId, sink);

@@ -2,7 +2,7 @@ import { requireHumanTarget } from "../human-target.js";
 import { assertChildMayRequest, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { OperationLedger } from "./operation-ledger.js";
 import { createDockSystem, readDockSystem } from "./system-tools.js";
-import type { DockToolsHostPort, DockToolsMutationPort, DockToolsRequest, DockToolsResult, ObservationDeliverySink } from "../core/dock-tools.js";
+import { withCurrentMachine, type DockToolsHostPort, type DockToolsMutationPort, type DockToolsRequest, type DockToolsResult, type ObservationDeliverySink } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { DockClient } from "./dock-client.js";
@@ -158,7 +158,7 @@ export class MainMachineDockToolsPort implements DockToolsHostPort {
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
     if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
-    return this.options.mainHostId().then((hostId) => this.options.authority().invoke(sourceInstanceId, hostId, request));
+    return this.options.mainHostId().then(async (hostId) => withCurrentMachine(await this.options.authority().invoke(sourceInstanceId, hostId, request), hostId));
   }
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void { return this.options.local().attachObservationSink(sourceInstanceId, sink); }
 }
@@ -170,7 +170,10 @@ function resolveCreateMachine(machines: readonly MachineDto[], sourceMachineId: 
     return source;
   }
   const matches = machines.filter((machine) => machine.name === requestedName);
-  if (matches.length === 0) throw new Error(`No Machine named ${JSON.stringify(requestedName)} was found. Check the Machine name and try again.`);
+  if (matches.length === 0) {
+    const names = machines.slice(0, 20).map((machine) => JSON.stringify(machine.name)).join(", ");
+    throw new Error(`No Machine named ${JSON.stringify(requestedName)} was found. Machines: ${names}. Omit machine to use this Work's Machine.`);
+  }
   if (matches.length > 1) throw new Error(`Several Machines are named ${JSON.stringify(requestedName)}. Use a unique Machine name and try again.`);
   return matches[0] as MachineDto;
 }

@@ -157,6 +157,7 @@ test("TUI and native Agent tools choose, read and explicitly save systems before
   await until(async () => (await client.tools(source.id)).tools.some((tool) => tool.name === "dock_system" && tool.active), "tools enable");
   const chosen = (await client.systemCatalog(peerCwd)).candidates.find((item) => item.name === "chosen.json")!;
   script = [
+    { name: "dock_machines", arguments: {} },
     { name: "dock_create", arguments: { cwd: peerCwd, name: "Native fallback" } },
     { name: "dock_system", arguments: { cwd: peerCwd } },
     { name: "dock_system", arguments: { cwd: peerCwd, id: chosen.id } },
@@ -172,6 +173,7 @@ test("TUI and native Agent tools choose, read and explicitly save systems before
   assert.equal(registry.dockToolsEnabled(peer.id), true);
   const texts = received.flatMap((request) => request.messages.filter((message) => message.role === "tool").map((message) => message.content ?? "")).join("\n");
   assert.match(texts, /Dock systems/u);
+  assert.match(texts, /- Fixture Main \(this Work's Machine\) · Main/u, "A Work on Main sees Main marked as its own Machine");
   assert.match(texts, /│ .*ignore the owner/u);
   const peerResource = (await client.resources(peer.id)).resources.find((item) => item.path?.endsWith("chosen.json"));
   assert.ok(peerResource?.contentRef);

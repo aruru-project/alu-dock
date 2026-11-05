@@ -86,15 +86,16 @@ const DELIVER_SCHEMA = {
   required: ["path"],
   additionalProperties: false,
 };
+const MACHINE_NAME_SCHEMA = { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS, description: "An exact name from dock_machines. Omit for this Work's Machine." };
 const SYSTEM_SCHEMA = {
   type: "object",
   properties: {
     cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
-    machine: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
-    id: { type: "string", minLength: 1, maxLength: 128 },
-    cursor: { type: "object", properties: { revision: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["revision", "offset"], additionalProperties: false },
-    offset: { type: "integer", minimum: 0 },
-    revision: { type: "string", minLength: 1, maxLength: 128 },
+    machine: MACHINE_NAME_SCHEMA,
+    id: { type: "string", minLength: 1, maxLength: 128, description: "A candidate's id from the list. Reads that candidate instead of listing." },
+    cursor: { type: "object", properties: { revision: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["revision", "offset"], additionalProperties: false, description: "The list's nextCursor, for its next page. Only without id." },
+    offset: { type: "integer", minimum: 0, description: "The candidate's nextOffset, to continue reading it. Only with id." },
+    revision: { type: "string", minLength: 1, maxLength: 128, description: "The revision that came with nextOffset. Only with id." },
   },
   required: ["cwd"], additionalProperties: false,
 };
@@ -102,10 +103,10 @@ const CREATE_SCHEMA = {
   type: "object",
   properties: {
     cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
-    systemId: { type: "string", minLength: 1, maxLength: 128 },
+    systemId: { type: "string", minLength: 1, maxLength: 128, description: "A candidate's id read with dock_system. Omit for the directory default." },
     saveDefault: { type: "boolean" },
     name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
-    machine: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
+    machine: MACHINE_NAME_SCHEMA,
     model: {
       type: "object",
       properties: {
@@ -394,7 +395,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_machines",
       label: "List Dock Machines",
-      description: toolDescription("List current Machines with their names, availability, platform, Home, and workspace roots."),
+      description: toolDescription("List current Machines with their names, availability, platform, Home, and workspace roots. The Machine this Work runs on is marked."),
       parameters: EMPTY_SCHEMA,
       execute: async () => toolResult(await bridge.invoke({ type: "machines" })),
     } as never);
@@ -435,14 +436,14 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_system",
       label: "Read Dock systems",
-      description: toolDescription("Discover systems for an absolute cwd, or read a candidate using id. Follow nextCursor for catalog pages; use nextOffset and revision for content pages. Omitted machine means this work's Machine."),
+      description: toolDescription("Find the systems a new Work in an absolute cwd can start from, or read one. Without id it lists candidates; pass the list's nextCursor as cursor for the next page. With id it reads that candidate; pass its nextOffset as offset, with the revision that came with it, to continue. cursor goes only without id, offset and revision only with id."),
       parameters: SYSTEM_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "system" }>, "type">) => toolResult(await bridge.invoke({ type: "system", ...params })),
     } as never);
     pi.registerTool({
       name: "dock_create",
       label: "Create Dock work",
-      description: toolDescription("Create a new top-level Work in an absolute working directory. Use an exact Machine name to place it on another Machine; omit machine to use this work's Machine. Select systemId from dock_system to override the Host default. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
+      description: toolDescription("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
       parameters: CREATE_SCHEMA,
       execute: async (_toolCallId: string, params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }) => toolResult(await bridge.invoke({
         type: "create",

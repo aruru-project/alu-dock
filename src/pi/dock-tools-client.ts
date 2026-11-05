@@ -63,7 +63,8 @@ export function renderDockToolsResult(result: DockToolsResult, context: RenderCo
       const platform = machine.platform === "windows" ? "Windows" : machine.platform === "linux" ? "Linux" : "Platform unavailable";
       const home = machine.homePath === undefined ? "Home unavailable" : `Home=${inline(machine.homePath, 180)}`;
       const roots = machine.workspaceRoots === undefined ? "roots unavailable" : `roots=${machine.workspaceRoots.map((root) => inline(root, 180)).join(", ")}`;
-      lines.push(`- ${inline(machine.name)} · ${role} · ${platform} · ${machine.available ? "online" : "offline"} · ${home} · ${roots}`);
+      const here = machine.hostId === result.currentHostId ? " (this Work's Machine)" : "";
+      lines.push(`- ${inline(machine.name)}${here} · ${role} · ${platform} · ${machine.available ? "online" : "offline"} · ${home} · ${roots}`);
     }
     return lines.join("\n");
   }

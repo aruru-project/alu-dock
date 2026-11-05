@@ -60,6 +60,9 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   }
   if (value.type === "system") {
     exactKeys(value, ["type", "cwd", "machine", "id", "cursor", "offset", "revision"], "Dock system request");
+    // The two reads take different continuations; say which, since a model mixing them cannot tell from the field names.
+    if (value.id !== undefined && value.cursor !== undefined) throw new Error("cursor pages the candidate list, so it cannot go with id. To continue reading one candidate, pass its id with offset and revision.");
+    if (value.id === undefined && (value.offset !== undefined || value.revision !== undefined)) throw new Error("offset and revision continue reading one candidate, so pass them with its id. To page the candidate list, pass cursor.");
     const { type: _type, machine: _machine, ...params } = value;
     const parsed = parseControlRequest({ kind: "request", version: 2, type: value.id === undefined ? "system.catalog" : "system.content", requestId: "dock-system", params });
     if (parsed.type !== "system.catalog" && parsed.type !== "system.content") throw new Error("Invalid system request");
@@ -161,9 +164,10 @@ export function parseDockToolsResult(raw: unknown): void {
     parseResourceContentResult(value.result); return;
   }
   if (value.type === "machines") {
-    exactKeys(value, ["type", "machines"], "Dock Machines result");
+    exactKeys(value, ["type", "machines", "currentHostId"], "Dock Machines result");
     if (!Array.isArray(value.machines) || value.machines.length < 1) throw new Error("Dock Machines result is invalid");
     for (const machine of value.machines) validateMachine(machine);
+    if (value.currentHostId !== undefined && !value.machines.some((machine) => (machine as { hostId: unknown }).hostId === value.currentHostId)) throw new Error("Dock Machines result marks a Machine it does not list");
     return;
   }
   if (value.type === "deliver") {

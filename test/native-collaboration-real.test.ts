@@ -352,3 +352,26 @@ test("a child Work's long final reply reaches its parent whole, and dock_inspect
   inspected.text("Read the whole brainstorm.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
 });
+
+// 2026-11-05 on a SubHost: a model told every field was required sent dock_system both continuations,
+// and the Host ended the Worker over a call it could not read.
+test("a Dock tool call whose fields do not fit together fails as that call, and the Work goes on", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-native-bad-fields-" });
+  const { coordinator } = team.providers;
+  const client = await team.startHost();
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "bad-fields-create", trust));
+  const [worker] = team.workerPids;
+  await client.prompt(parent.id, "Open a Work for the user.", "auto", "bad-fields-start");
+  (await coordinator.request(0)).tools({ id: "system-mixed", name: "dock_system", arguments: {
+    cwd: team.cwd, id: "candidate", cursor: { revision: "r1", offset: 0 }, offset: 0, revision: "r1",
+  } });
+  (await coordinator.request(1)).tools({ id: "create-relative", name: "dock_create", arguments: { cwd: "projects/next" } });
+  (await coordinator.request(2)).text("I need an absolute directory from the user.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
+
+  const results = (await client.history(parent.id)).entries.flatMap((entry) => entry.source === "tool" ? entry.content : [])
+    .flatMap((block) => block.type === "tool_result" ? [[block.toolCallId, block.isError]] : []);
+  assert.deepEqual(results, [["system-mixed", true], ["create-relative", true]]);
+  assert.equal(exited(worker!), false, "The same Worker keeps the Work");
+  assert.equal((await client.status(parent.id)).lifecycle, "active");
+});

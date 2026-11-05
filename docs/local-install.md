@@ -45,6 +45,19 @@ Alu Dock 自带 Pi。运行 `aludock` 后可在 **Settings → Pi** 查看可用
 
 两类凭据仍在 Work 所在的机器上读取：只由某个扩展自己定义、Main 上没有的供应商，用扩展自己的密钥（扩展读环境变量的，按扩展的说明在那台机器上配置）；Bedrock 和 Vertex 的云账号（AWS key/profile、Google ADC）由 Pi 在那台机器上读取。所以要用这两家，Main 和 Work 所在的机器都要配好云账号：Main 决定它们能不能选，请求用的是 Work 所在机器的账号。Dock 读一台机器的环境变量时用的是它的登录 shell，所以密钥和代理要写在登录 shell 会读的配置里。
 
+在 `models.json` 里自己加的 `openai-responses` 供应商（比如经 CLIProxyAPI 这类代理转发到 OpenAI 或 Codex），要在供应商一级写上 `"compat": { "supportsStrictMode": true }`：
+
+```json
+"openai-sub": {
+  "baseUrl": "http://192.168.1.195:38317/v1",
+  "api": "openai-responses",
+  "compat": { "supportsStrictMode": true },
+  "models": [ … ]
+}
+```
+
+不写时，Pi 发出的工具定义不带 `strict`，OpenAI 会自行把每个工具的所有参数都改成必填，模型就只能给本该省略的参数编一个值，比如给 `dock_create` 编一个不存在的机器名。写上之后，Pi 会按每个工具的定义告诉 OpenAI 哪些参数可以省略。Pi 自带的 `openai-codex` 不用写。改完后，已经运行的 Work 用 `/reload` 生效。
+
 安装 Pi package 使用：
 
 ```bash
