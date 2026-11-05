@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Component } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import { AluHubBrand } from "../src/tui/alu-mascot.js";
+import { AluHubBrand, renderHubAlu } from "../src/tui/alu-mascot.js";
 import { HubMenuLayout, HubProcessTerminal, visibleHubItemIndices } from "../src/tui/dock-hub.js";
 
 
@@ -34,7 +34,7 @@ test("fullscreen Hub keeps responsive brand geometry and deterministic item hitb
   rows = 24;
   const standard = layout.render(80);
   assert.equal(standard.length, 24);
-  assert.match(standard.join("\n"), /◆   ◆/u);
+  assert.match(standard.join("\n"), /◕    ◕/u);
   assert.equal(layout.hitTest(25, 10), 8);
   assert.equal(layout.hitTest(24, 10), undefined, "mascot/gutter is outside the list panel");
   assert.equal(layout.hitTest(80, 14), 12);
@@ -44,6 +44,17 @@ test("fullscreen Hub keeps responsive brand geometry and deterministic item hitb
   assert.equal(layout.render(120).length, 40);
   assert.equal(layout.hitTest(25, 18), 8);
   assert.equal(layout.hitTest(121, 18), undefined);
+});
+
+test("the color portrait keeps the Hub's mascot column: ten lines, never wider than the character version", () => {
+  for (const level of ["truecolor", "ansi256"] as const) {
+    for (const blink of [false, true]) {
+      const portrait = renderHubAlu(22, blink, level, true);
+      assert.equal(portrait.length, 10);
+      assert.ok(portrait.every((line) => visibleWidth(line) <= 21), `${level} portrait fits beside the menu`);
+    }
+    assert.notDeepEqual(renderHubAlu(22, true, level, true), renderHubAlu(22, false, level, true), "Alu still blinks");
+  }
 });
 
 test("short Hub height never exposes truncated item rows", () => {
