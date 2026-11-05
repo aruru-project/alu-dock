@@ -42,7 +42,6 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const hostSettingsOpen = ref(false)
   /** Host 设置: the model lists kept on Main (hidden models, child Work models). */
   const machineSettingsOpen = ref(false)
-  const machineSettingsHostId = ref<string | undefined>()
   const machineSettingsSection = ref<MachineSettingsSection>('hidden')
   /** The page has unsaved changes; closing it asks first. */
   const machineSettingsDirty = ref(false)
@@ -422,10 +421,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     rememberModalTrigger(); appSettingsOpen.value = true; hostSettingsOpen.value = false
     directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
   }
-  /** Opens Host 设置, preselecting a machine (for example the current Work's) and a section. */
-  function openMachineSettings(hostId?: string, section: MachineSettingsSection = 'hidden') {
+  /** Opens Host 设置 on one of its sections. */
+  function openMachineSettings(section: MachineSettingsSection = 'hidden') {
     const handoff = modalOpen.value
-    rememberModalTrigger(); machineSettingsHostId.value = hostId; machineSettingsSection.value = section; machineSettingsDirty.value = false; machineSettingsOpen.value = true
+    rememberModalTrigger(); machineSettingsSection.value = section; machineSettingsDirty.value = false; machineSettingsOpen.value = true
     appSettingsOpen.value = false; hostSettingsOpen.value = false; directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
     // From another dialog (the model picker) a modal stays open throughout, so the
     // open-watch never moves focus; without this the keyboard stays on the page behind.
@@ -445,5 +444,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsSection, machineSettingsDirty, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

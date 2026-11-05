@@ -1061,7 +1061,7 @@ try {
       { provider: 'openai', id: 'three', name: 'Model Three' },
     ]
     let hidden = [{ provider: 'retired', id: 'old' }]
-    modelVisibilityNative = async args => ({ models, total: 3, truncated: false, hidden: args.targetHostId === 'laptop' ? hidden : [] })
+    modelVisibilityNative = async () => ({ models, total: 3, truncated: false, hidden })
     const dialog = () => find(container, item => item.props['aria-labelledby'] === 'machine-settings-title')
     const results = () => find(container, item => item.props['aria-label'] === 'Host 设置保存结果')
     const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || item.props.title === label || text(item).includes(label)))
@@ -1075,12 +1075,13 @@ try {
       for (const handler of windowEvents.get('keydown') ?? []) handler({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} })
       await settle()
     }
-    const chooseMachine = async label => { await click(dialog(), '选择机器'); await click(dialog(), label) }
     const rowCount = label => all(find(dialog(), item => item.props['aria-label'] === label), item => item.type === 'button' && String(item.props.class).includes('model-row')).length
     // Opening through the real model selector also transfers keyboard focus.
     find(container, item => String(item.props.class ?? '').includes('alu-nav-selector-model')).props.onClick(); await settle()
     await click(container, '管理隐藏的模型')
-    assert.equal(calls.filter(call => call.command === 'model_visibility').at(-1).args.targetHostId, 'laptop')
+    // Card #660: Main keeps the only hidden list, so even a SubHost Work's settings choose no machine.
+    assert.equal(calls.filter(call => call.command === 'model_visibility').at(-1).args.targetHostId, null)
+    assertSameReference(button(dialog(), '选择机器'), undefined)
     assertSameReference(document.activeElement, button(dialog(), '关闭'))
     assert.ok(text(dialog()).includes('当前不可用'))
     const filter = find(dialog(), item => item.props['aria-label'] === '过滤显示中的模型')
@@ -1089,9 +1090,6 @@ try {
     assert.ok(text(dialog()).includes('已改动 2 项'))
     await escapeSettings()
     assert.ok(text(container).includes('放弃未保存的修改？'), 'real PageDialogs forwards dirty state')
-    await click(container, '取消')
-    await chooseMachine('工作站 · Main')
-    assert.ok(text(container).includes('切换机器？'))
     await click(container, '取消')
     let finishSave, rejectSave
     saveModelVisibilityNative = args => new Promise((resolve, reject) => {
@@ -1102,16 +1100,14 @@ try {
     assert.ok(text(dialog()).includes('关闭设置不会取消保存'))
     await click(dialog(), '关闭')
     assertSameReference(dialog(), undefined, 'closing unmounts the real editor during a save')
-    assert.ok(text(results()).includes('笔记本') && text(results()).includes('正在保存'))
+    assert.ok(text(results()).includes('隐藏模型') && text(results()).includes('正在保存'))
     await openSettings()
     assert.equal(button(dialog(), '正在保存…').props.disabled, true, 'reopening cannot submit the same pending save twice')
-    await chooseMachine('工作站 · Main')
-    assert.equal(rowCount('已隐藏的模型'), 0)
-    finishSave(); await settle()
-    assert.equal(rowCount('已隐藏的模型'), 0, 'the laptop response does not overwrite Main')
-    assert.ok(text(results()).includes('笔记本') && text(results()).includes('已保存'), 'other machine results remain visible inside the open editor')
+    assert.equal(rowCount('已隐藏的模型'), 3, 'reopening shows the list being saved')
     await escapeSettings()
-    assert.ok(text(results()).includes('已保存'), 'the original machine reports success after leaving')
+    assertSameReference(dialog(), undefined, 'a pending save is not an unsaved edit')
+    finishSave(); await settle()
+    assert.ok(text(results()).includes('已保存'), 'the save reports success after leaving')
     await click(results(), '知道了')
 
     // Back closes pending saves too. Failed and unknown submissions keep their draft across reopening.
@@ -1188,7 +1184,7 @@ try {
     await openSettings(); await click(dialog(), '隐藏 openai/three'); await click(dialog(), '保存'); await click(dialog(), '关闭')
     await app.switchHost('spare'); await settle()
     finishSave(); await settle()
-    assert.ok(text(results()).includes('Host · 笔记本') && text(results()).includes('已保存'))
+    assert.ok(text(results()).includes('Host · 隐藏模型') && text(results()).includes('已保存'))
     assert.equal(text(results()).includes('没有保存成功'), false)
     await click(results(), '知道了')
     await app.switchHost('host'); await settle(); app.selectWork('work'); app.applyWorkSnapshot({ ...app.selectedWork, hostId: 'laptop' }); await settle()

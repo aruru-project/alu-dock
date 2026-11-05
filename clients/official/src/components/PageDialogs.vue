@@ -17,12 +17,12 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const surfaces = useSurfacesStore()
-const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsHostId, machineSettingsDirty, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
+const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsDirty, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
 const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const { refreshCurrent } = useObservationStore()
 const workActions = useWorkActionsStore()
-const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, machineSettingsLoading, newWorkCompact } = storeToRefs(workActions)
+const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
 const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
@@ -80,10 +80,6 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
     <div v-if="machineSettingsOpen" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
       <section :ref="element => bindSurface('machine-settings', element)" class="machine-settings-surface" role="dialog" aria-modal="true" aria-labelledby="machine-settings-title" tabindex="-1" @wheel="handleModalWheel">
         <MachineSettings
-          :machines="hostMachines"
-          :machines-loading="machineSettingsLoading"
-          :machine-error="machineListError"
-          :initial-host-id="machineSettingsHostId"
           @close="closeModal"
           @dirty="machineSettingsDirty = $event"
         />

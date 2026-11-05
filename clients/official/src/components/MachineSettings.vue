@@ -3,24 +3,15 @@ import { computed, reactive, ref, watch } from 'vue'
 import { Eye, EyeOff, ListChecks, Plus, Server, X } from '@lucide/vue'
 import { getChildModels } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
-import { defaultMachineHostId, machineDisplayLabel, machineRequestTarget, machineSelectorVisible } from '../lib/machines'
 import { useModelListEditor } from '../lib/modelListEditor'
 import { addModels, childModelColumns, modelRowMatches, modelVisibilityColumns, orderedListChanges, removeModels, type ModelListRow } from '../lib/modelLists'
-import type { MachineDto } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useSurfacesStore, type MachineSettingsSection } from '../stores/surfaces'
 import { useModelCatalogStore } from '../stores/model-catalog'
 import { useModelListsStore } from '../stores/model-lists'
-import AluSelect from './AluSelect.vue'
 import MachineSettingsResults from './MachineSettingsResults.vue'
 
-const props = defineProps<{
-  machines: readonly MachineDto[]
-  machinesLoading: boolean
-  machineError?: string
-  /** Opened from a Work: start on that Work's machine. */
-  initialHostId?: string
-}>()
+// Both lists exist only on Main (card #303); every machine shares them, so no machine is chosen.
 const emit = defineEmits<{ close: []; dirty: [dirty: boolean] }>()
 const app = useAppStore()
 const surfaces = useSurfacesStore()
@@ -28,28 +19,21 @@ const submissions = useModelListsStore()
 const catalog = useModelCatalogStore()
 
 const section = ref<MachineSettingsSection>(surfaces.machineSettingsSection)
-/** Empty when the Dock has no machine list: the connected Host itself. */
-const hostId = ref('')
-const machine = computed(() => props.machines.find((candidate) => candidate.hostId === hostId.value))
-const targetHostId = computed(() => machine.value ? machineRequestTarget(machine.value) : hostId.value || undefined)
 const shownQuery = ref('')
 const hiddenQuery = ref('')
 const availableQuery = ref('')
 const listedQuery = ref('')
 
 const hidden = reactive(useModelListEditor({
-  submission: () => submissions.forTarget(app.activeConnectionId ?? '', targetHostId.value),
-  read: () => {
-    // This page always reads the Machine's current settings; the shared catalog follows that read.
-    const target = targetHostId.value
-    return currentConnectionCall(app, (context) => catalog.read(context, target, true))
-  },
+  submission: () => submissions.forHidden(app.activeConnectionId ?? ''),
+  // This page always reads the current settings; the shared catalog follows that read.
+  read: () => currentConnectionCall(app, (context) => catalog.read(context, undefined, true)),
   listOf: (result) => result.hidden,
   confirmed: (result, list) => ({ ...result, hidden: list, fileProblem: undefined }),
   shown: () => surfaces.machineSettingsOpen && section.value === 'hidden',
   markSuccessSeen: submissions.markSuccessSeen,
   discardSubmission: submissions.discard,
-  loadFailure: '暂时读不到这台机器上的模型。请稍后重试。',
+  loadFailure: '暂时读不到 Main 上的模型。请稍后重试。',
 }))
 const children = reactive(useModelListEditor({
   submission: () => submissions.forChildren(app.activeConnectionId ?? ''),
@@ -65,13 +49,6 @@ const children = reactive(useModelListEditor({
 }))
 const active = computed(() => section.value === 'hidden' ? hidden : children)
 
-const showMachineSelector = computed(() => machineSelectorVisible(props.machines))
-const machineOptions = computed(() => props.machines.map((candidate) => ({
-  value: candidate.hostId,
-  label: machineDisplayLabel(candidate),
-  description: candidate.available ? undefined : '暂时连不上',
-  disabled: !candidate.available,
-})))
 const columns = computed(() => modelVisibilityColumns(hidden.result?.models ?? [], hidden.draft))
 const shownRows = computed(() => columns.value.shown.filter((row) => modelRowMatches(row, shownQuery.value)))
 const hiddenRows = computed(() => columns.value.hidden.filter((row) => modelRowMatches(row, hiddenQuery.value)))
@@ -83,19 +60,10 @@ const childListFull = computed(() => !!children.result && children.draft.length 
 
 watch(() => hidden.dirty || children.dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
 
-watch(() => props.machines, (machines) => {
-  // Without a machine list, stay on the machine the page was opened for rather than
-  // quietly editing the connected Host instead.
-  if (hostId.value) return // A disconnected machine must not silently switch the editor to another machine.
-  hostId.value = props.initialHostId ?? defaultMachineHostId(machines) ?? ''
-}, { immediate: true })
-
 watch([
   () => app.connectionContext?.connectionId,
   () => app.connectionContext?.selectionGeneration,
-  hostId,
-  () => props.machinesLoading,
-], () => { if (!props.machinesLoading) void hidden.load() }, { immediate: true })
+], () => { void hidden.load() }, { immediate: true })
 
 // Main's child Work list is read the first time its section opens, and again after the connection changes.
 let childrenReadFor = ''
@@ -113,23 +81,12 @@ watch([
 // A hidden model leaves the child Work choices too; the draft and its section stay as they are.
 watch(() => submissions.hiddenSaved.get(app.activeConnectionId ?? ''), () => { void children.refreshChoices() })
 
-async function chooseMachine(value: string) {
-  if (value === hostId.value) return
-  if (hidden.dirty && !await surfaces.askConfirm('切换机器？', '这台机器的改动还没有保存，切换后会丢失。')) return
-  hostId.value = value
-}
-
 function save() {
   if (!active.value.canSave) return
   const connection = requireConnectionContext(app)
   const hostName = app.activeHost?.displayName ?? '本机'
-  if (section.value === 'children') {
-    void submissions.saveChildren(connection, `${hostName} · 子 Work 模型名单`, children.draft)
-    return
-  }
-  const machineName = machine.value?.name ?? 'Host'
-  const label = machineName === hostName ? hostName : `${hostName} · ${machineName}`
-  void submissions.save(connection, targetHostId.value, label, hidden.draft)
+  if (section.value === 'children') void submissions.saveChildren(connection, `${hostName} · 子 Work 模型名单`, children.draft)
+  else void submissions.saveHidden(connection, `${hostName} · 隐藏模型`, hidden.draft)
 }
 
 function hide(rows: readonly ModelListRow[]) { hidden.edit(addModels(hidden.draft, rows)) }
@@ -144,8 +101,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
       <span class="machine-settings-mark"><Server :size="20" /></span>
       <div>
         <h2 id="machine-settings-title">Host 设置</h2>
-        <p v-if="section === 'children'">所有机器共用 Main 上这一份</p>
-        <p v-else>{{ machine ? machineDisplayLabel(machine) : hostId ? '当前 Work 所在的机器' : '当前连接的 AluDock' }}</p>
+        <p>所有机器共用 Main 上的设置</p>
       </div>
     </div>
     <button class="machine-settings-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
@@ -163,19 +119,13 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
         <h3>模型显示</h3>
         <p>移到右边的模型不会出现在任何机器上任何 Work 的模型选择和搜索里，模型本身照常可用。所有机器共用 Main 上这一份。</p>
       </div>
-
-      <label v-if="showMachineSelector" class="machine-settings-machine">
-        <span>机器</span>
-        <AluSelect :value="hostId" :options="machineOptions" label="选择机器" :disabled="hidden.loading || machinesLoading" @select="chooseMachine" />
-      </label>
-      <p v-if="machineError" class="machine-settings-note is-warning" role="status">{{ machineError }}</p>
       <MachineSettingsResults embedded :exclude-key="hidden.submission?.key" />
 
-      <div v-if="machinesLoading || hidden.loading" class="machine-settings-status" role="status">正在读取这台机器上的模型…</div>
+      <div v-if="hidden.loading" class="machine-settings-status" role="status">正在读取 Main 上的模型…</div>
       <div v-else-if="hidden.loadError" class="machine-settings-error" role="alert"><span>{{ hidden.loadError }}</span><button type="button" class="button secondary" @click="hidden.load">重试</button></div>
       <template v-else-if="hidden.result">
         <p v-if="hidden.result.fileProblem" class="machine-settings-note is-warning" role="status">隐藏列表文件有问题：{{ hidden.result.fileProblem }}。现在没有隐藏任何模型。点保存会用这里的列表覆盖那个文件，文件里原来的内容不会保留。</p>
-        <p v-if="hidden.result.truncated" class="machine-settings-note">这台机器的模型太多，这里只列出了 {{ hidden.result.models.length }}/{{ hidden.result.total }} 个。</p>
+        <p v-if="hidden.result.truncated" class="machine-settings-note">Main 的模型太多，这里只列出了 {{ hidden.result.models.length }}/{{ hidden.result.total }} 个。</p>
         <div class="model-columns">
           <section class="model-column" aria-label="显示中的模型">
             <header><strong>显示中</strong><span>{{ columns.shown.length }}</span></header>
@@ -272,7 +222,6 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
 .machine-settings-content { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 14px; padding: 22px 24px; overflow: hidden; }
 .machine-settings-intro h3 { margin: 0 0 6px; color: var(--alu-text); font-size: 18px; font-weight: 650; }
 .machine-settings-intro p { max-width: 620px; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
-.machine-settings-machine { display: grid; max-width: 360px; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .machine-settings-status { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .machine-settings-note { margin: 0; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); line-height: 1.6; }
 .machine-settings-note.is-warning { border-color: rgb(251 191 36 / .35); color: var(--alu-amber); }

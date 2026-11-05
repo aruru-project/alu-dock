@@ -77,7 +77,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <span><strong>App 设置</strong><small>{{ windowsAwayLabel }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
-    <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings(selected?.hostId)">
+    <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings()">
       <span class="alu-sidebar-settings-icon"><Server :size="17" /></span>
       <span><strong>Host 设置</strong><small>模型显示和子 Work 模型</small></span>
       <span aria-hidden="true">›</span>

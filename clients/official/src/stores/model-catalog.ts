@@ -17,9 +17,9 @@ interface Flight {
 }
 
 /**
- * The models each Machine offers for a new Work, with that Machine's hidden list. Reading
- * them starts a Pi on the Machine, so the answer is kept for the app's lifetime and has no
- * expiry: the user refreshes after changing models or sign-ins there. The new-Work model
+ * The models each Machine offers for a new Work, with Main's hidden list, which every Machine
+ * shares (card #303). Reading them starts a Pi, so the answer is kept for the app's lifetime
+ * and has no expiry: the user refreshes after changing models or sign-ins. The new-Work model
  * choice reads the cache; the hidden-model settings page always reads fresh and updates it.
  */
 export const useModelCatalogStore = defineStore('model-catalog', () => {
@@ -55,13 +55,16 @@ export const useModelCatalogStore = defineStore('model-catalog', () => {
     return flight.request
   }
 
-  /** A confirmed hidden-list save is the Machine's current setting; the cached list follows it, and so does a read still in flight. */
-  function applyHidden(connectionId: string, targetHostId: string | undefined, hidden: ModelRef[]) {
-    const key = keyFor(connectionId, targetHostId)
-    const flight = flights.get(key)
-    if (flight) flight.savedHidden = hidden
-    const entry = catalogs.value.get(key)
-    if (entry?.result) catalogs.value.set(key, { ...entry, result: { ...entry.result, hidden, fileProblem: undefined } })
+  /**
+   * A confirmed hidden-list save is the current setting for every Machine of that connection:
+   * each cached list follows it, and so does each read still in flight.
+   */
+  function applyHidden(connectionId: string, hidden: ModelRef[]) {
+    const ofConnection = (key: string) => (JSON.parse(key) as [string, string | null])[0] === connectionId
+    for (const [key, flight] of flights) if (ofConnection(key)) flight.savedHidden = hidden
+    for (const [key, entry] of catalogs.value) {
+      if (ofConnection(key) && entry.result) catalogs.value.set(key, { ...entry, result: { ...entry.result, hidden, fileProblem: undefined } })
+    }
   }
 
   return { catalogs, forTarget, read, applyHidden }
