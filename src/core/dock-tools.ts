@@ -1,4 +1,4 @@
-import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef, type SystemCatalogResult, type SystemCatalogCursor, type ResourceContentResult } from "../control/protocol.js";
+import { MAX_CHILD_MODELS, MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef, type SystemCatalogResult, type SystemCatalogCursor, type ResourceContentResult } from "../control/protocol.js";
 import type { ThinkingLevel } from "./agent-worker.js";
 import type { CommandReceipt } from "./instance-dto.js";
 import type { DeliverableDto } from "./instance-deliverables.js";
@@ -18,7 +18,6 @@ export const MAX_DOCK_TOOL_MESSAGE_CHARS = 254_000;
  * The user's list of models shown to Agents for child Works: a short hand-picked list, not a catalog.
  * It only names models; a note on when to use one would be followed as a rule (user decision 2026-11-04).
  */
-export const MAX_CHILD_MODELS = 50;
 export const MAX_CHILD_MODEL_PROBLEM_CHARS = 1_024;
 
 /** The user's list as this machine's Host read it; `problem` explains a file it could not use. */

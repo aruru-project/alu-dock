@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, rename } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -29,6 +31,31 @@ export async function replaceStateFile(temporary: string, path: string, beforeAt
       await new Promise((resolveDelay) => setTimeout(resolveDelay, WINDOWS_REPLACE_RETRY_DELAYS_MS[attempt]));
     }
   }
+}
+
+/**
+ * Write a small hand-editable settings file in a private state directory: the old file stays
+ * whole until the new one replaces it. Throws when the new content is not in effect.
+ */
+export async function writePrivateStateFile(stateRoot: string, fileName: string, content: string): Promise<void> {
+  const root = resolve(stateRoot);
+  const temporary = join(root, `.${fileName}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await hardenWindowsPrivatePath(temporary, false);
+    await replaceStateFile(temporary, join(root, fileName));
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
+  // The new content is already in effect; flushing the directory entry only adds crash durability.
+  await syncPrivateDirectory(root).catch(() => {});
 }
 
 export async function syncPrivateDirectory(path: string, beforeSync?: () => void | Promise<void>): Promise<void> {

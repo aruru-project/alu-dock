@@ -213,6 +213,10 @@ export const MULTIPLEX_CAPABILITY = "transport.multiplex.v1" as const;
 export const MODEL_VISIBILITY_CAPABILITY = "model.visibility.v1" as const;
 /** Serialized hidden-list bound: the room a full model list leaves in one visibility response line, less envelope headroom. */
 export const MAX_HIDDEN_MODELS_BYTES = MAX_CONTROL_LINE_BYTES - MAX_MODEL_LIST_BYTES - 64 * 1024;
+/** Read and replace Main's list of models the user shows Agents for child Works (`dock_models`). */
+export const CHILD_MODELS_CAPABILITY = "model.children.v1" as const;
+/** The user's child Work model list; `dock_models` describes each entry, so it stays short. */
+export const MAX_CHILD_MODELS = 50;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -274,6 +278,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   WORKSPACE_FILES_CAPABILITY,
   MULTIPLEX_CAPABILITY,
   MODEL_VISIBILITY_CAPABILITY,
+  CHILD_MODELS_CAPABILITY,
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -350,6 +355,8 @@ export type ControlRequest =
   | Request<"thinking.set", { operationId: string; instanceId: string; level: ThinkingLevel }>
   | Request<"model.visibility.get", { hostId?: string }>
   | Request<"model.visibility.set", { operationId: string; hostId?: string; hidden: ModelRef[] }>
+  | Request<"model.children.get", Record<string, never>>
+  | Request<"model.children.set", { operationId: string; models: ModelRef[] }>
   | Request<"tool.list", { instanceId: string }>
   | Request<"tool.set_active", { operationId: string; instanceId: string; names: string[] }>
   | Request<"settings.get", { instanceId: string }>
@@ -433,6 +440,9 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "thinking.set": { target: "instance", effect: "command", transport: "unary" },
   "model.visibility.get": { target: "directory", effect: "query", transport: "unary" },
   "model.visibility.set": { target: "directory", effect: "command", transport: "unary" },
+  // No hostId: the list exists only on Main, so the connected Host answers.
+  "model.children.get": { target: "directory", effect: "query", transport: "unary" },
+  "model.children.set": { target: "directory", effect: "command", transport: "unary" },
   "tool.list": { target: "instance", effect: "query", transport: "unary" },
   "tool.set_active": { target: "instance", effect: "command", transport: "unary" },
   "settings.get": { target: "instance", effect: "query", transport: "unary" },
@@ -726,6 +736,12 @@ export interface ModelRef { provider: string; id: string }
  */
 export interface ModelVisibilityResult { models: AgentModelInfo[]; total: number; truncated: boolean; hidden: ModelRef[]; fileProblem?: string }
 export interface ModelVisibilitySetResult { hidden: ModelRef[] }
+/**
+ * Main's selectable models, without hidden ones, plus the child Work list in its saved order.
+ * `fileProblem` explains a hand-edited list that could not be read; Agents see no list until it is saved again.
+ */
+export interface ChildModelsResult { models: AgentModelInfo[]; total: number; truncated: boolean; listed: ModelRef[]; fileProblem?: string }
+export interface ChildModelsSetResult { listed: ModelRef[] }
 export interface ThinkingConfigurationResult { actualLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[]; total: number; truncated: boolean }
 export interface SessionInventoryResult {
@@ -856,6 +872,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "resource.content") return RESOURCE_CONTENT_CAPABILITY;
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
   if (type === "model.visibility.get" || type === "model.visibility.set") return MODEL_VISIBILITY_CAPABILITY;
+  if (type === "model.children.get" || type === "model.children.set") return CHILD_MODELS_CAPABILITY;
   return "models.v1";
 }
 export function requiredCapabilities(capability: Capability): string[] {
@@ -1186,6 +1203,8 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
     case "model.visibility.get": exact(params, ["hostId"], "invalid_request"); return { ...base, type, params: { hostId: hostId() } };
+    case "model.children.get": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
+    case "model.children.set": exact(params, ["operationId", "models"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), models: parseChildModelRefs(params.models, "params.models", "invalid_request") } };
     case "model.visibility.set": exact(params, ["operationId", "hostId", "hidden"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), hostId: hostId(), hidden: parseModelRefs(params.hidden, "params.hidden", "invalid_request") } };
     case "tool.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "tool.set_active": { exact(params, ["operationId", "instanceId", "names"], "invalid_request"); const names = strings(params.names, "params.names", MAX_COLLECTION, 256, "invalid_request"); if (new Set(names).size !== names.length) throw validation("invalid_request", "params.names must be unique"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), names } }; }
@@ -1921,6 +1940,18 @@ export function parseModelVisibilityResult(input: unknown): ModelVisibilityResul
 export function parseModelVisibilitySetResult(input: unknown): ModelVisibilitySetResult {
   const value = object(input, "model visibility set result"); exact(value, ["hidden"]);
   return { hidden: parseModelRefs(value.hidden, "hidden") };
+}
+/** The child Work list in a request or a Host response. */
+export function parseChildModelRefs(input: unknown, field: string, code = "invalid_response"): ModelRef[] {
+  return array(input, field, MAX_CHILD_MODELS, code).map((item, index) => parseModelRef(item, `${field}[${index}]`, code));
+}
+export function parseChildModelsResult(input: unknown): ChildModelsResult {
+  const value = object(input, "child models result"); exact(value, ["models", "total", "truncated", "listed", "fileProblem"]);
+  return { ...modelInfoList(value), listed: parseChildModelRefs(value.listed, "listed"), ...(value.fileProblem === undefined ? {} : { fileProblem: string(value.fileProblem, "fileProblem", MAX_MESSAGE) }) };
+}
+export function parseChildModelsSetResult(input: unknown): ChildModelsSetResult {
+  const value = object(input, "child models set result"); exact(value, ["listed"]);
+  return { listed: parseChildModelRefs(value.listed, "listed") };
 }
 /** Worker-produced model.list body; the Host adds only its own instance snapshot. */
 export function parseModelListBody(input: unknown): Omit<ModelsResult, "instance"> {

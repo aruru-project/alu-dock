@@ -538,6 +538,17 @@ export interface ModelVisibilityResult {
   fileProblem?: string
 }
 export interface ModelVisibilitySetResult { hidden: ModelRef[] }
+/** Main's models to choose from, less hidden ones, and the list Agents read for child Works. */
+export interface ChildModelsResult {
+  models: ModelInfo[]
+  total: number
+  truncated: boolean
+  /** In its saved order. */
+  listed: ModelRef[]
+  /** A hand-edited list could not be used; Agents see no list until it is saved. */
+  fileProblem?: string
+}
+export interface ChildModelsSetResult { listed: ModelRef[] }
 
 export type SourceKind = 'built-in' | 'extension' | 'skill' | 'prompt'
 export interface SafeSource { kind: SourceKind; package?: string }

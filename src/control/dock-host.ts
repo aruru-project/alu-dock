@@ -12,9 +12,9 @@ import { ClientLink, MAX_LINK_LINE_BYTES, VirtualProtocolSocket } from "./stream
 import { createDockSystem, readDockSystem, systemToolOperation } from "./system-tools.js";
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
-import { MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
+import { CHILD_MODELS_CAPABILITY, MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
 import { ModelVisibilityError, type ModelVisibilityPort } from "./model-visibility.js";
-import type { ChildModelsSource } from "./child-models.js";
+import type { ChildModelsEditor, ChildModelsSource } from "./child-models.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -164,6 +164,8 @@ export interface DockHostOptions {
   modelVisibility?: ModelVisibilityPort;
   /** The models the user shows Agents for child Works; without it the list is empty. */
   childModels?: ChildModelsSource;
+  /** Main edits that list for every machine; a SubHost leaves it out. */
+  childModelsEditor?: ChildModelsEditor;
   listen?: boolean;
 }
 
@@ -196,6 +198,7 @@ export class DockHost {
   private readonly attachmentService: AttachmentService | undefined;
   private readonly modelVisibility: ModelVisibilityPort | undefined;
   private readonly childModels: ChildModelsSource | undefined;
+  private readonly childModelsEditor: ChildModelsEditor | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -258,12 +261,14 @@ export class DockHost {
     this.attachmentService = options.attachmentService;
     this.modelVisibility = options.modelVisibility;
     this.childModels = options.childModels;
+    this.childModelsEditor = options.childModelsEditor;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
     // A Main that routes to SubHosts keeps its own list too (the CLI always gives it a state directory).
     if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
+    if (!this.childModelsEditor) capabilities.delete(CHILD_MODELS_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
@@ -974,6 +979,16 @@ export class DockHost {
         const result = request.type === "model.visibility.get"
           ? await visibility.get()
           : await this.operationLedger.run(request.params.operationId, request.type, request.params, () => visibility.set(request.params.hidden));
+        this.sendSuccessAndEnd(socket, request.requestId, result);
+        return;
+      }
+      case "model.children.get":
+      case "model.children.set": {
+        if (!this.childModelsEditor) throw new ProtocolValidationError("capability_missing", "子 Work 模型名单只能在 Main 上管理。");
+        const editor = this.childModelsEditor;
+        const result = request.type === "model.children.get"
+          ? await editor.get()
+          : await this.operationLedger.run(request.params.operationId, request.type, request.params, () => editor.set(request.params.models));
         this.sendSuccessAndEnd(socket, request.requestId, result);
         return;
       }

@@ -202,3 +202,4 @@ mod tests {
 
 pub(crate) const SYSTEM_TEMPLATES: &[&str] = &[CORE_V2, "system.templates.v1"];
 pub(crate) const MODEL_VISIBILITY: &[&str] = &[CORE_V2, "model.visibility.v1"];
+pub(crate) const CHILD_MODELS: &[&str] = &[CORE_V2, "model.children.v1"];

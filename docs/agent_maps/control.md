@@ -98,7 +98,7 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 Host 设置按一条分界线开放：决定“谁能连进来、从哪连进来”的设置只在本机改，其余 Agent 工作相关的设置配对过的设备也能改。这是防君子不防小人：配对过的设备本就能通过 Worker 做任何事，这里只保证设置页上不能随手改掉信任关系。
 
 - 只在本机：Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，SubHost 加入 Main 的信任，以及本机 Dock 角色和 Main 地址。它们是本机 `aludock` Hub 的 service-management surface，不属于 Protocol V2，不通过本地 IPC 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin endpoint 中提供；远程客户端不能开启或延长连接窗口。既有的 `machine.remove` 仍对所有连接开放，收紧待单独处理。
-- 配对过的设备也能改：逐项以 Protocol V2 能力开放，当前是模型隐藏列表（`model.visibility.v1`，见下文）。attachment storage directory 仍只在 Hub Settings 中提供。
+- 配对过的设备也能改：逐项以 Protocol V2 能力开放，当前是模型隐藏列表（`model.visibility.v1`）和子 Work 模型名单（`model.children.v1`），见下文。attachment storage directory 仍只在 Hub Settings 中提供。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。持久 record 的 `contentRef` 由 Agent 原生 session 与 entry identity 决定，append、refresh 和 Worker restart 不改变它；revision 与 cursor 只隔离一次分页 scan。
 
@@ -292,6 +292,15 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 列表存为 Main 的 Host 私有状态目录下的普通 JSON `model-visibility.json`（位置与格式见 [local-install](../local-install.md#隐藏的模型)）。Host 每次返回模型列表时现读，人或 Agent 直接改文件无需重启。没有持久状态目录的 Host 不提供这项能力，模型列表原样返回。
 
+## 子 Work 模型名单（`model.children.v1`）
+
+给 Agent 看的子 Work 模型名单（`dock_models` 读它，见 [runtime](runtime.md)）只有 Main 一份，存为 Main 的 Host 私有状态目录下的 `child-models.json`（格式见 [local-install](../local-install.md#给-agent-看的模型)）。
+
+- `model.children.get {}` → `{models,total,truncated,listed,fileProblem?}`：`models` 是 Main 上新建 Work 时可选的模型、去掉隐藏列表里的，和 `model.visibility.get` 用同一个短命 Pi 进程读取；`listed` 按保存顺序。`fileProblem` 说明手工编辑的文件为何不可用，此时 `listed` 为空，Agent 也看不到名单。
+- `model.children.set {operationId,models}` → `{listed}`：整份替换，保留顺序、去掉重复后原子写入，最后一次保存为准；沿用 operation ledger。写入失败返回 `child_models_write_failed`，原名单不变。
+- 请求不带 `hostId`：客户端和 Hub 都连着 Main，directory 请求没有 `hostId` 就由所连的 Host 处理，所以从哪台机器的设置页改都是同一份。只有 Main 广告这项能力，SubHost 不提供；SubHost 上的 Work 仍经 `SubHostModelLists` 只读 Main 的名单。
+- 名单上限 `MAX_CHILD_MODELS`（50）定义在 `protocol.ts`，请求、响应和 Worker 边界共用；不写用途说明（用户决定：写了 Agent 会当成规则）。
+
 ## 创建前 system 选择
 
 `system.templates.v1` 提供 directory-scoped 能力，三条请求都接受绝对 `cwd` 和可选 `hostId`；Main/SubHost 复用 InstanceManager 的 directory routing，不创建临时 Work、不触发 trust 或加载 extensions。
@@ -334,7 +343,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/instance-manager.ts`：唯一 instance identity/location 应用入口与 local/global profile。
 - `src/control/dock-registry.ts`：本机原生 instance 与 catalog lifecycle。
 - `src/control/native-collaboration.ts`：本机 Host 与 Main 共用的子 Work 规则：只能给父 Work 发消息、开子 Work、发消息并登记回复。
-- `src/control/child-models.ts`：Main 的 `child-models.json`，给 Agent 看的子 Work 模型名单；SubHost 经 `SubHostModelLists` 读 Main 的。
+- `src/control/child-models.ts`：Main 的 `child-models.json`，给 Agent 看的子 Work 模型名单，以及设置页读写它的 `ChildModelsService`（`model.children.v1`）；SubHost 经 `SubHostModelLists` 读 Main 的。
 - `src/control/stream-link.ts`：一条连接上多条 Protocol V2 流的框架——虚拟 socket、流表与输入上限、分道输出写入器、客户端链路（`transport.multiplex.v1`）的 ping/pong 与空闲关闭；机器链路复用同一套。
 - `src/control/machine-transport.ts`：InstanceManager 的 persistent remote-directory/transport backend 与 multiplexed Machine connection；不承担第二套客户端请求分类。
 - `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。

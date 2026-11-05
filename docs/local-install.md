@@ -76,7 +76,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 子 Work 默认和父 Work 用同一个模型、同一档 thinking。只有你在对话里点名，或者项目文件（如 `AGENTS.md`）里写明时，Agent 才给子 Work 换模型或 thinking；换了的模型没有这一档时，用它最接近的一档，开子 Work 的结果里会写明。
 
-你说"这次用 deepseek 审查"时，Agent 用 `dock_models` 在一份名单里找到准确的那个模型，而不是在全部模型里猜。名单只有 Main 上一份，SubHost 上的 Work 也读它，放在 Main 的 Host 私有状态目录中的 `child-models.json`，和 `model-visibility.json` 在同一个目录：
+你说"这次用 deepseek 审查"时，Agent 用 `dock_models` 在一份名单里找到准确的那个模型，而不是在全部模型里猜。名单只有 Main 上一份，SubHost 上的 Work 也读它。通常在官方客户端的 **Host 设置 → 子 Work 模型** 里管理，或者在 Main 上运行 `aludock`，进 **Settings → Pi → Models for child Works**；也可以直接编辑 Main 的 Host 私有状态目录中的 `child-models.json`，和 `model-visibility.json` 在同一个目录：
 
 ```json
 {
@@ -89,7 +89,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 `provider` 与 `id` 的写法和隐藏列表一样，名单最多 50 个模型，只写模型，不写用途：写给 Agent 的"什么时候用"会被它当成规则，固定的分工请写进项目文件。父 Work 自己的模型总排在第一位；名单里的每个模型会自动附上它支持的 thinking level、上下文长度和能不能看图，这台机器当前用不了的会单独列出。
 
-名单不限制子 Work 能用哪个模型：你点名要的其他模型照样可以用。文件不存在时，父 Work 只会看到它自己的模型。Host 每次被问到时现读这个文件，改完不用重启；格式写错时，Agent 会看到错误原因并可以转告你。
+名单不限制子 Work 能用哪个模型：你点名要的其他模型照样可以用。文件不存在时，父 Work 只会看到它自己的模型。Host 每次被问到时现读这个文件，改完不用重启；格式写错时，Agent 会看到错误原因并可以转告你，设置页也会指出问题，在页面上保存一次会写回正确的内容。
 
 ## Service 命令
 

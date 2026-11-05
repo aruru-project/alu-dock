@@ -1,9 +1,8 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import type { AgentModelInfo } from "../core/agent-worker.js";
-import { hardenWindowsPrivatePath, replaceStateFile, syncPrivateDirectory } from "../platform/private-state.js";
+import { writePrivateStateFile } from "../platform/private-state.js";
 import {
   MAX_HIDDEN_MODELS_BYTES,
   parseModelRefs,
@@ -47,8 +46,9 @@ export function modelVisibilityStateRoot(catalogPath: string): string {
   return dirname(resolve(catalogPath));
 }
 
+/** A model list setting on Main could not be read or saved: the hidden list or the child Work list. */
 export class ModelVisibilityError extends Error {
-  constructor(readonly code: "model_catalog_unavailable" | "model_visibility_write_failed", message: string, readonly retryable: boolean, options?: ErrorOptions) {
+  constructor(readonly code: "model_catalog_unavailable" | "model_visibility_write_failed" | "child_models_write_failed", message: string, readonly retryable: boolean, options?: ErrorOptions) {
     super(message, options);
     this.name = "ModelVisibilityError";
   }
@@ -103,26 +103,11 @@ export class ModelVisibilityStore {
   }
 
   private async replaceFile(hidden: readonly ModelRef[]): Promise<void> {
-    const root = resolve(this.stateRoot);
-    const temporary = join(root, `.${MODEL_VISIBILITY_FILE}.${process.pid}.${randomUUID()}.tmp`);
     try {
-      await mkdir(root, { recursive: true, mode: 0o700 });
-      const handle = await open(temporary, "wx", 0o600);
-      try {
-        await handle.writeFile(formatHiddenModelsFile(hidden), "utf8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await hardenWindowsPrivatePath(temporary, false);
-      await replaceStateFile(temporary, this.filePath);
+      await writePrivateStateFile(this.stateRoot, MODEL_VISIBILITY_FILE, formatHiddenModelsFile(hidden));
     } catch (error) {
       throw new ModelVisibilityError("model_visibility_write_failed", "隐藏列表没有保存成功，原来的设置不变。请检查这台机器的磁盘空间和 Alu Dock 状态目录的权限，然后再试。", true, { cause: error });
-    } finally {
-      await rm(temporary, { force: true }).catch(() => {});
     }
-    // The new list is already in effect; flushing the directory entry only adds crash durability.
-    await syncPrivateDirectory(root).catch(() => {});
   }
 }
 
@@ -148,12 +133,16 @@ export class ModelVisibilityService implements ModelVisibilityPort {
     return { hidden: await this.store.write(hidden) };
   }
 
-  private async readCatalog(): Promise<ModelList> {
-    try {
-      return await this.catalog.read();
-    } catch (error) {
-      throw new ModelVisibilityError("model_catalog_unavailable", "暂时读不到这台机器上可选的模型。请稍后再试；如果一直这样，请确认这台机器上能正常新建 Work。", true, { cause: error });
-    }
+  private readCatalog(): Promise<ModelList> {
+    return readModelCatalog(this.catalog);
+  }
+}
+
+export async function readModelCatalog(catalog: ModelCatalogReader): Promise<ModelList> {
+  try {
+    return await catalog.read();
+  } catch (error) {
+    throw new ModelVisibilityError("model_catalog_unavailable", "暂时读不到这台机器上可选的模型。请稍后再试；如果一直这样，请确认这台机器上能正常新建 Work。", true, { cause: error });
   }
 }
 
@@ -180,7 +169,7 @@ function formatHiddenModelsFile(hidden: readonly ModelRef[]): string {
   return `{\n  "hiddenModels": [\n${hidden.map((model) => `    ${JSON.stringify({ provider: model.provider, id: model.id })}`).join(",\n")}\n  ]\n}\n`;
 }
 
-function modelKey(model: ModelRef): string {
+export function modelKey(model: ModelRef): string {
   return `${model.provider}\u0000${model.id}`;
 }
 

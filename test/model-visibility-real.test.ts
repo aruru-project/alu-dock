@@ -12,13 +12,14 @@ import { MainMachineState, SubHostMachineState } from "../src/control/machine-st
 import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { MainMachineController, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "../src/control/machine-transport.js";
 import { ModelVisibilityService, ModelVisibilityStore } from "../src/control/model-visibility.js";
+import { ChildModelsService, ChildModelsStore } from "../src/control/child-models.js";
 import { ModelServiceProcess } from "../src/model-service/service-process.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { createPiModelCatalogReader } from "../src/pi/pi-model-catalog.js";
 
-// Card #303, decision 3: the hidden-model list exists only on Main. A SubHost's Works pick from
-// Main's models, and the list is the same whichever machine's settings page shows or edits it.
-test("hiding a model removes it from every machine's model picker without disabling it", { timeout: 90_000 }, async (context) => {
+// Card #303, decision 3: the hidden-model list and the child Work list exist only on Main. A SubHost's
+// Works pick from Main's models, and each list is the same whichever machine's settings page shows or edits it.
+test("Main's model lists: hiding a model leaves every picker, and the child Work list reaches every machine's Agents", { timeout: 90_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-model-visibility-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, "home"), cwd = join(home, "project"), mainAgent = join(home, "main-agent"), subAgent = join(home, "sub-agent");
@@ -41,8 +42,9 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
   const service = new ModelServiceProcess({ agentDir: mainAgent, environment: { ...env, PI_CODING_AGENT_DIR: mainAgent } });
   context.after(() => service.stop());
   await service.start();
-  const visibility = new ModelVisibilityService(new ModelVisibilityStore(mainStateRoot),
-    createPiModelCatalogReader({ agentDir: mainAgent, homeDir: home, environment: async () => ({ ...env, PI_CODING_AGENT_DIR: mainAgent }) }));
+  const catalog = createPiModelCatalogReader({ agentDir: mainAgent, homeDir: home, environment: async () => ({ ...env, PI_CODING_AGENT_DIR: mainAgent }) });
+  const visibility = new ModelVisibilityService(new ModelVisibilityStore(mainStateRoot), catalog);
+  const childModels = new ChildModelsService(new ChildModelsStore(mainStateRoot), catalog, visibility);
   const mainState = new MainMachineState(join(root, "main-machines"), "Main");
   await mainState.initialize();
   const joined = new SubHostMachineState(join(root, "sub-machines"));
@@ -52,8 +54,8 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
   await settings.writeMainConnections({ enabled: true, port });
   const mainRegistry = new DockRegistry((input) => createPiInstance({ ...input, agentDir: mainAgent, sessionDir: join(root, "main-sessions"), workerEnvironment: { ...env, PI_CODING_AGENT_DIR: mainAgent }, modelHostPort: service }));
   const controller = new MainMachineController({ state: mainState, settingsState: settings, bindAddress: "127.0.0.1",
-    mainHostEpoch: mainRegistry.hostEpoch, localSnapshots: () => mainRegistry.list(), models: { service, visibility } });
-  const main = new DockHost({ socketPath: join(root, "main.sock"), registry: mainRegistry, remoteInstances: controller, modelVisibility: visibility });
+    mainHostEpoch: mainRegistry.hostEpoch, localSnapshots: () => mainRegistry.list(), models: { service, visibility, childModels } });
+  const main = new DockHost({ socketPath: join(root, "main.sock"), registry: mainRegistry, remoteInstances: controller, modelVisibility: visibility, childModels, childModelsEditor: childModels });
   // Built as the SubHost Host builds itself in src/cli.ts.
   const subHostEpoch = randomUUID();
   let subRegistry!: DockRegistry;
@@ -111,6 +113,27 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
     // A correct hand edit (for example by an Agent) applies to the next list without a restart.
     await writeFile(join(mainStateRoot, "model-visibility.json"), `${JSON.stringify({ hiddenModels: [hiddenModel] })}\n`);
     assert.equal(await listed(work.id), false);
+
+    // The child Work list is offered from Main's models, less the hidden ones.
+    const children = await client.childModels();
+    assert.deepEqual(children.listed, []);
+    assert.equal(children.models.some((model) => model.provider === hiddenModel.provider && model.id === hiddenModel.id), false);
+    const [first, second] = children.models.map(({ provider, id }) => ({ provider, id }));
+    assert.ok(first && second);
+    // Saved in the order given, once each; a SubHost's Agents read the same list through dock_models.
+    assert.deepEqual((await client.setChildModels([second, first, second])).listed, [second, first]);
+    assert.deepEqual(await lists.read(), { models: [second, first] });
+    assert.deepEqual(JSON.parse(await readFile(join(mainStateRoot, "child-models.json"), "utf8")), { models: [second, first] });
+    // A hand edit with a mistake is reported, and saving from the page writes a correct file again.
+    await writeFile(join(mainStateRoot, "child-models.json"), "{ \"models\": [ { \"provider\": \"openai\" } ] }\n");
+    const brokenList = await client.childModels();
+    assert.ok(brokenList.fileProblem);
+    assert.deepEqual(brokenList.listed, []);
+    await client.setChildModels([first]);
+    const repaired = await client.childModels();
+    assert.deepEqual([repaired.listed, repaired.fileProblem], [[first], undefined]);
+    // The user's limit: at most 50 models.
+    await assert.rejects(client.setChildModels(Array.from({ length: 51 }, (_, index) => ({ provider: "openai", id: `model-${index}` }))), { code: "invalid_request" });
   } finally {
     client.closeActiveConnections();
     await upstream.stop().catch(() => {}); await main.stop().catch(() => {}); await subHost.stop().catch(() => {});

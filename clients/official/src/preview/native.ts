@@ -204,14 +204,16 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     ]
     case 'model_visibility': {
       await delay(260)
-      const models = ['azure-openai-responses', 'openai', 'openai-codex'].flatMap((provider) => [
-        { provider, id: 'gpt-5.6', name: 'GPT-5.6', reasoning: true },
-        { provider, id: 'gpt-5.6-mini', name: 'GPT-5.6 mini', reasoning: true },
-        { provider, id: 'gpt-4.1', name: 'GPT-4.1', reasoning: false },
-      ]).concat([{ provider: 'anthropic', id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', reasoning: true }])
-      return { models, total: models.length, truncated: false, hidden: previewHiddenModels }
+      return { models: previewMachineModels, total: previewMachineModels.length, truncated: false, hidden: previewHiddenModels }
     }
     case 'set_model_visibility': await delay(200); previewHiddenModels = args.hidden as typeof previewHiddenModels; return { hidden: previewHiddenModels }
+    case 'child_models': {
+      await delay(260)
+      const hidden = new Set(previewHiddenModels.map((model) => `${model.provider}/${model.id}`))
+      const models = previewMachineModels.filter((model) => !hidden.has(`${model.provider}/${model.id}`))
+      return { models, total: models.length, truncated: false, listed: previewChildModels }
+    }
+    case 'set_child_models': await delay(200); previewChildModels = args.models as typeof previewChildModels; return { listed: previewChildModels }
     case 'list_machines': await delay(80); return [
       { hostId: 'preview-main', name: '家里的工作站', kind: 'main', available: true, platform: 'linux', homePath: '/home/alu', workspaceRoots: ['/'] },
       { hostId: 'preview-subhost', name: 'Windows 工作站', kind: 'subhost', available: true, platform: 'windows', homePath: 'C:\\Users\\alu', workspaceRoots: ['C:\\', 'D:\\'] },
@@ -249,6 +251,12 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
   }
 }
 
+const previewMachineModels = ['azure-openai-responses', 'openai', 'openai-codex'].flatMap((provider) => [
+  { provider, id: 'gpt-5.6', name: 'GPT-5.6', reasoning: true },
+  { provider, id: 'gpt-5.6-mini', name: 'GPT-5.6 mini', reasoning: true },
+  { provider, id: 'gpt-4.1', name: 'GPT-4.1', reasoning: false },
+]).concat([{ provider: 'anthropic', id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', reasoning: true }])
+let previewChildModels: { provider: string; id: string }[] = [{ provider: 'openai-codex', id: 'gpt-5.6' }, { provider: 'anthropic', id: 'claude-sonnet-4-6' }]
 let previewHiddenModels: { provider: string; id: string }[] = [{ provider: 'azure-openai-responses', id: 'gpt-4.1' }, { provider: 'retired-provider', id: 'old-model' }]
 
 export function previewNative<T>(command: string, args?: InvokeArgs): Promise<T> {

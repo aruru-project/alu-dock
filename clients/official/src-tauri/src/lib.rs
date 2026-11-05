@@ -238,6 +238,8 @@ pub fn run() {
             work::list_machines,
             work::model_visibility,
             work::set_model_visibility,
+            work::child_models,
+            work::set_child_models,
             work::list_workspace,
             work::system_catalog,
             work::system_content,
