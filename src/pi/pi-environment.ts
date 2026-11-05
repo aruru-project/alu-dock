@@ -9,6 +9,8 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+
 import { configurePiNetwork } from "./configure-pi-network.js";
 import { projectPiModelList, type PiModelListBody } from "./pi-model-list.js";
 
@@ -43,6 +45,8 @@ export interface PiEnvironmentSnapshot {
 
 export interface PiEnvironmentOptions {
   agentDir?: string;
+  /** A SubHost's Work uses Main's models (card #303): this machine's model and credential files are not read. */
+  modelsFromMain?: boolean;
 }
 
 const PI_MODEL_UPDATE_TIMEOUT_MS = 15_000;
@@ -209,11 +213,13 @@ async function openPiEnvironment(options: PiEnvironmentOptions): Promise<{
   // Deliberately choose a non-project cwd: Hub manages Pi's global environment,
   // while each Worker still loads its own trusted project resources normally.
   const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
-  const modelRuntime = await ModelRuntime.create({
-    authPath: join(agentDir, "auth.json"),
-    modelsPath: join(agentDir, "models.json"),
-    allowModelNetwork: false,
-  });
+  const modelRuntime = options.modelsFromMain
+    ? await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, allowModelNetwork: false })
+    : await ModelRuntime.create({
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+      allowModelNetwork: false,
+    });
   const services = await createAgentSessionServices({
     cwd: agentDir,
     agentDir,

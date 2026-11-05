@@ -604,7 +604,7 @@ async function choosePiEnvironment(terminal: HubProcessTerminal, options: { mode
     let snapshot: PiEnvironmentSnapshot;
     try {
       const { inspectPiEnvironment } = await import("../pi/pi-environment.js");
-      snapshot = await inspectPiEnvironment();
+      snapshot = await inspectPiEnvironment({ modelsFromMain: options.modelsFromMain === true });
     } catch {
       await selectMenu(
         terminal,

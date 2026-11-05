@@ -80,7 +80,8 @@ Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加�
 - **Main 的模型服务**（`src/model-service/`）：Host 监管的独立进程，持有 Main 上 Pi 的 `ModelRuntime`，只回答三个问题：模型配置（`models.json` 原文与已保存目录）、凭据状态（哪些供应商已配置、哪些模型可用）和一次凭据。订阅登录只在这里刷新，Work 拿到的是短期令牌（GitHub Copilot 是换好的 Copilot 令牌和地址），不会拿到刷新令牌；普通 API key 原样给，只在内存里。服务崩溃时 Host 重新拉起，正在进行的回复不受影响。
 - **Worker**：Host 授予 `dock.models` 时，Worker 用 Pi 分叉的 `ModelRuntime.create({ owner })` 建模型运行时（`src/model-service/owner.ts`），不读本机的任何模型文件。Pi 所有取凭据的地方都经过 `getAuth`，包括扩展通过 `ModelRegistry` 自己调模型时，所以一并问 Main；改写请求的 hook 照常在 Worker 里运行。每个 session 新建一个运行时，扩展注册的供应商不会跨 session 残留。Main 在运行时里答复之前，它定义的供应商一律问 Main，不退回本机。
 - **路径**：Worker 只问自己的 Host（`dock.models` 反向调用）；Main 上的 Host 转给模型服务，SubHost 的 Host 经机器连接转给 Main（见 [control](control.md#main-与-subhost)）。问题等服务或连接最多 15 秒，等过一次后立即失败，直到恢复；取消立即放开调用方。
-- **例外**：只由扩展定义、Main 上没有的供应商用扩展自己的凭据；Bedrock、Vertex 的云账号由 Pi 在 Work 所在机器读取，Main 交不出去（用户 2026-11-05 接受）。
+- **例外**：只由扩展定义、Main 上没有的供应商用扩展自己的凭据；扩展只是给内置供应商或 Main 配置里的供应商加东西，不算。Bedrock、Vertex 的云账号由 Pi 在 Work 所在机器读取，Main 交不出去（用户 2026-11-05 接受）；它们能不能选仍由 Main 的凭据状态决定，所以两边都要配。
+- **机器连接**：Main 对同一台 SubHost 的回答一次发一份，配置的回答接近链路控制队列的上限，而那个队列满了拒绝、不等。SubHost 等一个问题的完整回答最多 120 秒，未答的问题最多 1024 个，回答累计不超过 `MAX_MODEL_ANSWER_BYTES`；断开或停止时未答的问题都失败。
 
 ## Worker 事故记录
 

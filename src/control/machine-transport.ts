@@ -45,6 +45,8 @@ const MAX_MODEL_ANSWER_CHUNKS = Math.ceil(MAX_MODEL_ANSWER_BYTES / MAX_MACHINE_I
 const MAX_MODEL_QUESTIONS = 1_024;
 /** How long a SubHost's model question waits for the connection to Main, like Main's own service wait. */
 const MODEL_CONNECTION_WAIT_MS = 15_000;
+/** How long an asked question waits for Main's whole answer, room for a large catalog on a slow link. */
+const MODEL_ANSWER_WAIT_MS = 120_000;
 const INVENTORY_INTERVAL_MS = 200;
 const RECONNECT_DELAY_MS = 250;
 const MACHINE_HEARTBEAT_TIMEOUT_MS = 5_000;
@@ -190,6 +192,11 @@ interface MainConnection {
   inventory?: InventoryTransfer;
   /** Model questions this SubHost asked that Main is still answering. */
   modelQuestions: Map<string, AbortController>;
+  /**
+   * Answers go out one at a time: a configuration answer is close to the link's control queue,
+   * which refuses rather than waits, so several at once would fail on a slow connection.
+   */
+  modelAnswers: Promise<void>;
 }
 
 /** Connection-fed remote directory/transport backend; InstanceManager remains the client request authority. */
@@ -876,9 +883,11 @@ export class MainMachineController implements RemoteInstanceDirectory {
           : request.op === "configuration" ? await (service ?? missing("models")).configuration(controller.signal)
           : request.op === "auth_state" ? await (service ?? missing("models")).authState(controller.signal)
           : await (service ?? missing("models")).auth(request, controller.signal);
-        await writeModelAnswer(socket, requestId, result);
+        const answered = connection.modelAnswers.then(() => writeModelAnswer(socket, requestId, result, controller.signal));
+        connection.modelAnswers = answered.catch(() => {});
+        await answered;
       } catch (error) {
-        await fail(error);
+        if (!controller.signal.aborted) await fail(error);
       } finally {
         connection.modelQuestions.delete(requestId);
       }
@@ -937,7 +946,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       this.nextCandidateOrdinal += 1;
       return { machine, candidateOrdinal: this.nextCandidateOrdinal };
     });
-    return { machine: admitted.machine, socket, hostEpoch: hello.hostEpoch, streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: admitted.candidateOrdinal, closed: false, modelQuestions: new Map() };
+    return { machine: admitted.machine, socket, hostEpoch: hello.hostEpoch, streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: admitted.candidateOrdinal, closed: false, modelQuestions: new Map(), modelAnswers: Promise.resolve() };
   }
 
   private async consumeMainRecord(connection: MainConnection, record: MachineWireRecord): Promise<void> {
@@ -1441,7 +1450,7 @@ export class SubHostMachineConnection {
   private streams: StreamAcceptor | undefined;
   private readonly toolRequests = new Map<string, { resolve: (result: DockToolsResult) => void; reject: (error: Error) => void }>();
   private readonly sourceOffRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
-  private readonly modelQuestions = new Map<string, { chunks: Buffer[]; count?: number; resolve: (result: unknown) => void; reject: (error: Error) => void }>();
+  private readonly modelQuestions = new Map<string, { chunks: Buffer[]; bytes: number; count?: number; resolve: (result: unknown) => void; reject: (error: Error) => void }>();
   private readonly readyWaiters = new Set<() => void>();
   private readonly observationSinks = new Map<string, ObservationDeliverySink>();
   private record: SubHostUpstreamRecord | undefined;
@@ -1490,10 +1499,23 @@ export class SubHostMachineConnection {
     this.maintenanceSocket = undefined;
     this.ready = false;
     this.notifyConnectionChanged(false);
+    // The socket's close handler sees it is no longer current, so the cleanup happens here.
+    this.failOutstanding();
     this.socket?.destroy();
     this.socket = undefined;
     this.streams?.closeAll();
     this.streams = undefined;
+  }
+
+  /** Whatever waits on the connection to Main fails when it goes away, so nothing waits forever. */
+  private failOutstanding(): void {
+    for (const pending of this.toolRequests.values()) pending.reject(new Error("Main went offline before the Dock tool completed"));
+    this.toolRequests.clear();
+    for (const pending of this.sourceOffRequests.values()) pending.reject(new Error("Main went offline before Dock tools were disabled"));
+    this.sourceOffRequests.clear();
+    for (const pending of this.modelQuestions.values()) pending.reject(new ModelServiceUnavailableError("Main went offline before it answered the model question"));
+    this.modelQuestions.clear();
+    for (const wake of [...this.readyWaiters]) wake();
   }
 
   connected(): boolean { return this.ready && this.socket !== undefined && !this.socket.destroyed; }
@@ -1525,16 +1547,20 @@ export class SubHostMachineConnection {
       });
     }
     if (signal.aborted) throw new Error("Model request cancelled");
+    if (this.modelQuestions.size >= MAX_MODEL_QUESTIONS) throw new ModelServiceUnavailableError("This machine has too many model questions open at Main. Try again shortly.");
     const socket = this.socket as TLSSocket;
     const requestId = randomUUID();
     return new Promise<unknown>((resolve, reject) => {
-      const cancel = () => {
+      const drop = (error: Error) => {
         if (!this.modelQuestions.delete(requestId)) return;
-        reject(new Error("Model request cancelled"));
+        reject(error);
         void writeMachine(socket, { kind: "machine_model_cancel", requestId }).catch(() => {});
       };
-      const settle = <T>(done: (value: T) => void) => (value: T) => { signal.removeEventListener("abort", cancel); done(value); };
-      this.modelQuestions.set(requestId, { chunks: [], resolve: settle(resolve), reject: settle(reject) });
+      const cancel = () => drop(new Error("Model request cancelled"));
+      // A Main that stops answering, or sends part of an answer, does not hold the question forever.
+      const deadline = setTimeout(() => drop(new ModelServiceUnavailableError("Main did not answer the model question in time")), MODEL_ANSWER_WAIT_MS);
+      const settle = <T>(done: (value: T) => void) => (value: T) => { clearTimeout(deadline); signal.removeEventListener("abort", cancel); done(value); };
+      this.modelQuestions.set(requestId, { chunks: [], bytes: 0, resolve: settle(resolve), reject: settle(reject) });
       signal.addEventListener("abort", cancel, { once: true });
       void writeMachine(socket, { kind: "machine_model_request", requestId, request }).catch((error: unknown) => {
         const pending = this.modelQuestions.get(requestId);
@@ -1644,12 +1670,7 @@ export class SubHostMachineConnection {
       this.notifyConnectionChanged(false);
       streams.closeAll();
       if (this.streams === streams) this.streams = undefined;
-      for (const pending of this.toolRequests.values()) pending.reject(new Error("Main went offline before the Dock tool completed"));
-      this.toolRequests.clear();
-      for (const pending of this.sourceOffRequests.values()) pending.reject(new Error("Main went offline before Dock tools were disabled"));
-      this.sourceOffRequests.clear();
-      for (const pending of this.modelQuestions.values()) pending.reject(new ModelServiceUnavailableError("Main went offline before it answered the model question"));
-      this.modelQuestions.clear();
+      this.failOutstanding();
       if (!this.stopped) {
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => {
@@ -1699,8 +1720,15 @@ export class SubHostMachineConnection {
         pending.reject(new Error("Main's model answer arrived out of order"));
         return;
       }
+      const chunk = Buffer.from(record.data, "base64");
       pending.count = record.count;
-      pending.chunks.push(Buffer.from(record.data, "base64"));
+      pending.bytes += chunk.byteLength;
+      if (pending.bytes > MAX_MODEL_ANSWER_BYTES) {
+        this.modelQuestions.delete(record.requestId);
+        pending.reject(new Error("Main's model answer is larger than any answer may be"));
+        return;
+      }
+      pending.chunks.push(chunk);
       if (pending.chunks.length < record.count) return;
       this.modelQuestions.delete(record.requestId);
       try { pending.resolve(JSON.parse(Buffer.concat(pending.chunks).toString("utf8"))); }
@@ -1711,7 +1739,7 @@ export class SubHostMachineConnection {
       const pending = this.modelQuestions.get(record.requestId);
       if (!pending) return;
       this.modelQuestions.delete(record.requestId);
-      pending.reject(new Error(record.error));
+      pending.reject(new MainModelAnswerError(record.error));
       return;
     }
     if (record.kind === "machine_tool_notification") {
@@ -1772,6 +1800,11 @@ export class SubHostModelPort implements ModelHostPort {
 /** How long a SubHost waits for Main's model lists; a Work's model questions carry their own cancel. */
 const MODEL_LIST_WAIT_MS = 30_000;
 
+/** Main answered the question with a failure, so it did not do what was asked. */
+class MainModelAnswerError extends Error {
+  constructor(message: string) { super(message); this.name = "MainModelAnswerError"; }
+}
+
 /**
  * A SubHost's model lists are Main's: the hidden list and the child Work list. Seen and edited from
  * either machine, they are the same list.
@@ -1794,7 +1827,11 @@ export class SubHostModelLists implements ModelVisibilityPort, ChildModelsSource
       const result = await this.upstream.askModels({ op: "visibility_set", hidden: [...hidden] }, AbortSignal.timeout(MODEL_LIST_WAIT_MS)) as ModelVisibilitySetResult;
       return { hidden: parseModelRefs(result.hidden, "hidden") };
     } catch (error) {
-      throw new ModelVisibilityError("model_visibility_write_failed", `隐藏列表没有保存到 Main，原来的设置不变：${error instanceof Error ? error.message : String(error)}`, true, { cause: error });
+      const reason = error instanceof Error ? error.message : String(error);
+      // Only Main's own refusal says the list is unchanged; a lost answer may follow a saved list.
+      throw new ModelVisibilityError("model_visibility_write_failed", error instanceof MainModelAnswerError
+        ? `隐藏列表没有保存到 Main，原来的设置不变：${reason}`
+        : `没能确认隐藏列表是否已保存到 Main（${reason}）。请重新打开列表看看；再保存一次也不会出错。`, true, { cause: error });
     }
   }
 
@@ -1809,11 +1846,13 @@ export class SubHostModelLists implements ModelVisibilityPort, ChildModelsSource
 }
 
 /** An answer of any size goes as base64 chunks that fit one machine record each. */
-async function writeModelAnswer(socket: TLSSocket, requestId: string, result: unknown): Promise<void> {
+async function writeModelAnswer(socket: TLSSocket, requestId: string, result: unknown, signal: AbortSignal): Promise<void> {
   const bytes = Buffer.from(JSON.stringify(result ?? null), "utf8");
   if (bytes.byteLength > MAX_MODEL_ANSWER_BYTES) throw new Error("Main's model answer is too large to send to this machine");
   const count = Math.max(1, Math.ceil(bytes.byteLength / MAX_MACHINE_INVENTORY_CHUNK_BYTES));
   for (let index = 0; index < count; index += 1) {
+    // The SubHost dropped a cancelled question; the rest of its answer would be ignored.
+    if (signal.aborted) return;
     const data = bytes.subarray(index * MAX_MACHINE_INVENTORY_CHUNK_BYTES, (index + 1) * MAX_MACHINE_INVENTORY_CHUNK_BYTES).toString("base64");
     await writeMachine(socket, { kind: "machine_model_answer", requestId, index, count, data });
   }

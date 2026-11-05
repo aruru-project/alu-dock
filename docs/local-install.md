@@ -43,7 +43,7 @@ Alu Dock 自带 Pi。运行 `aludock` 后可在 **Settings → Pi** 查看可用
 
 模型和登录只在 Main 上配置：Main 的 `models.json`、`auth.json` 和登录，供所有机器上的 Work 使用。每个 Work 每次发请求前向 Main 取一次凭据，订阅账号的登录只在 Main 上刷新；请求本身从 Work 所在的机器发出，用那台机器自己的代理等网络设置。SubHost 上的 `models.json`、`auth.json` 不再被使用，它的 **Settings → Pi** 只管理这台机器的 Pi package。Main 或它的模型服务不可用时，新的请求会报错说明原因，不会改用 SubHost 本机的配置。
 
-两类凭据仍在 Work 所在的机器上读取：只由某个扩展自己定义、Main 上没有的供应商，用扩展自己的密钥（扩展读环境变量的，按扩展的说明在那台机器上配置）；Bedrock 和 Vertex 的云账号（AWS key/profile、Google ADC）由 Pi 在那台机器上读取。Dock 读一台机器的环境变量时用的是它的登录 shell，所以密钥和代理要写在登录 shell 会读的配置里。
+两类凭据仍在 Work 所在的机器上读取：只由某个扩展自己定义、Main 上没有的供应商，用扩展自己的密钥（扩展读环境变量的，按扩展的说明在那台机器上配置）；Bedrock 和 Vertex 的云账号（AWS key/profile、Google ADC）由 Pi 在那台机器上读取。所以要用这两家，Main 和 Work 所在的机器都要配好云账号：Main 决定它们能不能选，请求用的是 Work 所在机器的账号。Dock 读一台机器的环境变量时用的是它的登录 shell，所以密钥和代理要写在登录 shell 会读的配置里。
 
 安装 Pi package 使用：
 
