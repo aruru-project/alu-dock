@@ -18,8 +18,8 @@ import { detectTerminalColorLevel, type TerminalColorLevel } from "./theme.js";
 const PORTRAIT_OPEN = [
   "......HHHHHHHH......",
   "......HHHHHHHH......",
-  "..HHHHhhhHHHHHHHHHH.",
-  "..HHHHhhhHHHHHHHWHH.",
+  "..HHHHHHHHHHHHHHHHH.",
+  "..HHHHHHHHHHHHHHWHH.",
   ".HHHHHHHHHHHHHHWfWH.",
   ".HHHHHHHHHHHHHHWfWH.",
   ".HHHHHHHHHHHHHHHWHH.",
@@ -54,7 +54,6 @@ interface PortraitColor { rgb: readonly [number, number, number]; ansi256: numbe
  */
 const PORTRAIT_COLORS: Record<string, PortraitColor> = {
   H: { rgb: [74, 46, 44], ansi256: 237 },
-  h: { rgb: [122, 82, 72], ansi256: 240 },
   B: { rgb: [78, 98, 168], ansi256: 61 },
   S: { rgb: [255, 233, 222], ansi256: 224 },
   s: { rgb: [246, 196, 190], ansi256: 217 },
