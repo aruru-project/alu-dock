@@ -15,7 +15,6 @@ import {
   encodeWorkerError,
   parseWorkerIdentity,
   validateDockCapabilityResult,
-  validateUiCapabilityArgs,
   validateUiCapabilityResult,
   type DockCapability,
   type ReverseWorkerCapability,
@@ -73,9 +72,6 @@ async function runWorker(): Promise<void> {
       return Promise.reject(new Error(`Host capability is not authorized for this Worker: ${capability}`));
     }
     if (signal?.aborted) return Promise.resolve(undefined);
-    // The Host ends a Worker whose call it cannot read. Arguments a tool or an extension got wrong,
-    // such as a model's mismatched Dock tool fields, fail here instead, in front of their caller.
-    try { validateUiCapabilityArgs(capability, args); } catch (error) { return Promise.reject(error); }
     return new Promise<unknown>((resolveCall, rejectCall) => {
       const abort = !signal ? undefined
         : capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); }

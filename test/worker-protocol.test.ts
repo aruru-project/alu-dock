@@ -439,3 +439,18 @@ test("Worker delivers legal large diagnostics and reports serialization failure 
   await sender.sendEnvelope({kind:"event",event,state:STATE});
   assert.equal(received.length,2);
 });
+
+// Without this a model's mismatched Dock tool fields ended its Worker (drawworker, 2026-11-05).
+test("a call the Host could not read fails in the Worker, judged on what actually crosses", async () => {
+  const frames: WorkerFrame[] = [];
+  const sender = new OrderedWorkerSender(IDENTITY, (frame, callback) => { frames.push(frame); callback(null); return true; });
+  await assert.rejects(sender.sendEnvelope({ kind: "call", callId: "mixed", capability: "dock.tools",
+    args: { request: { type: "system", cwd: "/tmp", id: "candidate", cursor: { revision: "r1", offset: 0 } } } }));
+  // An extension's sparse options pass a check of the live array; JSON turns the hole into null.
+  await assert.rejects(sender.sendEnvelope({ kind: "call", callId: "holes", capability: "ui.select", args: { title: "Pick", options: new Array(1) } }));
+  assert.equal(frames.length, 0, "Nothing the Host would refuse leaves the Worker");
+  // An optional field an extension left undefined is absent on the Host's side, so the call goes through.
+  await sender.sendEnvelope({ kind: "call", callId: "catalog", capability: "dock.tools", args: { request: { type: "system", cwd: "/tmp", id: undefined } } });
+  const receiver = new WorkerFrameReceiver(() => true);
+  assert.deepEqual(frames.map((frame) => receiver.accept(frame)).filter(Boolean).map((envelope) => (envelope as { callId: string }).callId), ["catalog"]);
+});

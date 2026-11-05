@@ -169,7 +169,7 @@ Agent 通过 observation 已建立的 reverse-capability 形状访问 Host-owned
 
 每项能力保留自己的 closed request/result、bounds 和开关规则。公开业务 DTO 统一在 Protocol V2 定义一次；private envelope 只验证 source binding、路径等 Host-private fact 和跨进程边界。
 
-Host 读不懂 Worker 的一次 call 时会结束这个 Worker。所以 Worker 发出每个 `dock.*`/`ui.*` call 之前，先用 Host 收到时的同一个 `validateUiCapabilityArgs` 检查参数，不合格就让这次调用在 Worker 里失败：模型把 Dock tool 参数填错，得到的是 tool error；扩展的 UI 调用填错，得到的是被拒绝的 Promise。Host 一侧的检查不放宽。
+Host 读不懂 Worker 的一次 call 时会结束这个 Worker。所以 Worker 的 `OrderedWorkerSender` 发出每个 `dock.*`/`ui.*` call 之前，对序列化后的那份内容（正是 Host 收到的样子）先用 Host 同一个 `validateUiCapabilityArgs` 检查，不合格就让这次调用在 Worker 里失败：模型把 Dock tool 参数填错，得到的是 tool error；扩展的 UI 调用填错，得到的是被拒绝的 Promise。Host 一侧的检查不放宽。
 
 `dock.attachments` 是这个 pattern 的第二个实现，而且始终随 managed Worker 提供。`command.submit` 的 full attachment metadata 通过 private invoke context 与公开 file IDs 做逐项一致性检查；Pi adapter 把一个明确的 untrusted metadata block 放进原生 prompt，同时在 live/history projection 中恢复干净文本和 `AttachmentDto[]`。该内部 block 由 Worker 使用 agent state 中持久、`0600` 的随机 key 做 HMAC 认证；普通 prompt 即使复制相同文本形状也不能伪造 attachment provenance，认证失败的文本不会被静默剥离。Host path 不进入 invoke context、Queue 或 conversation。
 
