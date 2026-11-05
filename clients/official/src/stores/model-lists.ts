@@ -30,6 +30,8 @@ const outcomes: Record<ModelListKind, { saved: string; failed: string }> = {
 export const useModelListsStore = defineStore('model-lists', () => {
   const catalog = useModelCatalogStore()
   const saves = ref(new Map<string, ModelListSave>())
+  /** Confirmed hidden-list saves per connection; Main's other lists offer models by that list. */
+  const hiddenSaved = ref(new Map<string, number>())
   const hiddenKey = (connectionId: string, targetHostId?: string) => JSON.stringify([connectionId, targetHostId ?? null])
   const childrenKey = (connectionId: string) => JSON.stringify([connectionId, null, 'children'])
   function forTarget(connectionId: string, targetHostId?: string) {
@@ -46,6 +48,7 @@ export const useModelListsStore = defineStore('model-lists', () => {
     return submit({ key: hiddenKey(context.connectionId, targetHostId), list: 'hidden', connectionId: context.connectionId, targetHostId, label }, hidden, async (models) => {
       const result = await setModelVisibility(models, destination, targetHostId)
       catalog.applyHidden(context.connectionId, targetHostId, result.hidden)
+      hiddenSaved.value.set(context.connectionId, (hiddenSaved.value.get(context.connectionId) ?? 0) + 1)
       return result.hidden
     })
   }
@@ -97,5 +100,5 @@ export const useModelListsStore = defineStore('model-lists', () => {
   function discard(key: string) {
     if (saves.value.get(key)?.state !== 'pending') saves.value.delete(key)
   }
-  return { saves, forTarget, forChildren, save, saveChildren, markSuccessSeen, dismiss, discard }
+  return { saves, hiddenSaved, forTarget, forChildren, save, saveChildren, markSuccessSeen, dismiss, discard }
 })

@@ -211,7 +211,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       await delay(260)
       const hidden = new Set(previewHiddenModels.map((model) => `${model.provider}/${model.id}`))
       const models = previewMachineModels.filter((model) => !hidden.has(`${model.provider}/${model.id}`))
-      return { models, total: models.length, truncated: false, listed: previewChildModels }
+      return { models, total: models.length, truncated: false, listed: previewChildModels, limit: 50 }
     }
     case 'set_child_models': await delay(200); previewChildModels = args.models as typeof previewChildModels; return { listed: previewChildModels }
     case 'list_machines': await delay(80); return [

@@ -116,7 +116,7 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
 
     // The child Work list is offered from Main's models, less the hidden ones.
     const children = await client.childModels();
-    assert.deepEqual(children.listed, []);
+    assert.deepEqual([children.listed, children.limit], [[], 50]);
     assert.equal(children.models.some((model) => model.provider === hiddenModel.provider && model.id === hiddenModel.id), false);
     const [first, second] = children.models.map(({ provider, id }) => ({ provider, id }));
     assert.ok(first && second);

@@ -296,7 +296,7 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 给 Agent 看的子 Work 模型名单（`dock_models` 读它，见 [runtime](runtime.md)）只有 Main 一份，存为 Main 的 Host 私有状态目录下的 `child-models.json`（格式见 [local-install](../local-install.md#给-agent-看的模型)）。
 
-- `model.children.get {}` → `{models,total,truncated,listed,fileProblem?}`：`models` 是 Main 上新建 Work 时可选的模型、去掉隐藏列表里的，和 `model.visibility.get` 用同一个短命 Pi 进程读取；`listed` 按保存顺序。`fileProblem` 说明手工编辑的文件为何不可用，此时 `listed` 为空，Agent 也看不到名单。
+- `model.children.get {}` → `{models,total,truncated,listed,limit,fileProblem?}`：`models` 是 Main 上新建 Work 时可选的模型、去掉隐藏列表里的，和 `model.visibility.get` 用同一个短命 Pi 进程读取；`listed` 按保存顺序；`limit` 是名单上限，客户端按它停用加入，不另定义。`fileProblem` 说明手工编辑的文件为何不可用，此时 `listed` 为空，Agent 也看不到名单。
 - `model.children.set {operationId,models}` → `{listed}`：整份替换，保留顺序、去掉重复后原子写入，最后一次保存为准；沿用 operation ledger。写入失败返回 `child_models_write_failed`，原名单不变。
 - 请求不带 `hostId`：客户端和 Hub 都连着 Main，directory 请求没有 `hostId` 就由所连的 Host 处理，所以从哪台机器的设置页改都是同一份。只有 Main 广告这项能力，SubHost 不提供；SubHost 上的 Work 仍经 `SubHostModelLists` 只读 Main 的名单。
 - 名单上限 `MAX_CHILD_MODELS`（50）定义在 `protocol.ts`，请求、响应和 Worker 边界共用；不写用途说明（用户决定：写了 Agent 会当成规则）。

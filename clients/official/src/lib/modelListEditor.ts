@@ -30,6 +30,8 @@ export function useModelListEditor<R extends ModelListRead>(options: {
   listOf: (result: R) => ModelRef[]
   /** The read with the list a save confirmed; a confirmed save also replaces a broken file. */
   confirmed: (result: R, list: ModelRef[]) => R
+  /** How many entries the draft changes; by default the order of the list does not count. */
+  changes?: (saved: readonly ModelRef[], draft: readonly ModelRef[]) => number
   /** The user can see this editor's own success, so it needs no acknowledgement elsewhere. */
   shown: () => boolean
   markSuccessSeen: (key: string) => void
@@ -37,6 +39,7 @@ export function useModelListEditor<R extends ModelListRead>(options: {
   loadFailure: string
 }) {
   const submission = computed(options.submission)
+  const listChanges = options.changes ?? modelListChanges
   const result = ref(null) as Ref<R | null>
   const saved = ref<ModelRef[]>([])
   const draft = ref<ModelRef[]>([])
@@ -46,9 +49,9 @@ export function useModelListEditor<R extends ModelListRead>(options: {
   let loadEpoch = 0
 
   const saving = computed(() => submission.value?.state === 'pending')
-  const changes = computed(() => modelListChanges(saved.value, draft.value))
+  const changes = computed(() => listChanges(saved.value, draft.value))
   const retained = computed(() => !!submission.value && submission.value.state !== 'succeeded'
-    && modelListChanges(submission.value.models, draft.value) === 0)
+    && listChanges(submission.value.models, draft.value) === 0)
   const dirty = computed(() => !!result.value && !retained.value && (changes.value > 0 || submission.value?.state === 'unknown'))
   const canSave = computed(() => !!result.value && !saving.value && (changes.value > 0 || !!result.value.fileProblem || submission.value?.state === 'unknown'))
   const status = computed(() => {
@@ -67,7 +70,7 @@ export function useModelListEditor<R extends ModelListRead>(options: {
   })
   // A success rendered in its own editor needs no second acknowledgement outside.
   // Keep its receipt while the editor reads, so an older read cannot undo it.
-  watch([submission, () => submission.value?.state, loading, result], () => {
+  watch([submission, () => submission.value?.state, loading, result, options.shown], () => {
     if (options.shown() && !loading.value && result.value && submission.value?.state === 'succeeded') {
       options.markSuccessSeen(submission.value.key)
     }
@@ -94,7 +97,7 @@ export function useModelListEditor<R extends ModelListRead>(options: {
       result.value = completedDuringRead ? options.confirmed(value, list) : value
       saved.value = list
       if (unknownAtStart && unknownAtStart === submission.value && !value.fileProblem
-        && modelListChanges(options.listOf(value), unknownAtStart.models) === 0) {
+        && listChanges(options.listOf(value), unknownAtStart.models) === 0) {
         // This fresh read confirms the desired settings, not the old request's outcome.
         // Retire only that submission's reminder; do not manufacture a success receipt.
         options.discardSubmission(unknownAtStart.key)
@@ -113,7 +116,7 @@ export function useModelListEditor<R extends ModelListRead>(options: {
     draft.value = next
     // Explicitly undoing a failed submission retires its retained draft. An unknown
     // save is different: the user can still save this desired list to confirm it.
-    if (submission.value?.state === 'failed' && modelListChanges(saved.value, next) === 0) {
+    if (submission.value?.state === 'failed' && listChanges(saved.value, next) === 0) {
       options.discardSubmission(submission.value.key)
     }
   }
@@ -123,5 +126,21 @@ export function useModelListEditor<R extends ModelListRead>(options: {
     edit([...saved.value])
   }
 
-  return { submission, result, saved, draft, loading, loadError, currentNotice, saving, changes, dirty, canSave, status, load, edit, discard }
+  /**
+   * Read the models to choose from again after something else changed them (a hidden-list
+   * save); the list, the draft and any submission stay as they are. A failed read keeps the old choices.
+   */
+  async function refreshChoices() {
+    if (!result.value || loading.value) return
+    const epoch = loadEpoch
+    try {
+      const value = await options.read()
+      if (epoch !== loadEpoch || !result.value) return
+      result.value = { ...result.value, models: value.models, total: value.total, truncated: value.truncated }
+    } catch {
+      // The previous choices stay; reopening settings reads them again.
+    }
+  }
+
+  return { submission, result, saved, draft, loading, loadError, currentNotice, saving, changes, dirty, canSave, status, load, edit, discard, refreshChoices }
 }

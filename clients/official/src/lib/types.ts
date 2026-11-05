@@ -545,6 +545,8 @@ export interface ChildModelsResult {
   truncated: boolean
   /** In its saved order. */
   listed: ModelRef[]
+  /** The most models the list may hold; the Host refuses more. */
+  limit: number
   /** A hand-edited list could not be used; Agents see no list until it is saved. */
   fileProblem?: string
 }

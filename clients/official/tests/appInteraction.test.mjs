@@ -1236,21 +1236,36 @@ try {
       { ...luna, name: 'GPT-6 Luna' },
       { ...haiku, name: 'Claude Haiku 5.5' },
     ]
-    let listed = [haiku, retired], finishSave
-    modelVisibilityNative = async () => ({ models, total: 3, truncated: false, hidden: [] })
-    childModelsNative = async () => ({ models, total: 3, truncated: false, listed })
+    let listed = [haiku, retired], hiddenNow = [], finishSave, finishHidden
+    const offered = () => models.filter(model => !hiddenNow.some(item => item.provider === model.provider && item.id === model.id))
+    modelVisibilityNative = async () => ({ models, total: 3, truncated: false, hidden: hiddenNow })
+    childModelsNative = async () => ({ models: offered(), total: offered().length, truncated: false, listed, limit: 50 })
     saveChildModelsNative = args => new Promise(resolve => { finishSave = () => { listed = args.models; resolve({ listed: args.models }) } })
+    saveModelVisibilityNative = args => new Promise(resolve => { finishHidden = () => { hiddenNow = args.hidden; resolve({ hidden: args.hidden }) } })
+    const titles = () => rows('子 Work 模型名单').map(row => row.props.title)
 
     await openList()
-    assert.deepEqual(rows('子 Work 模型名单').map(row => row.props.title), ['移出名单 claude-sub/claude-haiku-5-5', '移出名单 retired/old'], 'the list keeps its saved order')
+    assert.deepEqual(titles(), ['移出名单 claude-sub/claude-haiku-5-5', '移出名单 retired/old'], 'the list keeps its saved order')
     assert.ok(text(dialog()).includes('已隐藏或不可用'))
     assert.equal(rows('可以加入的模型').length, 2)
+    // The order is kept, so moving a model to the end is a change to save or discard.
+    await click(dialog(), '移出名单 claude-sub/claude-haiku-5-5'); await click(dialog(), '加入名单 claude-sub/claude-haiku-5-5')
+    assert.ok(text(dialog()).includes('已改动 1 项'))
+    await click(dialog(), '放弃改动')
+    assert.deepEqual(titles(), ['移出名单 claude-sub/claude-haiku-5-5', '移出名单 retired/old'])
     await click(dialog(), '加入名单 openai-sub/gpt-6-luna')
     assert.ok(text(dialog()).includes('已改动 1 项'))
+    // A model hidden meanwhile leaves the choices; the unsaved list stays, and its read is not repeated.
     const readsBeforeSwitch = reads()
-    await click(dialog(), '模型显示'); await click(dialog(), '子 Work 模型')
+    await click(dialog(), '模型显示')
+    await click(dialog(), '隐藏 openai-sub/gpt-6-astra'); await click(dialog(), '保存')
+    await click(dialog(), '子 Work 模型')
+    finishHidden(); await settle()
+    assert.equal(rows('可以加入的模型').length, 0, 'the newly hidden model is no longer offered')
     assert.equal(rows('子 Work 模型名单').length, 3, 'switching sections keeps the draft')
-    assert.equal(reads(), readsBeforeSwitch, 'switching back does not read the list again')
+    assert.equal(calls.filter(call => call.command === 'child_models').length, readsBeforeSwitch + 1, 'only the choices were read again')
+    // Its success is shown when its section is shown again, so it is not told again after closing.
+    await click(dialog(), '模型显示'); await click(dialog(), '子 Work 模型')
     await click(dialog(), '关闭')
     assert.ok(text(container).includes('放弃未保存的修改？'), 'leaving with an unsaved list asks first')
     await click(container, '取消')
@@ -1274,14 +1289,19 @@ try {
     listed = Array.from({ length: 50 }, (_, index) => ({ provider: 'fixture', id: `model-${index}` }))
     await openList()
     assert.ok(text(dialog()).includes('名单已满 50 个'))
-    assert.equal(button(dialog(), '加入名单 openai-sub/gpt-6-astra').props.disabled, true)
+    assert.equal(button(dialog(), '加入名单 openai-sub/gpt-6-luna').props.disabled, true)
+    // A save Main could not write says so in Main's words.
+    saveChildModelsNative = async () => { throw { code: 'child_models_write_failed', message: '子 Work 模型名单没有保存成功，原来的名单不变。' } }
+    await click(dialog(), '移出名单 fixture/model-0'); await click(dialog(), '保存')
+    assert.ok(text(dialog()).includes('原来的名单不变'))
+    await click(dialog(), '放弃改动')
     await click(dialog(), '关闭')
     // A Main without this list asks for an update; the hidden models still work.
     childModelsNative = async () => { throw { code: 'capability_missing', details: { missing: ['model.children.v1'] } } }
     await openList()
     assert.ok(text(dialog()).includes('请更新对应机器上的 Dock'))
     await click(dialog(), '模型显示')
-    assert.equal(all(find(dialog(), item => item.props['aria-label'] === '显示中的模型'), item => item.type === 'button' && String(item.props.class).includes('model-row')).length, 3)
+    assert.equal(all(find(dialog(), item => item.props['aria-label'] === '显示中的模型'), item => item.type === 'button' && String(item.props.class).includes('model-row')).length, 2)
     await click(dialog(), '关闭')
     console.log('PASS: Host settings child Work models: second section keeps its draft, saves the list on Main, reports after closing, stops at 50')
   }

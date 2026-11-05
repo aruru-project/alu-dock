@@ -56,6 +56,13 @@ export function modelListChanges(saved: readonly ModelRef[], draft: readonly Mod
   return changes
 }
 
+/** For a list whose order is kept: a list with the same models in another order is one change. */
+export function orderedListChanges(saved: readonly ModelRef[], draft: readonly ModelRef[]) {
+  const changes = modelListChanges(saved, draft)
+  if (changes > 0) return changes
+  return saved.some((model, index) => modelKey(model) !== modelKey(draft[index]!)) ? 1 : 0
+}
+
 export function addModels(draft: readonly ModelRef[], rows: readonly ModelListRow[]): ModelRef[] {
   const keys = new Set(draft.map(modelKey))
   return [...draft, ...rows.filter(row => !keys.has(row.key)).map(row => ({ provider: row.provider, id: row.id }))]

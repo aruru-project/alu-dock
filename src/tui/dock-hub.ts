@@ -715,6 +715,7 @@ async function chooseChildModels(terminal: HubProcessTerminal, client: DockClien
       return;
     }
     const label = `${terminalSafe(model.provider)}/${terminalSafe(model.id)}`;
+    terminal.write(`${removing ? "Removing" : "Adding"} ${label} on Main…\n`);
     try {
       listed = (await client.setChildModels(removing ? listed.filter((item) => modelKey(item) !== key) : [...listed, model])).listed;
       notice = removing ? `Removed ${label}.` : `Added ${label}.`;

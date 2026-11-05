@@ -737,10 +737,11 @@ export interface ModelRef { provider: string; id: string }
 export interface ModelVisibilityResult { models: AgentModelInfo[]; total: number; truncated: boolean; hidden: ModelRef[]; fileProblem?: string }
 export interface ModelVisibilitySetResult { hidden: ModelRef[] }
 /**
- * Main's selectable models, without hidden ones, plus the child Work list in its saved order.
- * `fileProblem` explains a hand-edited list that could not be read; Agents see no list until it is saved again.
+ * Main's selectable models, without hidden ones, plus the child Work list in its saved order and
+ * its size limit. `fileProblem` explains a hand-edited list that could not be read; Agents see no
+ * list until it is saved again.
  */
-export interface ChildModelsResult { models: AgentModelInfo[]; total: number; truncated: boolean; listed: ModelRef[]; fileProblem?: string }
+export interface ChildModelsResult { models: AgentModelInfo[]; total: number; truncated: boolean; listed: ModelRef[]; limit: number; fileProblem?: string }
 export interface ChildModelsSetResult { listed: ModelRef[] }
 export interface ThinkingConfigurationResult { actualLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[]; total: number; truncated: boolean }
@@ -1946,8 +1947,8 @@ export function parseChildModelRefs(input: unknown, field: string, code = "inval
   return array(input, field, MAX_CHILD_MODELS, code).map((item, index) => parseModelRef(item, `${field}[${index}]`, code));
 }
 export function parseChildModelsResult(input: unknown): ChildModelsResult {
-  const value = object(input, "child models result"); exact(value, ["models", "total", "truncated", "listed", "fileProblem"]);
-  return { ...modelInfoList(value), listed: parseChildModelRefs(value.listed, "listed"), ...(value.fileProblem === undefined ? {} : { fileProblem: string(value.fileProblem, "fileProblem", MAX_MESSAGE) }) };
+  const value = object(input, "child models result"); exact(value, ["models", "total", "truncated", "listed", "limit", "fileProblem"]);
+  return { ...modelInfoList(value), listed: parseChildModelRefs(value.listed, "listed"), limit: positive(value.limit, "limit"), ...(value.fileProblem === undefined ? {} : { fileProblem: string(value.fileProblem, "fileProblem", MAX_MESSAGE) }) };
 }
 export function parseChildModelsSetResult(input: unknown): ChildModelsSetResult {
   const value = object(input, "child models set result"); exact(value, ["listed"]);

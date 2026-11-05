@@ -5,7 +5,7 @@ import { getChildModels } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { defaultMachineHostId, machineDisplayLabel, machineRequestTarget, machineSelectorVisible } from '../lib/machines'
 import { useModelListEditor } from '../lib/modelListEditor'
-import { addModels, childModelColumns, modelRowMatches, modelVisibilityColumns, removeModels, type ModelListRow } from '../lib/modelLists'
+import { addModels, childModelColumns, modelRowMatches, modelVisibilityColumns, orderedListChanges, removeModels, type ModelListRow } from '../lib/modelLists'
 import type { MachineDto } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useSurfacesStore, type MachineSettingsSection } from '../stores/surfaces'
@@ -13,9 +13,6 @@ import { useModelCatalogStore } from '../stores/model-catalog'
 import { useModelListsStore } from '../stores/model-lists'
 import AluSelect from './AluSelect.vue'
 import MachineSettingsResults from './MachineSettingsResults.vue'
-
-/** The user's limit for the child Work list; the Host refuses more. */
-const MAX_CHILD_MODELS = 50
 
 const props = defineProps<{
   machines: readonly MachineDto[]
@@ -59,6 +56,8 @@ const children = reactive(useModelListEditor({
   read: () => currentConnectionCall(app, getChildModels),
   listOf: (result) => result.listed,
   confirmed: (result, list) => ({ ...result, listed: list, fileProblem: undefined }),
+  // The list keeps its order (dock_models shows it so), so reordering is a change to save.
+  changes: orderedListChanges,
   shown: () => surfaces.machineSettingsOpen && section.value === 'children',
   markSuccessSeen: submissions.markSuccessSeen,
   discardSubmission: submissions.discard,
@@ -79,7 +78,8 @@ const hiddenRows = computed(() => columns.value.hidden.filter((row) => modelRowM
 const childColumns = computed(() => childModelColumns(children.result?.models ?? [], children.draft))
 const availableRows = computed(() => childColumns.value.available.filter((row) => modelRowMatches(row, availableQuery.value)))
 const listedRows = computed(() => childColumns.value.listed.filter((row) => modelRowMatches(row, listedQuery.value)))
-const childListFull = computed(() => children.draft.length >= MAX_CHILD_MODELS)
+const childLimit = computed(() => children.result?.limit ?? 0)
+const childListFull = computed(() => !!children.result && children.draft.length >= childLimit.value)
 
 watch(() => hidden.dirty || children.dirty, (value) => emit('dirty', value), { immediate: true, flush: 'sync' })
 
@@ -109,6 +109,9 @@ watch([
   childrenReadFor = reading
   void children.load()
 }, { immediate: true })
+
+// A hidden model leaves the child Work choices too; the draft and its section stay as they are.
+watch(() => submissions.hiddenSaved.get(app.activeConnectionId ?? ''), () => { void children.refreshChoices() })
 
 async function chooseMachine(value: string) {
   if (value === hostId.value) return
@@ -206,7 +209,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
     <main v-else class="machine-settings-content">
       <div class="machine-settings-intro">
         <h3>子 Work 模型</h3>
-        <p>你让 Agent 给子 Work 换模型时，它在这份名单里找准确的模型名。名单不限制子 Work 能用哪个模型。所有机器共用 Main 上这一份，最多 {{ MAX_CHILD_MODELS }} 个。</p>
+        <p>你让 Agent 给子 Work 换模型时，它在这份名单里找准确的模型名。名单不限制子 Work 能用哪个模型。所有机器共用 Main 上这一份，最多 {{ childLimit }} 个。</p>
       </div>
       <MachineSettingsResults embedded :exclude-key="children.submission?.key" />
 
@@ -219,7 +222,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
           <section class="model-column" aria-label="可以加入的模型">
             <header><strong>可以加入</strong><span>{{ childColumns.available.length }}</span></header>
             <input v-model="availableQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤可以加入的模型" spellcheck="false" />
-            <p v-if="childListFull" class="model-column-note">名单已满 {{ MAX_CHILD_MODELS }} 个，先从右边移出一些。</p>
+            <p v-if="childListFull" class="model-column-note">名单已满 {{ childLimit }} 个，先从右边移出一些。</p>
             <div class="model-list">
               <button v-for="row in availableRows" :key="row.key" type="button" class="model-row" :title="`加入名单 ${row.provider}/${row.id}`" :disabled="children.saving || childListFull" @click="addChild(row)">
                 <span class="model-row-copy"><strong>{{ row.name }}</strong><small>{{ row.provider }}/{{ row.id }}</small></span>
@@ -229,7 +232,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
             </div>
           </section>
           <section class="model-column is-chosen" aria-label="子 Work 模型名单">
-            <header><strong>名单</strong><span>{{ childColumns.listed.length }}/{{ MAX_CHILD_MODELS }}</span></header>
+            <header><strong>名单</strong><span>{{ childColumns.listed.length }}/{{ childLimit }}</span></header>
             <input v-model="listedQuery" class="ui-dialog-input ui-dialog-search" placeholder="按名称过滤…" aria-label="过滤名单里的模型" spellcheck="false" />
             <div class="model-list">
               <button v-for="row in listedRows" :key="row.key" type="button" class="model-row" :title="`移出名单 ${row.provider}/${row.id}`" :disabled="children.saving" @click="removeChild(row)">

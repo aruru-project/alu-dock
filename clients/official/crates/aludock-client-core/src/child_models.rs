@@ -12,6 +12,8 @@ pub struct ChildModelsResult {
     pub truncated: bool,
     /// In its saved order.
     pub listed: Vec<ModelRef>,
+    /// The most models the list may hold; the Host refuses more.
+    pub limit: u64,
     /// Why a hand-edited list could not be used; Agents see no list until it is saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_problem: Option<String>,
@@ -104,11 +106,13 @@ mod tests {
             "total": 1,
             "truncated": false,
             "listed": [{ "provider": "claude-sub", "id": "claude-haiku-5-5" }],
+            "limit": 50,
             "fileProblem": "child-models.json is not valid JSON"
         }))
         .unwrap();
         assert_eq!(result.models[0].id, "gpt-6-astra");
         assert_eq!(result.listed[0].provider, "claude-sub");
+        assert_eq!(result.limit, 50);
         assert_eq!(
             result.file_problem.as_deref(),
             Some("child-models.json is not valid JSON")

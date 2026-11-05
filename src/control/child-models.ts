@@ -90,7 +90,7 @@ export class ChildModelsService implements ChildModelsSource, ChildModelsEditor 
   async get(): Promise<ChildModelsResult> {
     const [catalog, file] = await Promise.all([readModelCatalog(this.catalog), this.store.read()]);
     const selectable = this.visibility ? await this.visibility.filterModelList(catalog) : catalog;
-    return { ...selectable, listed: file.models, ...(file.problem === undefined ? {} : { fileProblem: file.problem }) };
+    return { ...selectable, listed: file.models, limit: MAX_CHILD_MODELS, ...(file.problem === undefined ? {} : { fileProblem: file.problem }) };
   }
 
   async set(models: readonly ModelRef[]): Promise<ChildModelsSetResult> {
