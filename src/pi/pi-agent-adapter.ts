@@ -21,6 +21,7 @@ import {
   createAgentSessionRuntime,
   createAgentSessionServices,
   getCompactionPromptTemplates,
+  type ModelRuntime,
   SettingsManager,
   type ResourceDiagnostic,
   type SessionEntry,
@@ -219,6 +220,8 @@ export interface PiAgentAdapterOptions {
 }
 
 export interface CreatePiAgentAdapterOptions {
+  /** Creates each session's models when another process owns their configuration and credentials; by default Pi reads this machine's. */
+  createModelRuntime?: () => Promise<ModelRuntime>;
   cwd: string;
   agentDir: string;
   sessionDir?: string;
@@ -3628,6 +3631,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     });
     configurePiNetwork(settingsManager);
     const services = await createAgentSessionServices({
+      ...(options.createModelRuntime === undefined ? {} : { modelRuntime: await options.createModelRuntime() }),
       cwd: canonicalCwd,
       agentDir,
       settingsManager,

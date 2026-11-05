@@ -13,8 +13,8 @@ import { createDockSystem, readDockSystem, systemToolOperation } from "./system-
 import { SystemService } from "./system-service.js";
 import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
-import { ModelVisibilityError, type ModelVisibilityService } from "./model-visibility.js";
-import type { ChildModelsStore } from "./child-models.js";
+import { ModelVisibilityError, type ModelVisibilityPort } from "./model-visibility.js";
+import type { ChildModelsSource } from "./child-models.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -161,9 +161,9 @@ export interface DockHostOptions {
   attachmentService?: AttachmentService;
   remoteInstances?: RemoteInstanceDirectory;
   /** This machine's hidden-model list; without it model lists are returned unchanged. */
-  modelVisibility?: ModelVisibilityService;
+  modelVisibility?: ModelVisibilityPort;
   /** The models the user shows Agents for child Works; without it the list is empty. */
-  childModels?: ChildModelsStore;
+  childModels?: ChildModelsSource;
   listen?: boolean;
 }
 
@@ -194,8 +194,8 @@ export class DockHost {
   private readonly workspaceBrowser: WorkspaceBrowser;
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
-  private readonly modelVisibility: ModelVisibilityService | undefined;
-  private readonly childModels: ChildModelsStore | undefined;
+  private readonly modelVisibility: ModelVisibilityPort | undefined;
+  private readonly childModels: ChildModelsSource | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;

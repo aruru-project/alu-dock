@@ -219,7 +219,7 @@ export async function runSubHostHub(
               : "No Main connection observation has been recorded"),
             entries: [
               { value: "connection", label: "Main connection", description: settings.subhost ? `${terminalSafe(settings.subhost.mainAddress)} · Port ${settings.subhost.port}` : "Connection settings are missing" },
-              { value: "pi", label: "Pi", description: "Models and provider access on this computer" },
+              { value: "pi", label: "Pi", description: "Pi packages on this computer; models and sign-ins come from Main" },
               { value: "main", label: "Use as Main", description: "Switch roles after the next restart" },
               { value: EXIT_HUB, label: "Leave", description: "Return to the shell" },
             ],
@@ -232,7 +232,7 @@ export async function runSubHostHub(
       if (result.value === "connection") {
         notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, result.data.settings, "manage");
       } else if (result.value === "pi") {
-        await choosePiEnvironment(terminal);
+        await choosePiEnvironment(terminal, { modelsFromMain: true });
       } else if (result.value === "main") {
         const selected = await selectMenu(
           terminal,
@@ -597,13 +597,14 @@ async function chooseHubSettings(
   }
 }
 
-async function choosePiEnvironment(terminal: HubProcessTerminal): Promise<void> {
+/** On a SubHost the Work uses Main's models and sign-ins (card #303), so only Pi packages are managed here. */
+async function choosePiEnvironment(terminal: HubProcessTerminal, options: { modelsFromMain?: boolean } = {}): Promise<void> {
   let notice: string | undefined;
   while (true) {
     let snapshot: PiEnvironmentSnapshot;
     try {
       const { inspectPiEnvironment } = await import("../pi/pi-environment.js");
-      snapshot = await inspectPiEnvironment();
+      snapshot = await inspectPiEnvironment({ modelsFromMain: options.modelsFromMain === true });
     } catch {
       await selectMenu(
         terminal,
@@ -622,18 +623,21 @@ async function choosePiEnvironment(terminal: HubProcessTerminal): Promise<void> 
         ? `${snapshot.diagnostics.length} Pi setup note${snapshot.diagnostics.length === 1 ? "" : "s"} · configuration stays in ${terminalSafe(snapshot.agentDir)}`
         : `Pi configuration · ${terminalSafe(snapshot.agentDir)}`),
       [
-        {
+        ...(options.modelsFromMain ? [{
+          value: "from-main",
+          label: "Models and sign-ins · on Main",
+          description: "Work on this computer uses Main's models; change them on Main",
+        }] : [{
           value: "models",
           label: `Models · ${snapshot.models.length}`,
           description: snapshot.defaultModel
             ? `Default · ${terminalSafe(snapshot.defaultModel.provider)}/${terminalSafe(snapshot.defaultModel.id)}`
             : `${snapshot.providers.length} providers recognized by Pi`,
-        },
-        {
+        }, {
           value: "access",
           label: `Provider access · ${configured} configured`,
           description: "Configure an API key, sign in, or remove saved access through Pi",
-        },
+        }]),
         ...(snapshot.diagnostics.length === 0 ? [] : [{
           value: "diagnostics",
           label: `Setup notes · ${snapshot.diagnostics.length}`,
@@ -646,6 +650,15 @@ async function choosePiEnvironment(terminal: HubProcessTerminal): Promise<void> 
     );
     if (!selected || selected === BACK) return;
     notice = undefined;
+    if (selected === "from-main") {
+      await selectMenu(
+        terminal,
+        "Models and sign-ins",
+        "This computer is a SubHost. Its Work uses the models, API keys and sign-ins set up on Main, and asks Main for them each time; this computer's own Pi model settings and sign-ins are not used. Change them on Main.",
+        [{ value: BACK, label: "Back", description: "Return to Pi" }],
+        "Enter or Esc · back",
+      );
+    }
     if (selected === "models") await choosePiModels(terminal, snapshot);
     if (selected === "access") await choosePiProviderAccess(terminal);
     if (selected === "diagnostics") await showPiDiagnostics(terminal, snapshot);

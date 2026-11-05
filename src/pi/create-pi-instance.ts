@@ -20,6 +20,7 @@ import { PI_SDK_VERSION } from "../version.js";
 import { resolvePiReopenTarget } from "./pi-session-target.js";
 import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerProcessTimeouts } from "./worker-process.js";
+import type { ModelHostPort } from "../model-service/service-process.js";
 
 export interface CreatePiInstanceOptions {
   child?: DockChildStart;
@@ -51,6 +52,8 @@ export interface CreatePiInstanceOptions {
   attachmentHostPort?: InstanceAttachmentHostPort;
   dockToolsEnabled?: boolean;
   workerIncidentRecorder?: WorkerIncidentRecorder;
+  /** Main's model service. Without it the Worker uses this machine's own Pi model configuration. */
+  modelHostPort?: ModelHostPort;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
@@ -88,6 +91,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     dockToolsHostPort,
     attachmentHostPort,
     initialDockToolsEnabled: dockToolsEnabled,
+    ...(options.modelHostPort === undefined ? {} : { modelHostPort: options.modelHostPort }),
     ...(options.name === undefined ? {} : { workName: options.name }),
     ...(options.workerIncidentRecorder === undefined ? {} : { workerIncidentRecorder: options.workerIncidentRecorder }),
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),

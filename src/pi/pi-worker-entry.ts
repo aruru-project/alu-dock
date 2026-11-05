@@ -31,6 +31,8 @@ import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/in
 import { DockToolsBridge } from "./dock-tools-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { mainModelOwner } from "../model-service/owner.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -71,7 +73,15 @@ async function runWorker(): Promise<void> {
     }
     if (signal?.aborted) return Promise.resolve(undefined);
     return new Promise<unknown>((resolveCall, rejectCall) => {
-      const abort = signal && capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); } : undefined;
+      const abort = !signal ? undefined
+        : capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); }
+        // A cancelled question to Main releases its caller at once; the Host cancels it there.
+        : capability === "dock.models" ? (): void => {
+          hostCalls.delete(callId);
+          rejectCall(new Error("Model request cancelled"));
+          void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "dock.models", args: { op: "cancel", callId } }).catch(() => {});
+        }
+        : undefined;
       if (signal && abort) signal.addEventListener("abort", abort, { once: true });
       hostCalls.set(callId, {
         capability,
@@ -116,6 +126,11 @@ async function runWorker(): Promise<void> {
       return result as AttachmentAccessResult;
     },
   } : undefined;
+  // With Main's model service the Work takes its model configuration and credentials from Main and
+  // reads none of this machine's; it still sends and handles its own requests. There is no local fallback.
+  // Each session gets its own runtime, so providers one session's extensions registered do not outlive it.
+  const modelOwner = hostCapabilities.has("dock.models") ? mainModelOwner((args, signal) => callHost("dock.models", args, signal)) : undefined;
+  const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
   dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
     configure: async (action) => {
       if (action === "status") return { enabled: dockToolsBridge!.enabled };
@@ -157,6 +172,7 @@ async function runWorker(): Promise<void> {
       ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
       dockToolsBridge,
       ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
+      ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
     });
   } catch (error) {
     // The Host learns why this Work could not start (an unavailable chosen model, an
@@ -331,7 +347,8 @@ function verifyDockContext(raw: unknown, expected: WorkerIdentity, runtimeGenera
   if (!Array.isArray(value.capabilities) || !value.capabilities.includes("dock.identity")) {
     throw new Error("Dock Worker identity capability was not authorized by Host");
   }
-  const known = new Set<string>(ORDINARY_REVERSE_WORKER_CAPABILITIES);
+  // dock.models is not ordinary: only a Host that offers model access grants it.
+  const known = new Set<string>([...ORDINARY_REVERSE_WORKER_CAPABILITIES, "dock.models"]);
   const capabilities = new Set<ReverseWorkerCapability>();
   for (const capability of value.capabilities) {
     if (typeof capability !== "string" || !known.has(capability)) throw new Error("Host advertised an unknown Worker capability");

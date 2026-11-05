@@ -53,7 +53,7 @@ Pi adapter 通过 SDK 嵌入 runtime 时，Host 必须在 fork 前把当前 Pi p
 
 ## Pi 原生配置与身份
 
-Pi 继续唯一拥有 `~/.pi/agent`（或 `PI_CODING_AGENT_DIR` 指定目录）中的 settings、`models.json`、`auth.json`、packages/extensions 和 `sessions/`。Dock 不创建 Profile、凭据副本、配置投影、导入流程或另一处 Session root。Managed Host 没有调用终端的 shell environment 时，会在启动时从用户 login shell 解析一次 Pi 原生 agent directory，但不保存 Dock 副本；解析结果同时供 inventory 和 Worker 使用。Host 解析出的 Pi `agentDir` 会作为 Pi 自己的环境契约传入 Worker，因此默认 Session 路径、nested Pi 与 `aludock pi:install` 仍指向同一份 Pi 环境；project `.pi`、`.agents`、Project Trust 与 Pi precedence 继续由每个 Worker 原生加载。
+Pi 继续唯一拥有 `~/.pi/agent`（或 `PI_CODING_AGENT_DIR` 指定目录）中的 settings、`models.json`、`auth.json`、packages/extensions 和 `sessions/`；其中模型配置和凭据只用 Main 那一份，见[模型配置与凭据](#模型配置与凭据)。Dock 不创建 Profile、凭据副本、配置投影、导入流程或另一处 Session root。Managed Host 没有调用终端的 shell environment 时，会在启动时从用户 login shell 解析一次 Pi 原生 agent directory，但不保存 Dock 副本；解析结果同时供 inventory 和 Worker 使用。Host 解析出的 Pi `agentDir` 会作为 Pi 自己的环境契约传入 Worker，因此默认 Session 路径、nested Pi 与 `aludock pi:install` 仍指向同一份 Pi 环境；project `.pi`、`.agents`、Project Trust 与 Pi precedence 继续由每个 Worker 原生加载。
 
 本机 Hub 通过 bundled Pi 的 public model/auth API 读取当前 Providers、models 与非秘密 access 状态，并让 Pi 自己执行 API-key login、OAuth login/logout 和 token persistence/refresh。`aludock pi:install <source>` 直接调用 bundled Pi package manager 并写入 Pi 的 global package settings；source 只承诺 Pi Package conventions。`aludock update model` 在 Windows/Linux 都直接调用 bundled Pi 的公开 `ModelRuntime.refresh({ allowNetwork: true, force: true })`，由 Pi 更新自己的持久模型目录；Dock 不复制下载、解析或合并逻辑。现有 Worker 不被 Host 热改配置，用户通过 `/reload` 采用 package/model 环境变化。普通 `/reload` 与插件 `ctx.reload()` 在新插件注册完成、`session_start` 前，调用 Pi 的 `ModelRuntime.refresh({ allowNetwork: false })` 重读本地 `models.json` 与已下载模型目录，再更新当前和 scoped model 引用；不为模型目录刷新访问上游，不主动切换当前模型。`/new` 与 resume 沿 Pi 原有 session replacement 重建本地模型环境，Worker 进程不变。
 
@@ -72,6 +72,16 @@ Pi provider 生成 `workerConfig.systemSelection`：原生 `project-system`/`glo
 Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加载读取固定选中文件并同时返回 custom/default 内容及实际 `source.path`；显式选择覆盖项目 SYSTEM，但 APPEND、context、skills、动态 tool prompt 继续由 Pi 原生组装。读取或校验失败明确失败，不把路径当正文、不回退。Host 不解释这个 workerConfig。配置随 durable catalog/reopen 原样保留，工具重建不查询目录默认；没有配置的旧 Work 保持原生行为。
 
 既有 `resource.get`/`resource.content` 自动使用 loader 的实际 source，所以 Work 读到的是选中的 JSON 或原生 SYSTEM 文件，而不是被覆盖的项目 SYSTEM，也不是最终组装快照。
+
+## 模型配置与凭据
+
+整个集群的模型配置和凭据只在 Main 上（card #303）：Main 的 `models.json`、已保存的模型目录（`models-store.json`）、`auth.json` 和登录。每个 Work 仍用 Pi 自己的代码组装请求、发送、处理回复，只是这些配置和凭据向 Main 要；回复不经过 Main，各 Work 只处理自己的回复。
+
+- **Main 的模型服务**（`src/model-service/`）：Host 监管的独立进程，持有 Main 上 Pi 的 `ModelRuntime`，只回答三个问题：模型配置（`models.json` 原文与已保存目录）、凭据状态（哪些供应商已配置、哪些模型可用）和一次凭据。订阅登录只在这里刷新，Work 拿到的是短期令牌（GitHub Copilot 是换好的 Copilot 令牌和地址），不会拿到刷新令牌；普通 API key 原样给，只在内存里。服务崩溃时 Host 重新拉起，正在进行的回复不受影响。
+- **Worker**：Host 授予 `dock.models` 时，Worker 用 Pi 分叉的 `ModelRuntime.create({ owner })` 建模型运行时（`src/model-service/owner.ts`），不读本机的任何模型文件。Pi 所有取凭据的地方都经过 `getAuth`，包括扩展通过 `ModelRegistry` 自己调模型时，所以一并问 Main；改写请求的 hook 照常在 Worker 里运行。每个 session 新建一个运行时，扩展注册的供应商不会跨 session 残留。Main 在运行时里答复之前，它定义的供应商一律问 Main，不退回本机。
+- **路径**：Worker 只问自己的 Host（`dock.models` 反向调用）；Main 上的 Host 转给模型服务，SubHost 的 Host 经机器连接转给 Main（见 [control](control.md#main-与-subhost)）。问题等服务或连接最多 15 秒，等过一次后立即失败，直到恢复；取消立即放开调用方。
+- **例外**：只由扩展定义、Main 上没有的供应商用扩展自己的凭据；扩展只是给内置供应商或 Main 配置里的供应商加东西，不算。Bedrock、Vertex 的云账号由 Pi 在 Work 所在机器读取，Main 交不出去（用户 2026-11-05 接受）；它们能不能选仍由 Main 的凭据状态决定，所以两边都要配。
+- **机器连接**：Main 对同一台 SubHost 的回答一次发一份，配置的回答接近链路控制队列的上限，而那个队列满了拒绝、不等。SubHost 等一个问题的完整回答最多 120 秒，未答的问题最多 1024 个，回答累计不超过 `MAX_MODEL_ANSWER_BYTES`；断开或停止时未答的问题都失败。
 
 ## Worker 事故记录
 
@@ -179,7 +189,7 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 
 `dock_wait` 只在 Worker 内等待，不经过 Host：`src/pi/child-replies.ts` 记下本 Work 交过任务、还没回复也没停止的子 Work；等待期间这些子 Work 的完成通知直接作为工具结果返回，不再另外送达。有消息排队给这个 Work（用户的或子 Work 的）、用户取消或超时即返回，所以等待不会把用户挡在外面。回复比派活结果先到（子 Work 立刻失败或做完）的子 Work 不记入；取消全部 watch 或关闭 Dock tools 时清空，因为 Host 上的回复 watch 已一起取消。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等子 Work 会白白耗掉轮数。
 
-`dock_models` 的事实由 Worker 读：Host 只返回本机 `child-models.json` 里用户列出的模型（只有 `provider`/`id`，不带用途说明，SubHost 上的 Work 也由本机 Host 回答，不经 Main），Worker 用当前 Pi 的模型和可用模型补上 thinking level（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
+`dock_models` 的事实由 Worker 读：Host 只返回 Main 的 `child-models.json` 里用户列出的模型（只有 `provider`/`id`，不带用途说明；SubHost 上的 Work 由本机 Host 回答，名单向 Main 取），Worker 用当前 Pi 的模型和可用模型补上 thinking level（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
 
 `dock_spawn(withContext:true)` 让子 Work 从父 Work 当前对话的副本开始。请求里只有这个开关，没有会话路径：Host 用私有 `branch_for_child` control 让父 Work 自己的 Worker 用 Pi `createBranchedSession` 把当前分支写成子 Work 目录下的新会话文件（Pi 在文件头记下来源会话），再以这个文件创建子 Work。分叉点在仍有工具调用未返回的那条回复之前，子 Work 不会看到“创建自己”的调用以无结果结束。子 Work 仍用父 Work 为它选的模型。Pi 只为新会话记录模型和 thinking level，所以 adapter 在子 Work 启动后补记一次，reload 时恢复的是子 Work 自己的设置。
 

@@ -56,7 +56,7 @@ InstanceManager 是 Main ID、位置和 instance key 的唯一应用 authority�
 
 Main 对每条转发流沿用 Protocol V2 hello，按 canonical request capability 要求目标 Host 的实际能力。相关联且已验证的 `hello_error` 转成原请求的结构化错误，保留缺失能力明细，经过既有 connection/stream 身份栅栏后只结束该流；不按 Main 的版本猜 SubHost 是否支持，也不把缺能力当机器断线。
 
-每条 logical stream 都有独立的有界串行输入队列和 stream reset；某条 stream 的 backpressure、解析、投影、持久化或客户端输出失败只关闭该 stream，TLS machine link 仍继续处理其他 stream 与 heartbeat。SubHost 的 link liveness 检查不等待 inventory/write 维护任务；Windows 休眠造成旧 I/O 悬挂时，唤醒后的超时检查仍会丢弃半开连接并通过完整 inventory 重连，既有 Registry、Worker、Queue 和 Work 不重启。机器 route 对 `response_transfer` 逐帧复用 canonical Protocol V2 parser，并在 Main identity 投影后继续受同一组 chunk、count 和 aggregate bounds 约束。机器断线只让 Main 的远端目录进入可恢复状态，不停止 SubHost Worker 或已经接受的 Queue。`machine.remove` 是 Main-owned、operation-idempotent 的 trust removal：持久删除 SubHost trust 与 routes 后关闭现有连接，但不停止 SubHost Worker 或 work；重新使用必须再次 join。离线时对 Main entry 执行 stop 只删除 route mapping；成功路由的 stop/forget 则在向客户端发出成功前持久退役该 Main route，同 generation 的迟到 inventory 不能恢复它，更新 generation 可重新取得新的 Main identity。普通转发不在 Main 缓存或重放 mutation；Main-owned global ensure 保留 Main operation identity，转发时仍沿用原 operation ID。SubHost 的全局 Agent Dock tools 使用同一上游 authority，并以 Main source ID 执行；上游不可用时 list/inspect/watch/create/send 立即失败。`dock_create` 省略 Machine 时回到 source SubHost，提供唯一 Machine display name 时由 Main 解析到既有 `hostId` placement。`dock_deliver` 始终由 source SubHost 在本机登记，不依赖 Main 连接。
+每条 logical stream 都有独立的有界串行输入队列和 stream reset；某条 stream 的 backpressure、解析、投影、持久化或客户端输出失败只关闭该 stream，TLS machine link 仍继续处理其他 stream 与 heartbeat。SubHost 的 link liveness 检查不等待 inventory/write 维护任务；Windows 休眠造成旧 I/O 悬挂时，唤醒后的超时检查仍会丢弃半开连接并通过完整 inventory 重连，既有 Registry、Worker、Queue 和 Work 不重启。机器 route 对 `response_transfer` 逐帧复用 canonical Protocol V2 parser，并在 Main identity 投影后继续受同一组 chunk、count 和 aggregate bounds 约束。机器断线只让 Main 的远端目录进入可恢复状态，不停止 SubHost Worker 或已经接受的 Queue。`machine.remove` 是 Main-owned、operation-idempotent 的 trust removal：持久删除 SubHost trust 与 routes 后关闭现有连接，但不停止 SubHost Worker 或 work；重新使用必须再次 join。离线时对 Main entry 执行 stop 只删除 route mapping；成功路由的 stop/forget 则在向客户端发出成功前持久退役该 Main route，同 generation 的迟到 inventory 不能恢复它，更新 generation 可重新取得新的 Main identity。普通转发不在 Main 缓存或重放 mutation；Main-owned global ensure 保留 Main operation identity，转发时仍沿用原 operation ID。SubHost 上 Work 的模型配置和凭据经同一条机器连接向 Main 的模型服务取（见 [runtime](runtime.md#模型配置与凭据)）：`machine_model_request`/`machine_model_cancel` 由 SubHost 发出，Main 先用 `parseMachineModelQuestion` 检查再交给模型服务或 Main 的模型列表，回答按机器记录的上限切成有序 base64 `machine_model_answer` 分段（总长受 `MAX_MODEL_ANSWER_BYTES` 约束），失败为 `machine_model_failure`。问题最多等 15 秒连接（SubHost 启动时 Work 先于连接恢复），连接断开时未答的问题失败，Main 也停止回答那条连接上的问题。SubHost 的全局 Agent Dock tools 使用同一上游 authority，并以 Main source ID 执行；上游不可用时 list/inspect/watch/create/send 立即失败。`dock_create` 省略 Machine 时回到 source SubHost，提供唯一 Machine display name 时由 Main 解析到既有 `hostId` placement。`dock_deliver` 始终由 source SubHost 在本机登记，不依赖 Main 连接。
 
 ## Protocol V2
 
@@ -282,15 +282,15 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 
 ## 模型隐藏列表（`model.visibility.v1`）
 
-每台 Host（Main 与各 SubHost）持有自己的隐藏列表，按 Pi 的 `provider + id` 精确到单个模型。它只是选择列表的显示过滤，不是禁用：
+隐藏列表只有 Main 一份（card #303），按 Pi 的 `provider + id` 精确到单个模型。它只是选择列表的显示过滤，不是禁用：
 
-- 拥有 Worker 的 Host 在 `model.list` 把 Worker 结果返回前删去隐藏条目，`total` 同步减去，响应形状不变，所有客户端不改就搜不到它们。Main 把 SubHost Work 的 `model.list` 原样转给 SubHost，因此各机器只用自己的列表。
+- 拥有 Worker 的 Host 在 `model.list` 把 Worker 结果返回前删去隐藏条目，`total` 同步减去，响应形状不变，所有客户端不改就搜不到它们。Main 把 SubHost Work 的 `model.list` 原样转给 SubHost，SubHost 经机器连接向 Main 取隐藏列表再过滤（`SubHostModelLists`），所以各机器的 Work 都按 Main 的列表显示。
 - `model.set`、Pi 自己的 scoped models 与 extension 的模型调用不受影响；当前模型即使被隐藏，snapshot 仍照常报告它。
-- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是这台机器新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要该机器上有 Work。官方客户端新建 Work 第一屏的模型选择读的就是它（去掉 `hidden`），并在客户端按连接 + 机器缓存、由用户手动刷新，Host 不另设缓存；读不到或旧 Host 没有这项能力时只剩「Pi 默认」，不阻止创建。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。同一 Host 同时只运行一个这样的进程，并发读取共用结果；整次读取在 20 秒内给出结果或错误，留在客户端 30 秒请求期限之内。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
+- `model.visibility.get {hostId?}` → `{models,total,truncated,hidden,fileProblem?}`：`models` 是新建 Work 时可选的模型，和 Work 的 `model.list` 同一生产者、同一上限；不需要有 Work。SubHost 收到时转问 Main，返回 Main 的可选模型和隐藏列表，`set` 同样写 Main 的列表。官方客户端新建 Work 第一屏的模型选择读的就是它（去掉 `hidden`），并在客户端按连接 + 机器缓存、由用户手动刷新，Host 不另设缓存；读不到或旧 Host 没有这项能力时只剩「Pi 默认」，不阻止创建。Pi adapter 用一个短命进程按 Worker 的方式加载 Pi（用户 login shell 环境、全局 extensions），extension 代码不进入 Host 进程；只由项目级 extension 提供的模型不在其中。同一 Host 同时只运行一个这样的进程，并发读取共用结果；整次读取在 20 秒内给出结果或错误，留在客户端 30 秒请求期限之内。`fileProblem` 说明手工编辑的文件为何不可用，此时 `hidden` 为空且该机器暂不隐藏任何模型。读不到可选模型时返回 `model_catalog_unavailable`。
 - `model.visibility.set {operationId,hostId?,hidden}` → `{hidden}`：整份替换，去重并排序后原子写入，最后一次保存为准；沿用 operation ledger。写入失败返回 `model_visibility_write_failed`，原列表不变。
 - 两条请求都是 directory-scoped，按可选 `hostId` 复用 InstanceManager 的机器路由；Main 向目标 SubHost 要求同一能力，旧 SubHost 得到 `capability_missing`。模型列表上限（`MAX_MODEL_LIST_BYTES` 等）与 `hidden` 的序列化上限 `MAX_HIDDEN_MODELS_BYTES` 都定义在 `protocol.ts`，后者取一条控制记录减去完整模型列表后剩余的空间；请求、响应和文件共用同一 parser。
 
-列表存为 Host 私有状态目录下的普通 JSON `model-visibility.json`（位置与格式见 [local-install](../local-install.md#隐藏的模型)）。Host 每次返回模型列表时现读，人或 Agent 直接改文件无需重启。没有持久状态目录的 Host 不提供这项能力，模型列表原样返回。
+列表存为 Main 的 Host 私有状态目录下的普通 JSON `model-visibility.json`（位置与格式见 [local-install](../local-install.md#隐藏的模型)）。Host 每次返回模型列表时现读，人或 Agent 直接改文件无需重启。没有持久状态目录的 Host 不提供这项能力，模型列表原样返回。
 
 ## 创建前 system 选择
 
@@ -334,7 +334,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/instance-manager.ts`：唯一 instance identity/location 应用入口与 local/global profile。
 - `src/control/dock-registry.ts`：本机原生 instance 与 catalog lifecycle。
 - `src/control/native-collaboration.ts`：本机 Host 与 Main 共用的子 Work 规则：只能给父 Work 发消息、开子 Work、发消息并登记回复。
-- `src/control/child-models.ts`：本机 `child-models.json`，给 Agent 看的子 Work 模型名单。
+- `src/control/child-models.ts`：Main 的 `child-models.json`，给 Agent 看的子 Work 模型名单；SubHost 经 `SubHostModelLists` 读 Main 的。
 - `src/control/stream-link.ts`：一条连接上多条 Protocol V2 流的框架——虚拟 socket、流表与输入上限、分道输出写入器、客户端链路（`transport.multiplex.v1`）的 ping/pong 与空闲关闭；机器链路复用同一套。
 - `src/control/machine-transport.ts`：InstanceManager 的 persistent remote-directory/transport backend 与 multiplexed Machine connection；不承担第二套客户端请求分类。
 - `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。
@@ -344,7 +344,8 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/remote-access-server.ts`：TLS admission、pairing bootstrap、listener reconfiguration 与 revocation。
 - `src/control/remote-pairing.ts`：客户端可复用的 pairing wire types，以及 SRP、identity encryption 和 certificate proof helpers。
 - `src/control/attachment-storage-state.ts`：本机 storage directory 设置。
-- `src/control/model-visibility.ts`：本机模型隐藏列表文件与 `model.list` 过滤；可选模型由 `src/pi/pi-model-catalog.ts` 的短命 Pi 进程提供。
+- `src/control/model-visibility.ts`：Main 的模型隐藏列表文件与 `model.list` 过滤；可选模型由 `src/pi/pi-model-catalog.ts` 的短命 Pi 进程提供。
+- `src/model-service/`：Main 的模型服务进程（配置与凭据）、Host 对它的监管，以及 Worker 侧把 Main 当作 Pi 模型配置的所有者（见 [runtime](runtime.md#模型配置与凭据)）。
 - `src/control/attachment-service.ts`：stream sink、hash verification、manifest、dedupe 与 Agent path resolution。
 - `src/core/instance-deliverables.ts`：instance-lifetime 临时交付 registry、path-free DTO 与 producer bounds。
 - `src/core/source-file.ts`：文件来源 canonicalize/stat/open/unchanged check；`src/control/published-file-reader.ts`：Host 对既有 `file.read` 分页接口的字节读取。

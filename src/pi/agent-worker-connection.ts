@@ -6,6 +6,8 @@ import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js"
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentModelStateObservation, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
+import type { ModelAuthRequest } from "../model-service/protocol.js";
+import type { ModelHostPort } from "../model-service/service-process.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
 import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
@@ -35,6 +37,8 @@ export interface CreateAgentWorkerConnectionOptions {
   onWorkerSpawn?: (pid: number) => void;
   dockToolsHostPort: DockToolsHostPort;
   attachmentHostPort: InstanceAttachmentHostPort;
+  /** Main's model service; with it the Worker takes its model configuration and credentials from Main. */
+  modelHostPort?: ModelHostPort;
   initialDockToolsEnabled: boolean;
   workName?: string;
   workerIncidentRecorder?: WorkerIncidentRecorder;
@@ -49,6 +53,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   private readonly listeners = new Set<(event: AgentEvent) => void>();
   private readonly pending = new Map<string, PendingCall>();
   private readonly uiAbort = new Map<string, AbortController>();
+  private readonly modelCalls = new Map<string, AbortController>();
   private readonly process: PiWorkerProcess;
   private readonly sender: OrderedWorkerSender;
   private readonly receiver: WorkerFrameReceiver;
@@ -72,6 +77,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     this.identity = identity;
     this.expectedGeneration = identity.runtimeGeneration;
     if (!options.initialDockToolsEnabled) this.reverseCapabilities.delete("dock.tools");
+    if (options.modelHostPort) this.reverseCapabilities.add("dock.models");
     this.process = new PiWorkerProcess({
       identity,
       init: options.init,
@@ -155,6 +161,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       try { cleanup = await this.control({ type: "dispose" }) as AgentCleanupResult; }
       catch { cleanup.cleanupErrors.push("dispose: graceful Worker cleanup failed; supervisor terminated it"); }
     }
+    this.abortModelCalls();
     this.sender.close();
     try { await this.process.terminate(); }
     finally { this.rejectPending(new AgentWorkerUnavailableError("Pi worker was disposed")); }
@@ -256,6 +263,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
         else this.reverseCapabilities.delete("dock.tools");
       } else if (capability === "dock.tools") {
         result = await this.options.dockToolsHostPort.invokeDockTool(this.identity.instanceId, args.request as DockToolsRequest);
+      } else if (capability === "dock.models") {
+        result = await this.handleModelCall(callId, args);
       } else {
         result = await this.options.attachmentHostPort.accessAttachments(this.identity.instanceId, args.request as AttachmentAccessRequest);
       }
@@ -263,6 +272,27 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     } catch (error) {
       await this.sender.sendEnvelope({ kind: "response", callId, ok: false, error: encodeWorkerError(error) }).catch(() => {});
     }
+  }
+
+  /** Relays one question to Main's model service; the Host does not read the questions or answers. */
+  private async handleModelCall(callId: string, args: Record<string, unknown>): Promise<unknown> {
+    const port = this.options.modelHostPort;
+    if (!port) throw new Error("This Host does not offer model access");
+    if (args.op === "cancel") { this.modelCalls.get(args.callId as string)?.abort(); return null; }
+    const controller = new AbortController();
+    this.modelCalls.set(callId, controller);
+    try {
+      if (args.op === "configuration") return await port.configuration(controller.signal);
+      if (args.op === "auth_state") return await port.authState(controller.signal);
+      return await port.auth(args.request as ModelAuthRequest, controller.signal);
+    } finally {
+      this.modelCalls.delete(callId);
+    }
+  }
+
+  private abortModelCalls(): void {
+    for (const controller of this.modelCalls.values()) controller.abort();
+    this.modelCalls.clear();
   }
 
   private async handleUiCall(callId: string, capability: UiCapability, args: Record<string, unknown>): Promise<void> {
@@ -313,6 +343,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   private failTransport(error: unknown): void {
     if (this.unavailable) return;
     this.unavailable = true;
+    this.abortModelCalls();
     this.sender.close();
     this.rejectReady(error);
     void this.finishTransportLoss(error);
