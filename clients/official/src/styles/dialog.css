@@ -291,7 +291,8 @@
 .session-trust { position: absolute; z-index: 5; inset: 0; display: grid; align-content: center; justify-items: center; padding: 20px; text-align: center; background: rgb(var(--alu-bg-rgb) / .96); }
 .session-trust p { color: var(--alu-text-dim); font: var(--alu-meta-size)/1.6 var(--font-reading); }
 .session-trust > div { display: flex; gap: 8px; }
-.session-trust button:not(.session-primary) { min-height: 42px; padding: 0 12px; color: var(--alu-text-dim); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; }
+.session-trust button { min-height: 42px; padding: 0 12px; cursor: pointer; border-radius: 8px; }
+.session-trust button:not(.session-primary) { color: var(--alu-text-dim); background: var(--alu-surface); border: 1px solid var(--alu-border-light); }
 @media (max-width: 640px) {
   .session-primary { min-height: 48px; }
 }

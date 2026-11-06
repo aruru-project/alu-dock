@@ -107,7 +107,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   font-weight: 650;
   transition: border-color 0.15s, background 0.15s;
 }
-.alu-new-work-btn:hover { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
+.alu-new-work-btn:hover:not(:disabled) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .alu-sidebar-refresh,
 .alu-sidebar-close {
   display: grid;
@@ -175,9 +175,9 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   padding: 1px 6px;
   border: 1px solid var(--alu-border);
   border-radius: 5px;
-  background: var(--alu-active);
+  background: var(--alu-tag-bg);
   color: var(--alu-highlight);
-  font: inherit; font-family: var(--font-mono);
+  font: inherit;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

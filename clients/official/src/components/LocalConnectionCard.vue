@@ -82,14 +82,14 @@ watch(() => [props.busy, props.error] as const, ([busy, error]) => {
 .local-connection-copy { display: grid; min-width: 0; gap: 3px; }
 .local-connection-copy strong { color: var(--alu-text); font-size: var(--alu-meta-size); }
 .local-connection-copy small { color: var(--alu-text-muted); font: var(--alu-micro-size)/1.4 var(--font-reading); }
-.local-connection-copy code { overflow: hidden; color: var(--alu-local-endpoint-text); font: inherit; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.local-connection-copy code { overflow: hidden; color: var(--alu-local-endpoint-text); font: inherit; text-overflow: ellipsis; white-space: nowrap; }
 .local-connection-actions { display: flex; align-items: center; gap: 6px; }
 .local-connection-config { display: grid; width: 34px; height: 34px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-text-dim); place-items: center; }
 .local-connection-config:hover { color: var(--alu-success); border-color: var(--alu-success-border-strong); }
 .local-connection-config:disabled { cursor: default; opacity: .45; }
 .local-endpoint-editor { display: grid; grid-column: 1 / -1; gap: 8px; padding-top: 10px; border-top: 1px solid var(--alu-border); }
 .local-endpoint-editor label { display: grid; gap: 5px; color: var(--alu-text-dim); font-size: var(--alu-micro-size); }
-.local-endpoint-editor input { width: 100%; height: 36px; padding: 0 10px; color: var(--alu-text); font: inherit; font-family: var(--font-mono); background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; outline: none; }
+.local-endpoint-editor input { width: 100%; height: 36px; padding: 0 10px; color: var(--alu-text); font: inherit; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; outline: none; }
 .local-endpoint-editor input:focus { border-color: var(--alu-success); box-shadow: 0 0 0 2px rgb(var(--alu-success-rgb) / .1); }
 .local-endpoint-editor p { margin: 0; color: var(--alu-text-muted); font: var(--alu-micro-size)/1.5 var(--font-reading); }
 .local-endpoint-editor footer { display: flex; justify-content: flex-end; gap: 7px; }

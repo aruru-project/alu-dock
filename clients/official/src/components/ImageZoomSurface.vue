@@ -209,7 +209,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', handleResize))
   border-radius: 10px;
   color: var(--alu-image-control-text);
   background: var(--alu-image-control-bg);
-  box-shadow: var(--alu-float-shadow);
+  box-shadow: var(--alu-image-control-shadow);
 }
 .alu-image-zoom-controls button {
   display: grid;

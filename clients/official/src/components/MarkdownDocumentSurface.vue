@@ -154,7 +154,6 @@ async function copySource() {
   border: 0;
   outline: none;
   background: var(--alu-bg);
-  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.65;
   tab-size: 2;

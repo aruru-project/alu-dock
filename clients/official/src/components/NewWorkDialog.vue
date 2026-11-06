@@ -662,10 +662,11 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .directory-confirm > button { flex-shrink: 0; min-height: 40px; }
 .system-option { display: flex; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid var(--alu-border); }
 .system-option .ui-dialog-option { flex: 1; min-width: 0; border-bottom: 0; }
-.system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-active); }
+.system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-highlight-bg); }
+.system-option .ui-dialog-option[aria-pressed="true"] .ui-dialog-option-marker { color: var(--alu-highlight); }
 .system-confirm { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
 .system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
-.system-confirm input { accent-color: var(--alu-accent); }
+.system-confirm input { accent-color: var(--alu-highlight); }
 .new-work-dialog > .resource-document { flex: 1; min-height: 0; }
 .alu-dialog-error > span { display: block; }
 /* Leaves room under the first-screen selectors for their open menus, which the dialog otherwise clips. */

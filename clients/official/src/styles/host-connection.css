@@ -6,7 +6,7 @@
 .pairing-card-title strong { font-size: 13px; }
 .pairing-card-title small { color: var(--alu-text-muted); font: var(--alu-meta-size)/1.5 var(--font-reading); }
 .pairing-card label { display: grid; gap: 6px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
-.pairing-card input { width: 100%; height: 39px; padding: 0 11px; color: var(--alu-text); font: inherit; font-family: var(--font-mono); background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; outline: none; }
+.pairing-card input { width: 100%; height: 39px; padding: 0 11px; color: var(--alu-text); font: inherit; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; outline: none; }
 .pairing-card input:focus { border-color: var(--alu-accent); box-shadow: 0 0 0 2px rgb(var(--alu-accent-rgb) / .09); }
 .pairing-card input:disabled { opacity: .55; }
 .pairing-card .pairing-field-hint { color: var(--alu-text-muted); font: var(--alu-micro-size)/1.45 var(--font-reading); }

@@ -496,5 +496,5 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 @media (max-width: 1399px) {
   .alu-nav-files { width: 44px; height: 44px; border-radius: 11px; }
 }
-.alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: var(--alu-on-success); border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-success); font: inherit; font-family: var(--font-mono); }
+.alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: var(--alu-on-success); border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-success); font: inherit; }
 </style>

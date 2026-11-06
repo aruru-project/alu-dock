@@ -191,7 +191,7 @@ onMounted(() => {
   white-space: nowrap;
 }
 .workspace-command-mode button + button { border-left: 1px solid var(--alu-border); }
-.workspace-command-mode button.selected { color: var(--alu-text); background: var(--alu-hover); }
+.workspace-command-mode button.selected { color: var(--alu-highlight); background: var(--alu-highlight-bg); }
 .workspace-command-mode button:hover:not(.selected) { color: var(--alu-text); }
 .workspace-command-run { color: var(--alu-highlight); border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); font-weight: 700; }
 .workspace-command-run:hover:not(:disabled) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }

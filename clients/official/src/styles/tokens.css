@@ -1,10 +1,7 @@
 /* ── Design Tokens ── */
 :root {
-  /* 字体：界面、等宽代码、长段阅读 */
-  --font-ui: 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
-  --font-mono: 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
+  font-family: 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
   --font-reading: 'Noto Sans SC', system-ui, sans-serif;
-  font-family: var(--font-ui);
   --alu-nav-height:     68px;
   /* 外壳文字的字号阶梯（侧栏、设置、面板、顶栏；会话正文不用）：
      手机和笔记本取下限，2K 及以上取上限。ui 是可交互项和主要文字，meta 是路径/说明/时间，
@@ -51,7 +48,8 @@
   --alu-surface: #111828; /* 输入框、卡片、窗口标题栏 */
   --alu-surface-rgb: 17 24 40;
   --alu-hover: #1a2236; /* 悬停、按下 */
-  --alu-active: #1c2438; /* 按下或选中的底、行内代码、表头 */
+  --alu-active: #1c2438; /* 按下或选中的底 */
+  --alu-tag-bg: #1c2438; /* 小标签的底 */
   --alu-nav-bg: #0c1020; /* 顶栏和输入区 */
   --alu-nav-border: #1a2436;
   --alu-control-bg: rgba(20, 28, 46, 0.8); /* 按钮和选择器的底 */
@@ -96,8 +94,8 @@
   --alu-border-focus: #3c4c62;
 
   /* 文字
-     muted 是要读的次要信息（路径、说明、时间），面板底色上 ≈4.8:1；faint 只给装饰和禁用态，≈2.7:1。
-     两者都不能低于此，2K 屏 100% 缩放下会看不清。 */
+     muted 是要读的次要信息（路径、说明、时间），面板底色上 ≈4.8:1；faint ≈2.7:1，用于装饰、禁用态，
+     也有少量最次要的状态文字（如工作列表里的状态）。两者都不能低于此，2K 屏 100% 缩放下会看不清。 */
   --alu-text: #dce8f4;
   --alu-text-dim: #8898b0;
   --alu-text-dim-rgb: 136 152 176;
@@ -116,7 +114,9 @@
   --alu-accent-hover-text: #dff8ff;
   --alu-focus-ring: 0 0 0 2px var(--alu-bg), 0 0 0 4px var(--alu-accent); /* 键盘焦点 */
 
-  /* 突出：选中项、主要按钮、输入焦点、命令提示符 */
+  /* 突出：选中项、主要按钮、输入焦点、命令提示符
+     选中项指已经选定的那一项；键盘光标停着的项（命令中心、输入建议、Session Tree 里待切换的节点）不算，
+     用 hover 或 accent。发送键有自己的一组颜色。 */
   --alu-highlight: #f472b6;
   --alu-highlight-rgb: 244 114 182;
   --alu-highlight-bg: #1e0f20;
@@ -146,6 +146,7 @@
   --alu-success-glow: rgba(52, 211, 153, 0.6);
   --alu-on-success: #07101d;
   --alu-running: #34d399; /* Work 正在运行 */
+  --alu-running-border: #245d57;
   --alu-running-glow: rgba(52, 211, 153, 0.45);
   --alu-idle: rgba(52, 211, 153, 0.45); /* Work 空闲 */
   --alu-waiting: #f472b6; /* 等你回答 */
@@ -175,6 +176,8 @@
   --alu-bubble-border: #253050;
   --alu-thinking-line: #1c3040;
   --alu-code-inline: #f472b6; /* 行内代码的字 */
+  --alu-code-inline-bg: #1c2438;
+  --alu-table-header-bg: #1c2438;
   --alu-quote-line: #f472b6;
   --alu-quote-bg: #1e0f20;
   --alu-code-block-bg: #0a0f1e;
@@ -211,9 +214,19 @@
   --alu-scrim: rgba(4, 6, 13, 0.82); /* 弹窗、命令中心、工作列表、工作区 */
   --alu-scrim-light: rgba(4, 6, 13, 0.72); /* 设置窗口、文件列表、扩展对话框、手机上的 Dock Tools */
   --alu-scrim-strong: rgba(4, 6, 13, 0.92); /* 手机上的弹窗、图片查看 */
-  --alu-dialog-shadow: 0 28px 90px rgba(0, 0, 0, 0.7); /* 弹窗、大窗口、Dock Tools */
-  --alu-popover-shadow: 0 18px 48px rgba(0, 0, 0, 0.5); /* 下拉菜单、命令建议、连接状态详情 */
-  --alu-float-shadow: 0 8px 24px rgba(2, 6, 18, 0.4); /* 浮动按钮、提示、拖动中的项 */
+  --alu-dialog-shadow: 0 28px 90px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(244, 114, 182, 0.05); /* 弹窗、命令中心 */
+  --alu-settings-shadow: 0 28px 80px rgba(0, 0, 0, .5); /* 设置窗口、连接与配对 */
+  --alu-workspace-shadow: 0 28px 90px rgba(0, 0, 0, .62);
+  --alu-image-viewer-shadow: 0 30px 100px rgba(0, 0, 0, .8);
+  --alu-dock-tools-shadow: 0 24px 72px rgba(0, 0, 0, .66), 0 0 0 1px rgba(115, 183, 255, .05);
+  --alu-panel-shadow: 0 18px 60px rgb(0 0 0 / 0.45); /* 扩展对话框 */
+  --alu-menu-shadow: 0 18px 42px rgba(0, 0, 0, 0.48); /* 下拉菜单 */
+  --alu-suggest-shadow: 0 18px 60px rgba(0, 0, 0, 0.62); /* 命令建议 */
+  --alu-popover-shadow: 0 12px 36px rgba(2, 6, 18, .4); /* 连接状态详情 */
+  --alu-float-shadow: 0 8px 24px rgba(2, 6, 18, .34); /* 回到底部、中止按钮 */
+  --alu-image-control-shadow: 0 6px 20px rgba(0, 0, 0, .45); /* 图片查看的按钮 */
+  --alu-toast-shadow: 0 8px 28px rgba(0, 0, 0, .42);
+  --alu-drag-shadow: 0 12px 30px rgba(2, 6, 18, 0.5); /* 拖动中的快捷按钮 */
   --alu-sidebar-shadow: 4px 0 24px rgba(0, 0, 0, .5);
   --alu-delivery-shadow: -18px 0 60px rgba(0, 0, 0, .5);
   --alu-option-current-bg: rgba(30, 15, 32, 0.7); /* 列表里的当前项 */

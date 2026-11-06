@@ -113,7 +113,7 @@ function modeLabel(mode: QuickButtonMode) {
 .quick-buttons-list { display: grid; gap: 4px; margin: 6px 0 0; padding: 0 10px; list-style: none; }
 .quick-buttons-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 2px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); }
 .quick-buttons-item.is-shifting { transition: transform 0.15s ease; }
-.quick-buttons-item.is-dragging { position: relative; z-index: 2; border-color: var(--alu-highlight-border); box-shadow: var(--alu-float-shadow); }
+.quick-buttons-item.is-dragging { position: relative; z-index: 2; border-color: var(--alu-highlight-border); box-shadow: var(--alu-drag-shadow); }
 /* 把手：按在这里就开始拖，手指在行的其他地方滑动仍是滚动。 */
 .quick-buttons-grip { display: inline-grid; width: 30px; height: 44px; flex: 0 0 auto; place-items: center; border-radius: 7px; color: var(--alu-text-faint); cursor: grab; touch-action: none; }
 .quick-buttons-grip:hover, .quick-buttons-grip:focus-visible { outline: none; background: var(--alu-hover); color: var(--alu-text); }

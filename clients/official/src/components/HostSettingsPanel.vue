@@ -139,16 +139,16 @@ onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
 .endpoint-row small.test-failure { color: var(--alu-danger); }
 .endpoint-row.current .endpoint-meta { color: var(--alu-success); }
 .endpoint-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
-.endpoint-actions button { min-height: 29px; padding: 5px 8px; color: var(--alu-text-dim); font: inherit; font-family: var(--font-ui); cursor: pointer; background: transparent; border: 1px solid var(--alu-border-light); border-radius: 7px; }
+.endpoint-actions button { min-height: 29px; padding: 5px 8px; color: var(--alu-text-dim); font: inherit; cursor: pointer; background: transparent; border: 1px solid var(--alu-border-light); border-radius: 7px; }
 .endpoint-actions button:hover:not(:disabled) { color: var(--alu-accent); border-color: rgb(var(--alu-accent-rgb) / .35); }
 .endpoint-actions button:disabled { cursor: default; opacity: .42; }
 .endpoint-actions .endpoint-delete { display: grid; width: 30px; padding: 0; color: var(--alu-text-muted); border-color: transparent; place-items: center; }
-.endpoint-actions .endpoint-delete:hover:not(:disabled) { color: var(--alu-danger); background: rgb(var(--alu-danger-rgb) / .07); }
+.endpoint-actions .endpoint-delete:hover:not(:disabled) { color: var(--alu-danger); border-color: rgb(var(--alu-danger-rgb) / .35); background: rgb(var(--alu-danger-rgb) / .07); }
 .endpoint-form { padding: 14px; margin-top: 16px; background: rgb(var(--alu-bg-raised-rgb) / .65); border: 1px solid var(--alu-border); border-radius: 11px; }
 .endpoint-form > div:first-child p { margin: -2px 0 12px; color: var(--alu-text-muted); font: var(--alu-meta-size)/1.5 var(--font-reading); }
 .endpoint-fields { display: grid; grid-template-columns: 1fr 120px; gap: 9px; }
 .endpoint-fields label { display: grid; gap: 5px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
-.endpoint-fields input { width: 100%; height: 35px; padding: 0 9px; color: var(--alu-text); font: inherit; font-family: var(--font-mono); background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 7px; outline: none; }
+.endpoint-fields input { width: 100%; height: 35px; padding: 0 9px; color: var(--alu-text); font: inherit; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 7px; outline: none; }
 .endpoint-fields .endpoint-label { grid-column: 1 / -1; }
 .endpoint-form footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
 .endpoint-form footer > span { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font: var(--alu-micro-size)/1.4 var(--font-reading); }
@@ -245,7 +245,7 @@ onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
 }
 .host-choice-main:disabled { cursor: default; opacity: 1; }
 .host-choice-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--alu-text-faint); }
-.host-choice.active .host-choice-dot { background: var(--alu-success); box-shadow: 0 0 7px var(--alu-running-glow); }
+.host-choice.active .host-choice-dot { background: var(--alu-success); box-shadow: 0 0 7px var(--alu-success-glow); }
 .host-choice-copy { display: grid; min-width: 0; gap: 3px; }
 .host-choice-copy strong,
 .host-choice-copy small {
@@ -254,7 +254,7 @@ onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
   white-space: nowrap;
 }
 .host-choice-copy strong { color: var(--alu-text); font-size: var(--alu-meta-size); font-weight: 650; }
-.host-choice-copy small { color: var(--alu-text-muted); font: inherit; font-family: var(--font-mono); }
+.host-choice-copy small { color: var(--alu-text-muted); font: inherit; }
 .host-choice-current { padding: 2px 5px; border-radius: 5px; background: rgb(var(--alu-highlight-rgb) / .1); color: var(--alu-highlight); font-size: var(--alu-micro-size); }
 .host-choice-delete {
   display: grid;
@@ -318,7 +318,7 @@ onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
 .local-connection-summary-icon { display: grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 9px; color: var(--alu-success); background: rgb(var(--alu-success-rgb) / .09); }
 .local-connection-summary > div { display: grid; min-width: 0; flex: 1; gap: 4px; }
 .local-connection-summary strong { color: var(--alu-text); font-size: var(--alu-meta-size); }
-.local-connection-summary p { min-width: 0; margin: 0; overflow: hidden; color: var(--alu-text-muted); font: inherit; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.local-connection-summary p { min-width: 0; margin: 0; overflow: hidden; color: var(--alu-text-muted); font: inherit; text-overflow: ellipsis; white-space: nowrap; }
 .host-section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
 .host-section-heading h3 { margin: 0 0 4px; color: var(--alu-text); font-size: var(--alu-ui-size); }
 .host-section-heading .endpoint-order-note { margin: 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }

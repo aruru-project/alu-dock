@@ -518,7 +518,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--alu-border);
   border-radius: 15px;
   background: var(--alu-window-bg);
-  box-shadow: var(--alu-dialog-shadow);
+  box-shadow: var(--alu-workspace-shadow);
 }
 .workspace-header {
   display: flex;
@@ -608,7 +608,7 @@ onBeforeUnmount(() => {
 .workspace-primary-button,
 .workspace-secondary-button { min-height: 38px; padding: 0 14px; font-size: var(--alu-meta-size); }
 .workspace-primary-button { color: var(--alu-highlight); border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); font-weight: 700; }
-.workspace-primary-button:hover { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
+.workspace-primary-button:hover:not(:disabled) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .workspace-progress { width: min(360px, 75%); height: 5px; overflow: hidden; border-radius: 5px; background: var(--alu-border); }
 .workspace-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--alu-accent), var(--alu-brand)); transition: width .18s ease; }
 .workspace-text-preview {
@@ -628,7 +628,7 @@ onBeforeUnmount(() => {
 .workspace-image-preview :deep(.alu-image-zoom-stage) { width: 100%; height: 100%; }
 .workspace-preview-state.error strong,
 .workspace-preview-state.error p { color: var(--alu-danger); }
-.workspace-save-status { position: absolute; right: 14px; bottom: 14px; max-width: calc(100% - 28px); padding: 9px 12px; color: var(--alu-text); border: 1px solid var(--alu-accent-border); border-radius: 8px; background: var(--alu-save-status-bg); box-shadow: var(--alu-float-shadow); font-size: var(--alu-micro-size); }
+.workspace-save-status { position: absolute; right: 14px; bottom: 14px; max-width: calc(100% - 28px); padding: 9px 12px; color: var(--alu-text); border: 1px solid var(--alu-accent-border); border-radius: 8px; background: var(--alu-save-status-bg); box-shadow: var(--alu-toast-shadow); font-size: var(--alu-micro-size); }
 .workspace-mobile-back { display: none; }
 .workspace-fade-enter-active,
 .workspace-fade-leave-active { transition: opacity .16s ease; }

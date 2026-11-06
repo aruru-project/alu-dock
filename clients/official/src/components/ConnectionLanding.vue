@@ -243,7 +243,7 @@ async function copyDiagnostic(text: string) {
   border-left: 2px solid var(--alu-danger);
   background: rgb(var(--alu-danger-rgb) / 0.06);
   color: var(--alu-danger);
-  font: inherit; font-family: var(--font-mono);
+  font: inherit;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -284,7 +284,7 @@ async function copyDiagnostic(text: string) {
 }
 .alu-work-state-primary:focus-visible { box-shadow: var(--alu-focus-ring); }
 .alu-work-state-primary:disabled { cursor: not-allowed; }
-.alu-work-state-primary:hover {
+.alu-work-state-primary:hover:not(:disabled) {
   color: var(--alu-highlight-hover-text);
   border-color: var(--alu-highlight-hover-border);
   background: var(--alu-highlight-hover-bg);

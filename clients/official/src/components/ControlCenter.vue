@@ -792,7 +792,7 @@ function isCurrentModel(model: ModelInfo) {
   font-size: var(--alu-micro-size);
   line-height: 1.3;
 }
-.alu-project-status-badge.is-running { border-color: var(--alu-success-border); color: var(--alu-running); }
+.alu-project-status-badge.is-running { border-color: var(--alu-running-border); color: var(--alu-running); }
 .alu-project-status-badge.is-branch { border-color: var(--alu-accent-border); color: var(--alu-accent); }
 .alu-project-status-section {
   padding: 12px 14px;
@@ -1032,7 +1032,7 @@ function isCurrentModel(model: ModelInfo) {
   border-radius: 9px;
   background: var(--alu-command-output-bg);
   color: var(--alu-text-muted);
-  font: inherit; font-family: var(--font-mono);
+  font: inherit;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

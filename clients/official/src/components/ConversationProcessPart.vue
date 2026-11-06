@@ -173,14 +173,14 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--alu-text-dim);
-  font: inherit; font-family: var(--font-mono);
+  font: inherit;
 }
 .tool-call-preview-truncated { flex: 0 0 auto; color: var(--alu-text-faint); font-size: 9px; }
 .tool-call-preview-body {
   margin: 0;
   overflow: hidden;
   color: var(--alu-code-block-text);
-  font: inherit; font-family: var(--font-mono);
+  font: inherit;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -190,7 +190,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   list-style: none;
   border-top: 1px solid var(--alu-tool-divider);
   color: var(--alu-text-muted);
-  font: inherit; font-family: var(--font-mono);
+  font: inherit;
 }
 .tool-nested-call { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
 .tool-nested-status { flex: 0 0 auto; width: 1em; text-align: center; }

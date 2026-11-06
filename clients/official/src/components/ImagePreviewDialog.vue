@@ -96,7 +96,7 @@ async function saveOpenImage() {
   border-radius: 14px;
   outline: none;
   background: var(--alu-image-viewer-bg);
-  box-shadow: var(--alu-dialog-shadow);
+  box-shadow: var(--alu-image-viewer-shadow);
 }
 .alu-image-preview-save {
   position: absolute;
@@ -113,7 +113,7 @@ async function saveOpenImage() {
   border-radius: 999px;
   color: var(--alu-image-control-text);
   background: var(--alu-image-save-bg);
-  box-shadow: var(--alu-float-shadow);
+  box-shadow: var(--alu-image-control-shadow);
   font: 600 11px var(--font-reading);
 }
 .alu-image-preview-save:focus-visible { box-shadow: var(--alu-focus-ring); }

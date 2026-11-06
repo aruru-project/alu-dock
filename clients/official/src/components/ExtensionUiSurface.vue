@@ -404,7 +404,7 @@ function interactionMethodLabel(method: string) {
 .extension-widgets details[open] summary svg { transform: rotate(90deg); }
 .extension-widgets pre { max-height: 42dvh; margin: 0; padding: 10px 12px 13px; overflow: auto; color: var(--alu-text); font: var(--alu-ui-size)/1.65 ui-monospace, monospace; overflow-wrap: anywhere; white-space: pre-wrap; border-top: 1px solid rgb(var(--alu-accent-rgb) / .1); }
 .extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: var(--alu-scrim-light); backdrop-filter: blur(8px); place-items: center; }
-.extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--alu-window-bg); border: 1px solid var(--alu-border-light); border-radius: 15px; box-shadow: var(--alu-dialog-shadow); }
+.extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--alu-window-bg); border: 1px solid var(--alu-border-light); border-radius: 15px; box-shadow: var(--alu-panel-shadow); }
 .extension-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .extension-dialog header small { color: var(--alu-accent); font-size: var(--alu-micro-size); letter-spacing: .14em; }
 .extension-dialog h2 { margin: 4px 0 0; font: 600 17px/1.4 var(--font-reading); overflow-wrap: anywhere; }
@@ -420,6 +420,7 @@ function interactionMethodLabel(method: string) {
 .extension-dialog footer { display: flex; justify-content: flex-end; gap: 7px; }
 .extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--alu-text-dim); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; }
 .extension-dialog footer button.primary { color: var(--alu-highlight); font-weight: 700; background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); }
+.extension-dialog footer button.primary:hover:not(:disabled) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 @media (max-width: 640px) {
   .extension-dialog-layer { padding: 0; place-items: end stretch; }
   .extension-dialog { width: 100%; max-height: 88dvh; padding: 15px; border-width: 1px 0 0; border-radius: 16px 16px 0 0; }
