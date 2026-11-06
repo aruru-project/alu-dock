@@ -38,7 +38,8 @@
    - 新界面先找已有用途；确实是新用途再在这里加一个。
    - 有三套配色：经典是默认，写在 :root；暮色、晨光各一块，页面根元素的 data-theme 决定用哪套（src/lib/theme.ts）。
      加变量时三套都要给值，漏掉的会悄悄沿用经典的颜色；tests/themes.test.ts 会检查。
-   - Android 启动时先画的窗口底色在 src-tauri/gen/android/app/src/main/res/values/colors.xml，改某套的 --alu-bg 时一起改。 */
+   - Android 启动时先画的窗口底色在 src-tauri/gen/android/app/src/main/res/values/colors.xml：暮色、晨光和各自的 --alu-bg 相同，
+     改它们时一起改；经典的原生底色 #070B18 和页面的 #080c18 差一点，是原来就有的。 */
 /* 经典 */
 :root,
 [data-theme="classic"] {
@@ -107,6 +108,16 @@
   --alu-text-muted-rgb: 116 129 154;
   --alu-text-faint: #4f5a70;
   --alu-text-faint-rgb: 79 90 112;
+  /* 组件在上面几种文字色之上再调淡的地方。经典保持原样，其他配色调到读得清 */
+  --alu-composer-placeholder-opacity: .7; /* 输入框的「输入消息…」 */
+  --alu-user-time-opacity: .7; /* 你的消息下的时间 */
+  --alu-reply-time-opacity: .65; /* 阿露回复下的时间 */
+  --alu-turn-summary-sep-opacity: .55; /* 每轮摘要里的分隔点 */
+  --alu-welcome-opacity: .65; /* 空对话的提示和欢迎图 */
+  --alu-tree-guide: rgb(var(--alu-text-faint-rgb) / .72); /* Session Tree 的连线 */
+  --alu-settings-footnote: var(--alu-text-faint); /* App 设置底部的说明 */
+  --alu-command-location: var(--alu-text-faint); /* 工作区命令区里「在哪台机器的哪个目录执行」 */
+  --alu-command-args-placeholder: var(--alu-text-faint); /* 命令中心参数框的占位字 */
 
   /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
   --alu-accent: #7ec8e0;
@@ -130,16 +141,24 @@
   --alu-highlight-hover-text: #f4b8c8;
   --alu-highlight-glow: rgba(244, 114, 182, 0.18); /* 顶栏选择器悬停光晕 */
 
-  /* 品牌：阿露头像、品牌字、装饰 */
-  --alu-brand: #f472b6;
-  --alu-brand-rgb: 244 114 182;
-  --alu-brand-bg: #1e0f20;
-  --alu-brand-border: #4a1e3a; /* 头像圈 */
+  /* 阿露头像：粉色只用在头像圈和发送键（发送键在输入区一组） */
+  --alu-avatar-ring: #4a1e3a; /* 头像圈 */
   --alu-avatar-glow: 0 0 12px rgba(244, 114, 182, 0.35), 0 0 28px rgba(244, 114, 182, 0.10); /* 对话里的头像 */
   --alu-nav-avatar-glow: 0 0 8px rgba(244, 114, 182, 0.45); /* 顶栏头像 */
   --alu-nav-avatar-glow-hover: 0 0 20px rgba(244, 114, 182, 0.65), 0 0 48px rgba(244, 114, 182, 0.22);
   --alu-welcome-image-filter: drop-shadow(0 0 24px rgba(244, 114, 182, 0.35)); /* 空对话的欢迎图 */
   --alu-illustration-shadow: drop-shadow(0 12px 18px rgb(0 0 0 / .28)); /* 配对页插图 */
+
+  /* 装饰：经典里是品牌粉，其他配色不用粉 */
+  --alu-welcome-emphasis: #f472b6; /* 空对话欢迎语里的强调字 */
+  --alu-onboarding-eyebrow: #f472b6; /* 首次配对页的英文眉题 */
+  --alu-pairing-step: #f472b6; /* 首次配对页的步骤编号 */
+  --alu-pairing-step-rgb: 244 114 182;
+  --alu-host-settings-mark: #f472b6; /* Host 设置标题旁的图标 */
+  --alu-host-settings-mark-bg: #1e0f20;
+  --alu-host-settings-mark-border: #4a1e3a;
+  --alu-window-edge-glint: #f472b6; /* 设置窗口顶边装饰线里和 accent 相接的那一色 */
+  --alu-progress-end: #f472b6; /* 附件上传、工作区读取的进度条渐变末端 */
 
   /* 状态 */
   --alu-success: #34d399; /* 已连接、成功、已开启 */
@@ -235,6 +254,8 @@
   --alu-delivery-shadow: -18px 0 60px rgba(0, 0, 0, .5);
   --alu-option-current-bg: rgba(30, 15, 32, 0.7); /* 列表里的当前项 */
   --alu-delivery-row-hover-bg: #121928;
+  --alu-delivery-head-glow: linear-gradient(145deg, rgb(var(--alu-accent-rgb) / .08), transparent 62%); /* 文件列表标题栏的底光 */
+  --alu-delivery-mark-glow: inset 0 0 18px rgb(var(--alu-accent-rgb) / .05); /* 文件列表标题图标的内发光 */
   --alu-message-header-bg: #151d2c; /* 查看消息原文 */
 
   /* 连接与配对、项目状态、命令中心、Dock Tools */
@@ -273,6 +294,7 @@
   /* 工作区 */
   --alu-workspace-header-bg: linear-gradient(105deg, rgba(16, 27, 45, .98), rgba(10, 16, 29, .98));
   --alu-save-status-bg: rgba(12, 29, 41, .96);
+  --alu-image-preview-glow: radial-gradient(circle at center, rgb(var(--alu-accent-rgb) / .055), transparent 55%); /* 图片预览背后的光 */
 }
 /* 暮色：压暗的靛灰做底和面板，顶栏和输入区比对话区亮一档；长春花蓝做可点的、选中的、链接和运行中，
    薰衣草做你的消息、思考和引用，粉只在阿露头像圈和发送键，琥珀是需要注意的，绿和红只表示成功和失败。
@@ -312,6 +334,15 @@
   --alu-text-muted-rgb: 157 157 170;
   --alu-text-faint: #767682;
   --alu-text-faint-rgb: 118 118 130;
+  --alu-composer-placeholder-opacity: 1;
+  --alu-user-time-opacity: 1;
+  --alu-reply-time-opacity: 1;
+  --alu-turn-summary-sep-opacity: .8;
+  --alu-welcome-opacity: 1;
+  --alu-tree-guide: #767682;
+  --alu-settings-footnote: #9d9daa;
+  --alu-command-location: #9d9daa;
+  --alu-command-args-placeholder: #9d9daa;
 
   /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
   --alu-accent: #a0afee;
@@ -333,16 +364,24 @@
   --alu-highlight-hover-text: #d8e0ff;
   --alu-highlight-glow: transparent;
 
-  /* 品牌：阿露头像、品牌字、装饰 */
-  --alu-brand: #e99dbf;
-  --alu-brand-rgb: 233 157 191;
-  --alu-brand-bg: #3d2530;
-  --alu-brand-border: #ca87a5;
+  /* 阿露头像：粉色只用在头像圈和发送键（发送键在输入区一组） */
+  --alu-avatar-ring: #ca87a5;
   --alu-avatar-glow: none;
   --alu-nav-avatar-glow: none;
   --alu-nav-avatar-glow-hover: none;
   --alu-welcome-image-filter: none;
   --alu-illustration-shadow: drop-shadow(0 10px 16px rgb(0 0 0 / .24));
+
+  /* 装饰：经典里是品牌粉，其他配色不用粉 */
+  --alu-welcome-emphasis: #a0afee;
+  --alu-onboarding-eyebrow: #a0afee;
+  --alu-pairing-step: #a0afee;
+  --alu-pairing-step-rgb: 160 175 238;
+  --alu-host-settings-mark: #a0afee;
+  --alu-host-settings-mark-bg: #262a3d;
+  --alu-host-settings-mark-border: #434b6d;
+  --alu-window-edge-glint: #a9b9ff;
+  --alu-progress-end: #a9b9ff;
 
   /* 状态 */
   --alu-success: #84c9a4;
@@ -438,6 +477,8 @@
   --alu-delivery-shadow: -16px 0 48px rgb(0 0 0 / .4);
   --alu-option-current-bg: #2a304e;
   --alu-delivery-row-hover-bg: #32333f;
+  --alu-delivery-head-glow: none;
+  --alu-delivery-mark-glow: none;
   --alu-message-header-bg: #282833;
 
   /* 连接与配对、项目状态、命令中心、Dock Tools */
@@ -476,6 +517,7 @@
   /* 工作区 */
   --alu-workspace-header-bg: #282833;
   --alu-save-status-bg: #21222b;
+  --alu-image-preview-glow: none;
 }
 /* 晨光：很淡的薰衣草灰做底，卡片和输入框是白的，顶栏和输入区比对话区暗一档；用色分工同暮色，
    深一档以便在浅底上看清。正文对页面底色约 12.6:1。投影很轻，没有光晕。 */
@@ -514,10 +556,19 @@
   --alu-text-muted-rgb: 99 99 116;
   --alu-text-faint: #898998;
   --alu-text-faint-rgb: 137 137 152;
+  --alu-composer-placeholder-opacity: 1;
+  --alu-user-time-opacity: 1;
+  --alu-reply-time-opacity: 1;
+  --alu-turn-summary-sep-opacity: .8;
+  --alu-welcome-opacity: 1;
+  --alu-tree-guide: #898998;
+  --alu-settings-footnote: #636374;
+  --alu-command-location: #636374;
+  --alu-command-args-placeholder: #636374;
 
   /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
-  --alu-accent: #4f5ca7;
-  --alu-accent-rgb: 79 92 167;
+  --alu-accent: #4a56a0;
+  --alu-accent-rgb: 74 86 160;
   --alu-accent-dim: #616eb5;
   --alu-accent-bg: #eaeefe;
   --alu-accent-border: #c0c9ec;
@@ -535,20 +586,28 @@
   --alu-highlight-hover-text: #323a96;
   --alu-highlight-glow: transparent;
 
-  /* 品牌：阿露头像、品牌字、装饰 */
-  --alu-brand: #af4d7e;
-  --alu-brand-rgb: 175 77 126;
-  --alu-brand-bg: #fde9f1;
-  --alu-brand-border: #e99dbf;
+  /* 阿露头像：粉色只用在头像圈和发送键（发送键在输入区一组） */
+  --alu-avatar-ring: #e99dbf;
   --alu-avatar-glow: none;
   --alu-nav-avatar-glow: none;
   --alu-nav-avatar-glow-hover: none;
   --alu-welcome-image-filter: none;
   --alu-illustration-shadow: drop-shadow(0 8px 14px rgb(42 36 78 / .12));
 
+  /* 装饰：经典里是品牌粉，其他配色不用粉 */
+  --alu-welcome-emphasis: #4a56a0;
+  --alu-onboarding-eyebrow: #4a56a0;
+  --alu-pairing-step: #4a56a0;
+  --alu-pairing-step-rgb: 74 86 160;
+  --alu-host-settings-mark: #4a56a0;
+  --alu-host-settings-mark-bg: #eaeefe;
+  --alu-host-settings-mark-border: #c0c9ec;
+  --alu-window-edge-glint: #4551a5;
+  --alu-progress-end: #4551a5;
+
   /* 状态 */
-  --alu-success: #2a7d57;
-  --alu-success-rgb: 42 125 87;
+  --alu-success: #1f744f;
+  --alu-success-rgb: 31 116 79;
   --alu-success-text: #256d4c;
   --alu-success-border: #acd6be;
   --alu-success-border-strong: #77b493;
@@ -558,10 +617,10 @@
   --alu-running-border: #b0bbe8;
   --alu-running-glow: transparent;
   --alu-idle: #898998;
-  --alu-waiting: #a4690c;
+  --alu-waiting: #955e00;
   --alu-waiting-glow: transparent;
-  --alu-warning: #a4690c;
-  --alu-warning-rgb: 164 105 12;
+  --alu-warning: #955e00;
+  --alu-warning-rgb: 149 94 0;
   --alu-warning-dim: #b68028;
   --alu-warning-glow: transparent;
   --alu-on-warning: #261704;
@@ -640,6 +699,8 @@
   --alu-delivery-shadow: -12px 0 36px rgb(42 36 78 / .1);
   --alu-option-current-bg: #e3e9ff;
   --alu-delivery-row-hover-bg: #e8e9f3;
+  --alu-delivery-head-glow: none;
+  --alu-delivery-mark-glow: none;
   --alu-message-header-bg: #ffffff;
 
   /* 连接与配对、项目状态、命令中心、Dock Tools */
@@ -678,4 +739,5 @@
   /* 工作区 */
   --alu-workspace-header-bg: #ffffff;
   --alu-save-status-bg: #ffffff;
+  --alu-image-preview-glow: none;
 }

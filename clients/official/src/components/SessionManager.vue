@@ -684,7 +684,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
   text-align: left;
   white-space: pre;
 }
-.alu-tree-prefix { color: rgb(var(--alu-text-faint-rgb) / .72); }
+.alu-tree-prefix { color: var(--alu-tree-guide); }
 .alu-tree-disclosure,
 .alu-tree-disclosure-placeholder {
   display: inline-block;

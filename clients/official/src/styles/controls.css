@@ -6,7 +6,7 @@
 .button.primary:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 .button.secondary { color: var(--alu-accent); background: var(--alu-accent-soft); border: 1px solid rgb(var(--alu-accent-rgb) / .28); }
 .attachment-progress { height: 3px; margin-top: 6px; overflow: hidden; background: rgb(var(--alu-accent-rgb) / .11); border-radius: 999px; }
-.attachment-progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--alu-accent), var(--alu-brand)); border-radius: inherit; transition: width .18s ease-out; }
+.attachment-progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--alu-accent), var(--alu-progress-end)); border-radius: inherit; transition: width .18s ease-out; }
 .alu-dialog-loading { position: absolute; z-index: 8; inset: 0; display: flex; align-items: center; justify-content: center; gap: 9px; background: rgb(var(--alu-bg-raised-rgb) / .9); color: var(--alu-text-muted); font-size: var(--alu-meta-size); backdrop-filter: blur(3px); animation: aluDialogLoadingReveal 0s linear 150ms both; }
 .alu-dialog-error, .alu-dialog-status, .alu-dialog-pending { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 8px 10px; border-radius: 8px; font-size: var(--alu-meta-size); }
 .alu-dialog-error { border: 1px solid var(--alu-danger-border); background: var(--alu-danger-bg); color: var(--alu-danger); }

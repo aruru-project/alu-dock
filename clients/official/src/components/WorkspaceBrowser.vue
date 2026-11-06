@@ -610,7 +610,7 @@ onBeforeUnmount(() => {
 .workspace-primary-button { color: var(--alu-highlight); border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); font-weight: 700; }
 .workspace-primary-button:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .workspace-progress { width: min(360px, 75%); height: 5px; overflow: hidden; border-radius: 5px; background: var(--alu-border); }
-.workspace-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--alu-accent), var(--alu-brand)); transition: width .18s ease; }
+.workspace-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--alu-accent), var(--alu-progress-end)); transition: width .18s ease; }
 .workspace-text-preview {
   min-width: 0;
   min-height: 0;
@@ -624,7 +624,7 @@ onBeforeUnmount(() => {
   white-space: pre;
   scrollbar-color: var(--alu-border) transparent;
 }
-.workspace-image-preview { overflow: auto; padding: 22px; background: radial-gradient(circle at center, rgb(var(--alu-accent-rgb) / .055), transparent 55%), var(--alu-bg); }
+.workspace-image-preview { overflow: auto; padding: 22px; background: var(--alu-image-preview-glow), var(--alu-bg); }
 .workspace-image-preview :deep(.alu-image-zoom-stage) { width: 100%; height: 100%; }
 .workspace-preview-state.error strong,
 .workspace-preview-state.error p { color: var(--alu-danger); }

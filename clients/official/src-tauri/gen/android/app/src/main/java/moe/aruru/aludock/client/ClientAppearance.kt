@@ -5,7 +5,8 @@ import android.content.Context
 /**
  * The page's color themes (src/lib/theme.ts). The page keeps the choice; this
  * copy lets the next start open its window and system bars in that theme before
- * the page has loaded. Backgrounds match --alu-bg in src/styles/tokens.css.
+ * the page has loaded. Dusk and dawn use their --alu-bg from src/styles/tokens.css; classic keeps
+ * the window color it always had (#070B18), one step off its page background (#080c18).
  */
 enum class ClientAppearance(
   val id: String,

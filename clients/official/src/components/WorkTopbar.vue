@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { FileDown, Wrench } from '@lucide/vue'
+import { FileDown, Settings, Wrench } from '@lucide/vue'
 import { dockToolsState } from '../lib/dockTools'
 import { formatCacheHitRate, formatContextUsage, formatTokenCount } from '../lib/uiBoundaries'
 import dockIconUrl from '../../../../assets/icon.svg'
@@ -11,6 +11,7 @@ import { useDeliveriesStore } from '../stores/deliveries'
 import { useHostStore } from '../stores/host'
 import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
+import { usePlatformStore } from '../stores/platform'
 import { useSurfacesStore } from '../stores/surfaces'
 
 const app = useAppStore()
@@ -19,6 +20,7 @@ const observation = useObservationStore()
 const { status: observationStatus, label: connectionLabel, refreshing } = storeToRefs(observation)
 const { refreshCurrent } = observation
 const { openHostSettings } = useHostStore()
+const { openAppSettings } = usePlatformStore()
 const surfaces = useSurfacesStore()
 const { deliveryOpen, dockToolsTrigger, dockToolsOpen } = storeToRefs(surfaces)
 const { openControlCenter, openDockTools } = surfaces
@@ -85,6 +87,10 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
       </button>
       <button class="alu-nav-hamburger" :aria-label="failureCount ? `打开工作列表，有 ${failureCount} 项操作结果` : '打开工作列表'" @click="app.workDrawerOpen = true">☰<span v-if="failureCount" class="alu-operation-count">{{ failureCount }}</span></button>
     </div>
+    <!-- Before any Host is paired there is no work list to open; App settings (the color theme) stays one tap away. -->
+    <div v-else class="alu-navbar-right">
+      <button class="alu-nav-hamburger alu-nav-app-settings" aria-label="App 设置" title="App 设置" @click="openAppSettings"><Settings :size="18" /></button>
+    </div>
   </nav>
 
 </template>
@@ -121,7 +127,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
-  border: 2px solid var(--alu-brand-border);
+  border: 2px solid var(--alu-avatar-ring);
   transition: box-shadow 0.3s;
 }
 .alu-navbar-avatar:hover {

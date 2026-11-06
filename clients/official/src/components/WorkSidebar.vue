@@ -222,7 +222,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-sidebar-overlay { position: fixed; z-index: 49; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-scrim); transition: opacity .25s ease; }
 .alu-sidebar-overlay.open { pointer-events: auto; opacity: 1; }
 .alu-sidebar-head { display: flex; min-height: 70px; flex: 0 0 auto; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--alu-border); }
-.alu-sidebar-avatar { width: 40px; height: 40px; flex: 0 0 auto; object-fit: cover; border: 2px solid var(--alu-brand-border); border-radius: 50%; }
+.alu-sidebar-avatar { width: 40px; height: 40px; flex: 0 0 auto; object-fit: cover; border: 2px solid var(--alu-avatar-ring); border-radius: 50%; }
 .alu-sidebar-title { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .alu-instance-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; }
 .alu-instance-link { width: 100%; border: 0; background: transparent; text-align: left; }

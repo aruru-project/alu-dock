@@ -197,7 +197,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
 }
 .alu-input-wrap textarea::placeholder {
   color: var(--alu-text-muted);
-  opacity: 0.7;
+  opacity: var(--alu-composer-placeholder-opacity);
 }
 /* 展开编辑：只在内容超过两行时出现在文字区右上角。 */
 .alu-composer-expand {

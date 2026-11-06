@@ -8,7 +8,10 @@ defineProps<{
   /** Missing when this device's settings could not be read; the color theme does not need them. */
   preferences: ClientPreferences | null
   theme: ClientTheme
+  /** This device could not keep the choice. */
   themeError?: string
+  /** The system bars did not follow the choice (Android). */
+  themeSyncError?: string
   buildIdentity?: string
   saving?: boolean
   error?: string
@@ -82,7 +85,8 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
       </div>
 
       <p v-if="themeError" class="app-settings-error" role="alert">{{ themeError }}</p>
-      <p v-else class="app-settings-footnote">设置保存在这台设备上，适用于所有 Host。</p>
+      <p v-if="themeSyncError" class="app-settings-error" role="alert">{{ themeSyncError }}</p>
+      <p v-if="!themeError && !themeSyncError" class="app-settings-footnote">设置保存在这台设备上，适用于所有 Host。</p>
     </main>
 
     <main v-else class="app-settings-content">
@@ -150,7 +154,7 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .theme-preview { display: grid; width: 76px; height: 52px; grid-template-rows: 13px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--alu-border-light); border-radius: 8px; background: var(--alu-bg); }
 .theme-preview i { display: block; }
 .theme-preview-bar { display: flex; align-items: center; gap: 4px; padding: 0 5px; border-bottom: 1px solid var(--alu-nav-border); background: var(--alu-nav-bg); }
-.theme-preview-avatar { width: 7px; height: 7px; border: 1.5px solid var(--alu-brand-border); border-radius: 50%; background: var(--alu-surface); }
+.theme-preview-avatar { width: 7px; height: 7px; border: 1.5px solid var(--alu-avatar-ring); border-radius: 50%; background: var(--alu-surface); }
 .theme-preview-control { width: 22px; height: 6px; margin-left: auto; border: 1px solid var(--alu-border-light); border-radius: 999px; background: var(--alu-control-bg); }
 .theme-preview-body { display: grid; align-content: start; gap: 3px; padding: 4px 5px; }
 .theme-preview-user { width: 26px; height: 7px; justify-self: end; border: 1px solid var(--alu-user-border); border-radius: 3px; background: var(--alu-user-bg); }
@@ -158,7 +162,7 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .theme-preview-input { display: flex; height: 9px; justify-content: flex-end; padding: 1px; border: 1px solid var(--alu-border-light); border-radius: 3px; background: var(--alu-surface); }
 .theme-preview-send { width: 9px; height: 100%; border-radius: 2px; background: var(--alu-send-bg); }
 .app-settings-footnote, .app-settings-error { margin: 16px 0 0; font-size: var(--alu-micro-size); }
-.app-settings-footnote { color: var(--alu-text-faint); }
+.app-settings-footnote { color: var(--alu-settings-footnote); }
 .app-settings-error { padding: 9px 10px; border: 1px solid var(--alu-danger-border); border-radius: 8px; background: var(--alu-danger-bg); color: var(--alu-danger); }
 @media (max-width: 640px) {
   .app-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }

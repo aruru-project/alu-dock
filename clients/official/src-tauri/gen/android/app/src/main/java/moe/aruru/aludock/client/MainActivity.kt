@@ -68,22 +68,24 @@ class MainActivity : TauriActivity() {
   fun describePickedFile(uriText: String): String =
     AndroidPickedFileBridge.describe(this, uriText)
 
-  /** Called from Rust when the page shows a color theme, at start and when the person switches. */
+  /**
+   * Called from Rust when the page shows a color theme: at every start, on a switch and on a retry.
+   * Throws only when the window background or the system bars could not follow; the page reports that.
+   */
   @Keep
   fun applyAppearance(themeId: String) {
     val next = ClientAppearance.fromId(themeId)
-    if (ClientAppearance.load(this) != next) {
-      ClientAppearance.save(this, next)
-      // Android 13+ draws the next cold start's splash screen from this theme.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        try {
-          splashScreen.setSplashScreenTheme(next.styleRes)
-        } catch (_: Exception) {
-          // The window and bars below still follow the theme.
-        }
+    if (ClientAppearance.load(this) != next) ClientAppearance.save(this, next)
+    // Android 13+ draws the next cold start's splash screen from this theme. Set it on every call so
+    // a failed attempt is tried again at the next start; it does not change the window now.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      try {
+        splashScreen.setSplashScreenTheme(next.styleRes)
+      } catch (_: Exception) {
+        // The window and bars below still follow the theme.
       }
     }
-    if (destroyed || next == appearance) return
+    if (destroyed) return
     appearance = next
     val background = getColor(next.backgroundRes)
     window.setBackgroundDrawable(ColorDrawable(background))

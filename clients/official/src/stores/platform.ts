@@ -24,6 +24,8 @@ export const usePlatformStore = defineStore('platform', () => {
   const appSettingsError = ref('')
   const theme = ref<ClientTheme>(readTheme(deviceStorage()))
   const themeSaveError = ref('')
+  const themeSyncError = ref('')
+  let themeSyncRequest = 0
   const desktopShell = ref<DesktopShellStatus | null>(null)
   const desktopShellBusy = ref(false)
   const unlisteners: UnlistenFn[] = []
@@ -38,19 +40,27 @@ export const usePlatformStore = defineStore('platform', () => {
     one_hour: '1 小时后暂离',
     never: '切到其他窗口时不暂离',
   } as Record<WindowsAwayDelay, string>)[appSettings.value?.windowsAwayDelay ?? 'one_minute'])
-  const themeLabel = computed(() => CLIENT_THEMES.find((option) => option.id === theme.value)?.label ?? '')
+  const themeName = (id: ClientTheme) => CLIENT_THEMES.find((option) => option.id === id)?.label ?? ''
+  const themeLabel = computed(() => themeName(theme.value))
 
-  /** Android also draws its status bar and the window behind the page; the page tells it which theme to match. */
+  /** Android also draws its status bar and the window behind the page; the page tells it which theme to match.
+   * Only the latest request decides what App settings reports. */
   function matchNativeAppearance(next: ClientTheme) {
-    setNativeAppearance(next).catch((cause) => console.error('Failed to match the system bars to the color theme.', cause))
+    const request = ++themeSyncRequest
+    setNativeAppearance(next).then(() => {
+      if (request === themeSyncRequest) themeSyncError.value = ''
+    }, (cause) => {
+      console.error('Failed to match the system bars to the color theme.', cause)
+      if (request === themeSyncRequest) themeSyncError.value = `状态栏没能跟着换成「${themeName(next)}」，上面的图标可能看不清。可以再点一下「${themeName(next)}」重试，还不行就重新打开客户端。`
+    })
   }
 
-  /** Takes effect at once; saving only decides whether the next start opens in it. */
+  /** Takes effect at once; saving only decides whether the next start opens in it.
+   * Choosing the current theme again retries saving it and matching the system bars. */
   function chooseTheme(next: ClientTheme) {
-    if (next === theme.value) return
     theme.value = next
     showTheme(next)
-    themeSaveError.value = saveTheme(deviceStorage(), next) ? '' : '配色已经换好，但没能保存到这台设备；重新打开客户端后会换回原来的配色。'
+    themeSaveError.value = saveTheme(deviceStorage(), next) ? '' : `配色已经换好，但没能存到这台设备，下次打开客户端会换回原来的配色。可以再点一下「${themeName(next)}」重试。`
     matchNativeAppearance(next)
   }
 
@@ -145,5 +155,5 @@ export const usePlatformStore = defineStore('platform', () => {
     void extensionUi.clear()
   })
 
-  return { appSettings, appSettingsSaving, appSettingsError, theme, themeLabel, themeSaveError, desktopShell, desktopShellBusy, windowsAwayLabel, retryDesktopHost, runDesktopShellAction, openAppSettings, chooseWindowsAwayDelay, chooseTheme, initialize }
+  return { appSettings, appSettingsSaving, appSettingsError, theme, themeLabel, themeSaveError, themeSyncError, desktopShell, desktopShellBusy, windowsAwayLabel, retryDesktopHost, runDesktopShellAction, openAppSettings, chooseWindowsAwayDelay, chooseTheme, initialize }
 })
