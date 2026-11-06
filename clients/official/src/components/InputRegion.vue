@@ -137,7 +137,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background: rgba(4, 6, 13, 0.6);
+  background: var(--alu-file-drop-scrim);
   pointer-events: none;
 }
 .alu-file-drop span {
@@ -145,10 +145,10 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   align-items: center;
   gap: 10px;
   padding: 18px 28px;
-  border: 2px dashed var(--alu-blue-border);
+  border: 2px dashed var(--alu-accent-border);
   border-radius: 12px;
   background: var(--alu-bg-raised);
-  color: var(--alu-blue);
+  color: var(--alu-accent);
   font-size: 16px;
 }
 .alu-input-section {
@@ -173,11 +173,8 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .alu-input-wrap:focus-within {
-  border-color: var(--alu-pink);
-  box-shadow:
-      0 0 0 4px rgba(244, 114, 182, 0.10),
-      0 0 32px rgba(244, 114, 182, 0.10),
-      inset 0 0 24px rgba(244, 114, 182, 0.03);
+  border-color: var(--alu-highlight);
+  box-shadow: var(--alu-composer-focus-glow);
 }
 .alu-composer-text { position: relative; display: flex; }
 /* Keep the first lines clear of the expand button. */
@@ -213,16 +210,16 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   place-items: center;
   border: 1px solid var(--alu-border);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--alu-surface) 88%, transparent);
+  background: rgb(var(--alu-surface-rgb) / .88);
   color: var(--alu-text-muted);
   transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 .alu-composer-expand:hover,
 .alu-composer-expand:focus-visible {
   outline: none;
-  color: var(--alu-blue);
-  background: var(--alu-blue-bg);
-  border-color: var(--alu-blue-border);
+  color: var(--alu-accent);
+  background: var(--alu-accent-bg);
+  border-color: var(--alu-accent-border);
 }
 /* ── 按钮行：带进来 │ 中间段 │ 动作 ── */
 .alu-composer-actions {
@@ -251,7 +248,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   background: var(--alu-hover);
   color: var(--alu-text-dim);
 }
-.alu-bar-btn[aria-expanded="true"] { color: var(--alu-blue); }
+.alu-bar-btn[aria-expanded="true"] { color: var(--alu-accent); }
 .alu-bar-btn kbd {
   display: inline-flex;
   align-items: center;
@@ -306,9 +303,9 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   flex-shrink: 0;
   min-height: 34px;
   padding: 0 18px 0 14px;
-  background: linear-gradient(135deg, #c8386e 0%, #a02858 100%);
+  background: var(--alu-send-bg);
   border: none;
-  color: #fce8f0;
+  color: var(--alu-send-text);
   border-radius: 11px;
   font-size: 14px;
   font-weight: 700;
@@ -317,17 +314,17 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   transition: all 0.15s;
   white-space: nowrap;
   letter-spacing: 0.03em;
-  box-shadow: 0 2px 14px rgba(200, 56, 110, 0.40);
+  box-shadow: var(--alu-send-shadow);
 }
-.alu-send-btn:focus-visible { box-shadow: var(--focus-ring); }
+.alu-send-btn:focus-visible { box-shadow: var(--alu-focus-ring); }
 .alu-send-btn:hover {
-  background: linear-gradient(135deg, #dc4880 0%, #b83468 100%);
-  box-shadow: 0 4px 24px rgba(220, 72, 128, 0.50);
+  background: var(--alu-send-bg-hover);
+  box-shadow: var(--alu-send-shadow-hover);
   transform: translateY(-1px);
 }
 .alu-send-btn:active {
   transform: translateY(0);
-  box-shadow: 0 2px 10px rgba(200, 56, 110, 0.32);
+  box-shadow: var(--alu-send-shadow-active);
 }
 .ui-dialog-composer-editor {
   min-height: 0;
@@ -343,15 +340,15 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   font: inherit;
   font-size: 14px;
   line-height: 1.7;
-  box-shadow: inset 0 1px 14px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--alu-editor-inset-shadow);
 }
 .ui-dialog-composer-editor:focus {
-  border-color: var(--alu-pink-border);
-  box-shadow: 0 0 0 3px rgba(244, 114, 182, 0.08), inset 0 1px 14px rgba(0, 0, 0, 0.2);
+  border-color: var(--alu-highlight-border);
+  box-shadow: 0 0 0 3px rgb(var(--alu-highlight-rgb) / 0.08), var(--alu-editor-inset-shadow);
 }
 .ui-dialog-composer-footer { align-items: center; }
 .ui-dialog-composer-attachments { min-width: 0; flex: 1; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
-.ui-dialog-composer-status { flex: 0 1 auto; color: var(--alu-amber); font-size: var(--alu-meta-size); }
+.ui-dialog-composer-status { flex: 0 1 auto; color: var(--alu-warning); font-size: var(--alu-meta-size); }
 .ui-dialog-composer-status[hidden] { display: none; }
 /* ── 输入框斜杠命令建议（锚在 .alu-input-wrap 上，贴着输入框浮出） ── */
 .cmd-suggest {
@@ -368,7 +365,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   background: var(--alu-bg-raised);
   border: 1px solid var(--alu-border-light);
   border-radius: 12px;
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.62);
+  box-shadow: var(--alu-suggest-shadow);
 }
 .cmd-suggest-item {
   display: flex;
@@ -383,7 +380,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   text-align: left;
 }
 .cmd-suggest-item.selected { background: var(--alu-hover); border-color: var(--alu-border); }
-.cmd-suggest-name { max-width: 48%; flex: 0 1 auto; overflow: hidden; color: var(--alu-amber); font-size: var(--alu-ui-size); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-suggest-name { max-width: 48%; flex: 0 1 auto; overflow: hidden; color: var(--alu-command-name); font-size: var(--alu-ui-size); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .cmd-suggest-desc { flex: 1 1 auto; overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .cmd-suggest-kind { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .cmd-suggest-hint { padding: 10px 12px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
@@ -444,23 +441,23 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   gap: 10px;
   margin: 8px 0 0;
   padding: 8px 12px;
-  border: 1px solid var(--alu-blue-border);
+  border: 1px solid var(--alu-accent-border);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--alu-blue-bg) 82%, transparent);
+  background: var(--alu-queue-bg);
   color: var(--alu-text-dim);
   font-size: var(--alu-meta-size);
 }
 .alu-queue-tray[hidden] { display: none; }
-.alu-queue-title { color: var(--alu-blue); font-weight: 700; white-space: nowrap; }
+.alu-queue-title { color: var(--alu-accent); font-weight: 700; white-space: nowrap; }
 .alu-queue-preview { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alu-queue-restore {
-  color: var(--alu-blue);
-  border: 1px solid var(--alu-blue-border);
+  color: var(--alu-accent);
+  border: 1px solid var(--alu-accent-border);
   border-radius: 7px;
   padding: 3px 8px;
   flex-shrink: 0;
 }
-.alu-queue-restore:hover { background: var(--alu-blue-bg); color: var(--alu-text); }
+.alu-queue-restore:hover { background: var(--alu-accent-bg); color: var(--alu-text); }
 @media (max-width: 640px) {
   .alu-queue-preview { max-width: 48vw; }
 }
@@ -470,14 +467,14 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   }
 }
 .alu-composer-error, .alu-composer-notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding: 7px 10px; border-radius: 8px; font-size: var(--alu-meta-size); }
-.alu-composer-error { color: var(--alu-rose); border: 1px solid var(--alu-rose-border); background: var(--alu-rose-bg); }
-.alu-composer-notice { color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); background: color-mix(in srgb, var(--alu-amber) 7%, transparent); }
+.alu-composer-error { color: var(--alu-danger); border: 1px solid var(--alu-danger-border); background: var(--alu-danger-bg); }
+.alu-composer-notice { color: var(--alu-warning); border: 1px solid rgb(var(--alu-warning-rgb) / .22); background: rgb(var(--alu-warning-rgb) / .07); }
 .alu-composer-error button, .alu-composer-notice button { color: inherit; }
 .alu-native-attachments { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 6px; max-height: 228px; margin-top: 8px; padding: 7px; overflow-y: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
 .alu-attachment-selection-summary { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 3px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
 .alu-attachment-selection-summary span { color: var(--alu-text-muted); }
-.alu-restored-images { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--alu-blue-border); border-radius: 8px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
-.alu-restored-images button { color: var(--alu-blue); }
+.alu-restored-images { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--alu-accent-border); border-radius: 8px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.alu-restored-images button { color: var(--alu-accent); }
 /* The overlay already excludes the keyboard; fit that space instead of moving above it. */
 .ui-dialog-box-composer { height: min(76dvh, 680px); max-height: 100%; }
 @media (max-width: 640px) {
@@ -511,19 +508,19 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   align-items: center;
   gap: 7px;
   padding: 0 12px;
-  border: 1px solid var(--alu-blue-border);
+  border: 1px solid var(--alu-accent-border);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--alu-bg-raised) 92%, transparent);
-  box-shadow: 0 8px 24px rgba(2, 6, 18, .34);
+  background: rgb(var(--alu-bg-raised-rgb) / .92);
+  box-shadow: var(--alu-float-shadow);
   color: var(--alu-text-dim);
   font-size: var(--alu-meta-size);
   font-weight: 650;
   cursor: pointer;
   backdrop-filter: blur(10px);
 }
-.alu-scroll-bottom > span { color: var(--alu-blue); font-size: 14px; line-height: 1; }
-.alu-scroll-bottom:hover { border-color: var(--alu-blue); color: var(--alu-text); transform: translateY(-1px); }
-.alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 2px; box-shadow: var(--focus-ring); }
+.alu-scroll-bottom > span { color: var(--alu-accent); font-size: 14px; line-height: 1; }
+.alu-scroll-bottom:hover { border-color: var(--alu-accent); color: var(--alu-text); transform: translateY(-1px); }
+.alu-scroll-bottom:focus-visible { outline: 2px solid var(--alu-accent); outline-offset: 2px; box-shadow: var(--alu-focus-ring); }
 @media (max-width: 640px) {
   .alu-input-float { top: -42px; right: 12px; left: 12px; }
   .alu-input-float-scroll { grid-column: 3; justify-self: end; }

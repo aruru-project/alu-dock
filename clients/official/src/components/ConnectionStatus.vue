@@ -53,25 +53,25 @@ function act() {
 }
 .alu-connection-status > summary::-webkit-details-marker { display: none; }
 .alu-connection-status > summary:hover { background: var(--alu-hover); }
-.alu-connection-status > summary:focus-visible { outline: 2px solid var(--alu-blue); outline-offset: 1px; }
+.alu-connection-status > summary:focus-visible { outline: 2px solid var(--alu-accent); outline-offset: 1px; }
 .alu-status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--alu-mint);
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+  background: var(--alu-success);
+  box-shadow: 0 0 6px var(--alu-success-glow);
   flex-shrink: 0;
 }
 .alu-status-dot.connecting {
-  background: var(--alu-amber);
-  box-shadow: 0 0 6px rgba(251, 191, 36, 0.6);
+  background: var(--alu-warning);
+  box-shadow: 0 0 6px var(--alu-warning-glow);
   animation: statusPulse 1.2s ease-in-out infinite;
 }
 .alu-status-dot.error {
-  background: var(--alu-rose);
-  box-shadow: 0 0 6px rgba(248, 113, 113, 0.6);
+  background: var(--alu-danger);
+  box-shadow: 0 0 6px var(--alu-danger-glow);
 }
-.alu-status-attention { font-size: var(--alu-meta-size); color: var(--alu-rose); white-space: nowrap; }
-.alu-status-details { position: absolute; left: 0; top: calc(100% + 6px); z-index: 30; width: min(320px, calc(100vw - 24px)); padding: 12px; box-sizing: border-box; border: 1px solid var(--alu-border-light); border-radius: 8px; background: var(--alu-surface); color: var(--alu-text); font-size: var(--alu-ui-size); box-shadow: 0 12px 36px rgba(2, 6, 18, .4); }
+.alu-status-attention { font-size: var(--alu-meta-size); color: var(--alu-danger); white-space: nowrap; }
+.alu-status-details { position: absolute; left: 0; top: calc(100% + 6px); z-index: 30; width: min(320px, calc(100vw - 24px)); padding: 12px; box-sizing: border-box; border: 1px solid var(--alu-border-light); border-radius: 8px; background: var(--alu-surface); color: var(--alu-text); font-size: var(--alu-ui-size); box-shadow: var(--alu-popover-shadow); }
 .alu-status-details p { margin: 8px 0; line-height: 1.5; overflow-wrap: anywhere; }
 </style>

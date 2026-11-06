@@ -80,8 +80,8 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
   overflow: hidden;
   border: 1px solid var(--alu-border-light);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--alu-bg-raised) 90%, black);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+  background: var(--alu-image-frame-bg);
+  box-shadow: var(--alu-image-shadow);
 }
 .alu-conversation-image-open {
   display: block;
@@ -89,7 +89,7 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
   padding: 0;
   cursor: zoom-in;
   border: 0;
-  background: #090b12;
+  background: var(--alu-image-backdrop);
 }
 .alu-conversation-image-open img {
   display: block;
@@ -116,7 +116,7 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
   cursor: pointer;
   border: 1px solid var(--alu-border-light);
   border-radius: 7px;
-  color: var(--alu-blue);
+  color: var(--alu-accent);
   background: var(--alu-bg);
   font: inherit;
 }

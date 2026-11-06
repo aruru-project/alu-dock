@@ -90,7 +90,7 @@ async function load() {
 .resource-document-title strong { overflow-wrap: anywhere; color: var(--alu-text); font-size: 13px; }
 .resource-document-title span { color: var(--alu-text-muted); font-size: 10px; }
 .resource-document-status { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 24px; color: var(--alu-text-muted); font-size: 12px; }
-.resource-document-error { flex-direction: column; color: var(--alu-rose); text-align: center; }
+.resource-document-error { flex-direction: column; color: var(--alu-danger); text-align: center; }
 .resource-document-error .ui-dialog-btn { display: inline-flex; align-items: center; gap: 6px; }
 .resource-document-empty { position: absolute; right: 16px; bottom: 16px; z-index: 1; color: var(--alu-text-muted); font-size: 12px; }
 @media (max-width: 720px) { .resource-document { height: 65dvh; } .resource-document-header { padding: 10px; gap: 8px; } }

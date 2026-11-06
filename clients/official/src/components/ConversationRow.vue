@@ -80,16 +80,16 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
   object-fit: cover;
   flex-shrink: 0;
   margin-top: 0;
-  border: 2px solid var(--alu-pink-border);
-  box-shadow: 0 0 12px rgba(244, 114, 182, 0.35), 0 0 28px rgba(244, 114, 182, 0.10);
+  border: 2px solid var(--alu-brand-border);
+  box-shadow: var(--alu-avatar-glow);
 }
 .alu-msg-assistant-content {
   flex: 1;
   min-width: 0;
 }
 .alu-msg-assistant-body {
-  background: rgba(20, 30, 52, 0.82);
-  border: 1px solid #253050;
+  background: var(--alu-bubble-bg);
+  border: 1px solid var(--alu-bubble-border);
   border-radius: 0 14px 14px 14px;
   padding: 14px 18px;
   font-size: 14px;
@@ -116,7 +116,7 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
   gap: 6px;
 }
 .msg-user-prefix {
-  color: var(--alu-amber);
+  color: var(--alu-user-prefix);
   font-weight: 600;
   opacity: 0.85;
   flex-shrink: 0;
@@ -169,9 +169,9 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
 }
 .message-text-action:hover,
 .message-text-action:focus-visible {
-  color: var(--alu-blue);
-  border-color: var(--alu-blue-border);
-  background: color-mix(in srgb, var(--alu-blue) 6%, transparent);
+  color: var(--alu-accent);
+  border-color: var(--alu-accent-border);
+  background: rgb(var(--alu-accent-rgb) / .06);
 }
 /* Runtime/status notices align with Assistant content instead of becoming
    full-width headless conversation rows. */
@@ -192,7 +192,7 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
   padding: 8px 10px;
   border-left: 2px solid var(--alu-border);
   color: var(--alu-text-dim);
-  background: rgba(255, 255, 255, 0.015);
+  background: rgb(var(--alu-overlay-rgb) / 0.015);
 }
 .alu-record-panel > summary {
   color: var(--alu-text-muted);
@@ -206,9 +206,9 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
   letter-spacing: 0.04em;
 }
 .alu-record-body { min-width: 0; }
-.alu-record-summary { border-left-color: var(--alu-blue-border); }
-.alu-record-extension { border-left-color: var(--alu-pink); }
-.alu-record-tool { border-left-color: var(--alu-amber); }
+.alu-record-summary { border-left-color: var(--alu-accent-border); }
+.alu-record-extension { border-left-color: var(--alu-highlight); }
+.alu-record-tool { border-left-color: var(--alu-tool-accent); }
 /* A user shell command stands beside the Agent's rows, aligned with its content. */
 .alu-shell-row { margin: 6px 0 6px 68px; max-width: calc(100% - 68px); }
 .alu-msg-assistant-row, .msg-user {

@@ -1,17 +1,17 @@
 .button { display: flex; align-items: center; justify-content: center; min-height: 38px; gap: 8px; padding: 0 15px; font-size: var(--alu-ui-size); font-weight: 600; cursor: pointer; border-radius: 9px; }
 .spinning { animation: spin .9s linear infinite; }
-.alu-spinner { width: 24px; height: 24px; border: 2px solid rgb(244 114 182 / .18); border-top-color: var(--c-sakura); border-radius: 50%; animation: spin .9s linear infinite; }
+.alu-spinner { width: 24px; height: 24px; border: 2px solid rgb(var(--alu-highlight-rgb) / .18); border-top-color: var(--alu-highlight); border-radius: 50%; animation: spin .9s linear infinite; }
 .pairing-progress .alu-spinner { width: 17px; height: 17px; }
-.button.primary { color: var(--c-space-950); background: var(--c-sakura); border: 1px solid var(--c-sakura); }
-.button.primary:hover { background: #fb8cc5; }
-.button.secondary { color: var(--c-ice); background: var(--c-ice-soft); border: 1px solid rgb(126 200 224 / .28); }
-.attachment-progress { height: 3px; margin-top: 6px; overflow: hidden; background: rgb(126 200 224 / .11); border-radius: 999px; }
-.attachment-progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--c-ice), var(--c-sakura)); border-radius: inherit; transition: width .18s ease-out; }
-.alu-dialog-loading { position: absolute; z-index: 8; inset: 0; display: flex; align-items: center; justify-content: center; gap: 9px; background: color-mix(in srgb, var(--alu-bg-raised) 90%, transparent); color: var(--alu-text-muted); font-size: var(--alu-meta-size); backdrop-filter: blur(3px); animation: aluDialogLoadingReveal 0s linear 150ms both; }
+.button.primary { color: var(--alu-on-highlight); background: var(--alu-highlight); border: 1px solid var(--alu-highlight); }
+.button.primary:hover { background: var(--alu-highlight-solid-hover); }
+.button.secondary { color: var(--alu-accent); background: var(--alu-accent-soft); border: 1px solid rgb(var(--alu-accent-rgb) / .28); }
+.attachment-progress { height: 3px; margin-top: 6px; overflow: hidden; background: rgb(var(--alu-accent-rgb) / .11); border-radius: 999px; }
+.attachment-progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--alu-accent), var(--alu-brand)); border-radius: inherit; transition: width .18s ease-out; }
+.alu-dialog-loading { position: absolute; z-index: 8; inset: 0; display: flex; align-items: center; justify-content: center; gap: 9px; background: rgb(var(--alu-bg-raised-rgb) / .9); color: var(--alu-text-muted); font-size: var(--alu-meta-size); backdrop-filter: blur(3px); animation: aluDialogLoadingReveal 0s linear 150ms both; }
 .alu-dialog-error, .alu-dialog-status, .alu-dialog-pending { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 8px 10px; border-radius: 8px; font-size: var(--alu-meta-size); }
-.alu-dialog-error { border: 1px solid var(--alu-rose-border); background: var(--alu-rose-bg); color: var(--alu-rose); }
-.alu-dialog-status { color: var(--alu-mint); background: color-mix(in srgb, var(--alu-mint) 6%, transparent); }
-.alu-dialog-pending { justify-content: flex-start; color: var(--alu-amber); }
+.alu-dialog-error { border: 1px solid var(--alu-danger-border); background: var(--alu-danger-bg); color: var(--alu-danger); }
+.alu-dialog-status { color: var(--alu-success); background: rgb(var(--alu-success-rgb) / .06); }
+.alu-dialog-pending { justify-content: flex-start; color: var(--alu-warning); }
 .alu-session-form { display: flex; min-height: 0; flex: 1; flex-direction: column; padding-top: 10px; }
 .alu-session-form > label { display: flex; min-height: 0; flex: 1; flex-direction: column; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .alu-session-form > label > span { padding: 5px 16px 0; }
@@ -24,8 +24,8 @@
 .alu-agent-activity-spinner {
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(244, 114, 182, 0.22);
-  border-top-color: var(--alu-pink);
+  border: 2px solid rgb(var(--alu-highlight-rgb) / 0.22);
+  border-top-color: var(--alu-highlight);
   border-radius: 50%;
   animation: aluAgentSpin 0.85s linear infinite;
 }

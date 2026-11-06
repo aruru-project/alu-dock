@@ -75,7 +75,7 @@ const label = computed(() => `${segments.value.join('，')}${props.section.error
 .alu-turn-summary-line:focus-visible {
   color: var(--alu-text);
   border-color: var(--alu-border);
-  background: color-mix(in srgb, var(--alu-bg-raised) 70%, transparent);
+  background: rgb(var(--alu-bg-raised-rgb) / .7);
 }
 .alu-turn-summary-text {
   display: inline-flex;
@@ -93,11 +93,11 @@ const label = computed(() => `${segments.value.join('，')}${props.section.error
   transition: transform .18s ease;
 }
 .alu-turn-summary.is-open .alu-turn-summary-disclosure { transform: rotate(90deg); }
-.alu-turn-summary.is-running .alu-turn-summary-line { color: var(--alu-blue); }
-.alu-turn-summary.is-running .alu-turn-summary-line:hover { color: var(--alu-blue); }
-.alu-turn-summary.is-failed .alu-turn-summary-line { color: var(--alu-rose); }
+.alu-turn-summary.is-running .alu-turn-summary-line { color: var(--alu-accent); }
+.alu-turn-summary.is-running .alu-turn-summary-line:hover { color: var(--alu-accent); }
+.alu-turn-summary.is-failed .alu-turn-summary-line { color: var(--alu-danger); }
 .alu-turn-summary.is-aborted .alu-turn-summary-line,
-.alu-turn-summary.is-interrupted .alu-turn-summary-line { color: #f6c56f; }
+.alu-turn-summary.is-interrupted .alu-turn-summary-line { color: var(--alu-warning-text); }
 .alu-turn-summary-error {
   margin: 2px 0 0 8px;
   overflow-wrap: anywhere;

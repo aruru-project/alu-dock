@@ -1,44 +1,7 @@
 /* ── Design Tokens ── */
 :root {
-  /* Background layers (deep space navy) */
-  --alu-bg:         #080c18;
-  --alu-bg-raised:  #0e1220;
-  --alu-surface:    #111828;
-  --alu-hover:      #1a2236;
-  --alu-active:     #1c2438;
-  /* Borders */
-  --alu-border:         #1c2638;
-  --alu-border-light:   #243040;
-  --alu-border-focus:   #3c4c62;
-  /* Text hierarchy */
-  --alu-text:           #dce8f4;
-  --alu-text-dim:       #8898b0;
-  /* muted 是要读的次要信息（路径、说明、时间），面板底色上 ≈4.8:1；
-     faint 只给装饰和禁用态，≈2.7:1。两者都不能低于此，2K 屏 100% 缩放下会看不清。 */
-  --alu-text-muted:     #74819a;
-  --alu-text-faint:     #4f5a70;
-  /* Accents — from Alu's character design */
-  --alu-pink:           #f472b6;
-  --alu-pink-bg:        #1e0f20;
-  --alu-pink-border:    #4a1e3a;
-  --alu-blue:           #7ec8e0;
-  --alu-blue-dim:       #5aaac8;
-  --alu-blue-bg:        #0e1c28;
-  --alu-blue-border:    #1c3040;
-  --alu-amber:          #fbbf24;
-  --alu-amber-dim:      #d09020;
-  --alu-rose:           #f87171;
-  --alu-rose-dim:       #d05050;
-  --alu-rose-bg:        #1e0f10;
-  --alu-rose-border:    #4a1820;
-  --alu-mint:           #34d399;
-  /* User message bubble */
-  --alu-user-bg:        #1c0e18;
-  --alu-user-border:    #3e1830;
-  --alu-user-text:      #d8c0cc;
-  /* Navbar */
-  --alu-nav-bg:         #0c1020;
-  --alu-nav-border:     #1a2436;
+  font-family: 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
+  --font-reading: 'Noto Sans SC', system-ui, sans-serif;
   --alu-nav-height:     68px;
   /* 外壳文字的字号阶梯（侧栏、设置、面板、顶栏；会话正文不用）：
      手机和笔记本取下限，2K 及以上取上限。ui 是可交互项和主要文字，meta 是路径/说明/时间，
@@ -57,30 +20,6 @@
   /* 手机三行：工作与入口 / 模型与思考等级 / 用量。统计行保持紧凑。 */
   :root { --alu-nav-height: auto; }
 }
-:root {
-  color-scheme: dark;
-  font-family: 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
-  --c-space-950: #080c18;
-  --c-space-925: #0b1020;
-  --c-space-900: #0e1220;
-  --c-space-850: #111828;
-  --c-space-800: #1a2236;
-  --c-line: #26324a;
-  --c-line-soft: #1b263b;
-  --c-text-1: #dce8f4;
-  --c-text-2: #8898b0;
-  --c-text-3: #6f7f96;
-  --c-sakura: #f472b6;
-  --c-sakura-line: #592348;
-  --c-ice: #7ec8e0;
-  --c-ice-soft: #17303f;
-  --c-amber: #fbbf24;
-  --c-danger: #f87171;
-  --c-success: #34d399;
-  --focus-ring: 0 0 0 2px #080c18, 0 0 0 4px #7ec8e0;
-  --font-reading: 'Noto Sans SC', system-ui, sans-serif;
-  --shadow-panel: 0 18px 60px rgb(0 0 0 / 0.45);
-}
 /* Android owns the real window geometry. Browser builds fall back to CSS safe areas. */
 :root {
   --aludock-inset-top: env(safe-area-inset-top, 0px);
@@ -89,4 +28,309 @@
   --aludock-inset-left: env(safe-area-inset-left, 0px);
   --aludock-ime-bottom: 0px;
   --aludock-base-viewport-height: 100dvh;
+}
+
+/* ── 颜色 ──
+   组件只用这里按用途命名的变量，不直接写颜色值（transparent、currentColor 除外）。
+   - 名字说用途，不说颜色：选中项用 --alu-highlight-*，不用"粉色"。经典配色里几种用途碰巧同色，各自仍用自己的变量。
+   - 以 -rgb 结尾的是同一颜色的 RGB 分量，只用来配透明度：rgb(var(--alu-accent-rgb) / .1)。
+   - 不用 color-mix()：Android 最旧支持的 WebView（Chromium 99）不认。需要混色时在这里算好写成固定值。
+   - 新界面先找已有用途；确实是新用途再在这里加一个。 */
+/* 经典 */
+:root {
+  color-scheme: dark;
+  /* 页面与表面 */
+  --alu-bg: #080c18; /* 页面底色 */
+  --alu-bg-rgb: 8 12 24;
+  --alu-bg-raised: #0e1220; /* 弹窗、面板 */
+  --alu-bg-raised-rgb: 14 18 32;
+  --alu-surface: #111828; /* 输入框、卡片 */
+  --alu-surface-rgb: 17 24 40;
+  --alu-hover: #1a2236; /* 悬停、按下 */
+  --alu-active: #1c2438; /* 按下或选中的底、行内代码、表头 */
+  --alu-nav-bg: #0c1020; /* 顶栏和输入区 */
+  --alu-nav-border: #1a2436;
+  --alu-nav-control-bg: rgba(20, 28, 46, 0.8); /* 顶栏里的选择器和按钮 */
+  --alu-nav-stat-bg: rgba(16, 22, 35, 0.8); /* 顶栏用量数字 */
+  --alu-button-bg: rgba(18, 28, 45, 0.8); /* 工作区、文档、命令行里的普通按钮 */
+  --alu-toolbar-bg: rgba(13, 21, 35, .94); /* 目录和文件预览的工具条 */
+  --alu-overlay-rgb: 255 255 255; /* 在底色上提亮一层（只配透明度用） */
+  --alu-page-bg: radial-gradient(ellipse at 50% 0%, #141e30 0%, #080c18 60%);
+  /* 星空背景 */
+  --alu-backdrop-stars:
+    radial-gradient(circle, rgba(255,255,255,0.80) 0.8px, transparent 0.8px),
+    radial-gradient(circle, rgba(200,220,255,0.70) 0.8px, transparent 0.8px),
+    radial-gradient(circle, rgba(255,255,255,0.72) 0.7px, transparent 0.7px),
+    radial-gradient(circle, rgba(255,255,255,0.50) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(200,210,255,0.48) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(255,255,255,0.50) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(255,255,255,0.46) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(200,220,255,0.50) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(255,255,255,0.45) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(255,255,255,0.50) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(255,255,255,0.48) 0.5px, transparent 0.5px),
+    radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.32) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.26) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(200,210,255,0.28) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.32) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.25) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(200,220,255,0.26) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.24) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
+    radial-gradient(circle, rgba(200,210,255,0.26) 0.4px, transparent 0.4px);
+
+  /* 线 */
+  --alu-border: #1c2638;
+  --alu-border-light: #243040;
+  --alu-border-focus: #3c4c62;
+  --alu-border-strong: #26324a; /* 配对、Host 设置、扩展对话框里的输入框和按钮描边 */
+  --alu-border-soft: #1b263b; /* 配对、Host 设置里的分隔线 */
+
+  /* 文字
+     muted 是要读的次要信息（路径、说明、时间），面板底色上 ≈4.8:1；faint 只给装饰和禁用态，≈2.7:1。
+     两者都不能低于此，2K 屏 100% 缩放下会看不清。 */
+  --alu-text: #dce8f4;
+  --alu-text-dim: #8898b0;
+  --alu-text-dim-rgb: 136 152 176;
+  --alu-text-muted: #74819a;
+  --alu-text-muted-rgb: 116 129 154;
+  --alu-text-subtle: #6f7f96; /* 配对、Host 设置、附件里的次要信息 */
+  --alu-text-faint: #4f5a70;
+  --alu-text-faint-rgb: 79 90 112;
+
+  /* 强调：链接、次要操作、悬停、信息、运行中 */
+  --alu-accent: #7ec8e0;
+  --alu-accent-rgb: 126 200 224;
+  --alu-accent-dim: #5aaac8;
+  --alu-accent-bg: #0e1c28;
+  --alu-accent-border: #1c3040;
+  --alu-accent-soft: #17303f; /* 附件图标、次要按钮的浅底 */
+  --alu-accent-hover: #a5e7f5; /* 实心强调按钮悬停 */
+  --alu-accent-hover-text: #dff8ff;
+  --alu-on-accent: #07121b; /* 实心强调按钮上的字 */
+  --alu-focus-ring: 0 0 0 2px var(--alu-bg), 0 0 0 4px var(--alu-accent); /* 键盘焦点 */
+
+  /* 突出：选中项、主按钮、输入焦点、命令提示符 */
+  --alu-highlight: #f472b6;
+  --alu-highlight-rgb: 244 114 182;
+  --alu-highlight-bg: #1e0f20;
+  --alu-highlight-border: #4a1e3a;
+  --alu-highlight-hover-bg: #261a26;
+  --alu-highlight-hover-border: #4a2a38;
+  --alu-highlight-hover-text: #f4b8c8;
+  --alu-highlight-solid-hover: #fb8cc5; /* 实心主按钮悬停 */
+  --alu-on-highlight: #080c18; /* 实心主按钮上的字 */
+  --alu-highlight-glow: rgba(244, 114, 182, 0.18); /* 顶栏选择器悬停光晕 */
+
+  /* 品牌：阿露头像、品牌字、装饰 */
+  --alu-brand: #f472b6;
+  --alu-brand-rgb: 244 114 182;
+  --alu-brand-bg: #1e0f20;
+  --alu-brand-border: #4a1e3a; /* 头像圈 */
+  --alu-avatar-glow: 0 0 12px rgba(244, 114, 182, 0.35), 0 0 28px rgba(244, 114, 182, 0.10); /* 对话里的头像 */
+  --alu-nav-avatar-glow: 0 0 8px rgba(244, 114, 182, 0.45); /* 顶栏头像 */
+  --alu-nav-avatar-glow-hover: 0 0 20px rgba(244, 114, 182, 0.65), 0 0 48px rgba(244, 114, 182, 0.22);
+  --alu-welcome-image-filter: drop-shadow(0 0 24px rgba(244, 114, 182, 0.35)); /* 空对话的欢迎图 */
+  --alu-illustration-shadow: drop-shadow(0 12px 18px rgb(0 0 0 / .28)); /* 配对页插图 */
+
+  /* 状态 */
+  --alu-success: #34d399; /* 已连接、成功、已开启 */
+  --alu-success-rgb: 52 211 153;
+  --alu-success-text: #82d7b5;
+  --alu-success-glow: rgba(52, 211, 153, 0.6);
+  --alu-on-success: #07101d;
+  --alu-running: #34d399; /* Work 正在运行 */
+  --alu-running-glow: rgba(52, 211, 153, 0.45);
+  --alu-idle: rgba(52, 211, 153, 0.45); /* Work 空闲 */
+  --alu-waiting: #f472b6; /* 等你回答 */
+  --alu-waiting-glow: #4a1e3a;
+  --alu-warning: #fbbf24; /* 提醒、等待、进行中的操作 */
+  --alu-warning-rgb: 251 191 36;
+  --alu-warning-dim: #d09020;
+  --alu-warning-glow: rgba(251, 191, 36, 0.6);
+  --alu-on-warning: #14100a;
+  --alu-warning-text: #f6c56f; /* 警告消息的文字 */
+  --alu-warning-line: #f59e0b; /* 警告消息的边线 */
+  --alu-warning-line-rgb: 245 158 11;
+  --alu-danger: #f87171; /* 错误、危险操作 */
+  --alu-danger-rgb: 248 113 113;
+  --alu-danger-dim: #d05050;
+  --alu-danger-bg: #1e0f10;
+  --alu-danger-border: #4a1820;
+  --alu-danger-text: #f8a0a0; /* 较柔和的错误文字 */
+  --alu-danger-glow: rgba(248, 113, 113, 0.6);
+
+  /* 对话 */
+  --alu-user-bg: #1c0e18; /* 你发的消息 */
+  --alu-user-border: #3e1830;
+  --alu-user-text: #d8c0cc;
+  --alu-user-prefix: #fbbf24;
+  --alu-bubble-bg: rgba(20, 30, 52, 0.82); /* 阿露的回复 */
+  --alu-bubble-border: #253050;
+  --alu-thinking-line: #1c3040;
+  --alu-code-inline: #f472b6; /* 行内代码的字 */
+  --alu-quote-line: #f472b6;
+  --alu-quote-bg: #1e0f20;
+  --alu-code-block-bg: #0a0f1e;
+  --alu-code-block-border: #253050;
+  --alu-code-block-header-bg: #111828;
+  --alu-code-block-header-border: #1e2e48;
+  --alu-code-block-text: #c9d8f0;
+  --alu-tool-accent: #fbbf24; /* 工具名、展开箭头、工具记录的边线 */
+  --alu-tool-bg: #121318;
+  --alu-tool-border: #524b33;
+  --alu-tool-divider: #373836;
+  --alu-tool-details-divider: #3b3b35;
+  --alu-tool-preview-bg: #0f1118;
+  --alu-tool-preview-text: #c9d5e4;
+  --alu-tool-diff-text: #f4c956;
+  --alu-tool-hover-bg: rgba(251, 191, 36, 0.05);
+  --alu-output-bg: #070b16; /* 工具输出、原文记录 */
+  --alu-command-name: #fbbf24; /* 命令建议、快捷按钮里的命令名 */
+  --alu-shell-accent: #fbbf24; /* 你运行的命令：提示符和边线 */
+  --alu-shell-bg: rgba(7, 11, 19, 0.9);
+  --alu-shell-running-glow: #7ec8e0;
+  --alu-terminal-bg: #04070d; /* 命令输出 */
+  --alu-terminal-text: #d4e3ee;
+  --alu-model-name: #5aaac8; /* 工作列表里的模型名 */
+  --alu-image-frame-bg: #0d101d; /* 对话里的图片 */
+  --alu-image-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+  --alu-image-backdrop: #090b12; /* 图片缩略图的底 */
+
+  /* 输入区 */
+  --alu-composer-focus-glow: 0 0 0 4px rgba(244, 114, 182, 0.10), 0 0 32px rgba(244, 114, 182, 0.10), inset 0 0 24px rgba(244, 114, 182, 0.03);
+  --alu-send-bg: linear-gradient(135deg, #c8386e 0%, #a02858 100%);
+  --alu-send-bg-hover: linear-gradient(135deg, #dc4880 0%, #b83468 100%);
+  --alu-send-text: #fce8f0;
+  --alu-send-shadow: 0 2px 14px rgba(200, 56, 110, 0.40);
+  --alu-send-shadow-hover: 0 4px 24px rgba(220, 72, 128, 0.50);
+  --alu-send-shadow-active: 0 2px 10px rgba(200, 56, 110, 0.32);
+  --alu-editor-inset-shadow: inset 0 1px 14px rgba(0, 0, 0, 0.2); /* 展开编辑框 */
+  --alu-queue-bg: rgba(14, 28, 40, 0.82);
+  --alu-file-drop-scrim: rgba(4, 6, 13, 0.6);
+  --alu-float-shadow: 0 8px 24px rgba(2, 6, 18, .34); /* 回到底部、中止按钮 */
+  --alu-suggest-shadow: 0 18px 60px rgba(0, 0, 0, 0.62); /* 命令建议 */
+
+  /* 弹窗、菜单、遮罩 */
+  --alu-dialog-scrim: rgba(4, 6, 13, 0.84);
+  --alu-dialog-scrim-compact: rgba(4, 6, 14, 0.92); /* 手机上的弹窗和命令中心 */
+  --alu-dialog-shadow: 0 28px 90px rgba(0,0,0,0.78), 0 0 0 1px rgba(244,114,182,0.04);
+  --alu-dialog-header-bg: #0f1220;
+  --alu-option-current-bg: rgba(30, 15, 32, 0.7); /* 列表里的当前项 */
+  --alu-palette-scrim: rgba(4, 6, 13, 0.82); /* 命令中心 */
+  --alu-palette-shadow: 0 28px 90px rgba(0,0,0,0.82), 0 0 0 1px rgba(244,114,182,0.05);
+  --alu-modal-scrim: rgb(2 5 12 / .72); /* 设置窗口 */
+  --alu-popover-scrim-compact: rgba(4, 6, 13, .68); /* 手机上的 Dock Tools */
+  --alu-drawer-scrim: rgba(6, 8, 14, .82); /* 工作列表 */
+  --alu-tray-scrim: rgba(3, 6, 13, .74); /* 文件列表 */
+  --alu-panel-shadow: 0 18px 60px rgb(0 0 0 / 0.45);
+  --alu-menu-shadow: 0 18px 42px rgba(0, 0, 0, 0.48); /* 下拉菜单 */
+  --alu-popover-shadow: 0 12px 36px rgba(2, 6, 18, .4); /* 连接状态详情 */
+  --alu-drag-shadow: 0 12px 30px rgba(2, 6, 18, 0.5); /* 拖动中的快捷按钮 */
+  --alu-toast-shadow: 0 8px 28px rgba(0, 0, 0, .42);
+  --alu-sidebar-shadow: 4px 0 24px rgba(0, 0, 0, .5);
+  --alu-delivery-tray-bg: #080c19; /* 文件列表 */
+  --alu-delivery-row-hover-bg: #121928;
+  --alu-delivery-shadow: -18px 0 60px rgba(0, 0, 0, .5);
+  --alu-message-header-bg: #151d2c; /* 查看消息原文 */
+  --alu-message-source-bg: #080c17;
+  --alu-new-work-hover-bg: #1d1426;
+
+  /* 设置窗口 */
+  --alu-settings-bg: #0b101c; /* App 设置、Host 设置（模型） */
+  --alu-settings-shadow: 0 28px 80px rgba(0, 0, 0, .5);
+  --alu-settings-header-bg: #101725;
+  --alu-settings-nav-bg: #080d17;
+  --alu-settings-footer-bg: #0d1322;
+  --alu-away-indicator-ring: #0d1725;
+  --alu-host-settings-bg: #090d19; /* 连接与配对 */
+  --alu-host-settings-shadow: 0 28px 80px rgba(0, 0, 0, .48), 0 0 0 1px rgba(255, 255, 255, .018) inset;
+  --alu-host-catalog-bg: #080c17;
+  --alu-host-endpoint-form-bg: #0e1724;
+  --alu-host-connect-border: #3f6074;
+  --alu-host-active-glow: rgba(52, 211, 153, 0.48);
+  --alu-endpoint-form-bg: rgb(11 16 32 / .65);
+  --alu-local-card-border: #2a5f60; /* 连接本机 */
+  --alu-local-card-border-connected: #2d7f70;
+  --alu-local-card-border-quiet: #22504f;
+  --alu-local-config-hover-border: #2b6f68;
+  --alu-local-endpoint-text: #43be98;
+
+  /* 项目状态、命令中心、Dock Tools */
+  --alu-status-section-bg: rgba(14, 19, 32, 0.72);
+  --alu-status-identity-bg: #111828;
+  --alu-command-output-bg: rgba(2, 5, 12, 0.52);
+  --alu-command-error-text: #f69aae;
+  --alu-command-important: #f28b8e;
+  --alu-dock-tools-bg: #0e1220;
+  --alu-dock-tools-border: #3d5b6d;
+  --alu-dock-tools-shadow: 0 24px 72px rgba(0, 0, 0, .66), 0 0 0 1px rgba(115, 183, 255, .05);
+  --alu-dock-tools-note-bg: rgba(2, 5, 12, .38);
+  --alu-dock-tools-on-border: #235a55;
+  --alu-dock-tools-toggle-on-border: #245d57;
+  --alu-dock-tools-toggle-on-bg: #13232f;
+  --alu-switch-track: rgba(5, 9, 18, .72);
+  --alu-switch-track-on: rgba(16, 56, 49, 0.7717);
+  --alu-switch-on-border: #266f61;
+  --alu-switch-knob-shadow: 0 2px 5px rgba(0, 0, 0, .4);
+
+  /* 连接中断页 */
+  --alu-work-state-bg: linear-gradient(145deg, rgba(20, 30, 52, 0.94), rgba(10, 16, 30, 0.96));
+  --alu-work-state-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  --alu-work-state-shadow-quiet: 0 24px 70px rgba(0, 0, 0, 0.24);
+  --alu-work-state-glow: rgba(245, 158, 11, 0.7);
+  --alu-work-state-error-glow: rgba(248, 113, 113, 0.7);
+  --alu-work-state-meta-bg: rgba(5, 10, 20, 0.42);
+  --alu-work-state-secondary-bg: rgba(20, 30, 52, 0.58);
+  --alu-work-state-action-border: #d08a1f;
+  --alu-work-state-action-text: #ffd78d;
+  --alu-work-state-action-glow: rgba(245, 158, 11, 0.08);
+
+  /* 附件、扩展 */
+  --alu-attachment-bg: linear-gradient(135deg, rgb(23 48 63 / .46), rgb(17 24 40 / .88));
+  --alu-attachment-error-bg: rgb(63 25 31 / .45);
+  --alu-attachment-error-text: #f4a2a2;
+  --alu-extension-dialog-bg: #0b1020;
+  --alu-extension-scrim: rgb(3 6 13 / .7);
+  --alu-extension-attention-text: #f6cf79;
+  --alu-extension-widget-bg: rgb(14 32 45 / .48);
+  --alu-extension-primary-text: #190d16;
+
+  /* 图片查看 */
+  --alu-image-scrim: rgba(2, 4, 10, .94);
+  --alu-image-viewer-bg: #070910;
+  --alu-image-viewer-shadow: 0 30px 100px rgba(0, 0, 0, .8);
+  --alu-image-zoom-stage: #05070c;
+  --alu-image-save-bg: rgba(38, 126, 164, .9);
+  --alu-image-control-text: white;
+  --alu-image-control-bg: rgba(5, 7, 12, .72);
+  --alu-image-zoom-controls-bg: rgba(5, 7, 12, .82);
+  --alu-image-control-border: rgba(255, 255, 255, .18);
+  --alu-image-control-hover: rgba(255, 255, 255, .12);
+  --alu-image-control-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+
+  /* 工作区、目录、文档 */
+  --alu-workspace-scrim: rgba(4, 7, 14, .82);
+  --alu-workspace-bg: #090e19;
+  --alu-workspace-shadow: 0 28px 90px rgba(0, 0, 0, .62);
+  --alu-workspace-header-bg: linear-gradient(105deg, rgba(16, 27, 45, .98), rgba(10, 16, 29, .98));
+  --alu-workspace-command-bg: rgba(9, 14, 25, 0.98);
+  --alu-viewer-bg: #080d17; /* 文件和文档预览 */
+  --alu-source-bg: #070b13; /* 纯文本和原文 */
+  --alu-preview-text: #d4e3ee;
+  --alu-save-status-bg: rgba(12, 29, 41, .96);
+  --alu-directory-bg: #0b111d;
+  --alu-directory-row-border: rgba(45, 57, 79, .55);
+  --alu-document-toolbar-bg: rgba(12, 19, 32, .96);
+  --alu-document-switch-bg: rgba(5, 9, 17, .72);
+  --alu-document-error-border: rgba(255, 100, 127, .28);
+  --alu-document-error-bg: rgba(40, 12, 22, .94);
 }

@@ -63,26 +63,26 @@ function stateText() {
 </template>
 
 <style scoped>
-.attachment-card { display: flex; min-width: 0; min-height: 58px; align-items: center; gap: 9px; padding: 8px 9px; color: var(--c-text-1); font-family: var(--font-reading); background: linear-gradient(135deg, rgb(23 48 63 / .46), rgb(17 24 40 / .88)); border: 1px solid rgb(126 200 224 / .2); border-radius: 10px; }
-.attachment-card.compact { min-height: 48px; padding: 6px 8px; background: rgb(8 12 24 / .42); }
-.attachment-card.is-error { background: rgb(63 25 31 / .45); border-color: rgb(248 113 113 / .28); }
-.attachment-card.is-queued { border-color: rgb(251 191 36 / .18); }
+.attachment-card { display: flex; min-width: 0; min-height: 58px; align-items: center; gap: 9px; padding: 8px 9px; color: var(--alu-text); font-family: var(--font-reading); background: var(--alu-attachment-bg); border: 1px solid rgb(var(--alu-accent-rgb) / .2); border-radius: 10px; }
+.attachment-card.compact { min-height: 48px; padding: 6px 8px; background: rgb(var(--alu-bg-rgb) / .42); }
+.attachment-card.is-error { background: var(--alu-attachment-error-bg); border-color: rgb(var(--alu-danger-rgb) / .28); }
+.attachment-card.is-queued { border-color: rgb(var(--alu-warning-rgb) / .18); }
 .attachment-preview-trigger { display: flex; min-width: 0; flex: 1; align-items: center; gap: 9px; color: inherit; font: inherit; text-align: left; }
 button.attachment-preview-trigger { margin: -4px; padding: 4px; cursor: zoom-in; background: transparent; border: 0; border-radius: 8px; }
-button.attachment-preview-trigger:hover { background: rgb(126 200 224 / .07); }
-button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--c-ice); outline-offset: 1px; }
-.attachment-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; color: var(--c-ice); background: var(--c-ice-soft); border-radius: 9px; place-items: center; }
-.attachment-icon.has-thumbnail { width: 42px; height: 42px; overflow: hidden; background: #090b12; }
+button.attachment-preview-trigger:hover { background: rgb(var(--alu-accent-rgb) / .07); }
+button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--alu-accent); outline-offset: 1px; }
+.attachment-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; color: var(--alu-accent); background: var(--alu-accent-soft); border-radius: 9px; place-items: center; }
+.attachment-icon.has-thumbnail { width: 42px; height: 42px; overflow: hidden; background: var(--alu-image-backdrop); }
 .attachment-card.compact .attachment-icon.has-thumbnail { width: 36px; height: 36px; }
 .attachment-thumbnail { display: block; width: 100%; height: 100%; object-fit: cover; }
-.attachment-card.is-error .attachment-icon { color: var(--c-danger); background: rgb(248 113 113 / .08); }
+.attachment-card.is-error .attachment-icon { color: var(--alu-danger); background: rgb(var(--alu-danger-rgb) / .08); }
 .attachment-copy { min-width: 0; flex: 1; }
 .attachment-copy strong { display: block; overflow: hidden; font-size: var(--alu-meta-size); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--c-text-3); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
-.attachment-copy small { color: #f4a2a2; }
+.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--alu-text-subtle); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
+.attachment-copy small { color: var(--alu-attachment-error-text); }
 .attachment-actions { display: flex; flex: 0 0 auto; gap: 2px; }
-.attachment-actions button { display: grid; width: 34px; height: 34px; padding: 0; color: var(--c-text-2); cursor: pointer; background: transparent; border: 0; border-radius: 8px; place-items: center; }
-.attachment-actions button:hover { color: var(--c-text-1); background: var(--c-space-800); }
+.attachment-actions button { display: grid; width: 34px; height: 34px; padding: 0; color: var(--alu-text-dim); cursor: pointer; background: transparent; border: 0; border-radius: 8px; place-items: center; }
+.attachment-actions button:hover { color: var(--alu-text); background: var(--alu-hover); }
 @media (max-width: 640px) {
   .attachment-actions button { min-height: 44px; height: 44px; }
 }

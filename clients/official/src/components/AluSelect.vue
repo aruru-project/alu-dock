@@ -165,7 +165,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPoin
 }
 .alu-select-trigger span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alu-select-trigger svg { flex: 0 0 auto; color: var(--alu-text-muted); transition: transform 140ms ease; }
-.is-open .alu-select-trigger { border-color: var(--alu-blue); box-shadow: 0 0 0 2px var(--alu-blue-bg); }
+.is-open .alu-select-trigger { border-color: var(--alu-accent); box-shadow: 0 0 0 2px var(--alu-accent-bg); }
 .is-open .alu-select-trigger svg { transform: rotate(180deg); }
 .is-disabled .alu-select-trigger { color: var(--alu-text-faint); opacity: 0.72; }
 .alu-select-menu {
@@ -180,7 +180,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPoin
   border: 1px solid var(--alu-border-light);
   border-radius: 9px;
   background: var(--alu-surface);
-  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.48);
+  box-shadow: var(--alu-menu-shadow);
 }
 .alu-select-option {
   display: flex;
@@ -198,7 +198,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPoin
 }
 .alu-select-option:hover:not(:disabled),
 .alu-select-option:focus-visible { color: var(--alu-text); background: var(--alu-hover); outline: none; }
-.alu-select-option.is-selected { color: var(--alu-pink); background: var(--alu-active); }
+.alu-select-option.is-selected { color: var(--alu-highlight); background: var(--alu-active); }
 .alu-select-option:disabled { color: var(--alu-text-faint); opacity: 0.5; }
 .alu-select-check { display: grid; width: 15px; flex: 0 0 15px; place-items: center; }
 .alu-select-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }

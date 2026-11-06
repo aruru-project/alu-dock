@@ -70,10 +70,10 @@ async function copyAllText() {
   gap: 16px;
   padding: 16px 18px;
   border-bottom: 1px solid var(--alu-border);
-  background: color-mix(in srgb, var(--alu-bg-raised) 94%, var(--alu-blue) 6%);
+  background: var(--alu-message-header-bg);
 }
 .message-text-header > div { display: grid; gap: 3px; }
-.message-text-header span { color: var(--alu-blue); font: 700 9px/1.2 var(--font-reading); letter-spacing: .14em; text-transform: uppercase; }
+.message-text-header span { color: var(--alu-accent); font: 700 9px/1.2 var(--font-reading); letter-spacing: .14em; text-transform: uppercase; }
 .message-text-header strong { color: var(--alu-text); font: 700 14px/1.35 var(--font-reading); }
 .message-text-close {
   display: grid;
@@ -96,7 +96,7 @@ async function copyAllText() {
   overflow: auto;
   color: var(--alu-text);
   outline: none;
-  background: color-mix(in srgb, var(--alu-bg) 96%, black);
+  background: var(--alu-message-source-bg);
   border: 0;
   border-radius: 0;
   font: 12px/1.7 var(--font-mono);
@@ -106,7 +106,7 @@ async function copyAllText() {
   user-select: text;
   white-space: pre-wrap;
 }
-.message-text-source:focus { box-shadow: inset 0 0 0 1px var(--alu-blue-border); }
+.message-text-source:focus { box-shadow: inset 0 0 0 1px var(--alu-accent-border); }
 .message-text-footer {
   display: flex;
   flex: 0 0 auto;
@@ -130,7 +130,7 @@ async function copyAllText() {
   border-radius: 9px;
   cursor: pointer;
 }
-.message-text-footer button.is-primary { color: var(--alu-bg); border-color: var(--alu-blue); background: var(--alu-blue); font-weight: 700; }
+.message-text-footer button.is-primary { color: var(--alu-bg); border-color: var(--alu-accent); background: var(--alu-accent); font-weight: 700; }
 @media (max-width: 640px) {
   .message-text-source { padding: 14px; font-size: 12px; }
   .message-text-footer { align-items: stretch; flex-direction: column; gap: 9px; }

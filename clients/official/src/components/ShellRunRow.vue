@@ -96,14 +96,14 @@ async function copyPath() {
   margin: 8px 0;
   padding: 9px 12px 8px;
   border: 1px solid var(--alu-border);
-  border-left: 2px solid var(--alu-amber);
+  border-left: 2px solid var(--alu-shell-accent);
   border-radius: 8px;
-  background: rgba(7, 11, 19, 0.9);
+  background: var(--alu-shell-bg);
   color: var(--alu-text-dim);
   font-size: var(--alu-meta-size);
 }
-.shell-run-running { border-left-color: var(--alu-blue); }
-.shell-run-failed { border-left-color: var(--alu-rose); }
+.shell-run-running { border-left-color: var(--alu-accent); }
+.shell-run-failed { border-left-color: var(--alu-danger); }
 .shell-run-stopped { border-left-color: var(--alu-text-faint); }
 .shell-run-header {
   display: flex;
@@ -113,7 +113,7 @@ async function copyPath() {
 }
 .shell-run-prompt {
   flex: none;
-  color: var(--alu-amber);
+  color: var(--alu-shell-accent);
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-weight: 700;
 }
@@ -135,8 +135,8 @@ async function copyPath() {
   font-size: var(--alu-micro-size);
   white-space: nowrap;
 }
-.shell-run-status.is-running { color: var(--alu-blue); border-color: var(--alu-blue-border); background: var(--alu-blue-bg); }
-.shell-run-status.is-failed { color: var(--alu-rose); border-color: var(--alu-rose-border); background: var(--alu-rose-bg); }
+.shell-run-status.is-running { color: var(--alu-accent); border-color: var(--alu-accent-border); background: var(--alu-accent-bg); }
+.shell-run-status.is-failed { color: var(--alu-danger); border-color: var(--alu-danger-border); background: var(--alu-danger-bg); }
 .shell-run-time { flex: none; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .shell-run-output {
   max-height: 320px;
@@ -145,8 +145,8 @@ async function copyPath() {
   overflow: auto;
   padding: 8px 10px;
   border-radius: 6px;
-  background: #04070d;
-  color: #d4e3ee;
+  background: var(--alu-terminal-bg);
+  color: var(--alu-terminal-text);
   font: var(--alu-meta-size)/1.55 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
   tab-size: 4;
   white-space: pre-wrap;
@@ -154,8 +154,8 @@ async function copyPath() {
   scrollbar-color: var(--alu-border) transparent;
 }
 .shell-run-note { margin: 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
-.shell-run-error { color: var(--alu-rose); white-space: pre-wrap; overflow-wrap: anywhere; }
-.shell-run-truncated { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--alu-amber-dim); }
+.shell-run-error { color: var(--alu-danger); white-space: pre-wrap; overflow-wrap: anywhere; }
+.shell-run-truncated { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--alu-warning-dim); }
 .shell-run-path { overflow-wrap: anywhere; color: var(--alu-text); font-family: 'JetBrains Mono', ui-monospace, monospace; user-select: all; }
 .shell-run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .shell-run-mode { margin-right: auto; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
@@ -167,15 +167,15 @@ async function copyPath() {
   padding: 0 10px;
   border: 1px solid var(--alu-border);
   border-radius: 6px;
-  background: rgba(18, 28, 45, 0.8);
+  background: var(--alu-button-bg);
   color: var(--alu-text-muted);
   font-size: var(--alu-micro-size);
 }
 .shell-run-action:hover:not(:disabled),
-.shell-run-action:focus-visible { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-hover); }
+.shell-run-action:focus-visible { color: var(--alu-text); border-color: var(--alu-accent-border); background: var(--alu-hover); }
 .shell-run-action:disabled { opacity: 0.6; }
-.shell-run-quote { color: var(--alu-blue); }
-.shell-run-stop { color: var(--alu-rose); }
+.shell-run-quote { color: var(--alu-accent); }
+.shell-run-stop { color: var(--alu-danger); }
 @media (max-width: 720px) {
   .shell-run-output { max-height: 240px; }
   .shell-run-action { min-height: 36px; }

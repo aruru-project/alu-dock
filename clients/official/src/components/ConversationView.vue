@@ -152,8 +152,8 @@ function bodyRows(section: ConversationTurnSection) {
 
 <style scoped>
 .conversation-flow.is-switching { opacity: .42; pointer-events: none; user-select: none; }
-.history-loader { display: grid; justify-items: center; gap: 6px; margin: 0 auto 12px; color: var(--alu-rose); font: 10px/1.4 var(--font-reading); }
-.history-loader button { display: inline-flex; min-height: 42px; align-items: center; gap: 6px; padding: 5px 12px; color: var(--alu-text-muted); cursor: pointer; background: rgb(17 24 40 / .8); border: 1px solid var(--alu-border); border-radius: 999px; }
+.history-loader { display: grid; justify-items: center; gap: 6px; margin: 0 auto 12px; color: var(--alu-danger); font: 10px/1.4 var(--font-reading); }
+.history-loader button { display: inline-flex; min-height: 42px; align-items: center; gap: 6px; padding: 5px 12px; color: var(--alu-text-muted); cursor: pointer; background: rgb(var(--alu-surface-rgb) / .8); border: 1px solid var(--alu-border); border-radius: 999px; }
 .history-loader button:hover { color: var(--alu-text); border-color: var(--alu-border-focus); }
 .history-loader .spinning { animation: spin .9s linear infinite; }
 .conversation-flow { width: 100%; }
