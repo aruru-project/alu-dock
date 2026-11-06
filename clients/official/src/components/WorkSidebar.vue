@@ -107,7 +107,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   font-weight: 650;
   transition: border-color 0.15s, background 0.15s;
 }
-.alu-new-work-btn:hover:not(:disabled) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
+.alu-new-work-btn:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .alu-sidebar-refresh,
 .alu-sidebar-close {
   display: grid;

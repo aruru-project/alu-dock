@@ -107,7 +107,7 @@
   text-align: left;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.ui-dialog-btn:hover,
+.ui-dialog-btn:hover:where(:not(:disabled)),
 .ui-dialog-btn:focus-visible {
   outline: none;
   background: var(--alu-hover);
@@ -116,7 +116,7 @@
 }
 .ui-dialog-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .ui-dialog-btn-primary { background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); color: var(--alu-highlight); }
-.ui-dialog-btn-primary:hover { background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); color: var(--alu-highlight-hover-text); }
+.ui-dialog-btn-primary:hover:where(:not(:disabled)) { background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); color: var(--alu-highlight-hover-text); }
 .ui-dialog-form-footer { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 8px; padding: 14px 16px; }
 .ui-dialog-input,
 .ui-dialog-editor {
@@ -287,7 +287,7 @@
   }
 }
 .session-primary { display: flex; min-height: 42px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; color: var(--alu-highlight); font-weight: 700; cursor: pointer; background: var(--alu-highlight-bg); border: 1px solid var(--alu-highlight-border); border-radius: 8px; }
-.session-primary:hover:not(:disabled) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
+.session-primary:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 .session-trust { position: absolute; z-index: 5; inset: 0; display: grid; align-content: center; justify-items: center; padding: 20px; text-align: center; background: rgb(var(--alu-bg-rgb) / .96); }
 .session-trust p { color: var(--alu-text-dim); font: var(--alu-meta-size)/1.6 var(--font-reading); }
 .session-trust > div { display: flex; gap: 8px; }

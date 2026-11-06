@@ -608,7 +608,7 @@ onBeforeUnmount(() => {
 .workspace-primary-button,
 .workspace-secondary-button { min-height: 38px; padding: 0 14px; font-size: var(--alu-meta-size); }
 .workspace-primary-button { color: var(--alu-highlight); border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); font-weight: 700; }
-.workspace-primary-button:hover:not(:disabled) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
+.workspace-primary-button:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .workspace-progress { width: min(360px, 75%); height: 5px; overflow: hidden; border-radius: 5px; background: var(--alu-border); }
 .workspace-progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--alu-accent), var(--alu-brand)); transition: width .18s ease; }
 .workspace-text-preview {

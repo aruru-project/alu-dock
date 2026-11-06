@@ -284,7 +284,7 @@ async function copyDiagnostic(text: string) {
 }
 .alu-work-state-primary:focus-visible { box-shadow: var(--alu-focus-ring); }
 .alu-work-state-primary:disabled { cursor: not-allowed; }
-.alu-work-state-primary:hover:not(:disabled) {
+.alu-work-state-primary:hover:where(:not(:disabled)) {
   color: var(--alu-highlight-hover-text);
   border-color: var(--alu-highlight-hover-border);
   background: var(--alu-highlight-hover-bg);
