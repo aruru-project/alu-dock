@@ -222,7 +222,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   padding: 7px 16px 7px 12px;
   border-radius: 999px;
   border: 1.5px solid var(--alu-border-light);
-  background: var(--alu-nav-control-bg);
+  background: var(--alu-control-bg);
   color: var(--alu-text-dim);
   font-size: 13px;
   font-family: inherit;
@@ -270,7 +270,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   border: 1px solid var(--alu-border-light);
   border-radius: 999px;
   color: var(--alu-text-muted);
-  background: var(--alu-nav-control-bg);
+  background: var(--alu-control-bg);
   font-size: var(--alu-meta-size);
   white-space: nowrap;
   transition: color .14s ease, border-color .14s ease, background .14s ease, box-shadow .14s ease;
@@ -283,7 +283,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 }
 .alu-nav-dock-tools.open { box-shadow: 0 0 0 3px rgb(var(--alu-accent-rgb) / .1); }
 .alu-nav-dock-tools b { min-width: 20px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); letter-spacing: .08em; text-align: center; }
-.alu-nav-dock-tools.active { color: var(--alu-success); border-color: var(--alu-dock-tools-toggle-on-border); background: rgb(var(--alu-success-rgb) / .07); }
+.alu-nav-dock-tools.active { color: var(--alu-success); border-color: var(--alu-success-border); background: rgb(var(--alu-success-rgb) / .07); }
 .alu-nav-dock-tools.active b { color: var(--alu-success); }
 .alu-nav-dock-tools-chevron { color: var(--alu-text-faint); font-size: var(--alu-micro-size); transition: transform .14s ease; }
 .alu-nav-dock-tools.open .alu-nav-dock-tools-chevron { transform: rotate(180deg); }
@@ -295,7 +295,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   justify-content: center;
   border-radius: 8px;
   border: 1.5px solid var(--alu-border-light);
-  background: var(--alu-nav-control-bg);
+  background: var(--alu-control-bg);
   color: var(--alu-text-dim);
   font-size: 18px;
   cursor: pointer;
@@ -429,7 +429,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     margin-top: 6px;
     border: 1px solid var(--alu-border-light);
     border-radius: 12px;
-    background: var(--alu-nav-control-bg);
+    background: var(--alu-control-bg);
   }
   .alu-nav-model-controls { grid-area: models; z-index: 1; min-height: 42px; margin-top: 6px; gap: 0; }
   .alu-nav-model-controls .alu-nav-selector {
@@ -496,5 +496,5 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 @media (max-width: 1399px) {
   .alu-nav-files { width: 44px; height: 44px; border-radius: 11px; }
 }
-.alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: var(--alu-on-success); border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-success); font: 800 var(--alu-micro-size)/1 var(--font-code); }
+.alu-nav-files-badge { position: absolute; top: -4px; right: -5px; display: grid; min-width: 17px; height: 17px; place-items: center; padding: 0 4px; color: var(--alu-on-success); border: 2px solid var(--alu-bg); border-radius: 999px; background: var(--alu-success); font: inherit; font-family: var(--font-mono); }
 </style>

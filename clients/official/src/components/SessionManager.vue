@@ -639,7 +639,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
   transition: background 0.1s, border-color 0.1s, color 0.1s;
 }
 .ui-dialog-filter:hover { background: var(--alu-hover); color: var(--alu-text); }
-.ui-dialog-filter.is-active { background: var(--alu-accent-bg); border-color: var(--alu-accent-border); color: var(--alu-accent); }
+.ui-dialog-filter.is-active { background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); color: var(--alu-highlight); }
 .ui-dialog-filter-count { color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-variant-numeric: tabular-nums; }
 .ui-dialog-filter.is-active .ui-dialog-filter-count { color: currentColor; opacity: 0.72; }
 .alu-tree-guidance {
@@ -752,7 +752,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
 .compaction-reader-note { flex-shrink: 0; margin: 6px 20px 14px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
 .compaction-prompt-sections { display: grid; flex-shrink: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 0 16px; padding: 4px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg); }
 .compaction-prompt-sections > button { min-width: 0; min-height: 40px; padding: 6px 3px; border: 1px solid transparent; border-radius: 6px; color: var(--alu-text-muted); background: transparent; font: inherit; font-size: var(--alu-meta-size); }
-.compaction-prompt-sections > button[aria-pressed="true"] { border-color: var(--alu-accent-border); color: var(--alu-text); background: var(--alu-active); }
+.compaction-prompt-sections > button[aria-pressed="true"] { border-color: var(--alu-highlight-border); color: var(--alu-text); background: var(--alu-active); }
 .compaction-prompt-sections > button:hover, .compaction-prompt-sections > button:focus-visible { outline: none; color: var(--alu-text); background: var(--alu-hover); }
 .compaction-section-description { flex-shrink: 0; margin: 10px 20px 14px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); line-height: 1.6; }
 .compaction-reader > .markdown-document { min-height: 160px; flex: 1 1 auto; border-top: 1px solid var(--alu-border); }

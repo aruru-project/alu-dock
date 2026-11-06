@@ -72,7 +72,7 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 </template>
 
 <style scoped>
-.app-settings-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: var(--alu-settings-header-bg); }
+.app-settings-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: var(--alu-surface); }
 .app-settings-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
 .app-settings-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-accent-border); border-radius: 10px; background: var(--alu-accent-bg); color: var(--alu-accent); place-items: center; }
 .app-settings-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
@@ -80,10 +80,10 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .app-settings-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .app-settings-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
 .app-settings-layout { display: grid; min-height: 0; grid-template-columns: 190px minmax(0, 1fr); }
-.app-settings-nav { padding: 20px 12px; border-right: 1px solid var(--alu-border); background: var(--alu-settings-nav-bg); }
+.app-settings-nav { padding: 20px 12px; border-right: 1px solid var(--alu-border); background: var(--alu-bg); }
 .app-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
 .app-settings-nav-item { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
-.app-settings-nav-item.is-active { border-color: var(--alu-accent-border); background: var(--alu-accent-bg); color: var(--alu-accent); }
+.app-settings-nav-item.is-active { border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); color: var(--alu-highlight); }
 .app-settings-content { min-width: 0; min-height: 0; padding: 28px 30px 34px; overflow-y: auto; }
 .app-settings-intro { padding-bottom: 20px; border-bottom: 1px solid var(--alu-border); }
 .app-settings-intro > span { color: var(--alu-accent); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .15em; }
@@ -93,9 +93,9 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
 .away-option { display: grid; min-height: 58px; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 11px; width: 100%; padding: 9px 12px; cursor: pointer; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); color: var(--alu-text); text-align: left; transition: border-color .14s ease, background .14s ease, transform .14s ease; }
 .away-option:hover { border-color: var(--alu-border-light); background: var(--alu-hover); transform: translateX(2px); }
 .away-option:disabled { cursor: wait; opacity: .62; transform: none; }
-.away-option.is-selected { border-color: var(--alu-accent-border); background: var(--alu-accent-bg); }
+.away-option.is-selected { border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); }
 .away-option-indicator { width: 13px; height: 13px; border: 1px solid var(--alu-text-faint); border-radius: 50%; box-shadow: 0 0 0 3px transparent inset; }
-.away-option.is-selected .away-option-indicator { border-color: var(--alu-accent); background: var(--alu-accent); box-shadow: 0 0 0 3px var(--alu-away-indicator-ring) inset; }
+.away-option.is-selected .away-option-indicator { border-color: var(--alu-highlight); background: var(--alu-highlight); box-shadow: 0 0 0 3px var(--alu-highlight-bg) inset; }
 .away-option-copy { display: grid; min-width: 0; gap: 3px; }
 .away-option-copy strong { font-size: var(--alu-meta-size); font-weight: 650; }
 .away-option-copy small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); }

@@ -180,7 +180,7 @@ onUnmounted(() => document.removeEventListener('pointerdown', handleDocumentPoin
   border: 1px solid var(--alu-border-light);
   border-radius: 9px;
   background: var(--alu-surface);
-  box-shadow: var(--alu-menu-shadow);
+  box-shadow: var(--alu-popover-shadow);
 }
 .alu-select-option {
   display: flex;

@@ -107,7 +107,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   font-weight: 650;
   transition: border-color 0.15s, background 0.15s;
 }
-.alu-new-work-btn:hover { border-color: var(--alu-highlight); background: var(--alu-new-work-hover-bg); }
+.alu-new-work-btn:hover { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .alu-sidebar-refresh,
 .alu-sidebar-close {
   display: grid;
@@ -177,7 +177,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   border-radius: 5px;
   background: var(--alu-active);
   color: var(--alu-highlight);
-  font: var(--alu-micro-size)/1.45 var(--alu-font-mono);
+  font: inherit; font-family: var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -218,7 +218,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 }
 .alu-sidebar { position: fixed; z-index: 50; inset: 0 auto 0 0; display: flex; width: 300px; max-width: 88vw; flex-direction: column; overflow: hidden; border-right: 1px solid var(--alu-border); background: var(--alu-bg); box-shadow: var(--alu-sidebar-shadow); transform: translateX(-100%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); }
 .alu-sidebar.open { transform: translateX(0); }
-.alu-sidebar-overlay { position: fixed; z-index: 49; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-drawer-scrim); transition: opacity .25s ease; }
+.alu-sidebar-overlay { position: fixed; z-index: 49; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-scrim); transition: opacity .25s ease; }
 .alu-sidebar-overlay.open { pointer-events: auto; opacity: 1; }
 .alu-sidebar-head { display: flex; min-height: 70px; flex: 0 0 auto; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--alu-border); }
 .alu-sidebar-avatar { width: 40px; height: 40px; flex: 0 0 auto; object-fit: cover; border: 2px solid var(--alu-brand-border); border-radius: 50%; }

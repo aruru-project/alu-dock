@@ -365,7 +365,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
   background: var(--alu-bg-raised);
   border: 1px solid var(--alu-border-light);
   border-radius: 12px;
-  box-shadow: var(--alu-suggest-shadow);
+  box-shadow: var(--alu-popover-shadow);
 }
 .cmd-suggest-item {
   display: flex;

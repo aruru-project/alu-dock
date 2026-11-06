@@ -289,7 +289,7 @@ defineExpose({ goBack })
 </template>
 
 <style scoped>
-.directory-browser { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--alu-border); background: var(--alu-directory-bg); }
+.directory-browser { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--alu-border); background: var(--alu-window-bg); }
 .directory-picker { flex: 1 1 auto; border-right: 0; }
 .directory-toolbar { display: flex; min-width: 0; min-height: 47px; flex: 0 0 auto; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid var(--alu-border); background: var(--alu-toolbar-bg); }
 .directory-heading { flex: 1; color: var(--alu-text-muted); font-size: var(--alu-micro-size); font-weight: 700; }
@@ -321,7 +321,7 @@ button:disabled { opacity: .5; }
 .spinning { animation: directory-spin .85s linear infinite; }
 .directory-breadcrumbs { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; overflow: auto; color: var(--alu-text-faint); }
 .directory-breadcrumbs button { min-height: 30px; padding: 0 2px; color: var(--alu-accent); border: 0; background: transparent; font-size: var(--alu-meta-size); white-space: nowrap; }
-.directory-mobile-row { display: grid; width: 100%; min-height: 52px; grid-template-columns: 22px minmax(0, 1fr) 18px; align-items: center; gap: 9px; padding: 7px 9px; color: var(--alu-text-muted); border: 0; border-bottom: 1px solid var(--alu-directory-row-border); background: transparent; text-align: left; }
+.directory-mobile-row { display: grid; width: 100%; min-height: 52px; grid-template-columns: 22px minmax(0, 1fr) 18px; align-items: center; gap: 9px; padding: 7px 9px; color: var(--alu-text-muted); border: 0; border-bottom: 1px solid var(--alu-border); background: transparent; text-align: left; }
 .directory-mobile-row > span { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .directory-mobile-row strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .directory-mobile-row small { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }

@@ -200,7 +200,7 @@ async function copyDiagnostic(text: string) {
   padding: 10px 12px;
   border: 1px solid var(--alu-border);
   border-radius: 8px;
-  background: var(--alu-work-state-meta-bg);
+  background: rgb(var(--alu-bg-rgb) / 0.42);
 }
 .alu-work-state-meta dt {
   margin-bottom: 5px;
@@ -243,7 +243,7 @@ async function copyDiagnostic(text: string) {
   border-left: 2px solid var(--alu-danger);
   background: rgb(var(--alu-danger-rgb) / 0.06);
   color: var(--alu-danger);
-  font: var(--alu-meta-size)/1.6 var(--font-mono);
+  font: inherit; font-family: var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -278,15 +278,16 @@ async function copyDiagnostic(text: string) {
   transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
 }
 .alu-work-state-primary {
-  border: 1px solid var(--alu-work-state-action-border);
-  background: rgb(var(--alu-warning-line-rgb) / 0.13);
-  color: var(--alu-work-state-action-text);
-  box-shadow: 0 0 24px var(--alu-work-state-action-glow);
+  border: 1px solid var(--alu-highlight-border);
+  background: var(--alu-highlight-bg);
+  color: var(--alu-highlight);
 }
 .alu-work-state-primary:focus-visible { box-shadow: var(--alu-focus-ring); }
 .alu-work-state-primary:disabled { cursor: not-allowed; }
 .alu-work-state-primary:hover {
-  background: rgb(var(--alu-warning-line-rgb) / 0.21);
+  color: var(--alu-highlight-hover-text);
+  border-color: var(--alu-highlight-hover-border);
+  background: var(--alu-highlight-hover-bg);
   transform: translateY(-1px);
 }
 .alu-work-state-secondary {
@@ -315,7 +316,7 @@ async function copyDiagnostic(text: string) {
 .alu-work-state[data-lifecycle='stopped'] .alu-work-state-card,
 .alu-work-state[data-lifecycle='stopping'] .alu-work-state-card {
   border-top-color: var(--alu-border-light);
-  box-shadow: var(--alu-work-state-shadow-quiet), inset 3px 0 0 var(--alu-border-light);
+  box-shadow: var(--alu-work-state-shadow), inset 3px 0 0 var(--alu-border-light);
 }
 .alu-work-state[data-lifecycle='stopped'] .alu-work-state-card::after,
 .alu-work-state[data-lifecycle='stopping'] .alu-work-state-card::after {

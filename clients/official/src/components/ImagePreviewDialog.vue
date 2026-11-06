@@ -78,7 +78,7 @@ async function saveOpenImage() {
   display: grid;
   place-items: center;
   padding: clamp(10px, 2.5vw, 30px);
-  background: var(--alu-image-scrim);
+  background: var(--alu-scrim-strong);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   animation: dialogFadeIn .14s ease-out;
@@ -96,7 +96,7 @@ async function saveOpenImage() {
   border-radius: 14px;
   outline: none;
   background: var(--alu-image-viewer-bg);
-  box-shadow: var(--alu-image-viewer-shadow);
+  box-shadow: var(--alu-dialog-shadow);
 }
 .alu-image-preview-save {
   position: absolute;
@@ -113,7 +113,7 @@ async function saveOpenImage() {
   border-radius: 999px;
   color: var(--alu-image-control-text);
   background: var(--alu-image-save-bg);
-  box-shadow: var(--alu-image-control-shadow);
+  box-shadow: var(--alu-float-shadow);
   font: 600 11px var(--font-reading);
 }
 .alu-image-preview-save:focus-visible { box-shadow: var(--alu-focus-ring); }

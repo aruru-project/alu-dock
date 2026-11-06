@@ -764,7 +764,7 @@ function isCurrentModel(model: ModelInfo) {
   padding: 14px 16px;
   border: 1px solid var(--alu-border-light);
   border-radius: 11px;
-  background: var(--alu-status-identity-bg);
+  background: var(--alu-surface);
 }
 .alu-project-status-signal { width: 9px; height: 9px; border-radius: 50%; background: var(--alu-text-faint); }
 .alu-project-status-signal.is-running { background: var(--alu-running); box-shadow: 0 0 9px var(--alu-running-glow); }
@@ -792,13 +792,13 @@ function isCurrentModel(model: ModelInfo) {
   font-size: var(--alu-micro-size);
   line-height: 1.3;
 }
-.alu-project-status-badge.is-running { border-color: var(--alu-highlight-border); color: var(--alu-highlight); }
+.alu-project-status-badge.is-running { border-color: var(--alu-success-border); color: var(--alu-running); }
 .alu-project-status-badge.is-branch { border-color: var(--alu-accent-border); color: var(--alu-accent); }
 .alu-project-status-section {
   padding: 12px 14px;
   border: 1px solid var(--alu-border);
   border-radius: 10px;
-  background: var(--alu-status-section-bg);
+  background: rgb(var(--alu-bg-raised-rgb) / 0.72);
 }
 .alu-project-status-section h3,
 .alu-project-status-resource-group h4 {
@@ -1005,7 +1005,7 @@ function isCurrentModel(model: ModelInfo) {
   font-size: var(--alu-meta-size);
   font-weight: 700;
 }
-.cmd-center-run:hover:not(:disabled) { background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
+.cmd-center-run:hover:not(:disabled) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 .cmd-center-run:disabled { cursor: wait; opacity: 0.55; }
 .cmd-center-completions {
   max-height: 170px;
@@ -1032,7 +1032,7 @@ function isCurrentModel(model: ModelInfo) {
   border-radius: 9px;
   background: var(--alu-command-output-bg);
   color: var(--alu-text-muted);
-  font: var(--alu-meta-size)/1.6 var(--alu-font-mono);
+  font: inherit; font-family: var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1062,7 +1062,7 @@ function isCurrentModel(model: ModelInfo) {
 .cmd-center-entry-command .cmd-center-entry-marker { color: var(--alu-highlight); }
 .cmd-center-entry.is-warning { color: var(--alu-warning-text); }
 .cmd-center-entry.is-warning .cmd-center-entry-marker { color: var(--alu-warning-line); }
-.cmd-center-entry.is-error { color: var(--alu-command-error-text); }
+.cmd-center-entry.is-error { color: var(--alu-danger-text); }
 .cmd-center-entry.is-error .cmd-center-entry-marker { color: var(--alu-danger); }
 .cmd-center-footer { min-height: 31px; }
 .dock-tools-popover-surface > .control-center-port { overflow-y: auto; }
@@ -1073,7 +1073,7 @@ function isCurrentModel(model: ModelInfo) {
 .dock-tools-header h3 { margin: 0; color: var(--alu-text); font-size: 14px; letter-spacing: .01em; }
 .dock-tools-header p { margin: 0; color: var(--alu-text-faint); font: var(--alu-micro-size)/1.35 var(--font-reading); }
 .dock-tools-state { padding: 4px 7px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .04em; white-space: nowrap; }
-.dock-tools-state[data-state="on"] { color: var(--alu-success); border-color: var(--alu-dock-tools-on-border); background: rgb(var(--alu-success-rgb) / .07); }
+.dock-tools-state[data-state="on"] { color: var(--alu-success); border-color: var(--alu-success-border); background: rgb(var(--alu-success-rgb) / .07); }
 .dock-tools-state[data-state="unavailable"] { color: var(--alu-text-muted); }
 .dock-tools-close { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 8px; color: var(--alu-text-muted); background: transparent; font-size: 18px; }
 .dock-tools-close:hover { color: var(--alu-text); background: var(--alu-hover); }
@@ -1084,14 +1084,14 @@ function isCurrentModel(model: ModelInfo) {
 .dock-tools-toggle { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 13px; border: 1px solid var(--alu-border-light); border-radius: 12px; color: var(--alu-text); background: var(--alu-surface); text-align: left; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
 .dock-tools-toggle:hover:not(:disabled) { border-color: var(--alu-accent-border); background: var(--alu-accent-bg); }
 .dock-tools-toggle:focus-visible { outline: none; border-color: var(--alu-accent); box-shadow: 0 0 0 3px rgb(var(--alu-accent-rgb) / .14); }
-.dock-tools-toggle.active { border-color: var(--alu-dock-tools-toggle-on-border); background: var(--alu-dock-tools-toggle-on-bg); }
+.dock-tools-toggle.active { border-color: var(--alu-success-border); background: var(--alu-dock-tools-toggle-on-bg); }
 .dock-tools-toggle.pending { cursor: wait; }
 .dock-tools-toggle-copy { display: grid; gap: 3px; }
 .dock-tools-toggle-copy strong { color: var(--alu-text); font-size: var(--alu-meta-size); font-weight: 680; }
 .dock-tools-toggle-copy small { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .dock-tools-switch { position: relative; width: 38px; height: 22px; flex: 0 0 auto; border: 1px solid var(--alu-border-light); border-radius: 999px; background: var(--alu-switch-track); transition: border-color .18s ease, background .18s ease; }
 .dock-tools-switch i { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--alu-text-faint); box-shadow: var(--alu-switch-knob-shadow); transition: transform .18s cubic-bezier(.2, .85, .2, 1), background .18s ease; }
-.dock-tools-toggle.active .dock-tools-switch { border-color: var(--alu-switch-on-border); background: var(--alu-switch-track-on); }
+.dock-tools-toggle.active .dock-tools-switch { border-color: var(--alu-success-border-strong); background: var(--alu-switch-track-on); }
 .dock-tools-toggle.active .dock-tools-switch i { background: var(--alu-success); transform: translateX(16px); }
 .dock-tools-toggle.pending .dock-tools-switch i { animation: dockToolsSwitchPending .7s ease-in-out infinite alternate; }
 .dock-tools-output { max-height: 120px; margin: 0; }

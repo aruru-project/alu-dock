@@ -78,7 +78,7 @@ async function copySource() {
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
   color: var(--alu-text);
-  background: var(--alu-viewer-bg);
+  background: var(--alu-bg);
 }
 .markdown-document-toolbar {
   display: flex;
@@ -89,7 +89,7 @@ async function copySource() {
   gap: 12px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--alu-border);
-  background: var(--alu-document-toolbar-bg);
+  background: var(--alu-toolbar-bg);
 }
 .markdown-mode-switch,
 .markdown-document-actions { display: flex; align-items: center; gap: 5px; }
@@ -97,7 +97,7 @@ async function copySource() {
   padding: 3px;
   border: 1px solid var(--alu-border);
   border-radius: 8px;
-  background: var(--alu-document-switch-bg);
+  background: var(--alu-switch-track);
 }
 .markdown-mode-switch button,
 .markdown-document-actions button {
@@ -117,11 +117,11 @@ async function copySource() {
 .markdown-mode-switch button.active {
   color: var(--alu-text);
   background: var(--alu-active);
-  box-shadow: inset 0 0 0 1px var(--alu-accent-border);
+  box-shadow: inset 0 0 0 1px var(--alu-highlight-border);
 }
 .markdown-document-actions button {
   border: 1px solid var(--alu-border);
-  background: var(--alu-button-bg);
+  background: var(--alu-control-bg);
 }
 .markdown-mode-switch button:hover,
 .markdown-document-actions button:hover { color: var(--alu-text); background: var(--alu-hover); }
@@ -153,7 +153,7 @@ async function copySource() {
   color: var(--alu-code-block-text);
   border: 0;
   outline: none;
-  background: var(--alu-source-bg);
+  background: var(--alu-bg);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.65;
@@ -167,9 +167,9 @@ async function copySource() {
   max-width: calc(100% - 24px);
   padding: 7px 10px;
   color: var(--alu-danger);
-  border: 1px solid var(--alu-document-error-border);
+  border: 1px solid rgb(var(--alu-danger-rgb) / .28);
   border-radius: 7px;
-  background: var(--alu-document-error-bg);
+  background: var(--alu-danger-bg);
   font-size: 9px;
 }
 @media (max-width: 720px) {

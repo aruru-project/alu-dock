@@ -96,7 +96,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   line-height: 1.58;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: var(--alu-output-bg);
+  background: var(--alu-bg);
   border-radius: 6px;
 }
 .msg-assistant {
@@ -166,21 +166,21 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   gap: 5px;
   padding: 8px 10px 9px;
   border-top: 1px solid var(--alu-tool-divider);
-  background: var(--alu-tool-preview-bg);
+  background: var(--alu-tool-bg);
 }
 .tool-call-preview-meta { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .tool-call-preview-title {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--alu-text-dim);
-  font: 600 10px/1.45 var(--font-mono);
+  font: inherit; font-family: var(--font-mono);
 }
 .tool-call-preview-truncated { flex: 0 0 auto; color: var(--alu-text-faint); font-size: 9px; }
 .tool-call-preview-body {
   margin: 0;
   overflow: hidden;
-  color: var(--alu-tool-preview-text);
-  font: 10.5px/1.5 var(--font-mono);
+  color: var(--alu-code-block-text);
+  font: inherit; font-family: var(--font-mono);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -190,7 +190,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   list-style: none;
   border-top: 1px solid var(--alu-tool-divider);
   color: var(--alu-text-muted);
-  font: 10.5px/1.6 var(--font-mono);
+  font: inherit; font-family: var(--font-mono);
 }
 .tool-nested-call { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
 .tool-nested-status { flex: 0 0 auto; width: 1em; text-align: center; }
@@ -203,7 +203,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
 .tool-nested-more { color: var(--alu-text-faint); }
 .tool-call-preview.is-diff .tool-call-preview-body { color: var(--alu-tool-diff-text); }
 .tool-call-preview.is-path .tool-call-preview-body { color: var(--alu-text-muted); }
-.msg-toolcall details { border-top: 1px solid var(--alu-tool-details-divider); }
+.msg-toolcall details { border-top: 1px solid var(--alu-tool-divider); }
 .msg-toolcall details summary {
   display: flex;
   min-height: 27px;
@@ -232,7 +232,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: normal;
-  background: var(--alu-output-bg);
+  background: var(--alu-bg);
   border: 0;
   border-top: 1px solid var(--alu-border);
   border-radius: 0;

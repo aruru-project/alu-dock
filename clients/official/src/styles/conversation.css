@@ -108,7 +108,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 7px 16px;
-  background: var(--alu-code-block-header-bg);
+  background: var(--alu-surface);
   border-bottom: 1px solid var(--alu-code-block-header-border);
 }
 .code-lang {
