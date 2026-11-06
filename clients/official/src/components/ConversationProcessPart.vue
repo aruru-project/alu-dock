@@ -96,7 +96,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   line-height: 1.58;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  background: color-mix(in srgb, var(--alu-bg) 92%, black);
+  background: var(--alu-output-bg);
   border-radius: 6px;
 }
 .msg-assistant {
@@ -110,7 +110,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
 .msg-thinking {
   color: var(--alu-text-muted);
   font-style: italic;
-  border-left: 2px solid var(--alu-blue-border);
+  border-left: 2px solid var(--alu-thinking-line);
   padding-left: 10px;
   margin: 4px 0;
   font-size: 12px;
@@ -120,7 +120,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   color: var(--alu-text-muted);
   font-size: 11px;
 }
-.msg-thinking summary:hover { color: var(--alu-blue-dim); }
+.msg-thinking summary:hover { color: var(--alu-accent-dim); }
 .think-content {
   white-space: pre-wrap;
   word-break: break-word;
@@ -133,8 +133,8 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   overflow: hidden;
   color: var(--alu-text-dim);
   font-size: 12px;
-  background: color-mix(in srgb, var(--alu-amber) 4%, var(--alu-bg));
-  border: 1px solid color-mix(in srgb, var(--alu-amber) 24%, var(--alu-border));
+  background: var(--alu-tool-bg);
+  border: 1px solid var(--alu-tool-border);
   border-radius: 8px;
 }
 .tool-call-header {
@@ -151,7 +151,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   align-items: center;
   gap: 7px;
   overflow-wrap: anywhere;
-  color: var(--alu-amber);
+  color: var(--alu-tool-accent);
   font-weight: 600;
 }
 .tool-status {
@@ -159,14 +159,14 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   color: var(--alu-text-muted);
   font-size: 10px;
 }
-.tool-status[data-status='running'] { color: var(--alu-blue); }
-.tool-status[data-status='error'] { color: var(--alu-rose); }
+.tool-status[data-status='running'] { color: var(--alu-accent); }
+.tool-status[data-status='error'] { color: var(--alu-danger); }
 .tool-call-preview {
   display: grid;
   gap: 5px;
   padding: 8px 10px 9px;
-  border-top: 1px solid color-mix(in srgb, var(--alu-amber) 12%, var(--alu-border));
-  background: color-mix(in srgb, var(--alu-amber) 3%, var(--alu-bg));
+  border-top: 1px solid var(--alu-tool-divider);
+  background: var(--alu-tool-preview-bg);
 }
 .tool-call-preview-meta { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .tool-call-preview-title {
@@ -179,7 +179,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
 .tool-call-preview-body {
   margin: 0;
   overflow: hidden;
-  color: color-mix(in srgb, var(--alu-text) 82%, var(--alu-text-muted));
+  color: var(--alu-tool-preview-text);
   font: 10.5px/1.5 var(--font-mono);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -188,22 +188,22 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   margin: 0;
   padding: 7px 10px 8px;
   list-style: none;
-  border-top: 1px solid color-mix(in srgb, var(--alu-amber) 12%, var(--alu-border));
+  border-top: 1px solid var(--alu-tool-divider);
   color: var(--alu-text-muted);
   font: 10.5px/1.6 var(--font-mono);
 }
 .tool-nested-call { display: flex; min-width: 0; align-items: baseline; gap: 6px; }
 .tool-nested-status { flex: 0 0 auto; width: 1em; text-align: center; }
-.tool-nested-call[data-status='ok'] .tool-nested-status { color: var(--alu-mint); }
-.tool-nested-call[data-status='error'] .tool-nested-status { color: var(--alu-rose); }
-.tool-nested-call[data-status='running'] .tool-nested-status { color: var(--alu-blue); }
+.tool-nested-call[data-status='ok'] .tool-nested-status { color: var(--alu-success); }
+.tool-nested-call[data-status='error'] .tool-nested-status { color: var(--alu-danger); }
+.tool-nested-call[data-status='running'] .tool-nested-status { color: var(--alu-accent); }
 .tool-nested-name { flex: 0 0 auto; color: var(--alu-text); }
 .tool-nested-args { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool-nested-duration { flex: 0 0 auto; color: var(--alu-text-faint); }
 .tool-nested-more { color: var(--alu-text-faint); }
-.tool-call-preview.is-diff .tool-call-preview-body { color: color-mix(in srgb, var(--alu-amber) 76%, var(--alu-text)); }
+.tool-call-preview.is-diff .tool-call-preview-body { color: var(--alu-tool-diff-text); }
 .tool-call-preview.is-path .tool-call-preview-body { color: var(--alu-text-muted); }
-.msg-toolcall details { border-top: 1px solid color-mix(in srgb, var(--alu-amber) 14%, var(--alu-border)); }
+.msg-toolcall details { border-top: 1px solid var(--alu-tool-details-divider); }
 .msg-toolcall details summary {
   display: flex;
   min-height: 27px;
@@ -217,10 +217,10 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   list-style: none;
 }
 .msg-toolcall details summary::-webkit-details-marker { display: none; }
-.msg-toolcall details summary:hover { color: var(--alu-text); background: color-mix(in srgb, var(--alu-amber) 5%, transparent); }
-.tool-disclosure { color: var(--alu-amber); font-size: 18px; line-height: 1; transition: transform .18s ease; }
+.msg-toolcall details summary:hover { color: var(--alu-text); background: var(--alu-tool-hover-bg); }
+.tool-disclosure { color: var(--alu-tool-accent); font-size: 18px; line-height: 1; transition: transform .18s ease; }
 .msg-toolcall details[open] .tool-disclosure { transform: rotate(90deg); }
-.msg-toolcall.is-error { border-color: var(--alu-rose-border); }
+.msg-toolcall.is-error { border-color: var(--alu-danger-border); }
 .msg-tool-output {
   max-height: min(54vh, 520px);
   padding: 10px 12px;
@@ -232,7 +232,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: normal;
-  background: color-mix(in srgb, var(--alu-bg) 92%, black);
+  background: var(--alu-output-bg);
   border: 0;
   border-top: 1px solid var(--alu-border);
   border-radius: 0;
@@ -243,18 +243,18 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
   .alu-msg-assistant-body > .msg-assistant {
     margin: 0 0 7px;
     padding: 12px 14px;
-    border: 1px solid #253050;
+    border: 1px solid var(--alu-bubble-border);
     border-radius: 3px 14px 14px 14px;
-    background: rgba(20, 30, 52, .82);
+    background: var(--alu-bubble-bg);
   }
   .alu-msg-assistant-body > .msg-thinking {
     min-width: 0;
     margin: 0 0 6px;
     padding: 8px 11px;
     border: 1px solid var(--alu-border);
-    border-left: 2px solid var(--alu-blue-border);
+    border-left: 2px solid var(--alu-thinking-line);
     border-radius: 3px 10px 10px 3px;
-    background: color-mix(in srgb, var(--alu-bg-raised) 78%, transparent);
+    background: rgb(var(--alu-bg-raised-rgb) / .78);
   }
   .alu-msg-assistant-body > .msg-toolcall {
     width: 100%;

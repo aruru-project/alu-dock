@@ -78,7 +78,7 @@ async function copySource() {
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
   color: var(--alu-text);
-  background: #080d17;
+  background: var(--alu-viewer-bg);
 }
 .markdown-document-toolbar {
   display: flex;
@@ -89,7 +89,7 @@ async function copySource() {
   gap: 12px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--alu-border);
-  background: rgba(12, 19, 32, .96);
+  background: var(--alu-document-toolbar-bg);
 }
 .markdown-mode-switch,
 .markdown-document-actions { display: flex; align-items: center; gap: 5px; }
@@ -97,7 +97,7 @@ async function copySource() {
   padding: 3px;
   border: 1px solid var(--alu-border);
   border-radius: 8px;
-  background: rgba(5, 9, 17, .72);
+  background: var(--alu-document-switch-bg);
 }
 .markdown-mode-switch button,
 .markdown-document-actions button {
@@ -117,11 +117,11 @@ async function copySource() {
 .markdown-mode-switch button.active {
   color: var(--alu-text);
   background: var(--alu-active);
-  box-shadow: inset 0 0 0 1px var(--alu-blue-border);
+  box-shadow: inset 0 0 0 1px var(--alu-accent-border);
 }
 .markdown-document-actions button {
   border: 1px solid var(--alu-border);
-  background: rgba(18, 28, 45, .8);
+  background: var(--alu-button-bg);
 }
 .markdown-mode-switch button:hover,
 .markdown-document-actions button:hover { color: var(--alu-text); background: var(--alu-hover); }
@@ -150,10 +150,10 @@ async function copySource() {
   resize: none;
   padding: 20px 22px 70px;
   overflow: auto;
-  color: #c9d8f0;
+  color: var(--alu-code-block-text);
   border: 0;
   outline: none;
-  background: #070b13;
+  background: var(--alu-source-bg);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.65;
@@ -166,10 +166,10 @@ async function copySource() {
   bottom: 12px;
   max-width: calc(100% - 24px);
   padding: 7px 10px;
-  color: var(--alu-rose);
-  border: 1px solid rgba(255, 100, 127, .28);
+  color: var(--alu-danger);
+  border: 1px solid var(--alu-document-error-border);
   border-radius: 7px;
-  background: rgba(40, 12, 22, .94);
+  background: var(--alu-document-error-bg);
   font-size: 9px;
 }
 @media (max-width: 720px) {

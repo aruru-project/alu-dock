@@ -142,10 +142,10 @@ async function copyDiagnostic(text: string) {
   overflow: hidden;
   padding: clamp(24px, 4vw, 40px);
   border: 1px solid var(--alu-border-light);
-  border-top-color: var(--alu-amber);
+  border-top-color: var(--alu-warning);
   border-radius: 2px 18px 18px 18px;
-  background: linear-gradient(145deg, rgba(20, 30, 52, 0.94), rgba(10, 16, 30, 0.96));
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28), inset 3px 0 0 rgba(245, 158, 11, 0.75);
+  background: var(--alu-work-state-bg);
+  box-shadow: var(--alu-work-state-shadow), inset 3px 0 0 rgb(var(--alu-warning-line-rgb) / 0.75);
 }
 .alu-work-state-card::after {
   content: '';
@@ -154,14 +154,14 @@ async function copyDiagnostic(text: string) {
   right: 0;
   width: 120px;
   height: 1px;
-  background: linear-gradient(90deg, transparent, var(--alu-amber));
+  background: linear-gradient(90deg, transparent, var(--alu-warning));
   opacity: 0.75;
 }
 .alu-work-state-status {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #f6c56f;
+  color: var(--alu-warning-text);
   font-size: var(--alu-meta-size);
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -171,8 +171,8 @@ async function copyDiagnostic(text: string) {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--alu-amber);
-  box-shadow: 0 0 14px rgba(245, 158, 11, 0.7);
+  background: var(--alu-warning);
+  box-shadow: 0 0 14px var(--alu-work-state-glow);
 }
 .alu-work-state-card h1 {
   margin: 18px 0 8px;
@@ -200,7 +200,7 @@ async function copyDiagnostic(text: string) {
   padding: 10px 12px;
   border: 1px solid var(--alu-border);
   border-radius: 8px;
-  background: rgba(5, 10, 20, 0.42);
+  background: var(--alu-work-state-meta-bg);
 }
 .alu-work-state-meta dt {
   margin-bottom: 5px;
@@ -220,9 +220,9 @@ async function copyDiagnostic(text: string) {
 .alu-work-state-error {
   margin-top: 12px;
   padding: 8px 10px;
-  border-left: 2px solid var(--alu-rose);
-  background: rgba(248, 113, 113, 0.06);
-  color: var(--alu-rose);
+  border-left: 2px solid var(--alu-danger);
+  background: rgb(var(--alu-danger-rgb) / 0.06);
+  color: var(--alu-danger);
   font-size: var(--alu-meta-size);
   line-height: 1.6;
   overflow-wrap: anywhere;
@@ -240,9 +240,9 @@ async function copyDiagnostic(text: string) {
 .alu-diagnostic > pre {
   margin: 6px 0;
   padding: 8px 10px;
-  border-left: 2px solid var(--alu-rose);
-  background: rgba(248, 113, 113, 0.06);
-  color: var(--alu-rose);
+  border-left: 2px solid var(--alu-danger);
+  background: rgb(var(--alu-danger-rgb) / 0.06);
+  color: var(--alu-danger);
   font: var(--alu-meta-size)/1.6 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -251,7 +251,7 @@ async function copyDiagnostic(text: string) {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--alu-blue);
+  color: var(--alu-accent);
   font: inherit;
   cursor: pointer;
 }
@@ -278,20 +278,20 @@ async function copyDiagnostic(text: string) {
   transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
 }
 .alu-work-state-primary {
-  border: 1px solid #d08a1f;
-  background: rgba(245, 158, 11, 0.13);
-  color: #ffd78d;
-  box-shadow: 0 0 24px rgba(245, 158, 11, 0.08);
+  border: 1px solid var(--alu-work-state-action-border);
+  background: rgb(var(--alu-warning-line-rgb) / 0.13);
+  color: var(--alu-work-state-action-text);
+  box-shadow: 0 0 24px var(--alu-work-state-action-glow);
 }
-.alu-work-state-primary:focus-visible { box-shadow: var(--focus-ring); }
+.alu-work-state-primary:focus-visible { box-shadow: var(--alu-focus-ring); }
 .alu-work-state-primary:disabled { cursor: not-allowed; }
 .alu-work-state-primary:hover {
-  background: rgba(245, 158, 11, 0.21);
+  background: rgb(var(--alu-warning-line-rgb) / 0.21);
   transform: translateY(-1px);
 }
 .alu-work-state-secondary {
   border: 1px solid var(--alu-border-light);
-  background: rgba(20, 30, 52, 0.58);
+  background: var(--alu-work-state-secondary-bg);
   color: var(--alu-text-dim);
 }
 .alu-work-state-secondary:hover {
@@ -299,23 +299,23 @@ async function copyDiagnostic(text: string) {
   color: var(--alu-text);
 }
 .alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-card {
-  border-top-color: var(--alu-rose);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28), inset 3px 0 0 rgba(248, 113, 113, 0.68);
+  border-top-color: var(--alu-danger);
+  box-shadow: var(--alu-work-state-shadow), inset 3px 0 0 rgb(var(--alu-danger-rgb) / 0.68);
 }
 .alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-card::after {
-  background: linear-gradient(90deg, transparent, var(--alu-rose));
+  background: linear-gradient(90deg, transparent, var(--alu-danger));
 }
 .alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-status {
-  color: var(--alu-rose);
+  color: var(--alu-danger);
 }
 .alu-work-state[data-lifecycle='runtime_error'] .alu-work-state-signal {
-  background: var(--alu-rose);
-  box-shadow: 0 0 14px rgba(248, 113, 113, 0.7);
+  background: var(--alu-danger);
+  box-shadow: 0 0 14px var(--alu-work-state-error-glow);
 }
 .alu-work-state[data-lifecycle='stopped'] .alu-work-state-card,
 .alu-work-state[data-lifecycle='stopping'] .alu-work-state-card {
   border-top-color: var(--alu-border-light);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24), inset 3px 0 0 var(--alu-border-light);
+  box-shadow: var(--alu-work-state-shadow-quiet), inset 3px 0 0 var(--alu-border-light);
 }
 .alu-work-state[data-lifecycle='stopped'] .alu-work-state-card::after,
 .alu-work-state[data-lifecycle='stopping'] .alu-work-state-card::after {
@@ -351,11 +351,11 @@ async function copyDiagnostic(text: string) {
   .alu-work-state-secondary { flex: 1 1 0; }
 }
 .center-state { min-height: 100%; }
-.center-state { display: grid; place-content: center; justify-items: center; color: var(--c-text-2); text-align: center; }
-.center-state h1 { margin: 12px 0 4px; color: var(--c-text-1); font-size: 19px; }
+.center-state { display: grid; place-content: center; justify-items: center; color: var(--alu-text-dim); text-align: center; }
+.center-state h1 { margin: 12px 0 4px; color: var(--alu-text); font-size: 19px; }
 .center-state p { max-width: 560px; margin: 8px 0 20px; font: 14px/1.6 var(--font-reading); }
-.error-state > svg { color: var(--c-danger); }
-.re-pair-error { width: min(620px, calc(100vw - 32px)); margin: -5px 0 12px; padding: 8px 10px; color: #f8a0a0; font: var(--alu-meta-size)/1.5 var(--font-reading); text-align: left; background: rgb(248 113 113 / .07); border: 1px solid rgb(248 113 113 / .18); border-radius: 9px; }
+.error-state > svg { color: var(--alu-danger); }
+.re-pair-error { width: min(620px, calc(100vw - 32px)); margin: -5px 0 12px; padding: 8px 10px; color: var(--alu-danger-text); font: var(--alu-meta-size)/1.5 var(--font-reading); text-align: left; background: rgb(var(--alu-danger-rgb) / .07); border: 1px solid rgb(var(--alu-danger-rgb) / .18); border-radius: 9px; }
 @media (max-width: 1000px) {
   .alu-work-state {
     width: min(100%, 760px);

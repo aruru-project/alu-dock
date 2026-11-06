@@ -27,6 +27,6 @@ const results = computed(() => [...saves.saves.values()].filter(save => !save.ac
 .machine-save-results { flex: none; width: min(calc(100% - 32px), 760px); max-height: 20vh; overflow: auto; margin: 6px auto; }
 .machine-save-result { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-surface); color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .machine-save-result span { flex: 1; min-width: 160px; }
-.machine-save-result.is-error { color: var(--alu-rose); }
+.machine-save-result.is-error { color: var(--alu-danger); }
 .machine-save-results.is-embedded { width: 100%; margin: 0; }
 </style>

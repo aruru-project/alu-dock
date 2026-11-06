@@ -99,15 +99,15 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-new-work-btn {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--alu-pink-border);
+  border: 1px solid var(--alu-highlight-border);
   border-radius: 9px;
-  background: var(--alu-pink-bg);
-  color: var(--alu-pink);
+  background: var(--alu-highlight-bg);
+  color: var(--alu-highlight);
   font-size: var(--alu-ui-size);
   font-weight: 650;
   transition: border-color 0.15s, background 0.15s;
 }
-.alu-new-work-btn:hover { border-color: var(--alu-pink); background: color-mix(in srgb, var(--alu-pink-bg) 72%, var(--alu-hover)); }
+.alu-new-work-btn:hover { border-color: var(--alu-highlight); background: var(--alu-new-work-hover-bg); }
 .alu-sidebar-refresh,
 .alu-sidebar-close {
   display: grid;
@@ -144,20 +144,20 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 }
 .alu-instance-row.is-child { margin-left: 18px; }
 .alu-instance-row:hover { background: var(--alu-hover); }
-.alu-instance-row.is-selected { background: var(--alu-pink-bg); border-color: var(--alu-pink-border); }
+.alu-instance-row.is-selected { background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); }
 .alu-instance-link { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px 8px; padding-right: 48px; }
 .alu-instance-state { width: 7px; height: 7px; border-radius: 50%; background: var(--alu-text-faint); flex-shrink: 0; }
 /* idle 仅保留对齐占位；running 绿呼吸，其余待处理或异常状态保留语义色。 */
-.alu-instance-state.is-running { background: var(--alu-mint); box-shadow: 0 0 6px rgba(52, 211, 153, 0.45); animation: aluInstancePulse 1.6s ease-in-out infinite; }
+.alu-instance-state.is-running { background: var(--alu-running); box-shadow: 0 0 6px var(--alu-running-glow); animation: aluInstancePulse 1.6s ease-in-out infinite; }
 .alu-instance-state.is-idle { visibility: hidden; }
-.alu-instance-state.is-waiting { background: var(--alu-pink); box-shadow: 0 0 6px var(--alu-pink-border); }
-.alu-instance-state.is-compacting { background: var(--alu-amber); animation: aluInstancePulse 1.6s ease-in-out infinite; }
-.alu-instance-state.is-stopping { background: var(--alu-amber); }
+.alu-instance-state.is-waiting { background: var(--alu-waiting); box-shadow: 0 0 6px var(--alu-waiting-glow); }
+.alu-instance-state.is-compacting { background: var(--alu-warning); animation: aluInstancePulse 1.6s ease-in-out infinite; }
+.alu-instance-state.is-stopping { background: var(--alu-warning); }
 .alu-instance-state.is-failed,
 .alu-instance-state.is-error {
-  background: var(--alu-rose);
+  background: var(--alu-danger);
 }
-.alu-instance-state.is-lost { background: var(--alu-blue-dim); }
+.alu-instance-state.is-lost { background: var(--alu-accent-dim); }
 @media (prefers-reduced-motion: reduce) {
   .alu-instance-state.is-running,
   .alu-instance-state.is-compacting {
@@ -176,7 +176,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   border: 1px solid var(--alu-border);
   border-radius: 5px;
   background: var(--alu-active);
-  color: var(--alu-pink);
+  color: var(--alu-highlight);
   font: var(--alu-micro-size)/1.45 var(--alu-font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -184,13 +184,13 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-instance-cwd, .alu-instance-note { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 模型名总是完整显示：provider 说明走哪家的钱，同一家的模型常常只差尾号。provider 保持灰色，模型名用冰蓝和目录区分。 */
 .alu-instance-model { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow-wrap: anywhere; }
-.alu-instance-model-id { color: var(--alu-blue-dim); }
+.alu-instance-model-id { color: var(--alu-model-name); }
 .alu-instance-meta { color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
 .alu-instance-action {
   position: absolute;
   right: 7px;
   bottom: 7px;
-  color: var(--alu-blue);
+  color: var(--alu-accent);
   font-size: var(--alu-micro-size);
   padding: 2px 4px;
 }
@@ -202,26 +202,26 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   color: var(--alu-text-muted);
   font-size: var(--alu-meta-size);
 }
-.alu-sidebar-error { color: var(--alu-rose); }
+.alu-sidebar-error { color: var(--alu-danger); }
 .alu-sidebar-refresh:disabled { cursor: default; opacity: .6; }
 .alu-sidebar-refresh.spinning { animation: aluSidebarSpin 1s linear infinite; }
 @keyframes aluSidebarSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .alu-sidebar-refresh.spinning { animation: none; } }
-.alu-sidebar-refresh-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font-size: var(--alu-meta-size); }
+.alu-sidebar-refresh-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 12px 0; padding: 7px 10px; color: var(--alu-danger); border: 1px solid var(--alu-danger-border); border-radius: 8px; background: var(--alu-danger-bg); font-size: var(--alu-meta-size); }
 .alu-sidebar-refresh-error button { flex: none; color: inherit; }
-.alu-sidebar-offline { display: flex; flex-direction: column; gap: 6px; margin: 12px; padding: 12px; color: var(--alu-text-muted); border: 1px solid var(--alu-rose-border); border-radius: 9px; background: var(--alu-rose-bg); font-size: var(--alu-meta-size); line-height: 1.5; }
-.alu-sidebar-offline strong { color: var(--alu-rose); font-size: var(--alu-ui-size); }
+.alu-sidebar-offline { display: flex; flex-direction: column; gap: 6px; margin: 12px; padding: 12px; color: var(--alu-text-muted); border: 1px solid var(--alu-danger-border); border-radius: 9px; background: var(--alu-danger-bg); font-size: var(--alu-meta-size); line-height: 1.5; }
+.alu-sidebar-offline strong { color: var(--alu-danger); font-size: var(--alu-ui-size); }
 .alu-sidebar-offline div { display: flex; gap: 12px; margin-top: 2px; }
-.alu-sidebar-offline button { color: var(--alu-blue); font-size: var(--alu-meta-size); }
+.alu-sidebar-offline button { color: var(--alu-accent); font-size: var(--alu-meta-size); }
 @media (max-width: 640px) {
   .alu-instance-link { padding-top: 10px; padding-bottom: 10px; }
 }
-.alu-sidebar { position: fixed; z-index: 50; inset: 0 auto 0 0; display: flex; width: 300px; max-width: 88vw; flex-direction: column; overflow: hidden; border-right: 1px solid var(--alu-border); background: var(--alu-bg); box-shadow: 4px 0 24px rgba(0, 0, 0, .5); transform: translateX(-100%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); }
+.alu-sidebar { position: fixed; z-index: 50; inset: 0 auto 0 0; display: flex; width: 300px; max-width: 88vw; flex-direction: column; overflow: hidden; border-right: 1px solid var(--alu-border); background: var(--alu-bg); box-shadow: var(--alu-sidebar-shadow); transform: translateX(-100%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); }
 .alu-sidebar.open { transform: translateX(0); }
-.alu-sidebar-overlay { position: fixed; z-index: 49; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: rgba(6, 8, 14, .82); transition: opacity .25s ease; }
+.alu-sidebar-overlay { position: fixed; z-index: 49; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-drawer-scrim); transition: opacity .25s ease; }
 .alu-sidebar-overlay.open { pointer-events: auto; opacity: 1; }
 .alu-sidebar-head { display: flex; min-height: 70px; flex: 0 0 auto; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--alu-border); }
-.alu-sidebar-avatar { width: 40px; height: 40px; flex: 0 0 auto; object-fit: cover; border: 2px solid var(--alu-pink-border); border-radius: 50%; }
+.alu-sidebar-avatar { width: 40px; height: 40px; flex: 0 0 auto; object-fit: cover; border: 2px solid var(--alu-brand-border); border-radius: 50%; }
 .alu-sidebar-title { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .alu-instance-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; }
 .alu-instance-link { width: 100%; border: 0; background: transparent; text-align: left; }
@@ -229,7 +229,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-sidebar-settings-entry:last-child { padding-bottom: max(9px, env(safe-area-inset-bottom)); }
 .alu-sidebar-settings-entry:hover { background: var(--alu-hover); color: var(--alu-text); }
 .alu-sidebar-settings-icon, .alu-sidebar-settings-entry img { display: grid; width: 32px; height: 32px; object-fit: cover; border-radius: 8px; place-items: center; }
-.alu-sidebar-settings-icon { border: 1px solid var(--alu-blue-border); background: var(--alu-blue-bg); color: var(--alu-blue); }
+.alu-sidebar-settings-icon { border: 1px solid var(--alu-accent-border); background: var(--alu-accent-bg); color: var(--alu-accent); }
 .alu-sidebar-settings-entry > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .alu-sidebar-settings-entry strong, .alu-sidebar-settings-entry small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alu-sidebar-settings-entry strong { color: var(--alu-text); font-size: var(--alu-meta-size); }

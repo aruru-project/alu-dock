@@ -78,7 +78,7 @@ async function saveOpenImage() {
   display: grid;
   place-items: center;
   padding: clamp(10px, 2.5vw, 30px);
-  background: rgba(2, 4, 10, .94);
+  background: var(--alu-image-scrim);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   animation: dialogFadeIn .14s ease-out;
@@ -95,8 +95,8 @@ async function saveOpenImage() {
   border: 1px solid var(--alu-border-light);
   border-radius: 14px;
   outline: none;
-  background: #070910;
-  box-shadow: 0 30px 100px rgba(0, 0, 0, .8);
+  background: var(--alu-image-viewer-bg);
+  box-shadow: var(--alu-image-viewer-shadow);
 }
 .alu-image-preview-save {
   position: absolute;
@@ -109,14 +109,14 @@ async function saveOpenImage() {
   gap: 7px;
   padding: 0 13px;
   cursor: pointer;
-  border: 1px solid rgba(126, 200, 224, .45);
+  border: 1px solid rgb(var(--alu-accent-rgb) / .45);
   border-radius: 999px;
-  color: white;
-  background: rgba(38, 126, 164, .9);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .45);
+  color: var(--alu-image-control-text);
+  background: var(--alu-image-save-bg);
+  box-shadow: var(--alu-image-control-shadow);
   font: 600 11px var(--font-reading);
 }
-.alu-image-preview-save:focus-visible { box-shadow: var(--focus-ring); }
+.alu-image-preview-save:focus-visible { box-shadow: var(--alu-focus-ring); }
 .alu-image-preview-save:disabled { cursor: wait; opacity: .65; }
 .alu-image-preview-close {
   position: absolute;
@@ -128,10 +128,10 @@ async function saveOpenImage() {
   height: 34px;
   place-items: center;
   cursor: pointer;
-  border: 1px solid rgba(255, 255, 255, .18);
+  border: 1px solid var(--alu-image-control-border);
   border-radius: 999px;
-  color: white;
-  background: rgba(5, 7, 12, .72);
+  color: var(--alu-image-control-text);
+  background: var(--alu-image-control-bg);
   font-size: 22px;
   line-height: 1;
 }
@@ -149,8 +149,8 @@ async function saveOpenImage() {
 }
 .alu-image-preview footer span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alu-image-preview footer strong { flex: 0 0 auto; font-weight: 600; }
-.alu-image-preview footer strong.is-success { color: #82d7b5; }
-.alu-image-preview footer strong.is-error { color: #f8a0a0; }
+.alu-image-preview footer strong.is-success { color: var(--alu-success-text); }
+.alu-image-preview footer strong.is-error { color: var(--alu-danger-text); }
 @media (max-width: 720px) {
   .alu-image-preview-overlay { padding: 0; }
   .alu-image-preview { width: 100%; height: 100vh; height: 100dvh; border: 0; border-radius: 0; }

@@ -90,8 +90,8 @@ const { appendShellQuote } = useInputStore()
 </template>
 
 <style scoped>
-.alu-conversation-switching { color: var(--alu-blue); border-color: var(--alu-blue-border); }
-.alu-follow-failed { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px auto; max-width: 760px; padding: 7px 10px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font-size: 11px; }
+.alu-conversation-switching { color: var(--alu-accent); border-color: var(--alu-accent-border); }
+.alu-follow-failed { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px auto; max-width: 760px; padding: 7px 10px; color: var(--alu-danger); border: 1px solid var(--alu-danger-border); border-radius: 8px; background: var(--alu-danger-bg); font-size: 11px; }
 .alu-follow-failed button { flex: none; color: inherit; }
 .alu-welcome-error { gap: 10px; }
 .alu-welcome-error .ui-dialog-btn { margin-top: 4px; }

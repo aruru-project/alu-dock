@@ -72,8 +72,8 @@ const filtered = computed(() => {
 .saved-session-meta > span { flex: 0 0 auto; }
 .saved-session-meta > span + span::before { content: '·'; margin: 0 6px; color: var(--alu-text-faint); }
 .saved-session-meta > .saved-session-cwd { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.saved-session-more-failed { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--alu-rose); }
-.saved-session-more-failed > button { flex-shrink: 0; color: var(--alu-blue); }
+.saved-session-more-failed { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--alu-danger); }
+.saved-session-more-failed > button { flex-shrink: 0; color: var(--alu-accent); }
 @media (min-width: 1200px) {
   .saved-session-title { font-size: calc(var(--alu-control-size) + 1px); }
   .saved-session-meta { font-size: var(--alu-meta-size); }

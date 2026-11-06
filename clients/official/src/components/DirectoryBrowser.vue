@@ -289,9 +289,9 @@ defineExpose({ goBack })
 </template>
 
 <style scoped>
-.directory-browser { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--alu-border); background: #0b111d; }
+.directory-browser { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--alu-border); background: var(--alu-directory-bg); }
 .directory-picker { flex: 1 1 auto; border-right: 0; }
-.directory-toolbar { display: flex; min-width: 0; min-height: 47px; flex: 0 0 auto; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid var(--alu-border); background: rgba(13, 21, 35, .94); }
+.directory-toolbar { display: flex; min-width: 0; min-height: 47px; flex: 0 0 auto; align-items: center; gap: 8px; padding: 0 13px; border-bottom: 1px solid var(--alu-border); background: var(--alu-toolbar-bg); }
 .directory-heading { flex: 1; color: var(--alu-text-muted); font-size: var(--alu-micro-size); font-weight: 700; }
 .directory-icon-button { display: inline-flex; width: 32px; min-height: 32px; flex: 0 0 auto; align-items: center; justify-content: center; padding: 0; color: var(--alu-text-muted); border: 0; border-radius: 7px; background: transparent; }
 .directory-icon-button:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
@@ -304,24 +304,24 @@ defineExpose({ goBack })
 .directory-tree-root > svg, .directory-tree-row > svg { flex-shrink: 0; }
 .directory-tree-row:hover:not(:disabled), .directory-tree-root:hover:not(:disabled), .directory-more:hover:not(:disabled) { color: var(--alu-text); background: var(--alu-hover); }
 /* 选中目录沿用 Work 列表和 Host 列表的选中样式：樱花粉底、粉边和左侧粉条。 */
-.selected { position: relative; color: var(--alu-text); background: var(--alu-pink-bg); box-shadow: inset 0 0 0 1px var(--alu-pink-border); }
-.selected::before { position: absolute; top: 8px; bottom: 8px; left: 0; width: 2px; border-radius: 0 2px 2px 0; background: var(--alu-pink); content: ''; }
-.selected > svg { color: var(--alu-pink); }
-.selected:hover:not(:disabled) { background: var(--alu-pink-bg); }
+.selected { position: relative; color: var(--alu-text); background: var(--alu-highlight-bg); box-shadow: inset 0 0 0 1px var(--alu-highlight-border); }
+.selected::before { position: absolute; top: 8px; bottom: 8px; left: 0; width: 2px; border-radius: 0 2px 2px 0; background: var(--alu-highlight); content: ''; }
+.selected > svg { color: var(--alu-highlight); }
+.selected:hover:not(:disabled) { background: var(--alu-highlight-bg); }
 button:disabled { opacity: .5; }
 .directory-chevron { width: 14px; flex: 0 0 14px; }
 .directory-detail { flex: 0 0 auto; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .directory-status { color: var(--alu-text-faint); }
-.directory-status.error { color: var(--alu-rose); }
+.directory-status.error { color: var(--alu-danger); }
 .directory-error-actions { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; }
-.directory-diagnostic { min-height: 34px; margin: 0 9px 4px; padding: 4px 8px; color: var(--alu-blue); border: 1px solid var(--alu-border); border-radius: 6px; background: transparent; font-size: var(--alu-meta-size); }
+.directory-diagnostic { min-height: 34px; margin: 0 9px 4px; padding: 4px 8px; color: var(--alu-accent); border: 1px solid var(--alu-border); border-radius: 6px; background: transparent; font-size: var(--alu-meta-size); }
 .directory-diagnostic:hover:not(:disabled) { background: var(--alu-hover); }
-.directory-more { color: var(--alu-blue); }
-.directory-spinner { display: inline-block; width: 13px; height: 13px; flex: 0 0 auto; border: 2px solid rgba(126, 200, 224, .22); border-top-color: var(--alu-blue); border-radius: 50%; animation: directory-spin .85s linear infinite; }
+.directory-more { color: var(--alu-accent); }
+.directory-spinner { display: inline-block; width: 13px; height: 13px; flex: 0 0 auto; border: 2px solid rgb(var(--alu-accent-rgb) / .22); border-top-color: var(--alu-accent); border-radius: 50%; animation: directory-spin .85s linear infinite; }
 .spinning { animation: directory-spin .85s linear infinite; }
 .directory-breadcrumbs { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; overflow: auto; color: var(--alu-text-faint); }
-.directory-breadcrumbs button { min-height: 30px; padding: 0 2px; color: var(--alu-blue); border: 0; background: transparent; font-size: var(--alu-meta-size); white-space: nowrap; }
-.directory-mobile-row { display: grid; width: 100%; min-height: 52px; grid-template-columns: 22px minmax(0, 1fr) 18px; align-items: center; gap: 9px; padding: 7px 9px; color: var(--alu-text-muted); border: 0; border-bottom: 1px solid rgba(45, 57, 79, .55); background: transparent; text-align: left; }
+.directory-breadcrumbs button { min-height: 30px; padding: 0 2px; color: var(--alu-accent); border: 0; background: transparent; font-size: var(--alu-meta-size); white-space: nowrap; }
+.directory-mobile-row { display: grid; width: 100%; min-height: 52px; grid-template-columns: 22px minmax(0, 1fr) 18px; align-items: center; gap: 9px; padding: 7px 9px; color: var(--alu-text-muted); border: 0; border-bottom: 1px solid var(--alu-directory-row-border); background: transparent; text-align: left; }
 .directory-mobile-row > span { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
 .directory-mobile-row strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .directory-mobile-row small { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }

@@ -3,7 +3,7 @@ body.alu-terminal-body {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', 'Menlo', monospace;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
-  background: radial-gradient(ellipse at 50% 0%, #141e30 0%, #080c18 60%);
+  background: var(--alu-page-bg);
   font-size: 14px;
 }
 /* ── 星空粒子背景 ── */
@@ -13,35 +13,7 @@ body.alu-terminal-body::before {
   inset: 0;
   pointer-events: none;
   z-index: 0;
-  background-image:
-      radial-gradient(circle, rgba(255,255,255,0.80) 0.8px, transparent 0.8px),
-      radial-gradient(circle, rgba(200,220,255,0.70) 0.8px, transparent 0.8px),
-      radial-gradient(circle, rgba(255,255,255,0.72) 0.7px, transparent 0.7px),
-      radial-gradient(circle, rgba(255,255,255,0.50) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(200,210,255,0.48) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255,255,255,0.50) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255,255,255,0.46) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(200,220,255,0.50) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255,255,255,0.45) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255,255,255,0.50) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255,255,255,0.48) 0.5px, transparent 0.5px),
-      radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.32) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.26) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(200,210,255,0.28) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.32) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.25) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.30) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(200,220,255,0.26) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.24) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(255,255,255,0.28) 0.4px, transparent 0.4px),
-      radial-gradient(circle, rgba(200,210,255,0.26) 0.4px, transparent 0.4px);
+  background-image: var(--alu-backdrop-stars);
   background-position:
       45% 30%,  67% 45%,  22% 70%,
        5% 10%,  70% 20%,  88% 82%,  62% 52%,  10% 78%,  78% 45%,  40% 72%,  24% 48%,
@@ -75,8 +47,8 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 @keyframes dialogAttention {
   0%, 100% { transform: translateX(0); border-color: var(--alu-border-light); }
-  35% { transform: translateX(-3px); border-color: var(--alu-pink-border); }
-  70% { transform: translateX(3px); border-color: var(--alu-pink-border); }
+  35% { transform: translateX(-3px); border-color: var(--alu-highlight-border); }
+  70% { transform: translateX(3px); border-color: var(--alu-highlight-border); }
 }
 @keyframes cmdOverlayIn {
   from { opacity: 0; }
@@ -108,12 +80,12 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 @keyframes aluInstancePulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 * { box-sizing: border-box; }
-button:focus-visible, textarea:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+button:focus-visible, textarea:focus-visible { outline: none; box-shadow: var(--alu-focus-ring); }
 button:disabled { cursor: not-allowed; opacity: .42; }
 body {
   min-width: 320px;
-  color: var(--c-text-1);
-  background: var(--c-space-950);
+  color: var(--alu-text);
+  background: var(--alu-bg);
   -webkit-font-smoothing: antialiased;
 }
 body::before {
@@ -121,16 +93,11 @@ body::before {
   inset: 0;
   pointer-events: none;
   content: '';
-  background:
-      radial-gradient(circle at 74% 4%, rgb(114 125 183 / .11), transparent 31%),
-      radial-gradient(circle at 14% 92%, rgb(126 200 224 / .055), transparent 25%),
-      radial-gradient(circle, rgb(255 255 255 / .22) .6px, transparent .8px) 11% 13% / 137px 137px,
-      radial-gradient(circle, rgb(196 214 255 / .18) .5px, transparent .7px) 63% 72% / 193px 193px,
-      var(--c-space-950);
+  background: var(--alu-bg);
 }
-time { display: block; margin-top: 5px; color: var(--c-text-3); font: var(--alu-meta-size)/1.3 'JetBrains Mono', monospace; text-align: right; }
+time { display: block; margin-top: 5px; color: var(--alu-text-subtle); font: var(--alu-meta-size)/1.3 'JetBrains Mono', monospace; text-align: right; }
 @keyframes spin { to { transform: rotate(1turn); } }
-kbd { padding: 1px 4px; color: var(--c-text-3); font: var(--alu-micro-size) 'JetBrains Mono'; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 4px; }
+kbd { padding: 1px 4px; color: var(--alu-text-subtle); font: var(--alu-micro-size) 'JetBrains Mono'; background: var(--alu-surface); border: 1px solid var(--alu-border-strong); border-radius: 4px; }
 .fade-enter-active, .fade-leave-active { transition: opacity 180ms; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {

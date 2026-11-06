@@ -65,11 +65,11 @@ const label = computed(() => `${aborting.value ? '正在中止当前回复' : '�
   align-items: center;
   gap: 7px;
   padding: 0 12px 0 10px;
-  border: 1px solid var(--alu-rose-border);
+  border: 1px solid var(--alu-danger-border);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--alu-bg-raised) 92%, transparent);
-  box-shadow: 0 8px 24px rgba(2, 6, 18, .34);
-  color: var(--alu-rose);
+  background: rgb(var(--alu-bg-raised-rgb) / .92);
+  box-shadow: var(--alu-float-shadow);
+  color: var(--alu-danger);
   font-size: var(--alu-meta-size);
   font-weight: 650;
   cursor: pointer;
@@ -89,10 +89,10 @@ const label = computed(() => `${aborting.value ? '正在中止当前回复' : '�
   font-weight: 600;
 }
 .alu-stop-run-time::before { content: '·'; margin-right: 7px; color: var(--alu-text-faint); }
-.alu-stop-run:hover { border-color: var(--alu-rose); background: var(--alu-rose-bg); transform: translateY(-1px); }
-.alu-stop-run:focus-visible { outline: 2px solid var(--alu-rose); outline-offset: 2px; box-shadow: var(--focus-ring); }
+.alu-stop-run:hover { border-color: var(--alu-danger); background: var(--alu-danger-bg); transform: translateY(-1px); }
+.alu-stop-run:focus-visible { outline: 2px solid var(--alu-danger); outline-offset: 2px; box-shadow: var(--alu-focus-ring); }
 .alu-stop-run:disabled { cursor: default; transform: none; }
-.alu-stop-run.is-pending { color: var(--alu-rose-dim); }
+.alu-stop-run.is-pending { color: var(--alu-danger-dim); }
 @media (max-width: 640px) {
   .alu-stop-run { min-height: 30px; padding: 0 10px 0 9px; }
 }

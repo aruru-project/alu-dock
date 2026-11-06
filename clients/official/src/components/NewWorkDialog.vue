@@ -665,7 +665,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .system-option .ui-dialog-option[aria-pressed="true"] { background: var(--alu-active); }
 .system-confirm { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
 .system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
-.system-confirm input { accent-color: var(--alu-blue); }
+.system-confirm input { accent-color: var(--alu-accent); }
 .new-work-dialog > .resource-document { flex: 1; min-height: 0; }
 .alu-dialog-error > span { display: block; }
 /* Leaves room under the first-screen selectors for their open menus, which the dialog otherwise clips. */

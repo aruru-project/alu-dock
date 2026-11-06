@@ -385,7 +385,7 @@ function interactionMethodLabel(method: string) {
   gap: 10px;
   overflow-x: auto;
   padding: 6px 4px 0;
-  color: var(--alu-amber-dim);
+  color: var(--alu-warning-dim);
   font-size: var(--alu-meta-size);
 }
 .alu-extension-status[hidden] { display: none; }
@@ -393,33 +393,33 @@ function interactionMethodLabel(method: string) {
 .extension-ui-surface { width: 100%; min-width: 0; }
 .alu-input-section .extension-ui-surface { min-width: 0; }
 .extension-ui-surface { display: contents; }
-.extension-attention { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 7px 10px; color: #f6cf79; font-size: var(--alu-meta-size); background: rgb(251 191 36 / .06); border: 1px solid rgb(251 191 36 / .22); border-radius: 8px; }
+.extension-attention { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 7px 10px; color: var(--alu-extension-attention-text); font-size: var(--alu-meta-size); background: rgb(var(--alu-warning-rgb) / .06); border: 1px solid rgb(var(--alu-warning-rgb) / .22); border-radius: 8px; }
 .extension-attention span { flex: 1; }
-.extension-attention button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--c-ice); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 6px; }
+.extension-attention button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--alu-accent); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-strong); border-radius: 6px; }
 .extension-widgets { display: grid; gap: 8px; }
-.extension-widgets details { overflow: hidden; background: rgb(14 32 45 / .48); border: 1px solid rgb(126 200 224 / .17); border-radius: 10px; }
-.extension-widgets summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; padding: 8px 12px; color: var(--c-ice); font-size: var(--alu-ui-size); cursor: pointer; list-style: none; }
+.extension-widgets details { overflow: hidden; background: var(--alu-extension-widget-bg); border: 1px solid rgb(var(--alu-accent-rgb) / .17); border-radius: 10px; }
+.extension-widgets summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; padding: 8px 12px; color: var(--alu-accent); font-size: var(--alu-ui-size); cursor: pointer; list-style: none; }
 .extension-widgets summary::-webkit-details-marker { display: none; }
 .extension-widgets summary svg { transition: transform 160ms; }
 .extension-widgets details[open] summary svg { transform: rotate(90deg); }
-.extension-widgets pre { max-height: 42dvh; margin: 0; padding: 10px 12px 13px; overflow: auto; color: var(--c-text-1); font: var(--alu-ui-size)/1.65 ui-monospace, monospace; overflow-wrap: anywhere; white-space: pre-wrap; border-top: 1px solid rgb(126 200 224 / .1); }
-.extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: rgb(3 6 13 / .7); backdrop-filter: blur(8px); place-items: center; }
-.extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--c-space-925); border: 1px solid var(--c-line); border-radius: 15px; box-shadow: var(--shadow-panel); }
+.extension-widgets pre { max-height: 42dvh; margin: 0; padding: 10px 12px 13px; overflow: auto; color: var(--alu-text); font: var(--alu-ui-size)/1.65 ui-monospace, monospace; overflow-wrap: anywhere; white-space: pre-wrap; border-top: 1px solid rgb(var(--alu-accent-rgb) / .1); }
+.extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: var(--alu-extension-scrim); backdrop-filter: blur(8px); place-items: center; }
+.extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--alu-extension-dialog-bg); border: 1px solid var(--alu-border-strong); border-radius: 15px; box-shadow: var(--alu-panel-shadow); }
 .extension-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.extension-dialog header small { color: var(--c-sakura); font-size: var(--alu-micro-size); letter-spacing: .14em; }
+.extension-dialog header small { color: var(--alu-brand); font-size: var(--alu-micro-size); letter-spacing: .14em; }
 .extension-dialog h2 { margin: 4px 0 0; font: 600 17px/1.4 var(--font-reading); overflow-wrap: anywhere; }
-.extension-dialog header > span { color: var(--c-amber); font-size: var(--alu-meta-size); }
-.extension-dialog input, .extension-dialog textarea { width: 100%; padding: 10px 11px; color: var(--c-text-1); background: var(--c-space-950); border: 1px solid var(--c-line); border-radius: 8px; resize: vertical; }
-.extension-dialog input:focus, .extension-dialog textarea:focus { outline: none; box-shadow: var(--focus-ring); }
+.extension-dialog header > span { color: var(--alu-warning); font-size: var(--alu-meta-size); }
+.extension-dialog input, .extension-dialog textarea { width: 100%; padding: 10px 11px; color: var(--alu-text); background: var(--alu-bg); border: 1px solid var(--alu-border-strong); border-radius: 8px; resize: vertical; }
+.extension-dialog input:focus, .extension-dialog textarea:focus { outline: none; box-shadow: var(--alu-focus-ring); }
 .extension-options { display: grid; min-height: 70px; max-height: min(48dvh, 440px); gap: 5px; overflow-y: auto; }
-.extension-options button { min-height: 42px; padding: 8px 10px; color: var(--c-text-1); text-align: left; overflow-wrap: anywhere; cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line-soft); border-radius: 7px; }
-.extension-options button.selected { color: var(--c-ice); border-color: var(--c-ice); background: var(--c-ice-soft); }
-.extension-options > span { padding: 20px; color: var(--c-text-3); text-align: center; }
-.extension-message { max-height: 40dvh; margin: 0; overflow-y: auto; color: var(--c-text-1); font: 14px/1.65 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
-.extension-dialog-error { padding: 8px; color: #f8a0a0; font: var(--alu-meta-size)/1.5 var(--font-reading); background: rgb(248 113 113 / .06); border-radius: 7px; }
+.extension-options button { min-height: 42px; padding: 8px 10px; color: var(--alu-text); text-align: left; overflow-wrap: anywhere; cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-soft); border-radius: 7px; }
+.extension-options button.selected { color: var(--alu-accent); border-color: var(--alu-accent); background: var(--alu-accent-soft); }
+.extension-options > span { padding: 20px; color: var(--alu-text-subtle); text-align: center; }
+.extension-message { max-height: 40dvh; margin: 0; overflow-y: auto; color: var(--alu-text); font: 14px/1.65 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
+.extension-dialog-error { padding: 8px; color: var(--alu-danger-text); font: var(--alu-meta-size)/1.5 var(--font-reading); background: rgb(var(--alu-danger-rgb) / .06); border-radius: 7px; }
 .extension-dialog footer { display: flex; justify-content: flex-end; gap: 7px; }
-.extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--c-text-2); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; }
-.extension-dialog footer button.primary { color: #190d16; font-weight: 700; background: var(--c-sakura); border-color: var(--c-sakura); }
+.extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--alu-text-dim); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-strong); border-radius: 8px; }
+.extension-dialog footer button.primary { color: var(--alu-extension-primary-text); font-weight: 700; background: var(--alu-highlight); border-color: var(--alu-highlight); }
 @media (max-width: 640px) {
   .extension-dialog-layer { padding: 0; place-items: end stretch; }
   .extension-dialog { width: 100%; max-height: 88dvh; padding: 15px; border-width: 1px 0 0; border-radius: 16px 16px 0 0; }

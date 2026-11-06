@@ -45,7 +45,7 @@ async function handleClick(event: MouseEvent) {
   display: inline;
   margin: 0;
   padding: 0;
-  color: var(--alu-blue);
+  color: var(--alu-accent);
   border: 0;
   background: transparent;
   font: inherit;
@@ -58,7 +58,7 @@ async function handleClick(event: MouseEvent) {
 }
 .markdown-content :deep(.markdown-copy-link:hover),
 .markdown-content :deep(.markdown-copy-link:focus-visible) {
-  color: var(--alu-pink);
+  color: var(--alu-highlight);
   outline: none;
   text-decoration-style: solid;
 }
@@ -79,7 +79,7 @@ async function handleClick(event: MouseEvent) {
   color: var(--alu-text-muted);
   border: 1px solid var(--alu-border);
   border-radius: 5px;
-  background: rgba(255, 255, 255, .025);
+  background: rgb(var(--alu-overlay-rgb) / .025);
   font-size: .88em;
   text-overflow: ellipsis;
   vertical-align: baseline;

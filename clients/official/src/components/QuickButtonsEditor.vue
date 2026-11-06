@@ -107,22 +107,22 @@ function modeLabel(mode: QuickButtonMode) {
 .quick-button-modes { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 0 16px 10px; border: 0; }
 .quick-button-modes legend { width: 100%; margin: 6px 0 6px; }
 .quick-button-modes label { display: inline-flex; min-height: 32px; align-items: center; gap: 7px; color: var(--alu-text); font-size: var(--alu-ui-size); cursor: pointer; }
-.quick-button-modes input { accent-color: var(--alu-pink); }
+.quick-button-modes input { accent-color: var(--alu-highlight); }
 .quick-buttons-toolbar { display: flex; padding: 12px 16px 4px; }
 .quick-buttons-toolbar .ui-dialog-btn { display: inline-flex; align-items: center; gap: 6px; }
 .quick-buttons-list { display: grid; gap: 4px; margin: 6px 0 0; padding: 0 10px; list-style: none; }
 .quick-buttons-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 2px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); }
 .quick-buttons-item.is-shifting { transition: transform 0.15s ease; }
-.quick-buttons-item.is-dragging { position: relative; z-index: 2; border-color: var(--alu-pink-border); box-shadow: 0 12px 30px rgba(2, 6, 18, 0.5); }
+.quick-buttons-item.is-dragging { position: relative; z-index: 2; border-color: var(--alu-highlight-border); box-shadow: var(--alu-drag-shadow); }
 /* 把手：按在这里就开始拖，手指在行的其他地方滑动仍是滚动。 */
 .quick-buttons-grip { display: inline-grid; width: 30px; height: 44px; flex: 0 0 auto; place-items: center; border-radius: 7px; color: var(--alu-text-faint); cursor: grab; touch-action: none; }
 .quick-buttons-grip:hover, .quick-buttons-grip:focus-visible { outline: none; background: var(--alu-hover); color: var(--alu-text); }
-.quick-buttons-item.is-dragging .quick-buttons-grip { cursor: grabbing; color: var(--alu-pink); }
+.quick-buttons-item.is-dragging .quick-buttons-grip { cursor: grabbing; color: var(--alu-highlight); }
 .quick-buttons-item-copy { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 3px; }
 .quick-buttons-item-top { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .quick-buttons-item-top strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); text-overflow: ellipsis; white-space: nowrap; }
 .quick-buttons-item-mode { flex: 0 0 auto; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
-.quick-buttons-item code { overflow: hidden; color: var(--alu-amber); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
+.quick-buttons-item code { overflow: hidden; color: var(--alu-command-name); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .quick-buttons-item-actions { display: flex; flex: 0 0 auto; gap: 2px; }
 .quick-buttons-item-actions button { display: inline-grid; width: 32px; height: 32px; place-items: center; border-radius: 7px; color: var(--alu-text-muted); }
 .quick-buttons-item-actions button:hover { background: var(--alu-hover); color: var(--alu-text); }

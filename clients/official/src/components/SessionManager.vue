@@ -639,7 +639,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
   transition: background 0.1s, border-color 0.1s, color 0.1s;
 }
 .ui-dialog-filter:hover { background: var(--alu-hover); color: var(--alu-text); }
-.ui-dialog-filter.is-active { background: var(--alu-blue-bg); border-color: var(--alu-blue-border); color: var(--alu-blue); }
+.ui-dialog-filter.is-active { background: var(--alu-accent-bg); border-color: var(--alu-accent-border); color: var(--alu-accent); }
 .ui-dialog-filter-count { color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-variant-numeric: tabular-nums; }
 .ui-dialog-filter.is-active .ui-dialog-filter-count { color: currentColor; opacity: 0.72; }
 .alu-tree-guidance {
@@ -665,14 +665,14 @@ function time(value?: string | null) { return treeNodeTime(value) }
   font: inherit;
   text-align: center;
 }
-.alu-tree-guidance button { margin-left: auto; color: var(--alu-blue); font-size: inherit; }
+.alu-tree-guidance button { margin-left: auto; color: var(--alu-accent); font-size: inherit; }
 .alu-tree-guidance button:hover { color: var(--alu-text); }
 .alu-tree-options { overflow: auto; }
 .alu-tree-option { grid-template-columns: max-content minmax(0, 1fr); }
 @media (min-width: 641px) {
   .alu-tree-option { padding-left: 12px; }
 }
-.alu-tree-option.is-active-path:not(.is-current) .alu-tree-path-marker { color: var(--alu-blue); }
+.alu-tree-option.is-active-path:not(.is-current) .alu-tree-path-marker { color: var(--alu-accent); }
 .alu-tree-marker {
   display: inline-flex;
   min-width: 22px;
@@ -684,7 +684,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
   text-align: left;
   white-space: pre;
 }
-.alu-tree-prefix { color: color-mix(in srgb, var(--alu-text-faint) 72%, transparent); }
+.alu-tree-prefix { color: rgb(var(--alu-text-faint-rgb) / .72); }
 .alu-tree-disclosure,
 .alu-tree-disclosure-placeholder {
   display: inline-block;
@@ -694,14 +694,14 @@ function time(value?: string | null) { return treeNodeTime(value) }
 }
 .alu-tree-disclosure {
   border-radius: 3px;
-  color: var(--alu-blue);
+  color: var(--alu-accent);
   cursor: pointer;
   pointer-events: auto;
 }
-.alu-tree-disclosure:hover { background: var(--alu-blue-bg); color: var(--alu-text); }
+.alu-tree-disclosure:hover { background: var(--alu-accent-bg); color: var(--alu-text); }
 .alu-tree-path-marker { display: inline-block; width: 12px; flex: 0 0 12px; text-align: center; }
-.ui-dialog-window-btn { display: block; width: 100%; padding: 9px 12px; color: var(--alu-blue); font-size: var(--alu-meta-size); text-align: center; }
-.ui-dialog-window-btn:hover { background: var(--alu-blue-bg); }
+.ui-dialog-window-btn { display: block; width: 100%; padding: 9px 12px; color: var(--alu-accent); font-size: var(--alu-meta-size); text-align: center; }
+.ui-dialog-window-btn:hover { background: var(--alu-accent-bg); }
 .ui-dialog-selection-summary { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-overflow: ellipsis; white-space: nowrap; }
 .alu-tree-actions .ui-dialog-selection-summary { display: flex; flex-direction: column; gap: 2px; }
 .alu-tree-actions .ui-dialog-selection-summary span { color: var(--alu-text-faint); font-size: var(--alu-micro-size); letter-spacing: 0.08em; }
@@ -719,9 +719,9 @@ function time(value?: string | null) { return treeNodeTime(value) }
   }
 }
 .session-manager { position: relative; display: flex; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; }
-.reload-summary { display: grid; gap: 4px; padding: 9px; color: var(--c-text-2); font: var(--alu-micro-size)/1.5 var(--font-reading); background: var(--c-space-850); border-radius: 7px; }
-.reload-summary span[data-severity='error'] { color: var(--c-danger); }
-.reload-summary span[data-severity='warning'] { color: var(--c-amber); }
+.reload-summary { display: grid; gap: 4px; padding: 9px; color: var(--alu-text-dim); font: var(--alu-micro-size)/1.5 var(--font-reading); background: var(--alu-surface); border-radius: 7px; }
+.reload-summary span[data-severity='error'] { color: var(--alu-danger); }
+.reload-summary span[data-severity='warning'] { color: var(--alu-warning); }
 @media (max-width: 640px) {
   .session-manager { min-height: 0; flex: 1; }
 }
@@ -738,25 +738,25 @@ function time(value?: string | null) { return treeNodeTime(value) }
 .compaction-field > .ui-dialog-editor::placeholder { color: var(--alu-text-muted); }
 .compaction-hint { margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.6; }
 .compaction-prompt-link { display: flex; min-height: 46px; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-bg); color: var(--alu-text-dim); text-align: left; font: inherit; font-size: var(--alu-ui-size); }
-.compaction-prompt-link > svg:first-child { color: var(--alu-blue); }
+.compaction-prompt-link > svg:first-child { color: var(--alu-accent); }
 .compaction-prompt-link > span:first-of-type { flex: 1; }
 .compaction-prompt-link > svg:last-child { color: var(--alu-text-muted); }
-.compaction-prompt-link:hover, .compaction-prompt-link:focus-visible { outline: none; border-color: var(--alu-blue-border); background: var(--alu-hover); color: var(--alu-text); }
+.compaction-prompt-link:hover, .compaction-prompt-link:focus-visible { outline: none; border-color: var(--alu-accent-border); background: var(--alu-hover); color: var(--alu-text); }
 .compaction-readonly { flex-shrink: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
-.compaction-progress { display: flex; align-items: center; gap: 8px; color: var(--alu-mint); font-size: var(--alu-ui-size); line-height: 1.6; }
+.compaction-progress { display: flex; align-items: center; gap: 8px; color: var(--alu-success); font-size: var(--alu-ui-size); line-height: 1.6; }
 .compaction-footer { border-top: 1px solid var(--alu-border); }
 .compaction-reader { display: flex; min-height: 0; height: min(64dvh, 560px); flex-direction: column; overflow: auto; }
 .compaction-reader-header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px 0; }
 .compaction-reader-back { display: inline-flex; min-height: 36px; align-items: center; gap: 7px; padding: 0 4px; border: 0; border-radius: 5px; color: var(--alu-text-dim); background: transparent; font: inherit; font-size: var(--alu-ui-size); }
-.compaction-reader-back:hover, .compaction-reader-back:focus-visible { outline: none; color: var(--alu-blue); background: var(--alu-hover); }
+.compaction-reader-back:hover, .compaction-reader-back:focus-visible { outline: none; color: var(--alu-accent); background: var(--alu-hover); }
 .compaction-reader-note { flex-shrink: 0; margin: 6px 20px 14px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
 .compaction-prompt-sections { display: grid; flex-shrink: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 0 16px; padding: 4px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg); }
 .compaction-prompt-sections > button { min-width: 0; min-height: 40px; padding: 6px 3px; border: 1px solid transparent; border-radius: 6px; color: var(--alu-text-muted); background: transparent; font: inherit; font-size: var(--alu-meta-size); }
-.compaction-prompt-sections > button[aria-pressed="true"] { border-color: var(--alu-blue-border); color: var(--alu-text); background: var(--alu-active); }
+.compaction-prompt-sections > button[aria-pressed="true"] { border-color: var(--alu-accent-border); color: var(--alu-text); background: var(--alu-active); }
 .compaction-prompt-sections > button:hover, .compaction-prompt-sections > button:focus-visible { outline: none; color: var(--alu-text); background: var(--alu-hover); }
 .compaction-section-description { flex-shrink: 0; margin: 10px 20px 14px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); line-height: 1.6; }
 .compaction-reader > .markdown-document { min-height: 160px; flex: 1 1 auto; border-top: 1px solid var(--alu-border); }
 .compaction-reader-state { display: flex; min-height: 160px; flex: 1; align-items: center; justify-content: center; gap: 9px; padding: 20px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
-.compaction-reader-error { flex-direction: column; color: var(--alu-rose); text-align: center; }
+.compaction-reader-error { flex-direction: column; color: var(--alu-danger); text-align: center; }
 .compaction-reader-error > p { margin: 0; line-height: 1.7; }
 </style>
