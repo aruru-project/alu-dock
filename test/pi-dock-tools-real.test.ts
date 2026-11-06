@@ -320,6 +320,20 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
     while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
     return (await client.status(remote.id)).execution === "idle";
   }, "Routed coordinator did not settle");
+
+  // A Work on a SubHost sees which Machine it is on, and a wrong Machine name gets the real names.
+  await client.prompt(remote.id, "Which Machine are you on?", "auto", "routed-machines");
+  (await coordinatorProvider.request(next++)).tools({ id: "routed-machines", name: "dock_machines", arguments: {} });
+  const machines = await coordinatorProvider.request(next++);
+  const machineList = JSON.stringify(machines.body.messages?.at(-1));
+  assert.match(machineList, /- Fixture SubHost \(this Work's Machine\) · SubHost/);
+  assert.match(machineList, /- Dock Tools Main · Main/);
+  machines.tools({ id: "routed-guess", name: "dock_create", arguments: { cwd: workspace, machine: "local" } });
+  const guessed = await coordinatorProvider.request(next++);
+  const refusal = JSON.stringify(guessed.body.messages?.at(-1));
+  assert.ok(refusal.includes("Dock Tools Main") && refusal.includes("Fixture SubHost"), "The refusal names the Machines there are");
+  guessed.text("I am on Fixture SubHost.");
+  await waitFor(async () => (await client.status(remote.id)).execution === "idle", "Routed coordinator did not settle after Machines");
   const spawned = childStdout.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line) as { kind: string; parentId?: string; pid?: number });
   const childPid = spawned.find(record => record.kind === "worker_started" && record.parentId === ready.nativeInstanceId)?.pid;
   assert.equal(typeof childPid, "number", "Child ownership is stored using the SubHost's native parent identity");

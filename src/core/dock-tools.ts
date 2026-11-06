@@ -76,7 +76,8 @@ export type DockToolsResult =
   | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; error?: string }
   | { type: "interrupt"; instance: ObservedInstanceStatus }
   | { type: "stop"; instance: ObservedInstanceStatus }
-  | { type: "machines"; machines: MachineDto[] }
+  /** `currentHostId` is the source Work's own Machine; only the source Host adds it. */
+  | { type: "machines"; machines: MachineDto[]; currentHostId?: string }
   | { type: "deliver"; deliverable: DeliverableDto }
   | { type: "system_catalog"; result: SystemCatalogResult }
   | { type: "system_content"; result: ResourceContentResult }
@@ -115,4 +116,14 @@ export function dockMessageText(sourceDisplayName: string, message: string): str
   return `[Agent message from ${JSON.stringify(safeName)}]\n${message}`;
 }
 
+/**
+ * The Host a Work runs on marks that Work's Machine in Main's list. Main's answer to a SubHost never
+ * carries the mark, so a SubHost of an earlier release still accepts it.
+ */
+export function withCurrentMachine(result: DockToolsResult, hostId: string | undefined): DockToolsResult {
+  if (result.type !== "machines" || hostId === undefined || !result.machines.some((machine) => machine.hostId === hostId)) return result;
+  return { ...result, currentHostId: hostId };
+}
+
 export type { ObservationDeliverySink };
+

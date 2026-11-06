@@ -794,6 +794,10 @@ function validateEnvelopeJson(root: unknown, context?: WorkerResponseContext): v
   const result = envelope.kind === "response" ? envelope.result : undefined;
   validateJsonValue(root);
   if (image) validateAgentWorkerResult("conversation.image", result);
+  // A receiver drops the connection over a call it cannot read, and the Host's drop ends the Worker.
+  // A call that tool or extension input got wrong, such as a model's mismatched Dock tool fields,
+  // fails here in front of its caller instead. The serialized copy is exactly what the receiver gets.
+  if (envelope.kind === "call") validateUiCapabilityArgs(parseCapability(envelope.capability), envelope.args);
 }
 
 function validateJsonValue(root: unknown): void {
