@@ -80,7 +80,7 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
   overflow: hidden;
   border: 1px solid var(--alu-border-light);
   border-radius: 12px;
-  background: var(--alu-image-frame-bg);
+  background: var(--alu-bg-raised);
   box-shadow: var(--alu-image-shadow);
 }
 .alu-conversation-image-open {
@@ -89,7 +89,7 @@ watch(() => [props.part.imageKey, props.part.source, props.resource.state] as co
   padding: 0;
   cursor: zoom-in;
   border: 0;
-  background: var(--alu-image-backdrop);
+  background: var(--alu-bg);
 }
 .alu-conversation-image-open img {
   display: block;

@@ -32,7 +32,7 @@
 
 - 只有一个组件用到的样式写在该组件的 `<style scoped>` 里。几个组件共用的样式放在 `src/styles/`：`tokens.css`（颜色、尺寸变量）、`base.css`（页面默认样式、动画）、`controls.css`（共用按钮等控件）、`host-connection.css`（配对与连接卡片）、`dialog.css`（通用弹窗框架的尺寸、位置和窄屏适配）、`conversation.css`（对话正文共用样式和 `v-html` 渲染的 Markdown）。
 - 同一元素的一种效果只写一处。不要靠加载顺序或更高优先级去盖掉另一个文件里的规则；窄屏不同就在同一处写明对应的媒体查询。
-- 颜色只在 `tokens.css` 里定义，按用途命名：选中项和主按钮用 `--alu-highlight-*`，不叫“粉色”。组件只引用这些变量，不写颜色值（`transparent`、`currentColor` 除外）；要半透明就用同名的 `-rgb` 分量，写成 `rgb(var(--alu-accent-rgb) / .1)`。已有变量都不是这个用途时，先在 `tokens.css` 里加一个。
+- 颜色只在 `tokens.css` 里定义，按用途命名：选中项（已经选定的那一项）和主要按钮用 `--alu-highlight-*`，不叫“粉色”；发送键有自己的一组，键盘光标停着的项不算选中。几种用途碰巧同色，也各用各的变量。组件只引用这些变量，不写颜色值（`transparent`、`currentColor` 除外）；要半透明就用同名的 `-rgb` 分量，写成 `rgb(var(--alu-accent-rgb) / .1)`。已有变量都不是这个用途时，先在 `tokens.css` 里加一个。
 - 样式要在 Android 最旧支持的 WebView（Chromium 99）上生效：`vite.config.ts` 的 `cssTarget` 保持 `chrome99`，不使用 CSS 嵌套、`:has()`、容器查询、`color-mix()`、`color()` 和 `(width <= …)` 这类范围写法的媒体查询。
 
 ## Project boundaries

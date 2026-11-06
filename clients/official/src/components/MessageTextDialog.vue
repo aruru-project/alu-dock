@@ -96,10 +96,10 @@ async function copyAllText() {
   overflow: auto;
   color: var(--alu-text);
   outline: none;
-  background: var(--alu-message-source-bg);
+  background: var(--alu-bg);
   border: 0;
   border-radius: 0;
-  font: 12px/1.7 var(--font-mono);
+  font: inherit;
   overflow-wrap: normal;
   tab-size: 2;
   touch-action: auto;
@@ -130,7 +130,8 @@ async function copyAllText() {
   border-radius: 9px;
   cursor: pointer;
 }
-.message-text-footer button.is-primary { color: var(--alu-bg); border-color: var(--alu-accent); background: var(--alu-accent); font-weight: 700; }
+.message-text-footer button.is-primary { color: var(--alu-highlight); border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); font-weight: 700; }
+.message-text-footer button.is-primary:hover { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 @media (max-width: 640px) {
   .message-text-source { padding: 14px; font-size: 12px; }
   .message-text-footer { align-items: stretch; flex-direction: column; gap: 9px; }

@@ -393,9 +393,9 @@ function interactionMethodLabel(method: string) {
 .extension-ui-surface { width: 100%; min-width: 0; }
 .alu-input-section .extension-ui-surface { min-width: 0; }
 .extension-ui-surface { display: contents; }
-.extension-attention { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 7px 10px; color: var(--alu-extension-attention-text); font-size: var(--alu-meta-size); background: rgb(var(--alu-warning-rgb) / .06); border: 1px solid rgb(var(--alu-warning-rgb) / .22); border-radius: 8px; }
+.extension-attention { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 7px 10px; color: var(--alu-warning-text); font-size: var(--alu-meta-size); background: rgb(var(--alu-warning-rgb) / .06); border: 1px solid rgb(var(--alu-warning-rgb) / .22); border-radius: 8px; }
 .extension-attention span { flex: 1; }
-.extension-attention button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--alu-accent); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-strong); border-radius: 6px; }
+.extension-attention button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--alu-accent); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 6px; }
 .extension-widgets { display: grid; gap: 8px; }
 .extension-widgets details { overflow: hidden; background: var(--alu-extension-widget-bg); border: 1px solid rgb(var(--alu-accent-rgb) / .17); border-radius: 10px; }
 .extension-widgets summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; padding: 8px 12px; color: var(--alu-accent); font-size: var(--alu-ui-size); cursor: pointer; list-style: none; }
@@ -403,23 +403,24 @@ function interactionMethodLabel(method: string) {
 .extension-widgets summary svg { transition: transform 160ms; }
 .extension-widgets details[open] summary svg { transform: rotate(90deg); }
 .extension-widgets pre { max-height: 42dvh; margin: 0; padding: 10px 12px 13px; overflow: auto; color: var(--alu-text); font: var(--alu-ui-size)/1.65 ui-monospace, monospace; overflow-wrap: anywhere; white-space: pre-wrap; border-top: 1px solid rgb(var(--alu-accent-rgb) / .1); }
-.extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: var(--alu-extension-scrim); backdrop-filter: blur(8px); place-items: center; }
-.extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--alu-extension-dialog-bg); border: 1px solid var(--alu-border-strong); border-radius: 15px; box-shadow: var(--alu-panel-shadow); }
+.extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: var(--alu-scrim-light); backdrop-filter: blur(8px); place-items: center; }
+.extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--alu-window-bg); border: 1px solid var(--alu-border-light); border-radius: 15px; box-shadow: var(--alu-panel-shadow); }
 .extension-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.extension-dialog header small { color: var(--alu-brand); font-size: var(--alu-micro-size); letter-spacing: .14em; }
+.extension-dialog header small { color: var(--alu-accent); font-size: var(--alu-micro-size); letter-spacing: .14em; }
 .extension-dialog h2 { margin: 4px 0 0; font: 600 17px/1.4 var(--font-reading); overflow-wrap: anywhere; }
 .extension-dialog header > span { color: var(--alu-warning); font-size: var(--alu-meta-size); }
-.extension-dialog input, .extension-dialog textarea { width: 100%; padding: 10px 11px; color: var(--alu-text); background: var(--alu-bg); border: 1px solid var(--alu-border-strong); border-radius: 8px; resize: vertical; }
+.extension-dialog input, .extension-dialog textarea { width: 100%; padding: 10px 11px; color: var(--alu-text); background: var(--alu-bg); border: 1px solid var(--alu-border-light); border-radius: 8px; resize: vertical; }
 .extension-dialog input:focus, .extension-dialog textarea:focus { outline: none; box-shadow: var(--alu-focus-ring); }
 .extension-options { display: grid; min-height: 70px; max-height: min(48dvh, 440px); gap: 5px; overflow-y: auto; }
-.extension-options button { min-height: 42px; padding: 8px 10px; color: var(--alu-text); text-align: left; overflow-wrap: anywhere; cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-soft); border-radius: 7px; }
-.extension-options button.selected { color: var(--alu-accent); border-color: var(--alu-accent); background: var(--alu-accent-soft); }
-.extension-options > span { padding: 20px; color: var(--alu-text-subtle); text-align: center; }
+.extension-options button { min-height: 42px; padding: 8px 10px; color: var(--alu-text); text-align: left; overflow-wrap: anywhere; cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border); border-radius: 7px; }
+.extension-options button.selected { color: var(--alu-highlight); border-color: var(--alu-highlight); background: var(--alu-highlight-bg); }
+.extension-options > span { padding: 20px; color: var(--alu-text-muted); text-align: center; }
 .extension-message { max-height: 40dvh; margin: 0; overflow-y: auto; color: var(--alu-text); font: 14px/1.65 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
 .extension-dialog-error { padding: 8px; color: var(--alu-danger-text); font: var(--alu-meta-size)/1.5 var(--font-reading); background: rgb(var(--alu-danger-rgb) / .06); border-radius: 7px; }
 .extension-dialog footer { display: flex; justify-content: flex-end; gap: 7px; }
-.extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--alu-text-dim); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-strong); border-radius: 8px; }
-.extension-dialog footer button.primary { color: var(--alu-extension-primary-text); font-weight: 700; background: var(--alu-highlight); border-color: var(--alu-highlight); }
+.extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--alu-text-dim); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-light); border-radius: 8px; }
+.extension-dialog footer button.primary { color: var(--alu-highlight); font-weight: 700; background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); }
+.extension-dialog footer button.primary:hover:not(:disabled) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 @media (max-width: 640px) {
   .extension-dialog-layer { padding: 0; place-items: end stretch; }
   .extension-dialog { width: 100%; max-height: 88dvh; padding: 15px; border-width: 1px 0 0; border-radius: 16px 16px 0 0; }

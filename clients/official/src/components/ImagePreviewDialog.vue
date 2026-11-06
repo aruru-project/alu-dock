@@ -78,7 +78,7 @@ async function saveOpenImage() {
   display: grid;
   place-items: center;
   padding: clamp(10px, 2.5vw, 30px);
-  background: var(--alu-image-scrim);
+  background: var(--alu-scrim-strong);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   animation: dialogFadeIn .14s ease-out;

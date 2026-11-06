@@ -98,7 +98,7 @@ async function copyPath() {
   border: 1px solid var(--alu-border);
   border-left: 2px solid var(--alu-shell-accent);
   border-radius: 8px;
-  background: var(--alu-shell-bg);
+  background: rgb(var(--alu-bg-rgb) / 0.9);
   color: var(--alu-text-dim);
   font-size: var(--alu-meta-size);
 }
@@ -146,7 +146,7 @@ async function copyPath() {
   padding: 8px 10px;
   border-radius: 6px;
   background: var(--alu-terminal-bg);
-  color: var(--alu-terminal-text);
+  color: var(--alu-mono-text);
   font: var(--alu-meta-size)/1.55 'JetBrains Mono', 'Noto Sans SC', ui-monospace, monospace;
   tab-size: 4;
   white-space: pre-wrap;
@@ -167,7 +167,7 @@ async function copyPath() {
   padding: 0 10px;
   border: 1px solid var(--alu-border);
   border-radius: 6px;
-  background: var(--alu-button-bg);
+  background: var(--alu-control-bg);
   color: var(--alu-text-muted);
   font-size: var(--alu-micro-size);
 }

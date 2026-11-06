@@ -9,7 +9,7 @@
   align-items: center;
   justify-content: center;
   padding: clamp(12px, 3vw, 32px);
-  background: var(--alu-dialog-scrim);
+  background: var(--alu-scrim);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   animation: dialogFadeIn 0.14s ease-out;
@@ -35,7 +35,7 @@
   flex: 0 0 auto;
   padding: 18px 58px 14px 20px;
   border-bottom: 1px solid var(--alu-border);
-  background: var(--alu-dialog-header-bg);
+  background: var(--alu-bg-raised);
 }
 .ui-dialog-title { color: var(--alu-text); font-size: 14px; font-weight: 700; letter-spacing: 0.01em; }
 .ui-dialog-body { margin-top: 4px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.55; white-space: pre-wrap; }
@@ -107,7 +107,7 @@
   text-align: left;
   transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.ui-dialog-btn:hover,
+.ui-dialog-btn:hover:where(:not(:disabled)),
 .ui-dialog-btn:focus-visible {
   outline: none;
   background: var(--alu-hover);
@@ -116,7 +116,7 @@
 }
 .ui-dialog-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .ui-dialog-btn-primary { background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); color: var(--alu-highlight); }
-.ui-dialog-btn-primary:hover { background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); color: var(--alu-highlight-hover-text); }
+.ui-dialog-btn-primary:hover:where(:not(:disabled)) { background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); color: var(--alu-highlight-hover-text); }
 .ui-dialog-form-footer { display: flex; flex: 0 0 auto; justify-content: flex-end; gap: 8px; padding: 14px 16px; }
 .ui-dialog-input,
 .ui-dialog-editor {
@@ -151,7 +151,7 @@
   justify-content: center;
   padding: 9vh 20px 20px;
   padding: 9dvh 20px 20px;
-  background: var(--alu-palette-scrim);
+  background: var(--alu-scrim);
   backdrop-filter: blur(9px);
   -webkit-backdrop-filter: blur(9px);
   animation: cmdOverlayIn 0.12s ease-out;
@@ -166,7 +166,7 @@
   background: var(--alu-bg-raised);
   border: 1px solid var(--alu-border-light);
   border-radius: 14px;
-  box-shadow: var(--alu-palette-shadow);
+  box-shadow: var(--alu-dialog-shadow);
   animation: cmdBoxIn 0.16s cubic-bezier(0.2, 0.85, 0.25, 1);
 }
 .cmd-palette-attention { animation: dialogAttention 0.18s ease-out; }
@@ -205,10 +205,10 @@
   }
 }
 @media (max-width: 640px) {
-  .dock-tools-popover-layer { background: var(--alu-popover-scrim-compact); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+  .dock-tools-popover-layer { background: var(--alu-scrim-light); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
   .ui-dialog-overlay,
   .cmd-palette-overlay {
-    background: var(--alu-dialog-scrim-compact);
+    background: var(--alu-scrim-strong);
   }
   .ui-dialog-box,
   .ui-dialog-size-wide,
@@ -286,11 +286,13 @@
     font-size: var(--alu-meta-size);
   }
 }
-.session-primary { display: flex; min-height: 42px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; color: var(--alu-on-highlight); font-weight: 700; cursor: pointer; background: var(--alu-highlight); border: 0; border-radius: 8px; }
+.session-primary { display: flex; min-height: 42px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; color: var(--alu-highlight); font-weight: 700; cursor: pointer; background: var(--alu-highlight-bg); border: 1px solid var(--alu-highlight-border); border-radius: 8px; }
+.session-primary:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 .session-trust { position: absolute; z-index: 5; inset: 0; display: grid; align-content: center; justify-items: center; padding: 20px; text-align: center; background: rgb(var(--alu-bg-rgb) / .96); }
 .session-trust p { color: var(--alu-text-dim); font: var(--alu-meta-size)/1.6 var(--font-reading); }
 .session-trust > div { display: flex; gap: 8px; }
-.session-trust button { min-height: 42px; padding: 0 12px; color: var(--alu-text-dim); cursor: pointer; background: var(--alu-surface); border: 1px solid var(--alu-border-strong); border-radius: 8px; }
+.session-trust button { min-height: 42px; padding: 0 12px; cursor: pointer; border-radius: 8px; }
+.session-trust button:not(.session-primary) { color: var(--alu-text-dim); background: var(--alu-surface); border: 1px solid var(--alu-border-light); }
 @media (max-width: 640px) {
   .session-primary { min-height: 48px; }
 }

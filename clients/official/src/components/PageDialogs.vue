@@ -133,7 +133,7 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   overflow: hidden;
   border: 1px solid var(--alu-dock-tools-border);
   border-radius: 15px;
-  background: var(--alu-dock-tools-bg);
+  background: var(--alu-bg-raised);
   box-shadow: var(--alu-dock-tools-shadow);
   transform-origin: 88% 0;
   animation: dockToolsPopoverIn .16s cubic-bezier(.2, .8, .2, 1);
@@ -141,18 +141,18 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 @media (max-width: 640px) {
   .dock-tools-popover-surface { top: auto; right: 0; bottom: 0; left: 0; width: 100%; max-height: min(76dvh, 560px); border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; transform-origin: 50% 100%; animation-name: dockToolsSheetIn; }
 }
-.modal-layer { position: fixed; z-index: 30; inset: 0; display: grid; padding: 24px; background: var(--alu-modal-scrim); backdrop-filter: blur(5px); place-items: center; }
+.modal-layer { position: fixed; z-index: 30; inset: 0; display: grid; padding: 24px; background: var(--alu-scrim-light); backdrop-filter: blur(5px); place-items: center; }
 @media (max-width: 640px) {
   .modal-layer { padding: 0; align-items: end; }
 }
 /* App settings is a quiet device-level surface, distinct from Host administration. */
-.app-settings-surface { position: relative; display: grid; width: min(760px, calc(100vw - 48px)); height: min(620px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-settings-bg); box-shadow: var(--alu-settings-shadow); }
+.app-settings-surface { position: relative; display: grid; width: min(760px, calc(100vw - 48px)); height: min(620px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-window-bg); box-shadow: var(--alu-settings-shadow); }
 .app-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-accent) 30%, var(--alu-brand) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
 @media (max-width: 640px) {
   .app-settings-surface { width: 100%; height: min(92vh, 760px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
 /* Host 设置 edits settings kept on one machine; it needs room for two model lists. */
-.machine-settings-surface { position: relative; display: grid; width: min(980px, calc(100vw - 48px)); height: min(720px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-settings-bg); box-shadow: var(--alu-settings-shadow); }
+.machine-settings-surface { position: relative; display: grid; width: min(980px, calc(100vw - 48px)); height: min(720px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-window-bg); box-shadow: var(--alu-settings-shadow); }
 .machine-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-brand) 30%, var(--alu-accent) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
 @media (max-width: 640px) {
   .machine-settings-surface { width: 100%; height: min(94vh, 820px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
@@ -170,8 +170,8 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   overflow: hidden;
   border: 1px solid var(--alu-border);
   border-radius: 16px;
-  background: var(--alu-host-settings-bg);
-  box-shadow: var(--alu-host-settings-shadow);
+  background: var(--alu-window-bg);
+  box-shadow: var(--alu-settings-shadow);
 }
 .host-settings-surface::before {
   position: absolute;

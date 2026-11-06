@@ -226,9 +226,9 @@ function dateLabel(value: string) {
 </template>
 
 <style scoped>
-.delivery-tray-scrim { position: fixed; z-index: 53; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-tray-scrim); backdrop-filter: blur(3px); transition: opacity .22s ease; }
+.delivery-tray-scrim { position: fixed; z-index: 53; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-scrim-light); backdrop-filter: blur(3px); transition: opacity .22s ease; }
 .delivery-tray-scrim.open { pointer-events: auto; opacity: 1; }
-.delivery-tray { position: fixed; z-index: 54; inset: 0 0 0 auto; display: flex; width: min(440px, 94vw); flex-direction: column; overflow: hidden; color: var(--alu-text); border-left: 1px solid var(--alu-border); background: var(--alu-delivery-tray-bg); box-shadow: var(--alu-delivery-shadow); transform: translateX(102%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); }
+.delivery-tray { position: fixed; z-index: 54; inset: 0 0 0 auto; display: flex; width: min(440px, 94vw); flex-direction: column; overflow: hidden; color: var(--alu-text); border-left: 1px solid var(--alu-border); background: var(--alu-bg); box-shadow: var(--alu-delivery-shadow); transform: translateX(102%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); }
 .delivery-tray.open { transform: translateX(0); }
 .delivery-tray-head { display: grid; min-height: 72px; flex: 0 0 auto; grid-template-columns: 38px minmax(0, 1fr) 34px 34px; align-items: center; gap: 8px; padding: max(12px, env(safe-area-inset-top)) 14px 12px; border-bottom: 1px solid var(--alu-border); background: linear-gradient(145deg, rgb(var(--alu-accent-rgb) / .08), transparent 62%); }
 .delivery-tray-mark { display: grid; width: 36px; height: 36px; place-items: center; color: var(--alu-accent); border: 1px solid var(--alu-accent-border); border-radius: 10px; background: rgb(var(--alu-accent-rgb) / .08); box-shadow: inset 0 0 18px rgb(var(--alu-accent-rgb) / .05); }

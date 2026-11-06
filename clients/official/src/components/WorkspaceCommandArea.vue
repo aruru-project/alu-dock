@@ -137,7 +137,7 @@ onMounted(() => {
   grid-column: 1 / -1;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   border-top: 1px solid var(--alu-border);
-  background: var(--alu-workspace-command-bg);
+  background: var(--alu-bg);
 }
 .workspace-command.collapsed { grid-template-rows: auto; }
 .workspace-command-bar { display: flex; min-width: 0; align-items: center; gap: 10px; padding: 4px 12px; }
@@ -175,7 +175,7 @@ onMounted(() => {
   padding: 0 12px;
   border: 1px solid var(--alu-border);
   border-radius: 8px;
-  background: var(--alu-button-bg);
+  background: var(--alu-control-bg);
   color: var(--alu-text-muted);
   font-size: var(--alu-meta-size);
 }
@@ -191,10 +191,10 @@ onMounted(() => {
   white-space: nowrap;
 }
 .workspace-command-mode button + button { border-left: 1px solid var(--alu-border); }
-.workspace-command-mode button.selected { color: var(--alu-text); background: var(--alu-hover); }
+.workspace-command-mode button.selected { color: var(--alu-highlight); background: var(--alu-highlight-bg); }
 .workspace-command-mode button:hover:not(.selected) { color: var(--alu-text); }
-.workspace-command-run { color: var(--alu-on-accent); border-color: var(--alu-accent); background: var(--alu-accent); font-weight: 700; }
-.workspace-command-run:hover:not(:disabled) { background: var(--alu-accent-hover); }
+.workspace-command-run { color: var(--alu-highlight); border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); font-weight: 700; }
+.workspace-command-run:hover:not(:disabled) { color: var(--alu-highlight-hover-text); border-color: var(--alu-highlight-hover-border); background: var(--alu-highlight-hover-bg); }
 .workspace-command-run:disabled { opacity: 0.55; }
 .workspace-command-stop { color: var(--alu-danger); }
 .workspace-command-stop:hover:not(:disabled) { border-color: var(--alu-danger-border); background: var(--alu-danger-bg); }

@@ -64,15 +64,15 @@ onBeforeUnmount(() => { void stopPairing() })
 .pairing-intro h1 { margin: 5px 0 6px; font-size: clamp(23px, 3vw, 32px); letter-spacing: -.03em; }
 .pairing-intro p { max-width: 620px; margin: 0; color: var(--alu-text-dim); font: 13px/1.65 var(--font-reading); }
 .pairing-layout { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(260px, .82fr); gap: 14px; align-items: start; }
-.pairing-guide { background: rgb(var(--alu-bg-raised-rgb) / .9); border: 1px solid var(--alu-border-strong); border-radius: 15px; }
-.pairing-method-divider { display: flex; align-items: center; gap: 9px; color: var(--alu-text-subtle); font-size: var(--alu-micro-size); }
-.pairing-method-divider::before, .pairing-method-divider::after { height: 1px; flex: 1; content: ''; background: var(--alu-border-soft); }
+.pairing-guide { background: rgb(var(--alu-bg-raised-rgb) / .9); border: 1px solid var(--alu-border-light); border-radius: 15px; }
+.pairing-method-divider { display: flex; align-items: center; gap: 9px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.pairing-method-divider::before, .pairing-method-divider::after { height: 1px; flex: 1; content: ''; background: var(--alu-border); }
 .pairing-guide { padding: 9px 15px; margin: 0; list-style: none; }
 .pairing-guide li { display: flex; gap: 11px; padding: 13px 2px; }
-.pairing-guide li + li { border-top: 1px solid var(--alu-border-soft); }
+.pairing-guide li + li { border-top: 1px solid var(--alu-border); }
 .pairing-guide li > span { display: grid; flex: 0 0 auto; width: 25px; height: 25px; color: var(--alu-brand); font-weight: 700; background: rgb(var(--alu-brand-rgb) / .09); border: 1px solid rgb(var(--alu-brand-rgb) / .2); border-radius: 50%; place-items: center; }
 .pairing-guide strong { font-size: var(--alu-meta-size); }
-.pairing-guide p { margin: 5px 0 0; color: var(--alu-text-subtle); font: var(--alu-meta-size)/1.55 var(--font-reading); }
+.pairing-guide p { margin: 5px 0 0; color: var(--alu-text-muted); font: var(--alu-meta-size)/1.55 var(--font-reading); }
 @media (max-width: 1000px) {
   .pairing-onboarding {
     width: min(100%, 760px);
@@ -113,7 +113,7 @@ onBeforeUnmount(() => { void stopPairing() })
   .pairing-guide li { min-width: 0; padding: 11px; }
   .pairing-guide li + li {
     border-top: 0;
-    border-left: 1px solid var(--alu-border-soft);
+    border-left: 1px solid var(--alu-border);
   }
 }
 @media (max-width: 640px) {
@@ -133,7 +133,7 @@ onBeforeUnmount(() => { void stopPairing() })
   }
   .pairing-guide li { padding: 12px 2px; }
   .pairing-guide li + li {
-    border-top: 1px solid var(--alu-border-soft);
+    border-top: 1px solid var(--alu-border);
     border-left: 0;
   }
 }

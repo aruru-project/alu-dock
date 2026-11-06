@@ -72,14 +72,14 @@ button.attachment-preview-trigger { margin: -4px; padding: 4px; cursor: zoom-in;
 button.attachment-preview-trigger:hover { background: rgb(var(--alu-accent-rgb) / .07); }
 button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--alu-accent); outline-offset: 1px; }
 .attachment-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; color: var(--alu-accent); background: var(--alu-accent-soft); border-radius: 9px; place-items: center; }
-.attachment-icon.has-thumbnail { width: 42px; height: 42px; overflow: hidden; background: var(--alu-image-backdrop); }
+.attachment-icon.has-thumbnail { width: 42px; height: 42px; overflow: hidden; background: var(--alu-bg); }
 .attachment-card.compact .attachment-icon.has-thumbnail { width: 36px; height: 36px; }
 .attachment-thumbnail { display: block; width: 100%; height: 100%; object-fit: cover; }
 .attachment-card.is-error .attachment-icon { color: var(--alu-danger); background: rgb(var(--alu-danger-rgb) / .08); }
 .attachment-copy { min-width: 0; flex: 1; }
 .attachment-copy strong { display: block; overflow: hidden; font-size: var(--alu-meta-size); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--alu-text-subtle); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
-.attachment-copy small { color: var(--alu-attachment-error-text); }
+.attachment-copy span, .attachment-copy small { display: block; margin-top: 3px; overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
+.attachment-copy small { color: var(--alu-danger-text); }
 .attachment-actions { display: flex; flex: 0 0 auto; gap: 2px; }
 .attachment-actions button { display: grid; width: 34px; height: 34px; padding: 0; color: var(--alu-text-dim); cursor: pointer; background: transparent; border: 0; border-radius: 8px; place-items: center; }
 .attachment-actions button:hover { color: var(--alu-text); background: var(--alu-hover); }

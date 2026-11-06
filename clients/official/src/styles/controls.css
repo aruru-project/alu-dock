@@ -2,8 +2,8 @@
 .spinning { animation: spin .9s linear infinite; }
 .alu-spinner { width: 24px; height: 24px; border: 2px solid rgb(var(--alu-highlight-rgb) / .18); border-top-color: var(--alu-highlight); border-radius: 50%; animation: spin .9s linear infinite; }
 .pairing-progress .alu-spinner { width: 17px; height: 17px; }
-.button.primary { color: var(--alu-on-highlight); background: var(--alu-highlight); border: 1px solid var(--alu-highlight); }
-.button.primary:hover { background: var(--alu-highlight-solid-hover); }
+.button.primary { color: var(--alu-highlight); background: var(--alu-highlight-bg); border: 1px solid var(--alu-highlight-border); }
+.button.primary:hover:where(:not(:disabled)) { color: var(--alu-highlight-hover-text); background: var(--alu-highlight-hover-bg); border-color: var(--alu-highlight-hover-border); }
 .button.secondary { color: var(--alu-accent); background: var(--alu-accent-soft); border: 1px solid rgb(var(--alu-accent-rgb) / .28); }
 .attachment-progress { height: 3px; margin-top: 6px; overflow: hidden; background: rgb(var(--alu-accent-rgb) / .11); border-radius: 999px; }
 .attachment-progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--alu-accent), var(--alu-brand)); border-radius: inherit; transition: width .18s ease-out; }

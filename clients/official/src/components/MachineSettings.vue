@@ -206,7 +206,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
 </template>
 
 <style scoped>
-.machine-settings-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: var(--alu-settings-header-bg); }
+.machine-settings-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: var(--alu-surface); }
 .machine-settings-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
 .machine-settings-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-brand-border); border-radius: 10px; background: var(--alu-brand-bg); color: var(--alu-brand); place-items: center; }
 .machine-settings-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
@@ -214,7 +214,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
 .machine-settings-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .machine-settings-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
 .machine-settings-layout { display: grid; min-height: 0; grid-template-columns: 170px minmax(0, 1fr); }
-.machine-settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 20px 12px; border-right: 1px solid var(--alu-border); background: var(--alu-settings-nav-bg); }
+.machine-settings-nav { display: flex; flex-direction: column; gap: 6px; padding: 20px 12px; border-right: 1px solid var(--alu-border); background: var(--alu-bg); }
 .machine-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: var(--alu-micro-size); font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
 .machine-settings-nav-item { display: flex; width: 100%; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; cursor: pointer; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-align: left; }
 .machine-settings-nav-item:hover:not(.is-active) { background: var(--alu-hover); color: var(--alu-text); }
@@ -243,7 +243,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
 .model-row-copy small { overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
 .model-row-badge { flex: 0 0 auto; padding: 2px 6px; border-radius: 999px; background: rgb(var(--alu-warning-rgb) / .12); color: var(--alu-warning); font-size: var(--alu-micro-size); }
 .model-list-empty { margin: 8px 4px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
-.machine-settings-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--alu-border); background: var(--alu-settings-footer-bg); }
+.machine-settings-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--alu-border); background: var(--alu-bg-raised); }
 .machine-settings-footer > .machine-settings-error, .machine-settings-footer-status { flex: 1 1 auto; min-width: 0; }
 .machine-settings-footer-status { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 @media (max-width: 640px) {
