@@ -20,6 +20,8 @@ class AndroidInsetsBridge(
   private val resources: Resources,
   private val contentRootProvider: () -> View?,
   private val webViewProvider: () -> WebView?,
+  /** True while the page's color theme is light, so the bar icons must be dark. */
+  private val lightBarsProvider: () -> Boolean,
   private val isDestroyed: () -> Boolean,
   private val mainHandler: Handler,
   private val readinessPoller: WebViewReadinessPoller,
@@ -58,6 +60,10 @@ class AndroidInsetsBridge(
     refresh()
   }
 
+  fun onAppearanceChanged() {
+    configureSystemBars()
+  }
+
   private fun refresh() {
     attachListenerIfNeeded()
     requestInsets()
@@ -73,9 +79,12 @@ class AndroidInsetsBridge(
 
   @Suppress("DEPRECATION")
   private fun configureSystemBars() {
+    val lightBars = lightBarsProvider()
     WindowCompat.setDecorFitsSystemWindows(window, false)
     window.statusBarColor = Color.TRANSPARENT
-    window.navigationBarColor = Color.TRANSPARENT
+    // Android 7 cannot draw dark navigation icons; keep its white ones on a dark scrim.
+    window.navigationBarColor =
+      if (lightBars && Build.VERSION.SDK_INT < Build.VERSION_CODES.O) MainActivity.LEGACY_DARK_SCRIM else Color.TRANSPARENT
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       window.attributes = window.attributes.apply {
         layoutInDisplayCutoutMode =
@@ -88,8 +97,8 @@ class AndroidInsetsBridge(
     }
 
     WindowInsetsControllerCompat(window, window.decorView).apply {
-      isAppearanceLightStatusBars = false
-      isAppearanceLightNavigationBars = false
+      isAppearanceLightStatusBars = lightBars
+      isAppearanceLightNavigationBars = lightBars
       systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
       show(WindowInsetsCompat.Type.systemBars())
     }

@@ -35,9 +35,13 @@
    - 名字说用途，不说颜色：选中项用 --alu-highlight-*，不用"粉色"。经典配色里几种用途碰巧同色，各自仍用自己的变量。
    - 以 -rgb 结尾的是同一颜色的 RGB 分量，只用来配透明度：rgb(var(--alu-accent-rgb) / .1)。
    - 不用 color-mix()：Android 最旧支持的 WebView（Chromium 99）不认。需要混色时在这里算好写成固定值。
-   - 新界面先找已有用途；确实是新用途再在这里加一个。 */
+   - 新界面先找已有用途；确实是新用途再在这里加一个。
+   - 有三套配色：经典是默认，写在 :root；暮色、晨光各一块，页面根元素的 data-theme 决定用哪套（src/lib/theme.ts）。
+     加变量时三套都要给值，漏掉的会悄悄沿用经典的颜色；tests/themes.test.ts 会检查。
+   - Android 启动时先画的窗口底色在 src-tauri/gen/android/app/src/main/res/values/colors.xml，改某套的 --alu-bg 时一起改。 */
 /* 经典 */
-:root {
+:root,
+[data-theme="classic"] {
   color-scheme: dark;
   /* 页面与表面 */
   --alu-bg: #080c18; /* 页面底色；贴着页面的面板、预览区、凹下去的输出区也用它 */
@@ -269,4 +273,409 @@
   /* 工作区 */
   --alu-workspace-header-bg: linear-gradient(105deg, rgba(16, 27, 45, .98), rgba(10, 16, 29, .98));
   --alu-save-status-bg: rgba(12, 29, 41, .96);
+}
+/* 暮色：压暗的靛灰做底和面板，顶栏和输入区比对话区亮一档；长春花蓝做可点的、选中的、链接和运行中，
+   薰衣草做你的消息、思考和引用，粉只在阿露头像圈和发送键，琥珀是需要注意的，绿和红只表示成功和失败。
+   正文对页面底色约 12.9:1。没有光晕和星空。 */
+[data-theme="dusk"] {
+  color-scheme: dark;
+  /* 页面与表面 */
+  --alu-bg: #1b1b23;
+  --alu-bg-rgb: 27 27 35;
+  --alu-bg-raised: #21222b;
+  --alu-bg-raised-rgb: 33 34 43;
+  --alu-window-bg: #1d1e27;
+  --alu-surface: #282833;
+  --alu-surface-rgb: 40 40 51;
+  --alu-hover: #32333f;
+  --alu-active: #343442;
+  --alu-tag-bg: #353542;
+  --alu-nav-bg: #262731;
+  --alu-nav-border: #393945;
+  --alu-control-bg: #30303c;
+  --alu-nav-stat-bg: #1b1b23;
+  --alu-toolbar-bg: #282833;
+  --alu-overlay-rgb: 255 255 255;
+  --alu-page-bg: #1b1b23;
+  --alu-backdrop-stars: none;
+
+  /* 线 */
+  --alu-border: #33343f;
+  --alu-border-light: #434451;
+  --alu-border-focus: #5e5f71;
+
+  /* 文字 */
+  --alu-text: #dedfe8;
+  --alu-text-dim: #bcbcc8;
+  --alu-text-dim-rgb: 188 188 200;
+  --alu-text-muted: #9d9daa;
+  --alu-text-muted-rgb: 157 157 170;
+  --alu-text-faint: #767682;
+  --alu-text-faint-rgb: 118 118 130;
+
+  /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
+  --alu-accent: #a0afee;
+  --alu-accent-rgb: 160 175 238;
+  --alu-accent-dim: #8896d2;
+  --alu-accent-bg: #262a3d;
+  --alu-accent-border: #434b6d;
+  --alu-accent-soft: #2c324a;
+  --alu-accent-hover-text: #d4ddfd;
+  --alu-focus-ring: 0 0 0 2px var(--alu-bg), 0 0 0 4px var(--alu-accent);
+
+  /* 突出：选中项、主要按钮、输入焦点、命令提示符 */
+  --alu-highlight: #a9b9ff;
+  --alu-highlight-rgb: 169 185 255;
+  --alu-highlight-bg: #2a304e;
+  --alu-highlight-border: #535f98;
+  --alu-highlight-hover-bg: #31395e;
+  --alu-highlight-hover-border: #6775b8;
+  --alu-highlight-hover-text: #d8e0ff;
+  --alu-highlight-glow: transparent;
+
+  /* 品牌：阿露头像、品牌字、装饰 */
+  --alu-brand: #e99dbf;
+  --alu-brand-rgb: 233 157 191;
+  --alu-brand-bg: #3d2530;
+  --alu-brand-border: #ca87a5;
+  --alu-avatar-glow: none;
+  --alu-nav-avatar-glow: none;
+  --alu-nav-avatar-glow-hover: none;
+  --alu-welcome-image-filter: none;
+  --alu-illustration-shadow: drop-shadow(0 10px 16px rgb(0 0 0 / .24));
+
+  /* 状态 */
+  --alu-success: #84c9a4;
+  --alu-success-rgb: 132 201 164;
+  --alu-success-text: #a3d7ba;
+  --alu-success-border: #355946;
+  --alu-success-border-strong: #447259;
+  --alu-success-glow: transparent;
+  --alu-on-success: #102118;
+  --alu-running: #95a5f0;
+  --alu-running-border: #4c557f;
+  --alu-running-glow: transparent;
+  --alu-idle: #767682;
+  --alu-waiting: #eac578;
+  --alu-waiting-glow: transparent;
+  --alu-warning: #eac578;
+  --alu-warning-rgb: 234 197 120;
+  --alu-warning-dim: #c1a057;
+  --alu-warning-glow: transparent;
+  --alu-on-warning: #282110;
+  --alu-warning-text: #eccf92;
+  --alu-warning-line: #c9a658;
+  --alu-warning-line-rgb: 201 166 88;
+  --alu-danger: #e78f88;
+  --alu-danger-rgb: 231 143 136;
+  --alu-danger-dim: #c8726b;
+  --alu-danger-bg: #351f1d;
+  --alu-danger-border: #673b37;
+  --alu-danger-text: #ecafaa;
+  --alu-danger-glow: transparent;
+
+  /* 对话 */
+  --alu-user-bg: #322a3e;
+  --alu-user-border: #4e4261;
+  --alu-user-text: #e0dbeb;
+  --alu-user-prefix: #bda9dd;
+  --alu-bubble-bg: #202029;
+  --alu-bubble-border: #33343f;
+  --alu-thinking-line: #615278;
+  --alu-code-inline: #d0d0da;
+  --alu-code-inline-bg: #32333f;
+  --alu-table-header-bg: #282833;
+  --alu-quote-line: #9b87bb;
+  --alu-quote-bg: #26212d;
+  --alu-code-block-bg: #14141b;
+  --alu-code-block-border: #33343f;
+  --alu-code-block-header-border: #2c2d37;
+  --alu-code-block-text: #d0d0da;
+  --alu-mono-text: #d0d0da;
+  --alu-tool-accent: #bcbcc8;
+  --alu-tool-bg: #1e1f27;
+  --alu-tool-border: #33343f;
+  --alu-tool-divider: #2c2d37;
+  --alu-tool-diff-text: #d0d0da;
+  --alu-tool-hover-bg: rgb(255 255 255 / .03);
+  --alu-command-name: #dedfe8;
+  --alu-shell-accent: #7e7f8c;
+  --alu-shell-running-glow: transparent;
+  --alu-terminal-bg: #111117;
+  --alu-model-name: #bcbcc8;
+  --alu-image-shadow: 0 8px 24px rgb(0 0 0 / .2);
+
+  /* 输入区 */
+  --alu-composer-focus-glow: 0 0 0 3px rgb(169 185 255 / .14);
+  --alu-send-bg: #e697bb;
+  --alu-send-bg-hover: #f1a5c7;
+  --alu-send-text: #331725;
+  --alu-send-shadow: 0 1px 2px rgb(0 0 0 / .3);
+  --alu-send-shadow-hover: 0 2px 6px rgb(0 0 0 / .32);
+  --alu-send-shadow-active: none;
+  --alu-editor-inset-shadow: inset 0 1px 8px rgb(0 0 0 / .18);
+  --alu-queue-bg: #262a3d;
+  --alu-file-drop-scrim: rgb(9 9 16 / .55);
+
+  /* 遮罩、投影、浮层 */
+  --alu-scrim: rgb(9 9 16 / .72);
+  --alu-scrim-light: rgb(9 9 16 / .6);
+  --alu-scrim-strong: rgb(9 9 16 / .86);
+  --alu-dialog-shadow: 0 24px 64px rgb(0 0 0 / .48);
+  --alu-settings-shadow: 0 24px 64px rgb(0 0 0 / .42);
+  --alu-workspace-shadow: 0 24px 72px rgb(0 0 0 / .48);
+  --alu-image-viewer-shadow: 0 24px 80px rgb(0 0 0 / .6);
+  --alu-dock-tools-shadow: 0 20px 56px rgb(0 0 0 / .5);
+  --alu-panel-shadow: 0 16px 48px rgb(0 0 0 / .4);
+  --alu-menu-shadow: 0 14px 36px rgb(0 0 0 / .42);
+  --alu-suggest-shadow: 0 16px 48px rgb(0 0 0 / .48);
+  --alu-popover-shadow: 0 12px 32px rgb(0 0 0 / .38);
+  --alu-float-shadow: 0 6px 20px rgb(0 0 0 / .32);
+  --alu-image-control-shadow: 0 6px 18px rgb(0 0 0 / .35);
+  --alu-toast-shadow: 0 8px 24px rgb(0 0 0 / .36);
+  --alu-drag-shadow: 0 10px 26px rgb(0 0 0 / .42);
+  --alu-sidebar-shadow: 4px 0 24px rgb(0 0 0 / .36);
+  --alu-delivery-shadow: -16px 0 48px rgb(0 0 0 / .4);
+  --alu-option-current-bg: #2a304e;
+  --alu-delivery-row-hover-bg: #32333f;
+  --alu-message-header-bg: #282833;
+
+  /* 连接与配对、项目状态、命令中心、Dock Tools */
+  --alu-host-connect-border: #434b6d;
+  --alu-local-endpoint-text: #a3d7ba;
+  --alu-command-output-bg: #14141b;
+  --alu-command-important: #ec9998;
+  --alu-dock-tools-border: #434451;
+  --alu-dock-tools-note-bg: #14141b;
+  --alu-dock-tools-toggle-on-bg: #262a3d;
+  --alu-switch-track: #14141b;
+  --alu-switch-track-on: #1f3d2d;
+  --alu-switch-knob-shadow: 0 1px 3px rgb(0 0 0 / .36);
+
+  /* 连接中断页 */
+  --alu-work-state-bg: #21222b;
+  --alu-work-state-shadow: 0 20px 56px rgb(0 0 0 / .28);
+  --alu-work-state-glow: transparent;
+  --alu-work-state-error-glow: transparent;
+  --alu-work-state-secondary-bg: #282833;
+
+  /* 附件、扩展 */
+  --alu-attachment-bg: #282833;
+  --alu-attachment-error-bg: #351f1d;
+  --alu-extension-widget-bg: #262a3d;
+
+  /* 图片查看 */
+  --alu-image-viewer-bg: #0f0f15;
+  --alu-image-zoom-stage: #0b0c10;
+  --alu-image-save-bg: #5663a8;
+  --alu-image-control-text: #ffffff;
+  --alu-image-control-bg: rgb(14 13 22 / .78);
+  --alu-image-control-border: rgb(255 255 255 / .18);
+  --alu-image-control-hover: rgb(255 255 255 / .12);
+
+  /* 工作区 */
+  --alu-workspace-header-bg: #282833;
+  --alu-save-status-bg: #21222b;
+}
+/* 晨光：很淡的薰衣草灰做底，卡片和输入框是白的，顶栏和输入区比对话区暗一档；用色分工同暮色，
+   深一档以便在浅底上看清。正文对页面底色约 12.6:1。投影很轻，没有光晕。 */
+[data-theme="dawn"] {
+  color-scheme: light;
+  /* 页面与表面 */
+  --alu-bg: #f6f5fa;
+  --alu-bg-rgb: 246 245 250;
+  --alu-bg-raised: #ffffff;
+  --alu-bg-raised-rgb: 255 255 255;
+  --alu-window-bg: #faf9fc;
+  --alu-surface: #ffffff;
+  --alu-surface-rgb: 255 255 255;
+  --alu-hover: #e8e9f3;
+  --alu-active: #e2e3f2;
+  --alu-tag-bg: #e4e5f1;
+  --alu-nav-bg: #e8e9f2;
+  --alu-nav-border: #cfd0db;
+  --alu-control-bg: #fefdff;
+  --alu-nav-stat-bg: #e4e4ef;
+  --alu-toolbar-bg: #ffffff;
+  --alu-overlay-rgb: 52 44 104;
+  --alu-page-bg: #f6f5fa;
+  --alu-backdrop-stars: none;
+
+  /* 线 */
+  --alu-border: #dbdbe6;
+  --alu-border-light: #cacbd8;
+  --alu-border-focus: #9b9cb1;
+
+  /* 文字 */
+  --alu-text: #2c2c3c;
+  --alu-text-dim: #4e4e60;
+  --alu-text-dim-rgb: 78 78 96;
+  --alu-text-muted: #636374;
+  --alu-text-muted-rgb: 99 99 116;
+  --alu-text-faint: #898998;
+  --alu-text-faint-rgb: 137 137 152;
+
+  /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
+  --alu-accent: #4f5ca7;
+  --alu-accent-rgb: 79 92 167;
+  --alu-accent-dim: #616eb5;
+  --alu-accent-bg: #eaeefe;
+  --alu-accent-border: #c0c9ec;
+  --alu-accent-soft: #e1e7fd;
+  --alu-accent-hover-text: #343d8c;
+  --alu-focus-ring: 0 0 0 2px var(--alu-bg), 0 0 0 4px var(--alu-accent);
+
+  /* 突出：选中项、主要按钮、输入焦点、命令提示符 */
+  --alu-highlight: #4551a5;
+  --alu-highlight-rgb: 69 81 165;
+  --alu-highlight-bg: #e3e9ff;
+  --alu-highlight-border: #9eabe1;
+  --alu-highlight-hover-bg: #d6deff;
+  --alu-highlight-hover-border: #7f8dd0;
+  --alu-highlight-hover-text: #323a96;
+  --alu-highlight-glow: transparent;
+
+  /* 品牌：阿露头像、品牌字、装饰 */
+  --alu-brand: #af4d7e;
+  --alu-brand-rgb: 175 77 126;
+  --alu-brand-bg: #fde9f1;
+  --alu-brand-border: #e99dbf;
+  --alu-avatar-glow: none;
+  --alu-nav-avatar-glow: none;
+  --alu-nav-avatar-glow-hover: none;
+  --alu-welcome-image-filter: none;
+  --alu-illustration-shadow: drop-shadow(0 8px 14px rgb(42 36 78 / .12));
+
+  /* 状态 */
+  --alu-success: #2a7d57;
+  --alu-success-rgb: 42 125 87;
+  --alu-success-text: #256d4c;
+  --alu-success-border: #acd6be;
+  --alu-success-border-strong: #77b493;
+  --alu-success-glow: transparent;
+  --alu-on-success: #ffffff;
+  --alu-running: #5b69bd;
+  --alu-running-border: #b0bbe8;
+  --alu-running-glow: transparent;
+  --alu-idle: #898998;
+  --alu-waiting: #a4690c;
+  --alu-waiting-glow: transparent;
+  --alu-warning: #a4690c;
+  --alu-warning-rgb: 164 105 12;
+  --alu-warning-dim: #b68028;
+  --alu-warning-glow: transparent;
+  --alu-on-warning: #261704;
+  --alu-warning-text: #8a5619;
+  --alu-warning-line: #dea645;
+  --alu-warning-line-rgb: 222 166 69;
+  --alu-danger: #b74441;
+  --alu-danger-rgb: 183 68 65;
+  --alu-danger-dim: #c65954;
+  --alu-danger-bg: #fef0ee;
+  --alu-danger-border: #f0c5c1;
+  --alu-danger-text: #a03f3c;
+  --alu-danger-glow: transparent;
+
+  /* 对话 */
+  --alu-user-bg: #f0e9fc;
+  --alu-user-border: #d8ccec;
+  --alu-user-text: #312a3d;
+  --alu-user-prefix: #7d63a2;
+  --alu-bubble-bg: #fefdff;
+  --alu-bubble-border: #dbdbe6;
+  --alu-thinking-line: #cabce2;
+  --alu-code-inline: #343344;
+  --alu-code-inline-bg: #e8e9f3;
+  --alu-table-header-bg: #efeff5;
+  --alu-quote-line: #a892cb;
+  --alu-quote-bg: #f4f0fc;
+  --alu-code-block-bg: #efeff5;
+  --alu-code-block-border: #dbdbe6;
+  --alu-code-block-header-border: #e1e2eb;
+  --alu-code-block-text: #343344;
+  --alu-mono-text: #343344;
+  --alu-tool-accent: #4e4e60;
+  --alu-tool-bg: #f9f8fc;
+  --alu-tool-border: #dbdbe6;
+  --alu-tool-divider: #e1e2eb;
+  --alu-tool-diff-text: #343344;
+  --alu-tool-hover-bg: rgb(42 36 78 / .035);
+  --alu-command-name: #2c2c3c;
+  --alu-shell-accent: #7e7f8f;
+  --alu-shell-running-glow: transparent;
+  --alu-terminal-bg: #eeeef5;
+  --alu-model-name: #4e4e60;
+  --alu-image-shadow: 0 6px 18px rgb(42 36 78 / .08);
+
+  /* 输入区 */
+  --alu-composer-focus-glow: 0 0 0 3px rgb(69 81 165 / .12);
+  --alu-send-bg: #bb5087;
+  --alu-send-bg-hover: #ae447b;
+  --alu-send-text: #ffffff;
+  --alu-send-shadow: 0 1px 2px rgb(42 36 78 / .14);
+  --alu-send-shadow-hover: 0 2px 6px rgb(42 36 78 / .16);
+  --alu-send-shadow-active: none;
+  --alu-editor-inset-shadow: inset 0 1px 6px rgb(42 36 78 / .05);
+  --alu-queue-bg: #eaeefe;
+  --alu-file-drop-scrim: rgb(34 31 58 / .22);
+
+  /* 遮罩、投影、浮层 */
+  --alu-scrim: rgb(34 31 58 / .32);
+  --alu-scrim-light: rgb(34 31 58 / .24);
+  --alu-scrim-strong: rgb(34 31 58 / .5);
+  --alu-dialog-shadow: 0 18px 48px rgb(42 36 78 / .14), 0 2px 8px rgb(42 36 78 / .06);
+  --alu-settings-shadow: 0 18px 48px rgb(42 36 78 / .13), 0 2px 8px rgb(42 36 78 / .05);
+  --alu-workspace-shadow: 0 18px 52px rgb(42 36 78 / .14), 0 2px 8px rgb(42 36 78 / .05);
+  --alu-image-viewer-shadow: 0 24px 64px rgb(42 36 78 / .22);
+  --alu-dock-tools-shadow: 0 16px 40px rgb(42 36 78 / .14), 0 2px 6px rgb(42 36 78 / .06);
+  --alu-panel-shadow: 0 14px 36px rgb(42 36 78 / .12);
+  --alu-menu-shadow: 0 10px 28px rgb(42 36 78 / .12), 0 1px 4px rgb(42 36 78 / .06);
+  --alu-suggest-shadow: 0 12px 32px rgb(42 36 78 / .13), 0 1px 4px rgb(42 36 78 / .06);
+  --alu-popover-shadow: 0 10px 28px rgb(42 36 78 / .12);
+  --alu-float-shadow: 0 4px 14px rgb(42 36 78 / .1);
+  --alu-image-control-shadow: 0 6px 18px rgb(42 36 78 / .35);
+  --alu-toast-shadow: 0 6px 20px rgb(42 36 78 / .12);
+  --alu-drag-shadow: 0 8px 22px rgb(42 36 78 / .14);
+  --alu-sidebar-shadow: 4px 0 20px rgb(42 36 78 / .1);
+  --alu-delivery-shadow: -12px 0 36px rgb(42 36 78 / .1);
+  --alu-option-current-bg: #e3e9ff;
+  --alu-delivery-row-hover-bg: #e8e9f3;
+  --alu-message-header-bg: #ffffff;
+
+  /* 连接与配对、项目状态、命令中心、Dock Tools */
+  --alu-host-connect-border: #c0c9ec;
+  --alu-local-endpoint-text: #256d4c;
+  --alu-command-output-bg: #efeff5;
+  --alu-command-important: #b23e46;
+  --alu-dock-tools-border: #cacbd8;
+  --alu-dock-tools-note-bg: #efeff5;
+  --alu-dock-tools-toggle-on-bg: #eaeefe;
+  --alu-switch-track: #e2e3f2;
+  --alu-switch-track-on: #c2e9d3;
+  --alu-switch-knob-shadow: 0 1px 3px rgb(42 36 78 / .2);
+
+  /* 连接中断页 */
+  --alu-work-state-bg: #ffffff;
+  --alu-work-state-shadow: 0 14px 40px rgb(42 36 78 / .1);
+  --alu-work-state-glow: transparent;
+  --alu-work-state-error-glow: transparent;
+  --alu-work-state-secondary-bg: #ffffff;
+
+  /* 附件、扩展 */
+  --alu-attachment-bg: #ffffff;
+  --alu-attachment-error-bg: #fef0ee;
+  --alu-extension-widget-bg: #eaeefe;
+
+  /* 图片查看 */
+  --alu-image-viewer-bg: #23232c;
+  --alu-image-zoom-stage: #1d1d25;
+  --alu-image-save-bg: #4f5ca7;
+  --alu-image-control-text: #ffffff;
+  --alu-image-control-bg: rgb(14 13 22 / .78);
+  --alu-image-control-border: rgb(255 255 255 / .18);
+  --alu-image-control-hover: rgb(255 255 255 / .12);
+
+  /* 工作区 */
+  --alu-workspace-header-bg: #ffffff;
+  --alu-save-status-bg: #ffffff;
 }

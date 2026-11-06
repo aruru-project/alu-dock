@@ -11,6 +11,7 @@ use tauri::{Emitter, Manager};
 
 #[cfg(target_os = "android")]
 mod android_documents;
+mod appearance;
 mod attachment_import;
 mod away;
 mod configuration;
@@ -157,6 +158,7 @@ pub fn run() {
             desktop_shell::open_desktop_tui,
             away::get_client_preferences,
             away::update_client_preferences,
+            appearance::set_native_appearance,
             away::begin_windows_away,
             away::cancel_windows_away,
             connection::get_host_catalog,

@@ -24,8 +24,9 @@ const host = useHostStore()
 const { pairingInProgress } = storeToRefs(host)
 const { openHostSettings } = host
 const platform = usePlatformStore()
-const { appSettings, windowsAwayLabel } = storeToRefs(platform)
+const { appSettings, themeLabel, windowsAwayLabel } = storeToRefs(platform)
 const { openAppSettings } = platform
+const appSettingsSummary = computed(() => [`配色：${themeLabel.value}`, ...(appSettings.value?.windowsAwaySupported ? [windowsAwayLabel.value] : [])].join(' · '))
 const operations = useOperationsStore()
 const { listResults } = storeToRefs(operations)
 const { consumeNativeOperation } = operations
@@ -72,9 +73,9 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
         <div v-else class="alu-sidebar-empty">暂无工作</div>
       </template>
     </div>
-    <button v-if="appSettings?.windowsAwaySupported" class="alu-sidebar-settings-entry" aria-label="App 设置" @click="openAppSettings">
+    <button class="alu-sidebar-settings-entry" aria-label="App 设置" @click="openAppSettings">
       <span class="alu-sidebar-settings-icon"><Settings :size="17" /></span>
-      <span><strong>App 设置</strong><small>{{ windowsAwayLabel }}</small></span>
+      <span><strong>App 设置</strong><small>{{ appSettingsSummary }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
     <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings()">

@@ -1,6 +1,8 @@
 package moe.aruru.aludock.client
 
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -12,6 +14,7 @@ import androidx.activity.enableEdgeToEdge
 class MainActivity : TauriActivity() {
   private var webView: WebView? = null
   private var destroyed = false
+  private var appearance = ClientAppearance.CLASSIC
   private val mainHandler = Handler(Looper.getMainLooper())
   private val readinessPoller by lazy {
     WebViewReadinessPoller(webViewProvider = { webView }, isDestroyed = { destroyed })
@@ -31,6 +34,7 @@ class MainActivity : TauriActivity() {
       resources = resources,
       contentRootProvider = { window.decorView.findViewById(android.R.id.content) },
       webViewProvider = { webView },
+      lightBarsProvider = { appearance.lightBars },
       isDestroyed = { destroyed },
       mainHandler = mainHandler,
       readinessPoller = readinessPoller,
@@ -38,18 +42,23 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    // The window takes its background from the theme, so pick it before anything draws.
+    appearance = ClientAppearance.load(this)
+    setTheme(appearance.styleRes)
     val transparent = Color.TRANSPARENT
-    enableEdgeToEdge(
-      statusBarStyle = SystemBarStyle.dark(transparent),
-      navigationBarStyle = SystemBarStyle.dark(transparent),
-    )
+    val barStyle = if (appearance.lightBars) {
+      SystemBarStyle.light(transparent, LEGACY_DARK_SCRIM)
+    } else {
+      SystemBarStyle.dark(transparent)
+    }
+    enableEdgeToEdge(statusBarStyle = barStyle, navigationBarStyle = barStyle)
     super.onCreate(savedInstanceState)
     networkBridge.onCreate()
     insetsBridge.onCreate()
   }
 
   override fun onWebViewCreate(webView: WebView) {
-    webView.setBackgroundColor(getColor(R.color.aludock_background))
+    webView.setBackgroundColor(getColor(appearance.backgroundRes))
     this.webView = webView
     networkBridge.onWebViewAvailable()
     insetsBridge.onWebViewAvailable()
@@ -58,6 +67,29 @@ class MainActivity : TauriActivity() {
   @Keep
   fun describePickedFile(uriText: String): String =
     AndroidPickedFileBridge.describe(this, uriText)
+
+  /** Called from Rust when the page shows a color theme, at start and when the person switches. */
+  @Keep
+  fun applyAppearance(themeId: String) {
+    val next = ClientAppearance.fromId(themeId)
+    if (ClientAppearance.load(this) != next) {
+      ClientAppearance.save(this, next)
+      // Android 13+ draws the next cold start's splash screen from this theme.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        try {
+          splashScreen.setSplashScreenTheme(next.styleRes)
+        } catch (_: Exception) {
+          // The window and bars below still follow the theme.
+        }
+      }
+    }
+    if (destroyed || next == appearance) return
+    appearance = next
+    val background = getColor(next.backgroundRes)
+    window.setBackgroundDrawable(ColorDrawable(background))
+    webView?.setBackgroundColor(background)
+    insetsBridge.onAppearanceChanged()
+  }
 
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
@@ -81,5 +113,10 @@ class MainActivity : TauriActivity() {
     mainHandler.removeCallbacksAndMessages(null)
     webView = null
     super.onDestroy()
+  }
+
+  companion object {
+    /** Behind white navigation icons on Android 7, which cannot draw them dark. */
+    val LEGACY_DARK_SCRIM: Int = Color.argb(0x80, 0x1b, 0x1b, 0x1b)
   }
 }

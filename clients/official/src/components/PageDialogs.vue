@@ -25,8 +25,8 @@ const workActions = useWorkActionsStore()
 const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
-const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
-const { chooseWindowsAwayDelay } = platform
+const { appSettings, appSettingsSaving, appSettingsError, theme, themeSaveError } = storeToRefs(platform)
+const { chooseWindowsAwayDelay, chooseTheme } = platform
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 </script>
 
@@ -62,15 +62,18 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   </Transition>
 
   <Transition name="fade">
-    <div v-if="appSettingsOpen && appSettings" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+    <div v-if="appSettingsOpen" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
       <section :ref="element => bindSurface('app-settings', element)" class="app-settings-surface" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1" @wheel="handleModalWheel">
         <AppSettings
           :preferences="appSettings"
+          :theme="theme"
+          :theme-error="themeSaveError"
           :build-identity="appBuildIdentity"
           :saving="appSettingsSaving"
           :error="appSettingsError"
           @close="closeModal"
           @update="chooseWindowsAwayDelay"
+          @theme="chooseTheme"
         />
       </section>
     </div>

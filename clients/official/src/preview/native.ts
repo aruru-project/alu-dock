@@ -180,6 +180,8 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       preview.clientPreferences = { ...preview.clientPreferences, revision: Number(args.expectedRevision) + 1, windowsAwayDelay: args.windowsAwayDelay as ClientPreferences['windowsAwayDelay'] }
       return { ...preview.clientPreferences }
     case 'desktop_shell_status': case 'start_desktop_host': return { ...preview.desktopShell }
+    // Only Android has system bars to match; a browser has nothing to do.
+    case 'set_native_appearance': return undefined
     // A device with no saved Host opens the pairing screen.
     case 'get_host_catalog': return previewScreen() === 'onboarding' ? { ...preview.previewCatalog, activeTarget: undefined, hosts: [] } : preview.previewCatalog
     case 'bootstrap': {

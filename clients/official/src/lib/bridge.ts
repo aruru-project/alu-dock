@@ -1,6 +1,7 @@
 import { type OperationContext, type OperationTarget, type HostOperationContext, type NativeOperation } from './operationBinding'
 import { convertFileSrc, invoke, type InvokeArgs, type InvokeOptions } from '@tauri-apps/api/core'
 import { previewNative } from '../preview/native'
+import type { ClientTheme } from './theme'
 import type {
   BootstrapPayload,
   CommandCompletionsResult,
@@ -89,6 +90,11 @@ export async function updateClientPreferences(
   windowsAwayDelay: WindowsAwayDelay,
 ): Promise<ClientPreferences> {
   return native<ClientPreferences>('update_client_preferences', { expectedRevision, windowsAwayDelay })
+}
+
+/** Android matches its status and navigation bars, and the window shown before the page loads, to the theme. Other platforms ignore it. */
+export async function setNativeAppearance(theme: ClientTheme): Promise<void> {
+  await native('set_native_appearance', { theme })
 }
 
 export async function beginWindowsAway(runningInstanceIds: string[]): Promise<string | null> {

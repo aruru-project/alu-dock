@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- The window color shown before the page paints: each theme's page background (alu-bg in src/styles/tokens.css). -->
     <color name="aludock_background">#070B18</color>
+    <color name="aludock_background_dusk">#1B1B23</color>
+    <color name="aludock_background_dawn">#F6F5FA</color>
 </resources>

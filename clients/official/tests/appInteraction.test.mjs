@@ -111,6 +111,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'start_pairing') return startPairingNative(args)
   if (command === 'cancel_pairing') return cancelPairingNative(args)
   if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
+  if (command === 'set_native_appearance') return
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
   if (command === 'work_catalog') {
     const list = () => { const instances = hostWorks(); return { ...context, hostEpoch: 'epoch', instances, total: instances.length } }
@@ -1045,6 +1046,27 @@ try {
     finishModel(JSON.parse(JSON.stringify(app.selectedWork))); await settle()
     modelNative = undefined
     assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model'), undefined)
+  }
+  // #665: the color theme is chosen in App settings on any device, shows at once,
+  // stays on this device for the next start, and Android is asked to match it.
+  {
+    const settings = () => find(container, item => item.props['aria-labelledby'] === 'app-settings-title')
+    const option = label => find(settings(), item => item.type === 'button' && item.props['aria-pressed'] !== undefined && text(item).includes(label))
+    assert.equal(calls.findLast(call => call.command === 'set_native_appearance')?.args.theme, 'classic', 'a device that never chose opens in classic and tells Android so')
+    find(container, item => item.type === 'button' && item.props['aria-label'] === 'App 设置').props.onClick(); await settle()
+    assert.ok(settings(), 'App settings opens on a device without the Windows away setting')
+    assert.equal(option('经典').props['aria-pressed'], true)
+    option('晨光').props.onClick(); await settle()
+    assert.equal(document.documentElement.dataset.theme, 'dawn', 'the page shows dawn at once')
+    assert.equal(storage.get('aludock.theme'), 'dawn', 'this device keeps dawn for the next start')
+    assert.equal(calls.findLast(call => call.command === 'set_native_appearance')?.args.theme, 'dawn', 'Android is asked to match dawn')
+    assert.equal(option('晨光').props['aria-pressed'], true)
+    option('经典').props.onClick(); await settle()
+    assert.equal(document.documentElement.dataset.theme, 'classic')
+    assert.equal(storage.get('aludock.theme'), 'classic')
+    find(settings(), item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
+    assertSameReference(settings(), undefined, 'closing App settings leaves the chosen theme in place')
+    console.log('PASS: App settings switches the color theme at once, this device keeps it, and Android is asked to match')
   }
   // #339: the real App/PageDialogs wiring owns leaving; submitted saves survive the editor.
   {
