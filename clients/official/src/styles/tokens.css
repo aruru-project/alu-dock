@@ -118,6 +118,8 @@
   --alu-settings-footnote: var(--alu-text-faint); /* App 设置底部的说明 */
   --alu-command-location: var(--alu-text-faint); /* 工作区命令区里「在哪台机器的哪个目录执行」 */
   --alu-command-args-placeholder: var(--alu-text-faint); /* 命令中心参数框的占位字 */
+  --alu-download-location: rgb(var(--alu-text-muted-rgb) / .8); /* 文件列表里过去下载的保存位置 */
+  --alu-endpoint-disabled-opacity: .72; /* 连接与配对里停用的地址整行 */
 
   /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
   --alu-accent: #7ec8e0;
@@ -182,6 +184,7 @@
   --alu-warning-text: #f6c56f; /* 警告消息的文字 */
   --alu-warning-line: #f59e0b; /* 警告消息的边线 */
   --alu-warning-line-rgb: 245 158 11;
+  --alu-model-unavailable: var(--alu-warning); /* Host 设置里「当前不可用」标签的字 */
   --alu-danger: #f87171; /* 错误、危险操作 */
   --alu-danger-rgb: 248 113 113;
   --alu-danger-dim: #d05050;
@@ -343,6 +346,8 @@
   --alu-settings-footnote: #9d9daa;
   --alu-command-location: #9d9daa;
   --alu-command-args-placeholder: #9d9daa;
+  --alu-download-location: #9d9daa;
+  --alu-endpoint-disabled-opacity: 1;
 
   /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
   --alu-accent: #a0afee;
@@ -405,6 +410,7 @@
   --alu-warning-text: #eccf92;
   --alu-warning-line: #c9a658;
   --alu-warning-line-rgb: 201 166 88;
+  --alu-model-unavailable: #eac578;
   --alu-danger: #e78f88;
   --alu-danger-rgb: 231 143 136;
   --alu-danger-dim: #c8726b;
@@ -565,6 +571,8 @@
   --alu-settings-footnote: #636374;
   --alu-command-location: #636374;
   --alu-command-args-placeholder: #636374;
+  --alu-download-location: #636374;
+  --alu-endpoint-disabled-opacity: 1;
 
   /* 强调：链接、次要操作、悬停、信息、运行中的进度 */
   --alu-accent: #4a56a0;
@@ -606,8 +614,8 @@
   --alu-progress-end: #4551a5;
 
   /* 状态 */
-  --alu-success: #1f744f;
-  --alu-success-rgb: 31 116 79;
+  --alu-success: #176e4a;
+  --alu-success-rgb: 23 110 74;
   --alu-success-text: #256d4c;
   --alu-success-border: #acd6be;
   --alu-success-border-strong: #77b493;
@@ -627,6 +635,7 @@
   --alu-warning-text: #8a5619;
   --alu-warning-line: #dea645;
   --alu-warning-line-rgb: 222 166 69;
+  --alu-model-unavailable: #804e00;
   --alu-danger: #b74441;
   --alu-danger-rgb: 183 68 65;
   --alu-danger-dim: #c65954;

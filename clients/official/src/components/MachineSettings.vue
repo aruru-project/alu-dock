@@ -241,7 +241,7 @@ function removeChild(row: ModelListRow) { children.edit(removeModels(children.dr
 .model-row-copy { display: grid; min-width: 0; flex: 1 1 auto; gap: 2px; }
 .model-row-copy strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .model-row-copy small { overflow: hidden; color: var(--alu-text-muted); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
-.model-row-badge { flex: 0 0 auto; padding: 2px 6px; border-radius: 999px; background: rgb(var(--alu-warning-rgb) / .12); color: var(--alu-warning); font-size: var(--alu-micro-size); }
+.model-row-badge { flex: 0 0 auto; padding: 2px 6px; border-radius: 999px; background: rgb(var(--alu-warning-rgb) / .12); color: var(--alu-model-unavailable); font-size: var(--alu-micro-size); }
 .model-list-empty { margin: 8px 4px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
 .machine-settings-footer { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--alu-border); background: var(--alu-bg-raised); }
 .machine-settings-footer > .machine-settings-error, .machine-settings-footer-status { flex: 1 1 auto; min-width: 0; }

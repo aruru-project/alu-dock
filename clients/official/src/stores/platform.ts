@@ -43,15 +43,20 @@ export const usePlatformStore = defineStore('platform', () => {
   const themeName = (id: ClientTheme) => CLIENT_THEMES.find((option) => option.id === id)?.label ?? ''
   const themeLabel = computed(() => themeName(theme.value))
 
-  /** Android also draws its status bar and the window behind the page; the page tells it which theme to match.
-   * Only the latest request decides what App settings reports. */
+  /** Android also draws its status bar, the window behind the page and the next start's splash screen;
+   * the page tells it which theme to match. Only the latest request decides what App settings reports. */
   function matchNativeAppearance(next: ClientTheme) {
     const request = ++themeSyncRequest
     setNativeAppearance(next).then(() => {
       if (request === themeSyncRequest) themeSyncError.value = ''
     }, (cause) => {
       console.error('Failed to match the system bars to the color theme.', cause)
-      if (request === themeSyncRequest) themeSyncError.value = `状态栏没能跟着换成「${themeName(next)}」，上面的图标可能看不清。可以再点一下「${themeName(next)}」重试，还不行就重新打开客户端。`
+      if (request !== themeSyncRequest) return
+      const name = themeName(next)
+      // The page has switched either way; only say what did not follow.
+      themeSyncError.value = (cause as { code?: unknown } | null)?.code === 'splash_theme_unavailable'
+        ? `配色已经换好，只是下次打开客户端时，最先出现的启动画面可能还是原来的配色。可以再点一下「${name}」重试。`
+        : `状态栏没能跟着换成「${name}」，上面的图标可能看不清。可以再点一下「${name}」重试，还不行就重新打开客户端。`
     })
   }
 

@@ -270,12 +270,6 @@
 @media (max-width: 640px) {
   .ui-dialog-close { width: 40px; height: 40px; top: 8px; right: 8px; }
 }
-.ui-dialog-overlay[data-pending="true"] .ui-dialog-box { cursor: wait; }
-.ui-dialog-overlay[data-pending="true"] button,
-.ui-dialog-overlay[data-pending="true"] input,
-.ui-dialog-overlay[data-pending="true"] textarea {
-  opacity: 0.58;
-}
 @media (min-width: 1200px) {
   .ui-dialog-title,
   .ui-dialog-option-label {

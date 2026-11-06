@@ -10,7 +10,7 @@ defineProps<{
   theme: ClientTheme
   /** This device could not keep the choice. */
   themeError?: string
-  /** The system bars did not follow the choice (Android). */
+  /** Android did not follow the choice: its system bars now, or the next start's splash screen. */
   themeSyncError?: string
   buildIdentity?: string
   saving?: boolean

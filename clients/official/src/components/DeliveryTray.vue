@@ -261,7 +261,7 @@ function dateLabel(value: string) {
 .delivery-file-copy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .delivery-file-copy strong { display: -webkit-box; overflow: hidden; color: var(--alu-text); font: 650 13px/1.4 var(--font-reading); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .delivery-file-copy > span, .delivery-file-copy > small, .delivery-file-meta span { overflow: hidden; color: var(--alu-text-muted); font: var(--alu-ui-size)/1.35 var(--font-reading); text-overflow: ellipsis; white-space: nowrap; }
-.delivery-file-copy > small { color: rgb(var(--alu-text-muted-rgb) / .8); font-size: var(--alu-meta-size); }
+.delivery-file-copy > small { color: var(--alu-download-location); font-size: var(--alu-meta-size); }
 .delivery-file-meta { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .delivery-file-meta em { flex: 0 0 auto; padding: 2px 6px; color: var(--alu-success); border: 1px solid rgb(var(--alu-success-rgb) / .24); border-radius: 999px; background: rgb(var(--alu-success-rgb) / .06); font: 700 var(--alu-meta-size)/1.2 var(--font-reading); font-style: normal; }
 .delivery-progress { width: 100%; height: 3px; overflow: hidden; border-radius: 999px; background: rgb(var(--alu-accent-rgb) / .12); }

@@ -116,6 +116,7 @@ const invoke = async (command, args = {}) => {
     return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
   }
   if (command === 'set_native_appearance') {
+    if (failNativeAppearance === 'splash') throw { code: 'splash_theme_unavailable', message: '下次的启动画面没能跟着换配色。' }
     if (failNativeAppearance) throw { code: 'appearance_unavailable', message: '状态栏没能跟着换配色。' }
     return
   }
@@ -2311,6 +2312,18 @@ try {
       await choose('暮色')
       assert.equal(nativeTheme(), 'dusk', 'clicking the chosen theme again asks Android again')
       assert.deepEqual(alerts(), [], 'and a successful retry clears the message')
+
+      // Android 13+ followed now but did not take the splash screen of the next start.
+      failNativeAppearance = 'splash'
+      await choose('晨光')
+      const splashAlert = alerts().find(line => line.includes('启动画面'))
+      assert.ok(splashAlert && splashAlert.includes('配色已经换好') && splashAlert.includes('再点一下「晨光」重试'), 'a splash screen that did not follow is told as such, with a retry')
+      assert.equal(splashAlert.includes('状态栏'), false, 'it does not claim the system bars failed')
+      assert.equal(document.documentElement.dataset.theme, 'dawn', 'the page keeps the new theme')
+      assert.equal(storage.get('aludock.theme'), 'dawn', 'and this device keeps it')
+      failNativeAppearance = false
+      await choose('晨光')
+      assert.deepEqual(alerts(), [], 'a successful retry clears it')
 
       const pairedHosts = savedHosts
       savedHosts = []

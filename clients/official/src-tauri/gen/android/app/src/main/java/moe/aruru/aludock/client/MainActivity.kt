@@ -70,27 +70,40 @@ class MainActivity : TauriActivity() {
 
   /**
    * Called from Rust when the page shows a color theme: at every start, on a switch and on a retry.
-   * Throws only when the window background or the system bars could not follow; the page reports that.
+   * Reports which part could not follow, so the page can say so: the window and system bars now, or
+   * (Android 13+) the splash screen of the next start.
    */
   @Keep
-  fun applyAppearance(themeId: String) {
+  fun applyAppearance(themeId: String): Int {
     val next = ClientAppearance.fromId(themeId)
     if (ClientAppearance.load(this) != next) ClientAppearance.save(this, next)
-    // Android 13+ draws the next cold start's splash screen from this theme. Set it on every call so
-    // a failed attempt is tried again at the next start; it does not change the window now.
+    var windowFollowed = true
+    if (!destroyed) {
+      try {
+        appearance = next
+        val background = getColor(next.backgroundRes)
+        window.setBackgroundDrawable(ColorDrawable(background))
+        webView?.setBackgroundColor(background)
+        insetsBridge.onAppearanceChanged()
+      } catch (_: Exception) {
+        windowFollowed = false
+      }
+    }
+    // Android 13+ draws the next cold start's splash screen from this theme. Set it on every call so a
+    // failed attempt is tried again on a retry and at the next start.
+    var splashFollowed = true
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
       try {
         splashScreen.setSplashScreenTheme(next.styleRes)
       } catch (_: Exception) {
-        // The window and bars below still follow the theme.
+        splashFollowed = false
       }
     }
-    if (destroyed) return
-    appearance = next
-    val background = getColor(next.backgroundRes)
-    window.setBackgroundDrawable(ColorDrawable(background))
-    webView?.setBackgroundColor(background)
-    insetsBridge.onAppearanceChanged()
+    return when {
+      !windowFollowed -> APPEARANCE_WINDOW_FAILED
+      !splashFollowed -> APPEARANCE_SPLASH_FAILED
+      else -> APPEARANCE_APPLIED
+    }
   }
 
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -118,6 +131,11 @@ class MainActivity : TauriActivity() {
   }
 
   companion object {
+    /** What applyAppearance reports; src-tauri/src/appearance.rs reads the same numbers. */
+    const val APPEARANCE_APPLIED = 0
+    const val APPEARANCE_WINDOW_FAILED = 1
+    const val APPEARANCE_SPLASH_FAILED = 2
+
     /** Behind white navigation icons on Android 7, which cannot draw them dark. */
     val LEGACY_DARK_SCRIM: Int = Color.argb(0x80, 0x1b, 0x1b, 0x1b)
   }
