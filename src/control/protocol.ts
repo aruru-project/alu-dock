@@ -23,6 +23,32 @@ import { cloneWorkerConfig } from "../core/worker-config.js";
 import { parseAllowedTools } from "../core/worker-tool-policy.js";
 import type { DockChildSelection } from "../core/dock-tools.js";
 import {
+  AssistantError,
+  parseAssistantContextParams,
+  parseAssistantDocumentName,
+  parseAssistantDocumentText,
+  parseAssistantSearchParams,
+  type AssistantContextRequest,
+  type AssistantDocumentName,
+  type AssistantSearchRequest,
+} from "../core/assistant.js";
+export {
+  parseAssistantContextResult,
+  parseAssistantDocument,
+  parseAssistantInfo,
+  parseAssistantPreview,
+  parseAssistantSearchResult,
+  type AssistantContextResult,
+  type AssistantDocument,
+  type AssistantDocumentName,
+  type AssistantEntry,
+  type AssistantInfo,
+  type AssistantPreview,
+  type AssistantSearchHit,
+  type AssistantSearchResult,
+  type AssistantSessionInfo,
+} from "../core/assistant.js";
+import {
   MAX_DELIVERY_REF_CHARS,
   MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
   parseDeliverableDto,
@@ -217,6 +243,13 @@ export const MAX_HIDDEN_MODELS_BYTES = MAX_CONTROL_LINE_BYTES - MAX_MODEL_LIST_B
 export const CHILD_MODELS_CAPABILITY = "model.children.v1" as const;
 /** The user's child Work model list; `dock_models` describes each entry, so it stays short. */
 export const MAX_CHILD_MODELS = 50;
+/**
+ * A new Work may be opened as the personal assistant (card #295): `instance.create` and
+ * `system.default.set` accept `assistant`, and the snapshot marks such a Work. Every Host offers it.
+ */
+export const INSTANCE_ASSISTANT_CAPABILITY = "instance.assistant.v1" as const;
+/** Read and edit the assistant's persona and notes, see what she loads, and search her conversations. Only Main offers it. */
+export const ASSISTANT_CAPABILITY = "assistant.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -279,6 +312,8 @@ export const IMPLEMENTED_CAPABILITIES = [
   MULTIPLEX_CAPABILITY,
   MODEL_VISIBILITY_CAPABILITY,
   CHILD_MODELS_CAPABILITY,
+  INSTANCE_ASSISTANT_CAPABILITY,
+  ASSISTANT_CAPABILITY,
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -323,7 +358,7 @@ export type ControlRequest =
   | Request<"machine.list", Record<string, never>>
   | Request<"machine.remove", { operationId: string; hostId: string }>
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; child?: DockChildSelection }>
+  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject; child?: DockChildSelection; assistant?: boolean }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
@@ -364,7 +399,13 @@ export type ControlRequest =
   | Request<"resource.get", { instanceId: string }>
   | Request<"system.catalog", { cwd: string; hostId?: string; cursor?: SystemCatalogCursor; limit: number }>
   | Request<"system.content", { cwd: string; hostId?: string; id: string; offset?: number; revision?: string }>
-  | Request<"system.default.set", { cwd: string; hostId?: string; id: string; operationId: string }>
+  | Request<"system.default.set", { cwd: string; hostId?: string; id: string; operationId: string; assistant?: boolean }>
+  | Request<"assistant.info", Record<string, never>>
+  | Request<"assistant.preview", Record<string, never>>
+  | Request<"assistant.document.get", { document: AssistantDocumentName }>
+  | Request<"assistant.document.set", { operationId: string; document: AssistantDocumentName; text: string; baseRevision: string }>
+  | Request<"assistant.search", AssistantSearchRequest>
+  | Request<"assistant.context", AssistantContextRequest>
   | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
@@ -451,6 +492,13 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "system.catalog": { target: "directory", effect: "query", transport: "unary" },
   "system.content": { target: "directory", effect: "query", transport: "unary" },
   "system.default.set": { target: "directory", effect: "command", transport: "unary" },
+  // No hostId: the assistant lives on Main, so the connected Host answers.
+  "assistant.info": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.preview": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.document.get": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.document.set": { target: "directory", effect: "command", transport: "unary" },
+  "assistant.search": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.context": { target: "directory", effect: "query", transport: "unary" },
   "resource.content": { target: "instance", effect: "query", transport: "unary" },
   "command.catalog": { target: "instance", effect: "query", transport: "unary" },
   "command.content": { target: "instance", effect: "query", transport: "unary" },
@@ -789,6 +837,8 @@ export interface SystemCatalogCursor { revision: string; offset: number }
 export interface SystemCatalogResult {
   cwd: string; candidates: SystemCandidate[]; total: number; revision: string;
   warnings: string[]; defaultSelection?: SystemCandidate; nextCursor?: SystemCatalogCursor;
+  /** This directory opens new Works as the assistant unless the creator says otherwise. */
+  defaultAssistant?: true;
 }
 export interface SystemDefaultSetResult { selection: SystemCandidate }
 
@@ -825,7 +875,13 @@ export function requestOptionCapabilities(request: ControlRequest): string[] {
   }
   if ((request.type === "interaction.respond" || request.type === "extension.widget_viewport.set") && request.params.leaseToken === undefined) return [SHARED_INTERACTIONS_CAPABILITY];
   if (request.type === "session.inventory" && request.params.cursor !== undefined) return [SESSION_INVENTORY_PAGES_CAPABILITY];
-  if (request.type === "instance.create" && request.params.child !== undefined) return [COLLABORATION_CAPABILITY];
+  if (request.type === "instance.create") {
+    return [
+      ...(request.params.child === undefined ? [] : [COLLABORATION_CAPABILITY]),
+      ...(request.params.assistant === undefined ? [] : [INSTANCE_ASSISTANT_CAPABILITY]),
+    ];
+  }
+  if (request.type === "system.default.set" && request.params.assistant !== undefined) return [INSTANCE_ASSISTANT_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
@@ -874,6 +930,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
   if (type === "model.visibility.get" || type === "model.visibility.set") return MODEL_VISIBILITY_CAPABILITY;
   if (type === "model.children.get" || type === "model.children.set") return CHILD_MODELS_CAPABILITY;
+  if (type.startsWith("assistant.")) return ASSISTANT_CAPABILITY;
   return "models.v1";
 }
 export function requiredCapabilities(capability: Capability): string[] {
@@ -1051,7 +1108,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...(uploadInstanceId === undefined ? {} : { instanceId: uploadInstanceId }), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
-      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "child"], "invalid_request");
+      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig", "child", "assistant"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
@@ -1062,7 +1119,10 @@ export function parseControlRequest(input: unknown): ControlRequest {
         catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.workerConfig is invalid"); }
       }
       const child = params.child === undefined ? undefined : parseChildSelection(params.child);
-      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(child === undefined ? {} : { child }) } };
+      const assistant = params.assistant === undefined ? undefined : boolean(params.assistant, "params.assistant", "invalid_request");
+      // A child Work never carries the assistant's memory (card #295).
+      if (child !== undefined && assistant === true) throw validation("invalid_request", "A child Work cannot be opened as the assistant");
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }), ...(child === undefined ? {} : { child }), ...(assistant === undefined ? {} : { assistant }) } };
     }
     case "instance.ensure": {
       exact(params, ["operationId", "key", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
@@ -1215,7 +1275,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "system.catalog":
     case "system.content":
     case "system.default.set": {
-      exact(params, type === "system.catalog" ? ["cwd", "hostId", "cursor", "limit"] : type === "system.content" ? ["cwd", "hostId", "id", "offset", "revision"] : ["cwd", "hostId", "id", "operationId"], "invalid_request");
+      exact(params, type === "system.catalog" ? ["cwd", "hostId", "cursor", "limit"] : type === "system.content" ? ["cwd", "hostId", "id", "offset", "revision"] : ["cwd", "hostId", "id", "operationId", "assistant"], "invalid_request");
       const cwd = string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request");
       if (!isPortableAbsoluteLocalPath(cwd)) throw validation("invalid_request", "params.cwd must be absolute");
       const common = { cwd, hostId: hostId() };
@@ -1225,12 +1285,36 @@ export function parseControlRequest(input: unknown): ControlRequest {
         return { ...base, type, params: { ...common, limit, cursor: params.cursor === undefined ? undefined : parseSystemCatalogCursor(params.cursor, "invalid_request") } };
       }
       const selected = string(params.id, "params.id", 128, "invalid_request");
-      if (type === "system.default.set") return { ...base, type, params: { ...common, id: selected, operationId: operationId() } };
+      if (type === "system.default.set") {
+        const assistant = params.assistant === undefined ? undefined : boolean(params.assistant, "params.assistant", "invalid_request");
+        return { ...base, type, params: { ...common, id: selected, operationId: operationId(), ...(assistant === undefined ? {} : { assistant }) } };
+      }
       const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
       const revision = optionalString(params.revision, "params.revision", 128, "invalid_request");
       if (offset !== undefined && offset > 0 && revision === undefined) throw validation("invalid_request", "Resource continuation requires revision");
       return { ...base, type, params: { ...common, id: selected, offset, revision } };
     }
+    case "assistant.info":
+    case "assistant.preview":
+      exact(params, [], "invalid_request");
+      return { ...base, type, params: {} };
+    case "assistant.document.get":
+      exact(params, ["document"], "invalid_request");
+      return { ...base, type, params: { document: assistantParams(() => parseAssistantDocumentName(params.document, "params.document")) } };
+    case "assistant.document.set":
+      exact(params, ["operationId", "document", "text", "baseRevision"], "invalid_request");
+      return { ...base, type, params: {
+        operationId: operationId(),
+        document: assistantParams(() => parseAssistantDocumentName(params.document, "params.document")),
+        text: assistantParams(() => parseAssistantDocumentText(params.text, "params.text")),
+        baseRevision: string(params.baseRevision, "params.baseRevision", 128, "invalid_request"),
+      } };
+    case "assistant.search":
+      exact(params, ["query", "from", "to", "cursor", "limit"], "invalid_request");
+      return { ...base, type, params: assistantParams(() => parseAssistantSearchParams(params, "params")) };
+    case "assistant.context":
+      exact(params, ["sessionId", "entryId", "before", "after"], "invalid_request");
+      return { ...base, type, params: assistantParams(() => parseAssistantContextParams(params, "params")) };
     case "resource.content": {
       exact(params, ["instanceId", "contentRef", "offset", "revision"], "invalid_request");
       const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
@@ -2444,13 +2528,15 @@ function parseSystemCandidate(input: unknown): SystemCandidate {
 }
 export function parseSystemCatalogResult(input: unknown): SystemCatalogResult {
   const value = object(input, "system catalog");
-  exact(value, ["cwd", "candidates", "total", "revision", "warnings", "defaultSelection", "nextCursor"]);
+  exact(value, ["cwd", "candidates", "total", "revision", "warnings", "defaultSelection", "nextCursor", "defaultAssistant"]);
+  if (value.defaultAssistant !== undefined && value.defaultAssistant !== true) throw validation("invalid_response", "defaultAssistant must be true when present");
   return { cwd: string(value.cwd, "cwd", MAX_CONTROL_CWD_CHARS),
     candidates: array(value.candidates, "candidates", MAX_SYSTEM_CATALOG_ITEMS).map(parseSystemCandidate),
     total: unsigned(value.total, "total"), revision: string(value.revision, "revision", 128),
     warnings: strings(value.warnings, "warnings", MAX_COLLECTION, MAX_CONTROL_CWD_CHARS + 256),
     ...(value.defaultSelection === undefined ? {} : { defaultSelection: parseSystemCandidate(value.defaultSelection) }),
     ...(value.nextCursor === undefined ? {} : { nextCursor: parseSystemCatalogCursor(value.nextCursor) }),
+    ...(value.defaultAssistant === true ? { defaultAssistant: true as const } : {}),
   };
 }
 export function parseSystemDefaultSetResult(input: unknown): SystemDefaultSetResult {
@@ -2620,9 +2706,9 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   return result;
 }
 export function parseInstanceSnapshot(input: unknown, field = "instance"): InstanceSnapshot {
-  const value = object(input, field); exact(value, ["id", "creationOperationId", "parentId", "hostId", "key", "name", "displayName", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
+  const value = object(input, field); exact(value, ["id", "creationOperationId", "parentId", "assistant", "hostId", "key", "name", "displayName", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
   const snapshot: InstanceSnapshot = {
-    id: id(value.id, `${field}.id`), ...(value.parentId === undefined ? {} : { parentId: id(value.parentId, `${field}.parentId`) }), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), hostId: optionalString(value.hostId, `${field}.hostId`, 128), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(value.displayName, `${field}.displayName`), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
+    id: id(value.id, `${field}.id`), ...(value.parentId === undefined ? {} : { parentId: id(value.parentId, `${field}.parentId`) }), ...(value.assistant === undefined ? {} : { assistant: literalTrue(value.assistant, `${field}.assistant`) }), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), hostId: optionalString(value.hostId, `${field}.hostId`, 128), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(value.displayName, `${field}.displayName`), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), compacting: boolean(value.compacting, `${field}.compacting`), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, toolsExpanded: boolean(value.toolsExpanded, `${field}.toolsExpanded`), activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_CATALOG_LAST_ERROR_CHARS), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), executionChangedAt: timestamp(value.executionChangedAt, `${field}.executionChangedAt`), ...(value.runStartedAt === undefined ? {} : { runStartedAt: timestamp(value.runStartedAt, `${field}.runStartedAt`) }), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }
@@ -3110,6 +3196,15 @@ export class ProtocolHelloRejectedError extends ProtocolValidationError {
   }
 }
 function validation(code: string, message: string): ProtocolValidationError { return new ProtocolValidationError(code, message); }
+/** The assistant's own field checks, reported with their Protocol V2 code. */
+function assistantParams<T>(read: () => T): T {
+  try { return read(); }
+  catch (error) { if (error instanceof AssistantError) throw validation(error.code, error.message); throw error; }
+}
+function literalTrue(input: unknown, field: string): true {
+  if (input !== true) throw validation("invalid_response", `${field} must be true when present`);
+  return true;
+}
 function object(input: unknown, field: string, code = "invalid_response"): Record<string, unknown> { if (input === null || typeof input !== "object" || Array.isArray(input)) throw validation(code, `${field} must be a JSON object`); return input as Record<string, unknown>; }
 function exact(value: Record<string, unknown>, keys: readonly string[], code = "invalid_response"): void {
   // Client and hello input stays closed. Host responses/events are additive:
