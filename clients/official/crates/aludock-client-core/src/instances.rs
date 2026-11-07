@@ -532,8 +532,8 @@ impl DockClient {
             .await
     }
 
-    /// `assistant` opens the Work as the personal assistant (true) or not (false);
-    /// `None` leaves it to the directory's saved choice on the Host.
+    /// `assistant` opens the Work as the personal assistant (true) or, against a directory
+    /// that remembers doing so, not (false); `None` leaves it to the directory's saved choice.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_instance_for_machine(
         &self,

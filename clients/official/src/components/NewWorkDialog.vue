@@ -88,6 +88,8 @@ const saveFailed = ref(false)
 const assistantChoice = ref(false)
 // Starts from the directory's saved choice; fixed once the Work is created.
 const openAsAssistant = ref(false)
+// The directory opens new Works as the assistant unless told otherwise; only then is "off" said.
+const directoryAssistant = ref(false)
 // The model the new Work starts with; null leaves the choice to Pi on that Machine.
 const modelChoice = ref<ModelRef | null>(null)
 let systemEpoch = 0
@@ -213,6 +215,7 @@ function resetSystems() {
   saveFailed.value = false
   assistantChoice.value = false
   openAsAssistant.value = false
+  directoryAssistant.value = false
 }
 
 async function chooseDirectory(path: string, refresh = false) {
@@ -251,6 +254,7 @@ async function chooseDirectory(path: string, refresh = false) {
     } while (cursor)
     systemCatalogState.value = 'ready'
     assistantChoice.value = takesAssistant
+    directoryAssistant.value = defaultAssistant
     openAsAssistant.value = takesAssistant && (chosenAssistant ?? defaultAssistant)
     systemCandidates.value = candidates
     systemWarnings.value = warnings
@@ -307,8 +311,10 @@ async function confirmSystem() {
   const epoch = systemEpoch
   const path = systemPath.value
   const hostId = machineHostId.value
-  // From this page the choice is always said, so a default saved meanwhile by another Client cannot change it.
-  const asAssistant = assistantChoice.value ? openAsAssistant.value : undefined
+  // Only a choice that matters is sent: "on", or "off" against a directory that opens as the assistant.
+  // Without it the request stays as every Host knows it, so an older SubHost is unaffected.
+  const on = assistantChoice.value && openAsAssistant.value
+  const asAssistant = on ? true : directoryAssistant.value ? false : undefined
   // A fresh confirmation is a fresh save intent; another Client may have changed
   // the default. Trust continuation calls createAt directly and does not save again.
   if (saveDefault.value) {
@@ -316,7 +322,8 @@ async function confirmSystem() {
     clearError()
     saveFailed.value = false
     try {
-      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, asAssistant))
+      // The Host writes the whole default: without `assistant` it no longer opens new Works as her.
+      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, on ? true : undefined))
       if (epoch !== systemEpoch) return
       savedDefaultId.value = selection.id
     } catch (cause) {
@@ -496,8 +503,10 @@ function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind
     error.value = { message: 'Dock 返回的信任确认与当前操作对不上。请重新选择后再试。' }
     return
   }
-  if (attempt.assistant && failure?.code === 'assistant_unavailable') {
-    error.value = { message: '助手服务现在没有运行，没能以助手身份创建。可以稍后再试，或关掉「以助手身份打开」再创建。' }
+  if (attempt.assistant && (failure?.code === 'assistant_unavailable' || failure?.code === 'capability_missing')) {
+    error.value = { message: failure.code === 'assistant_unavailable'
+      ? '助手服务现在没有运行，没能以助手身份创建。可以稍后再试，或关掉「以助手身份打开」再创建。'
+      : '这台机器上的 Dock 还不能以助手身份打开 Work。可以更新那台机器的 Dock，或关掉「以助手身份打开」再创建。' }
     app.failureShown(cause)
     return
   }

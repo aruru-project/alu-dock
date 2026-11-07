@@ -375,7 +375,9 @@ try {
 
   // Card #295: a new Work can open as the assistant. The choice sits on the system page, starts from the
   // directory's saved choice, can be remembered with the default, and is fixed when the Work is created.
-  for (const scenario of ['default-on', 'save-off', 'direct-default', 'workspace', 'trust', 'unavailable']) {
+  // Only a choice that matters is sent ("on", or "off" against a directory that opens as her), so an
+  // older SubHost never receives the field.
+  for (const scenario of ['default-on', 'override-off', 'plain-off', 'save-on', 'direct-default', 'workspace', 'trust', 'unavailable', 'unsupported-target']) {
     const store = await createStore()
     const calls = [], created = []
     const workspace = '/home/alu/.aludock/assistant'
@@ -390,7 +392,7 @@ try {
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
       if (command === 'system_catalog') {
         // Main remembered {"assistant":true} for her workspace; other directories remember nothing.
-        const remembered = args.cwd === workspace || scenario === 'default-on' || scenario === 'direct-default'
+        const remembered = args.cwd === workspace || ['default-on', 'override-off', 'direct-default'].includes(scenario)
         return { cwd: args.cwd, candidates: [project], total: 1, revision: 'r', warnings: [], assistantChoice: true,
           ...(remembered ? { defaultAssistant: true } : {}), ...(scenario === 'direct-default' ? { defaultSelection: project } : {}) }
       }
@@ -398,6 +400,8 @@ try {
       if (command === 'create_work') {
         if (scenario === 'trust' && !args.trustChallengeId) throw { code: 'project_trust_required', details: { operationId: 'create-1', challengeId: 'trust-1' } }
         if (scenario === 'unavailable' && args.assistant) throw { code: 'assistant_unavailable', message: 'The assistant service is not running.' }
+        // An older target machine: Main refuses the choice as for any missing capability.
+        if (scenario === 'unsupported-target' && args.assistant != null) throw { code: 'capability_missing', message: 'Required capabilities are unavailable', details: { missing: ['instance.assistant.v1'] } }
         return { id: 'created-work', ...(args.assistant ? { assistant: true } : {}) }
       }
       throw new Error(`Unexpected IPC ${command}`)
@@ -429,29 +433,37 @@ try {
       assert.equal(creates()[0].args.assistant, null, 'nothing is said, so the Host decides from the directory default')
       app.unmount(); continue
     }
-    assert.equal(toggle().checked, scenario === 'default-on', 'the switch starts from the directory\'s saved choice')
+    assert.equal(toggle().checked, ['default-on', 'override-off'].includes(scenario), 'the switch starts from the directory\'s saved choice')
     assert.ok(text(container).includes('创建后不能更改'))
-    if (scenario === 'save-off') {
-      const saveBox = find(container, item => item.type === 'input' && item.props.type === 'checkbox' && item !== toggle())
-      saveBox.checked = true; saveBox.change(); await settle()
+    const setToggle = async on => { const input = toggle(); input.checked = on; input.change(); await settle() }
+    const saveAsDefault = async () => { const box = find(container, item => item.type === 'input' && item.props.type === 'checkbox' && item !== toggle()); box.checked = true; box.change(); await settle() }
+    if (scenario === 'override-off' || scenario === 'save-on') {
+      await setToggle(scenario === 'save-on')
+      await saveAsDefault()
       await click('确认并创建')
-      assert.equal(calls.find(c => c.command === 'set_system_default').args.assistant, false, 'saving the default also says the switch is off')
-      assert.equal(creates()[0].args.assistant, false, 'from the system page the choice is always said')
+      // The Host writes the whole default: saved without the field, the directory no longer opens as her.
+      assert.equal(calls.find(c => c.command === 'set_system_default').args.assistant, scenario === 'save-on' ? true : null)
+      assert.equal(creates()[0].args.assistant, scenario === 'save-on' ? true : false, 'turning the switch off against the directory default is said')
       app.unmount(); continue
     }
-    if (scenario === 'trust' || scenario === 'unavailable') { const input = toggle(); input.checked = true; input.change(); await settle() }
+    if (scenario === 'plain-off') {
+      await click('确认并创建')
+      assert.equal(creates()[0].args.assistant, null, 'off where the directory remembers nothing needs no field')
+      app.unmount(); continue
+    }
+    if (['trust', 'unavailable', 'unsupported-target'].includes(scenario)) await setToggle(true)
     await click('确认并创建')
     if (scenario === 'trust') {
       await click('仅本次信任')
       assert.deepEqual(creates().map(c => c.args.assistant), [true, true], 'the trust continuation replays the choice')
       assert.equal(creates()[1].args.trustChallengeId, 'trust-1')
-    } else if (scenario === 'unavailable') {
+    } else if (scenario === 'unavailable' || scenario === 'unsupported-target') {
       assert.equal(created.length, 0)
-      assert.ok(text(container).includes('助手服务现在没有运行'), text(container))
+      assert.ok(text(container).includes(scenario === 'unavailable' ? '助手服务现在没有运行' : '还不能以助手身份打开'), text(container))
       assert.ok(text(container).includes('关掉「以助手身份打开」'), 'the user is told what can still be done')
-      const input = toggle(); input.checked = false; input.change(); await settle()
+      await setToggle(false)
       await click('确认并创建')
-      assert.equal(creates()[1].args.assistant, false)
+      assert.equal(creates()[1].args.assistant, null)
     } else {
       assert.equal(creates()[0].args.assistant, true)
       assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
@@ -459,7 +471,7 @@ try {
     assert.equal(created.length, 1)
     app.unmount()
   }
-  console.log('PASS: open as the assistant: switch starts from the directory default, is always sent from the system page, is remembered with the default, survives trust; a usable default lets the Host decide; her workspace shortcut on Main')
+  console.log('PASS: open as the assistant: switch starts from the directory default, sent only when it matters, remembered with the default, survives trust, refused by an older machine with a way on; a usable default lets the Host decide; her workspace shortcut on Main')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

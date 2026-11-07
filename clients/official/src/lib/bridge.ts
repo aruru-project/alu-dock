@@ -636,7 +636,7 @@ export async function systemContent(cwd: string, id: string, context: Connection
   return native<ResourceContentResult>('system_content', { ...context, cwd, id, targetHostId, offset: offset ?? null, revision: revision ?? null })
 }
 
-/** `assistant` also remembers (true) or forgets (false) opening new Works here as the assistant; omit it for a Host without that choice. */
+/** `assistant: true` also remembers opening new Works here as the assistant; without it the saved default no longer does. */
 export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
   return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId, assistant: assistant ?? null })
 }
@@ -698,7 +698,7 @@ export async function createWork(
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
   workerConfig?: Record<string, unknown>,
-  /** Open as the assistant or not; omitted, the Host uses the directory's saved choice. */
+  /** Open as the assistant (true) or, against a directory that does, not (false); omitted, the Host uses the directory's saved choice. */
   assistant?: boolean,
 ): Promise<Work> {
   return native<Work>('create_work', {

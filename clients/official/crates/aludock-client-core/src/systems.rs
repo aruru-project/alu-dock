@@ -186,8 +186,8 @@ impl DockClient {
         .await
     }
 
-    /// `assistant` also remembers (true) or forgets (false) opening new Works here as the
-    /// assistant; `None` leaves the request as an older Host knows it.
+    /// `Some(true)` also remembers opening new Works here as the assistant. The Host writes
+    /// the whole default, so `None` saves it without that choice and an older Host is unaffected.
     pub async fn set_system_default(
         &self,
         cwd: &str,
@@ -249,12 +249,12 @@ mod tests {
             id: "template",
             host_id: None,
             operation_id: "save-1",
-            assistant: Some(false),
+            assistant: Some(true),
         })
         .unwrap();
         assert_eq!(
             remember,
-            serde_json::json!({ "cwd": "/project", "id": "template", "operationId": "save-1", "assistant": false })
+            serde_json::json!({ "cwd": "/project", "id": "template", "operationId": "save-1", "assistant": true })
         );
         let older_save = serde_json::to_value(DefaultParams {
             cwd: "/project",
@@ -266,7 +266,7 @@ mod tests {
         .unwrap();
         assert!(older_save.get("assistant").is_none());
         assert_eq!(
-            with_assistant_choice(SYSTEM_TEMPLATES, Some(false)),
+            with_assistant_choice(SYSTEM_TEMPLATES, Some(true)),
             ["core.v2", "system.templates.v1", "instance.assistant.v1"]
         );
         assert_eq!(
