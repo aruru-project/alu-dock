@@ -308,7 +308,7 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 - `system.catalog {cwd,hostId?,cursor?,limit?}` → `{cwd,candidates,total,revision,warnings,defaultSelection?,nextCursor?}`。候选按项目 `.pi/SYSTEM.md`、原生 agentDir 的 `SYSTEM.md`、目标 Host Home 下 `.aludock/systems/*.json` 文件名顺序返回。`nextCursor` 必须续读到缺省，不能只展示第一页；有效 `defaultSelection` 独立返回，即使不在当前页也可直接用于创建。
 - 候选的唯一 DTO 是 `protocol.ts` 中的 `SystemCandidate`：`{id,name,kind,path,workerConfig,warning?}`；`kind` 为 `project-system | global-system | dock-template`。`id` 是 cwd-bound opaque identity，不是文件路径。`warning` 表示该候选当前不可使用；可以预览原文并让用户修复或重选。
 - `system.content {cwd,hostId?,id,offset?,revision?}` 只读当前目录候选，不接受任意路径。与 `resource.content` 共用 `readResourceContent` 和唯一的 `ResourceContentResult` parser：`{text,revision,nextOffset?}`，字节续读、UTF-8 和文件变化处理完全一致。
-- `system.default.set {cwd,hostId?,id,operationId,assistant?}` → `{selection}`。这是独立的显式保存操作，复用 operation ledger。只写本目录 `.aludock/system-default.json` 的 `{id,assistant?}`，不继承父目录、不保存正文。普通查询和本次确认都不写这个文件。带 `assistant` 要求 `instance.assistant.v1`，`true` 时同时记住“以助手身份打开”，`false` 或省略时不记（见下文[个人助手](#个人助手instanceassistantv1assistantv1)）。
+- `system.default.set {cwd,hostId?,id,operationId,assistant?}` → `{selection}`。这是独立的显式保存操作，复用 operation ledger。只写本目录 `.aludock/system-default.json` 的 `{id,assistant?}`，不继承父目录、不保存正文。普通查询和本次确认都不写这个文件。`assistant: true` 同时记住“以助手身份打开”并要求 `instance.assistant.v1`；`false` 清掉它；省略时保留本目录原来的选择，所以不显示这个开关的入口（Hub、旧客户端、`dock_create` 的 `saveDefault`）保存 system 时不会把它清掉（见下文[个人助手](#个人助手instanceassistantv1assistantv1)）。
 
 创建默认归实际创建 Worker 的 Host：`DockRegistry.createNew` 在 project trust 完成、cwd 规范化后解析最终 `workerConfig`，覆盖 `instance.create` 和 `instance.ensure` 新建。显式 system 选择优先；省略时使用本目录保存的默认；仅在未配置目录默认时使用 Pi 原生行为。其他 `workerConfig` 字段不会关闭 system 默认。已配置但损坏、不可读或目标缺失时返回 `system_default_unavailable`，不静默换正文，新旧客户端一致。最终配置进入既有 creation/catalog 路径；同一创建操作不重选默认，ensure 命中已有 Work、adopt 和 reopen 不重新应用目录默认。
 
@@ -326,13 +326,13 @@ Dock 自带一个个人助手（card #295），默认是阿露。她的人设、
 
 **以助手身份打开（`instance.assistant.v1`，每台 Host 都提供）**
 
-- `instance.create` 可带 `assistant: boolean`，带了就要求这项能力。`true` 以助手身份打开，`false` 明确不以助手身份打开；省略时用本目录 `.aludock/system-default.json` 记住的选择，没有记住就是不以助手身份打开。`child` 与 `assistant: true` 不能同时出现：子 Work 不带记忆。
+- `instance.create` 可带 `assistant: boolean`。`true` 以助手身份打开，要求这项能力；`false` 明确不以助手身份打开，不要求能力，Main 转给不认识它的 SubHost 时去掉（那样的 Host 本来就不会以助手身份打开）；省略时用本目录 `.aludock/system-default.json` 记住的选择，没有记住就是不以助手身份打开。`child` 与 `assistant: true` 不能同时出现：子 Work 不带记忆。
 - 这个选择创建时定下，写进 catalog，reopen 沿用，之后不能切换。Snapshot 对这样的 Work 带 `assistant: true`，其他 Work 不带这个字段。
 - `system.catalog` 结果在本目录记住了以助手身份打开时带 `defaultAssistant: true`，即使没有记住 system（只有 `{"assistant":true}`）。客户端把它作为创建页上开关的初值；目录记住了可用的 system 而直接创建时，客户端省略 `assistant`，由 Host 按目录默认决定。
-- 客户端只在需要时带这个字段，所以不支持它的 Host 照常创建：开关为开时带 `assistant: true`；开关为关时，只有 catalog 给了 `defaultAssistant: true`（用户要推翻目录默认）才带 `assistant: false`。保存目录默认时开关为开才带 `assistant: true`；不带就整份写 `{id}`，等于清掉助手默认。是否显示开关看 Main hello 的 `instance.assistant.v1`（所有机器一起升级）；目标 SubHost 不支持而用户要开时，Main 按常规返回 `capability_missing`。
+- 客户端只在需要时带这个字段：开关为开时带 `assistant: true`；开关为关时，只有 catalog 给了 `defaultAssistant: true`（用户要推翻目录默认）才带 `assistant: false`。创建和保存目录默认用同一条规则。是否显示开关看 Main hello 的 `instance.assistant.v1`（所有机器一起升级）；目标 SubHost 不支持而用户要开时，Main 按常规返回 `capability_missing`。
 - Agent 的 `dock_create` 可带 `assistant`；不带等于 `false`，不套用目录默认，免得她派的协作成员带上记忆。`dock_spawn` 的子 Work 一律不是助手。
 - Main 启动时确保助手在 Main 上的工作区 `~/.aludock/assistant` 存在，并在没有目录默认时写入 `{"assistant":true}`。
-- Host 没有助手服务可用时（没有持久状态目录的开发 Host），以助手身份创建返回 `assistant_unavailable`。
+- Host 用不了助手时（没有持久状态目录的开发 Host）不广告这项能力；以助手身份创建（包括目录默认为助手）返回 `assistant_unavailable`。
 
 **助手资料（`assistant.v1`，只有 Main 提供）**
 
@@ -341,10 +341,10 @@ Dock 自带一个个人助手（card #295），默认是阿露。她的人设、
 - `assistant.info {}` → `{workspacePath,maxDocumentBytes}`：她在 Main 上的工作区，和一份文档的字节上限。
 - `assistant.preview {}` → `{text,loadedAt}`：现在新开一个助手会话会载入的全文，以及这份内容生成的时间。
 - `assistant.document.get {document}` → `{document,text,revision}`；`document` 为 `persona`（人设）或 `notes`（手写设定）。
-- `assistant.document.set {operationId,document,text,baseRevision}` → `{document,text,revision}`：整份替换，沿用 operation ledger。`baseRevision` 不是当前版本时返回 `assistant_document_changed`，内容不变；超过 `MAX_ASSISTANT_DOCUMENT_BYTES`（256 KiB）返回 `assistant_document_too_large`。
-- `assistant.search {query,from?,to?,cursor?,limit}` → `{hits,nextCursor?}`：按关键词搜她经历过的对话，`query` 按空白分成几个词，全部出现才算命中（不分大小写），`from`/`to` 是时间范围；结果从新到旧，`limit` 最多 50，`nextCursor` 续读下一页。每条命中是 `{session,entryId,at,kind,snippet}`，`snippet` 是命中处前后的一段原文。
+- `assistant.document.set {operationId,document,text,baseRevision}` → `{document,text,revision}`：整份替换，沿用 operation ledger。`baseRevision` 不是当前版本时返回 `assistant_document_changed`，内容不变；超过 `MAX_ASSISTANT_DOCUMENT_BYTES`（256 KiB）返回 `assistant_document_too_large`。她用工具按原文替换一段时，找不到原文为 `assistant_edit_not_found`，原文出现不止一次为 `assistant_edit_ambiguous`。
+- `assistant.search {query?,from?,to?,cursor?,limit}` → `{hits,nextCursor?}`：按关键词、时间或两者一起搜她经历过的对话。`query` 按空白分成几个词，全部出现才算命中（不分大小写）；`from`/`to` 是时间范围，只写日期时按 Main 的本地日，`to` 含当天；没有 `query` 时必须给时间范围，列出这段时间里的全部条目。结果从新到旧，`limit` 最多 50，`nextCursor` 续读下一页。每条命中是 `{session,entryId,at,kind,snippet}`，`snippet` 是命中处前后最多 400 个 UTF-16 单位的原文（含省略号）。
 - `assistant.context {sessionId,entryId,before,after}` → `{session,entries,hasBefore,hasAfter}`：从这条往前读同一分支上的 `before` 条、往后读 `after` 条（各最多 50），`entries` 按时间从早到晚、包含这一条；放不进一条记录时从远处少给，`hasBefore`/`hasAfter` 说明两头还有没有。找不到这一条返回 `assistant_entry_not_found`。
-- `session` 是 `{sessionId,sessionFile?,cwd?,name?,workId?,machine?,startedAt,lastAt}`：`workId` 是记录时那个 Work 的 Main ID，那个 Work 可能已经停止；`machine` 是机器名。条目 `{entryId,parentId?,at,kind,text,toolName?,toolCalls?,truncated?}` 的 `kind` 为 `user | assistant | tool_result | bash | summary | notice`；助手自己的回复带她调用的工具名和参数（各截到 2,000 字符），超过 32,000 字符的正文截断并标 `truncated`，原文仍在 Agent 自己的会话文件里。
+- `session` 是 `{sessionId,sessionFile?,cwd?,name?,workId?,machine?,startedAt,lastAt}`：`workId` 是说这句话时那个 Work 的 Main ID（那个 Work 可能已经停止），`machine` 是机器名；搜索命中里是这一条自己的，前后文里是最后一条的。助手相关的回答按 Protocol V2 的规矩忽略不认识的字段。条目 `{entryId,parentId?,at,kind,text,toolName?,toolCalls?,truncated?}` 的 `kind` 为 `user | assistant | tool_result | bash | summary | notice`；助手自己的回复带她调用的工具名和参数（各截到 2,000 字符），超过 32,000 字符的正文截断并标 `truncated`，原文仍在 Agent 自己的会话文件里。
 - 助手服务没有运行时返回 `assistant_unavailable`。
 
 ## 命令发现

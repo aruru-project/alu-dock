@@ -24,6 +24,7 @@ import { parseAllowedTools } from "../core/worker-tool-policy.js";
 import type { DockChildSelection } from "../core/dock-tools.js";
 import {
   AssistantError,
+  MAX_ASSISTANT_REVISION_CHARS,
   parseAssistantContextParams,
   parseAssistantDocumentName,
   parseAssistantDocumentText,
@@ -878,10 +879,12 @@ export function requestOptionCapabilities(request: ControlRequest): string[] {
   if (request.type === "instance.create") {
     return [
       ...(request.params.child === undefined ? [] : [COLLABORATION_CAPABILITY]),
-      ...(request.params.assistant === undefined ? [] : [INSTANCE_ASSISTANT_CAPABILITY]),
+      // Only opening as the assistant needs a Host that knows her; `false` means what a Host without
+      // her does anyway, and Main drops it for such a SubHost.
+      ...(request.params.assistant === true ? [INSTANCE_ASSISTANT_CAPABILITY] : []),
     ];
   }
-  if (request.type === "system.default.set" && request.params.assistant !== undefined) return [INSTANCE_ASSISTANT_CAPABILITY];
+  if (request.type === "system.default.set" && request.params.assistant === true) return [INSTANCE_ASSISTANT_CAPABILITY];
   if (request.type === "conversation.content.stream") return [CONVERSATION_CONTENT_CAPABILITY, CONVERSATION_REFERENCES_CAPABILITY, FILE_TRANSFER_CAPABILITY];
   return (request.type === "conversation.history" || request.type === "conversation.content") && request.params.view === "references"
     ? [CONVERSATION_REFERENCES_CAPABILITY] : [];
@@ -1307,7 +1310,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
         operationId: operationId(),
         document: assistantParams(() => parseAssistantDocumentName(params.document, "params.document")),
         text: assistantParams(() => parseAssistantDocumentText(params.text, "params.text")),
-        baseRevision: string(params.baseRevision, "params.baseRevision", 128, "invalid_request"),
+        baseRevision: string(params.baseRevision, "params.baseRevision", MAX_ASSISTANT_REVISION_CHARS, "invalid_request"),
       } };
     case "assistant.search":
       exact(params, ["query", "from", "to", "cursor", "limit"], "invalid_request");

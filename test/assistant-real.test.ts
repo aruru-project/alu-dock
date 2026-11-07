@@ -31,6 +31,7 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
 
   await client.prompt(plain.id, "随便聊聊天气（不该记住）", "auto", "plain-ask");
   const plainAsked = await coordinator.request(1);
+  // Card #295: a Work not opened as her neither reads nor writes her memory.
   assert.ok(!systemPrompt(plainAsked.body).includes("团子"), "A Work not opened as the assistant knows nothing of her");
   plainAsked.text("晴。");
   await settled(client, plain.id);
@@ -40,8 +41,7 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
   const found = await client.assistantSearch("团子");
   assert.equal(found.hits[0]!.kind, "assistant");
   assert.equal(found.hits[0]!.session.workId, alu.id);
-  assert.equal(found.hits[0]!.session.machine, "Main");
-  assert.equal((await client.assistantSearch("天气")).hits.length, 0);
+  assert.equal((await client.assistantSearch("天气")).hits.length, 0, "Card #295: a Work not opened as her is not recorded");
   const around = await client.assistantContext(found.hits[0]!.session.sessionId, found.hits[0]!.entryId, 5, 5);
   assert.deepEqual(around.entries.map((entry) => entry.text), ["我家猫叫什么来着？", "团子呀，这都忘了？"]);
 

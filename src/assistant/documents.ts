@@ -47,7 +47,7 @@ export class AssistantDocuments {
       const current = (await this.get(document)).text;
       const first = current.indexOf(oldText);
       if (first < 0) throw new AssistantError("assistant_edit_not_found", "要替换的那段原文没有找到，内容没有改动。请先读一遍现在的内容，再照原样引用。");
-      if (current.indexOf(oldText, first + 1) >= 0) throw new AssistantError("assistant_edit_not_found", "要替换的那段原文出现了不止一次，内容没有改动。请多带一些前后文，让它只出现一次。");
+      if (current.indexOf(oldText, first + 1) >= 0) throw new AssistantError("assistant_edit_ambiguous", "要替换的那段原文出现了不止一次，内容没有改动。请多带一些前后文，让它只出现一次。");
       const text = current.slice(0, first) + newText + current.slice(first + oldText.length);
       if (Buffer.byteLength(text, "utf8") > MAX_ASSISTANT_DOCUMENT_BYTES) throw new AssistantError("assistant_document_too_large", `改完后内容会超过 ${MAX_ASSISTANT_DOCUMENT_BYTES / 1024} KB，没有保存。请删短一些再改。`);
       await writeWhole(this.path(document), text);

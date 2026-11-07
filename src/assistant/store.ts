@@ -20,9 +20,9 @@ import {
 
 /*
  * The conversations of the Works opened as the assistant, in Node's own SQLite. Every entry keeps
- * where it came from: the Agent's session and entry IDs, the Work and machine, and when it was said.
- * Search is keyword search: SQLite's full-text index cuts text into three-character pieces, so Chinese
- * works without a word list; shorter words are matched one row at a time.
+ * where it came from: the Agent's session and entry IDs, the Work and machine it was said in, and
+ * when. Search is keyword search: SQLite's full-text index cuts text into three-character pieces, so
+ * Chinese works without a word list; shorter words are matched one row at a time.
  */
 
 const SCHEMA = `
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS entries (
   session_id TEXT NOT NULL REFERENCES sessions(session_id),
   entry_id TEXT NOT NULL, parent_id TEXT,
   at TEXT NOT NULL, at_ms INTEGER NOT NULL,
+  work_id TEXT, machine TEXT,
   kind TEXT NOT NULL, text TEXT NOT NULL, tool_name TEXT, tool_calls TEXT, truncated INTEGER NOT NULL DEFAULT 0,
   search_text TEXT NOT NULL,
   UNIQUE (session_id, entry_id)
@@ -69,6 +70,8 @@ interface EntryRow {
   parent_id: string | null;
   at: string;
   at_ms: number;
+  work_id: string | null;
+  machine: string | null;
   kind: string;
   text: string;
   tool_name: string | null;
@@ -109,8 +112,8 @@ export class AssistantStore {
   record(session: AssistantRecordSession, entries: readonly AssistantEntry[], throughEntryId: string, source: AssistantSource): { lastEntryId: string } {
     const now = new Date().toISOString();
     const times = entries.map((entry) => ({ at: entry.at, ms: Date.parse(entry.at) }));
-    const first = times.reduce((earliest, time) => (time.ms < earliest.ms ? time : earliest), { at: now, ms: Date.parse(now) });
-    const last = times.reduce((latest, time) => (time.ms > latest.ms ? time : latest), times[0] ?? first);
+    const first = times.reduce((earliest, time) => (time.ms < earliest.ms ? time : earliest), times[0] ?? { at: now, ms: Date.parse(now) });
+    const last = times.reduce((latest, time) => (time.ms > latest.ms ? time : latest), first);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare(`
@@ -130,12 +133,12 @@ export class AssistantStore {
       `).run(session.sessionId, session.sessionFile ?? null, session.cwd, session.name ?? null, source.workId ?? null, source.machine ?? null,
         first.at, first.ms, last.at, last.ms, throughEntryId);
       const insert = this.db.prepare(`
-        INSERT OR IGNORE INTO entries (session_id, entry_id, parent_id, at, at_ms, kind, text, tool_name, tool_calls, truncated, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO entries (session_id, entry_id, parent_id, at, at_ms, work_id, machine, kind, text, tool_name, tool_calls, truncated, search_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const entry of entries) {
-        insert.run(session.sessionId, entry.entryId, entry.parentId ?? null, entry.at, Date.parse(entry.at), entry.kind, entry.text,
-          entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searchText(entry));
+        insert.run(session.sessionId, entry.entryId, entry.parentId ?? null, entry.at, Date.parse(entry.at), source.workId ?? null, source.machine ?? null,
+          entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searchText(entry));
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -145,9 +148,9 @@ export class AssistantStore {
     return { lastEntryId: throughEntryId };
   }
 
-  /** Newest first; every word must occur, in any letter case. */
+  /** Newest first; every word must occur, in any letter case. Without words, everything in the time range. */
   search(request: AssistantSearchRequest): AssistantSearchResult {
-    const terms = request.query.trim().split(/\s+/u).filter((term) => term.length > 0).slice(0, MAX_SEARCH_TERMS);
+    const terms = (request.query ?? "").trim().split(/\s+/u).filter((term) => term.length > 0).slice(0, MAX_SEARCH_TERMS);
     const indexed = terms.filter((term) => [...term].length >= INDEXED_TERM_CHARS);
     const scanned = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS);
     const where = ["e.search_text <> ''"];
@@ -171,7 +174,7 @@ export class AssistantStore {
     const hits: AssistantSearchHit[] = page.map((row) => {
       let session = sessions.get(row.session_id);
       if (!session) { session = this.session(row.session_id); sessions.set(row.session_id, session); }
-      return { session, entryId: row.entry_id, at: row.at, kind: row.kind as AssistantEntryKind, snippet: snippet(row.search_text, terms) };
+      return { session: saidIn(session, row), entryId: row.entry_id, at: row.at, kind: row.kind as AssistantEntryKind, snippet: snippet(row.search_text, terms) };
     });
     const last = page.at(-1);
     return { hits, ...(rows.length > request.limit && last ? { nextCursor: encodeCursor(last.at_ms, last.seq) } : {}) };
@@ -198,12 +201,19 @@ export class AssistantStore {
     }
     let hasAfter = Boolean(cursor && latestChild.get(request.sessionId, cursor.entry_id));
     // Leave out the farthest entries until the answer fits one record; the entry asked for always stays.
-    const size = (rows: EntryRow[]) => Buffer.byteLength(JSON.stringify(rows.map(entryOf)), "utf8");
-    while (size([...before, target, ...after]) > MAX_ASSISTANT_RESULT_BYTES - 16 * 1024 && before.length + after.length > 0) {
-      if (before.length >= after.length) { before.shift(); hasBefore = true; }
-      else { after.pop(); hasAfter = true; }
+    const entries = new Map<EntryRow, { entry: AssistantEntry; bytes: number }>();
+    for (const row of [...before, target, ...after]) {
+      const entry = entryOf(row);
+      entries.set(row, { entry, bytes: Buffer.byteLength(JSON.stringify(entry), "utf8") + 1 });
     }
-    return { session: this.session(request.sessionId), entries: [...before, target, ...after].map(entryOf), hasBefore, hasAfter };
+    let bytes = [...entries.values()].reduce((sum, item) => sum + item.bytes, 0);
+    while (bytes > MAX_ASSISTANT_RESULT_BYTES && before.length + after.length > 0) {
+      if (before.length >= after.length) { bytes -= entries.get(before.shift()!)!.bytes; hasBefore = true; }
+      else { bytes -= entries.get(after.pop()!)!.bytes; hasAfter = true; }
+    }
+    const kept = [...before, target, ...after];
+    const latest = kept.at(-1)!;
+    return { session: saidIn(this.session(request.sessionId), latest), entries: kept.map((row) => entries.get(row)!.entry), hasBefore, hasAfter };
   }
 
   private session(sessionId: string): AssistantSessionInfo {
@@ -219,6 +229,12 @@ export class AssistantStore {
       lastAt: row.last_at,
     };
   }
+}
+
+/** The session as it was where this entry was said: the Work and machine of the entry itself. */
+function saidIn(session: AssistantSessionInfo, row: EntryRow): AssistantSessionInfo {
+  const { workId: _workId, machine: _machine, ...rest } = session;
+  return { ...rest, ...(row.work_id ? { workId: row.work_id } : {}), ...(row.machine ? { machine: row.machine } : {}) };
 }
 
 /** What search looks through: the words, and the assistant's tool calls except her own memory tools. */
@@ -242,16 +258,28 @@ function entryOf(row: EntryRow): AssistantEntry {
   };
 }
 
-/** A part of the text around the first word found, at most MAX_ASSISTANT_SNIPPET_CHARS long. */
+/**
+ * A part of the text around the first word found, at most MAX_ASSISTANT_SNIPPET_CHARS code units with
+ * its "…" marks, never splitting a character such as an emoji.
+ */
 function snippet(text: string, terms: readonly string[]): string {
-  const lower = text.toLowerCase();
+  const flat = text.replace(/\s+/gu, " ").trim();
+  const lower = flat.toLowerCase();
   const positions = terms.map((term) => lower.indexOf(term.toLowerCase())).filter((position) => position >= 0);
   const found = positions.length === 0 ? 0 : Math.min(...positions);
-  const characters = [...text];
-  const offset = [...text.slice(0, found)].length;
-  const start = Math.max(0, offset - Math.floor(MAX_ASSISTANT_SNIPPET_CHARS / 3));
-  const end = Math.min(characters.length, start + MAX_ASSISTANT_SNIPPET_CHARS);
-  return `${start > 0 ? "…" : ""}${characters.slice(start, end).join("").replace(/\s+/gu, " ").trim()}${end < characters.length ? "…" : ""}`;
+  if (flat.length <= MAX_ASSISTANT_SNIPPET_CHARS) return flat;
+  // Room for a mark at each end.
+  const budget = MAX_ASSISTANT_SNIPPET_CHARS - 2;
+  const start = characterStart(flat, Math.max(0, Math.min(found - Math.floor(budget / 3), flat.length - budget)));
+  const end = characterStart(flat, Math.min(flat.length, start + budget));
+  return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+}
+
+/** Moves an index off the second half of a surrogate pair. */
+function characterStart(text: string, index: number): number {
+  if (index <= 0 || index >= text.length) return Math.max(0, Math.min(index, text.length));
+  const code = text.charCodeAt(index);
+  return code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
 }
 
 /**

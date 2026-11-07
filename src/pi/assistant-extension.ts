@@ -1,8 +1,12 @@
 import type { ExtensionContext, ExtensionFactory, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import {
+  ASSISTANT_CONTEXT_DEFAULT_SPAN,
+  ASSISTANT_DOCUMENTS,
   ASSISTANT_TOOL_NAMES,
   MAX_ASSISTANT_CONTEXT_SPAN,
+  MAX_ASSISTANT_ID_CHARS,
+  MAX_ASSISTANT_NAME_CHARS,
   MAX_ASSISTANT_ENTRY_TEXT_CHARS,
   MAX_ASSISTANT_QUERY_CHARS,
   MAX_ASSISTANT_RECORD_BATCH_BYTES,
@@ -11,6 +15,7 @@ import {
   MAX_ASSISTANT_TOOL_CALLS,
   type AssistantContextResult,
   type AssistantDocument,
+  type AssistantDocumentName,
   type AssistantEntry,
   type AssistantPreview,
   type AssistantRequest,
@@ -19,6 +24,7 @@ import {
   type AssistantSessionInfo,
 } from "../core/assistant.js";
 import { extractDockAttachmentContext } from "./dock-attachment-context.js";
+import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
 /*
  * What makes a Pi Work the personal assistant (card #295). Each session start (new Work, reload,
@@ -39,27 +45,27 @@ const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
 const SECTION = "assistant";
 /** A Work that is stopping waits this long at most for its last entries to reach Main. */
 const SHUTDOWN_SYNC_MS = 1_000;
-const DEFAULT_CONTEXT_SPAN = 6;
+/** Tool arguments kept of an entry that would not fit one batch otherwise. */
+const SQUEEZED_ARGUMENT_CHARS = 200;
 
 const SEARCH_SCHEMA = {
   type: "object",
   properties: {
-    query: { type: "string", minLength: 1, maxLength: MAX_ASSISTANT_QUERY_CHARS, description: "Keywords separated by spaces; every one must occur. Chinese works; try other wording when nothing is found." },
+    query: { type: "string", maxLength: MAX_ASSISTANT_QUERY_CHARS, description: "Keywords separated by spaces; every one must occur. Chinese works; try other wording when nothing is found. Omit it with from or to to list everything said in that time." },
     from: { type: "string", description: "Earliest time, as YYYY-MM-DD (the local day) or an ISO time." },
     to: { type: "string", description: "Latest time, as YYYY-MM-DD (including that day) or an ISO time." },
     cursor: { type: "string", description: "The cursor an earlier search returned, to read older results." },
     limit: { type: "integer", minimum: 1, maximum: MAX_ASSISTANT_SEARCH_LIMIT },
   },
-  required: ["query"],
   additionalProperties: false,
 };
 const READ_SCHEMA = {
   type: "object",
   properties: {
-    sessionId: { type: "string", minLength: 1, maxLength: 128 },
-    entryId: { type: "string", minLength: 1, maxLength: 128 },
-    before: { type: "integer", minimum: 0, maximum: MAX_ASSISTANT_CONTEXT_SPAN, description: `Entries before it; default ${DEFAULT_CONTEXT_SPAN}.` },
-    after: { type: "integer", minimum: 0, maximum: MAX_ASSISTANT_CONTEXT_SPAN, description: `Entries after it; default ${DEFAULT_CONTEXT_SPAN}.` },
+    sessionId: { type: "string", minLength: 1, maxLength: MAX_ASSISTANT_ID_CHARS },
+    entryId: { type: "string", minLength: 1, maxLength: MAX_ASSISTANT_ID_CHARS },
+    before: { type: "integer", minimum: 0, maximum: MAX_ASSISTANT_CONTEXT_SPAN, description: `Entries before it; default ${ASSISTANT_CONTEXT_DEFAULT_SPAN}.` },
+    after: { type: "integer", minimum: 0, maximum: MAX_ASSISTANT_CONTEXT_SPAN, description: `Entries after it; default ${ASSISTANT_CONTEXT_DEFAULT_SPAN}.` },
   },
   required: ["sessionId", "entryId"],
   additionalProperties: false,
@@ -67,7 +73,7 @@ const READ_SCHEMA = {
 const DOCUMENT_SCHEMA = {
   type: "object",
   properties: {
-    document: { type: "string", enum: ["persona", "notes"], description: "persona: who you are. notes: the facts and rules your owner wrote by hand." },
+    document: { type: "string", enum: [...ASSISTANT_DOCUMENTS], description: "persona: who you are. notes: the facts and rules your owner wrote by hand." },
     action: { type: "string", enum: ["read", "write", "edit"] },
     text: { type: "string", description: "write: the whole new text." },
     oldText: { type: "string", description: "edit: an exact passage that occurs once." },
@@ -77,30 +83,64 @@ const DOCUMENT_SCHEMA = {
   additionalProperties: false,
 };
 
+type Notify = (message: string) => void;
+
+/**
+ * What one session loaded from Main. Its first run asks and waits; when that fails, later runs go on
+ * without her and ask again in the background. It asks at the first run rather than at session start,
+ * because a reload or a new session cancels the Work's questions still open while it is replaced.
+ */
+class SessionLoad {
+  loaded: AssistantPreview | undefined;
+  failure: Error | undefined;
+  private pending: Promise<void> | undefined;
+  private told = false;
+
+  constructor(private readonly port: AssistantCallPort) {}
+
+  private start(): Promise<void> {
+    this.pending ??= this.port.call({ op: "load" }).then(
+      (preview) => { this.loaded = preview; this.failure = undefined; },
+      (error: unknown) => { this.failure = error instanceof Error ? error : new Error(String(error)); },
+    ).finally(() => { this.pending = undefined; });
+    return this.pending;
+  }
+
+  async section(notify: Notify): Promise<string> {
+    if (!this.loaded && !this.failure) await this.start();
+    if (this.loaded) return this.loaded.text;
+    // Try again in the background; this run goes on without her and the owner is told once.
+    void this.start();
+    if (!this.told) {
+      this.told = true;
+      notify(`这一轮没能从 Main 载入助手的人设和设定（${this.failure?.message ?? "原因不明"}）。她这一轮不知道你写给她的设定；Main 恢复后，之后的回合会自动载入。`);
+    }
+    return `You are the owner's personal assistant, but your persona and notes could not be loaded from Main just now (${this.failure?.message ?? "unknown reason"}). Say so if it matters, and do not make them up.`;
+  }
+}
+
 export function assistantExtension(port: AssistantCallPort, attachmentContextKey: Uint8Array): ExtensionFactory {
   return (pi) => {
-    let loading: Promise<AssistantPreview | Error> | undefined;
+    let load: SessionLoad | undefined;
     let recorder: SessionRecorder | undefined;
-    const load = () => port.call({ op: "load" }).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
 
-    pi.on("session_start", (_event, ctx) => {
-      loading = load();
-      recorder = new SessionRecorder(port, ctx.sessionManager, attachmentContextKey);
-      void recorder.sync();
+    pi.on("session_start", (event, ctx) => {
+      load = new SessionLoad(port);
+      // A resumed or forked session's earlier history was not hers, or is kept under its first session.
+      // Like loading, catching up waits for the first run, after any replacement has finished.
+      recorder = new SessionRecorder(port, ctx.sessionManager, attachmentContextKey, event.reason === "resume" || event.reason === "fork",
+        (message) => ctx.ui.notify(message, "warning"));
       const collision = pi.getAllTools().find((tool) => OWN_TOOLS.has(tool.name) && tool.sourceInfo.path !== EXTENSION_PATH);
       if (collision) {
         pi.setActiveTools(pi.getActiveTools().filter((name) => !OWN_TOOLS.has(name)));
-        ctx.ui.notify(`The assistant's tools are unavailable because ${collision.name} is already registered.`, "error");
+        ctx.ui.notify(`另一个扩展也提供了 ${collision.name}，所以这个会话里助手不能搜记忆、读以前的对话或改设定。停用那个扩展后执行 /reload 即可恢复。`, "error");
       }
     });
 
-    pi.on("before_agent_start", async (event) => {
-      let loaded = await (loading ??= load());
-      // A session that could not load at its start tries again before each run, until it can.
-      if (loaded instanceof Error) loaded = await (loading = load());
-      event.systemPromptOptions.sections[SECTION] = loaded instanceof Error
-        ? `You are the owner's personal assistant, but your persona and notes could not be loaded from Main just now (${loaded.message}). Say so if it matters, and do not make them up.`
-        : loaded.text;
+    pi.on("before_agent_start", async (event, ctx) => {
+      load ??= new SessionLoad(port);
+      void recorder?.sync();
+      event.systemPromptOptions.sections[SECTION] = await load.section((message) => ctx.ui.notify(message, "warning"));
     });
 
     // Her words go to Main once each run settles; a stopped run or a failed send is caught up later.
@@ -115,10 +155,10 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.registerTool({
       name: "assistant_search",
       label: "Search memory",
-      description: "Search your past conversations with your owner by keywords and time, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
+      description: "Search your past conversations with your owner by keywords, time, or both, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
       parameters: SEARCH_SCHEMA,
-      execute: async (_id: string, params: { query: string; from?: string; to?: string; cursor?: string; limit?: number }) => {
-        const result = await port.call({ op: "search", query: params.query, ...optional("from", params.from), ...optional("to", params.to), ...optional("cursor", params.cursor), limit: params.limit ?? 10 });
+      execute: async (_id: string, params: { query?: string; from?: string; to?: string; cursor?: string; limit?: number }) => {
+        const result = await port.call({ op: "search", ...optional("query", params.query), ...optional("from", params.from), ...optional("to", params.to), ...optional("cursor", params.cursor), limit: params.limit ?? 10 });
         return { content: [{ type: "text", text: renderSearch(result) }], details: result };
       },
     } as never);
@@ -129,7 +169,7 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
       description: "Read what was said around one entry of a past conversation, including the tools called and what they returned. Use the sessionId and entryId from assistant_search.",
       parameters: READ_SCHEMA,
       execute: async (_id: string, params: { sessionId: string; entryId: string; before?: number; after?: number }) => {
-        const result = await port.call({ op: "context", sessionId: params.sessionId, entryId: params.entryId, before: params.before ?? DEFAULT_CONTEXT_SPAN, after: params.after ?? DEFAULT_CONTEXT_SPAN });
+        const result = await port.call({ op: "context", sessionId: params.sessionId, entryId: params.entryId, before: params.before ?? ASSISTANT_CONTEXT_DEFAULT_SPAN, after: params.after ?? ASSISTANT_CONTEXT_DEFAULT_SPAN });
         return { content: [{ type: "text", text: renderContext(result, params.entryId) }], details: result };
       },
     } as never);
@@ -139,7 +179,7 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
       label: "Persona and notes",
       description: "Read or change your persona (who you are) or the notes your owner wrote by hand (facts and rules that win over anything else). write replaces the whole text; edit replaces one exact passage. Changes apply to sessions that start later; this session already knows what you changed.",
       parameters: DOCUMENT_SCHEMA,
-      execute: async (_id: string, params: { document: "persona" | "notes"; action: "read" | "write" | "edit"; text?: string; oldText?: string; newText?: string }) => {
+      execute: async (_id: string, params: { document: AssistantDocumentName; action: "read" | "write" | "edit"; text?: string; oldText?: string; newText?: string }) => {
         let result: AssistantDocument;
         if (params.action === "read") result = await port.call({ op: "document_get", document: params.document });
         else if (params.action === "write") {
@@ -164,28 +204,46 @@ class SessionRecorder {
   private known = false;
   private running: Promise<void> | undefined;
   private again = false;
+  private told = false;
 
+  /**
+   * `fromNow`: when Main has not recorded this session, it starts at what the session already holds
+   * instead of from its first entry.
+   */
   constructor(
     private readonly port: AssistantCallPort,
     private readonly session: ReadonlySessionManager,
     private readonly attachmentContextKey: Uint8Array,
+    private readonly fromNow: boolean,
+    private readonly notify: Notify,
   ) {}
 
   sync(): Promise<void> {
     if (this.running) { this.again = true; return this.running; }
     this.running = (async () => {
       do { this.again = false; await this.once(); } while (this.again);
-    })().catch(() => { /* Main is unreachable; the next run or session start catches up. */ }).finally(() => { this.running = undefined; });
+      this.told = false;
+    })().catch((error: unknown) => {
+      // The next run or session start catches up; the owner hears once until it does. A question the
+      // Work's own session replacement cancelled is not a failure to report.
+      if (this.told || error instanceof WorkerUiLifecycleCancelledError) return;
+      this.told = true;
+      this.notify(`刚才的对话还没记进助手的记忆（${error instanceof Error ? error.message : String(error)}）。连上 Main 后会自动补记，不用重发。`);
+    }).finally(() => { this.running = undefined; });
     return this.running;
   }
 
   private async once(): Promise<void> {
     const sessionId = this.session.getSessionId();
+    const entries = this.session.getEntries();
     if (!this.known) {
       this.through = (await this.port.call({ op: "recorded", sessionId })).lastEntryId;
+      if (this.through === undefined && this.fromNow && entries.length > 0) {
+        await this.port.call({ op: "record", session: this.sessionInfo(sessionId), entries: [], throughEntryId: entries.at(-1)!.id });
+        this.through = entries.at(-1)!.id;
+      }
       this.known = true;
     }
-    const entries = this.session.getEntries();
     const recordedAt = this.through === undefined ? -1 : entries.findIndex((entry) => entry.id === this.through);
     const pending = entries.slice(recordedAt + 1);
     if (pending.length === 0) return;
@@ -202,9 +260,7 @@ class SessionRecorder {
       while (parent && !keeps(parent)) parent = parent.parentId === null ? undefined : byId.get(parent.parentId);
       return parent?.id;
     };
-    const sessionFile = this.session.getSessionFile();
-    const name = this.session.getSessionName();
-    const session = { sessionId, ...(sessionFile === undefined ? {} : { sessionFile }), cwd: this.session.getCwd(), ...(name === undefined ? {} : { name }) };
+    const session = this.sessionInfo(sessionId);
     let batch: AssistantEntry[] = [];
     let bytes = 0;
     const send = async (throughEntryId: string) => {
@@ -215,17 +271,28 @@ class SessionRecorder {
     };
     for (const [index, entry] of pending.entries()) {
       const mapped = keeps(entry) ? assistantEntryOf(entry, this.attachmentContextKey) : undefined;
-      if (mapped) {
-        const parentId = parentOf(entry);
-        const item = parentId === undefined ? mapped : { ...mapped, parentId };
-        const size = Buffer.byteLength(JSON.stringify(item), "utf8");
-        if (batch.length > 0 && bytes + size > MAX_ASSISTANT_RECORD_BATCH_BYTES - 16 * 1024) await send(pending[index - 1]!.id);
-        batch.push(item);
-        bytes += size;
-      }
+      if (!mapped) continue;
+      const parentId = parentOf(entry);
+      const item = fitBatch(parentId === undefined ? mapped : { ...mapped, parentId });
+      const size = Buffer.byteLength(JSON.stringify(item), "utf8");
+      if (batch.length > 0 && bytes + size > MAX_ASSISTANT_RECORD_BATCH_BYTES) await send(pending[index - 1]!.id);
+      batch.push(item);
+      bytes += size;
     }
     await send(pending.at(-1)!.id);
   }
+
+  private sessionInfo(sessionId: string) {
+    const sessionFile = this.session.getSessionFile();
+    const name = this.session.getSessionName();
+    return { sessionId, ...(sessionFile === undefined ? {} : { sessionFile }), cwd: this.session.getCwd(), ...(name === undefined ? {} : { name: cut(name, MAX_ASSISTANT_NAME_CHARS).text }) };
+  }
+}
+
+/** An entry with many long tool calls keeps a shorter part of each, so it fits one batch alone. */
+function fitBatch(entry: AssistantEntry): AssistantEntry {
+  if (Buffer.byteLength(JSON.stringify(entry), "utf8") <= MAX_ASSISTANT_RECORD_BATCH_BYTES || entry.toolCalls === undefined) return entry;
+  return { ...entry, toolCalls: entry.toolCalls.map((call) => ({ name: cut(call.name, SQUEEZED_ARGUMENT_CHARS).text, arguments: cut(call.arguments, SQUEEZED_ARGUMENT_CHARS).text })), truncated: true };
 }
 
 type Block = { type: string; text?: string; name?: string; arguments?: unknown; thinking?: string };

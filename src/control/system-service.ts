@@ -235,16 +235,20 @@ export class SystemService {
     return readResourceContent(await this.contentPath(cwd, id), offset, revision);
   }
 
-  /** Saves the whole default: without `assistant` the directory no longer opens new Works as the assistant. */
-  async setDefault(cwd: string, id: string, assistant = false): Promise<SystemDefaultSetResult> {
+  /**
+   * Saves the directory's system. `assistant` says whether new Works open as the assistant; without
+   * it the directory keeps what it had, so a client that does not show the switch cannot clear it.
+   */
+  async setDefault(cwd: string, id: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
     cwd = await this.directory(cwd);
     const selection = await this.selected(cwd, id);
+    const keepsAssistant = assistant ?? (await this.savedDefault(cwd).catch(() => undefined))?.assistant === true;
     const path = join(cwd, ".aludock", "system-default.json");
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       await mkdir(dirname(path), { recursive: true });
       const handle = await open(temporary, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify(assistant ? { id, assistant: true } : { id }) + "\n"); await handle.sync(); }
+      try { await handle.writeFile(JSON.stringify(keepsAssistant ? { id, assistant: true } : { id }) + "\n"); await handle.sync(); }
       finally { await handle.close(); }
       await rename(temporary, path);
     } catch { throw new ProtocolValidationError("system_default_unavailable", "无法保存本目录的 system 选择。请检查 .aludock 的写入权限后重试；本次仍可单独选择。"); }

@@ -236,7 +236,7 @@ export class SupervisedService {
 
 /**
  * The service process's side: answers each request with `answer`, relays cancels, and says it is
- * ready once `prepare` finished. A failed answer carries the error's `code` when it has one.
+ * ready. Call it once the service is set up. A failed answer carries the error's `code` when it has one.
  */
 export async function serveRequests(answer: (request: unknown, signal: AbortSignal) => Promise<unknown>): Promise<void> {
   if (!process.send) throw new Error("The service must be started by the Dock Host");

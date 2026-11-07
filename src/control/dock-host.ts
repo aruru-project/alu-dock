@@ -16,7 +16,7 @@ import { CHILD_MODELS_CAPABILITY, MODEL_VISIBILITY_CAPABILITY } from "./protocol
 import { ModelVisibilityError, type ModelVisibilityPort } from "./model-visibility.js";
 import type { ChildModelsEditor, ChildModelsSource } from "./child-models.js";
 import { AssistantError, type AssistantHostPort, type AssistantRequest } from "../core/assistant.js";
-import { ASSISTANT_CAPABILITY } from "./protocol.js";
+import { ASSISTANT_CAPABILITY, INSTANCE_ASSISTANT_CAPABILITY } from "./protocol.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -276,6 +276,8 @@ export class DockHost {
     if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
     if (!this.childModelsEditor) capabilities.delete(CHILD_MODELS_CAPABILITY);
     if (!this.assistant) capabilities.delete(ASSISTANT_CAPABILITY);
+    // A Main that routes to SubHosts lets them answer for themselves.
+    if (!this.registry.assistantAvailable && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(INSTANCE_ASSISTANT_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
@@ -1054,7 +1056,7 @@ export class DockHost {
           : request.type === "system.content"
           ? await this.systemService.content(request.params.cwd, request.params.id, request.params.offset, request.params.revision)
           : await this.operationLedger.run(request.params.operationId, request.type, params,
-            () => this.systemService!.setDefault(request.params.cwd, request.params.id, request.params.assistant === true));
+            () => this.systemService!.setDefault(request.params.cwd, request.params.id, request.params.assistant));
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "workspace.list": {

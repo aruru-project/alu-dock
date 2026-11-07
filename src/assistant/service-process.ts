@@ -3,8 +3,8 @@ import { fileURLToPath } from "node:url";
 import { ServiceAnswerError, SupervisedService } from "../control/service-supervisor.js";
 import {
   AssistantError,
+  isAssistantErrorCode,
   parseAssistantResult,
-  type AssistantErrorCode,
   type AssistantHostPort,
   type AssistantRequest,
   type AssistantResultFor,
@@ -26,7 +26,6 @@ export interface AssistantServiceProcessOptions {
 }
 
 const DEFAULT_ENTRY = fileURLToPath(new URL("./service-entry.js", import.meta.url));
-const CODES: readonly AssistantErrorCode[] = ["assistant_unavailable", "assistant_document_changed", "assistant_document_too_large", "assistant_edit_not_found", "assistant_entry_not_found", "invalid_request"];
 
 /** Main's assistant service, started and watched by the Host like the model service. */
 export class AssistantServiceProcess implements AssistantHostPort {
@@ -49,14 +48,13 @@ export class AssistantServiceProcess implements AssistantHostPort {
 
   start(): Promise<void> { return this.service.start(); }
   stop(): Promise<void> { return this.service.stop(); }
-  get pid(): number | undefined { return this.service.pid; }
 
   async request<R extends AssistantRequest>(request: R, source: AssistantSource, signal?: AbortSignal): Promise<AssistantResultFor<R>> {
     let answer: unknown;
     try {
       answer = await this.service.request({ request, source }, signal);
     } catch (error) {
-      if (error instanceof ServiceAnswerError && CODES.includes(error.code as AssistantErrorCode)) throw new AssistantError(error.code as AssistantErrorCode, error.message);
+      if (error instanceof ServiceAnswerError && isAssistantErrorCode(error.code)) throw new AssistantError(error.code, error.message);
       throw error;
     }
     return parseAssistantResult(request, answer);

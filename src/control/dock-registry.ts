@@ -196,7 +196,7 @@ export class DockRegistry implements DockToolsHostPort {
       assistantAvailable?: boolean;
     } = {},
   ) {
-    this.assistantAvailable = options.assistantAvailable === true;
+    this.assistantAvailableValue = options.assistantAvailable === true;
     if (options.catalogCommitPort && options.catalogStore) throw new Error("Configure either catalogCommitPort or catalogStore, not both");
     this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.startedAt = options.startedAt ?? new Date().toISOString();
@@ -236,7 +236,9 @@ export class DockRegistry implements DockToolsHostPort {
 
   private readonly trustPreflight: CreateTrustPreflight | undefined;
   private readonly reopenTargetResolver: ReopenTargetResolver | undefined;
-  private readonly assistantAvailable: boolean;
+  private readonly assistantAvailableValue: boolean;
+  /** Whether a Work here can be opened as the assistant. */
+  get assistantAvailable(): boolean { return this.assistantAvailableValue; }
 
   async initializeCatalog(): Promise<void> {
     if (!this.catalogStore) return;
@@ -315,8 +317,10 @@ export class DockRegistry implements DockToolsHostPort {
       : { workerConfig: input.workerConfig, assistant: parent === undefined && input.assistant === true };
     const resolvedConfig = creation.workerConfig;
     const assistant = creation.assistant;
-    if (assistant && !this.assistantAvailable) {
-      throw new ProtocolValidationError("assistant_unavailable", "这台机器上的 Dock 连不上助手，没有创建 Work。请确认 Main 在线后再试，或者不以助手身份打开。");
+    if (assistant && !this.assistantAvailableValue) {
+      throw new ProtocolValidationError("assistant_unavailable", input.assistant === true
+        ? "这台机器的 Dock 用不了助手，没有创建 Work。请换一台能用助手的机器，或者不以助手身份打开。"
+        : "这个目录默认以助手身份打开新 Work，但这台机器的 Dock 用不了助手，所以没有创建。请在创建时关掉「以助手身份打开」，或者换一台能用助手的机器。");
     }
     const workerConfig = resolvedConfig === undefined
       ? undefined
