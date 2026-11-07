@@ -6,17 +6,20 @@ import {
   type AssistantSource,
 } from "../core/assistant.js";
 import type { AssistantDocuments } from "./documents.js";
+import type { AssistantReaders } from "./readers.js";
 import type { AssistantStore } from "./store.js";
 
 /**
  * The assistant service's answers (card #295). It runs in its own process on Main, holds her persona,
  * the owner's notes and her recorded conversations, and answers the Works opened as her and the
- * owner's clients alike.
+ * owner's clients alike. Writes go through one connection on this thread, a short batch at a time;
+ * searches and context reads run on reader threads, so none of them waits behind another.
  */
 export class AssistantCore {
   constructor(
     private readonly documents: AssistantDocuments,
     private readonly store: AssistantStore,
+    private readonly readers: Pick<AssistantReaders, "search" | "context">,
     private readonly workspacePath: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -31,8 +34,8 @@ export class AssistantCore {
       case "load": return this.preview();
       case "recorded": return this.store.recorded(request.sessionId);
       case "record": return this.store.record(request.session, request.entries, request.throughEntryId, source);
-      case "search": return this.store.search(request);
-      case "context": return this.store.context(request);
+      case "search": return this.readers.search(request);
+      case "context": return this.readers.context(request);
       case "document_get": return this.documents.get(request.document);
       case "document_set": return this.documents.set(request.document, request.text, request.baseRevision);
       case "document_edit": return this.documents.edit(request.document, request.oldText, request.newText);

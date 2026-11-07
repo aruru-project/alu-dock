@@ -1,4 +1,4 @@
-import { DatabaseSync, type SQLInputValue } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 
 import {
   ASSISTANT_TOOL_NAMES,
@@ -21,8 +21,16 @@ import {
 /*
  * The conversations of the Works opened as the assistant, in Node's own SQLite. Every entry keeps
  * where it came from: the Agent's session and entry IDs, the Work and machine it was said in, and
- * when. Search is keyword search: SQLite's full-text index cuts text into three-character pieces, so
- * Chinese works without a word list; shorter words are matched one row at a time.
+ * when.
+ *
+ * An entry's row ID is its time in milliseconds times ENTRY_IDS_PER_MS plus a counter, so the rows,
+ * and the full-text index that shares their IDs, are in time order. A search walks the index from the
+ * newest match back and stops once it has enough, and a time range is a range of IDs; neither reads
+ * every match first. The index cuts text into three-character pieces, so Chinese works without a
+ * word list; words of one or two characters are checked row by row, newest first.
+ *
+ * One connection writes (the service's main thread); searches and context reads use their own
+ * read connections on other threads (see readers.ts), which SQLite's WAL journal lets run alongside a write.
  */
 
 const SCHEMA = `
@@ -36,40 +44,42 @@ CREATE TABLE IF NOT EXISTS sessions (
   through_entry_id TEXT
 );
 CREATE TABLE IF NOT EXISTS entries (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  id INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(session_id),
   entry_id TEXT NOT NULL, parent_id TEXT,
-  at TEXT NOT NULL, at_ms INTEGER NOT NULL,
+  at TEXT NOT NULL,
   work_id TEXT, machine TEXT,
   kind TEXT NOT NULL, text TEXT NOT NULL, tool_name TEXT, tool_calls TEXT, truncated INTEGER NOT NULL DEFAULT 0,
   search_text TEXT NOT NULL,
   UNIQUE (session_id, entry_id)
 );
-CREATE INDEX IF NOT EXISTS entries_parent ON entries (session_id, parent_id, seq);
-CREATE INDEX IF NOT EXISTS entries_time ON entries (at_ms, seq);
-CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5 (search_text, content = 'entries', content_rowid = 'seq', tokenize = 'trigram');
+CREATE INDEX IF NOT EXISTS entries_parent ON entries (session_id, parent_id, id);
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5 (search_text, content = 'entries', content_rowid = 'id', tokenize = 'trigram');
 CREATE TRIGGER IF NOT EXISTS entries_insert AFTER INSERT ON entries BEGIN
-  INSERT INTO entries_fts (rowid, search_text) VALUES (new.seq, new.search_text);
+  INSERT INTO entries_fts (rowid, search_text) VALUES (new.id, new.search_text);
 END;
 CREATE TRIGGER IF NOT EXISTS entries_delete AFTER DELETE ON entries BEGIN
-  INSERT INTO entries_fts (entries_fts, rowid, search_text) VALUES ('delete', old.seq, old.search_text);
+  INSERT INTO entries_fts (entries_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
 END;
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
 `;
 
+/** Room for entries said in the same millisecond; the rare overflow borrows the next free ID. */
+const ENTRY_IDS_PER_MS = 1024;
 const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
 /** Words searched at once; more are ignored rather than refused. */
 const MAX_SEARCH_TERMS = 8;
-/** Pieces shorter than this cannot use the three-character index and are matched row by row. */
+/** Pieces shorter than this cannot use the three-character index and are checked row by row. */
 const INDEXED_TERM_CHARS = 3;
+/** Index matches read per step while looking for enough entries that also hold the short words. */
+const SEARCH_STEP = 256;
 
 interface EntryRow {
-  seq: number;
+  id: number;
   session_id: string;
   entry_id: string;
   parent_id: string | null;
   at: string;
-  at_ms: number;
   work_id: string | null;
   machine: string | null;
   kind: string;
@@ -95,9 +105,14 @@ interface SessionRow {
 export class AssistantStore {
   private readonly db: DatabaseSync;
 
-  constructor(path: string) {
+  /** `reader` opens a connection that only reads, for a thread that answers searches. */
+  constructor(path: string, options: { reader?: boolean } = {}) {
     this.db = new DatabaseSync(path);
-    this.db.exec(SCHEMA);
+    if (options.reader) {
+      this.db.exec("PRAGMA query_only = 1; PRAGMA busy_timeout = 5000;");
+    } else {
+      this.db.exec(SCHEMA);
+    }
   }
 
   close(): void { this.db.close(); }
@@ -132,12 +147,20 @@ export class AssistantStore {
           through_entry_id = excluded.through_entry_id
       `).run(session.sessionId, session.sessionFile ?? null, session.cwd, session.name ?? null, source.workId ?? null, source.machine ?? null,
         first.at, first.ms, last.at, last.ms, throughEntryId);
+      const known = this.db.prepare("SELECT 1 FROM entries WHERE session_id = ? AND entry_id = ?");
+      const latestAt = this.db.prepare("SELECT max(id) AS id FROM entries WHERE id >= ? AND id < ?");
+      const taken = this.db.prepare("SELECT 1 FROM entries WHERE id = ?");
       const insert = this.db.prepare(`
-        INSERT OR IGNORE INTO entries (session_id, entry_id, parent_id, at, at_ms, work_id, machine, kind, text, tool_name, tool_calls, truncated, search_text)
+        INSERT INTO entries (id, session_id, entry_id, parent_id, at, work_id, machine, kind, text, tool_name, tool_calls, truncated, search_text)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const entry of entries) {
-        insert.run(session.sessionId, entry.entryId, entry.parentId ?? null, entry.at, Date.parse(entry.at), source.workId ?? null, source.machine ?? null,
+        if (known.get(session.sessionId, entry.entryId)) continue;
+        const base = Date.parse(entry.at) * ENTRY_IDS_PER_MS;
+        const latest = (latestAt.get(base, base + ENTRY_IDS_PER_MS) as { id: number | null }).id;
+        let id = latest === null ? base : latest + 1;
+        while (taken.get(id)) id += 1;
+        insert.run(id, session.sessionId, entry.entryId, entry.parentId ?? null, entry.at, source.workId ?? null, source.machine ?? null,
           entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searchText(entry));
       }
       this.db.exec("COMMIT");
@@ -152,23 +175,39 @@ export class AssistantStore {
   search(request: AssistantSearchRequest): AssistantSearchResult {
     const terms = (request.query ?? "").trim().split(/\s+/u).filter((term) => term.length > 0).slice(0, MAX_SEARCH_TERMS);
     const indexed = terms.filter((term) => [...term].length >= INDEXED_TERM_CHARS);
-    const scanned = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS);
-    const where = ["e.search_text <> ''"];
-    const values: SQLInputValue[] = [];
+    const short = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS).map((term) => term.toLowerCase());
+    const lowest = request.from === undefined ? Number.MIN_SAFE_INTEGER : boundary(request.from, "start") * ENTRY_IDS_PER_MS;
+    let below = Math.min(
+      request.to === undefined ? Number.MAX_SAFE_INTEGER : boundary(request.to, "end") * ENTRY_IDS_PER_MS,
+      request.cursor === undefined ? Number.MAX_SAFE_INTEGER : parseCursor(request.cursor),
+    );
+    const wanted = request.limit + 1;
+    const rows: EntryRow[] = [];
     if (indexed.length > 0) {
-      where.push("e.seq IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)");
-      values.push(indexed.map((term) => `"${term.replaceAll("\"", "\"\"")}"`).join(" AND "));
+      // Walk the index newest first; entries are read only for matches, and only until there are enough.
+      const matches = this.db.prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH ? AND rowid >= ? AND rowid < ? ORDER BY rowid DESC LIMIT ?");
+      const read = this.db.prepare("SELECT * FROM entries WHERE id = ?");
+      const expression = indexed.map((term) => `"${term.replaceAll("\"", "\"\"")}"`).join(" AND ");
+      while (rows.length < wanted) {
+        const step = matches.all(expression, lowest, below, SEARCH_STEP) as Array<{ id?: number; rowid: number }>;
+        for (const match of step) {
+          const row = read.get(match.rowid) as unknown as EntryRow | undefined;
+          if (row && holdsAll(row.search_text, short)) rows.push(row);
+          if (rows.length >= wanted) break;
+        }
+        if (step.length < SEARCH_STEP) break;
+        below = step.at(-1)!.rowid;
+      }
+    } else {
+      const where = ["id >= ?", "id < ?", "search_text <> ''"];
+      const values: SQLInputValue[] = [lowest, below];
+      for (const term of short) {
+        where.push("search_text LIKE ? ESCAPE '\\'");
+        values.push(`%${term.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`);
+      }
+      // The primary key is in time order, so this reads newest first and stops at the limit.
+      rows.push(...this.db.prepare(`SELECT * FROM entries WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`).all(...values, wanted) as unknown as EntryRow[]);
     }
-    for (const term of scanned) {
-      where.push("e.search_text LIKE ? ESCAPE '\\'");
-      values.push(`%${term.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`);
-    }
-    if (request.from !== undefined) { where.push("e.at_ms >= ?"); values.push(boundary(request.from, "start")); }
-    if (request.to !== undefined) { where.push("e.at_ms < ?"); values.push(boundary(request.to, "end")); }
-    const after = request.cursor === undefined ? undefined : parseCursor(request.cursor);
-    if (after) { where.push("(e.at_ms < ? OR (e.at_ms = ? AND e.seq < ?))"); values.push(after.ms, after.ms, after.seq); }
-    const rows = this.db.prepare(`SELECT e.* FROM entries e WHERE ${where.join(" AND ")} ORDER BY e.at_ms DESC, e.seq DESC LIMIT ?`)
-      .all(...values, request.limit + 1) as unknown as EntryRow[];
     const page = rows.slice(0, request.limit);
     const sessions = new Map<string, AssistantSessionInfo>();
     const hits: AssistantSearchHit[] = page.map((row) => {
@@ -177,13 +216,13 @@ export class AssistantStore {
       return { session: saidIn(session, row), entryId: row.entry_id, at: row.at, kind: row.kind as AssistantEntryKind, snippet: snippet(row.search_text, terms) };
     });
     const last = page.at(-1);
-    return { hits, ...(rows.length > request.limit && last ? { nextCursor: encodeCursor(last.at_ms, last.seq) } : {}) };
+    return { hits, ...(rows.length > request.limit && last ? { nextCursor: encodeCursor(last.id) } : {}) };
   }
 
   /** The entry with what came before it on its branch and what followed on the latest branch after it. */
   context(request: AssistantContextRequest): AssistantContextResult {
     const byId = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND entry_id = ?");
-    const latestChild = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND parent_id = ? ORDER BY seq DESC LIMIT 1");
+    const latestChild = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND parent_id = ? ORDER BY id DESC LIMIT 1");
     const target = byId.get(request.sessionId, request.entryId) as unknown as EntryRow | undefined;
     if (!target) throw new AssistantError("assistant_entry_not_found", "没有找到这条对话记录。它可能还没记下来，或者编号写错了。");
     const before: EntryRow[] = [];
@@ -212,12 +251,13 @@ export class AssistantStore {
       else { bytes -= entries.get(after.pop()!)!.bytes; hasAfter = true; }
     }
     const kept = [...before, target, ...after];
-    const latest = kept.at(-1)!;
-    return { session: saidIn(this.session(request.sessionId), latest), entries: kept.map((row) => entries.get(row)!.entry), hasBefore, hasAfter };
+    return { session: saidIn(this.session(request.sessionId), kept.at(-1)!), entries: kept.map((row) => entries.get(row)!.entry), hasBefore, hasAfter };
   }
 
+  private sessionStatement: StatementSync | undefined;
   private session(sessionId: string): AssistantSessionInfo {
-    const row = this.db.prepare("SELECT * FROM sessions WHERE session_id = ?").get(sessionId) as unknown as SessionRow;
+    this.sessionStatement ??= this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
+    const row = this.sessionStatement.get(sessionId) as unknown as SessionRow;
     return {
       sessionId: row.session_id,
       ...(row.session_file ? { sessionFile: row.session_file } : {}),
@@ -229,6 +269,13 @@ export class AssistantStore {
       lastAt: row.last_at,
     };
   }
+}
+
+/** Whether the text holds every short word, in any letter case, as SQL LIKE matches them. */
+function holdsAll(text: string, lowerTerms: readonly string[]): boolean {
+  if (lowerTerms.length === 0) return text.length > 0;
+  const lower = text.toLowerCase();
+  return lowerTerms.every((term) => lower.includes(term));
 }
 
 /** The session as it was where this entry was said: the Work and machine of the entry itself. */
@@ -294,11 +341,9 @@ function boundary(value: string, side: "start" | "end"): number {
   return side === "start" ? start : new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]) + 1).getTime();
 }
 
-function encodeCursor(ms: number, seq: number): string { return Buffer.from(JSON.stringify([ms, seq])).toString("base64url"); }
-function parseCursor(cursor: string): { ms: number; seq: number } {
-  try {
-    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (Array.isArray(value) && value.length === 2 && value.every((item) => Number.isSafeInteger(item))) return { ms: value[0] as number, seq: value[1] as number };
-  } catch { /* reported below */ }
+function encodeCursor(id: number): string { return Buffer.from(String(id)).toString("base64url"); }
+function parseCursor(cursor: string): number {
+  const id = Number(Buffer.from(cursor, "base64url").toString("utf8"));
+  if (Number.isSafeInteger(id)) return id;
   throw new AssistantError("invalid_request", "这个续读位置不是这次搜索给出的，请重新搜索。");
 }
