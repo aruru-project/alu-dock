@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { BookUser, Brain, Eye, NotebookPen, RefreshCw, Search, Settings2, Sparkles, X } from '@lucide/vue'
 import { assistantEntryLabel, assistantSessionLabel, assistantTime } from '../lib/assistant'
@@ -20,7 +20,8 @@ const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
 const { search, reading } = assistant
 const { preview, info, canSearch } = storeToRefs(assistant)
-const { assistantSection: section } = storeToRefs(useSurfacesStore())
+const surfaces = useSurfacesStore()
+const { assistantSection: section } = storeToRefs(surfaces)
 
 const sections: Array<{ id: AssistantSection; label: string; icon: typeof Eye }> = [
   { id: 'preview', label: '她会读到什么', icon: Eye },
@@ -50,6 +51,16 @@ watch([section, () => app.connectionContext?.connectionId, () => app.connectionC
     void assistant.loadInfo()
   }
 }, { immediate: true })
+
+// Android Back steps back inside the page before it closes it, as each 「返回」 button does: where a
+// memory was said → the memory → the list; a conversation around a search hit → the results.
+onUnmounted(surfaces.onAssistantBack(() => {
+  if (section.value === 'memories' && memory.source.place) memory.closeSource()
+  else if (section.value === 'memories' && memory.detail.id) memory.closeMemory()
+  else if (section.value === 'search' && reading.place) assistant.closeContext()
+  else return false
+  return true
+}))
 
 function hitPlace(hit: AssistantSearchHit) {
   return [assistantSessionLabel(hit.session), hit.session.machine].filter(Boolean).join(' · ')

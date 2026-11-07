@@ -52,6 +52,22 @@ export function memoryTopicLabel(topic: AssistantMemoryTopic): string {
   return memoryTopics.find((item) => item.topic === topic)?.label ?? '其他'
 }
 
+/**
+ * How much of a memory's length is used, against Main's `limit` (0 when not known). What is
+ * counted is what would be saved: the text without the spaces around it, as a string's length.
+ */
+export function memoryLength(text: string, limit: number): { used: number; over: number; label: string } {
+  const used = text.trim().length
+  const over = limit > 0 && used > limit ? used - limit : 0
+  return {
+    used,
+    over,
+    label: over
+      ? `超出 ${over} 字：一条记忆最多 ${limit} 字，请删到 ${limit} 字以内再保存。`
+      : limit > 0 ? `${used} / ${limit} 字` : `${used} 字`,
+  }
+}
+
 /** Whether every new session of hers reads it, or only her looking finds it. */
 export function memoryResidentLabel(resident: boolean): string {
   return resident ? '每次都带上' : '她查的时候才用'

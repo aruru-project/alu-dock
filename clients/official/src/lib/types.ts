@@ -734,8 +734,11 @@ export interface SystemCatalogResult {
 }
 export interface SystemDefaultSetResult { selection: SystemCandidate }
 
-/** The personal assistant kept on Main (card #295). */
-export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; extraction?: AssistantExtractionStatus }
+/**
+ * The personal assistant kept on Main (card #295). `maxMemoryChars` is how long one memory may be,
+ * in UTF-16 code units as a string's length counts them.
+ */
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; extraction?: AssistantExtractionStatus }
 /**
  * Making memories from her conversations in the background: `off` without a model; `failed` when
  * the last try did not work, tried again at `retryAt`. `lastError` is written for the owner; with

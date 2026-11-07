@@ -48,7 +48,7 @@ let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, chil
 // Card #295: Main keeps the assistant; the spare Host is an older Main without her.
 let assistantNative = (command, args) => {
   if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
-  if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144 }
+  if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 1000 }
   throw new Error(`Unexpected assistant call: ${command}`)
 }
 // The fake Host's Work list: extra records it lists, and Works it has retired.
@@ -1478,6 +1478,14 @@ try {
     const said = all(reading(), item => String(item.props.class ?? '') === 'assistant-entry-text').map(text)
     assert.deepEqual(said.slice(0, 3), ['早', '早上好', '今天天气怎么样？'], 'the earlier entry joins once at the top, without repeating the edge')
     assertSameReference(button(reading(), '往前再读'), undefined, 'nothing earlier is left')
+    // Android Back leaves the conversation for the results; her page stays and keeps its Back entry.
+    const pageEntries = historyDepth
+    systemBack(); await settle()
+    assert.equal(!!page(), true, 'Back inside her page keeps it open')
+    assert.equal(!!reading(), false, 'Back leaves the conversation')
+    assert.equal(!!results(), true, 'the results show again')
+    assert.equal(historyDepth, pageEntries)
+    await click(results(), '今天上午有雨')
     await click(reading(), '打开这个 Work')
     assertSameReference(page(), undefined)
     assert.equal(app.selectedWork.id, 'other', 'the conversation\'s Work, still in the list, opens')
@@ -1516,7 +1524,7 @@ try {
     let model, loseNextReply = false
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
-      if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, extraction: model ? { state: 'idle', model, waitingSessions: 1 } : { state: 'off', waitingSessions: 1 } }
+      if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, extraction: model ? { state: 'idle', model, waitingSessions: 1 } : { state: 'off', waitingSessions: 1 } }
       if (command === 'assistant_memories') return { memories: structuredClone(memories.filter(item => item.state === (args.filter.state ?? 'active') && (!args.filter.topic || item.topic === args.filter.topic))) }
       if (command === 'assistant_memory') {
         const found = memories.find(item => item.id === args.id)
@@ -1560,12 +1568,15 @@ try {
     assert.deepEqual(sent('assistant_memories').filter, { topic: 'preferences' })
     assert.ok(list().includes('香菜') && !list().includes('体检'))
 
-    // Where it was said, read in the conversation.
+    // Where it was said, read in the conversation; Android Back returns to the memory.
     await click(labelled('记忆列表'), '主人不吃香菜')
     await click(page(), '看原话')
     assert.deepEqual([sent('assistant_context').sessionId, sent('assistant_context').entryId], ['s1', 'e2'])
     assert.ok(text(labelled('对话前后文')).includes('我不吃香菜哦') && text(page()).includes('这条记忆：主人不吃香菜。'))
-    await click(page(), '← 返回这条记忆')
+    systemBack(); await settle()
+    assert.equal(!!page(), true, 'Back inside her page keeps it open')
+    assert.equal(!!labelled('对话前后文'), false)
+    assert.ok(text(labelled('这条记忆')).includes('在哪里说的'), 'Back from where it was said shows the memory')
 
     // Choosing what it already is keeps the background from changing it; then only her looking
     // finds it. Each change names the version shown.
@@ -1611,12 +1622,20 @@ try {
     await click(page(), '去看合并后的那一条')
     assert.equal(sent('assistant_memory').id, '2')
     assert.ok(text(page()).includes('主人下周三要去体检。') && text(page()).includes('#2'))
-    await click(page(), '← 返回列表')
+    systemBack(); await settle()
+    assert.equal(!!page(), true, 'Back inside her page keeps it open')
+    assert.equal(!!labelled('这条记忆'), false)
+    assert.equal(!!labelled('记忆列表'), true, 'Back from a memory shows the list')
 
     // The owner writes one; the newest heads the list.
     await click(page(), '最近记住的')
     await click(page(), '写一条')
+    // Main's limit is told while writing; past it nothing is saved until it is short enough.
+    await type('要她记住的事', '她答应过每周五下班前提醒主人整理这一周做完的工作。')
+    assert.ok(text(labelled('写一条记忆')).includes('超出 5 字') && text(labelled('写一条记忆')).includes('请删到 20 字以内'), text(labelled('写一条记忆')))
+    assert.equal(button(labelled('写一条记忆'), '记下').props.disabled, true)
     await type('要她记住的事', '她答应过每周五提醒整理工作。')
+    assert.ok(text(labelled('写一条记忆')).includes('14 / 20'))
     await click(labelled('这条的分类'), '她自己')
     await click(labelled('这条什么时候用'), '每次都带上')
     labelled('写一条记忆').props.onSubmit({ preventDefault() {} }); await settle()
@@ -1637,9 +1656,11 @@ try {
     await click(page(), '整理记忆的模型')
     await click(find(page(), item => item.props.role === 'listbox'), '不整理')
     assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
-    await click(page(), '关闭')
+    // At the top of a section, Back closes her page.
+    systemBack(); await settle()
+    assertSameReference(page(), undefined, 'Back at the top closes her page')
     assistantNative = fallback; modelVisibilityNative = previousModels
-    console.log('PASS: assistant memories: newest and by topic, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, one merged elsewhere refused with a way to the other, written by the owner, the model chosen from Main\'s and cleared')
+    console.log('PASS: assistant memories: newest and by topic, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, one merged elsewhere refused with a way to the other, written by the owner within Main\'s length, the model chosen from Main\'s and cleared, Back one level at a time')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.

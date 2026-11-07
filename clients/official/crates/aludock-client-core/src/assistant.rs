@@ -7,12 +7,15 @@ use uuid::Uuid;
 
 use crate::{DockClient, ModelRef, Result, capabilities::ASSISTANT};
 
-/// Her workspace on Main, the most one document may hold, and how her memories are being made.
+/// Her workspace on Main, the most one document and one memory may hold, and how her memories
+/// are being made.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantInfo {
     pub workspace_path: String,
     pub max_document_bytes: u64,
+    /// In UTF-16 code units, as a JavaScript string counts them.
+    pub max_memory_chars: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction: Option<AssistantExtractionStatus>,
 }
@@ -737,6 +740,7 @@ mod tests {
         let info: AssistantInfo = serde_json::from_value(serde_json::json!({
             "workspacePath": "/home/alu/.aludock/assistant",
             "maxDocumentBytes": 262144,
+            "maxMemoryChars": 1000,
             "extraction": { "state": "paused", "waitingSessions": 2 }
         }))
         .unwrap();
