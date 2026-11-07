@@ -1,4 +1,7 @@
-import type { AssistantEntryKind, AssistantSessionInfo } from './types'
+import type {
+  AssistantEntryKind, AssistantExtractionStatus, AssistantMemory, AssistantMemoryAction, AssistantMemoryAuthor,
+  AssistantMemoryChange, AssistantMemoryState, AssistantMemoryTopic, AssistantSessionInfo,
+} from './types'
 
 /** Who said an entry of her conversation, as the page labels it. */
 export function assistantEntryLabel(kind: AssistantEntryKind, toolName?: string): string {
@@ -32,4 +35,58 @@ export function utf8Bytes(text: string): number {
 export function kilobytes(bytes: number): string {
   const value = bytes / 1024
   return value < 10 ? value.toFixed(1) : String(Math.round(value))
+}
+
+type Known<T> = Exclude<T, 'unrecognized'>
+
+/** What her memories are about, in the order the page offers them. */
+export const memoryTopics: ReadonlyArray<{ topic: Known<AssistantMemoryTopic>; label: string }> = [
+  { topic: 'owner', label: '主人' },
+  { topic: 'preferences', label: '喜好和习惯' },
+  { topic: 'relationship', label: '我们之间' },
+  { topic: 'events', label: '经历过的事' },
+  { topic: 'self', label: '她自己' },
+]
+
+export function memoryTopicLabel(topic: AssistantMemoryTopic): string {
+  return memoryTopics.find((item) => item.topic === topic)?.label ?? '其他'
+}
+
+/** Whether every new session of hers reads it, or only her looking finds it. */
+export function memoryResidentLabel(resident: boolean): string {
+  return resident ? '每次都带上' : '她查的时候才用'
+}
+
+export function memoryStateLabel(state: AssistantMemoryState): string {
+  return state === 'active' ? '在用' : state === 'retired' ? '已作废' : state === 'forgotten' ? '已删除' : '状态未知'
+}
+
+const WROTE: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里记下', dreaming: '整理时记下', assistant: '她在对话里记下', owner: '你写的' }
+const CHANGED: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里改的', dreaming: '整理时改的', assistant: '她在对话里改的', owner: '你改的' }
+
+/** Who made the latest change; a memory nobody changed since it was written says who wrote it. */
+export function memoryAuthorLabel(memory: Pick<AssistantMemory, 'author' | 'revision'>): string {
+  if (memory.author === 'unrecognized') return ''
+  return (memory.revision <= 1 ? WROTE : CHANGED)[memory.author]
+}
+
+const ACTOR: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里', dreaming: '整理时', assistant: '她在对话里', owner: '你' }
+const ACTION: Record<Known<AssistantMemoryAction>, string> = {
+  added: '记下', rewritten: '改写', moved: '换了分类', resident: '改成每次都带上', query_only: '改成她查的时候才用',
+  retired: '作废', forgotten: '删除', restored: '恢复', merged: '合并进另一条',
+}
+
+/** One line of a memory's history: who did what. */
+export function memoryChangeLabel(change: AssistantMemoryChange): string {
+  const actor = change.author === 'unrecognized' ? '' : ACTOR[change.author]
+  return `${actor}${change.action === 'unrecognized' ? '改动' : ACTION[change.action]}`
+}
+
+/** Making memories in the background, in a few words. */
+export function extractionStateLabel(status: AssistantExtractionStatus): string {
+  if (status.state === 'off') return '没在整理：还没选模型'
+  if (status.state === 'working') return '正在整理'
+  if (status.state === 'failed') return '上次没有整理成，等着自动再试'
+  if (status.state === 'idle') return status.waitingSessions > 0 ? '等对话停下一阵再整理' : '都整理完了'
+  return '这个客户端认不出现在的状态，请更新客户端'
 }

@@ -5,9 +5,9 @@
 import type { InvokeArgs } from '@tauri-apps/api/core'
 import type { SessionContext } from '../lib/bridge'
 import type {
-  AssistantContextResult, AssistantDocument, AssistantSearchResult, BootstrapPayload, ClientPreferences, CommandsResult,
-  DesktopShellStatus, HostCatalog, ModelsResult, SavedSessionPage, SessionTree, SettingsResult, ToolsResult, Work,
-  WorkspacePage,
+  AssistantContextResult, AssistantDocument, AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter,
+  AssistantSearchResult, AssistantSettings, BootstrapPayload, ClientPreferences, CommandsResult, DesktopShellStatus, HostCatalog,
+  ModelsResult, SavedSessionPage, SessionTree, SettingsResult, ToolsResult, Work, WorkspacePage,
 } from '../lib/types'
 
 function sampleData() {
@@ -187,11 +187,31 @@ function sampleData() {
     hasBefore: false,
     hasAfter: false,
   }
+  // Her memories, newest first by number, and the model that makes them.
+  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+  const said = (entryId: string, minutes: number) => ({ sessionId: assistantSession.sessionId, entryId, at: ago(minutes) })
+  const memory = (fields: Partial<AssistantMemory> & Pick<AssistantMemory, 'id' | 'topic' | 'text'>, minutes: number): AssistantMemory => ({
+    resident: false, state: 'active', author: 'extraction', createdAt: ago(minutes), updatedAt: ago(minutes), revision: 1, sources: [], sourceCount: 0, ...fields,
+  })
+  const assistantMemories: AssistantMemory[] = [
+    memory({ id: '14', topic: 'preferences', text: '主人不吃香菜，点外卖要避开。', resident: true, sources: [said('a1', 50)], sourceCount: 1 }, 40),
+    memory({ id: '13', topic: 'events', text: '主人今天上午十点有一个评审，出门要带伞。', author: 'assistant', sources: [said('a3', 45)], sourceCount: 1 }, 44),
+    memory({ id: '12', topic: 'owner', text: '主人在做 Alu Dock，一个在自己电脑上托管 Agent 工作的软件。', resident: true, author: 'owner', revision: 3, updatedAt: ago(180), sources: [said('a1', 3000)], sourceCount: 4 }, 3000),
+    memory({ id: '11', topic: 'relationship', text: '主人喜欢她说话简短，先给结论，不要一上来就列一大堆。', resident: true, author: 'dreaming', revision: 2, updatedAt: ago(600), sources: [said('a2', 4000), said('a3', 3900)], sourceCount: 2 }, 4100),
+    memory({ id: '10', topic: 'self', text: '她答应过以后每周五提醒主人整理本周的工作。', sources: [said('a3', 5000)], sourceCount: 1 }, 5000),
+    memory({ id: '9', topic: 'preferences', text: '主人早上习惯先看天气。', state: 'retired', author: 'dreaming', revision: 2, updatedAt: ago(600), supersededBy: '11', sources: [said('a1', 6000)], sourceCount: 1 }, 6000),
+    memory({ id: '8', topic: 'events', text: '主人上个月去体检了。', state: 'forgotten', author: 'owner', revision: 2, updatedAt: ago(900), sources: [said('a2', 7000)], sourceCount: 1 }, 7000),
+  ]
+  const assistantMemoryHistory = new Map<string, AssistantMemoryChange[]>(assistantMemories.map((item) => [item.id, [
+    ...(item.revision > 1 ? [{ at: item.updatedAt, author: item.author, action: item.state === 'retired' ? 'merged' as const : item.state === 'forgotten' ? 'forgotten' as const : 'rewritten' as const, ...(item.state === 'active' ? { text: item.text } : {}) }] : []),
+    { at: item.createdAt, author: item.revision > 1 && item.author !== 'owner' ? 'extraction' as const : item.author, action: 'added' as const, text: item.text },
+  ]]))
+  const assistantSettings: AssistantSettings = { extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' } }
 
   const clientPreferences: ClientPreferences = { revision: 1, windowsAwayDelay: 'one_minute', windowsAwaySupported: true }
   const desktopShell: DesktopShellStatus = { supported: false, hostReady: false, loginStartEnabled: false, autoStartLocalHost: false }
   return { previewCommands, previewModels, previewTools, previewSettings, previewSessions, previewTree, previewBootstrap, previewCatalog, clientPreferences, desktopShell,
-    assistantWorkspace, assistantDocuments, assistantSearch, assistantContext }
+    assistantWorkspace, assistantDocuments, assistantSearch, assistantContext, assistantMemories, assistantMemoryHistory, assistantSettings, ago }
 }
 
 let data: ReturnType<typeof sampleData> | undefined
@@ -248,7 +268,60 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       { hostId: 'preview-main', name: '家里的工作站', kind: 'main', available: true, platform: 'linux', homePath: '/home/alu', workspaceRoots: ['/'] },
       { hostId: 'preview-subhost', name: 'Windows 工作站', kind: 'subhost', available: true, platform: 'windows', homePath: 'C:\\Users\\alu', workspaceRoots: ['C:\\', 'D:\\'] },
     ]
-    case 'assistant_info': await delay(80); return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024 }
+    case 'assistant_info': {
+      await delay(80)
+      const model = preview.assistantSettings.extractionModel
+      return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024,
+        extraction: { state: model ? 'idle' : 'off', ...(model ? { model } : {}), waitingSessions: 2, lastRunAt: preview.ago(25) } }
+    }
+    case 'assistant_memories': {
+      await delay(180)
+      const filter = args.filter as AssistantMemoryFilter
+      const words = (filter.query ?? '').split(/\s+/u).filter(Boolean)
+      const matching = preview.assistantMemories
+        .filter((item) => item.state === (filter.state ?? 'active') && (!filter.topic || item.topic === filter.topic)
+          && words.every((word) => item.text.includes(word)) && (!args.cursor || Number(item.id) < Number(args.cursor)))
+        .sort((left, right) => Number(right.id) - Number(left.id))
+      const page = matching.slice(0, Number(args.limit))
+      return { memories: structuredClone(page), ...(matching.length > page.length ? { nextCursor: page.at(-1)!.id } : {}) }
+    }
+    case 'assistant_memory': {
+      await delay(140)
+      const found = preview.assistantMemories.find((item) => item.id === args.id)
+      if (!found) throw { code: 'assistant_memory_not_found', message: 'No memory has this number.' }
+      return { memory: structuredClone(found), history: structuredClone(preview.assistantMemoryHistory.get(found.id) ?? []) }
+    }
+    case 'add_assistant_memory': {
+      await delay(220)
+      const at = new Date().toISOString()
+      const id = String(Math.max(...preview.assistantMemories.map((item) => Number(item.id))) + 1)
+      const added: AssistantMemory = { id, topic: args.topic as AssistantMemory['topic'], text: String(args.text), resident: args.resident === true, state: 'active', author: 'owner', createdAt: at, updatedAt: at, revision: 1, sources: [], sourceCount: 0 }
+      preview.assistantMemories.push(added)
+      preview.assistantMemoryHistory.set(id, [{ at, author: 'owner', action: 'added', text: added.text }])
+      return structuredClone(added)
+    }
+    case 'update_assistant_memory': {
+      await delay(220)
+      const found = preview.assistantMemories.find((item) => item.id === args.id)
+      if (!found) throw { code: 'assistant_memory_not_found', message: 'No memory has this number.' }
+      if (found.revision !== args.revision) throw { code: 'assistant_memory_changed', message: 'The memory changed since it was read.' }
+      const edit = args.edit as AssistantMemoryEdit
+      const at = new Date().toISOString()
+      const history = preview.assistantMemoryHistory.get(found.id) ?? []
+      if (edit.text !== undefined) history.unshift({ at, author: 'owner', action: 'rewritten', text: edit.text })
+      if (edit.topic !== undefined) history.unshift({ at, author: 'owner', action: 'moved' })
+      if (edit.resident !== undefined) history.unshift({ at, author: 'owner', action: edit.resident ? 'resident' : 'query_only' })
+      if (edit.state !== undefined) history.unshift({ at, author: 'owner', action: edit.state === 'active' ? 'restored' : edit.state })
+      Object.assign(found, edit, { author: 'owner', updatedAt: at, revision: found.revision + 1 }, edit.state === 'active' ? { supersededBy: undefined } : {})
+      preview.assistantMemoryHistory.set(found.id, history)
+      return structuredClone(found)
+    }
+    case 'assistant_settings': await delay(120); return structuredClone(preview.assistantSettings)
+    case 'set_assistant_settings': {
+      await delay(200)
+      preview.assistantSettings = args.extractionModel ? { extractionModel: args.extractionModel as AssistantSettings['extractionModel'] } : {}
+      return structuredClone(preview.assistantSettings)
+    }
     case 'assistant_preview': {
       await delay(200)
       const { persona, notes } = preview.assistantDocuments

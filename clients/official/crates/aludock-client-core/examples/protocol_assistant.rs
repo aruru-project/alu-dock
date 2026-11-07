@@ -3,8 +3,10 @@
 use std::{env, path::PathBuf};
 
 use aludock_client_core::{
-    AssistantDocumentName, AssistantEntryKind, ClientError, ConnectionRouter, DockClient,
-    IdentityStore, LocalDockEndpoint, MachineKind,
+    AssistantDocumentName, AssistantEntryKind, AssistantEntryRef, AssistantExtractionState,
+    AssistantMemoryAction, AssistantMemoryAuthor, AssistantMemoryEdit, AssistantMemoryFilter,
+    AssistantMemoryState, AssistantMemoryTopic, ClientError, ConnectionRouter, DockClient,
+    IdentityStore, LocalDockEndpoint, MachineKind, ModelRef,
 };
 
 #[tokio::main]
@@ -102,12 +104,213 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     assert_eq!(day.hits.len(), 2);
+
+    // Her memories: the owner writes one where it was said; sending it again with the same
+    // operation adds nothing more, as a retry after a lost reply does.
+    let in_use = AssistantMemoryFilter::default();
+    assert!(
+        client
+            .assistant_memories(&in_use, None, 20)
+            .await?
+            .memories
+            .is_empty()
+    );
+    let source = AssistantEntryRef {
+        session_id: hit.session.session_id.clone(),
+        entry_id: hit.entry_id.clone(),
+    };
+    let write = |operation| {
+        client.add_assistant_memory(
+            AssistantMemoryTopic::Owner,
+            "主人的猫叫团子。",
+            false,
+            std::slice::from_ref(&source),
+            Some(operation),
+        )
+    };
+    let added = write("gate-add").await?;
+    assert_eq!(write("gate-add").await?.id, added.id);
+    assert_eq!(
+        (added.author, added.state, added.source_count),
+        (
+            AssistantMemoryAuthor::Owner,
+            AssistantMemoryState::Active,
+            1
+        )
+    );
+    let listed = client.assistant_memories(&in_use, None, 20).await?;
+    assert_eq!(listed.memories.len(), 1);
+
+    // Rewritten and loaded every session; a change from the version before is refused.
+    let edit = |state| AssistantMemoryEdit {
+        state: Some(state),
+        ..AssistantMemoryEdit::default()
+    };
+    let rewritten = client
+        .update_assistant_memory(
+            &added.id,
+            added.revision,
+            &AssistantMemoryEdit {
+                text: Some("主人的猫叫团子，是只橘猫。".into()),
+                resident: Some(true),
+                ..AssistantMemoryEdit::default()
+            },
+            None,
+        )
+        .await?;
+    match client
+        .update_assistant_memory(
+            &added.id,
+            added.revision,
+            &edit(AssistantMemoryState::Retired),
+            None,
+        )
+        .await
+    {
+        Err(ClientError::Host { code, .. }) if code == "assistant_memory_changed" => {}
+        other => {
+            return Err(format!("a change from an old version was not refused: {other:?}").into());
+        }
+    }
+    assert!(
+        client
+            .assistant_preview()
+            .await?
+            .text
+            .contains("主人的猫叫团子，是只橘猫。")
+    );
+
+    // Deleted: she forgets it, and the words it came from are not found or read either.
+    let forgotten = client
+        .update_assistant_memory(
+            &rewritten.id,
+            rewritten.revision,
+            &edit(AssistantMemoryState::Forgotten),
+            None,
+        )
+        .await?;
+    assert!(
+        client
+            .assistant_memories(&in_use, None, 20)
+            .await?
+            .memories
+            .is_empty()
+    );
+    let deleted = AssistantMemoryFilter {
+        state: Some(AssistantMemoryState::Forgotten),
+        ..AssistantMemoryFilter::default()
+    };
+    assert_eq!(
+        client
+            .assistant_memories(&deleted, None, 20)
+            .await?
+            .memories[0]
+            .id,
+        added.id
+    );
+    assert!(!client.assistant_preview().await?.text.contains("橘猫"));
+    let unsaid = client
+        .assistant_search(Some("团子"), None, None, None, 10)
+        .await?;
+    assert!(unsaid.hits.is_empty());
+    let where_said = client
+        .assistant_context(&source.session_id, &source.entry_id, 0, 0)
+        .await?;
+    assert!(!where_said.entries[0].text.contains("团子"));
+
+    // Restored: in use again under its topic, and the words are found again.
+    let restored = client
+        .update_assistant_memory(
+            &forgotten.id,
+            forgotten.revision,
+            &edit(AssistantMemoryState::Active),
+            None,
+        )
+        .await?;
+    let owner = AssistantMemoryFilter {
+        topic: Some(AssistantMemoryTopic::Owner),
+        ..AssistantMemoryFilter::default()
+    };
+    assert_eq!(
+        client.assistant_memories(&owner, None, 20).await?.memories[0].id,
+        added.id
+    );
+    assert_eq!(
+        client
+            .assistant_search(Some("团子"), None, None, None, 10)
+            .await?
+            .hits
+            .len(),
+        1
+    );
+    let detail = client.assistant_memory(&restored.id).await?;
+    let history: Vec<_> = detail.history.iter().map(|change| change.action).collect();
+    assert_eq!(
+        history,
+        [
+            AssistantMemoryAction::Restored,
+            AssistantMemoryAction::Forgotten,
+            AssistantMemoryAction::Resident,
+            AssistantMemoryAction::Rewritten,
+            AssistantMemoryAction::Added,
+        ]
+    );
+
+    // Settings: without a model nothing is made into memories, and the conversation waits.
+    assert!(
+        client
+            .assistant_settings()
+            .await?
+            .extraction_model
+            .is_none()
+    );
+    let off = client
+        .assistant_info()
+        .await?
+        .extraction
+        .ok_or("no status")?;
+    assert_eq!(
+        (off.state, off.waiting_sessions),
+        (AssistantExtractionState::Off, 1)
+    );
+    let model = ModelRef {
+        provider: "gate-provider".into(),
+        id: "gate-model".into(),
+    };
+    let chosen = client.set_assistant_settings(Some(&model), None).await?;
+    assert_eq!(chosen.extraction_model.as_ref(), Some(&model));
+    assert_eq!(
+        client.assistant_settings().await?.extraction_model.as_ref(),
+        Some(&model)
+    );
+    let on = client
+        .assistant_info()
+        .await?
+        .extraction
+        .ok_or("no status")?;
+    assert_ne!(on.state, AssistantExtractionState::Off);
+    assert!(
+        client
+            .set_assistant_settings(None, None)
+            .await?
+            .extraction_model
+            .is_none()
+    );
+    assert!(
+        client
+            .assistant_settings()
+            .await?
+            .extraction_model
+            .is_none()
+    );
     println!(
-        "assistant gate: workspace={} hits={} context={} day={}",
+        "assistant gate: workspace={} hits={} context={} day={} history={} waiting={}",
         info.workspace_path,
         found.hits.len(),
         around.entries.len(),
-        day.hits.len()
+        day.hits.len(),
+        detail.history.len(),
+        off.waiting_sessions
     );
     Ok(())
 }

@@ -1,13 +1,13 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
+import { useConversationReading } from '../lib/assistantReading'
 import {
-  getAssistantContext, getAssistantDocument, getAssistantInfo, getAssistantPreview, searchAssistant, setAssistantDocument,
+  getAssistantDocument, getAssistantInfo, getAssistantPreview, searchAssistant, setAssistantDocument,
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
 import { replyLost } from '../lib/operationBinding'
 import type {
-  AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantEntry, AssistantInfo, AssistantPreview,
-  AssistantSearchHit, ConnectionContext,
+  AssistantDocument, AssistantDocumentName, AssistantInfo, AssistantPreview, AssistantSearchHit, ConnectionContext,
 } from '../lib/types'
 import { userErrorMessage } from '../lib/userError'
 import { useAppStore } from './app'
@@ -29,11 +29,13 @@ interface InfoEntry {
   /** `unavailable`: Main has the assistant, but her service is not running right now. */
   state: 'loading' | 'ready' | 'unsupported' | 'unavailable' | 'failed'
   info?: AssistantInfo
+  /** Read again while the earlier answer stays shown. */
+  refreshing?: boolean
+  /** That read failed; `info` is still the earlier answer. */
+  refreshError?: string
 }
 
 const SEARCH_PAGE = 20
-const CONTEXT_SPAN = 6
-const CONTEXT_MORE = 12
 
 function errorCode(cause: unknown) {
   return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
@@ -54,21 +56,27 @@ export const useAssistantStore = defineStore('assistant', () => {
   const info = computed(() => current.value?.info)
   let infoEpoch = 0
 
+  /** Also how her page reads how her memories are being made, which changes as she works. */
   async function loadInfo() {
     const context = app.connectionContext ? { ...app.connectionContext } : null
     if (!context) return
     const epoch = ++infoEpoch
     const previous = infos.value.get(context.connectionId)
-    infos.value.set(context.connectionId, { state: previous?.state === 'ready' ? 'ready' : 'loading', info: previous?.info })
+    const ready = previous?.state === 'ready'
+    infos.value.set(context.connectionId, { state: ready ? 'ready' : 'loading', info: previous?.info, refreshing: ready })
     try {
       const answer = await currentConnectionCall(app, getAssistantInfo)
       if (epoch === infoEpoch) infos.value.set(context.connectionId, { state: 'ready', info: answer })
     } catch (cause) {
       if (epoch !== infoEpoch) return
       const code = errorCode(cause)
-      // An older Main has no assistant: nothing about her shows. Any other failure is read again later.
-      const state = code === 'capability_missing' ? 'unsupported' : code === 'assistant_unavailable' ? 'unavailable' : 'failed'
-      infos.value.set(context.connectionId, { state, info: state === 'failed' ? previous?.info : undefined })
+      // An older Main has no assistant: nothing about her shows. Any other failure is read again later;
+      // one after she was found keeps her page and entry, with what was read before.
+      const state = code === 'capability_missing' ? 'unsupported' : code === 'assistant_unavailable' ? 'unavailable' : ready ? 'ready' : 'failed'
+      infos.value.set(context.connectionId, {
+        state, info: state === 'failed' || state === 'ready' ? previous?.info : undefined,
+        ...(state === 'ready' ? { refreshError: userErrorMessage(cause, '暂时读不到助手现在的状态。请稍后重试。') } : {}),
+      })
     }
   }
   watch(() => [app.connectionContext?.connectionId, app.connectionContext?.selectionGeneration], () => { void loadInfo() }, { immediate: true })
@@ -274,68 +282,12 @@ export const useAssistantStore = defineStore('assistant', () => {
   }
 
   // ── One conversation around a hit ──
-  const reading = reactive({
-    hit: null as AssistantSearchHit | null,
-    session: null as AssistantContextResult['session'] | null,
-    entries: [] as AssistantEntry[],
-    hasBefore: false,
-    hasAfter: false,
-    loading: false,
-    loadingBefore: false,
-    loadingAfter: false,
-    error: '',
-  })
-  let readingEpoch = 0
-
-  function closeContext() {
-    readingEpoch++
-    Object.assign(reading, { hit: null, session: null, entries: [], hasBefore: false, hasAfter: false, loading: false, loadingBefore: false, loadingAfter: false, error: '' })
-  }
-
-  async function openContext(hit: AssistantSearchHit) {
-    closeContext()
-    const epoch = readingEpoch
-    reading.hit = hit
-    reading.session = hit.session
-    reading.loading = true
-    try {
-      const result = await currentConnectionCall(app, (ctx) => getAssistantContext(hit.session.sessionId, hit.entryId, CONTEXT_SPAN, CONTEXT_SPAN, ctx))
-      if (epoch !== readingEpoch) return
-      Object.assign(reading, { session: result.session, entries: result.entries, hasBefore: result.hasBefore, hasAfter: result.hasAfter })
-    } catch (cause) {
-      if (epoch === readingEpoch) reading.error = userErrorMessage(cause, '暂时读不到这段对话。请重试。')
-    } finally {
-      if (epoch === readingEpoch) reading.loading = false
-    }
-  }
-
-  /** Reads further back (`before`) or on (`after`) from the first or last entry shown. */
-  async function readMore(direction: 'before' | 'after') {
-    const session = reading.session
-    const edge = direction === 'before' ? reading.entries[0] : reading.entries.at(-1)
-    if (!session || !edge || reading.loadingBefore || reading.loadingAfter || reading.loading) return
-    const epoch = readingEpoch
-    const flag = direction === 'before' ? 'loadingBefore' : 'loadingAfter'
-    reading[flag] = true
-    reading.error = ''
-    try {
-      const result = await currentConnectionCall(app, (ctx) => getAssistantContext(session.sessionId, edge.entryId,
-        direction === 'before' ? CONTEXT_MORE : 0, direction === 'after' ? CONTEXT_MORE : 0, ctx))
-      if (epoch !== readingEpoch) return
-      // The answer repeats the edge entry it was read from.
-      const added = result.entries.filter((entry) => entry.entryId !== edge.entryId)
-      if (direction === 'before') {
-        reading.entries = [...added, ...reading.entries]
-        reading.hasBefore = result.hasBefore
-      } else {
-        reading.entries = [...reading.entries, ...added]
-        reading.hasAfter = result.hasAfter
-      }
-    } catch (cause) {
-      if (epoch === readingEpoch) reading.error = userErrorMessage(cause, '没有读到更多对话。请重试。')
-    } finally {
-      if (epoch === readingEpoch) reading[flag] = false
-    }
+  const hitReading = useConversationReading(app, { failure: '暂时读不到这段对话。请重试。' })
+  const reading = hitReading.state
+  const closeContext = hitReading.close
+  const readMore = hitReading.readMore
+  function openContext(hit: AssistantSearchHit) {
+    return hitReading.open({ sessionId: hit.session.sessionId, entryId: hit.entryId, session: hit.session })
   }
 
   // A search or open conversation belongs to the connection it was read from.

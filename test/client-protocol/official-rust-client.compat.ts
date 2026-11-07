@@ -65,8 +65,10 @@ test("official Rust client pages through saved sessions, newest conversation fir
 });
 
 // Card #295: the official client reads and edits the assistant on a production Main, whose own
-// assistant service keeps her; her recorded conversation is seeded as the service stores it.
-test("official Rust client reads and edits the assistant on Main and finds her conversations", { timeout: 60_000 }, async (context) => {
+// assistant service keeps her; her recorded conversation is seeded as the service stores it. Her
+// memories are written, changed, forgotten and restored by the owner there, and the model that
+// makes them is chosen and cleared; no model is called.
+test("official Rust client reads and edits the assistant on Main, finds her conversations and manages her memories", { timeout: 60_000 }, async (context) => {
   assert.equal(process.platform, "linux", "test:client-protocol requires Linux isolated Unix-socket process semantics");
   const root = await mkdtemp(join(tmpdir(), "alu-dock-client-assistant-"));
   const home = join(root, "home");
@@ -95,7 +97,7 @@ test("official Rust client reads and edits the assistant on Main and finds her c
     const gate = join(targetDirectory, "debug", "examples", "protocol_assistant");
     const result = await run(gate, [socket, join(root, "client-identity"), "gate-session"], process.env, context.signal);
     assert.equal(result.code, 0, `official Rust client failed:\n${result.stderr}`);
-    assert.match(result.stdout, /assistant gate: workspace=\S+ hits=1 context=2 day=2/u);
+    assert.match(result.stdout, /assistant gate: workspace=\S+ hits=1 context=2 day=2 history=5 waiting=1/u);
   } finally {
     await stopChild(host);
     await rm(root, { recursive: true, force: true });

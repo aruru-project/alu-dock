@@ -7,8 +7,15 @@ import type {
   AssistantDocument,
   AssistantDocumentName,
   AssistantInfo,
+  AssistantMemory,
+  AssistantMemoryDetail,
+  AssistantMemoryEdit,
+  AssistantMemoryFilter,
+  AssistantMemoryList,
+  AssistantMemoryTopic,
   AssistantPreview,
   AssistantSearchResult,
+  AssistantSettings,
   BootstrapPayload,
   CommandCompletionsResult,
   CommandContentResult,
@@ -666,6 +673,34 @@ export async function searchAssistant(query: string | undefined, range: { from?:
 
 export async function getAssistantContext(sessionId: string, entryId: string, before: number, after: number, context: ConnectionContext): Promise<AssistantContextResult> {
   return native<AssistantContextResult>('assistant_context', { ...context, sessionId, entryId, before, after })
+}
+
+/** Her memories, newest first. */
+export async function listAssistantMemories(filter: AssistantMemoryFilter, cursor: string | undefined, limit: number, context: ConnectionContext): Promise<AssistantMemoryList> {
+  return native<AssistantMemoryList>('assistant_memories', { ...context, filter, cursor: cursor ?? null, limit })
+}
+
+export async function getAssistantMemory(id: string, context: ConnectionContext): Promise<AssistantMemoryDetail> {
+  return native<AssistantMemoryDetail>('assistant_memory', { ...context, id })
+}
+
+/** The same `operationId` adds it at most once, so a retry after a lost reply names it again. */
+export async function addAssistantMemory(memory: { topic: AssistantMemoryTopic; text: string; resident: boolean }, operationId: string, context: ConnectionContext): Promise<AssistantMemory> {
+  return native<AssistantMemory>('add_assistant_memory', { ...context, ...memory, operationId })
+}
+
+/** The Host refuses with `assistant_memory_changed`, changing nothing, when `revision` is no longer current. */
+export async function updateAssistantMemory(id: string, revision: number, edit: AssistantMemoryEdit, operationId: string, context: ConnectionContext): Promise<AssistantMemory> {
+  return native<AssistantMemory>('update_assistant_memory', { ...context, id, revision, edit, operationId })
+}
+
+export async function getAssistantSettings(context: ConnectionContext): Promise<AssistantSettings> {
+  return native<AssistantSettings>('assistant_settings', { ...context })
+}
+
+/** `null` stops making memories; those already made stay. */
+export async function setAssistantSettings(extractionModel: ModelRef | null, operationId: string, context: ConnectionContext): Promise<AssistantSettings> {
+  return native<AssistantSettings>('set_assistant_settings', { ...context, extractionModel, operationId })
 }
 
 export interface CreateWorkContinuation {

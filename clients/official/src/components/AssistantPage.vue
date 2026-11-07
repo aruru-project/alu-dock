@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { BookUser, Eye, NotebookPen, RefreshCw, Search, Sparkles, X } from '@lucide/vue'
+import { BookUser, Brain, Eye, NotebookPen, RefreshCw, Search, Settings2, Sparkles, X } from '@lucide/vue'
 import { assistantEntryLabel, assistantSessionLabel, assistantTime } from '../lib/assistant'
 import type { AssistantSearchHit } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
+import { useAssistantMemoryStore } from '../stores/assistant-memory'
 import { useSurfacesStore, type AssistantSection } from '../stores/surfaces'
+import AssistantConversation from './AssistantConversation.vue'
 import AssistantDocumentEditor from './AssistantDocumentEditor.vue'
+import AssistantMemories from './AssistantMemories.vue'
+import AssistantSettings from './AssistantSettings.vue'
 
 // The assistant kept on Main (card #295). Her persona can be the user's own assistant, so the page says 「助手」, never a name.
 const emit = defineEmits<{ close: [] }>()
 const app = useAppStore()
 const assistant = useAssistantStore()
+const memory = useAssistantMemoryStore()
 const { search, reading } = assistant
 const { preview, info, canSearch } = storeToRefs(assistant)
 const { assistantSection: section } = storeToRefs(useSurfacesStore())
@@ -21,10 +26,13 @@ const sections: Array<{ id: AssistantSection; label: string; icon: typeof Eye }>
   { id: 'preview', label: '她会读到什么', icon: Eye },
   { id: 'persona', label: '人设', icon: BookUser },
   { id: 'notes', label: '手写设定', icon: NotebookPen },
+  { id: 'memories', label: '记忆', icon: Brain },
   { id: 'search', label: '搜索对话', icon: Search },
+  { id: 'settings', label: '设置', icon: Settings2 },
 ]
 
 // Each section reads the Host's current version the first time it is shown while the page is open.
+// How her memories are being made changes as she works, so both of their sections read it again.
 const readThisOpen = ref(new Set<AssistantSection>())
 watch([section, () => app.connectionContext?.connectionId, () => app.connectionContext?.selectionGeneration], ([current], previous) => {
   if (previous && (previous[1] !== app.connectionContext?.connectionId || previous[2] !== app.connectionContext?.selectionGeneration)) readThisOpen.value = new Set()
@@ -32,26 +40,16 @@ watch([section, () => app.connectionContext?.connectionId, () => app.connectionC
   readThisOpen.value.add(current)
   if (current === 'preview') void assistant.loadPreview()
   else if (current === 'persona' || current === 'notes') void assistant.loadDocument(current)
+  else if (current === 'memories') {
+    void memory.loadMemories()
+    if (memory.detail.id) void memory.readMemory(memory.detail.id)
+    void assistant.loadInfo()
+  } else if (current === 'settings') {
+    void memory.loadSettings()
+    void memory.loadModels()
+    void assistant.loadInfo()
+  }
 }, { immediate: true })
-
-// A conversation opens on the entry that was found, which may sit below earlier entries.
-const hitElement: { current: HTMLElement | null } = { current: null }
-watch(() => reading.loading, async (loading, wasLoading) => {
-  if (loading || !wasLoading) return
-  await nextTick()
-  hitElement.current?.scrollIntoView?.({ block: 'center' })
-})
-
-const openWorkId = computed(() => {
-  const workId = reading.session?.workId
-  return workId && app.works.some((work) => work.id === workId) ? workId : ''
-})
-
-function openWork() {
-  if (!openWorkId.value) return
-  app.selectWork(openWorkId.value)
-  emit('close')
-}
 
 function hitPlace(hit: AssistantSearchHit) {
   return [assistantSessionLabel(hit.session), hit.session.machine].filter(Boolean).join(' · ')
@@ -64,7 +62,7 @@ function hitPlace(hit: AssistantSearchHit) {
       <span class="assistant-mark"><Sparkles :size="20" /></span>
       <div>
         <h2 id="assistant-title">助手</h2>
-        <p>她的人设、你写的设定和她经历过的对话，都保存在 Main 上</p>
+        <p>她的人设、你写的设定、她记住的事和经历过的对话，都保存在 Main 上</p>
       </div>
     </div>
     <button class="assistant-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
@@ -74,7 +72,7 @@ function hitPlace(hit: AssistantSearchHit) {
     <nav class="assistant-nav" aria-label="助手分区">
       <button v-for="item in sections" :key="item.id" type="button" class="assistant-nav-item" :class="{ 'is-active': section === item.id }" :aria-current="section === item.id ? 'page' : undefined" @click="section = item.id">
         <component :is="item.icon" :size="16" /><span>{{ item.label }}</span>
-        <span v-if="(item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null" class="assistant-nav-dot" aria-label="有未保存的改动" />
+        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts)" class="assistant-nav-dot" aria-label="有未保存的改动" />
       </button>
     </nav>
 
@@ -101,6 +99,22 @@ function hitPlace(hit: AssistantSearchHit) {
       <AssistantDocumentEditor :document="section" />
     </main>
 
+    <main v-else-if="section === 'memories'" class="assistant-content">
+      <div v-if="!memory.detail.id" class="assistant-intro">
+        <h3>记忆</h3>
+        <p>她从对话里记住的事。「每次都带上」的会写进每个新开的助手会话，其余的她查的时候才用。你在这里改过的，后台整理不会再动。</p>
+      </div>
+      <AssistantMemories @settings="section = 'settings'" />
+    </main>
+
+    <main v-else-if="section === 'settings'" class="assistant-content">
+      <div class="assistant-intro">
+        <h3>设置</h3>
+        <p>这些设置保存在 Main 上，哪台设备改的都是同一份。</p>
+      </div>
+      <AssistantSettings />
+    </main>
+
     <main v-else class="assistant-content">
       <div class="assistant-intro">
         <h3>搜索对话</h3>
@@ -114,32 +128,7 @@ function hitPlace(hit: AssistantSearchHit) {
       </form>
       <div v-if="search.error" class="assistant-error" role="alert"><span>{{ search.error }}</span></div>
 
-      <section v-if="reading.hit" class="assistant-reading" aria-label="对话前后文">
-        <div class="assistant-reading-head">
-          <button type="button" class="button secondary" @click="assistant.closeContext()">← 返回结果</button>
-          <div v-if="reading.session" class="assistant-reading-place">
-            <strong>{{ assistantSessionLabel(reading.session) }}</strong>
-            <span>{{ [reading.session.machine, reading.session.cwd].filter(Boolean).join(' · ') }}</span>
-            <span>{{ assistantTime(reading.session.startedAt) }} – {{ assistantTime(reading.session.lastAt) }}</span>
-          </div>
-          <button v-if="openWorkId" type="button" class="button primary" @click="openWork">打开这个 Work</button>
-        </div>
-        <div v-if="reading.error" class="assistant-error" role="alert"><span>{{ reading.error }}</span></div>
-        <div v-if="reading.loading" class="assistant-status" role="status">正在读取这段对话…</div>
-        <div v-else class="assistant-entries">
-          <button v-if="reading.hasBefore" type="button" class="assistant-more" :disabled="reading.loadingBefore" @click="assistant.readMore('before')">{{ reading.loadingBefore ? '正在读取…' : '往前再读' }}</button>
-          <article v-for="entry in reading.entries" :key="entry.entryId" :ref="(element) => { if (entry.entryId === reading.hit?.entryId) hitElement.current = element as HTMLElement | null }" class="assistant-entry" :class="[`is-${entry.kind}`, { 'is-hit': entry.entryId === reading.hit.entryId }]">
-            <header><strong>{{ assistantEntryLabel(entry.kind, entry.toolName) }}</strong><time>{{ assistantTime(entry.at) }}</time></header>
-            <div v-if="entry.text" class="assistant-entry-text">{{ entry.text }}</div>
-            <details v-for="(call, index) in entry.toolCalls ?? []" :key="index" class="assistant-entry-call">
-              <summary>调用 {{ call.name }}</summary>
-              <pre>{{ call.arguments }}</pre>
-            </details>
-            <p v-if="entry.truncated" class="assistant-entry-cut">这一条太长，这里只显示前一部分。</p>
-          </article>
-          <button v-if="reading.hasAfter" type="button" class="assistant-more" :disabled="reading.loadingAfter" @click="assistant.readMore('after')">{{ reading.loadingAfter ? '正在读取…' : '往后再读' }}</button>
-        </div>
-      </section>
+      <AssistantConversation v-if="reading.place" :reading="reading" back-label="← 返回结果" @back="assistant.closeContext()" @more="assistant.readMore" />
 
       <template v-else-if="search.shown">
         <div class="assistant-results" role="list" aria-label="搜索结果">
@@ -191,25 +180,10 @@ function hitPlace(hit: AssistantSearchHit) {
 .assistant-hit:hover { border-color: var(--alu-border-light); background: var(--alu-hover); }
 .assistant-hit-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
 .assistant-hit-snippet { color: var(--alu-text); font: var(--alu-meta-size)/1.6 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
-.assistant-empty { margin: 8px 2px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
-.assistant-more { align-self: center; padding: 6px 12px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-accent); font-size: var(--alu-meta-size); }
-.assistant-more:hover:not(:disabled) { background: var(--alu-hover); }
-.assistant-more:disabled { cursor: wait; opacity: .6; }
-.assistant-reading { display: flex; min-height: 0; flex-direction: column; gap: 10px; }
-.assistant-reading-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.assistant-reading-place { display: grid; min-width: 0; flex: 1 1 200px; gap: 2px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
-.assistant-reading-place strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); text-overflow: ellipsis; white-space: nowrap; }
-.assistant-entries { display: flex; flex-direction: column; gap: 8px; }
-.assistant-entry { padding: 9px 12px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); }
-.assistant-entry.is-hit { border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); }
-.assistant-entry header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
-.assistant-entry header strong { color: var(--alu-text-dim); }
-.assistant-entry header time { margin: 0; }
-.assistant-entry-text { color: var(--alu-text); font: var(--alu-meta-size)/1.7 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
-.assistant-entry-call { margin-top: 6px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
-.assistant-entry-call summary { cursor: pointer; }
-.assistant-entry-call pre { margin: 4px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.assistant-entry-cut { margin: 6px 0 0; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.assistant-content :deep(.assistant-empty) { margin: 8px 2px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
+.assistant-content :deep(.assistant-more) { align-self: center; padding: 6px 12px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-accent); font-size: var(--alu-meta-size); }
+.assistant-content :deep(.assistant-more:hover:not(:disabled)) { background: var(--alu-hover); }
+.assistant-content :deep(.assistant-more:disabled) { cursor: wait; opacity: .6; }
 .assistant-footnote { margin: 0; padding: 8px 18px; overflow: hidden; border-top: 1px solid var(--alu-border); background: var(--alu-bg-raised); color: var(--alu-text-faint); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
 .spinning { animation: assistantSpin 1s linear infinite; }
 @keyframes assistantSpin { to { transform: rotate(360deg); } }

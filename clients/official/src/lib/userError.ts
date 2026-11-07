@@ -68,6 +68,8 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'assistant_document_changed') return '这份内容在别处被改过，这次没有保存。你的草稿还在，可以先读取最新内容再决定。'
     if (code === 'assistant_document_too_large') return '内容超过了一份的长度上限，没有保存。草稿还在，删短一些再存。'
     if (code === 'assistant_entry_not_found') return '这段对话已经找不到了。请重新搜索。'
+    if (code === 'assistant_memory_changed') return '这条记忆刚被改过（可能是她自己或后台整理改的），这次没有改动。请看过现在的内容再改。'
+    if (code === 'assistant_memory_not_found') return '没有找到这条记忆。请回到列表刷新后再试。'
     if (code === 'host_unreachable') return '无法连接这台 AluDock。请检查电脑状态、网络和保存的地址，然后重试。'
     if ('message' in cause && (!code || SAFE_ERROR_CODES.has(code))) {
       const message = String(cause.message || '').trim()

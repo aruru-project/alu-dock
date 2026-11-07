@@ -7,8 +7,10 @@ use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
     AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantInfo,
-    AssistantPreview, AssistantSearchResult, AttachmentState, BashRunResult, ChildModelsResult,
-    ChildModelsSetResult, DeliveryMode, ExtensionControlState, InstanceSnapshot, Machine, ModelRef,
+    AssistantMemory, AssistantMemoryDetail, AssistantMemoryEdit, AssistantMemoryFilter,
+    AssistantMemoryList, AssistantMemoryTopic, AssistantPreview, AssistantSearchResult,
+    AssistantSettings, AttachmentState, BashRunResult, ChildModelsResult, ChildModelsSetResult,
+    DeliveryMode, ExtensionControlState, InstanceSnapshot, Machine, ModelRef,
     ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult, RestoredImageState,
     SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor,
     SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor, WorkspacePage,
@@ -672,6 +674,102 @@ pub(crate) async fn assistant_context(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .assistant_context(&session_id, &entry_id, before, after)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_memories(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    filter: AssistantMemoryFilter,
+    cursor: Option<String>,
+    limit: u32,
+) -> Result<AssistantMemoryList, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_memories(&filter, cursor.as_deref(), limit)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_memory(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+) -> Result<AssistantMemoryDetail, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_memory(&id)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// The page names the operation: after a lost reply, the same request sent again names it
+/// too, so the Host adds or changes the memory at most once. Like the document save, these
+/// do not join the Work operation results.
+#[tauri::command]
+pub(crate) async fn add_assistant_memory(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    topic: AssistantMemoryTopic,
+    text: String,
+    resident: bool,
+    operation_id: String,
+) -> Result<AssistantMemory, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .add_assistant_memory(topic, &text, resident, &[], Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn update_assistant_memory(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+    revision: u64,
+    edit: AssistantMemoryEdit,
+    operation_id: String,
+) -> Result<AssistantMemory, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .update_assistant_memory(&id, revision, &edit, Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_settings(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+) -> Result<AssistantSettings, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_settings()
+        .await
+        .map_err(CommandError::from)
+}
+
+/// `None` stops making memories. The operation is named by the page, as for memory changes.
+#[tauri::command]
+pub(crate) async fn set_assistant_settings(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    extraction_model: Option<ModelRef>,
+    operation_id: String,
+) -> Result<AssistantSettings, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_assistant_settings(extraction_model.as_ref(), Some(&operation_id))
         .await
         .map_err(CommandError::from)
 }

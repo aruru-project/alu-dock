@@ -735,7 +735,55 @@ export interface SystemCatalogResult {
 export interface SystemDefaultSetResult { selection: SystemCandidate }
 
 /** The personal assistant kept on Main (card #295). */
-export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number }
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; extraction?: AssistantExtractionStatus }
+/**
+ * Making memories from her conversations in the background: `off` without a model; `failed` when
+ * the last try did not work, tried again at `retryAt`. `lastError` is written for the owner; with
+ * `idle` it tells of a part that was passed over.
+ */
+export interface AssistantExtractionStatus {
+  state: 'off' | 'idle' | 'working' | 'failed' | Unrecognized
+  model?: ModelRef
+  /** Conversations with something said since they were last read for memories. */
+  waitingSessions: number
+  lastRunAt?: string
+  lastError?: string
+  retryAt?: string
+}
+/** The model that makes her memories; without one nothing is made. */
+export interface AssistantSettings { extractionModel?: ModelRef }
+export type AssistantMemoryTopic = 'owner' | 'preferences' | 'relationship' | 'events' | 'self' | Unrecognized
+/** In use; set aside as no longer true (kept for the record); or forgotten at the owner's word. */
+export type AssistantMemoryState = 'active' | 'retired' | 'forgotten' | Unrecognized
+/** Who made the latest change; the client's changes are the owner's. */
+export type AssistantMemoryAuthor = 'extraction' | 'dreaming' | 'assistant' | 'owner' | Unrecognized
+export type AssistantMemoryAction = 'added' | 'rewritten' | 'moved' | 'resident' | 'query_only' | 'retired' | 'forgotten' | 'restored' | 'merged' | Unrecognized
+export interface AssistantMemorySource { sessionId: string; entryId: string; at: string }
+export interface AssistantMemory {
+  id: string
+  topic: AssistantMemoryTopic
+  text: string
+  /** Loaded into every new assistant session; otherwise found only when she looks. */
+  resident: boolean
+  state: AssistantMemoryState
+  author: AssistantMemoryAuthor
+  createdAt: string
+  updatedAt: string
+  /** A change names the revision it was made from. */
+  revision: number
+  /** The earliest places it was said, of `sourceCount`. */
+  sources: AssistantMemorySource[]
+  sourceCount: number
+  /** The memory it was merged into. */
+  supersededBy?: string
+}
+export interface AssistantMemoryList { memories: AssistantMemory[]; nextCursor?: string }
+export interface AssistantMemoryChange { at: string; author: AssistantMemoryAuthor; action: AssistantMemoryAction; text?: string }
+export interface AssistantMemoryDetail { memory: AssistantMemory; history: AssistantMemoryChange[] }
+/** Which memories a list shows, newest first; without `state`, those in use. */
+export interface AssistantMemoryFilter { query?: string; topic?: AssistantMemoryTopic; state?: AssistantMemoryState; resident?: boolean; author?: AssistantMemoryAuthor }
+/** What one change sets; the rest stays as it is. */
+export interface AssistantMemoryEdit { text?: string; topic?: AssistantMemoryTopic; resident?: boolean; state?: AssistantMemoryState }
 /** What a new assistant session loads now, and when it was put together. */
 export interface AssistantPreview { text: string; loadedAt: string }
 /** `persona`: who she is; `notes`: what the owner told her by hand. */
