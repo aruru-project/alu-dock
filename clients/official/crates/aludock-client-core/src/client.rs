@@ -69,7 +69,7 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        self.request_with_host_epoch_fenced(
+        self.request_with_hello(
             request_type,
             params,
             required_capabilities,
@@ -91,7 +91,7 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        self.request_with_host_epoch_fenced(
+        self.request_with_hello(
             request_type,
             params,
             required_capabilities,
@@ -99,6 +99,7 @@ impl DockClient {
             None,
         )
         .await
+        .map(|(result, hello)| (result, hello.host.host_epoch))
     }
 
     pub(crate) async fn request_on_host_epoch<P, R>(
@@ -113,7 +114,7 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        self.request_with_host_epoch_fenced(
+        self.request_with_hello(
             request_type,
             params,
             required_capabilities,
@@ -124,14 +125,16 @@ impl DockClient {
         .map(|(result, _)| result)
     }
 
-    async fn request_with_host_epoch_fenced<P, R>(
+    /// The answer with the hello of the connection that carried it: which Host
+    /// answered, and every capability that Host offers.
+    pub(crate) async fn request_with_hello<P, R>(
         &self,
         request_type: &'static str,
         params: &P,
         required_capabilities: &[&str],
         operation_id: Option<&str>,
         expected_host_epoch: Option<&str>,
-    ) -> Result<(R, String)>
+    ) -> Result<(R, HelloAck)>
     where
         P: Serialize,
         R: DeserializeOwned,
@@ -205,7 +208,7 @@ impl DockClient {
             return Err(ambiguous_if_mutation(error, operation_id));
         }
         let result = response_result(response, request_type, operation_id)?;
-        Ok((result, hello.host.host_epoch))
+        Ok((result, hello))
     }
 
     pub(crate) async fn open_instance_records<P: Serialize, R: DeserializeOwned>(

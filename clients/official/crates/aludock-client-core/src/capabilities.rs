@@ -203,3 +203,19 @@ mod tests {
 pub(crate) const SYSTEM_TEMPLATES: &[&str] = &[CORE_V2, "system.templates.v1"];
 pub(crate) const MODEL_VISIBILITY: &[&str] = &[CORE_V2, "model.visibility.v1"];
 pub(crate) const CHILD_MODELS: &[&str] = &[CORE_V2, "model.children.v1"];
+/// The Host takes `assistant` on `instance.create` and `system.default.set` (card #295).
+pub(crate) const INSTANCE_ASSISTANT_V1: &str = "instance.assistant.v1";
+/// The assistant's persona, notes, preview and conversations; only Main offers them.
+pub(crate) const ASSISTANT: &[&str] = &[CORE_V2, "assistant.v1"];
+
+/// A request that says whether the new Work opens as the assistant needs a Host that takes the choice.
+pub(crate) fn with_assistant_choice(
+    capabilities: &[&'static str],
+    assistant: Option<bool>,
+) -> Vec<&'static str> {
+    let mut required = capabilities.to_vec();
+    if assistant.is_some() {
+        required.push(INSTANCE_ASSISTANT_V1);
+    }
+    required
+}

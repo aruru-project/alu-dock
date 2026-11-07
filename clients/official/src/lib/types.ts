@@ -36,6 +36,8 @@ export interface EventCursor { hostEpoch: string; instanceId: string; runtimeGen
 
 export interface Work {
   parentId?: string
+  /** Opened as the personal assistant: it loads her persona and memory. Fixed at creation. */
+  assistant?: true
   id: string
   hostId?: string
   key?: string
@@ -725,8 +727,46 @@ export interface SystemCatalogResult {
   warnings: string[]
   defaultSelection?: SystemCandidate
   nextCursor?: SystemCatalogCursor
+  /** This directory opens new Works as the assistant unless the creator says otherwise. */
+  defaultAssistant?: true
+  /** The connected Host takes the "open as the assistant" choice (its hello, read by the Rust core). */
+  assistantChoice: boolean
 }
 export interface SystemDefaultSetResult { selection: SystemCandidate }
+
+/** The personal assistant kept on Main (card #295). */
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number }
+/** What a new assistant session loads now, and when it was put together. */
+export interface AssistantPreview { text: string; loadedAt: string }
+/** `persona`: who she is; `notes`: what the owner told her by hand. */
+export type AssistantDocumentName = 'persona' | 'notes'
+export interface AssistantDocument { document: AssistantDocumentName; text: string; revision: string }
+export type AssistantEntryKind = 'user' | 'assistant' | 'tool_result' | 'bash' | 'summary' | 'notice' | Unrecognized
+export interface AssistantSessionInfo {
+  sessionId: string
+  cwd?: string
+  name?: string
+  /** The Work's ID when this was recorded; that Work may have stopped since. */
+  workId?: string
+  /** The machine's name. */
+  machine?: string
+  startedAt: string
+  lastAt: string
+}
+export interface AssistantSearchHit { session: AssistantSessionInfo; entryId: string; at: string; kind: AssistantEntryKind; snippet: string }
+export interface AssistantSearchResult { hits: AssistantSearchHit[]; nextCursor?: string }
+export interface AssistantEntry {
+  entryId: string
+  parentId?: string
+  at: string
+  kind: AssistantEntryKind
+  text: string
+  toolName?: string
+  toolCalls?: Array<{ name: string; arguments: string }>
+  /** The text was cut; the whole of it stays in the Agent's own session file. */
+  truncated?: true
+}
+export interface AssistantContextResult { session: AssistantSessionInfo; entries: AssistantEntry[]; hasBefore: boolean; hasAfter: boolean }
 
 /** Native default instructions; excludes this call's conversation and extension payload. */
 export interface CompactionPromptTemplatesResult {

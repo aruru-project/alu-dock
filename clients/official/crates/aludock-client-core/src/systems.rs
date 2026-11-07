@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::{DockClient, ResourceContentResult, Result, capabilities::SYSTEM_TEMPLATES};
+use crate::{
+    DockClient, ResourceContentResult, Result,
+    capabilities::{INSTANCE_ASSISTANT_V1, SYSTEM_TEMPLATES, with_assistant_choice},
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -45,6 +48,13 @@ pub struct SystemCatalogResult {
     pub default_selection: Option<SystemCandidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<SystemCatalogCursor>,
+    /// This directory opens new Works as the assistant unless the creator says otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_assistant: bool,
+    /// The connected Host takes the "open as the assistant" choice. Read from the hello of
+    /// the connection that carried this answer, never from the answer itself.
+    #[serde(skip_deserializing)]
+    pub assistant_choice: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -83,6 +93,8 @@ struct DefaultParams<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     host_id: Option<&'a str>,
     operation_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assistant: Option<bool>,
 }
 
 impl DockClient {
@@ -92,17 +104,24 @@ impl DockClient {
         host_id: Option<&str>,
         cursor: Option<&SystemCatalogCursor>,
     ) -> Result<SystemCatalogResult> {
-        self.request(
-            "system.catalog",
-            &CatalogParams {
-                cwd,
-                host_id,
-                cursor,
-            },
-            SYSTEM_TEMPLATES,
-            None,
-        )
-        .await
+        let (mut page, hello): (SystemCatalogResult, _) = self
+            .request_with_hello(
+                "system.catalog",
+                &CatalogParams {
+                    cwd,
+                    host_id,
+                    cursor,
+                },
+                SYSTEM_TEMPLATES,
+                None,
+                None,
+            )
+            .await?;
+        page.assistant_choice = hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == INSTANCE_ASSISTANT_V1);
+        Ok(page)
     }
 
     pub async fn system_content_all(
@@ -167,12 +186,15 @@ impl DockClient {
         .await
     }
 
+    /// `assistant` also remembers (true) or forgets (false) opening new Works here as the
+    /// assistant; `None` leaves the request as an older Host knows it.
     pub async fn set_system_default(
         &self,
         cwd: &str,
         id: &str,
         host_id: Option<&str>,
         operation_id: Option<&str>,
+        assistant: Option<bool>,
     ) -> Result<SystemDefaultSetResult> {
         let generated = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated);
@@ -183,10 +205,73 @@ impl DockClient {
                 id,
                 host_id,
                 operation_id,
+                assistant,
             },
-            SYSTEM_TEMPLATES,
+            &with_assistant_choice(SYSTEM_TEMPLATES, assistant),
             Some(operation_id),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_directory_that_opens_as_the_assistant_says_so_and_saving_can_remember_it() {
+        let page: SystemCatalogResult = serde_json::from_value(serde_json::json!({
+            "cwd": "/home/alu/.aludock/assistant",
+            "candidates": [],
+            "total": 0,
+            "revision": "r1",
+            "warnings": [],
+            "defaultAssistant": true,
+            "assistantChoice": true
+        }))
+        .unwrap();
+        assert!(page.default_assistant);
+        assert!(
+            !page.assistant_choice,
+            "whether the Host takes the choice comes from its hello, not from the answer"
+        );
+        let older: SystemCatalogResult = serde_json::from_value(serde_json::json!({
+            "cwd": "/project", "candidates": [], "total": 0, "revision": "r1", "warnings": []
+        }))
+        .unwrap();
+        assert!(!older.default_assistant);
+        let shown = serde_json::to_value(&older).unwrap();
+        assert!(shown.get("defaultAssistant").is_none());
+        assert_eq!(shown["assistantChoice"], false);
+
+        let remember = serde_json::to_value(DefaultParams {
+            cwd: "/project",
+            id: "template",
+            host_id: None,
+            operation_id: "save-1",
+            assistant: Some(false),
+        })
+        .unwrap();
+        assert_eq!(
+            remember,
+            serde_json::json!({ "cwd": "/project", "id": "template", "operationId": "save-1", "assistant": false })
+        );
+        let older_save = serde_json::to_value(DefaultParams {
+            cwd: "/project",
+            id: "template",
+            host_id: None,
+            operation_id: "save-1",
+            assistant: None,
+        })
+        .unwrap();
+        assert!(older_save.get("assistant").is_none());
+        assert_eq!(
+            with_assistant_choice(SYSTEM_TEMPLATES, Some(false)),
+            ["core.v2", "system.templates.v1", "instance.assistant.v1"]
+        );
+        assert_eq!(
+            with_assistant_choice(SYSTEM_TEMPLATES, None),
+            ["core.v2", "system.templates.v1"]
+        );
     }
 }

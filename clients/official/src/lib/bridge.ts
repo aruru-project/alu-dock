@@ -3,6 +3,12 @@ import { convertFileSrc, invoke, type InvokeArgs, type InvokeOptions } from '@ta
 import { previewNative } from '../preview/native'
 import type { ClientTheme } from './theme'
 import type {
+  AssistantContextResult,
+  AssistantDocument,
+  AssistantDocumentName,
+  AssistantInfo,
+  AssistantPreview,
+  AssistantSearchResult,
   BootstrapPayload,
   CommandCompletionsResult,
   CommandContentResult,
@@ -630,8 +636,35 @@ export async function systemContent(cwd: string, id: string, context: Connection
   return native<ResourceContentResult>('system_content', { ...context, cwd, id, targetHostId, offset: offset ?? null, revision: revision ?? null })
 }
 
-export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string): Promise<SystemDefaultSetResult> {
-  return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId })
+/** `assistant` also remembers (true) or forgets (false) opening new Works here as the assistant; omit it for a Host without that choice. */
+export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
+  return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId, assistant: assistant ?? null })
+}
+
+/** The assistant lives on Main, so the connected Host answers; there is no machine to choose. */
+export async function getAssistantInfo(context: ConnectionContext): Promise<AssistantInfo> {
+  return native<AssistantInfo>('assistant_info', { ...context })
+}
+
+export async function getAssistantPreview(context: ConnectionContext): Promise<AssistantPreview> {
+  return native<AssistantPreview>('assistant_preview', { ...context })
+}
+
+export async function getAssistantDocument(document: AssistantDocumentName, context: ConnectionContext): Promise<AssistantDocument> {
+  return native<AssistantDocument>('assistant_document', { ...context, document })
+}
+
+/** Replaces the whole document; the Host refuses when `baseRevision` is no longer current. */
+export async function setAssistantDocument(document: AssistantDocumentName, text: string, baseRevision: string, context: ConnectionContext): Promise<AssistantDocument> {
+  return native<AssistantDocument>('set_assistant_document', { ...context, document, text, baseRevision })
+}
+
+export async function searchAssistant(query: string, range: { from?: string; to?: string }, cursor: string | undefined, limit: number, context: ConnectionContext): Promise<AssistantSearchResult> {
+  return native<AssistantSearchResult>('assistant_search', { ...context, query, from: range.from ?? null, to: range.to ?? null, cursor: cursor ?? null, limit })
+}
+
+export async function getAssistantContext(sessionId: string, entryId: string, before: number, after: number, context: ConnectionContext): Promise<AssistantContextResult> {
+  return native<AssistantContextResult>('assistant_context', { ...context, sessionId, entryId, before, after })
 }
 
 export interface CreateWorkContinuation {
@@ -665,10 +698,13 @@ export async function createWork(
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
   workerConfig?: Record<string, unknown>,
+  /** Open as the assistant or not; omitted, the Host uses the directory's saved choice. */
+  assistant?: boolean,
 ): Promise<Work> {
   return native<Work>('create_work', {
     ...context, cwd,
     workerConfig: workerConfig ?? null,
+    assistant: assistant ?? null,
     name: name || null,
     targetHostId: targetHostId ?? null,
     operationId: continuation?.operationId ?? null,

@@ -45,6 +45,12 @@ let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, childModelsNative, saveChildModelsNative
+// Card #295: Main keeps the assistant; the spare Host is an older Main without her.
+let assistantNative = (command, args) => {
+  if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
+  if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144 }
+  throw new Error(`Unexpected assistant call: ${command}`)
+}
 // The fake Host's Work list: extra records it lists, and Works it has retired.
 let extraListed = [], holdWorkCatalog, reopenNative
 const retiredWorks = new Set()
@@ -174,6 +180,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'set_model_visibility') return saveModelVisibilityNative(args)
   if (command === 'child_models') return childModelsNative(args)
   if (command === 'set_child_models') return saveChildModelsNative(args)
+  if (command.startsWith('assistant_') || command === 'set_assistant_document') return assistantNative(command, args)
   if (command === 'consume_operation') {
     if (consumeFailures.has(args.operationId)) throw { code: 'io_error', message: 'fixture acknowledgement unavailable' }
     nativeResults.delete(args.operationId); return
@@ -1333,6 +1340,141 @@ try {
     assert.equal(all(find(dialog(), item => item.props['aria-label'] === '显示中的模型'), item => item.type === 'button' && String(item.props.class).includes('model-row')).length, 2)
     await click(dialog(), '关闭')
     console.log('PASS: Host settings child Work models: second section keeps its draft, saves the list on Main, reports after closing, stops at 50')
+  }
+  // Card #295: the assistant's page from the sidebar: what she reads, her persona and notes, her conversations.
+  {
+    const page = () => find(container, item => item.props['aria-labelledby'] === 'assistant-title')
+    const entry = () => find(container, item => item.type === 'button' && item.props['aria-label'] === '助手')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || item.props.title === label || text(item).includes(label)))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(target, `button exists: ${label}`)
+      assert.equal(!!target.props.disabled, false, `${label} is available`)
+      target.props.onClick(); await settle()
+    }
+    const editor = () => find(page(), item => item.type === 'textarea')
+    const type = async value => { const input = editor(); input.value = value; input.props.onInput({ target: input }); await settle() }
+    const session = { sessionId: 's1', name: '早上的闲聊', cwd: '/home/alu/.aludock/assistant', workId: 'other', machine: '工作站', startedAt: '2026-11-06T08:00:00.000Z', lastAt: '2026-11-06T08:30:00.000Z' }
+    const entryAt = (entryId, kind, text, extra = {}) => ({ entryId, at: '2026-11-06T08:05:00.000Z', kind, text, ...extra })
+    let persona = { document: 'persona', text: '她说话简短。', revision: 'p1' }
+    let notes = { document: 'notes', text: '早上先说天气。', revision: 'n1' }
+    const fallback = assistantNative
+    assistantNative = async (command, args) => {
+      if (args.connectionId === 'spare' || command === 'assistant_info') return fallback(command, args)
+      if (command === 'assistant_preview') return { text: `${persona.text}\n${notes.text}`, loadedAt: '2026-11-07T09:00:00.000Z' }
+      if (command === 'assistant_document') return structuredClone(args.document === 'persona' ? persona : notes)
+      if (command === 'set_assistant_document' && args.document === 'notes') {
+        // The save lands, but its reply is lost on the way back.
+        notes = { document: 'notes', text: args.text, revision: 'n2' }
+        throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed' }
+      }
+      if (command === 'set_assistant_document') {
+        if (args.baseRevision !== persona.revision) throw { code: 'assistant_document_changed', message: 'The document changed since it was read.' }
+        persona = { document: 'persona', text: args.text, revision: `${persona.revision}+` }
+        return structuredClone(persona)
+      }
+      if (command === 'assistant_search') return args.cursor
+        ? { hits: [{ session: { ...session, sessionId: 's0', workId: 'retired', name: undefined }, entryId: 'old', at: '2026-11-01T08:00:00.000Z', kind: 'user', snippet: '上周的天气' }] }
+        : { hits: [{ session, entryId: 'e3', at: '2026-11-06T08:05:00.000Z', kind: 'assistant', snippet: '…今天上午有雨…' }], nextCursor: 'c2' }
+      if (command === 'assistant_context') return args.before === 12
+        ? { session, entries: [entryAt('e0', 'user', '早'), entryAt('e1', 'assistant', '早上好')], hasBefore: false, hasAfter: true }
+        : { session, entries: [entryAt('e1', 'assistant', '早上好'), entryAt('e2', 'user', '今天天气怎么样？'), entryAt('e3', 'assistant', '今天上午有雨。', { toolCalls: [{ name: 'bash', arguments: '{"command":"weather"}' }] }), entryAt('e4', 'tool_result', '小雨', { toolName: 'bash', truncated: true })], hasBefore: true, hasAfter: true }
+      throw new Error(`Unexpected assistant call: ${command}`)
+    }
+    // A Work opened as the assistant carries a small mark in the list and the top bar.
+    extraListed = [{ ...otherWork, id: 'helper', displayName: 'Helper Work', assistant: true }]
+    await app.refreshWorksQuietly(); await settle()
+    const helperRow = find(container, item => String(item.props.class ?? '').includes('alu-instance-row') && text(item).includes('Helper Work'))
+    assert.ok(find(helperRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag') && text(item) === '助手'), 'her Work is marked in the list')
+    const plainRow = all(container, item => String(item.props.class ?? '').split(' ').includes('alu-instance-row')).find(row => row !== helperRow)
+    assertSameReference(find(plainRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag')), undefined, 'other Works carry no mark')
+    const original = JSON.parse(JSON.stringify(app.selectedWork))
+    app.applyWorkSnapshot({ ...original, assistant: true }); await settle()
+    assert.ok(find(container, item => String(item.props.class ?? '').includes('alu-nav-assistant-tag')), 'and in the top bar')
+    app.applyWorkSnapshot(original); extraListed = []; await app.refreshWorksQuietly(); await settle()
+
+    // An older Main has no assistant, so there is no entry; Main with her has one.
+    const previousCatalogFailure = failCatalog, originalContext = { ...context }
+    failCatalog = false
+    await app.switchHost('spare'); await settle()
+    assertSameReference(entry(), undefined, 'a Main without the assistant shows no entry')
+    await app.switchHost('host'); await settle(); app.selectWork('work'); await settle()
+    assert.ok(entry(), 'Main with the assistant has her entry in the sidebar')
+    await click(container, '助手')
+    assert.ok(page(), 'the entry opens her page')
+    assert.ok(text(page()).includes('她说话简短。') && text(page()).includes('生成于'), 'it starts with the whole text a new session of hers reads')
+
+    // Persona: an unsaved draft survives switching sections and closing the page.
+    await click(page(), '人设')
+    assert.equal(editor().value, '她说话简短。')
+    await type('她说话简短，先给结论。')
+    assert.ok(text(page()).includes('有改动还没有保存'))
+    await click(page(), '手写设定')
+    assert.equal(editor().value, '早上先说天气。')
+    await click(page(), '人设')
+    assert.equal(editor().value, '她说话简短，先给结论。', 'switching sections keeps the draft')
+    await click(page(), '关闭')
+    assertSameReference(page(), undefined, 'closing asks nothing: the draft is kept')
+    assert.ok(text(entry()).includes('有改动还没有保存'), 'the sidebar says a draft is waiting')
+    await click(container, '助手')
+    assert.equal(editor().value, '她说话简短，先给结论。', 'reopening shows the draft')
+
+    // Saved elsewhere meanwhile: this save is refused, the draft stays, and the user chooses with the newer version in view.
+    persona = { document: 'persona', text: '她说话简短。会用敬语。', revision: 'p2' }
+    await click(page(), '保存')
+    const firstSave = calls.filter(call => call.command === 'set_assistant_document').at(-1).args
+    assert.deepEqual([firstSave.document, firstSave.text, firstSave.baseRevision], ['persona', '她说话简短，先给结论。', 'p1'], 'a save names the version it was edited from')
+    assert.ok(text(page()).includes('在别处被改过') && text(page()).includes('草稿还在'), text(page()))
+    assert.equal(editor().value, '她说话简短，先给结论。')
+    await click(page(), '读取最新内容')
+    assert.ok(text(page()).includes('她说话简短。会用敬语。'), 'the version saved elsewhere is shown')
+    assert.equal(button(page(), '保存').props.disabled, true, 'saving waits for the user to choose between the two')
+    await click(page(), '保留我的草稿')
+    await click(page(), '保存')
+    assert.equal(calls.filter(call => call.command === 'set_assistant_document').at(-1).args.baseRevision, 'p2', 'the user\'s choice saves over the newer version')
+    assert.ok(text(page()).includes('已保存'))
+    assert.equal(persona.text, '她说话简短，先给结论。')
+    assert.equal(text(entry()).includes('有改动还没有保存'), false)
+    // A save whose reply is lost is told once; reading the current version settles whether it went through.
+    await click(page(), '手写设定')
+    await type('早上先说天气，再说日程。')
+    await click(page(), '保存')
+    assert.ok(text(page()).includes('没收到保存结果') && text(page()).includes('草稿还在'))
+    await click(page(), '读取最新内容')
+    assert.ok(text(page()).includes('和你的草稿一样'), 'the lost save did go through, and the page says so')
+    assert.equal(button(page(), '保存').props.disabled, true, 'nothing is left to save')
+
+    // Searching her conversations, reading around a hit, and opening the Work it happened in.
+    await click(page(), '搜索对话')
+    const query = find(page(), item => item.props['aria-label'] === '要找的词')
+    query.value = '天气'; query['event:input']({ target: query }); await settle()
+    find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const search = calls.filter(call => call.command === 'assistant_search').at(-1).args
+    assert.deepEqual([search.query, search.from, search.to, search.cursor], ['天气', null, null, null])
+    const results = () => find(page(), item => item.props['aria-label'] === '搜索结果')
+    assert.ok(text(results()).includes('今天上午有雨') && text(results()).includes('早上的闲聊') && text(results()).includes('工作站'), 'a hit shows where it happened and the text around it')
+    await click(page(), '更多结果')
+    assert.equal(calls.filter(call => call.command === 'assistant_search').at(-1).args.cursor, 'c2')
+    assert.ok(text(results()).includes('上周的天气'))
+    await click(results(), '今天上午有雨')
+    const around = calls.filter(call => call.command === 'assistant_context').at(-1).args
+    assert.deepEqual([around.sessionId, around.entryId], ['s1', 'e3'])
+    const reading = () => find(page(), item => item.props['aria-label'] === '对话前后文')
+    assert.ok(text(reading()).includes('今天天气怎么样？') && text(reading()).includes('调用 bash') && text(reading()).includes('只显示前一部分'))
+    await click(reading(), '往前再读')
+    const earlier = calls.filter(call => call.command === 'assistant_context').at(-1).args
+    assert.deepEqual([earlier.entryId, earlier.before, earlier.after], ['e1', 12, 0], 'reading back continues from the first entry shown')
+    const said = all(reading(), item => String(item.props.class ?? '') === 'assistant-entry-text').map(text)
+    assert.deepEqual(said.slice(0, 3), ['早', '早上好', '今天天气怎么样？'], 'the earlier entry joins once at the top, without repeating the edge')
+    assertSameReference(button(reading(), '往前再读'), undefined, 'nothing earlier is left')
+    await click(reading(), '打开这个 Work')
+    assertSameReference(page(), undefined)
+    assert.equal(app.selectedWork.id, 'other', 'the conversation\'s Work, still in the list, opens')
+    app.selectWork('work'); await settle()
+    assistantNative = fallback; failCatalog = previousCatalogFailure
+    Object.assign(context, originalContext)
+    app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
+    await settle()
+    console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search with more results, context reading back, opening the Work')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.

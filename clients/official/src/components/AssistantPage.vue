@@ -1,0 +1,225 @@
+<script setup lang="ts">
+import { computed, nextTick, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { BookUser, Eye, NotebookPen, RefreshCw, Search, Sparkles, X } from '@lucide/vue'
+import { assistantEntryLabel, assistantSessionLabel, assistantTime } from '../lib/assistant'
+import type { AssistantSearchHit } from '../lib/types'
+import { useAppStore } from '../stores/app'
+import { useAssistantStore } from '../stores/assistant'
+import { useSurfacesStore, type AssistantSection } from '../stores/surfaces'
+import AssistantDocumentEditor from './AssistantDocumentEditor.vue'
+
+// The assistant kept on Main (card #295). Her persona can be the user's own assistant, so the page says 「助手」, never a name.
+const emit = defineEmits<{ close: [] }>()
+const app = useAppStore()
+const assistant = useAssistantStore()
+const { search, reading } = assistant
+const { preview, info } = storeToRefs(assistant)
+const { assistantSection: section } = storeToRefs(useSurfacesStore())
+
+const sections: Array<{ id: AssistantSection; label: string; icon: typeof Eye }> = [
+  { id: 'preview', label: '她会读到什么', icon: Eye },
+  { id: 'persona', label: '人设', icon: BookUser },
+  { id: 'notes', label: '手写设定', icon: NotebookPen },
+  { id: 'search', label: '搜索对话', icon: Search },
+]
+
+// Each section reads the Host's current version the first time it is shown while the page is open.
+const readThisOpen = ref(new Set<AssistantSection>())
+watch([section, () => app.connectionContext?.connectionId, () => app.connectionContext?.selectionGeneration], ([current], previous) => {
+  if (previous && (previous[1] !== app.connectionContext?.connectionId || previous[2] !== app.connectionContext?.selectionGeneration)) readThisOpen.value = new Set()
+  if (!app.connectionContext || readThisOpen.value.has(current)) return
+  readThisOpen.value.add(current)
+  if (current === 'preview') void assistant.loadPreview()
+  else if (current === 'persona' || current === 'notes') void assistant.loadDocument(current)
+}, { immediate: true })
+
+// A conversation opens on the entry that was found, which may sit below earlier entries.
+const hitElement: { current: HTMLElement | null } = { current: null }
+watch(() => reading.loading, async (loading, wasLoading) => {
+  if (loading || !wasLoading) return
+  await nextTick()
+  hitElement.current?.scrollIntoView?.({ block: 'center' })
+})
+
+const openWorkId = computed(() => {
+  const workId = reading.session?.workId
+  return workId && app.works.some((work) => work.id === workId) ? workId : ''
+})
+
+function openWork() {
+  if (!openWorkId.value) return
+  app.selectWork(openWorkId.value)
+  emit('close')
+}
+
+function hitPlace(hit: AssistantSearchHit) {
+  return [assistantSessionLabel(hit.session), hit.session.machine].filter(Boolean).join(' · ')
+}
+</script>
+
+<template>
+  <header class="assistant-header">
+    <div class="assistant-heading">
+      <span class="assistant-mark"><Sparkles :size="20" /></span>
+      <div>
+        <h2 id="assistant-title">助手</h2>
+        <p>她的人设、你写的设定和她经历过的对话，都保存在 Main 上</p>
+      </div>
+    </div>
+    <button class="assistant-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
+  </header>
+
+  <div class="assistant-layout">
+    <nav class="assistant-nav" aria-label="助手分区">
+      <button v-for="item in sections" :key="item.id" type="button" class="assistant-nav-item" :class="{ 'is-active': section === item.id }" :aria-current="section === item.id ? 'page' : undefined" @click="section = item.id">
+        <component :is="item.icon" :size="16" /><span>{{ item.label }}</span>
+        <span v-if="(item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null" class="assistant-nav-dot" aria-label="有未保存的改动" />
+      </button>
+    </nav>
+
+    <main v-if="section === 'preview'" class="assistant-content">
+      <div class="assistant-intro">
+        <h3>她会读到什么</h3>
+        <p>现在新开一个助手会话，她会先读到下面的全文。</p>
+      </div>
+      <div class="assistant-toolbar">
+        <span v-if="preview?.result" class="assistant-meta">生成于 {{ assistantTime(preview.result.loadedAt) }}</span>
+        <button type="button" class="button secondary" :disabled="preview?.loading" @click="assistant.loadPreview()"><RefreshCw :size="15" :class="{ spinning: preview?.loading }" />{{ preview?.loading ? '正在读取…' : '刷新' }}</button>
+      </div>
+      <div v-if="preview?.error" class="assistant-error" role="alert"><span>{{ preview.error }}</span></div>
+      <div v-if="preview?.loading && !preview.result" class="assistant-status" role="status">正在读取她会读到的内容…</div>
+      <pre v-else-if="preview?.result" class="assistant-text-block assistant-preview-text">{{ preview.result.text || '（现在是空的）' }}</pre>
+    </main>
+
+    <main v-else-if="section === 'persona' || section === 'notes'" :key="section" class="assistant-content">
+      <div class="assistant-intro">
+        <h3>{{ section === 'persona' ? '人设' : '手写设定' }}</h3>
+        <p v-if="section === 'persona'">她是谁、怎么说话。保存后，新开的助手会话会读到。</p>
+        <p v-else>你写给她的设定和要记住的事。保存后，新开的助手会话会读到。</p>
+      </div>
+      <AssistantDocumentEditor :document="section" />
+    </main>
+
+    <main v-else class="assistant-content">
+      <div class="assistant-intro">
+        <h3>搜索对话</h3>
+        <p>在她经历过的对话里找。几个词用空格分开，要全部出现才算找到。</p>
+      </div>
+      <form class="assistant-search" @submit.prevent="assistant.runSearch()">
+        <input v-model="search.query" class="ui-dialog-input ui-dialog-search" type="search" placeholder="要找的词…" aria-label="要找的词" spellcheck="false" />
+        <label><span>从</span><input v-model="search.from" class="ui-dialog-input ui-dialog-search" type="date" aria-label="从哪天开始" /></label>
+        <label><span>到</span><input v-model="search.to" class="ui-dialog-input ui-dialog-search" type="date" aria-label="到哪天为止" /></label>
+        <button type="submit" class="button primary" :disabled="search.loading || !search.query.trim()">{{ search.loading ? '正在搜索…' : '搜索' }}</button>
+      </form>
+      <div v-if="search.error" class="assistant-error" role="alert"><span>{{ search.error }}</span></div>
+
+      <section v-if="reading.hit" class="assistant-reading" aria-label="对话前后文">
+        <div class="assistant-reading-head">
+          <button type="button" class="button secondary" @click="assistant.closeContext()">← 返回结果</button>
+          <div v-if="reading.session" class="assistant-reading-place">
+            <strong>{{ assistantSessionLabel(reading.session) }}</strong>
+            <span>{{ [reading.session.machine, reading.session.cwd].filter(Boolean).join(' · ') }}</span>
+            <span>{{ assistantTime(reading.session.startedAt) }} – {{ assistantTime(reading.session.lastAt) }}</span>
+          </div>
+          <button v-if="openWorkId" type="button" class="button primary" @click="openWork">打开这个 Work</button>
+        </div>
+        <div v-if="reading.error" class="assistant-error" role="alert"><span>{{ reading.error }}</span></div>
+        <div v-if="reading.loading" class="assistant-status" role="status">正在读取这段对话…</div>
+        <div v-else class="assistant-entries">
+          <button v-if="reading.hasBefore" type="button" class="assistant-more" :disabled="reading.loadingBefore" @click="assistant.readMore('before')">{{ reading.loadingBefore ? '正在读取…' : '往前再读' }}</button>
+          <article v-for="entry in reading.entries" :key="entry.entryId" :ref="(element) => { if (entry.entryId === reading.hit?.entryId) hitElement.current = element as HTMLElement | null }" class="assistant-entry" :class="[`is-${entry.kind}`, { 'is-hit': entry.entryId === reading.hit.entryId }]">
+            <header><strong>{{ assistantEntryLabel(entry.kind, entry.toolName) }}</strong><time>{{ assistantTime(entry.at) }}</time></header>
+            <div v-if="entry.text" class="assistant-entry-text">{{ entry.text }}</div>
+            <details v-for="(call, index) in entry.toolCalls ?? []" :key="index" class="assistant-entry-call">
+              <summary>调用 {{ call.name }}</summary>
+              <pre>{{ call.arguments }}</pre>
+            </details>
+            <p v-if="entry.truncated" class="assistant-entry-cut">这一条太长，这里只显示前一部分。</p>
+          </article>
+          <button v-if="reading.hasAfter" type="button" class="assistant-more" :disabled="reading.loadingAfter" @click="assistant.readMore('after')">{{ reading.loadingAfter ? '正在读取…' : '往后再读' }}</button>
+        </div>
+      </section>
+
+      <template v-else-if="search.shown">
+        <div class="assistant-results" role="list" aria-label="搜索结果">
+          <button v-for="hit in search.hits" :key="`${hit.session.sessionId}:${hit.entryId}`" type="button" role="listitem" class="assistant-hit" @click="assistant.openContext(hit)">
+            <span class="assistant-hit-meta"><span>{{ assistantTime(hit.at) }}</span><span>{{ hitPlace(hit) }}</span><span>{{ assistantEntryLabel(hit.kind) }}</span></span>
+            <span class="assistant-hit-snippet">{{ hit.snippet }}</span>
+          </button>
+          <p v-if="!search.hits.length" class="assistant-empty">没有找到包含「{{ search.shown.query }}」的对话。可以换几个词，或放宽时间范围。</p>
+        </div>
+        <div v-if="search.moreError" class="assistant-error" role="alert"><span>{{ search.moreError }}</span></div>
+        <button v-if="search.nextCursor" type="button" class="assistant-more" :disabled="search.loadingMore" @click="assistant.searchMore()">{{ search.loadingMore ? '正在读取…' : '更多结果' }}</button>
+      </template>
+    </main>
+  </div>
+  <p v-if="info" class="assistant-footnote">她的工作区：{{ info.workspacePath }}（Main）</p>
+</template>
+
+<style scoped>
+.assistant-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: var(--alu-surface); }
+.assistant-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
+.assistant-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-accent-border); border-radius: 10px; background: var(--alu-accent-bg); color: var(--alu-accent); place-items: center; }
+.assistant-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
+.assistant-heading p { margin: 3px 0 0; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.assistant-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
+.assistant-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
+.assistant-layout { display: grid; min-height: 0; grid-template-columns: 170px minmax(0, 1fr); }
+.assistant-nav { display: flex; flex-direction: column; gap: 6px; padding: 20px 12px; border-right: 1px solid var(--alu-border); background: var(--alu-bg); }
+.assistant-nav-item { display: flex; width: 100%; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; cursor: pointer; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); text-align: left; }
+.assistant-nav-item:hover:not(.is-active) { background: var(--alu-hover); color: var(--alu-text); }
+.assistant-nav-item.is-active { border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); color: var(--alu-highlight); }
+.assistant-nav-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: var(--alu-warning); }
+.assistant-content { display: flex; min-width: 0; min-height: 0; flex-direction: column; gap: 12px; padding: 20px 24px 16px; overflow-y: auto; }
+.assistant-intro h3 { margin: 0 0 6px; color: var(--alu-text); font-size: 18px; font-weight: 650; }
+.assistant-intro p { max-width: 640px; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
+.assistant-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.assistant-meta { flex: 1 1 auto; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.assistant-content :deep(.assistant-status) { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.assistant-content :deep(.assistant-note) { margin: 0; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); line-height: 1.6; }
+.assistant-content :deep(.assistant-note.is-warning) { border-color: rgb(var(--alu-warning-rgb) / .35); color: var(--alu-warning); }
+.assistant-content :deep(.assistant-error) { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0; padding: 9px 10px; border: 1px solid var(--alu-danger-border); border-radius: 8px; background: var(--alu-danger-bg); color: var(--alu-danger); font-size: var(--alu-meta-size); }
+.assistant-content :deep(.assistant-text-block) { margin: 0; padding: 12px 14px; overflow: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); color: var(--alu-text); font: 13px/1.75 var(--font-reading); white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-preview-text { min-height: 0; flex: 1 1 auto; }
+.assistant-search { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.assistant-search > input { min-width: 180px; flex: 1 1 220px; }
+.assistant-search label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.assistant-search label input { width: 150px; }
+.assistant-results { display: grid; gap: 6px; }
+.assistant-hit { display: grid; gap: 4px; width: 100%; padding: 9px 11px; cursor: pointer; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); text-align: left; }
+.assistant-hit:hover { border-color: var(--alu-border-light); background: var(--alu-hover); }
+.assistant-hit-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.assistant-hit-snippet { color: var(--alu-text); font: var(--alu-meta-size)/1.6 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
+.assistant-empty { margin: 8px 2px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
+.assistant-more { align-self: center; padding: 6px 12px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-accent); font-size: var(--alu-meta-size); }
+.assistant-more:hover:not(:disabled) { background: var(--alu-hover); }
+.assistant-more:disabled { cursor: wait; opacity: .6; }
+.assistant-reading { display: flex; min-height: 0; flex-direction: column; gap: 10px; }
+.assistant-reading-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.assistant-reading-place { display: grid; min-width: 0; flex: 1 1 200px; gap: 2px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.assistant-reading-place strong { overflow: hidden; color: var(--alu-text); font-size: var(--alu-ui-size); text-overflow: ellipsis; white-space: nowrap; }
+.assistant-entries { display: flex; flex-direction: column; gap: 8px; }
+.assistant-entry { padding: 9px 12px; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); }
+.assistant-entry.is-hit { border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); }
+.assistant-entry header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 4px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.assistant-entry header strong { color: var(--alu-text-dim); }
+.assistant-entry header time { margin: 0; }
+.assistant-entry-text { color: var(--alu-text); font: var(--alu-meta-size)/1.7 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
+.assistant-entry-call { margin-top: 6px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.assistant-entry-call summary { cursor: pointer; }
+.assistant-entry-call pre { margin: 4px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-entry-cut { margin: 6px 0 0; color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
+.assistant-footnote { margin: 0; padding: 8px 18px; overflow: hidden; border-top: 1px solid var(--alu-border); background: var(--alu-bg-raised); color: var(--alu-text-faint); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
+.spinning { animation: assistantSpin 1s linear infinite; }
+@keyframes assistantSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
+@media (max-width: 640px) {
+  .assistant-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .assistant-nav { flex-direction: row; gap: 4px; overflow-x: auto; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--alu-border); scrollbar-width: none; }
+  .assistant-nav::-webkit-scrollbar { display: none; }
+  .assistant-nav-item { width: auto; min-height: 36px; flex: 0 0 auto; gap: 6px; padding: 0 8px; }
+  .assistant-content { padding: 16px 14px; }
+  .assistant-search label input { width: 132px; }
+}
+</style>
