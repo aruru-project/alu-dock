@@ -23,7 +23,9 @@ import { MEMORY_CASES, type MemoryCase } from "./assistant-memory-cases.js";
  * It calls the model for real, with this computer's Pi login, and that costs money: run it only when
  * the owner agreed to.
  *
- *   npm run build && node dist/scripts/assistant-memory-eval.js --model PROVIDER/MODEL [--case NAME] [--agent-dir DIR]
+ *   npm run build && node dist/scripts/assistant-memory-eval.js --model PROVIDER/MODEL [--case NAME] [--agent-dir DIR] [--history]
+ *
+ * --history also lists every change of every memory, to see which pass decided what.
  */
 
 const CASE_TIMEOUT_MS = 10 * 60_000;
@@ -37,12 +39,12 @@ async function main(): Promise<void> {
   if (cases.length === 0) throw new Error(`No case is named ${options.case}; the cases are ${MEMORY_CASES.map((item) => item.name).join(", ")}`);
   process.stdout.write(`Calling ${options.model.provider}/${options.model.id} for ${cases.length} case(s); this uses the real model.\n`);
   let failed = 0;
-  for (const item of cases) if (!await runCase(item, options.model, create)) failed += 1;
+  for (const item of cases) if (!await runCase(item, options.model, create, options.history)) failed += 1;
   process.stdout.write(`\n${cases.length - failed} of ${cases.length} case(s) met what they expect.\n`);
   if (failed > 0) process.exitCode = 1;
 }
 
-async function runCase(item: MemoryCase, model: AssistantModelRef, create: () => Promise<ModelRuntime>): Promise<boolean> {
+async function runCase(item: MemoryCase, model: AssistantModelRef, create: () => Promise<ModelRuntime>, history: boolean): Promise<boolean> {
   const root = await mkdtemp(join(tmpdir(), "alu-memory-eval-"));
   const store = new AssistantStore(join(root, "memory.sqlite"));
   const documents = new AssistantDocuments(root);
@@ -77,8 +79,11 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
     const setAside = [...memories.list({ limit: 100, state: "retired" }).memories, ...memories.list({ limit: 100, state: "forgotten" }).memories];
     const checks = judge(item, inUse);
     process.stdout.write(`\n== ${item.name}: ${item.about}\n`);
-    for (const memory of inUse.slice().reverse()) process.stdout.write(`  + ${describe(memory)}\n`);
-    for (const memory of setAside) process.stdout.write(`  - ${describe(memory)}${memory.supersededBy === undefined ? "" : ` → #${memory.supersededBy}`}\n`);
+    const changes = (memory: AssistantMemory) => history
+      ? memories.get(memory.id).history.slice().reverse().map((change) => `\n      ${change.author} ${change.action}${change.text === undefined ? "" : `: ${change.text}`}`).join("")
+      : "";
+    for (const memory of inUse.slice().reverse()) process.stdout.write(`  + ${describe(memory)}${changes(memory)}\n`);
+    for (const memory of setAside) process.stdout.write(`  - ${describe(memory)}${memory.supersededBy === undefined ? "" : ` → #${memory.supersededBy}`}${changes(memory)}\n`);
     if (inUse.length + setAside.length === 0) process.stdout.write("  (nothing kept)\n");
     if (status.lastError !== undefined) process.stdout.write(`  ! ${status.lastError}\n`);
     for (const problem of problems) process.stdout.write(`  ! ${problem}\n`);
@@ -122,23 +127,25 @@ function describe(memory: AssistantMemory): string {
   return `#${memory.id} [${memory.topic} · ${memory.resident ? "loaded every session" : "when searched"} · ${memory.author}] ${memory.text}${from ? ` (from ${from})` : ""}`;
 }
 
-function parseArgs(args: string[]): { model: AssistantModelRef; case?: string; agentDir?: string } {
+function parseArgs(args: string[]): { model: AssistantModelRef; case?: string; agentDir?: string; history: boolean } {
   let model: AssistantModelRef | undefined;
   let only: string | undefined;
   let agentDir: string | undefined;
+  let history = false;
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index + 1];
+    if (args[index] === "--history") { history = true; continue; }
     if (args[index] === "--model" && value) {
       const slash = value.indexOf("/");
       if (slash <= 0 || slash === value.length - 1) throw new Error("--model takes PROVIDER/MODEL");
       model = { provider: value.slice(0, slash), id: value.slice(slash + 1) };
     } else if (args[index] === "--case" && value) only = value;
     else if (args[index] === "--agent-dir" && value) agentDir = value;
-    else throw new Error(`Unknown argument ${args[index]}; usage: --model PROVIDER/MODEL [--case NAME] [--agent-dir DIR]`);
+    else throw new Error(`Unknown argument ${args[index]}; usage: --model PROVIDER/MODEL [--case NAME] [--agent-dir DIR] [--history]`);
     index += 1;
   }
   if (!model) throw new Error("--model PROVIDER/MODEL is required; this runs the real model");
-  return { model, ...(only === undefined ? {} : { case: only }), ...(agentDir === undefined ? {} : { agentDir }) };
+  return { model, ...(only === undefined ? {} : { case: only }), ...(agentDir === undefined ? {} : { agentDir }), history };
 }
 
 main().catch((error: unknown) => {

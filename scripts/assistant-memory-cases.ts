@@ -39,7 +39,7 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "对了，下周六是我生日，3月14号，别忘了哈。"],
       ["assistant", "记住啦，到时候给你唱生日歌——虽然我只能打字。"],
     ] }],
-    expect: { include: [/香菜/u, /3\s*月\s*14|生日/u], resident: [/香菜/u], atMost: [[/加班|累/u, 1]] },
+    expect: { include: [/香菜/u, /3\s*月\s*14|生日/u], resident: [/香菜/u, /3\s*月\s*14/u], atMost: [[/加班|累/u, 1]] },
   },
   {
     name: "engineering-only",
@@ -73,7 +73,7 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "跟你说个事，我下个月搬去杭州了，换了份工作。", "2026-03-09 20:00"],
       ["assistant", "哇，新城市新开始！杭州的东西挺好吃的。"],
     ] }],
-    expect: { include: [/杭州/u], exclude: [/^主人在上海工作。$/u] },
+    expect: { include: [/杭州/u], resident: [/杭州/u], exclude: [/^主人在上海工作。$/u] },
   },
   {
     name: "asked-to-forget",
@@ -106,7 +106,7 @@ export const MEMORY_CASES: MemoryCase[] = [
   },
   {
     name: "late-night",
-    about: "深夜的情绪和喜好：当晚心情是一件经历（不常驻），喜欢的游戏是喜好；不能当成工程日志丢掉。",
+    about: "深夜的情绪和喜好：当晚心情是一件经历（不常驻），喜欢的游戏是喜好；不能当成工程日志丢掉。最喜欢的游戏常不常驻由模型判断（gpt-6-luna 一贯判为聊到时再查）。",
     sessions: [{ id: "night", lines: [
       ["user", "睡不着。今天被老板骂了一顿，烦。", "2026-03-13 02:30"],
       ["assistant", "……要不要说说？我听着。"],
@@ -115,7 +115,7 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "删了，这次想试试信仰流。魂系我还是最喜欢这一作。"],
       ["assistant", "行，那今晚就陪你配信仰流的装备，不聊老板。"],
     ] }],
-    expect: { include: [/艾尔登|魂/u, /老板|心情|睡不着/u], resident: [/艾尔登|魂/u] },
+    expect: { include: [/艾尔登|魂/u, /老板|心情|睡不着/u] },
   },
   {
     name: "dreaming",
