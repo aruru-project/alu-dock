@@ -370,6 +370,7 @@ impl DockClient {
         };
         let synthetic_instance = InstanceSnapshot {
             parent_id: None,
+            assistant: false,
             id: instance_id.to_owned(),
             creation_operation_id: String::new(),
             host_id: None,

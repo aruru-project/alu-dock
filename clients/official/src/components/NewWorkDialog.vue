@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { FolderOpen, RefreshCw, RotateCcw } from '@lucide/vue'
+import { FolderOpen, RefreshCw, RotateCcw, Sparkles } from '@lucide/vue'
 import {
   adoptSession,
   createWork,
@@ -29,6 +29,7 @@ import type { DirectoryPage } from '../lib/workspaceBrowser'
 import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
+import { useAssistantStore } from '../stores/assistant'
 import { useModelCatalogStore } from '../stores/model-catalog'
 import AluSelect from './AluSelect.vue'
 import DirectoryBrowser from './DirectoryBrowser.vue'
@@ -43,6 +44,8 @@ type TrustAttempt = {
   trustChallengeId: string
   machineHostId: string
   workerConfig?: Record<string, unknown>
+  /** The original attempt's "open as the assistant" choice; trust continuation replays it. */
+  assistant?: boolean
   path?: string
   sessionToken?: string
 }
@@ -60,6 +63,7 @@ const emit = defineEmits<{
 }>()
 const app = useAppStore()
 const catalog = useModelCatalogStore()
+const assistant = useAssistantStore()
 
 const view = ref<View>('launcher')
 const machineHostId = ref('')
@@ -80,6 +84,12 @@ const systemCatalogState = ref<'idle' | 'ready' | 'unsupported' | 'failed'>('idl
 const saveDefault = ref(false)
 const savedDefaultId = ref('')
 const saveFailed = ref(false)
+// The connected Host takes the "open as the assistant" choice (card #295); without it the system page has no switch.
+const assistantChoice = ref(false)
+// Starts from the directory's saved choice; fixed once the Work is created.
+const openAsAssistant = ref(false)
+// The directory opens new Works as the assistant unless told otherwise; only then is "off" said.
+const directoryAssistant = ref(false)
 // The model the new Work starts with; null leaves the choice to Pi on that Machine.
 const modelChoice = ref<ModelRef | null>(null)
 let systemEpoch = 0
@@ -105,6 +115,9 @@ const workspaceRootOptions = computed(() => {
   ]
 })
 const recentWorkspaces = computed(() => machineHostId.value ? app.recentWorkspaces(machineHostId.value) : [])
+// Her workspace is on Main; the shortcut opens it there whichever machine is selected.
+const mainMachine = computed(() => props.machines.find((candidate) => candidate.kind === 'main' && candidate.available))
+const assistantWorkspace = computed(() => assistant.available && mainMachine.value ? assistant.info?.workspacePath ?? '' : '')
 const PI_DEFAULT_MODEL = ''
 // The Machine's model list is cached for the app's lifetime; the refresh button asks the Machine again.
 const modelCatalog = computed(() => machine.value?.available
@@ -200,6 +213,9 @@ function resetSystems() {
   saveDefault.value = false
   savedDefaultId.value = ''
   saveFailed.value = false
+  assistantChoice.value = false
+  openAsAssistant.value = false
+  directoryAssistant.value = false
 }
 
 async function chooseDirectory(path: string, refresh = false) {
@@ -207,6 +223,8 @@ async function chooseDirectory(path: string, refresh = false) {
   const selectedId = refresh ? systemSelection.value?.id : undefined
   const shouldSave = refresh && saveDefault.value
   const previouslySaved = refresh ? savedDefaultId.value : ''
+  // Reading the list again keeps the user's switch as it is.
+  const chosenAssistant = refresh ? openAsAssistant.value : undefined
   resetSystems()
   saveDefault.value = shouldSave
   const epoch = systemEpoch
@@ -221,6 +239,8 @@ async function chooseDirectory(path: string, refresh = false) {
     const warnings: string[] = []
     let cursor: SystemCatalogCursor | undefined
     let defaultSelection: SystemCandidate | undefined
+    let defaultAssistant = false
+    let takesAssistant = false
     do {
       const page = await currentConnectionCall(app, (context) => systemCatalog(path, context, hostId, cursor))
       if (epoch !== systemEpoch) return
@@ -228,14 +248,20 @@ async function chooseDirectory(path: string, refresh = false) {
       candidates.push(...page.candidates)
       for (const warning of page.warnings) if (!warnings.includes(warning)) warnings.push(warning)
       defaultSelection ??= page.defaultSelection
+      defaultAssistant ||= page.defaultAssistant === true
+      takesAssistant ||= page.assistantChoice === true
       cursor = page.nextCursor
     } while (cursor)
     systemCatalogState.value = 'ready'
+    assistantChoice.value = takesAssistant
+    directoryAssistant.value = defaultAssistant
+    openAsAssistant.value = takesAssistant && (chosenAssistant ?? defaultAssistant)
     systemCandidates.value = candidates
     systemWarnings.value = warnings
     savedDefaultId.value = defaultSelection?.id === previouslySaved ? previouslySaved : ''
     // Without a saved default the first usable candidate is already selected; confirming is one click.
     systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? candidates.find(candidate => !candidate.warning) ?? null
+    // A usable saved default creates at once; the Host applies the directory's saved choices, so none is sent.
     if (!refresh && defaultSelection && !defaultSelection.warning) {
       systemSelection.value = defaultSelection
       await createAt(path, hostId)
@@ -285,6 +311,9 @@ async function confirmSystem() {
   const epoch = systemEpoch
   const path = systemPath.value
   const hostId = machineHostId.value
+  // Creating and saving the default say the same, and only when it matters: "on", or "off" against a
+  // directory that opens as the assistant. Without the field the Host keeps the directory's choice.
+  const asAssistant = assistantChoice.value && openAsAssistant.value ? true : directoryAssistant.value ? false : undefined
   // A fresh confirmation is a fresh save intent; another Client may have changed
   // the default. Trust continuation calls createAt directly and does not save again.
   if (saveDefault.value) {
@@ -292,7 +321,7 @@ async function confirmSystem() {
     clearError()
     saveFailed.value = false
     try {
-      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId))
+      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, asAssistant))
       if (epoch !== systemEpoch) return
       savedDefaultId.value = selection.id
     } catch (cause) {
@@ -304,7 +333,16 @@ async function confirmSystem() {
       pending.value = ''
     }
   }
-  if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection.workerConfig)
+  if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection.workerConfig, asAssistant)
+}
+
+/** Her workspace on Main, through the same steps as choosing that directory. */
+async function openAssistantWorkspace() {
+  const main = mainMachine.value
+  const path = assistantWorkspace.value
+  if (!main || !path || actionBusy.value) return
+  machineHostId.value = main.hostId
+  await chooseDirectory(path)
 }
 
 function clearError() {
@@ -407,7 +445,7 @@ async function loadInventory() {
   }
 }
 
-async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, systemConfig?: Record<string, unknown>) {
+async function createAt(path: string, machineId = machineHostId.value, continuation?: CreateWorkContinuation, systemConfig?: Record<string, unknown>, asAssistant?: boolean) {
   if (!isTauri || !!pending.value || (!!trust.value && !continuation)) return
   const selectedMachine = props.machines.find((candidate) => candidate.hostId === machineId)
   if (!selectedMachine?.available) return
@@ -418,14 +456,14 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
   clearError()
   try {
     const context = requireConnectionContext(app)
-    const work = await createWork(path, app.captureHostOperation(context), undefined, continuation, machineId, workerConfig)
+    const work = await createWork(path, app.captureHostOperation(context), undefined, continuation, machineId, workerConfig, asAssistant)
     if (!app.contextMatches(context) || epoch !== systemEpoch) return
     trust.value = null
     emit('created', work)
   } catch (cause) {
     if (epoch === systemEpoch) {
       if (systemCatalogState.value !== 'unsupported') view.value = 'systems'
-      handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path, workerConfig })
+      handleMutationFailure(cause, { kind: 'create', machineHostId: machineId, path, workerConfig, assistant: asAssistant })
     }
   } finally {
     pending.value = ''
@@ -451,7 +489,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
   }
 }
 
-function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken' | 'workerConfig'>) {
+function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind' | 'machineHostId' | 'path' | 'sessionToken' | 'workerConfig' | 'assistant'>) {
   const failure = cause as { code?: string; details?: Record<string, unknown>; operationId?: string }
   if (failure?.code === 'project_trust_required') {
     const operationId = String(failure.details?.operationId || failure.operationId || '')
@@ -461,6 +499,13 @@ function handleMutationFailure(cause: unknown, attempt: Pick<TrustAttempt, 'kind
       return
     }
     error.value = { message: 'Dock 返回的信任确认与当前操作对不上。请重新选择后再试。' }
+    return
+  }
+  if (attempt.assistant && (failure?.code === 'assistant_unavailable' || failure?.code === 'capability_missing')) {
+    error.value = { message: failure.code === 'assistant_unavailable'
+      ? '助手服务现在没有运行，没能以助手身份创建。可以稍后再试，或关掉「以助手身份打开」再创建。'
+      : '这台机器上的 Dock 还不能以助手身份打开 Work。可以更新那台机器的 Dock，或关掉「以助手身份打开」再创建。' }
+    app.failureShown(cause)
     return
   }
   setError(
@@ -478,7 +523,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
     trustChallengeId: attempt.trustChallengeId,
     projectTrustDecision: decision,
   }
-  if (attempt.kind === 'create' && attempt.path) void createAt(attempt.path, attempt.machineHostId, continuation, attempt.workerConfig)
+  if (attempt.kind === 'create' && attempt.path) void createAt(attempt.path, attempt.machineHostId, continuation, attempt.workerConfig, attempt.assistant)
   else if (attempt.kind === 'adopt' && attempt.sessionToken) void adoptSaved(attempt.sessionToken, attempt.machineHostId, continuation)
 }
 </script>
@@ -536,6 +581,10 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         </div>
         <div class="new-work-section-label">开始</div>
         <div class="ui-dialog-options new-work-action-options">
+          <button v-if="assistantWorkspace" type="button" class="ui-dialog-option" :disabled="actionBusy" @click="openAssistantWorkspace">
+            <span class="ui-dialog-option-marker"><Sparkles :size="16" /></span>
+            <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">助手的工作区…</span><span class="ui-dialog-option-detail"><span>在 Main 上打开 {{ assistantWorkspace }}</span></span></span>
+          </button>
           <button type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="startBrowsing()">
             <span class="ui-dialog-option-marker"><FolderOpen :size="16" /></span>
             <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">选择其他目录…</span><span class="ui-dialog-option-detail"><span>浏览这台机器上的目录</span></span></span>
@@ -585,6 +634,10 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
             </div>
             <div v-if="systemCatalogState === 'ready' && !systemCandidates.length" class="ui-dialog-empty">没有可用的 system。请检查这台机器的 SYSTEM 文件或 Dock 模板后重新读取。</div>
           </div>
+          <label v-if="assistantChoice" class="new-work-assistant">
+            <input v-model="openAsAssistant" type="checkbox" :disabled="actionBusy" />
+            <span><strong>以助手身份打开</strong><small>{{ openAsAssistant ? '这个 Work 会载入助手的人设和记忆，对话会记进她的记忆。' : '这个 Work 和助手的记忆无关。' }}创建后不能更改。</small></span>
+          </label>
           <footer class="system-confirm">
             <button type="button" class="ui-dialog-btn" :disabled="actionBusy" @click="chooseDirectory(systemPath, true)">重新读取</button>
             <label><input v-model="saveDefault" type="checkbox" :disabled="actionBusy" />设为此目录默认</label>
@@ -667,6 +720,11 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .system-confirm { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
 .system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
 .system-confirm input { accent-color: var(--alu-highlight); }
+.new-work-assistant { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 9px; padding: 10px 14px; border-top: 1px solid var(--alu-border); color: var(--alu-text-muted); font-size: var(--alu-ui-size); cursor: pointer; }
+.new-work-assistant input { margin-top: 3px; accent-color: var(--alu-highlight); }
+.new-work-assistant span { display: grid; gap: 2px; }
+.new-work-assistant strong { color: var(--alu-text); font-weight: 600; }
+.new-work-assistant small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); line-height: 1.5; }
 .new-work-dialog > .resource-document { flex: 1; min-height: 0; }
 .alu-dialog-error > span { display: block; }
 /* Leaves room under the first-screen selectors for their open menus, which the dialog otherwise clips. */

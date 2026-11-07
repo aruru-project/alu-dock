@@ -12,7 +12,7 @@ import type { ConnectionContext, MachineDto, Work } from '../lib/types'
 import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
-import { useSurfacesStore, type MachineSettingsSection } from './surfaces'
+import { useSurfacesStore, type AssistantSection, type MachineSettingsSection } from './surfaces'
 
 /** Work buttons, the Work list and New Work, with their local feedback. Results are claimed by the operations store. */
 export const useWorkActionsStore = defineStore('work-actions', () => {
@@ -401,6 +401,12 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     page.openMachineSettings(section)
   }
 
+  /** The assistant's page; she lives on Main, so no machine is chosen (card #295). */
+  function openAssistant(section?: AssistantSection) {
+    if (host.pairingInProgress) return
+    page.openAssistant(section)
+  }
+
   function acceptCreatedWork(work: Work) {
     page.directoryBusy = false
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
@@ -417,6 +423,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, acceptCreatedWork,
   }
 })

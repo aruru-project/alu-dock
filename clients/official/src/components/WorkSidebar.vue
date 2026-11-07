@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { Server, Settings, X } from '@lucide/vue'
+import { Server, Settings, Sparkles, X } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
 import { childNeedsStop, workPresence } from '../lib/uiBoundaries'
 import OperationResults from './OperationResults.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
+import { useAssistantStore } from '../stores/assistant'
 import { useHostStore } from '../stores/host'
 import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
@@ -18,7 +19,8 @@ const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const workActions = useWorkActionsStore()
 const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions)
-const { workMachineTag, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings } = workActions
+const { workMachineTag, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant } = workActions
+const assistant = useAssistantStore()
 const { directoryOpen } = storeToRefs(useSurfacesStore())
 const host = useHostStore()
 const { pairingInProgress } = storeToRefs(host)
@@ -55,7 +57,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
         <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
           <button class="alu-instance-link" @click="selectWork(work.id)">
             <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
-            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
+            <span class="alu-instance-copy"><span class="alu-instance-name"><span v-if="work.assistant" class="alu-instance-assistant-tag">助手</span>{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
             <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
           </button>
           <button v-if="childNeedsStop(work)" class="alu-instance-action" :disabled="!isTauri || workMutating" @click="selectWork(work.id); stopSelectedWork()">停止</button>
@@ -76,6 +78,11 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     <button class="alu-sidebar-settings-entry" aria-label="App 设置" @click="openAppSettings">
       <span class="alu-sidebar-settings-icon"><Settings :size="17" /></span>
       <span><strong>App 设置</strong><small>{{ appSettingsSummary }}</small></span>
+      <span aria-hidden="true">›</span>
+    </button>
+    <button v-if="app.connectionContext && assistant.available" class="alu-sidebar-settings-entry" aria-label="助手" @click="openAssistant()">
+      <span class="alu-sidebar-settings-icon"><Sparkles :size="17" /></span>
+      <span><strong>助手</strong><small>{{ assistant.hasDrafts ? '有改动还没有保存' : '人设、手写设定和过去的对话' }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
     <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings()">
@@ -167,6 +174,18 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 }
 .alu-instance-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .alu-instance-name { color: var(--alu-text); font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alu-instance-assistant-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--alu-accent-border);
+  border-radius: 5px;
+  color: var(--alu-accent);
+  font-size: var(--alu-micro-size);
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 1px;
+}
 .alu-instance-machine-tag {
   display: block;
   max-width: 100%;

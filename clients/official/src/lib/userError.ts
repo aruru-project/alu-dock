@@ -63,6 +63,11 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'workspace_too_large') return '这个目录里的项目太多，无法列出。请输入更具体的路径。'
     if (code === 'workspace_unavailable') return '无法打开这个目录。请检查路径后重试。'
     if (code === 'model_not_found') return '这个模型现在在这台机器上不可用。请换一个模型，或检查它的登录状态后重试。'
+    // The personal assistant (card #295) on Main.
+    if (code === 'assistant_unavailable') return '助手服务现在没有运行，这一步没有完成。请稍后重试。'
+    if (code === 'assistant_document_changed') return '这份内容在别处被改过，这次没有保存。你的草稿还在，可以先读取最新内容再决定。'
+    if (code === 'assistant_document_too_large') return '内容超过了一份的长度上限，没有保存。草稿还在，删短一些再存。'
+    if (code === 'assistant_entry_not_found') return '这段对话已经找不到了。请重新搜索。'
     if (code === 'host_unreachable') return '无法连接这台 AluDock。请检查电脑状态、网络和保存的地址，然后重试。'
     if ('message' in cause && (!code || SAFE_ERROR_CODES.has(code))) {
       const message = String(cause.message || '').trim()

@@ -10,6 +10,7 @@ use crate::{
         CATALOG_MAINTENANCE as FORGET_CAPABILITIES, INSTANCE_ADOPT as ADOPT_CAPABILITIES,
         INSTANCE_CATALOG as INSTANCE_CAPABILITIES, INSTANCE_REOPEN as REOPEN_CAPABILITIES,
         MACHINES as MACHINE_CAPABILITIES, WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
+        with_assistant_choice,
     },
 };
 
@@ -79,6 +80,10 @@ pub struct ExecutorSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct InstanceSnapshot {
     pub parent_id: Option<String>,
+    /// Opened as the personal assistant: it loads her persona and memory, and its
+    /// conversation becomes hers. Fixed when the Work is created.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assistant: bool,
     pub id: String,
     pub creation_operation_id: String,
     pub host_id: Option<String>,
@@ -280,6 +285,8 @@ struct CreateInstanceParams<'a> {
     trust_challenge_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_trust_decision: Option<ProjectTrustDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assistant: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -521,10 +528,14 @@ impl DockClient {
         continuation: Option<(&str, ProjectTrustDecision)>,
         operation_id: Option<&str>,
     ) -> Result<InstanceSnapshot> {
-        self.create_instance_for_machine(cwd, name, continuation, operation_id, None, None)
+        self.create_instance_for_machine(cwd, name, continuation, operation_id, None, None, None)
             .await
     }
 
+    /// `assistant` opens the Work as the personal assistant (true) or, against a directory
+    /// that remembers doing so, not (false); `None` leaves it to the directory's saved choice.
+    /// Only `true` needs a Host that takes the choice.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_instance_for_machine(
         &self,
         cwd: &str,
@@ -533,6 +544,7 @@ impl DockClient {
         operation_id: Option<&str>,
         target_host_id: Option<&str>,
         worker_config: Option<&serde_json::Map<String, Value>>,
+        assistant: Option<bool>,
     ) -> Result<InstanceSnapshot> {
         let generated_operation_id = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated_operation_id);
@@ -550,8 +562,9 @@ impl DockClient {
                     host_id: target_host_id,
                     trust_challenge_id,
                     project_trust_decision,
+                    assistant,
                 },
-                INSTANCE_CAPABILITIES,
+                &with_assistant_choice(INSTANCE_CAPABILITIES, assistant),
                 Some(operation_id),
             )
             .await?;
@@ -766,6 +779,7 @@ mod tests {
             },
             instance: InstanceSnapshot {
                 parent_id: None,
+                assistant: false,
                 id: "work".into(),
                 creation_operation_id: "created".into(),
                 host_id: None,
@@ -872,6 +886,7 @@ mod tests {
             host_id: Some("subhost-a"),
             trust_challenge_id: None,
             project_trust_decision: None,
+            assistant: None,
         })
         .unwrap();
         assert_eq!(
@@ -900,6 +915,37 @@ mod tests {
                 "hostId": "subhost-a"
             })
         );
+    }
+
+    #[test]
+    fn a_work_opened_as_the_assistant_is_created_and_shown_as_hers() {
+        let creation = serde_json::to_value(CreateInstanceParams {
+            operation_id: "operation-a",
+            cwd: "/home/alu/.aludock/assistant",
+            name: None,
+            worker_config: None,
+            host_id: None,
+            trust_challenge_id: None,
+            project_trust_decision: None,
+            assistant: Some(true),
+        })
+        .unwrap();
+        assert_eq!(creation["assistant"], true);
+        assert_eq!(
+            with_assistant_choice(INSTANCE_CAPABILITIES, Some(true)).last(),
+            Some(&"instance.assistant.v1")
+        );
+
+        let mut snapshot =
+            serde_json::to_value(stopped_result("operation", None).instance).unwrap();
+        assert!(
+            snapshot.get("assistant").is_none(),
+            "an ordinary Work carries no mark"
+        );
+        snapshot["assistant"] = serde_json::json!(true);
+        let hers: InstanceSnapshot = serde_json::from_value(snapshot).unwrap();
+        assert!(hers.assistant);
+        assert_eq!(serde_json::to_value(&hers).unwrap()["assistant"], true);
     }
 
     #[test]

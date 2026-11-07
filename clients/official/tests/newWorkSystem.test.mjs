@@ -92,6 +92,8 @@ try {
     globalThis[stateKey] = { store, invoke: async (command, args) => {
       calls.push({ command, args })
       if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
+      // Card #295: an older Main keeps no assistant; nothing about her shows.
+      if (command === 'assistant_info') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
       if (command === 'model_visibility') {
         if (scenario.startsWith('legacy')) throw { code: 'capability_missing', details: { missing: ['model.visibility.v1'] } }
         // The connected Host itself is addressed by omitting the target; a SubHost answers with Main's models and list.
@@ -137,6 +139,7 @@ try {
     const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
     const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} enabled`); target.props.onClick(); await settle() }
     await settle()
+    if (scenario === 'legacy') assert.ok(!button('助手的工作区'), 'a Main without the assistant offers no shortcut to her workspace')
     if (scenario === 'model') {
       // Card 361: the model is chosen on the first screen; hidden models stay out of the list.
       await click('选择模型')
@@ -358,14 +361,112 @@ try {
     const creates = calls.filter(c => c.command === 'create_work')
     for (const call of creates) {
       assert.deepEqual(call.args.workerConfig, template.workerConfig, 'Active choice, not first candidate, reaches real bridge unchanged')
+      assert.equal(call.args.assistant, null, 'a Host without the assistant choice is not sent one')
       assert.equal(call.args.targetHostId, 'target')
       assert.equal(call.args.connectionId, 'connection-a')
     }
     const saves = scenario === 'save-create-failure' || scenario === 'save-default-changed' ? 2 : scenario.startsWith('save-') ? 1 : 0
     assert.equal(calls.filter(c => c.command === 'set_system_default').length, saves, 'Trust continuation saves once; a new explicit confirmation saves its requested default again')
+    for (const call of calls.filter(c => c.command === 'set_system_default')) assert.equal(call.args.assistant, null)
+    assert.ok(!find(container, hasClass('new-work-assistant')), 'without the Host\'s assistant choice the system page has no switch')
     app.unmount()
   }
   console.log('PASS: directory/recent → first candidate preselected → raw whole-file preview/copy → retained choice → once/save/failures/trust; model choice rides with the system; stale discovery fenced; actual TS IPC payloads')
+
+  // Card #295: a new Work can open as the assistant. The choice sits on the system page, starts from the
+  // directory's saved choice, can be remembered with the default, and is fixed when the Work is created.
+  // Creating and saving the default send the choice only when it matters ("on", or "off" against a
+  // directory that opens as her); without the field the Host keeps the directory's choice.
+  for (const scenario of ['default-on', 'override-off', 'plain-off', 'save-on', 'direct-default', 'workspace', 'trust', 'unavailable', 'unsupported-target']) {
+    const store = await createStore()
+    const calls = [], created = []
+    const workspace = '/home/alu/.aludock/assistant'
+    const props = reactive({ machines: [
+      { hostId: 'target', name: '目标机器', kind: 'main', available: true, platform: 'linux', homePath: '/home/alu', workspaceRoots: ['/'] },
+      { hostId: 'laptop', name: '笔记本', kind: 'subhost', available: true, platform: 'linux', homePath: '/home/alu', workspaceRoots: ['/'] },
+    ], machinesLoading: false })
+    globalThis[stateKey] = { store, invoke: async (command, args) => {
+      calls.push({ command, args })
+      if (command === 'assistant_info') return { workspacePath: workspace, maxDocumentBytes: 262144 }
+      if (command === 'model_visibility') return { models: [], total: 0, truncated: false, hidden: [] }
+      if (command === 'list_workspace') return { path: args.path, revision: 'w', entries: [], total: 0, truncated: false }
+      if (command === 'system_catalog') {
+        // Main remembered {"assistant":true} for her workspace; other directories remember nothing.
+        const remembered = args.cwd === workspace || ['default-on', 'override-off', 'direct-default'].includes(scenario)
+        return { cwd: args.cwd, candidates: [project], total: 1, revision: 'r', warnings: [], assistantChoice: true,
+          ...(remembered ? { defaultAssistant: true } : {}), ...(scenario === 'direct-default' ? { defaultSelection: project } : {}) }
+      }
+      if (command === 'set_system_default') return { selection: project }
+      if (command === 'create_work') {
+        if (scenario === 'trust' && !args.trustChallengeId) throw { code: 'project_trust_required', details: { operationId: 'create-1', challengeId: 'trust-1' } }
+        if (scenario === 'unavailable' && args.assistant) throw { code: 'assistant_unavailable', message: 'The assistant service is not running.' }
+        // An older target machine: Main refuses the choice as for any missing capability.
+        if (scenario === 'unsupported-target' && args.assistant != null) throw { code: 'capability_missing', message: 'Required capabilities are unavailable', details: { missing: ['instance.assistant.v1'] } }
+        return { id: 'created-work', ...(args.assistant ? { assistant: true } : {}) }
+      }
+      throw new Error(`Unexpected IPC ${command}`)
+    } }
+    const container = node('root')
+    const app = renderer.createApp({ render: () => h(NewWorkDialog, { ...props, onCreated: work => created.push(work), onClose() {} }) })
+    app.mount(container)
+    const button = label => find(container, item => item.type === 'button' && (text(item).includes(label) || item.props['aria-label'] === label))
+    const click = async label => { const target = button(label); assert.ok(target, `${scenario}: button ${label} exists`); assert.ok(!target.props.disabled, `${scenario}: ${label} enabled`); target.props.onClick(); await settle() }
+    const toggle = () => find(find(container, hasClass('new-work-assistant')) ?? node('none'), item => item.type === 'input')
+    const creates = () => calls.filter(c => c.command === 'create_work')
+    await settle()
+    if (scenario === 'workspace') {
+      // Her workspace is on Main; the shortcut takes the same steps as choosing that directory there.
+      await click('选择 Machine'); await click('笔记本 · SubHost')
+      await click('助手的工作区')
+      const read = calls.find(c => c.command === 'system_catalog')
+      assert.deepEqual([read.args.cwd, read.args.targetHostId], [workspace, 'target'], 'the shortcut reads her workspace on Main')
+      assert.equal(toggle().checked, true, 'her workspace remembers opening as the assistant')
+      await click('确认并创建')
+      assert.deepEqual([creates()[0].args.cwd, creates()[0].args.targetHostId, creates()[0].args.assistant], [workspace, 'target', true])
+      assert.equal(created[0].assistant, true)
+      app.unmount(); continue
+    }
+    await click('project')
+    if (scenario === 'direct-default') {
+      // A usable saved default creates at once: the Host applies the directory's saved choices.
+      assert.equal(creates().length, 1)
+      assert.equal(creates()[0].args.assistant, null, 'nothing is said, so the Host decides from the directory default')
+      app.unmount(); continue
+    }
+    assert.equal(toggle().checked, ['default-on', 'override-off'].includes(scenario), 'the switch starts from the directory\'s saved choice')
+    assert.ok(text(container).includes('创建后不能更改'))
+    const setToggle = async on => { const input = toggle(); input.checked = on; input.change(); await settle() }
+    const saveAsDefault = async () => { const box = find(container, item => item.type === 'input' && item.props.type === 'checkbox' && item !== toggle()); box.checked = true; box.change(); await settle() }
+    if (scenario === 'override-off' || scenario === 'save-on' || scenario === 'plain-off') {
+      if (scenario !== 'plain-off') await setToggle(scenario === 'save-on')
+      await saveAsDefault()
+      await click('确认并创建')
+      const said = { 'save-on': true, 'override-off': false, 'plain-off': null }[scenario]
+      assert.equal(calls.find(c => c.command === 'set_system_default').args.assistant, said, 'saving the default says the same as creating')
+      assert.equal(creates()[0].args.assistant, said, scenario === 'plain-off' ? 'off where the directory remembers nothing needs no field' : 'turning the switch off against the directory default is said')
+      app.unmount(); continue
+    }
+    if (['trust', 'unavailable', 'unsupported-target'].includes(scenario)) await setToggle(true)
+    await click('确认并创建')
+    if (scenario === 'trust') {
+      await click('仅本次信任')
+      assert.deepEqual(creates().map(c => c.args.assistant), [true, true], 'the trust continuation replays the choice')
+      assert.equal(creates()[1].args.trustChallengeId, 'trust-1')
+    } else if (scenario === 'unavailable' || scenario === 'unsupported-target') {
+      assert.equal(created.length, 0)
+      assert.ok(text(container).includes(scenario === 'unavailable' ? '助手服务现在没有运行' : '还不能以助手身份打开'), text(container))
+      assert.ok(text(container).includes('关掉「以助手身份打开」'), 'the user is told what can still be done')
+      await setToggle(false)
+      await click('确认并创建')
+      assert.equal(creates()[1].args.assistant, null)
+    } else {
+      assert.equal(creates()[0].args.assistant, true)
+      assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
+    }
+    assert.equal(created.length, 1)
+    app.unmount()
+  }
+  console.log('PASS: open as the assistant: switch starts from the directory default, sent only when it matters, remembered with the default, survives trust, refused by an older machine with a way on; a usable default lets the Host decide; her workspace shortcut on Main')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

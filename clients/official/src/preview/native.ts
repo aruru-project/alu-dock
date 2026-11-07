@@ -5,8 +5,9 @@
 import type { InvokeArgs } from '@tauri-apps/api/core'
 import type { SessionContext } from '../lib/bridge'
 import type {
-  BootstrapPayload, ClientPreferences, CommandsResult, DesktopShellStatus, HostCatalog, ModelsResult, SavedSessionPage,
-  SessionTree, SettingsResult, ToolsResult, Work, WorkspacePage,
+  AssistantContextResult, AssistantDocument, AssistantSearchResult, BootstrapPayload, ClientPreferences, CommandsResult,
+  DesktopShellStatus, HostCatalog, ModelsResult, SavedSessionPage, SessionTree, SettingsResult, ToolsResult, Work,
+  WorkspacePage,
 } from '../lib/types'
 
 function sampleData() {
@@ -101,6 +102,7 @@ function sampleData() {
       { ...previewWork('独立代码审查', '/workshop/alu_dock/clients/official', 'idle', 'active', 'main', { provider: 'anthropic', id: 'claude-sonnet-4-6' }), parentId: 'preview-Alu Dock Official Client' },
       previewWork('Alu Workstation', '/workshop/alu_workstation', 'unavailable', 'host_lost', undefined, null),
       previewWork('alu_dock', '/workshop/alu_dock', 'idle', 'active', 'main', { provider: 'openrouter', id: 'anthropic/claude-opus-4.1-20250805-thinking-preview' }),
+      { ...previewWork('早上的闲聊', '/home/alu/.aludock/assistant', 'idle', 'active'), assistant: true },
     ],
   }
 
@@ -161,9 +163,35 @@ function sampleData() {
     }
   }
 
+  // The assistant kept on Main (card #295).
+  const assistantWorkspace = '/home/alu/.aludock/assistant'
+  const assistantDocuments: Record<'persona' | 'notes', AssistantDocument> = {
+    persona: { document: 'persona', revision: 'p1', text: '# 人设\n\n她是这台 Dock 的助手，说话简短，先给结论。\n记得你的习惯，但不替你做决定。\n' },
+    notes: { document: 'notes', revision: 'n1', text: '- 早上先说天气和今天的日程。\n- 周五提醒整理本周的工作。\n' },
+  }
+  const assistantSession = { sessionId: 'preview-assistant-session', name: '早上的闲聊', cwd: assistantWorkspace, workId: 'preview-早上的闲聊', machine: '家里的工作站', startedAt: now, lastAt: now }
+  const assistantSearch: AssistantSearchResult = {
+    hits: [
+      { session: assistantSession, entryId: 'a3', at: now, kind: 'assistant', snippet: '…今天上午有雨，出门记得带伞。日程里十点有一个评审…' },
+      { session: { ...assistantSession, sessionId: 'preview-older', name: undefined, workId: 'preview-retired', cwd: '/workshop/alu_dock' }, entryId: 'b7', at: now, kind: 'user', snippet: '明天早上提醒我看一下天气' },
+    ],
+  }
+  const assistantContext: AssistantContextResult = {
+    session: assistantSession,
+    entries: [
+      { entryId: 'a1', at: now, kind: 'user', text: '早，今天怎么样？' },
+      { entryId: 'a2', parentId: 'a1', at: now, kind: 'assistant', text: '我先看一下天气。', toolCalls: [{ name: 'bash', arguments: '{"command":"weather --today"}' }] },
+      { entryId: 'a2r', parentId: 'a2', at: now, kind: 'tool_result', toolName: 'bash', text: '小雨 14–19°C' },
+      { entryId: 'a3', parentId: 'a2r', at: now, kind: 'assistant', text: '今天上午有雨，出门记得带伞。日程里十点有一个评审。' },
+    ],
+    hasBefore: false,
+    hasAfter: false,
+  }
+
   const clientPreferences: ClientPreferences = { revision: 1, windowsAwayDelay: 'one_minute', windowsAwaySupported: true }
   const desktopShell: DesktopShellStatus = { supported: false, hostReady: false, loginStartEnabled: false, autoStartLocalHost: false }
-  return { previewCommands, previewModels, previewTools, previewSettings, previewSessions, previewTree, previewBootstrap, previewCatalog, clientPreferences, desktopShell }
+  return { previewCommands, previewModels, previewTools, previewSettings, previewSessions, previewTree, previewBootstrap, previewCatalog, clientPreferences, desktopShell,
+    assistantWorkspace, assistantDocuments, assistantSearch, assistantContext }
 }
 
 let data: ReturnType<typeof sampleData> | undefined
@@ -220,6 +248,23 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       { hostId: 'preview-main', name: '家里的工作站', kind: 'main', available: true, platform: 'linux', homePath: '/home/alu', workspaceRoots: ['/'] },
       { hostId: 'preview-subhost', name: 'Windows 工作站', kind: 'subhost', available: true, platform: 'windows', homePath: 'C:\\Users\\alu', workspaceRoots: ['C:\\', 'D:\\'] },
     ]
+    case 'assistant_info': await delay(80); return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024 }
+    case 'assistant_preview': {
+      await delay(200)
+      const { persona, notes } = preview.assistantDocuments
+      return { text: `${persona.text}\n# 手写设定\n\n${notes.text}\n# 最近的对话\n\n- 今天早上聊了天气和评审。\n`, loadedAt: new Date().toISOString() }
+    }
+    case 'assistant_document': await delay(160); return { ...preview.assistantDocuments[args.document as 'persona' | 'notes'] }
+    case 'set_assistant_document': {
+      await delay(240)
+      const name = args.document as 'persona' | 'notes'
+      const current = preview.assistantDocuments[name]
+      if (args.baseRevision !== current.revision) throw { code: 'assistant_document_changed', message: 'The document changed since it was read.' }
+      preview.assistantDocuments[name] = { document: name, text: String(args.text), revision: `${current.revision}+` }
+      return { ...preview.assistantDocuments[name] }
+    }
+    case 'assistant_search': await delay(220); return preview.assistantSearch
+    case 'assistant_context': await delay(160); return preview.assistantContext
     case 'list_workspace': {
       await delay(180)
       const path = String(args.path)

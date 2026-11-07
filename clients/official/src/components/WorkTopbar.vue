@@ -47,6 +47,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
       <button type="button" class="alu-navbar-breadcrumb" title="查看项目状态" aria-label="查看项目状态" :disabled="!selected" @click="openControlCenter('resources')">
         <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
         <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>
+        <span v-if="!app.needsPairing && selected?.assistant" class="alu-nav-assistant-tag" title="以助手身份打开的 Work">助手</span>
         <span class="alu-nav-session">{{ app.needsPairing ? 'AluDock' : selected?.name || selected?.displayName || '选择 Work' }}</span>
         <span v-if="selected?.gitBranch" class="alu-nav-git-branch"> {{ selected.gitBranch }}</span>
         <span class="alu-navbar-breadcrumb-arrow" aria-hidden="true">▾</span>
@@ -188,6 +189,16 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   white-space: nowrap;
 }
 .alu-nav-git-branch[hidden] { display: none; }
+.alu-nav-assistant-tag {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--alu-accent-border);
+  border-radius: 6px;
+  color: var(--alu-accent);
+  font-size: var(--alu-meta-size);
+  font-weight: 600;
+  line-height: 1;
+}
 .alu-navbar-breadcrumb-arrow { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .alu-navbar-right {
   display: flex;
