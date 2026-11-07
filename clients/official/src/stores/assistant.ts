@@ -210,7 +210,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   const search = reactive({
     query: '', from: '', to: '',
     /** The search the list shows; reading more continues it, not the fields being edited. */
-    shown: null as null | { connectionId: string; query: string; from?: string; to?: string },
+    shown: null as null | { connectionId: string; query?: string; from?: string; to?: string },
     hits: [] as AssistantSearchHit[],
     nextCursor: undefined as string | undefined,
     loading: false,
@@ -229,18 +229,20 @@ export const useAssistantStore = defineStore('assistant', () => {
     return { ...(from ? { from: day(from, false) } : {}), ...(to ? { to: day(to, true) } : {}) }
   }
 
+  /** Words, a time range, or both; a range alone lists that time's conversations, newest first. */
+  const canSearch = computed(() => !!(search.query.trim() || search.from || search.to))
   async function runSearch() {
-    const query = search.query.trim()
+    const query = search.query.trim() || undefined
     const context = app.connectionContext
-    if (!query || !context) return
+    if (!canSearch.value || !context) return
     const epoch = ++searchEpoch
-    const shown = { connectionId: context.connectionId, query, ...range(search.from, search.to) }
+    const shown = { connectionId: context.connectionId, ...(query ? { query } : {}), ...range(search.from, search.to) }
     search.loading = true
     search.error = ''
     search.moreError = ''
     closeContext()
     try {
-      const page = await currentConnectionCall(app, (ctx) => searchAssistant(query, shown, undefined, SEARCH_PAGE, ctx))
+      const page = await currentConnectionCall(app, (ctx) => searchAssistant(shown.query, shown, undefined, SEARCH_PAGE, ctx))
       if (epoch !== searchEpoch) return
       search.shown = shown
       search.hits = page.hits
@@ -347,7 +349,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     infos, available, info, current, loadInfo,
     editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
-    search, runSearch, searchMore,
+    search, canSearch, runSearch, searchMore,
     reading, openContext, readMore, closeContext,
   }
 })

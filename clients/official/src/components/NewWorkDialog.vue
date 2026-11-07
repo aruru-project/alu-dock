@@ -311,10 +311,9 @@ async function confirmSystem() {
   const epoch = systemEpoch
   const path = systemPath.value
   const hostId = machineHostId.value
-  // Only a choice that matters is sent: "on", or "off" against a directory that opens as the assistant.
-  // Without it the request stays as every Host knows it, so an older SubHost is unaffected.
-  const on = assistantChoice.value && openAsAssistant.value
-  const asAssistant = on ? true : directoryAssistant.value ? false : undefined
+  // Creating and saving the default say the same, and only when it matters: "on", or "off" against a
+  // directory that opens as the assistant. Without the field the Host keeps the directory's choice.
+  const asAssistant = assistantChoice.value && openAsAssistant.value ? true : directoryAssistant.value ? false : undefined
   // A fresh confirmation is a fresh save intent; another Client may have changed
   // the default. Trust continuation calls createAt directly and does not save again.
   if (saveDefault.value) {
@@ -322,8 +321,7 @@ async function confirmSystem() {
     clearError()
     saveFailed.value = false
     try {
-      // The Host writes the whole default: without `assistant` it no longer opens new Works as her.
-      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, on ? true : undefined))
+      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, asAssistant))
       if (epoch !== systemEpoch) return
       savedDefaultId.value = selection.id
     } catch (cause) {

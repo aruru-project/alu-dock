@@ -375,8 +375,8 @@ try {
 
   // Card #295: a new Work can open as the assistant. The choice sits on the system page, starts from the
   // directory's saved choice, can be remembered with the default, and is fixed when the Work is created.
-  // Only a choice that matters is sent ("on", or "off" against a directory that opens as her), so an
-  // older SubHost never receives the field.
+  // Creating and saving the default send the choice only when it matters ("on", or "off" against a
+  // directory that opens as her); without the field the Host keeps the directory's choice.
   for (const scenario of ['default-on', 'override-off', 'plain-off', 'save-on', 'direct-default', 'workspace', 'trust', 'unavailable', 'unsupported-target']) {
     const store = await createStore()
     const calls = [], created = []
@@ -437,18 +437,13 @@ try {
     assert.ok(text(container).includes('创建后不能更改'))
     const setToggle = async on => { const input = toggle(); input.checked = on; input.change(); await settle() }
     const saveAsDefault = async () => { const box = find(container, item => item.type === 'input' && item.props.type === 'checkbox' && item !== toggle()); box.checked = true; box.change(); await settle() }
-    if (scenario === 'override-off' || scenario === 'save-on') {
-      await setToggle(scenario === 'save-on')
+    if (scenario === 'override-off' || scenario === 'save-on' || scenario === 'plain-off') {
+      if (scenario !== 'plain-off') await setToggle(scenario === 'save-on')
       await saveAsDefault()
       await click('确认并创建')
-      // The Host writes the whole default: saved without the field, the directory no longer opens as her.
-      assert.equal(calls.find(c => c.command === 'set_system_default').args.assistant, scenario === 'save-on' ? true : null)
-      assert.equal(creates()[0].args.assistant, scenario === 'save-on' ? true : false, 'turning the switch off against the directory default is said')
-      app.unmount(); continue
-    }
-    if (scenario === 'plain-off') {
-      await click('确认并创建')
-      assert.equal(creates()[0].args.assistant, null, 'off where the directory remembers nothing needs no field')
+      const said = { 'save-on': true, 'override-off': false, 'plain-off': null }[scenario]
+      assert.equal(calls.find(c => c.command === 'set_system_default').args.assistant, said, 'saving the default says the same as creating')
+      assert.equal(creates()[0].args.assistant, said, scenario === 'plain-off' ? 'off where the directory remembers nothing needs no field' : 'turning the switch off against the directory default is said')
       app.unmount(); continue
     }
     if (['trust', 'unavailable', 'unsupported-target'].includes(scenario)) await setToggle(true)

@@ -186,8 +186,8 @@ impl DockClient {
         .await
     }
 
-    /// `Some(true)` also remembers opening new Works here as the assistant. The Host writes
-    /// the whole default, so `None` saves it without that choice and an older Host is unaffected.
+    /// `Some(true)` also remembers opening new Works here as the assistant and `Some(false)`
+    /// forgets it; `None` keeps whatever the directory remembered, as an older client's save does.
     pub async fn set_system_default(
         &self,
         cwd: &str,
@@ -244,17 +244,17 @@ mod tests {
         assert!(shown.get("defaultAssistant").is_none());
         assert_eq!(shown["assistantChoice"], false);
 
-        let remember = serde_json::to_value(DefaultParams {
+        let forget = serde_json::to_value(DefaultParams {
             cwd: "/project",
             id: "template",
             host_id: None,
             operation_id: "save-1",
-            assistant: Some(true),
+            assistant: Some(false),
         })
         .unwrap();
         assert_eq!(
-            remember,
-            serde_json::json!({ "cwd": "/project", "id": "template", "operationId": "save-1", "assistant": true })
+            forget,
+            serde_json::json!({ "cwd": "/project", "id": "template", "operationId": "save-1", "assistant": false })
         );
         let older_save = serde_json::to_value(DefaultParams {
             cwd: "/project",
@@ -270,8 +270,9 @@ mod tests {
             ["core.v2", "system.templates.v1", "instance.assistant.v1"]
         );
         assert_eq!(
-            with_assistant_choice(SYSTEM_TEMPLATES, None),
-            ["core.v2", "system.templates.v1"]
+            with_assistant_choice(SYSTEM_TEMPLATES, Some(false)),
+            ["core.v2", "system.templates.v1"],
+            "turning the choice off asks nothing of the Host"
         );
     }
 }

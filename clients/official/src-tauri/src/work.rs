@@ -640,7 +640,7 @@ pub(crate) async fn assistant_search(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
     selection_generation: u64,
-    query: String,
+    query: Option<String>,
     from: Option<String>,
     to: Option<String>,
     cursor: Option<String>,
@@ -649,7 +649,7 @@ pub(crate) async fn assistant_search(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .assistant_search(
-            &query,
+            query.as_deref(),
             from.as_deref(),
             to.as_deref(),
             cursor.as_deref(),

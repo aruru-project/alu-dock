@@ -14,7 +14,7 @@ const emit = defineEmits<{ close: [] }>()
 const app = useAppStore()
 const assistant = useAssistantStore()
 const { search, reading } = assistant
-const { preview, info } = storeToRefs(assistant)
+const { preview, info, canSearch } = storeToRefs(assistant)
 const { assistantSection: section } = storeToRefs(useSurfacesStore())
 
 const sections: Array<{ id: AssistantSection; label: string; icon: typeof Eye }> = [
@@ -104,13 +104,13 @@ function hitPlace(hit: AssistantSearchHit) {
     <main v-else class="assistant-content">
       <div class="assistant-intro">
         <h3>搜索对话</h3>
-        <p>在她经历过的对话里找。几个词用空格分开，要全部出现才算找到。</p>
+        <p>在她经历过的对话里找。几个词用空格分开，要全部出现才算找到；只选日期不填词，就列出那几天的对话。</p>
       </div>
       <form class="assistant-search" @submit.prevent="assistant.runSearch()">
-        <input v-model="search.query" class="ui-dialog-input ui-dialog-search" type="search" placeholder="要找的词…" aria-label="要找的词" spellcheck="false" />
+        <input v-model="search.query" class="ui-dialog-input ui-dialog-search" type="search" placeholder="要找的词（选了日期可以不填）" aria-label="要找的词" spellcheck="false" />
         <label><span>从</span><input v-model="search.from" class="ui-dialog-input ui-dialog-search" type="date" aria-label="从哪天开始" /></label>
         <label><span>到</span><input v-model="search.to" class="ui-dialog-input ui-dialog-search" type="date" aria-label="到哪天为止" /></label>
-        <button type="submit" class="button primary" :disabled="search.loading || !search.query.trim()">{{ search.loading ? '正在搜索…' : '搜索' }}</button>
+        <button type="submit" class="button primary" :disabled="search.loading || !canSearch">{{ search.loading ? '正在搜索…' : '搜索' }}</button>
       </form>
       <div v-if="search.error" class="assistant-error" role="alert"><span>{{ search.error }}</span></div>
 
@@ -147,7 +147,7 @@ function hitPlace(hit: AssistantSearchHit) {
             <span class="assistant-hit-meta"><span>{{ assistantTime(hit.at) }}</span><span>{{ hitPlace(hit) }}</span><span>{{ assistantEntryLabel(hit.kind) }}</span></span>
             <span class="assistant-hit-snippet">{{ hit.snippet }}</span>
           </button>
-          <p v-if="!search.hits.length" class="assistant-empty">没有找到包含「{{ search.shown.query }}」的对话。可以换几个词，或放宽时间范围。</p>
+          <p v-if="!search.hits.length" class="assistant-empty">{{ search.shown.query ? `没有找到包含「${search.shown.query}」的对话。可以换几个词，或放宽时间范围。` : '这段时间里没有对话。可以放宽时间范围。' }}</p>
         </div>
         <div v-if="search.moreError" class="assistant-error" role="alert"><span>{{ search.moreError }}</span></div>
         <button v-if="search.nextCursor" type="button" class="assistant-more" :disabled="search.loadingMore" @click="assistant.searchMore()">{{ search.loadingMore ? '正在读取…' : '更多结果' }}</button>

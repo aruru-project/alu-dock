@@ -208,13 +208,14 @@ pub(crate) const INSTANCE_ASSISTANT_V1: &str = "instance.assistant.v1";
 /// The assistant's persona, notes, preview and conversations; only Main offers them.
 pub(crate) const ASSISTANT: &[&str] = &[CORE_V2, "assistant.v1"];
 
-/// A request that says whether the new Work opens as the assistant needs a Host that takes the choice.
+/// Opening as the assistant needs a Host that takes the choice; `assistant: false` does not,
+/// since Main drops it on its way to a machine without that choice.
 pub(crate) fn with_assistant_choice(
     capabilities: &[&'static str],
     assistant: Option<bool>,
 ) -> Vec<&'static str> {
     let mut required = capabilities.to_vec();
-    if assistant.is_some() {
+    if assistant == Some(true) {
         required.push(INSTANCE_ASSISTANT_V1);
     }
     required

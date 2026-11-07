@@ -147,7 +147,9 @@ struct DocumentSetParams<'a> {
 
 #[derive(Serialize)]
 struct SearchParams<'a> {
-    query: &'a str,
+    /// Optional with a time range: then her conversations of that time, newest first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     from: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,9 +217,10 @@ impl DockClient {
         .await
     }
 
+    /// Words that must all appear, or with `from`/`to` alone everything in that time.
     pub async fn assistant_search(
         &self,
-        query: &str,
+        query: Option<&str>,
         from: Option<&str>,
         to: Option<&str>,
         cursor: Option<&str>,
@@ -287,9 +290,9 @@ mod tests {
     }
 
     #[test]
-    fn a_search_without_a_time_range_sends_only_the_words() {
+    fn a_search_sends_the_words_or_only_a_time_range() {
         let params = serde_json::to_value(SearchParams {
-            query: "天气 早上",
+            query: Some("天气 早上"),
             from: None,
             to: None,
             cursor: None,
@@ -300,18 +303,22 @@ mod tests {
             params,
             serde_json::json!({ "query": "天气 早上", "limit": 20 })
         );
-        let next = serde_json::to_value(SearchParams {
-            query: "天气",
-            from: Some("2026-11-01T00:00:00.000Z"),
-            to: Some("2026-11-08T00:00:00.000Z"),
+        let yesterday = serde_json::to_value(SearchParams {
+            query: None,
+            from: Some("2026-11-06T00:00:00.000Z"),
+            to: Some("2026-11-07T00:00:00.000Z"),
             cursor: Some("c2"),
             limit: 20,
         })
         .unwrap();
-        assert_eq!(next["from"], "2026-11-01T00:00:00.000Z");
-        assert_eq!(next["cursor"], "c2");
+        assert_eq!(
+            yesterday,
+            serde_json::json!({ "from": "2026-11-06T00:00:00.000Z", "to": "2026-11-07T00:00:00.000Z", "cursor": "c2", "limit": 20 }),
+            "a time range alone lists that time's conversations"
+        );
     }
 
+    /// The Host may add fields to hits and sessions; the client reads the ones it knows.
     #[test]
     fn search_results_show_where_a_conversation_happened_without_session_file_paths() {
         let result: AssistantSearchResult = serde_json::from_value(serde_json::json!({
@@ -324,12 +331,14 @@ mod tests {
                     "workId": "work-1",
                     "machine": "工作站",
                     "startedAt": "2026-11-06T08:00:00.000Z",
-                    "lastAt": "2026-11-06T08:30:00.000Z"
+                    "lastAt": "2026-11-06T08:30:00.000Z",
+                    "entryCount": 42
                 },
                 "entryId": "e3",
                 "at": "2026-11-06T08:05:00.000Z",
                 "kind": "assistant",
-                "snippet": "…今天早上的天气…"
+                "snippet": "…今天早上的天气…",
+                "score": 0.8
             }],
             "nextCursor": "c2"
         }))

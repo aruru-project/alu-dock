@@ -1455,6 +1455,18 @@ try {
     await click(page(), '更多结果')
     assert.equal(calls.filter(call => call.command === 'assistant_search').at(-1).args.cursor, 'c2')
     assert.ok(text(results()).includes('上周的天气'))
+    // A time range alone lists that time's conversations ("昨天聊了什么").
+    query.value = ''; query['event:input']({ target: query })
+    const from = find(page(), item => item.props['aria-label'] === '从哪天开始')
+    from.value = '2026-11-06'; from['event:input']({ target: from }); await settle()
+    find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const byDay = calls.filter(call => call.command === 'assistant_search').at(-1).args
+    assert.equal(byDay.query, null, 'no words are needed with a day')
+    assert.ok(byDay.from && byDay.to === null, 'the range starts at that day')
+    query.value = '天气'; query['event:input']({ target: query })
+    from.value = ''; from['event:input']({ target: from }); await settle()
+    find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    await click(page(), '更多结果')
     await click(results(), '今天上午有雨')
     const around = calls.filter(call => call.command === 'assistant_context').at(-1).args
     assert.deepEqual([around.sessionId, around.entryId], ['s1', 'e3'])
@@ -1474,7 +1486,7 @@ try {
     Object.assign(context, originalContext)
     app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
     await settle()
-    console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search with more results, context reading back, opening the Work')
+    console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search by words or by day with more results, context reading back, opening the Work')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
