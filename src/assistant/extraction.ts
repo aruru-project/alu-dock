@@ -116,6 +116,11 @@ export class AssistantExtraction {
     await this.running;
   }
 
+  /** Whether a pass runs or one is due now; what the evaluation script waits on. */
+  busy(): boolean {
+    return this.running !== undefined || (this.settings().extractionModel !== undefined && !this.failure && this.nextJob(this.now()) !== undefined);
+  }
+
   settings(): AssistantSettings {
     const value = this.meta("extraction_model");
     return value === undefined ? {} : { extractionModel: JSON.parse(value) as AssistantModelRef };

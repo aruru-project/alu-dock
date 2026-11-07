@@ -1,4 +1,4 @@
-import { ModelRuntime, type ModelRuntimeOwner } from "@earendil-works/pi-coding-agent";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { AssistantModelRef } from "../core/assistant.js";
 import { ExtractionModelError, type ExtractionModel } from "./extraction.js";
@@ -8,19 +8,19 @@ import type { ModelPrompt } from "./extraction-prompt.js";
 const REPLY_TOKENS = 16_000;
 
 /**
- * The assistant service's own model calls, with Main's model configuration and credentials as the
- * model service keeps them (card #303): it asks the Host, which asks the model service, like a Work.
+ * The assistant service's own model calls. In the service the runtime takes Main's model
+ * configuration and credentials from the model service (card #303), asking the Host like a Work does.
  */
 export class MainModelAccess implements ExtractionModel {
   private runtime: Promise<ModelRuntime> | undefined;
 
-  constructor(private readonly owner: ModelRuntimeOwner) {}
+  constructor(private readonly create: () => Promise<ModelRuntime>) {}
 
   async complete(ref: AssistantModelRef, prompt: ModelPrompt, signal: AbortSignal): Promise<string> {
     const name = `${ref.provider}/${ref.id}`;
     let runtime: ModelRuntime;
     try {
-      runtime = await (this.runtime ??= ModelRuntime.create({ owner: this.owner, signal }).catch((error: unknown) => { this.runtime = undefined; throw error; }));
+      runtime = await (this.runtime ??= this.create().catch((error: unknown) => { this.runtime = undefined; throw error; }));
       // Models and logins changed on Main since the last call count from this one.
       await runtime.refresh({ allowNetwork: false, signal });
     } catch (error) {

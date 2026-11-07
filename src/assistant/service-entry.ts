@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 import { askHost, serveRequests } from "../control/service-supervisor.js";
 import { parseAssistantRequest, parseAssistantSource, type AssistantSource } from "../core/assistant.js";
@@ -35,7 +35,8 @@ async function main(): Promise<void> {
   const readers = new AssistantReaders({ databasePath });
   const memories = new AssistantMemories(store.connection);
   // Main's model service answers for credentials through the Host, as it does for Works.
-  const models = new MainModelAccess(mainModelOwner((args, signal) => askHost({ model: args }, signal)));
+  const owner = mainModelOwner((args, signal) => askHost({ model: args }, signal));
+  const models = new MainModelAccess(() => ModelRuntime.create({ owner }));
   const extraction = new AssistantExtraction(store.connection, memories, documents, models, timing(),
     (message) => process.stderr.write(`Alu Dock: ${message}\n`));
   // The Host stops the service with SIGTERM: close the database rather than leave it to recovery.
