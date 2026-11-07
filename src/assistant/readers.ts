@@ -18,9 +18,10 @@ export type ReaderTask =
   | { op: "search"; request: AssistantSearchRequest }
   | { op: "context"; request: AssistantContextRequest };
 export type ReaderMessage = { id: number; task: ReaderTask; deadline: number };
+/** `retire`: this thread's connection is closed; it takes no more reads and a new thread replaces it. */
 export type ReaderAnswer =
-  | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; message: string; code?: string };
+  | { id: number; ok: true; result: unknown; retire?: true }
+  | { id: number; ok: false; message: string; code?: string; retire?: true };
 
 export interface AssistantReadersOptions {
   databasePath: string;
@@ -46,6 +47,7 @@ interface Read {
 interface Thread {
   worker: Worker;
   read: Read | undefined;
+  retiring: boolean;
 }
 
 const ENTRY = new URL("./reader-entry.js", import.meta.url);
@@ -116,7 +118,7 @@ export class AssistantReaders {
 
   private dispatch(): void {
     for (const thread of this.threads) {
-      if (thread.read) continue;
+      if (thread.read || thread.retiring) continue;
       // A read whose time ran out while it waited is answered, not run.
       let read = this.waiting.shift();
       while (read && Date.now() > read.deadline) {
@@ -130,13 +132,15 @@ export class AssistantReaders {
   }
 
   private start(): void {
-    const thread: Thread = { worker: new Worker(ENTRY, { workerData: { databasePath: this.options.databasePath } }), read: undefined };
+    const thread: Thread = { worker: new Worker(ENTRY, { workerData: { databasePath: this.options.databasePath } }), read: undefined, retiring: false };
     this.threads.push(thread);
     thread.worker.on("message", (answer: ReaderAnswer) => {
       const read = thread.read;
       // A late answer to a read that timed out or was cancelled frees the thread and is dropped.
       if (!read || read.id !== answer.id) return;
       thread.read = undefined;
+      // A thread that cannot go on gets nothing new; its exit brings in a replacement.
+      if (answer.retire) { thread.retiring = true; void thread.worker.terminate(); }
       // An answer that arrives after the deadline is late even if its timer has not run yet.
       settle(read, Date.now() > read.deadline ? new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE)
         : answer.ok ? { result: answer.result } : isAssistantErrorCode(answer.code) ? new AssistantError(answer.code, answer.message) : new Error(answer.message));
