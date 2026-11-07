@@ -1,17 +1,214 @@
 //! The personal assistant kept on Main (card #295): her persona, the owner's hand-written
-//! notes, what a new assistant session loads, and the conversations she took part in.
+//! notes, what a new assistant session loads, the conversations she took part in, the
+//! memories made from them and the model that makes them.
 //! Requests carry no `hostId`; the connected Main answers.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{DockClient, Result, capabilities::ASSISTANT};
+use crate::{DockClient, ModelRef, Result, capabilities::ASSISTANT};
 
-/// Her workspace on Main and the most one document may hold.
+/// Her workspace on Main, the most one document may hold, and how her memories are being made.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantInfo {
     pub workspace_path: String,
     pub max_document_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<AssistantExtractionStatus>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantExtractionState {
+    /// No model is chosen, so nothing is made into memories.
+    Off,
+    Idle,
+    Working,
+    /// The last try did not work; it is tried again at `retry_at`.
+    Failed,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// Making memories from her conversations in the background, as it stands now.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantExtractionStatus {
+    pub state: AssistantExtractionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    /// Conversations with something said since they were last read for memories.
+    pub waiting_sessions: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<String>,
+    /// Written for the owner. With `Idle`, a part of a conversation that was passed over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
+}
+
+/// The model that makes her memories; without one nothing is made.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_model: Option<ModelRef>,
+}
+
+/// What a memory is about: the owner, his likes and habits, the two of them, what they went
+/// through, or herself.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMemoryTopic {
+    Owner,
+    Preferences,
+    Relationship,
+    Events,
+    #[serde(rename = "self")]
+    Herself,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// In use; set aside as no longer true but kept for the record; or forgotten at the owner's word.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMemoryState {
+    Active,
+    Retired,
+    Forgotten,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// Who made a memory's latest change. Every change a client makes is the owner's.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMemoryAuthor {
+    Extraction,
+    Dreaming,
+    Assistant,
+    Owner,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMemoryAction {
+    Added,
+    Rewritten,
+    Moved,
+    Resident,
+    QueryOnly,
+    Retired,
+    Forgotten,
+    Restored,
+    Merged,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
+}
+
+/// An entry of her recorded conversations.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantEntryRef {
+    pub session_id: String,
+    pub entry_id: String,
+}
+
+/// Where a memory was said.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantMemorySource {
+    pub session_id: String,
+    pub entry_id: String,
+    pub at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantMemory {
+    pub id: String,
+    pub topic: AssistantMemoryTopic,
+    pub text: String,
+    /// Loaded into every new assistant session; otherwise found only when she looks.
+    pub resident: bool,
+    pub state: AssistantMemoryState,
+    pub author: AssistantMemoryAuthor,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Goes up with every change; a change names the revision it was made from.
+    pub revision: u64,
+    /// The earliest places it was said, `source_count` in all.
+    pub sources: Vec<AssistantMemorySource>,
+    pub source_count: u64,
+    /// The memory it was merged into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantMemoryList {
+    /// Newest first.
+    pub memories: Vec<AssistantMemory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AssistantMemoryChange {
+    pub at: String,
+    pub author: AssistantMemoryAuthor,
+    pub action: AssistantMemoryAction,
+    /// The text it was written or rewritten to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AssistantMemoryDetail {
+    pub memory: AssistantMemory,
+    /// Its latest changes, newest first.
+    pub history: Vec<AssistantMemoryChange>,
+}
+
+/// Which memories a list shows; each field left out widens it. Without `state`, those in use.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantMemoryFilter {
+    /// Words that must all occur.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<AssistantMemoryTopic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AssistantMemoryState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<AssistantMemoryAuthor>,
+}
+
+/// What a change to one memory sets; each field left out stays as it is.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantMemoryEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<AssistantMemoryTopic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AssistantMemoryState>,
 }
 
 /// The whole text a new assistant session loads now, and when it was put together.
@@ -168,6 +365,49 @@ struct ContextParams<'a> {
     after: u32,
 }
 
+#[derive(Serialize)]
+struct MemoryListParams<'a> {
+    #[serde(flatten)]
+    filter: &'a AssistantMemoryFilter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
+    limit: u32,
+}
+
+#[derive(Serialize)]
+struct MemoryGetParams<'a> {
+    id: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryAddParams<'a> {
+    operation_id: &'a str,
+    topic: AssistantMemoryTopic,
+    text: &'a str,
+    resident: bool,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    sources: &'a [AssistantEntryRef],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryUpdateParams<'a> {
+    operation_id: &'a str,
+    id: &'a str,
+    revision: u64,
+    #[serde(flatten)]
+    edit: &'a AssistantMemoryEdit,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsSetParams<'a> {
+    operation_id: &'a str,
+    /// Sent as `null` to stop making memories.
+    extraction_model: Option<&'a ModelRef>,
+}
+
 impl DockClient {
     pub async fn assistant_info(&self) -> Result<AssistantInfo> {
         self.request("assistant.info", &NoParams {}, ASSISTANT, None)
@@ -262,6 +502,116 @@ impl DockClient {
         )
         .await
     }
+
+    /// Her memories, newest first.
+    pub async fn assistant_memories(
+        &self,
+        filter: &AssistantMemoryFilter,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<AssistantMemoryList> {
+        self.request(
+            "assistant.memory.list",
+            &MemoryListParams {
+                filter,
+                cursor,
+                limit,
+            },
+            ASSISTANT,
+            None,
+        )
+        .await
+    }
+
+    /// One memory with its latest changes.
+    pub async fn assistant_memory(&self, id: &str) -> Result<AssistantMemoryDetail> {
+        self.request(
+            "assistant.memory.get",
+            &MemoryGetParams { id },
+            ASSISTANT,
+            None,
+        )
+        .await
+    }
+
+    /// A memory the owner writes, said where `sources` name. The same `operation_id` adds
+    /// it at most once while the Host runs.
+    pub async fn add_assistant_memory(
+        &self,
+        topic: AssistantMemoryTopic,
+        text: &str,
+        resident: bool,
+        sources: &[AssistantEntryRef],
+        operation_id: Option<&str>,
+    ) -> Result<AssistantMemory> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        self.request(
+            "assistant.memory.add",
+            &MemoryAddParams {
+                operation_id,
+                topic,
+                text,
+                resident,
+                sources,
+            },
+            ASSISTANT,
+            Some(operation_id),
+        )
+        .await
+    }
+
+    /// Changes what `edit` names. The Host refuses, changing nothing, with
+    /// `assistant_memory_changed` when `revision` is no longer the memory's, and with
+    /// `assistant_memory_merged` when forgetting one whose words live on in the memory it
+    /// was merged into. Setting `resident`, even to what it is, makes it the owner's choice.
+    pub async fn update_assistant_memory(
+        &self,
+        id: &str,
+        revision: u64,
+        edit: &AssistantMemoryEdit,
+        operation_id: Option<&str>,
+    ) -> Result<AssistantMemory> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        self.request(
+            "assistant.memory.update",
+            &MemoryUpdateParams {
+                operation_id,
+                id,
+                revision,
+                edit,
+            },
+            ASSISTANT,
+            Some(operation_id),
+        )
+        .await
+    }
+
+    pub async fn assistant_settings(&self) -> Result<AssistantSettings> {
+        self.request("assistant.settings.get", &NoParams {}, ASSISTANT, None)
+            .await
+    }
+
+    /// `None` stops making memories; those already made stay.
+    pub async fn set_assistant_settings(
+        &self,
+        extraction_model: Option<&ModelRef>,
+        operation_id: Option<&str>,
+    ) -> Result<AssistantSettings> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        self.request(
+            "assistant.settings.set",
+            &SettingsSetParams {
+                operation_id,
+                extraction_model,
+            },
+            ASSISTANT,
+            Some(operation_id),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +699,50 @@ mod tests {
         let shown = serde_json::to_value(&result).unwrap();
         assert!(!shown.to_string().contains("s1.jsonl"));
         assert_eq!(shown["hits"][0]["session"]["machine"], "工作站");
+    }
+
+    /// `self` is a Rust keyword, so the topic about herself is named apart from its wire value;
+    /// the real-Host gate only lists the owner's topic.
+    #[test]
+    fn the_topic_about_herself_is_asked_for_as_self() {
+        let herself = AssistantMemoryFilter {
+            topic: Some(AssistantMemoryTopic::Herself),
+            ..AssistantMemoryFilter::default()
+        };
+        assert_eq!(
+            serde_json::to_value(MemoryListParams {
+                filter: &herself,
+                cursor: None,
+                limit: 30,
+            })
+            .unwrap(),
+            serde_json::json!({ "topic": "self", "limit": 30 })
+        );
+    }
+
+    /// A newer Main may add fields and values; the client keeps the memories it can show.
+    #[test]
+    fn memories_from_a_newer_main_keep_what_this_client_knows() {
+        let list: AssistantMemoryList = serde_json::from_value(serde_json::json!({
+            "memories": [{
+                "id": "7", "topic": "places", "text": "主人住在海边。", "resident": true,
+                "state": "active", "author": "someone-new", "createdAt": "2026-11-07T10:00:00.000Z",
+                "updatedAt": "2026-11-07T10:00:00.000Z", "revision": 1, "sources": [], "sourceCount": 0,
+                "confidence": 0.9
+            }]
+        }))
+        .unwrap();
+        assert_eq!(list.memories[0].topic, AssistantMemoryTopic::Unrecognized);
+        assert_eq!(list.memories[0].author, AssistantMemoryAuthor::Unrecognized);
+        let info: AssistantInfo = serde_json::from_value(serde_json::json!({
+            "workspacePath": "/home/alu/.aludock/assistant",
+            "maxDocumentBytes": 262144,
+            "extraction": { "state": "paused", "waitingSessions": 2 }
+        }))
+        .unwrap();
+        let extraction = info.extraction.unwrap();
+        assert_eq!(extraction.state, AssistantExtractionState::Unrecognized);
+        assert_eq!(extraction.waiting_sessions, 2);
     }
 
     #[test]

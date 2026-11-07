@@ -12,7 +12,7 @@ export type ImagePreview =
 /** Host 设置 sections: the hidden-model list, or Main's child Work model list. */
 export type MachineSettingsSection = 'hidden' | 'children'
 /** The assistant page's sections (card #295). */
-export type AssistantSection = 'preview' | 'persona' | 'notes' | 'search'
+export type AssistantSection = 'preview' | 'persona' | 'notes' | 'memories' | 'search' | 'settings'
 
 export const useSurfacesStore = defineStore('surfaces', () => {
   const app = useAppStore()

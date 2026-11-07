@@ -180,7 +180,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'set_model_visibility') return saveModelVisibilityNative(args)
   if (command === 'child_models') return childModelsNative(args)
   if (command === 'set_child_models') return saveChildModelsNative(args)
-  if (command.startsWith('assistant_') || command === 'set_assistant_document') return assistantNative(command, args)
+  if (/(^|_)assistant(_|$)/.test(command)) return assistantNative(command, args)
   if (command === 'consume_operation') {
     if (consumeFailures.has(args.operationId)) throw { code: 'io_error', message: 'fixture acknowledgement unavailable' }
     nativeResults.delete(args.operationId); return
@@ -1487,6 +1487,159 @@ try {
     app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
     await settle()
     console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search by words or by day with more results, context reading back, opening the Work')
+  }
+  // Card #295: her memories from the same page: the newest, by topic and those deleted, where one
+  // was said, changing, deleting and restoring it, writing one, and the model that makes them.
+  {
+    const page = () => find(container, item => item.props['aria-labelledby'] === 'assistant-title')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || text(item).includes(label)))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(target, `button exists: ${label}`)
+      assert.equal(!!target.props.disabled, false, `${label} is available`)
+      target.props.onClick(); await settle()
+    }
+    const labelled = label => find(page(), item => item.props['aria-label'] === label)
+    const type = async (label, value) => { const input = labelled(label); input.value = value; input.props.onInput({ target: input }); await settle() }
+    const sent = command => calls.filter(call => call.command === command).at(-1).args
+    const list = () => text(labelled('记忆列表') ?? element('none'))
+    const rows = () => all(page(), item => item.props.class === 'memory-row-text').map(text)
+    const at = '2026-11-07T10:00:00.000Z'
+    const memoryOf = (id, topic, text, extra = {}) => ({ id, topic, text, resident: false, state: 'active', author: 'extraction', createdAt: at, updatedAt: at, revision: 1, sources: [], sourceCount: 0, ...extra })
+    const memories = [
+      memoryOf('3', 'preferences', '主人不吃香菜。', { resident: true, sources: [{ sessionId: 's1', entryId: 'e2', at }], sourceCount: 1 }),
+      memoryOf('2', 'events', '主人下周三要去体检。', { author: 'assistant' }),
+      memoryOf('1', 'owner', '主人养了一只猫。', { state: 'forgotten', author: 'owner', revision: 2 }),
+      memoryOf('4', 'events', '主人周三体检。', { state: 'retired', author: 'dreaming', revision: 2, supersededBy: '2' }),
+    ]
+    // Main does a change once per operation; the same operation sent again gets its answer again.
+    const answered = new Map()
+    let model, loseNextReply = false
+    const fallback = assistantNative, previousModels = modelVisibilityNative
+    assistantNative = async (command, args) => {
+      if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, extraction: model ? { state: 'idle', model, waitingSessions: 1 } : { state: 'off', waitingSessions: 1 } }
+      if (command === 'assistant_memories') return { memories: structuredClone(memories.filter(item => item.state === (args.filter.state ?? 'active') && (!args.filter.topic || item.topic === args.filter.topic))) }
+      if (command === 'assistant_memory') {
+        const found = memories.find(item => item.id === args.id)
+        return { memory: structuredClone(found), history: [{ at, author: found.author, action: 'added', text: found.text }] }
+      }
+      if (command === 'assistant_context') return { session: { sessionId: args.sessionId, name: '午饭闲聊', startedAt: at, lastAt: at }, entries: [{ entryId: 'e2', at, kind: 'user', text: '我不吃香菜哦。' }], hasBefore: false, hasAfter: false }
+      if (command === 'update_assistant_memory' || command === 'add_assistant_memory') {
+        if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
+        let changed
+        if (command === 'add_assistant_memory') {
+          changed = memoryOf(String(memories.length + 1), args.topic, args.text, { resident: args.resident, author: 'owner' })
+          memories.unshift(changed)
+        } else {
+          changed = memories.find(item => item.id === args.id)
+          if (args.revision !== changed.revision) throw { code: 'assistant_memory_changed', message: 'The memory changed since that revision.' }
+          const into = memories.find(item => item.id === changed.supersededBy)
+          if (args.edit.state === 'forgotten' && into?.state === 'active') throw { code: 'assistant_memory_merged', message: `这条记忆已经合并进 #${into.id}（“${into.text}”），只忘掉它的话，那一条里还留着同样的事。这次没有改动。` }
+          Object.assign(changed, args.edit, { author: 'owner', revision: changed.revision + 1 })
+        }
+        answered.set(args.operationId, structuredClone(changed))
+        if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
+        return structuredClone(changed)
+      }
+      if (command === 'assistant_settings') return model ? { extractionModel: model } : {}
+      if (command === 'set_assistant_settings') { model = args.extractionModel ?? undefined; return model ? { extractionModel: model } : {} }
+      return fallback(command, args)
+    }
+    modelVisibilityNative = async () => ({
+      models: [{ provider: 'openai', id: 'gpt-mini', name: 'GPT mini', reasoning: false }, { provider: 'openai', id: 'set-aside', name: 'Set aside', reasoning: false }],
+      total: 2, truncated: false, hidden: [{ provider: 'openai', id: 'set-aside' }],
+    })
+
+    await click(container, '助手')
+    await click(page(), '记忆')
+    assert.deepEqual(sent('assistant_memories').filter, {}, 'the newest in use come first')
+    assert.ok(list().includes('主人不吃香菜') && list().includes('体检') && !list().includes('猫'), list())
+    assert.ok(list().includes('从对话里记下') && list().includes('她在对话里记下'), 'each says who wrote it')
+    assert.ok(text(page()).includes('还没选整理记忆的模型'), 'without a model the page says nothing is made into memories')
+    await click(page(), '按分类')
+    await click(page(), '喜好和习惯')
+    assert.deepEqual(sent('assistant_memories').filter, { topic: 'preferences' })
+    assert.ok(list().includes('香菜') && !list().includes('体检'))
+
+    // Where it was said, read in the conversation.
+    await click(labelled('记忆列表'), '主人不吃香菜')
+    await click(page(), '看原话')
+    assert.deepEqual([sent('assistant_context').sessionId, sent('assistant_context').entryId], ['s1', 'e2'])
+    assert.ok(text(labelled('对话前后文')).includes('我不吃香菜哦') && text(page()).includes('这条记忆：主人不吃香菜。'))
+    await click(page(), '← 返回这条记忆')
+
+    // Choosing what it already is keeps the background from changing it; then only her looking
+    // finds it. Each change names the version shown.
+    await click(labelled('什么时候用'), '每次都带上')
+    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [1, { resident: true }])
+    assert.ok(text(page()).includes('已定下：每次都带上') && text(page()).includes('后台整理不会再改'))
+    await click(labelled('什么时候用'), '她查的时候才用')
+    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], ['3', 2, { resident: false }])
+    assert.ok(text(page()).includes('已改成她查的时候才用'))
+    // Changed by her meanwhile: nothing is changed, the page shows it as it is now and keeps the rewrite.
+    await click(page(), '改写')
+    await type('改写这条记忆', '主人不吃香菜和葱。')
+    Object.assign(memories[0], { text: '主人不吃香菜，点外卖要避开。', revision: memories[0].revision + 1, author: 'assistant' })
+    await click(page(), '保存改写')
+    assert.ok(text(page()).includes('刚被改过') && text(page()).includes('点外卖要避开'), text(page()))
+    assert.equal(labelled('改写这条记忆').value, '主人不吃香菜和葱。', 'the rewrite being typed stays')
+    await click(page(), '保存改写')
+    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [4, { text: '主人不吃香菜和葱。' }])
+    assert.ok(text(page()).includes('已改写') && text(page()).includes('你改的'))
+    // A deletion whose reply is lost is said once; sending it again is the same operation, done once.
+    loseNextReply = true
+    await click(page(), '删除')
+    const lost = sent('update_assistant_memory').operationId
+    assert.ok(text(page()).includes('连接中断，没收到结果'))
+    await click(page(), '删除')
+    assert.equal(sent('update_assistant_memory').operationId, lost)
+    assert.ok(text(page()).includes('已删除') && !!button(page(), '恢复'), 'the deleted memory can be restored from here')
+    await click(page(), '← 返回列表')
+
+    // Restored from those deleted.
+    await click(page(), '已删除')
+    assert.deepEqual(sent('assistant_memories').filter, { state: 'forgotten' })
+    await click(labelled('记忆列表'), '主人养了一只猫')
+    await click(page(), '恢复')
+    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').edit], ['1', { state: 'active' }])
+    assert.ok(text(page()).includes('已恢复'))
+    await click(page(), '← 返回列表')
+    // One merged into a memory still in use cannot be forgotten alone; Main says which, and it opens from here.
+    await click(page(), '已作废')
+    await click(labelled('记忆列表'), '主人周三体检')
+    await click(page(), '删除')
+    assert.ok(text(page()).includes('已经合并进 #2') && text(page()).includes('这次没有改动'), text(page()))
+    await click(page(), '去看合并后的那一条')
+    assert.equal(sent('assistant_memory').id, '2')
+    assert.ok(text(page()).includes('主人下周三要去体检。') && text(page()).includes('#2'))
+    await click(page(), '← 返回列表')
+
+    // The owner writes one; the newest heads the list.
+    await click(page(), '最近记住的')
+    await click(page(), '写一条')
+    await type('要她记住的事', '她答应过每周五提醒整理工作。')
+    await click(labelled('这条的分类'), '她自己')
+    await click(labelled('这条什么时候用'), '每次都带上')
+    labelled('写一条记忆').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual([sent('add_assistant_memory').topic, sent('add_assistant_memory').text, sent('add_assistant_memory').resident], ['self', '她答应过每周五提醒整理工作。', true])
+    assert.equal(rows()[0], '她答应过每周五提醒整理工作。')
+    assert.ok(text(page()).includes('已记下'))
+
+    // The model that makes memories: Main's models less the hidden ones; choosing one starts it.
+    await click(page(), '设置')
+    await click(page(), '刷新模型列表')
+    assert.ok(text(page()).includes('还没选模型') && text(page()).includes('没在整理'))
+    await click(page(), '整理记忆的模型')
+    const choices = find(page(), item => item.props.role === 'listbox')
+    assert.ok(text(choices).includes('GPT mini') && !text(choices).includes('Set aside'), 'hidden models are not offered')
+    await click(choices, 'GPT mini')
+    assert.deepEqual(sent('set_assistant_settings').extractionModel, { provider: 'openai', id: 'gpt-mini' })
+    assert.ok(text(page()).includes('已保存') && text(page()).includes('1 段对话'), text(page()))
+    await click(page(), '整理记忆的模型')
+    await click(find(page(), item => item.props.role === 'listbox'), '不整理')
+    assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
+    await click(page(), '关闭')
+    assistantNative = fallback; modelVisibilityNative = previousModels
+    console.log('PASS: assistant memories: newest and by topic, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, one merged elsewhere refused with a way to the other, written by the owner, the model chosen from Main\'s and cleared')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.
