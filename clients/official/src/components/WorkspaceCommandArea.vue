@@ -156,7 +156,7 @@ onMounted(() => {
 }
 .workspace-command-collapse:hover { color: var(--alu-text); background: var(--alu-hover); }
 .workspace-command-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--alu-accent); box-shadow: 0 0 6px var(--alu-shell-running-glow); }
-.workspace-command-place { min-width: 0; overflow: hidden; color: var(--alu-text-faint); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
+.workspace-command-place { min-width: 0; overflow: hidden; color: var(--alu-command-location); font-size: var(--alu-micro-size); text-overflow: ellipsis; white-space: nowrap; }
 .workspace-shell-list { min-height: 0; overflow: auto; padding: 0 12px; scrollbar-color: var(--alu-border) transparent; }
 .workspace-shell-empty { margin: 8px 0; color: var(--alu-text-faint); font-family: var(--font-reading); font-size: var(--alu-meta-size); line-height: 1.6; }
 .workspace-shell-feedback { margin: 0; padding: 6px 12px 0; font-size: var(--alu-meta-size); }

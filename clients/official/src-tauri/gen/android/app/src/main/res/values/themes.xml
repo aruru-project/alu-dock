@@ -10,4 +10,16 @@
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
     </style>
+
+    <!-- The page's dusk and dawn color themes; MainActivity picks one before the window draws
+         and Android 13+ also uses it for the next start's splash screen. -->
+    <style name="Theme.aludock_client_app.Dusk">
+        <item name="android:windowBackground">@color/aludock_background_dusk</item>
+    </style>
+
+    <style name="Theme.aludock_client_app.Dawn">
+        <item name="android:windowBackground">@color/aludock_background_dawn</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
 </resources>

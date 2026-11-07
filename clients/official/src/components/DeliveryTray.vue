@@ -230,8 +230,8 @@ function dateLabel(value: string) {
 .delivery-tray-scrim.open { pointer-events: auto; opacity: 1; }
 .delivery-tray { position: fixed; z-index: 54; inset: 0 0 0 auto; display: flex; width: min(440px, 94vw); flex-direction: column; overflow: hidden; color: var(--alu-text); border-left: 1px solid var(--alu-border); background: var(--alu-bg); box-shadow: var(--alu-delivery-shadow); transform: translateX(102%); transition: transform .25s cubic-bezier(.4, 0, .2, 1); }
 .delivery-tray.open { transform: translateX(0); }
-.delivery-tray-head { display: grid; min-height: 72px; flex: 0 0 auto; grid-template-columns: 38px minmax(0, 1fr) 34px 34px; align-items: center; gap: 8px; padding: max(12px, env(safe-area-inset-top)) 14px 12px; border-bottom: 1px solid var(--alu-border); background: linear-gradient(145deg, rgb(var(--alu-accent-rgb) / .08), transparent 62%); }
-.delivery-tray-mark { display: grid; width: 36px; height: 36px; place-items: center; color: var(--alu-accent); border: 1px solid var(--alu-accent-border); border-radius: 10px; background: rgb(var(--alu-accent-rgb) / .08); box-shadow: inset 0 0 18px rgb(var(--alu-accent-rgb) / .05); }
+.delivery-tray-head { display: grid; min-height: 72px; flex: 0 0 auto; grid-template-columns: 38px minmax(0, 1fr) 34px 34px; align-items: center; gap: 8px; padding: max(12px, env(safe-area-inset-top)) 14px 12px; border-bottom: 1px solid var(--alu-border); background: var(--alu-delivery-head-glow); }
+.delivery-tray-mark { display: grid; width: 36px; height: 36px; place-items: center; color: var(--alu-accent); border: 1px solid var(--alu-accent-border); border-radius: 10px; background: rgb(var(--alu-accent-rgb) / .08); box-shadow: var(--alu-delivery-mark-glow); }
 .delivery-tray-head h2, .delivery-tray-head p { margin: 0; }
 .delivery-tray-head h2 { font: 700 14px var(--font-reading); letter-spacing: .03em; }
 .delivery-tray-head p { margin-top: 3px; color: var(--alu-text-muted); font: var(--alu-meta-size) var(--font-reading); }
@@ -261,7 +261,7 @@ function dateLabel(value: string) {
 .delivery-file-copy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .delivery-file-copy strong { display: -webkit-box; overflow: hidden; color: var(--alu-text); font: 650 13px/1.4 var(--font-reading); overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
 .delivery-file-copy > span, .delivery-file-copy > small, .delivery-file-meta span { overflow: hidden; color: var(--alu-text-muted); font: var(--alu-ui-size)/1.35 var(--font-reading); text-overflow: ellipsis; white-space: nowrap; }
-.delivery-file-copy > small { color: rgb(var(--alu-text-muted-rgb) / .8); font-size: var(--alu-meta-size); }
+.delivery-file-copy > small { color: var(--alu-download-location); font-size: var(--alu-meta-size); }
 .delivery-file-meta { display: flex; min-width: 0; align-items: center; gap: 7px; }
 .delivery-file-meta em { flex: 0 0 auto; padding: 2px 6px; color: var(--alu-success); border: 1px solid rgb(var(--alu-success-rgb) / .24); border-radius: 999px; background: rgb(var(--alu-success-rgb) / .06); font: 700 var(--alu-meta-size)/1.2 var(--font-reading); font-style: normal; }
 .delivery-progress { width: 100%; height: 3px; overflow: hidden; border-radius: 999px; background: rgb(var(--alu-accent-rgb) / .12); }

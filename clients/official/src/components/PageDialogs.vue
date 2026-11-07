@@ -25,8 +25,8 @@ const workActions = useWorkActionsStore()
 const { selectedCompactionPending, hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact } = storeToRefs(workActions)
 const { stopSelectedWork, startCompaction, acceptCreatedWork } = workActions
 const platform = usePlatformStore()
-const { appSettings, appSettingsSaving, appSettingsError } = storeToRefs(platform)
-const { chooseWindowsAwayDelay } = platform
+const { appSettings, appSettingsSaving, appSettingsError, theme, themeSaveError, themeSyncError } = storeToRefs(platform)
+const { chooseWindowsAwayDelay, chooseTheme } = platform
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 </script>
 
@@ -62,15 +62,19 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   </Transition>
 
   <Transition name="fade">
-    <div v-if="appSettingsOpen && appSettings" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+    <div v-if="appSettingsOpen" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
       <section :ref="element => bindSurface('app-settings', element)" class="app-settings-surface" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1" @wheel="handleModalWheel">
         <AppSettings
           :preferences="appSettings"
+          :theme="theme"
+          :theme-error="themeSaveError"
+          :theme-sync-error="themeSyncError"
           :build-identity="appBuildIdentity"
           :saving="appSettingsSaving"
           :error="appSettingsError"
           @close="closeModal"
           @update="chooseWindowsAwayDelay"
+          @theme="chooseTheme"
         />
       </section>
     </div>
@@ -147,13 +151,13 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 }
 /* App settings is a quiet device-level surface, distinct from Host administration. */
 .app-settings-surface { position: relative; display: grid; width: min(760px, calc(100vw - 48px)); height: min(620px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-window-bg); box-shadow: var(--alu-settings-shadow); }
-.app-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-accent) 30%, var(--alu-brand) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
+.app-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-accent) 30%, var(--alu-window-edge-glint) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
 @media (max-width: 640px) {
   .app-settings-surface { width: 100%; height: min(92vh, 760px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
 /* Host 设置 edits settings kept on one machine; it needs room for two model lists. */
 .machine-settings-surface { position: relative; display: grid; width: min(980px, calc(100vw - 48px)); height: min(720px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-window-bg); box-shadow: var(--alu-settings-shadow); }
-.machine-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-brand) 30%, var(--alu-accent) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
+.machine-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-window-edge-glint) 30%, var(--alu-accent) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
 @media (max-width: 640px) {
   .machine-settings-surface { width: 100%; height: min(94vh, 820px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
@@ -180,7 +184,7 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   right: 0;
   left: 0;
   height: 1px;
-  background: linear-gradient(90deg, transparent 4%, var(--alu-brand) 23%, var(--alu-accent) 70%, transparent 96%);
+  background: linear-gradient(90deg, transparent 4%, var(--alu-window-edge-glint) 23%, var(--alu-accent) 70%, transparent 96%);
   content: '';
   opacity: .56;
   pointer-events: none;

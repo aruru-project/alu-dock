@@ -1,13 +1,19 @@
 import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { getClientPreferences, getDesktopShellStatus, isTauri, startDesktopHost, updateClientPreferences } from '../lib/bridge'
+import { getClientPreferences, getDesktopShellStatus, isTauri, setNativeAppearance, startDesktopHost, updateClientPreferences } from '../lib/bridge'
+import { CLIENT_THEMES, readTheme, saveTheme, showTheme, type ClientTheme } from '../lib/theme'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { ClientPreferences, DesktopShellStatus, WindowsAwayDelay } from '../lib/types'
 import { useAppStore } from './app'
 import { useExtensionUiStore } from './extension-ui'
 import { useSurfacesStore } from './surfaces'
-/** App settings, the desktop shell and draft flushing on page lifecycle.
+
+function deviceStorage(): Storage | null {
+  try { return window.localStorage } catch { return null }
+}
+
+/** App settings, the color theme, the desktop shell and draft flushing on page lifecycle.
  * Window focus and the Windows away period decide when to observe; they live in the observation store. */
 export const usePlatformStore = defineStore('platform', () => {
   const app = useAppStore()
@@ -16,6 +22,10 @@ export const usePlatformStore = defineStore('platform', () => {
   const appSettings = ref<ClientPreferences | null>(null)
   const appSettingsSaving = ref(false)
   const appSettingsError = ref('')
+  const theme = ref<ClientTheme>(readTheme(deviceStorage()))
+  const themeSaveError = ref('')
+  const themeSyncError = ref('')
+  let themeSyncRequest = 0
   const desktopShell = ref<DesktopShellStatus | null>(null)
   const desktopShellBusy = ref(false)
   const unlisteners: UnlistenFn[] = []
@@ -30,6 +40,34 @@ export const usePlatformStore = defineStore('platform', () => {
     one_hour: '1 小时后暂离',
     never: '切到其他窗口时不暂离',
   } as Record<WindowsAwayDelay, string>)[appSettings.value?.windowsAwayDelay ?? 'one_minute'])
+  const themeName = (id: ClientTheme) => CLIENT_THEMES.find((option) => option.id === id)?.label ?? ''
+  const themeLabel = computed(() => themeName(theme.value))
+
+  /** Android also draws its status bar, the window behind the page and the next start's splash screen;
+   * the page tells it which theme to match. Only the latest request decides what App settings reports. */
+  function matchNativeAppearance(next: ClientTheme) {
+    const request = ++themeSyncRequest
+    setNativeAppearance(next).then(() => {
+      if (request === themeSyncRequest) themeSyncError.value = ''
+    }, (cause) => {
+      console.error('Failed to match the system bars to the color theme.', cause)
+      if (request !== themeSyncRequest) return
+      const name = themeName(next)
+      // The page has switched either way; only say what did not follow.
+      themeSyncError.value = (cause as { code?: unknown } | null)?.code === 'splash_theme_unavailable'
+        ? `配色已经换好，只是下次打开客户端时，最先出现的启动画面可能还是原来的配色。可以再点一下「${name}」重试。`
+        : `状态栏没能跟着换成「${name}」，上面的图标可能看不清。可以再点一下「${name}」重试，还不行就重新打开客户端。`
+    })
+  }
+
+  /** Takes effect at once; saving only decides whether the next start opens in it.
+   * Choosing the current theme again retries saving it and matching the system bars. */
+  function chooseTheme(next: ClientTheme) {
+    theme.value = next
+    showTheme(next)
+    themeSaveError.value = saveTheme(deviceStorage(), next) ? '' : `配色已经换好，但没能存到这台设备，下次打开客户端会换回原来的配色。可以再点一下「${themeName(next)}」重试。`
+    matchNativeAppearance(next)
+  }
 
   async function retryDesktopHost() {
     if (desktopShellBusy.value) return
@@ -59,7 +97,6 @@ export const usePlatformStore = defineStore('platform', () => {
   }
 
   function openAppSettings() {
-    if (!appSettings.value?.windowsAwaySupported) return
     appSettingsError.value = ''
     surfaces.openAppSettings()
   }
@@ -88,6 +125,8 @@ export const usePlatformStore = defineStore('platform', () => {
   async function initialize() {
     if (initialized) return
     initialized = true
+    showTheme(theme.value)
+    matchNativeAppearance(theme.value)
     window.addEventListener('pagehide', flushDrafts)
     document.addEventListener('visibilitychange', flushDrafts)
     try {
@@ -121,5 +160,5 @@ export const usePlatformStore = defineStore('platform', () => {
     void extensionUi.clear()
   })
 
-  return { appSettings, appSettingsSaving, appSettingsError, desktopShell, desktopShellBusy, windowsAwayLabel, retryDesktopHost, runDesktopShellAction, openAppSettings, chooseWindowsAwayDelay, initialize }
+  return { appSettings, appSettingsSaving, appSettingsError, theme, themeLabel, themeSaveError, themeSyncError, desktopShell, desktopShellBusy, windowsAwayLabel, retryDesktopHost, runDesktopShellAction, openAppSettings, chooseWindowsAwayDelay, chooseTheme, initialize }
 })

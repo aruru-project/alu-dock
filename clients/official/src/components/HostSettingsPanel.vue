@@ -127,7 +127,7 @@ onBeforeUnmount(() => { void stopPairing(); stopRouteWatch() })
 .endpoint-list { display: grid; gap: 7px; }
 .endpoint-row { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(150px, auto); align-items: center; gap: 10px; padding: 11px; background: var(--alu-surface); border: 1px solid var(--alu-border); border-radius: 9px; }
 .endpoint-row.state-draft_unverified { border-color: rgb(var(--alu-warning-rgb) / .2); }
-.endpoint-row.state-disabled { opacity: .72; }
+.endpoint-row.state-disabled { opacity: var(--alu-endpoint-disabled-opacity); }
 .endpoint-icon { display: grid; width: 31px; height: 31px; color: var(--alu-success); background: rgb(var(--alu-success-rgb) / .07); border-radius: 8px; place-items: center; }
 .state-draft_unverified .endpoint-icon { color: var(--alu-warning); background: rgb(var(--alu-warning-rgb) / .07); }
 .state-disabled .endpoint-icon { color: var(--alu-text-muted); background: rgb(var(--alu-text-dim-rgb) / .07); }

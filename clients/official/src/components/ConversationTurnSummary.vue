@@ -85,7 +85,7 @@ const label = computed(() => `${segments.value.join('，')}${props.section.error
   gap: 6px;
   overflow-wrap: anywhere;
 }
-.alu-turn-summary-sep { opacity: .55; }
+.alu-turn-summary-sep { opacity: var(--alu-turn-summary-sep-opacity); }
 .alu-turn-summary-disclosure {
   color: var(--alu-text-faint);
   font-size: 18px;

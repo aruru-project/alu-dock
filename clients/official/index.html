@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, viewport-fit=cover, initial-scale=1, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#080c18" />
+    <script>
+      // Show the saved color theme from the first paint. src/lib/theme.ts owns the storage key and the theme names.
+      try { document.documentElement.setAttribute('data-theme', localStorage.getItem('aludock.theme') || 'classic') } catch {}
+    </script>
     <link id="app-icon" rel="icon" type="image/svg+xml" />
     <title>AluDock</title>
   </head>

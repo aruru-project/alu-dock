@@ -81,6 +81,10 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 @keyframes aluInstancePulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 * { box-sizing: border-box; }
 button:focus-visible, textarea:focus-visible { outline: none; box-shadow: var(--alu-focus-ring); }
+/* 输入框的占位字。经典沿用各平台浏览器自己的默认色（各引擎深浅不同，无法用一个变量原样表示），
+   所以只给其他配色统一设成 muted，这是唯一按配色写的样式。组件自己定了占位字颜色的不受影响。 */
+[data-theme="dusk"] ::placeholder,
+[data-theme="dawn"] ::placeholder { color: var(--alu-text-muted); }
 button:disabled { cursor: not-allowed; opacity: .42; }
 body {
   min-width: 320px;

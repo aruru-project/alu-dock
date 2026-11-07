@@ -16,6 +16,7 @@ const filesOnly = process.argv.includes('--files-reading')
 const listeners = new Map(), storage = new Map(), calls = []
 const consumeFailures = new Set()
 const nativeJobs = new Map()
+let failPreferences = false, failNativeAppearance = false
 let pickedJobs = [], droppedJobs = [], clipboardFiles = null, failStorage = false, jobsRevision = 0, deferJobSnapshot = false, releaseJobSnapshot, uploadNative
 const context = { connectionId: 'host', selectionGeneration: 1 }
 const work = { id: 'work', displayName: 'Work', name: 'Old Session', cwd: '/work', lifecycle: 'active', extensionStatus: {}, execution: 'idle', compacting: false,
@@ -110,7 +111,15 @@ const invoke = async (command, args = {}) => {
   if (command === 'submit_message') return submitNative(args)
   if (command === 'start_pairing') return startPairingNative(args)
   if (command === 'cancel_pairing') return cancelPairingNative(args)
-  if (command === 'get_client_preferences') return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
+  if (command === 'get_client_preferences') {
+    if (failPreferences) throw { code: 'io_error', message: '这台设备的设置暂时读不到。' }
+    return { revision: 1, windowsAwaySupported: false, windowsAwayDelay: 'immediate' }
+  }
+  if (command === 'set_native_appearance') {
+    if (failNativeAppearance === 'splash') throw { code: 'splash_theme_unavailable', message: '下次的启动画面没能跟着换配色。' }
+    if (failNativeAppearance) throw { code: 'appearance_unavailable', message: '状态栏没能跟着换配色。' }
+    return
+  }
   if (command === 'desktop_shell_status') return { supported: false, hostReady: true }
   if (command === 'work_catalog') {
     const list = () => { const instances = hostWorks(); return { ...context, hostEpoch: 'epoch', instances, total: instances.length } }
@@ -1045,6 +1054,27 @@ try {
     finishModel(JSON.parse(JSON.stringify(app.selectedWork))); await settle()
     modelNative = undefined
     assertSameReference(find(container, item => item.props.role === 'dialog' && item.props['aria-label'] === '选择 Model'), undefined)
+  }
+  // #665: the color theme is chosen in App settings on any device, shows at once,
+  // stays on this device for the next start, and Android is asked to match it.
+  {
+    const settings = () => find(container, item => item.props['aria-labelledby'] === 'app-settings-title')
+    const option = label => find(settings(), item => item.type === 'button' && item.props['aria-pressed'] !== undefined && text(item).includes(label))
+    assert.equal(calls.findLast(call => call.command === 'set_native_appearance')?.args.theme, 'classic', 'a device that never chose opens in classic and tells Android so')
+    find(container, item => item.type === 'button' && item.props['aria-label'] === 'App 设置').props.onClick(); await settle()
+    assert.ok(settings(), 'App settings opens on a device without the Windows away setting')
+    assert.equal(option('经典').props['aria-pressed'], true)
+    option('晨光').props.onClick(); await settle()
+    assert.equal(document.documentElement.dataset.theme, 'dawn', 'the page shows dawn at once')
+    assert.equal(storage.get('aludock.theme'), 'dawn', 'this device keeps dawn for the next start')
+    assert.equal(calls.findLast(call => call.command === 'set_native_appearance')?.args.theme, 'dawn', 'Android is asked to match dawn')
+    assert.equal(option('晨光').props['aria-pressed'], true)
+    option('经典').props.onClick(); await settle()
+    assert.equal(document.documentElement.dataset.theme, 'classic')
+    assert.equal(storage.get('aludock.theme'), 'classic')
+    find(settings(), item => item.type === 'button' && item.props['aria-label'] === '关闭').props.onClick(); await settle()
+    assertSameReference(settings(), undefined, 'closing App settings leaves the chosen theme in place')
+    console.log('PASS: App settings switches the color theme at once, this device keeps it, and Android is asked to match')
   }
   // #339: the real App/PageDialogs wiring owns leaving; submitted saves survive the editor.
   {
@@ -2233,6 +2263,82 @@ try {
     await closeDialog()
     catalogNative = undefined
     console.log('PASS: quick buttons: defaults run local controls; pinned command takes an argument; send keeps draft/attachments; restart keeps buttons; insert fills without sending; overflow runs from palette; order decides the row')
+  }
+
+  // #665 review: the color theme survives a reload, works without this device's settings,
+  // tells a failed save or a failed system-bar match with a retry, and is reachable before pairing.
+  {
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    let themeView
+    const mountThemeView = async () => {
+      mounted?.unmount(); await settle()
+      delete document.documentElement.dataset.theme // a reloaded page starts without the old page's attribute
+      const pinia = createPinia(); useAppStore(pinia); themeView = element('theme-app')
+      mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+      mounted.mount(themeView); await settle()
+    }
+    const settings = () => find(themeView, item => item.props['aria-labelledby'] === 'app-settings-title')
+    const openSettings = async () => { find(themeView, item => item.type === 'button' && item.props['aria-label'] === 'App 设置').props.onClick(); await settle() }
+    const choose = async label => { find(settings(), item => item.type === 'button' && item.props['aria-pressed'] !== undefined && text(item).includes(label)).props.onClick(); await settle() }
+    const alerts = () => all(settings(), item => item.props.role === 'alert').map(text)
+    const nativeTheme = () => calls.findLast(call => call.command === 'set_native_appearance')?.args.theme
+    const loggedError = console.error
+    console.error = () => {} // the failures below are expected; the page also logs them for diagnosis
+    try {
+      await mountThemeView(); await openSettings(); await choose('晨光')
+      await mountThemeView()
+      assert.equal(document.documentElement.dataset.theme, 'dawn', 'a saved dawn survives a reload')
+      assert.equal(nativeTheme(), 'dawn', 'the reloaded page asks Android to match dawn again')
+
+      failPreferences = true
+      await mountThemeView(); await openSettings()
+      assert.ok(settings(), 'App settings opens when this device\'s settings cannot be read')
+      await choose('暮色')
+      assert.equal(document.documentElement.dataset.theme, 'dusk', 'and the theme still changes')
+      failPreferences = false
+
+      failStorage = true
+      await choose('晨光')
+      assert.ok(alerts().some(line => line.includes('没能存到这台设备') && line.includes('再点一下「晨光」重试')), 'a choice this device cannot keep is told with what to do')
+      failStorage = false
+      await choose('晨光')
+      assert.equal(storage.get('aludock.theme'), 'dawn', 'clicking the chosen theme again saves it')
+      assert.deepEqual(alerts(), [], 'and the message goes away')
+
+      failNativeAppearance = true
+      await choose('暮色')
+      assert.ok(alerts().some(line => line.includes('状态栏没能跟着换成「暮色」') && line.includes('再点一下「暮色」重试')), 'system bars that did not follow are told with what to do')
+      failNativeAppearance = false
+      await choose('暮色')
+      assert.equal(nativeTheme(), 'dusk', 'clicking the chosen theme again asks Android again')
+      assert.deepEqual(alerts(), [], 'and a successful retry clears the message')
+
+      // Android 13+ followed now but did not take the splash screen of the next start.
+      failNativeAppearance = 'splash'
+      await choose('晨光')
+      const splashAlert = alerts().find(line => line.includes('启动画面'))
+      assert.ok(splashAlert && splashAlert.includes('配色已经换好') && splashAlert.includes('再点一下「晨光」重试'), 'a splash screen that did not follow is told as such, with a retry')
+      assert.equal(splashAlert.includes('状态栏'), false, 'it does not claim the system bars failed')
+      assert.equal(document.documentElement.dataset.theme, 'dawn', 'the page keeps the new theme')
+      assert.equal(storage.get('aludock.theme'), 'dawn', 'and this device keeps it')
+      failNativeAppearance = false
+      await choose('晨光')
+      assert.deepEqual(alerts(), [], 'a successful retry clears it')
+
+      const pairedHosts = savedHosts
+      savedHosts = []
+      await mountThemeView()
+      const topbar = find(themeView, item => item.type === 'nav' && String(item.props.class).includes('alu-navbar'))
+      assertSameReference(find(topbar, item => item.type === 'button' && String(item.props['aria-label']).startsWith('打开工作列表')), undefined, 'the first pairing page has no work list to open')
+      const entry = find(topbar, item => item.type === 'button' && item.props['aria-label'] === 'App 设置')
+      assert.ok(entry, 'the first pairing page has App settings in its top bar')
+      entry.props.onClick(); await settle()
+      assert.ok(settings(), 'and it opens App settings')
+      savedHosts = pairedHosts
+    } finally {
+      console.error = loggedError; failPreferences = false; failStorage = false; failNativeAppearance = false
+    }
+    console.log('PASS: color theme survives a reload, works without device settings, tells a failed save or system-bar match and retries on a second click, opens before pairing')
   }
 
   }

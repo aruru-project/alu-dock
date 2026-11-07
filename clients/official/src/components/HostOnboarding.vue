@@ -57,7 +57,7 @@ onBeforeUnmount(() => { void stopPairing() })
 </template>
 
 <style scoped>
-.eyebrow { color: var(--alu-brand); font-size: var(--alu-meta-size); font-weight: 700; letter-spacing: .16em; }
+.eyebrow { color: var(--alu-onboarding-eyebrow); font-size: var(--alu-meta-size); font-weight: 700; letter-spacing: .16em; }
 .pairing-onboarding { width: min(920px, 100%); min-height: 100%; padding: 12px 0 26px; margin: 0 auto; }
 .pairing-intro { display: flex; align-items: center; gap: 18px; margin: 0 auto 18px; }
 .pairing-intro > img { width: 108px; height: 116px; object-fit: contain; object-position: bottom; filter: var(--alu-illustration-shadow); }
@@ -70,7 +70,7 @@ onBeforeUnmount(() => { void stopPairing() })
 .pairing-guide { padding: 9px 15px; margin: 0; list-style: none; }
 .pairing-guide li { display: flex; gap: 11px; padding: 13px 2px; }
 .pairing-guide li + li { border-top: 1px solid var(--alu-border); }
-.pairing-guide li > span { display: grid; flex: 0 0 auto; width: 25px; height: 25px; color: var(--alu-brand); font-weight: 700; background: rgb(var(--alu-brand-rgb) / .09); border: 1px solid rgb(var(--alu-brand-rgb) / .2); border-radius: 50%; place-items: center; }
+.pairing-guide li > span { display: grid; flex: 0 0 auto; width: 25px; height: 25px; color: var(--alu-pairing-step); font-weight: 700; background: rgb(var(--alu-pairing-step-rgb) / .09); border: 1px solid rgb(var(--alu-pairing-step-rgb) / .2); border-radius: 50%; place-items: center; }
 .pairing-guide strong { font-size: var(--alu-meta-size); }
 .pairing-guide p { margin: 5px 0 0; color: var(--alu-text-muted); font: var(--alu-meta-size)/1.55 var(--font-reading); }
 @media (max-width: 1000px) {

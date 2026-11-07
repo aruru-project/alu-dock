@@ -80,7 +80,7 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
   object-fit: cover;
   flex-shrink: 0;
   margin-top: 0;
-  border: 2px solid var(--alu-brand-border);
+  border: 2px solid var(--alu-avatar-ring);
   box-shadow: var(--alu-avatar-glow);
 }
 .alu-msg-assistant-content {
@@ -148,8 +148,8 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
   align-items: center;
   gap: 7px;
 }
-.msg-timestamp > span { opacity: .7; }
-.msg-assistant-timestamp > span { opacity: .65; }
+.msg-timestamp > span { opacity: var(--alu-user-time-opacity); }
+.msg-assistant-timestamp > span { opacity: var(--alu-reply-time-opacity); }
 .message-text-action {
   display: inline-flex;
   min-height: 30px;

@@ -993,7 +993,7 @@ function isCurrentModel(model: ModelInfo) {
   font: inherit;
   font-size: var(--alu-ui-size);
 }
-.cmd-center-args::placeholder { color: var(--alu-text-faint); }
+.cmd-center-args::placeholder { color: var(--alu-command-args-placeholder); }
 .cmd-center-run {
   min-height: 34px;
   margin-right: 4px;
