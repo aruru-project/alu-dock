@@ -338,7 +338,7 @@ Dock 自带一个个人助手（card #295），默认是阿露。她的人设、
 
 请求都不带 `hostId`，由所连的 Main 回答。DTO 与 parser 定义在 `src/core/assistant.ts`，`protocol.ts` 复用。
 
-- `assistant.info {}` → `{workspacePath,maxDocumentBytes,extraction?}`：她在 Main 上的工作区，一份文档的字节上限，以及后台整理记忆的现状 `extraction {state,model?,waitingSessions,lastRunAt?,lastError?,retryAt?}`。`state` 为 `off`（没选模型，不整理）、`idle`、`working` 或 `failed`（`lastError` 是给主人看的原因，`retryAt` 自动再试）；`waitingSessions` 是还有新内容没读的对话数；`lastError` 在 `idle` 时也可能有，说明上次有一段被跳过。
+- `assistant.info {}` → `{workspacePath,maxDocumentBytes,maxMemoryChars,extraction?}`：她在 Main 上的工作区，一份文档的字节上限，一条记忆的长度上限（UTF-16 单位，现在是 1,000），以及后台整理记忆的现状 `extraction {state,model?,waitingSessions,lastRunAt?,lastError?,retryAt?}`。`state` 为 `off`（没选模型，不整理）、`idle`、`working` 或 `failed`（`lastError` 是给主人看的原因，`retryAt` 自动再试）；`waitingSessions` 是还有新内容没读的对话数；`lastError` 在 `idle` 时也可能有，说明上次有一段被跳过。
 - `assistant.preview {}` → `{text,loadedAt}`：现在新开一个助手会话会载入的全文，以及这份内容生成的时间。
 - `assistant.document.get {document}` → `{document,text,revision}`；`document` 为 `persona`（人设）或 `notes`（手写设定）。
 - `assistant.document.set {operationId,document,text,baseRevision}` → `{document,text,revision}`：整份替换，沿用 operation ledger。`baseRevision` 不是当前版本时返回 `assistant_document_changed`，内容不变；超过 `MAX_ASSISTANT_DOCUMENT_BYTES`（256 KiB）返回 `assistant_document_too_large`。她用工具按原文替换一段时，找不到原文为 `assistant_edit_not_found`，原文出现不止一次为 `assistant_edit_ambiguous`。

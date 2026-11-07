@@ -100,7 +100,8 @@ export interface AssistantExtractionStatus {
   lastError?: string;
   retryAt?: string;
 }
-export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; extraction?: AssistantExtractionStatus }
+/** `maxMemoryChars`: how long one memory may be, in characters (UTF-16 code units), for a client to say before saving. */
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; extraction?: AssistantExtractionStatus }
 
 /** Where something was said: an entry of a recorded conversation. */
 export interface AssistantMemorySource { sessionId: string; entryId: string; at: string }
@@ -548,6 +549,7 @@ export function parseAssistantInfo(input: unknown, field = "assistant info"): As
     return {
       workspacePath: text(value.workspacePath, `${field}.workspacePath`, MAX_PATH_CHARS, 1),
       maxDocumentBytes: count(value.maxDocumentBytes, `${field}.maxDocumentBytes`, Number.MAX_SAFE_INTEGER, 1),
+      maxMemoryChars: count(value.maxMemoryChars, `${field}.maxMemoryChars`, Number.MAX_SAFE_INTEGER, 1),
       ...(value.extraction === undefined ? {} : { extraction: parseExtractionStatus(value.extraction, `${field}.extraction`) }),
     };
   });

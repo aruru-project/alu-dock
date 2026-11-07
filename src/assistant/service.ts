@@ -1,6 +1,7 @@
 import {
   ASSISTANT_MEMORY_TOPICS,
   MAX_ASSISTANT_DOCUMENT_BYTES,
+  MAX_ASSISTANT_MEMORY_CHARS,
   MAX_ASSISTANT_PREVIEW_BYTES,
   type AssistantMemory,
   type AssistantMemoryAuthor,
@@ -49,7 +50,7 @@ export class AssistantCore {
     // A Work asking is the assistant herself; a client asking is the owner.
     const author: AssistantMemoryAuthor = source.workId === undefined ? "owner" : "assistant";
     switch (request.op) {
-      case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES, extraction: this.extraction.status() };
+      case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES, maxMemoryChars: MAX_ASSISTANT_MEMORY_CHARS, extraction: this.extraction.status() };
       case "load": return this.preview();
       case "recorded": return this.store.recorded(request.sessionId);
       case "record": return this.store.record(request.session, request.entries, request.throughEntryId, source);
