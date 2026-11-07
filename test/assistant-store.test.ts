@@ -100,6 +100,20 @@ test("the assistant's memory pages through many rows without gaps, keeps a burst
   assert.equal(burst.length, 1_100);
   assert.deepEqual(burst.slice(0, 3), ["b1099", "b1098", "b1097"]);
   assert.equal(store.search({ query: "连发", from: new Date(start - 59_999).toISOString(), limit: 50 }).hits.length, 0);
+  // Said a millisecond after the burst but recorded before it, an entry still comes first, and paging
+  // across the entries that had to take later IDs neither skips nor repeats.
+  const later = new Date(start - 60_000 + 1).toISOString();
+  store.record({ sessionId: "order", cwd: "/w" }, [entry("x", undefined, later, "user", "顺序 后说的")], "x", {});
+  store.record({ sessionId: "order", cwd: "/w" }, Array.from({ length: 1_030 }, (_, n) => entry(`o${n}`, undefined, at, "user", `顺序 ${n}`)), "o1029", {});
+  const ordered: string[] = [];
+  let page: string | undefined;
+  do {
+    const found = store.search({ query: "顺序", limit: 7, ...(page === undefined ? {} : { cursor: page }) });
+    ordered.push(...found.hits.map((hit) => hit.entryId));
+    page = found.nextCursor;
+  } while (page !== undefined);
+  assert.equal(ordered[0], "x");
+  assert.deepEqual(ordered.slice(1), Array.from({ length: 1_030 }, (_, n) => `o${1_029 - n}`));
   const first = store.context({ sessionId: "burst", entryId: "b0", before: 5, after: 1 });
   assert.equal(first.entries[0]!.parentId, undefined);
   assert.equal(first.hasBefore, false);

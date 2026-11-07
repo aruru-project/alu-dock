@@ -199,73 +199,101 @@ export class AssistantStore {
   }
 
   /**
-   * Newest first; every word must occur. Without words, everything in the time range. Past `deadline`
-   * (a Date.now() time) it stops between steps and refuses with assistant_query_timeout.
+   * Newest first by when each entry was said; every word must occur. Without words, everything in the
+   * time range. Past `deadline` (a Date.now() time) it stops between steps and refuses with
+   * assistant_query_timeout. The whole search reads one snapshot of the memory.
    */
   search(request: AssistantSearchRequest, deadline = Number.POSITIVE_INFINITY): AssistantSearchResult {
     if (Date.now() > deadline) throw new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE);
+    return this.snapshot(() => this.searchSnapshot(request, deadline));
+  }
+
+  /**
+   * The walk goes down the IDs, which are in time order except that an entry of a full millisecond
+   * sits up to `shift` milliseconds late. Every entry not yet reached was said no later than the
+   * millisecond of the current position, so an entry reached is handed out once its own time is at or
+   * past that; until then it waits, and the hits come out in (time, ID) order. The cursor is that pair.
+   */
+  private searchSnapshot(request: AssistantSearchRequest, deadline: number): AssistantSearchResult {
     const terms = (request.query ?? "").trim().split(/\s+/u).filter((term) => term.length > 0);
     const indexed = terms.filter((term) => [...term].length >= INDEXED_TERM_CHARS);
     const short = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS);
-    // IDs bound the walk; each entry's own time decides, since a burst may sit a few milliseconds late.
+    const shift = Number((this.db.prepare("SELECT value FROM meta WHERE key = 'max_shift_ms'").get() as { value: string }).value);
     const fromMs = request.from === undefined ? undefined : boundary(request.from, "start");
     const toMs = request.to === undefined ? undefined : boundary(request.to, "end");
-    const shift = Number((this.db.prepare("SELECT value FROM meta WHERE key = 'max_shift_ms'").get() as { value: string }).value);
+    const after = request.cursor === undefined ? undefined : parseCursor(request.cursor);
     const lowest = fromMs === undefined ? Number.MIN_SAFE_INTEGER : idAt(fromMs);
-    let below = Math.min(
+    let position = Math.min(
       toMs === undefined ? Number.MAX_SAFE_INTEGER : idAt(toMs + shift),
-      request.cursor === undefined ? Number.MAX_SAFE_INTEGER : parseCursor(request.cursor),
+      after === undefined ? Number.MAX_SAFE_INTEGER : idAt(after.ms + 1 + shift),
     );
-    const wanted = request.limit + 1;
     const filters = [
       ...(fromMs === undefined ? [] : ["e.at_ms >= ?"]),
       ...(toMs === undefined ? [] : ["e.at_ms < ?"]),
+      ...(after === undefined ? [] : ["(e.at_ms < ? OR (e.at_ms = ? AND e.id < ?))"]),
       ...short.map(() => "e.search_text LIKE ? ESCAPE '\\'"),
     ];
     const filterValues: SQLInputValue[] = [
       ...(fromMs === undefined ? [] : [fromMs]),
       ...(toMs === undefined ? [] : [toMs]),
+      ...(after === undefined ? [] : [after.ms, after.ms, after.id]),
       ...short.map((term) => `%${term.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`),
     ];
+    const conditions = filters.map((condition) => `AND ${condition}`).join(" ");
     const expression = indexed.map((term) => `"${term.replaceAll("\"", "\"\"")}"`).join(" AND ");
-    const fromIndex = (extra: string[]) => this.db.prepare(`SELECT e.* FROM entries_fts f JOIN entries e ON e.id = f.rowid
-      WHERE entries_fts MATCH ? AND f.rowid >= ? AND f.rowid < ? ${extra.map((condition) => `AND ${condition}`).join(" ")} ORDER BY f.rowid DESC LIMIT ?`);
-    const rows: EntryRow[] = [];
-    if (indexed.length > 0 && short.length === 0) {
-      // The index alone: it is read newest first and the read stops at the limit.
-      rows.push(...fromIndex(filters).all(expression, lowest, below, ...filterValues, wanted) as unknown as EntryRow[]);
-    } else {
-      const windowEnd = this.db.prepare("SELECT id FROM entries WHERE id >= ? AND id < ? ORDER BY id DESC LIMIT 1 OFFSET ?");
-      const step = indexed.length > 0
-        ? fromIndex(filters)
-        : this.db.prepare(`SELECT e.* FROM entries e WHERE e.id >= ? AND e.id < ? AND e.search_text <> '' ${filters.map((condition) => `AND ${condition}`).join(" ")} ORDER BY e.id DESC LIMIT ?`);
-      while (rows.length < wanted) {
-        if (Date.now() > deadline) throw new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE);
-        // [low, below) holds at most SCAN_WINDOW rows; the next window ends where this one began.
-        const end = windowEnd.get(lowest, below, SCAN_WINDOW - 1) as { id: number } | undefined;
-        const low = end?.id ?? lowest;
-        const need = wanted - rows.length;
-        rows.push(...(indexed.length > 0 ? step.all(expression, low, below, ...filterValues, need) : step.all(low, below, ...filterValues, need)) as unknown as EntryRow[]);
-        if (end === undefined) break;
-        below = low;
-      }
+    const wanted = request.limit + 1;
+    // With only indexed words the index is followed alone; otherwise SCAN_WINDOW rows at a time.
+    const indexOnly = indexed.length > 0 && short.length === 0;
+    const step = indexed.length > 0
+      ? this.db.prepare(`SELECT e.* FROM entries_fts f JOIN entries e ON e.id = f.rowid WHERE entries_fts MATCH ? AND f.rowid >= ? AND f.rowid < ? ${conditions} ORDER BY f.rowid DESC LIMIT ?`)
+      : this.db.prepare(`SELECT e.* FROM entries e WHERE e.id >= ? AND e.id < ? AND e.search_text <> '' ${conditions} ORDER BY e.id DESC LIMIT ?`);
+    const windowEnd = this.db.prepare("SELECT id FROM entries WHERE id >= ? AND id < ? ORDER BY id DESC LIMIT 1 OFFSET ?");
+    const hits: EntryRow[] = [];
+    let waiting: EntryRow[] = [];
+    for (;;) {
+      if (Date.now() > deadline) throw new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE);
+      const end = indexOnly ? undefined : windowEnd.get(lowest, position, SCAN_WINDOW - 1) as { id: number } | undefined;
+      const low = end?.id ?? lowest;
+      const rows = (indexed.length > 0 ? step.all(expression, low, position, ...filterValues, wanted) : step.all(low, position, ...filterValues, wanted)) as unknown as EntryRow[];
+      // Everything from here down is still to be read, unless this step reached the bottom.
+      const reachedBottom = rows.length < wanted && end === undefined;
+      position = rows.length === wanted ? rows.at(-1)!.id : low;
+      waiting.push(...rows);
+      waiting.sort(newestFirst);
+      const ready = reachedBottom ? waiting.length : waiting.findIndex((row) => row.at_ms < Math.floor((position - 1) / ENTRY_IDS_PER_MS));
+      const count = ready < 0 ? waiting.length : ready;
+      hits.push(...waiting.slice(0, count));
+      waiting = waiting.slice(count);
+      if (hits.length >= wanted || reachedBottom || position <= lowest) break;
     }
-    const page = rows.slice(0, request.limit);
+    hits.push(...waiting);
+    const page = hits.slice(0, request.limit);
     const sessions = new Map<string, AssistantSessionInfo>();
-    const hits: AssistantSearchHit[] = page.map((row) => {
+    const result: AssistantSearchHit[] = page.map((row) => {
       let session = sessions.get(row.session_id);
       if (!session) { session = this.session(row.session_id); sessions.set(row.session_id, session); }
       return { session: saidIn(session, row), entryId: row.entry_id, at: row.at, kind: row.kind as AssistantEntryKind, snippet: snippet(row.search_text, terms) };
     });
     const last = page.at(-1);
-    return { hits, ...(rows.length > request.limit && last ? { nextCursor: encodeCursor(last.id) } : {}) };
+    return { hits: result, ...(hits.length > request.limit && last ? { nextCursor: encodeCursor(last.at_ms, last.id) } : {}) };
+  }
+
+  /** Runs reads in one transaction, so they all see the same committed state. */
+  private snapshot<T>(read: () => T): T {
+    this.db.exec("BEGIN");
+    try { return read(); }
+    finally { try { this.db.exec("COMMIT"); } catch { /* a read transaction has nothing to keep */ } }
   }
 
   /** The entry with what came before it on its branch and what followed on the latest branch after it; at most about 2 × 50 lookups. */
   context(request: AssistantContextRequest, deadline = Number.POSITIVE_INFINITY): AssistantContextResult {
     if (Date.now() > deadline) throw new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE);
+    return this.snapshot(() => this.contextSnapshot(request));
+  }
+
+  private contextSnapshot(request: AssistantContextRequest): AssistantContextResult {
     const byId = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND entry_id = ?");
-    const latestChild = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND parent_id = ? ORDER BY id DESC LIMIT 1");
+    const latestChild = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND parent_id = ? ORDER BY at_ms DESC, id DESC LIMIT 1");
     const target = byId.get(request.sessionId, request.entryId) as unknown as EntryRow | undefined;
     if (!target) throw new AssistantError("assistant_entry_not_found", "没有找到这条对话记录。它可能还没记下来，或者编号写错了。");
     const before: EntryRow[] = [];
@@ -393,9 +421,14 @@ function boundary(value: string, side: "start" | "end"): number {
   return side === "start" ? start : new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]) + 1).getTime();
 }
 
-function encodeCursor(id: number): string { return Buffer.from(String(id)).toString("base64url"); }
-function parseCursor(cursor: string): number {
-  const id = Number(Buffer.from(cursor, "base64url").toString("utf8"));
-  if (Number.isSafeInteger(id)) return id;
+/** Later said first; among entries of one millisecond, the later ID first. */
+function newestFirst(left: EntryRow, right: EntryRow): number {
+  return right.at_ms - left.at_ms || right.id - left.id;
+}
+
+function encodeCursor(ms: number, id: number): string { return Buffer.from(`${ms}:${id}`).toString("base64url"); }
+function parseCursor(cursor: string): { ms: number; id: number } {
+  const [ms, id, extra] = Buffer.from(cursor, "base64url").toString("utf8").split(":").map(Number);
+  if (extra === undefined && Number.isSafeInteger(ms) && Number.isSafeInteger(id)) return { ms: ms!, id: id! };
   throw new AssistantError("invalid_request", "这个续读位置不是这次搜索给出的，请重新搜索。");
 }
