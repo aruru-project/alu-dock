@@ -3,11 +3,15 @@ import type { ExtensionContext, ExtensionFactory, SessionEntry } from "@earendil
 import {
   ASSISTANT_CONTEXT_DEFAULT_SPAN,
   ASSISTANT_DOCUMENTS,
+  ASSISTANT_MEMORY_STATES,
+  ASSISTANT_MEMORY_TOPICS,
   ASSISTANT_TOOL_NAMES,
   MAX_ASSISTANT_CONTEXT_SPAN,
   MAX_ASSISTANT_ID_CHARS,
   MAX_ASSISTANT_NAME_CHARS,
   MAX_ASSISTANT_ENTRY_TEXT_CHARS,
+  MAX_ASSISTANT_MEMORY_CHARS,
+  MAX_ASSISTANT_MEMORY_SOURCES,
   MAX_ASSISTANT_QUERY_CHARS,
   MAX_ASSISTANT_RECORD_BATCH_BYTES,
   MAX_ASSISTANT_SEARCH_LIMIT,
@@ -17,6 +21,11 @@ import {
   type AssistantDocument,
   type AssistantDocumentName,
   type AssistantEntry,
+  type AssistantMemory,
+  type AssistantMemoryDetail,
+  type AssistantMemoryList,
+  type AssistantMemoryState,
+  type AssistantMemoryTopic,
   type AssistantPreview,
   type AssistantRequest,
   type AssistantResultFor,
@@ -28,9 +37,10 @@ import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
 /*
  * What makes a Pi Work the personal assistant (card #295). Each session start (new Work, reload,
- * /new, resume, reopen) loads her persona, the owner's notes and how to recall more from Main into a
- * prompt section; the session keeps that copy until it starts again. Her conversation goes to Main
- * entry by entry, and her tools search and read it and edit her persona and the owner's notes.
+ * /new, resume, reopen) loads her persona, the owner's notes, the memories loaded every session and
+ * how to recall more from Main into a prompt section; the session keeps that copy until it starts
+ * again. Her conversation goes to Main entry by entry, and her tools search her memories and
+ * conversations, read around a hit, change her memories, and edit her persona and the owner's notes.
  */
 
 type ReadonlySessionManager = ExtensionContext["sessionManager"];
@@ -68,6 +78,24 @@ const READ_SCHEMA = {
     after: { type: "integer", minimum: 0, maximum: MAX_ASSISTANT_CONTEXT_SPAN, description: `Entries after it; default ${ASSISTANT_CONTEXT_DEFAULT_SPAN}.` },
   },
   required: ["sessionId", "entryId"],
+  additionalProperties: false,
+};
+const MEMORY_SCHEMA = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["add", "rewrite", "retire", "forget", "restore", "resident", "get", "list"] },
+    id: { type: "string", description: "The memory's number, as in #12 (without #); for every action but add and list." },
+    topic: { type: "string", enum: [...ASSISTANT_MEMORY_TOPICS], description: "owner: who your owner is. preferences: what they like and how they want things. relationship: how the two of you get on. events: things you went through, with the day. self: what you decided about yourself. For add; rewrite may move a memory; list may filter by it." },
+    text: { type: "string", maxLength: MAX_ASSISTANT_MEMORY_CHARS, description: "add and rewrite: one thing, as a sentence that makes sense on its own." },
+    resident: { type: "boolean", description: "add and resident: true to have it loaded at the start of every session; keep that for what matters in every conversation." },
+    sources: {
+      type: "array", maxItems: MAX_ASSISTANT_MEMORY_SOURCES,
+      items: { type: "object", properties: { sessionId: { type: "string" }, entryId: { type: "string" } }, required: ["sessionId", "entryId"], additionalProperties: false },
+      description: "add: where it was said, as sessionId and entryId from assistant_search.",
+    },
+    state: { type: "string", enum: [...ASSISTANT_MEMORY_STATES], description: "list: active (default), retired, or forgotten." },
+  },
+  required: ["action"],
   additionalProperties: false,
 };
 const DOCUMENT_SCHEMA = {
@@ -168,11 +196,14 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.registerTool({
       name: "assistant_search",
       label: "Search memory",
-      description: "Search your past conversations with your owner by keywords, time, or both, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
+      description: "Search what you remember and your past conversations with your owner, by keywords, time, or both. Memories whose text has every keyword come first; then what was said, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
       parameters: SEARCH_SCHEMA,
       execute: async (_id: string, params: { query?: string; from?: string; to?: string; cursor?: string; limit?: number }) => {
+        const query = params.query?.trim();
+        // Memories on the first page of a keyword search; the cursor pages through what was said.
+        const memories = query && params.cursor === undefined ? await port.call({ op: "memory_list", query, limit: 10 }) : undefined;
         const result = await port.call({ op: "search", ...optional("query", params.query), ...optional("from", params.from), ...optional("to", params.to), ...optional("cursor", params.cursor), limit: params.limit ?? 10 });
-        return { content: [{ type: "text", text: renderSearch(result) }], details: result };
+        return { content: [{ type: "text", text: [...(memories ? [renderMemories(memories, "Memories")] : []), renderSearch(result)].join("\n\n") }], details: { ...result, ...(memories ? { memories: memories.memories } : {}) } };
       },
     } as never);
 
@@ -184,6 +215,55 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
       execute: async (_id: string, params: { sessionId: string; entryId: string; before?: number; after?: number }) => {
         const result = await port.call({ op: "context", sessionId: params.sessionId, entryId: params.entryId, before: params.before ?? ASSISTANT_CONTEXT_DEFAULT_SPAN, after: params.after ?? ASSISTANT_CONTEXT_DEFAULT_SPAN });
         return { content: [{ type: "text", text: renderContext(result, params.entryId) }], details: result };
+      },
+    } as never);
+
+    pi.registerTool({
+      name: "assistant_memory",
+      label: "Memories",
+      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true. forget: forget one when your owner asks; the words it came from are not found by searches either. restore: bring back a retired or forgotten one. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic or state, newest first. Use it when your owner asks you to remember or forget something, or when something is clearly worth remembering. Changes apply to sessions that start later; this session already knows.",
+      parameters: MEMORY_SCHEMA,
+      execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState }, _signal: unknown, _update: unknown, ctx: ExtensionContext) => {
+        const needId = (): string => {
+          if (params.id === undefined) throw new Error(`${params.action} needs the memory's id.`);
+          return params.id.replace(/^#/u, "");
+        };
+        const current = async (): Promise<AssistantMemory> => (await port.call({ op: "memory_get", id: needId() })).memory;
+        if (params.action === "list") {
+          const list = await port.call({ op: "memory_list", ...(params.topic === undefined ? {} : { topic: params.topic }), ...(params.state === undefined ? {} : { state: params.state }), limit: 50 });
+          return { content: [{ type: "text", text: renderMemories(list, params.state === undefined || params.state === "active" ? "Memories in use" : `${params.state} memories`) }], details: list };
+        }
+        if (params.action === "get") {
+          const detail = await port.call({ op: "memory_get", id: needId() });
+          return { content: [{ type: "text", text: renderMemoryDetail(detail) }], details: detail };
+        }
+        let memory: AssistantMemory;
+        if (params.action === "add") {
+          if (params.topic === undefined || params.text === undefined) throw new Error("add needs topic and text.");
+          const add = { op: "memory_add" as const, topic: params.topic, text: params.text, resident: params.resident ?? false };
+          if (params.sources?.length) memory = await port.call({ ...add, sources: params.sources });
+          else {
+            // Said here: the owner's latest words in this session, once they reached Main, are where it came from.
+            await recorder?.sync();
+            const said = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "message" && (entry.message as { role?: string }).role === "user");
+            memory = said === undefined
+              ? await port.call(add)
+              : await port.call({ ...add, sources: [{ sessionId: ctx.sessionManager.getSessionId(), entryId: said.id }] })
+                .catch(() => port.call(add));
+          }
+        } else {
+          const before = await current();
+          const change = params.action === "rewrite" ? { ...(params.text === undefined ? {} : { text: params.text }), ...(params.topic === undefined ? {} : { topic: params.topic }) }
+            : params.action === "retire" ? { state: "retired" as const }
+            : params.action === "forget" ? { state: "forgotten" as const }
+            : params.action === "restore" ? { state: "active" as const }
+            : params.action === "resident" ? (params.resident === undefined ? {} : { resident: params.resident })
+            : undefined;
+          if (change === undefined) throw new Error(`Unknown action ${params.action}.`);
+          if (Object.keys(change).length === 0) throw new Error(params.action === "rewrite" ? "rewrite needs text or topic." : "resident needs resident: true or false.");
+          memory = await port.call({ op: "memory_update", id: before.id, revision: before.revision, ...change });
+        }
+        return { content: [{ type: "text", text: `Done: ${renderMemory(memory)}\nSessions that start from now on load it as it is now.` }], details: memory };
       },
     } as never);
 
@@ -311,7 +391,11 @@ function fitBatch(entry: AssistantEntry): AssistantEntry {
 
 type Block = { type: string; text?: string; name?: string; arguments?: unknown; thinking?: string };
 
-/** What Main keeps of one session entry; undefined for what is not part of the conversation. */
+/**
+ * What Main keeps of one session entry; undefined for what is not part of the conversation. Her own
+ * memory tools keep only what she did (the action), not the words they carried or returned: those
+ * live in her memories and conversations already, where forgetting reaches them.
+ */
 export function assistantEntryOf(entry: SessionEntry, attachmentContextKey: Uint8Array): Omit<AssistantEntry, "parentId"> | undefined {
   const base = { entryId: entry.id, at: entry.timestamp };
   if (entry.type === "compaction" || entry.type === "branch_summary") return withText({ ...base, kind: "summary" }, entry.summary);
@@ -329,11 +413,12 @@ export function assistantEntryOf(entry: SessionEntry, attachmentContextKey: Uint
       const blocks = Array.isArray(message.content) ? message.content as Block[] : [];
       const text = blocks.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
       const toolCalls = blocks.filter((block) => block.type === "toolCall" && typeof block.name === "string").slice(0, MAX_ASSISTANT_TOOL_CALLS)
-        .map((block) => ({ name: block.name as string, arguments: cut(JSON.stringify(block.arguments ?? {}), MAX_ASSISTANT_TOOL_ARGUMENT_CHARS).text }));
+        .map((block) => ({ name: block.name as string, arguments: cut(JSON.stringify(OWN_TOOLS.has(block.name as string) ? ownToolAction(block.arguments) : block.arguments ?? {}), MAX_ASSISTANT_TOOL_ARGUMENT_CHARS).text }));
       if (text.length === 0 && toolCalls.length === 0) return undefined;
       return withText({ ...base, kind: "assistant", ...(toolCalls.length === 0 ? {} : { toolCalls }) }, text);
     }
     case "toolResult":
+      if (typeof message.toolName === "string" && OWN_TOOLS.has(message.toolName)) return undefined;
       return withText({ ...base, kind: "tool_result", ...(typeof message.toolName === "string" && message.toolName.length > 0 ? { toolName: message.toolName } : {}) }, contentText(message.content as string | Block[]));
     case "bashExecution":
       return withText({ ...base, kind: "bash" }, `$ ${String(message.command ?? "")}\n${String(message.output ?? "")}`);
@@ -345,6 +430,11 @@ export function assistantEntryOf(entry: SessionEntry, attachmentContextKey: Uint
     default:
       return undefined;
   }
+}
+
+function ownToolAction(input: unknown): Record<string, unknown> {
+  const args = input !== null && typeof input === "object" ? input as Record<string, unknown> : {};
+  return Object.fromEntries(["action", "document"].filter((key) => typeof args[key] === "string").map((key) => [key, args[key]]));
 }
 
 function withText<T extends { kind: AssistantEntry["kind"] }>(entry: T & { entryId: string; at: string }, text: string): Omit<AssistantEntry, "parentId"> {
@@ -390,6 +480,30 @@ function renderSearch(result: AssistantSearchResult): string {
     `Found ${result.hits.length} entr${result.hits.length === 1 ? "y" : "ies"}, newest first:`,
     ...lines,
     ...(result.nextCursor === undefined ? [] : [`Older results remain; search again with cursor "${result.nextCursor}".`]),
+  ].join("\n");
+}
+
+const STATE_NAMES: Record<AssistantMemoryState, string> = { active: "in use", retired: "retired", forgotten: "forgotten" };
+
+function renderMemory(memory: AssistantMemory): string {
+  const marks = [memory.topic, memory.resident ? "loaded every session" : "found when searched", ...(memory.state === "active" ? [] : [STATE_NAMES[memory.state]])];
+  return `#${memory.id} [${marks.join(" · ")}] ${memory.text}`;
+}
+
+function renderMemories(list: AssistantMemoryList, title: string): string {
+  if (list.memories.length === 0) return `${title}: none.`;
+  return [`${title}:`, ...list.memories.map((memory) => `- ${renderMemory(memory)}`), ...(list.nextCursor === undefined ? [] : ["(more exist; narrow by topic or keywords)"])].join("\n");
+}
+
+function renderMemoryDetail(detail: AssistantMemoryDetail): string {
+  const { memory } = detail;
+  return [
+    renderMemory(memory),
+    `Since ${memory.createdAt}; last changed ${memory.updatedAt} by ${memory.author}.`,
+    ...(memory.supersededBy === undefined ? [] : [`Merged into #${memory.supersededBy}.`]),
+    memory.sources.length === 0 ? "Where it was said: not recorded." : `Where it was said (${memory.sourceCount}):`,
+    ...memory.sources.map((source) => `- ${source.at} sessionId=${source.sessionId} entryId=${source.entryId}`),
+    ...(detail.history.length === 0 ? [] : ["Changes, newest first:", ...detail.history.map((change) => `- ${change.at} ${change.author} ${change.action}${change.text === undefined ? "" : `: ${change.text}`}`)]),
   ].join("\n");
 }
 

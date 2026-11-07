@@ -322,7 +322,7 @@ Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一�
 
 ## 个人助手（`instance.assistant.v1`、`assistant.v1`）
 
-Dock 自带一个个人助手（card #295），默认是阿露。她的人设、主人的手写设定和她经历过的对话由 Main 上的助手服务保管（见 [runtime](runtime.md#个人助手)）。新建 Work 时可以选择以助手身份打开：这样的 Work 载入人设和记忆，对话记进她的记忆；没选的 Work 与记忆无关。
+Dock 自带一个个人助手（card #295），默认是阿露。她的人设、主人的手写设定、她经历过的对话和从中整理出的记忆由 Main 上的助手服务保管（见 [runtime](runtime.md#个人助手)）。新建 Work 时可以选择以助手身份打开：这样的 Work 载入人设和记忆，对话记进她的记忆；没选的 Work 与记忆无关。
 
 **以助手身份打开（`instance.assistant.v1`，每台 Host 都提供）**
 
@@ -338,13 +338,19 @@ Dock 自带一个个人助手（card #295），默认是阿露。她的人设、
 
 请求都不带 `hostId`，由所连的 Main 回答。DTO 与 parser 定义在 `src/core/assistant.ts`，`protocol.ts` 复用。
 
-- `assistant.info {}` → `{workspacePath,maxDocumentBytes}`：她在 Main 上的工作区，和一份文档的字节上限。
+- `assistant.info {}` → `{workspacePath,maxDocumentBytes,extraction?}`：她在 Main 上的工作区，一份文档的字节上限，以及后台整理记忆的现状 `extraction {state,model?,waitingSessions,lastRunAt?,lastError?,retryAt?}`。`state` 为 `off`（没选模型，不整理）、`idle`、`working` 或 `failed`（`lastError` 是给主人看的原因，`retryAt` 自动再试）；`waitingSessions` 是还有新内容没读的对话数；`lastError` 在 `idle` 时也可能有，说明上次有一段被跳过。
 - `assistant.preview {}` → `{text,loadedAt}`：现在新开一个助手会话会载入的全文，以及这份内容生成的时间。
 - `assistant.document.get {document}` → `{document,text,revision}`；`document` 为 `persona`（人设）或 `notes`（手写设定）。
 - `assistant.document.set {operationId,document,text,baseRevision}` → `{document,text,revision}`：整份替换，沿用 operation ledger。`baseRevision` 不是当前版本时返回 `assistant_document_changed`，内容不变；超过 `MAX_ASSISTANT_DOCUMENT_BYTES`（256 KiB）返回 `assistant_document_too_large`。她用工具按原文替换一段时，找不到原文为 `assistant_edit_not_found`，原文出现不止一次为 `assistant_edit_ambiguous`。
 - `assistant.search {query?,from?,to?,cursor?,limit}` → `{hits,nextCursor?}`：按关键词、时间或两者一起搜她经历过的对话。`query` 按空白分成几个词，全部出现才算命中；三个字及以上的词不分大小写，一两个字的词只有英文字母不分大小写；`from`/`to` 是时间范围，只写日期时按 Main 的本地日，`to` 含当天；没有 `query` 时必须给时间范围，列出这段时间里的全部条目。结果从新到旧，`limit` 最多 50，`nextCursor` 续读下一页。每条命中是 `{session,entryId,at,kind,snippet}`，`snippet` 是命中处前后最多 400 个 UTF-16 单位的原文（含省略号）。
 - `assistant.context {sessionId,entryId,before,after}` → `{session,entries,hasBefore,hasAfter}`：从这条往前读同一分支上的 `before` 条、往后读 `after` 条（各最多 50），`entries` 按时间从早到晚、包含这一条；放不进一条记录时从远处少给，`hasBefore`/`hasAfter` 说明两头还有没有。找不到这一条返回 `assistant_entry_not_found`。搜索或读前后文从提问起（含排队）15 秒没有结果时返回 `assistant_query_timeout`；同时排队的读太多时直接返回 `assistant_unavailable`。
 - `session` 是 `{sessionId,sessionFile?,cwd?,name?,workId?,machine?,startedAt,lastAt}`：`workId` 是说这句话时那个 Work 的 Main ID（那个 Work 可能已经停止），`machine` 是机器名；搜索命中里是这一条自己的，前后文里是最后一条的。助手相关的回答按 Protocol V2 的规矩忽略不认识的字段。条目 `{entryId,parentId?,at,kind,text,toolName?,toolCalls?,truncated?}` 的 `kind` 为 `user | assistant | tool_result | bash | summary | notice`；助手自己的回复带她调用的工具名和参数（各截到 2,000 字符），超过 32,000 字符的正文截断并标 `truncated`，原文仍在 Agent 自己的会话文件里。
+- `assistant.memory.list {query?,topic?,state?,resident?,author?,cursor?,limit}` → `{memories,nextCursor?}`：她的记忆，按记下的先后从新到旧（最近新记住的就是第一页），`limit` 最多 100。`state` 省略时只列在用的（`active`），也可列 `retired`（作废）或 `forgotten`（忘掉）。`query` 按空白分词、全部出现才算命中。
+- `assistant.memory.get {id}` → `{memory,history}`：一条记忆和它最近 50 次改动（从新到旧，`{at,author,action,text?}`）。
+- `assistant.memory.add {operationId,topic,text,resident,sources?}` → `memory`：主人新写一条；`sources` 是 `{sessionId,entryId}`，指向记录过的对话，找不到时返回 `assistant_entry_not_found`。
+- `assistant.memory.update {operationId,id,revision,text?,topic?,resident?,state?}` → `memory`：改写、换分类、设常驻、作废（`retired`）、忘掉（`forgotten`）或恢复（`active`）。`revision` 不是当前版本时返回 `assistant_memory_changed`，什么都不改；编号不存在返回 `assistant_memory_not_found`。
+- `assistant.settings.get {}`、`assistant.settings.set {operationId,extractionModel}` → `{extractionModel?}`：整理记忆用的模型 `{provider,id}`，取自 Main 的模型服务；`null` 停止整理。
+- 记忆 `memory` 是 `{id,topic,text,resident,state,author,createdAt,updatedAt,revision,sources,sourceCount,supersededBy?}`。`topic` 为 `owner`（主人这个人）、`preferences`（喜好和习惯）、`relationship`（他们之间）、`events`（经历过的事）、`self`（她自己）；`resident` 为每次开会话都载入，否则只在她查的时候用；`author` 是最近一次改动的来源：`extraction`（从对话提炼）、`dreaming`（后台整理）、`assistant`（她在对话里改的）、`owner`（主人改的，客户端的改动都算主人的）；`sources` 是最早的至多 20 处出处 `{sessionId,entryId,at}`，共 `sourceCount` 处；`supersededBy` 是它被合并进去的那条。被忘掉的记忆不再载入，它的出处在搜索里也找不到，读前后文时只显示“这一条主人让我忘掉了”；恢复后都回来。
 - 助手服务没有运行时返回 `assistant_unavailable`。
 
 ## 命令发现
@@ -382,8 +388,8 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/attachment-storage-state.ts`：本机 storage directory 设置。
 - `src/control/model-visibility.ts`：Main 的模型隐藏列表文件与 `model.list` 过滤；可选模型由 `src/pi/pi-model-catalog.ts` 的短命 Pi 进程提供。
 - `src/model-service/`：Main 的模型服务进程（配置与凭据）、Host 对它的监管，以及 Worker 侧把 Main 当作 Pi 模型配置的所有者（见 [runtime](runtime.md#模型配置与凭据)）。
-- `src/assistant/`、`src/core/assistant.ts`：Main 的助手服务进程（人设、手写设定、对话记录与搜索）及其唯一的问答定义（见 [runtime](runtime.md#个人助手)）。
-- `src/control/service-supervisor.ts`：Host 启动并看护 Main 上常驻服务进程（模型服务、助手服务）的共用部分。
+- `src/assistant/`、`src/core/assistant.ts`：Main 的助手服务进程（人设、手写设定、对话记录与搜索、记忆及其后台整理）及其唯一的问答定义（见 [runtime](runtime.md#个人助手)）。
+- `src/control/service-supervisor.ts`：Host 启动并看护 Main 上常驻服务进程（模型服务、助手服务）的共用部分；服务也能反过来问 Host（助手服务借此向模型服务要模型设置和凭据）。
 - `src/control/attachment-service.ts`：stream sink、hash verification、manifest、dedupe 与 Agent path resolution。
 - `src/core/instance-deliverables.ts`：instance-lifetime 临时交付 registry、path-free DTO 与 producer bounds。
 - `src/core/source-file.ts`：文件来源 canonicalize/stat/open/unchanged check；`src/control/published-file-reader.ts`：Host 对既有 `file.read` 分页接口的字节读取。

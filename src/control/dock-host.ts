@@ -1006,7 +1006,13 @@ export class DockHost {
       case "assistant.document.get":
       case "assistant.document.set":
       case "assistant.search":
-      case "assistant.context": {
+      case "assistant.context":
+      case "assistant.memory.list":
+      case "assistant.memory.get":
+      case "assistant.memory.add":
+      case "assistant.memory.update":
+      case "assistant.settings.get":
+      case "assistant.settings.set": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.answerAssistant(request));
         return;
       }
@@ -1332,6 +1338,21 @@ export class DockHost {
       }
       case "assistant.search": return ask({ op: "search", ...request.params });
       case "assistant.context": return ask({ op: "context", ...request.params });
+      case "assistant.memory.list": return ask({ op: "memory_list", ...request.params });
+      case "assistant.memory.get": return ask({ op: "memory_get", id: request.params.id });
+      case "assistant.memory.add": {
+        const { operationId, ...add } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "memory_add", ...add }));
+      }
+      case "assistant.memory.update": {
+        const { operationId, ...update } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "memory_update", ...update }));
+      }
+      case "assistant.settings.get": return ask({ op: "settings_get" });
+      case "assistant.settings.set": {
+        const { operationId, extractionModel } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", extractionModel }));
+      }
     }
   }
 

@@ -13,6 +13,17 @@ export interface ModelHostPort {
   auth(request: ModelAuthRequest, signal: AbortSignal): Promise<ModelAuthResult>;
 }
 
+/**
+ * Answers one model question a Work or the assistant service asked: `{ op: "configuration" }`,
+ * `{ op: "auth_state" }`, or `{ op: "auth", request }`, as `mainModelOwner` asks them.
+ */
+export async function answerModelQuestion(port: ModelHostPort, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  if (args.op === "configuration") return await port.configuration(signal);
+  if (args.op === "auth_state") return await port.authState(signal);
+  if (args.op === "auth") return await port.auth(args.request as ModelAuthRequest, signal);
+  throw new Error("Unknown model question");
+}
+
 export class ModelServiceUnavailableError extends Error {
   constructor(message: string) { super(message); this.name = "ModelServiceUnavailableError"; }
 }

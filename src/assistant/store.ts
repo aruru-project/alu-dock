@@ -48,7 +48,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_file TEXT, cwd TEXT, name TEXT, work_id TEXT, machine TEXT,
   started_at TEXT NOT NULL, started_ms INTEGER NOT NULL,
   last_at TEXT NOT NULL, last_ms INTEGER NOT NULL,
-  through_entry_id TEXT
+  through_entry_id TEXT,
+  -- Extraction: the last entry row read for memories, the searchable characters recorded since, and
+  -- when (Main's clock) the latest of them arrived.
+  extracted_through INTEGER NOT NULL DEFAULT 0,
+  waiting_chars INTEGER NOT NULL DEFAULT 0,
+  recorded_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS entries (
   id INTEGER PRIMARY KEY,
@@ -58,9 +63,12 @@ CREATE TABLE IF NOT EXISTS entries (
   work_id TEXT, machine TEXT,
   kind TEXT NOT NULL, text TEXT NOT NULL, tool_name TEXT, tool_calls TEXT, truncated INTEGER NOT NULL DEFAULT 0,
   search_text TEXT NOT NULL,
+  -- How many forgotten memories name this entry as where they were said; while any do, it is not found.
+  forgotten INTEGER NOT NULL DEFAULT 0,
   UNIQUE (session_id, entry_id)
 );
 CREATE INDEX IF NOT EXISTS entries_parent ON entries (session_id, parent_id, id);
+CREATE INDEX IF NOT EXISTS entries_session ON entries (session_id, id);
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5 (search_text, content = 'entries', content_rowid = 'id', tokenize = 'trigram');
 CREATE TRIGGER IF NOT EXISTS entries_insert AFTER INSERT ON entries BEGIN
   INSERT INTO entries_fts (rowid, search_text) VALUES (new.id, new.search_text);
@@ -68,6 +76,29 @@ END;
 CREATE TRIGGER IF NOT EXISTS entries_delete AFTER DELETE ON entries BEGIN
   INSERT INTO entries_fts (entries_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
 END;
+CREATE TABLE IF NOT EXISTS memories (
+  id INTEGER PRIMARY KEY,
+  topic TEXT NOT NULL, text TEXT NOT NULL, resident INTEGER NOT NULL,
+  state TEXT NOT NULL, author TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  superseded_by INTEGER,
+  -- The owner chose whether it is loaded every session; the background passes leave that as it is.
+  resident_fixed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS memories_state ON memories (state, id);
+CREATE TABLE IF NOT EXISTS memory_sources (
+  memory_id INTEGER NOT NULL REFERENCES memories(id),
+  entry_row INTEGER NOT NULL REFERENCES entries(id),
+  PRIMARY KEY (memory_id, entry_row)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_sources_entry ON memory_sources (entry_row);
+CREATE TABLE IF NOT EXISTS memory_changes (
+  id INTEGER PRIMARY KEY,
+  memory_id INTEGER NOT NULL REFERENCES memories(id),
+  at TEXT NOT NULL, author TEXT NOT NULL, action TEXT NOT NULL, text TEXT
+);
+CREATE INDEX IF NOT EXISTS memory_changes_memory ON memory_changes (memory_id, id);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('max_shift_ms', '0');
 `;
@@ -81,9 +112,10 @@ const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
 const INDEXED_TERM_CHARS = 3;
 /** Rows one step of a search reads before it checks its deadline again. */
 const SCAN_WINDOW = 5_000;
+const FORGOTTEN_TEXT = "（这一条里的事主人让我忘掉了。）";
 const TIMEOUT_MESSAGE = "这次查询超时，没有返回结果。请换个更具体的词，或者缩小时间范围再试。";
 
-interface EntryRow {
+export interface EntryRow {
   id: number;
   session_id: string;
   entry_id: string;
@@ -98,6 +130,7 @@ interface EntryRow {
   tool_calls: string | null;
   truncated: number;
   search_text: string;
+  forgotten: number;
 }
 
 interface SessionRow {
@@ -141,6 +174,9 @@ export class AssistantStore {
 
   close(): void { this.db.close(); }
 
+  /** The writing connection, shared with her memories (memories.ts) and extraction, which keep their rows beside the conversations. */
+  get connection(): DatabaseSync { return this.db; }
+
   /** The last entry of the Agent's session recorded so far, kept or not. */
   recorded(sessionId: string): { lastEntryId?: string } {
     const row = this.db.prepare("SELECT through_entry_id FROM sessions WHERE session_id = ?").get(sessionId) as { through_entry_id: string | null } | undefined;
@@ -178,6 +214,7 @@ export class AssistantStore {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       let shift = 0;
+      let waiting = 0;
       for (const entry of entries) {
         if (known.get(session.sessionId, entry.entryId)) continue;
         // A parent this session has not kept, such as history before a resume, is not named.
@@ -185,9 +222,12 @@ export class AssistantStore {
         const ms = Date.parse(entry.at);
         const id = this.nextId(latestIn, ms);
         shift = Math.max(shift, Math.floor(id / ENTRY_IDS_PER_MS) - ms);
+        const searched = searchText(entry);
+        waiting += searched.length;
         insert.run(id, session.sessionId, entry.entryId, parentId, entry.at, ms, source.workId ?? null, source.machine ?? null,
-          entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searchText(entry));
+          entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searched);
       }
+      if (waiting > 0) this.db.prepare("UPDATE sessions SET waiting_chars = waiting_chars + ?, recorded_ms = ? WHERE session_id = ?").run(waiting, Date.now(), session.sessionId);
       if (shift > 0) this.db.prepare("UPDATE meta SET value = max(CAST(value AS INTEGER), ?) WHERE key = 'max_shift_ms'").run(shift);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -228,6 +268,7 @@ export class AssistantStore {
       after === undefined ? Number.MAX_SAFE_INTEGER : idAt(after.ms + 1 + shift),
     );
     const filters = [
+      "e.forgotten = 0",
       ...(fromMs === undefined ? [] : ["e.at_ms >= ?"]),
       ...(toMs === undefined ? [] : ["e.at_ms < ?"]),
       ...(after === undefined ? [] : ["(e.at_ms < ? OR (e.at_ms = ? AND e.id < ?))"]),
@@ -396,7 +437,11 @@ function searchText(entry: AssistantEntry): string {
   return [entry.text, ...calls].filter((part) => part.length > 0).join("\n");
 }
 
-function entryOf(row: EntryRow): AssistantEntry {
+/** An entry as she reads it; one said where a forgotten memory came from shows only that it was forgotten. */
+export function entryOf(row: EntryRow): AssistantEntry {
+  if (row.forgotten > 0) {
+    return { entryId: row.entry_id, ...(row.parent_id === null ? {} : { parentId: row.parent_id }), at: row.at, kind: row.kind as AssistantEntryKind, text: FORGOTTEN_TEXT };
+  }
   const toolCalls = row.tool_calls === null ? undefined : JSON.parse(row.tool_calls) as AssistantToolCall[];
   return {
     entryId: row.entry_id,

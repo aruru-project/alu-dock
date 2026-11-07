@@ -28,23 +28,41 @@ import {
   parseAssistantContextParams,
   parseAssistantDocumentName,
   parseAssistantDocumentText,
+  parseAssistantMemoryAddParams,
+  parseAssistantMemoryId,
+  parseAssistantMemoryListParams,
+  parseAssistantMemoryUpdateParams,
   parseAssistantSearchParams,
+  parseAssistantSettingsSetParams,
   type AssistantContextRequest,
   type AssistantDocumentName,
+  type AssistantMemoryAddRequest,
+  type AssistantMemoryListRequest,
+  type AssistantMemoryUpdateRequest,
+  type AssistantModelRef,
   type AssistantSearchRequest,
 } from "../core/assistant.js";
 export {
   parseAssistantContextResult,
   parseAssistantDocument,
   parseAssistantInfo,
+  parseAssistantMemory,
+  parseAssistantMemoryDetail,
+  parseAssistantMemoryList,
   parseAssistantPreview,
   parseAssistantSearchResult,
+  parseAssistantSettings,
   type AssistantContextResult,
   type AssistantDocument,
   type AssistantDocumentName,
   type AssistantEntry,
+  type AssistantExtractionStatus,
   type AssistantInfo,
+  type AssistantMemory,
+  type AssistantMemoryDetail,
+  type AssistantMemoryList,
   type AssistantPreview,
+  type AssistantSettings,
   type AssistantSearchHit,
   type AssistantSearchResult,
   type AssistantSessionInfo,
@@ -249,7 +267,10 @@ export const MAX_CHILD_MODELS = 50;
  * `system.default.set` accept `assistant`, and the snapshot marks such a Work. Every Host offers it.
  */
 export const INSTANCE_ASSISTANT_CAPABILITY = "instance.assistant.v1" as const;
-/** Read and edit the assistant's persona and notes, see what she loads, and search her conversations. Only Main offers it. */
+/**
+ * Read and edit the assistant's persona, notes and memories, see what she loads, search her
+ * conversations, and choose the model that keeps her memories. Only Main offers it.
+ */
 export const ASSISTANT_CAPABILITY = "assistant.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
@@ -407,6 +428,12 @@ export type ControlRequest =
   | Request<"assistant.document.set", { operationId: string; document: AssistantDocumentName; text: string; baseRevision: string }>
   | Request<"assistant.search", AssistantSearchRequest>
   | Request<"assistant.context", AssistantContextRequest>
+  | Request<"assistant.memory.list", AssistantMemoryListRequest>
+  | Request<"assistant.memory.get", { id: string }>
+  | Request<"assistant.memory.add", { operationId: string } & AssistantMemoryAddRequest>
+  | Request<"assistant.memory.update", { operationId: string } & AssistantMemoryUpdateRequest>
+  | Request<"assistant.settings.get", Record<string, never>>
+  | Request<"assistant.settings.set", { operationId: string; extractionModel: AssistantModelRef | null }>
   | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
@@ -500,6 +527,12 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "assistant.document.set": { target: "directory", effect: "command", transport: "unary" },
   "assistant.search": { target: "directory", effect: "query", transport: "unary" },
   "assistant.context": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.memory.list": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.memory.get": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.memory.add": { target: "directory", effect: "command", transport: "unary" },
+  "assistant.memory.update": { target: "directory", effect: "command", transport: "unary" },
+  "assistant.settings.get": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.settings.set": { target: "directory", effect: "command", transport: "unary" },
   "resource.content": { target: "instance", effect: "query", transport: "unary" },
   "command.catalog": { target: "instance", effect: "query", transport: "unary" },
   "command.content": { target: "instance", effect: "query", transport: "unary" },
@@ -1299,8 +1332,28 @@ export function parseControlRequest(input: unknown): ControlRequest {
     }
     case "assistant.info":
     case "assistant.preview":
+    case "assistant.settings.get":
       exact(params, [], "invalid_request");
       return { ...base, type, params: {} };
+    case "assistant.memory.list":
+      exact(params, ["query", "topic", "state", "resident", "author", "cursor", "limit"], "invalid_request");
+      return { ...base, type, params: assistantParams(() => parseAssistantMemoryListParams(params, "params")) };
+    case "assistant.memory.get":
+      exact(params, ["id"], "invalid_request");
+      return { ...base, type, params: { id: assistantParams(() => parseAssistantMemoryId(params.id, "params.id")) } };
+    case "assistant.memory.add": {
+      exact(params, ["operationId", "topic", "text", "resident", "sources"], "invalid_request");
+      const { operationId: _operationId, ...rest } = params;
+      return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryAddParams(rest, "params")) } };
+    }
+    case "assistant.memory.update": {
+      exact(params, ["operationId", "id", "revision", "text", "topic", "resident", "state"], "invalid_request");
+      const { operationId: _operationId, ...rest } = params;
+      return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryUpdateParams(rest, "params")) } };
+    }
+    case "assistant.settings.set":
+      exact(params, ["operationId", "extractionModel"], "invalid_request");
+      return { ...base, type, params: { operationId: operationId(), extractionModel: assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
     case "assistant.document.get":
       exact(params, ["document"], "invalid_request");
       return { ...base, type, params: { document: assistantParams(() => parseAssistantDocumentName(params.document, "params.document")) } };

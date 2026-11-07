@@ -1,25 +1,41 @@
 import {
+  ASSISTANT_MEMORY_TOPICS,
   MAX_ASSISTANT_DOCUMENT_BYTES,
+  MAX_ASSISTANT_PREVIEW_BYTES,
+  type AssistantMemory,
+  type AssistantMemoryAuthor,
+  type AssistantMemoryTopic,
   type AssistantPreview,
   type AssistantRequest,
   type AssistantResultFor,
   type AssistantSource,
 } from "../core/assistant.js";
 import type { AssistantDocuments } from "./documents.js";
+import type { AssistantExtraction } from "./extraction.js";
+import { localTime } from "./local-time.js";
+import type { AssistantMemories } from "./memories.js";
 import type { AssistantReaders } from "./readers.js";
 import type { AssistantStore } from "./store.js";
 
+/** How a session she loads heads each topic of what she remembers. */
+const TOPIC_HEADINGS: Record<AssistantMemoryTopic, string> = {
+  owner: "主人", preferences: "主人的喜好和习惯", relationship: "你们之间", events: "经历过的事", self: "你自己",
+};
+
 /**
  * The assistant service's answers (card #295). It runs in its own process on Main, holds her persona,
- * the owner's notes and her recorded conversations, and answers the Works opened as her and the
- * owner's clients alike. Writes go through one connection on this thread, a short batch at a time;
- * searches and context reads run on reader threads, so none of them waits behind another.
+ * the owner's notes, her recorded conversations and her memories, and answers the Works opened as her
+ * and the owner's clients alike. Writes go through one connection on this thread, a short transaction
+ * at a time; conversation searches and context reads run on reader threads, so none of them waits
+ * behind another. Memories are few enough to be listed on this thread.
  */
 export class AssistantCore {
   constructor(
     private readonly documents: AssistantDocuments,
     private readonly store: AssistantStore,
     private readonly readers: Pick<AssistantReaders, "search" | "context">,
+    private readonly memories: AssistantMemories,
+    private readonly extraction: Pick<AssistantExtraction, "status" | "settings" | "setModel">,
     private readonly workspacePath: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -30,8 +46,10 @@ export class AssistantCore {
   }
 
   private async dispatch(request: AssistantRequest, source: AssistantSource, signal?: AbortSignal): Promise<unknown> {
+    // A Work asking is the assistant herself; a client asking is the owner.
+    const author: AssistantMemoryAuthor = source.workId === undefined ? "owner" : "assistant";
     switch (request.op) {
-      case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES };
+      case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES, extraction: this.extraction.status() };
       case "load": return this.preview();
       case "recorded": return this.store.recorded(request.sessionId);
       case "record": return this.store.record(request.session, request.entries, request.throughEntryId, source);
@@ -40,10 +58,19 @@ export class AssistantCore {
       case "document_get": return this.documents.get(request.document);
       case "document_set": return this.documents.set(request.document, request.text, request.baseRevision);
       case "document_edit": return this.documents.edit(request.document, request.oldText, request.newText);
+      case "memory_list": { const { op: _op, ...list } = request; return this.memories.list(list); }
+      case "memory_get": return this.memories.get(request.id);
+      case "memory_add": { const { op: _op, ...add } = request; return this.memories.add(add, author); }
+      case "memory_update": { const { op: _op, ...update } = request; return this.memories.update(update, author); }
+      case "settings_get": return this.extraction.settings();
+      case "settings_set": return this.extraction.setModel(request.extractionModel);
     }
   }
 
-  /** Exactly what a new assistant session loads: the persona, the owner's notes, and how to recall more. */
+  /**
+   * Exactly what a new assistant session loads: the persona, the owner's notes, the memories loaded
+   * every session, and how to recall more.
+   */
   private async preview(): Promise<AssistantPreview> {
     const loaded = this.now();
     const [persona, notes] = await Promise.all([this.documents.get("persona"), this.documents.get("notes")]);
@@ -51,23 +78,38 @@ export class AssistantCore {
     if (notes.text.trim().length > 0) {
       parts.push(`## 主人亲手写的设定\n\n这些是主人亲手写下的事实和规矩，和别的说法冲突时以这里为准。\n\n${notes.text.trim()}`);
     }
+    const remembered = rememberedSection(this.memories.resident());
+    if (remembered) parts.push(remembered);
     parts.push([
       "## 记忆",
       "",
       `这份资料载入于 ${localTime(loaded)}。之后新记住或改过的东西不在这里；拿不准时先查，别凭印象说。`,
       "",
-      "- 用 assistant_search 按关键词和时间搜你和主人过去的对话，搜不到就换个说法再搜。",
+      "- 用 assistant_search 按关键词和时间搜你记得的事和你们过去的对话，搜不到就换个说法再搜。",
       "- 用 assistant_read 看某一条前后的原话，包括当时调用的工具和查到的结果。",
+      "- 用 assistant_memory 记下、改写、作废、忘掉或恢复一条记忆。主人让你记住或忘掉什么时用它；你自己觉得以后一定用得着的事，也可以记。",
       "- 用 assistant_document 读和改你的人设（persona）和主人的手写设定（notes）。",
     ].join("\n"));
-    return { text: parts.filter((part) => part.length > 0).join("\n\n"), loadedAt: loaded.toISOString() };
+    const text = parts.filter((part) => part.length > 0).join("\n\n");
+    // A very long list of memories loaded every session still leaves room for the persona and notes.
+    return { text: fitPreview(text), loadedAt: loaded.toISOString() };
   }
 }
 
-/** Main's local time with its offset, such as "2026-11-07 15:04（UTC+08:00）". */
-export function localTime(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  const offset = -date.getTimezoneOffset();
-  const sign = offset >= 0 ? "+" : "-";
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}（UTC${sign}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}）`;
+/** The memories loaded every session, under a heading per topic. */
+function rememberedSection(memories: readonly AssistantMemory[]): string | undefined {
+  if (memories.length === 0) return undefined;
+  const groups = ASSISTANT_MEMORY_TOPICS.map((topic) => {
+    const lines = memories.filter((memory) => memory.topic === topic).map((memory) => `- ${memory.text}（#${memory.id}）`);
+    return lines.length === 0 ? undefined : `### ${TOPIC_HEADINGS[topic]}\n\n${lines.join("\n")}`;
+  }).filter((group): group is string => group !== undefined);
+  return ["## 你记得的事", "", "这些是你从过去和主人相处中记下的，每次都带着。括号里是记忆的编号，改写或忘掉时用。", "", ...groups.flatMap((group) => [group, ""])].join("\n").trim();
+}
+
+function fitPreview(text: string): string {
+  if (Buffer.byteLength(text, "utf8") <= MAX_ASSISTANT_PREVIEW_BYTES) return text;
+  const note = "\n\n（记得的事太多，后面的没有放进来；需要时用 assistant_search 查。）";
+  const bytes = Buffer.from(text, "utf8").subarray(0, MAX_ASSISTANT_PREVIEW_BYTES - Buffer.byteLength(note, "utf8"));
+  // Drop a character cut in half.
+  return `${bytes.toString("utf8").replace(/\uFFFD$/u, "")}${note}`;
 }

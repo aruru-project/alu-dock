@@ -30,7 +30,7 @@ test("an assistant Work on a SubHost loads her from Main and its conversation re
     models: [{ id: "fixture", name: "fixture", reasoning: false, input: ["text"], contextWindow: 32_000, maxTokens: 2_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] } } }));
   await writeFile(join(subAgent, "settings.json"), JSON.stringify({ defaultProvider: "coordinator", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false }, retry: { enabled: false } }));
   const environment = isolatedProcessEnvironment(home, { XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" });
-  const assistant = new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), environment });
+  const assistant = new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir: join(root, "main-agent"), environment });
   context.after(() => assistant.stop());
   await assistant.start();
 

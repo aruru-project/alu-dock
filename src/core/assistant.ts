@@ -14,8 +14,6 @@ export type AssistantDocumentName = typeof ASSISTANT_DOCUMENTS[number];
 
 /** One document in UTF-8; persona and notes together stay well inside one control record. */
 export const MAX_ASSISTANT_DOCUMENT_BYTES = 256 * 1024;
-/** What a session loads: both documents and the few lines around them. */
-export const MAX_ASSISTANT_PREVIEW_BYTES = 2 * MAX_ASSISTANT_DOCUMENT_BYTES + 8 * 1024;
 export const MAX_ASSISTANT_QUERY_CHARS = 256;
 export const MAX_ASSISTANT_SEARCH_LIMIT = 50;
 /** Entries read on each side of one conversation entry, and how many when the asker does not say. */
@@ -31,6 +29,11 @@ export const MAX_ASSISTANT_SNIPPET_CHARS = 400;
 export const MAX_ASSISTANT_RECORD_BATCH_BYTES = 384 * 1024;
 /** The entries of one context answer in UTF-8 JSON; the rest of that answer is small. */
 export const MAX_ASSISTANT_RESULT_BYTES = 768 * 1024;
+/**
+ * What a session loads: both documents, the memories loaded every session, and the lines around
+ * them. There is no other limit on those memories; this is what one record carries with room to spare.
+ */
+export const MAX_ASSISTANT_PREVIEW_BYTES = MAX_ASSISTANT_RESULT_BYTES;
 export const MAX_ASSISTANT_ID_CHARS = 128;
 /**
  * Entry times the memory accepts, in milliseconds either side of 1970 (about the years 1717 to 2223):
@@ -43,12 +46,106 @@ const MAX_PATH_CHARS = 16_384;
 const MAX_CURSOR_CHARS = 256;
 
 /** The assistant's own tools; their calls and results are kept for context but not searched again. */
-export const ASSISTANT_TOOL_NAMES = ["assistant_search", "assistant_read", "assistant_document"] as const;
+export const ASSISTANT_TOOL_NAMES = ["assistant_search", "assistant_read", "assistant_document", "assistant_memory"] as const;
+
+/**
+ * What her memories are about. They describe the owner and the two of them, not the work they did:
+ * who he is, what he likes and how he wants things, how they get on, what they went through, and
+ * what she resolved about herself.
+ */
+export const ASSISTANT_MEMORY_TOPICS = ["owner", "preferences", "relationship", "events", "self"] as const;
+export type AssistantMemoryTopic = typeof ASSISTANT_MEMORY_TOPICS[number];
+/** In use; set aside as no longer true (kept for the record); or forgotten at the owner's word. */
+export const ASSISTANT_MEMORY_STATES = ["active", "retired", "forgotten"] as const;
+export type AssistantMemoryState = typeof ASSISTANT_MEMORY_STATES[number];
+/**
+ * Who made a memory's latest change: extraction from a conversation, dreaming (the later pass that
+ * checks and tidies memories), the assistant in a conversation, or the owner. Neither background pass
+ * changes what the owner changed last.
+ */
+export const ASSISTANT_MEMORY_AUTHORS = ["extraction", "dreaming", "assistant", "owner"] as const;
+export type AssistantMemoryAuthor = typeof ASSISTANT_MEMORY_AUTHORS[number];
+export const ASSISTANT_MEMORY_ACTIONS = ["added", "rewritten", "moved", "resident", "query_only", "retired", "forgotten", "restored", "merged"] as const;
+export type AssistantMemoryAction = typeof ASSISTANT_MEMORY_ACTIONS[number];
+/** One memory's text in characters. */
+export const MAX_ASSISTANT_MEMORY_CHARS = 1_000;
+/** Places a memory names as where it was said, in a question and in an answer. */
+export const MAX_ASSISTANT_MEMORY_SOURCES = 20;
+export const MAX_ASSISTANT_MEMORY_LIST_LIMIT = 100;
+/** Changes shown for one memory, newest first. */
+export const MAX_ASSISTANT_MEMORY_HISTORY = 50;
+const MAX_MODEL_PROVIDER_CHARS = 256;
+const MAX_MODEL_ID_CHARS = 512;
+const MEMORY_ID = /^[1-9][0-9]{0,14}$/u;
 
 export interface AssistantDocument { document: AssistantDocumentName; text: string; revision: string }
 /** What a new assistant session loads, and when it was put together. */
 export interface AssistantPreview { text: string; loadedAt: string }
-export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number }
+/** A model of Main's model service. */
+export interface AssistantModelRef { provider: string; id: string }
+export interface AssistantSettings {
+  /** The model that turns her conversations into memories; without it nothing is extracted. */
+  extractionModel?: AssistantModelRef;
+}
+/**
+ * Extraction as it stands: `off` without a model; `idle` with nothing to do; `working` on a
+ * conversation now; `failed` when the last try did not work, to be tried again at `retryAt`.
+ */
+export interface AssistantExtractionStatus {
+  state: "off" | "idle" | "working" | "failed";
+  model?: AssistantModelRef;
+  /** Conversations with something said since they were last read for memories. */
+  waitingSessions: number;
+  lastRunAt?: string;
+  lastError?: string;
+  retryAt?: string;
+}
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; extraction?: AssistantExtractionStatus }
+
+/** Where something was said: an entry of a recorded conversation. */
+export interface AssistantMemorySource { sessionId: string; entryId: string; at: string }
+export interface AssistantMemory {
+  id: string;
+  topic: AssistantMemoryTopic;
+  text: string;
+  /** Loaded into every new assistant session; otherwise found only when she looks. */
+  resident: boolean;
+  state: AssistantMemoryState;
+  /** Who made the latest change. */
+  author: AssistantMemoryAuthor;
+  createdAt: string;
+  updatedAt: string;
+  /** Goes up with every change; an update names the revision it started from. */
+  revision: number;
+  /** The earliest places it was said, at most MAX_ASSISTANT_MEMORY_SOURCES of `sourceCount`. */
+  sources: AssistantMemorySource[];
+  sourceCount: number;
+  /** The memory this one was merged into. */
+  supersededBy?: string;
+}
+export interface AssistantMemoryChange { at: string; author: AssistantMemoryAuthor; action: AssistantMemoryAction; text?: string }
+export interface AssistantMemoryDetail { memory: AssistantMemory; history: AssistantMemoryChange[] }
+/** Newest first. Without `state`, the memories in use. Every word of `query` must occur. */
+export interface AssistantMemoryListRequest {
+  query?: string;
+  topic?: AssistantMemoryTopic;
+  state?: AssistantMemoryState;
+  resident?: boolean;
+  author?: AssistantMemoryAuthor;
+  cursor?: string;
+  limit: number;
+}
+export interface AssistantMemoryList { memories: AssistantMemory[]; nextCursor?: string }
+export interface AssistantMemoryAddRequest { topic: AssistantMemoryTopic; text: string; resident: boolean; sources?: Array<{ sessionId: string; entryId: string }> }
+/** Changes what it names, if nobody changed the memory since `revision`. */
+export interface AssistantMemoryUpdateRequest {
+  id: string;
+  revision: number;
+  text?: string;
+  topic?: AssistantMemoryTopic;
+  resident?: boolean;
+  state?: AssistantMemoryState;
+}
 
 export type AssistantEntryKind = "user" | "assistant" | "tool_result" | "bash" | "summary" | "notice";
 export interface AssistantToolCall { name: string; arguments: string }
@@ -109,7 +206,14 @@ export type AssistantRequest =
   | { op: "document_get"; document: AssistantDocumentName }
   /** Without `baseRevision` the text replaces whatever is there. */
   | { op: "document_set"; document: AssistantDocumentName; text: string; baseRevision?: string }
-  | { op: "document_edit"; document: AssistantDocumentName; oldText: string; newText: string };
+  | { op: "document_edit"; document: AssistantDocumentName; oldText: string; newText: string }
+  | ({ op: "memory_list" } & AssistantMemoryListRequest)
+  | { op: "memory_get"; id: string }
+  | ({ op: "memory_add" } & AssistantMemoryAddRequest)
+  | ({ op: "memory_update" } & AssistantMemoryUpdateRequest)
+  | { op: "settings_get" }
+  /** `null` stops extraction. */
+  | { op: "settings_set"; extractionModel: AssistantModelRef | null };
 
 export type AssistantResultFor<R extends AssistantRequest> =
   R extends { op: "info" } ? AssistantInfo
@@ -118,6 +222,10 @@ export type AssistantResultFor<R extends AssistantRequest> =
   : R extends { op: "record" } ? { lastEntryId: string }
   : R extends { op: "search" } ? AssistantSearchResult
   : R extends { op: "context" } ? AssistantContextResult
+  : R extends { op: "memory_list" } ? AssistantMemoryList
+  : R extends { op: "memory_get" } ? AssistantMemoryDetail
+  : R extends { op: "memory_add" | "memory_update" } ? AssistantMemory
+  : R extends { op: "settings_get" | "settings_set" } ? AssistantSettings
   : AssistantDocument;
 
 /** What a Host offers its assistant Works and, on Main, its clients. */
@@ -128,7 +236,8 @@ export interface AssistantHostPort {
 /** Refusals the owner can act on; each is also the Protocol V2 error code. */
 export const ASSISTANT_ERROR_CODES = [
   "assistant_unavailable", "assistant_document_changed", "assistant_document_too_large",
-  "assistant_edit_not_found", "assistant_edit_ambiguous", "assistant_entry_not_found", "assistant_query_timeout", "invalid_request",
+  "assistant_edit_not_found", "assistant_edit_ambiguous", "assistant_entry_not_found", "assistant_query_timeout",
+  "assistant_memory_not_found", "assistant_memory_changed", "invalid_request",
 ] as const;
 export type AssistantErrorCode = typeof ASSISTANT_ERROR_CODES[number];
 export class AssistantError extends Error {
@@ -180,6 +289,79 @@ const ENTRY_KINDS: readonly AssistantEntryKind[] = ["user", "assistant", "tool_r
 function entryKind(input: unknown, field: string): AssistantEntryKind {
   if (!ENTRY_KINDS.includes(input as AssistantEntryKind)) fail(`${field} is unknown`);
   return input as AssistantEntryKind;
+}
+
+function oneOf<T extends string>(input: unknown, values: readonly T[], field: string): T {
+  if (!values.includes(input as T)) fail(`${field} must be one of ${values.join(", ")}`);
+  return input as T;
+}
+function flag(input: unknown, field: string): boolean {
+  if (typeof input !== "boolean") fail(`${field} must be true or false`);
+  return input as boolean;
+}
+function memoryId(input: unknown, field: string): string {
+  if (typeof input !== "string" || !MEMORY_ID.test(input)) fail(`${field} must be a memory ID`);
+  return input as string;
+}
+function memoryText(input: unknown, field: string): string {
+  const value = text(input, field, MAX_ASSISTANT_MEMORY_CHARS);
+  if (value.trim().length === 0) fail(`${field} must not be empty`);
+  return value.trim();
+}
+function modelRef(input: unknown, field: string, closed: boolean): AssistantModelRef {
+  const value = record(input, field);
+  if (closed) only(value, ["provider", "id"], field);
+  return { provider: text(value.provider, `${field}.provider`, MAX_MODEL_PROVIDER_CHARS, 1), id: text(value.id, `${field}.id`, MAX_MODEL_ID_CHARS, 1) };
+}
+
+function parseMemoryList(value: Record<string, unknown>, field: string): AssistantMemoryListRequest {
+  const query = optionalText(value.query, `${field}.query`, MAX_ASSISTANT_QUERY_CHARS);
+  const cursor = optionalText(value.cursor, `${field}.cursor`, MAX_CURSOR_CHARS, 1);
+  return {
+    ...(query === undefined || query.trim().length === 0 ? {} : { query }),
+    ...(value.topic === undefined ? {} : { topic: oneOf(value.topic, ASSISTANT_MEMORY_TOPICS, `${field}.topic`) }),
+    ...(value.state === undefined ? {} : { state: oneOf(value.state, ASSISTANT_MEMORY_STATES, `${field}.state`) }),
+    ...(value.resident === undefined ? {} : { resident: flag(value.resident, `${field}.resident`) }),
+    ...(value.author === undefined ? {} : { author: oneOf(value.author, ASSISTANT_MEMORY_AUTHORS, `${field}.author`) }),
+    ...(cursor === undefined ? {} : { cursor }),
+    limit: count(value.limit, `${field}.limit`, MAX_ASSISTANT_MEMORY_LIST_LIMIT, 1),
+  };
+}
+
+function parseMemoryAdd(value: Record<string, unknown>, field: string): AssistantMemoryAddRequest {
+  let sources: AssistantMemoryAddRequest["sources"];
+  if (value.sources !== undefined) {
+    if (!Array.isArray(value.sources) || value.sources.length > MAX_ASSISTANT_MEMORY_SOURCES) fail(`${field}.sources must list at most ${MAX_ASSISTANT_MEMORY_SOURCES} places`);
+    sources = (value.sources as unknown[]).map((raw, index) => {
+      const source = record(raw, `${field}.sources[${index}]`);
+      only(source, ["sessionId", "entryId"], `${field}.sources[${index}]`);
+      return { sessionId: id(source.sessionId, `${field}.sources[${index}].sessionId`), entryId: id(source.entryId, `${field}.sources[${index}].entryId`) };
+    });
+  }
+  return {
+    topic: oneOf(value.topic, ASSISTANT_MEMORY_TOPICS, `${field}.topic`),
+    text: memoryText(value.text, `${field}.text`),
+    resident: flag(value.resident, `${field}.resident`),
+    ...(sources === undefined || sources.length === 0 ? {} : { sources }),
+  };
+}
+
+function parseMemoryUpdate(value: Record<string, unknown>, field: string): AssistantMemoryUpdateRequest {
+  const update: AssistantMemoryUpdateRequest = {
+    id: memoryId(value.id, `${field}.id`),
+    revision: count(value.revision, `${field}.revision`, Number.MAX_SAFE_INTEGER, 1),
+    ...(value.text === undefined ? {} : { text: memoryText(value.text, `${field}.text`) }),
+    ...(value.topic === undefined ? {} : { topic: oneOf(value.topic, ASSISTANT_MEMORY_TOPICS, `${field}.topic`) }),
+    ...(value.resident === undefined ? {} : { resident: flag(value.resident, `${field}.resident`) }),
+    ...(value.state === undefined ? {} : { state: oneOf(value.state, ASSISTANT_MEMORY_STATES, `${field}.state`) }),
+  };
+  if (update.text === undefined && update.topic === undefined && update.resident === undefined && update.state === undefined) fail(`${field} changes nothing`);
+  return update;
+}
+
+function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantModelRef | null {
+  if (!("extractionModel" in value)) fail(`${field}.extractionModel is required`);
+  return value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true);
 }
 
 /** `closed` refuses unknown fields, as in a question; an answer ignores them. */
@@ -283,6 +465,24 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
       case "document_edit":
         only(value, ["op", "document", "oldText", "newText"], field);
         return { op: "document_edit", document: documentName(value.document, `${field}.document`), oldText: text(value.oldText, `${field}.oldText`, MAX_ASSISTANT_DOCUMENT_BYTES, 1), newText: documentText(value.newText, `${field}.newText`) };
+      case "memory_list":
+        only(value, ["op", "query", "topic", "state", "resident", "author", "cursor", "limit"], field);
+        return { op: "memory_list", ...parseMemoryList(value, field) };
+      case "memory_get":
+        only(value, ["op", "id"], field);
+        return { op: "memory_get", id: memoryId(value.id, `${field}.id`) };
+      case "memory_add":
+        only(value, ["op", "topic", "text", "resident", "sources"], field);
+        return { op: "memory_add", ...parseMemoryAdd(value, field) };
+      case "memory_update":
+        only(value, ["op", "id", "revision", "text", "topic", "resident", "state"], field);
+        return { op: "memory_update", ...parseMemoryUpdate(value, field) };
+      case "settings_get":
+        only(value, ["op"], field);
+        return { op: "settings_get" };
+      case "settings_set":
+        only(value, ["op", "extractionModel"], field);
+        return { op: "settings_set", extractionModel: parseSettingsSet(value, field) };
       default:
         return fail(`${field}.op is unknown`);
     }
@@ -295,6 +495,21 @@ export function parseAssistantSearchParams(input: Record<string, unknown>, field
 }
 export function parseAssistantContextParams(input: Record<string, unknown>, field: string): AssistantContextRequest {
   return question(() => parseContext(input, field));
+}
+export function parseAssistantMemoryListParams(input: Record<string, unknown>, field: string): AssistantMemoryListRequest {
+  return question(() => parseMemoryList(input, field));
+}
+export function parseAssistantMemoryId(input: unknown, field: string): string {
+  return question(() => memoryId(input, field));
+}
+export function parseAssistantMemoryAddParams(input: Record<string, unknown>, field: string): AssistantMemoryAddRequest {
+  return question(() => parseMemoryAdd(input, field));
+}
+export function parseAssistantMemoryUpdateParams(input: Record<string, unknown>, field: string): AssistantMemoryUpdateRequest {
+  return question(() => parseMemoryUpdate(input, field));
+}
+export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantModelRef | null {
+  return question(() => parseSettingsSet(input, field));
 }
 export function parseAssistantDocumentName(input: unknown, field: string): AssistantDocumentName {
   return question(() => documentName(input, field));
@@ -330,7 +545,85 @@ function parseSession(input: unknown, field: string): AssistantSessionInfo {
 export function parseAssistantInfo(input: unknown, field = "assistant info"): AssistantInfo {
   return answer(() => {
     const value = record(input, field);
-    return { workspacePath: text(value.workspacePath, `${field}.workspacePath`, MAX_PATH_CHARS, 1), maxDocumentBytes: count(value.maxDocumentBytes, `${field}.maxDocumentBytes`, Number.MAX_SAFE_INTEGER, 1) };
+    return {
+      workspacePath: text(value.workspacePath, `${field}.workspacePath`, MAX_PATH_CHARS, 1),
+      maxDocumentBytes: count(value.maxDocumentBytes, `${field}.maxDocumentBytes`, Number.MAX_SAFE_INTEGER, 1),
+      ...(value.extraction === undefined ? {} : { extraction: parseExtractionStatus(value.extraction, `${field}.extraction`) }),
+    };
+  });
+}
+
+function parseExtractionStatus(input: unknown, field: string): AssistantExtractionStatus {
+  const value = record(input, field);
+  const optionalTime = (key: string) => value[key] === undefined ? {} : { [key]: time(value[key], `${field}.${key}`) };
+  const lastError = optionalText(value.lastError, `${field}.lastError`, 4_000, 1);
+  return {
+    state: oneOf(value.state, ["off", "idle", "working", "failed"] as const, `${field}.state`),
+    ...(value.model === undefined ? {} : { model: modelRef(value.model, `${field}.model`, false) }),
+    waitingSessions: count(value.waitingSessions, `${field}.waitingSessions`, Number.MAX_SAFE_INTEGER),
+    ...optionalTime("lastRunAt"),
+    ...(lastError === undefined ? {} : { lastError }),
+    ...optionalTime("retryAt"),
+  } as AssistantExtractionStatus;
+}
+
+export function parseAssistantMemory(input: unknown, field = "assistant memory"): AssistantMemory {
+  return answer(() => {
+    const value = record(input, field);
+    if (!Array.isArray(value.sources) || value.sources.length > MAX_ASSISTANT_MEMORY_SOURCES) fail(`${field}.sources must list at most ${MAX_ASSISTANT_MEMORY_SOURCES} places`);
+    return {
+      id: memoryId(value.id, `${field}.id`),
+      topic: oneOf(value.topic, ASSISTANT_MEMORY_TOPICS, `${field}.topic`),
+      text: text(value.text, `${field}.text`, MAX_ASSISTANT_MEMORY_CHARS, 1),
+      resident: flag(value.resident, `${field}.resident`),
+      state: oneOf(value.state, ASSISTANT_MEMORY_STATES, `${field}.state`),
+      author: oneOf(value.author, ASSISTANT_MEMORY_AUTHORS, `${field}.author`),
+      createdAt: time(value.createdAt, `${field}.createdAt`),
+      updatedAt: time(value.updatedAt, `${field}.updatedAt`),
+      revision: count(value.revision, `${field}.revision`, Number.MAX_SAFE_INTEGER, 1),
+      sources: (value.sources as unknown[]).map((raw, index) => {
+        const source = record(raw, `${field}.sources[${index}]`);
+        return { sessionId: id(source.sessionId, `${field}.sources[${index}].sessionId`), entryId: id(source.entryId, `${field}.sources[${index}].entryId`), at: time(source.at, `${field}.sources[${index}].at`) };
+      }),
+      sourceCount: count(value.sourceCount, `${field}.sourceCount`, Number.MAX_SAFE_INTEGER),
+      ...(value.supersededBy === undefined ? {} : { supersededBy: memoryId(value.supersededBy, `${field}.supersededBy`) }),
+    };
+  });
+}
+
+export function parseAssistantMemoryList(input: unknown, field = "assistant memories"): AssistantMemoryList {
+  return answer(() => {
+    const value = record(input, field);
+    if (!Array.isArray(value.memories) || value.memories.length > MAX_ASSISTANT_MEMORY_LIST_LIMIT) fail(`${field}.memories must list at most ${MAX_ASSISTANT_MEMORY_LIST_LIMIT} memories`);
+    const nextCursor = optionalText(value.nextCursor, `${field}.nextCursor`, MAX_CURSOR_CHARS, 1);
+    return { memories: (value.memories as unknown[]).map((raw, index) => parseAssistantMemory(raw, `${field}.memories[${index}]`)), ...(nextCursor === undefined ? {} : { nextCursor }) };
+  });
+}
+
+export function parseAssistantMemoryDetail(input: unknown, field = "assistant memory"): AssistantMemoryDetail {
+  return answer(() => {
+    const value = record(input, field);
+    if (!Array.isArray(value.history) || value.history.length > MAX_ASSISTANT_MEMORY_HISTORY) fail(`${field}.history must list at most ${MAX_ASSISTANT_MEMORY_HISTORY} changes`);
+    return {
+      memory: parseAssistantMemory(value.memory, `${field}.memory`),
+      history: (value.history as unknown[]).map((raw, index) => {
+        const change = record(raw, `${field}.history[${index}]`);
+        const changed = optionalText(change.text, `${field}.history[${index}].text`, MAX_ASSISTANT_MEMORY_CHARS);
+        return {
+          at: time(change.at, `${field}.history[${index}].at`),
+          author: oneOf(change.author, ASSISTANT_MEMORY_AUTHORS, `${field}.history[${index}].author`),
+          action: oneOf(change.action, ASSISTANT_MEMORY_ACTIONS, `${field}.history[${index}].action`),
+          ...(changed === undefined ? {} : { text: changed }),
+        };
+      }),
+    };
+  });
+}
+
+export function parseAssistantSettings(input: unknown, field = "assistant settings"): AssistantSettings {
+  return answer(() => {
+    const value = record(input, field);
+    return value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) };
   });
 }
 export function parseAssistantPreview(input: unknown, field = "assistant preview"): AssistantPreview {
@@ -388,6 +681,12 @@ export function parseAssistantResult<R extends AssistantRequest>(request: R, inp
     case "record": return answer(() => ({ lastEntryId: id(record(input, "record").lastEntryId, "record.lastEntryId") })) as AssistantResultFor<R>;
     case "search": return parseAssistantSearchResult(input) as AssistantResultFor<R>;
     case "context": return parseAssistantContextResult(input) as AssistantResultFor<R>;
+    case "memory_list": return parseAssistantMemoryList(input) as AssistantResultFor<R>;
+    case "memory_get": return parseAssistantMemoryDetail(input) as AssistantResultFor<R>;
+    case "memory_add":
+    case "memory_update": return parseAssistantMemory(input) as AssistantResultFor<R>;
+    case "settings_get":
+    case "settings_set": return parseAssistantSettings(input) as AssistantResultFor<R>;
     default: return parseAssistantDocument(input) as AssistantResultFor<R>;
   }
 }

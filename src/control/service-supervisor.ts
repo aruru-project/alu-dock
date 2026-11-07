@@ -3,19 +3,24 @@ import { randomUUID } from "node:crypto";
 
 /*
  * A long-lived helper process a Host starts and keeps alive, such as Main's model service (card
- * #303) and assistant service (card #295). One question at a time goes out as a request with an ID
- * and comes back as one result; the process says when it is ready.
+ * #303) and assistant service (card #295). Each question goes out as a request with an ID and comes
+ * back as one result; the process says when it is ready. A service may ask its Host in the same way
+ * (`ask` and `answer`), as the assistant service asks for model credentials.
  */
 
 export type ServiceInbound =
   | { type: "request"; id: string; request: unknown }
-  | { type: "cancel"; id: string };
+  | { type: "cancel"; id: string }
+  | { type: "answer"; id: string; ok: true; result: unknown }
+  | { type: "answer"; id: string; ok: false; error: string };
 
 export type ServiceOutbound =
   | { type: "ready" }
   | { type: "result"; id: string; ok: true; result: unknown }
   /** `code` names a refusal the asker can act on; without it the failure is the service's own. */
-  | { type: "result"; id: string; ok: false; error: string; code?: string };
+  | { type: "result"; id: string; ok: false; error: string; code?: string }
+  | { type: "ask"; id: string; request: unknown }
+  | { type: "ask_cancel"; id: string };
 
 /** The service answered, and its answer was a refusal. */
 export class ServiceAnswerError extends Error {
@@ -36,6 +41,8 @@ export interface SupervisedServiceOptions {
   readyWaitMs?: number;
   /** A service that has not said it is ready by then is stopped and started again. */
   startTimeoutMs?: number;
+  /** Answers what the service asks its Host; without it every question is refused. */
+  answer?(request: unknown, signal: AbortSignal): Promise<unknown>;
 }
 
 interface Pending {
@@ -168,6 +175,8 @@ export class SupervisedService {
       let started = false;
       let ended = false;
       const startTimer = setTimeout(() => { if (!started) child.kill("SIGKILL"); }, this.options.startTimeoutMs ?? 60_000);
+      // What this process asked the Host and is still waiting for.
+      const asked = new Map<string, AbortController>();
       // A process that could not be created reports "error" and may never report "exit".
       const end = (how: string) => {
         if (ended) return;
@@ -176,6 +185,8 @@ export class SupervisedService {
         clearTimeout(this.stableTimer);
         if (this.child === child) this.child = undefined;
         if (this.readyChild === child) this.readyChild = undefined;
+        for (const controller of asked.values()) controller.abort();
+        asked.clear();
         this.failPending(this.options.unavailable(`${this.options.label} stopped while answering (${how}).`), child);
         if (started) this.scheduleRestart();
         else this.startFailed(this.options.unavailable(`${this.options.label} could not start (${how}). Check the Dock Host log on Main.`));
@@ -197,11 +208,31 @@ export class SupervisedService {
           this.wakeWaiters();
           return;
         }
+        if (message?.type === "ask" && typeof message.id === "string" && !asked.has(message.id)) {
+          void this.answerAsk(child, asked, message.id, message.request);
+          return;
+        }
+        if (message?.type === "ask_cancel") { asked.get(message.id)?.abort(); return; }
         this.receive(message);
       });
       child.on("error", (error) => { if (child.pid === undefined) end(error.message); });
       child.once("exit", (code, signal) => end(signal ?? `exit ${code}`));
     })();
+  }
+
+  private async answerAsk(child: ChildProcess, asked: Map<string, AbortController>, id: string, request: unknown): Promise<void> {
+    const controller = new AbortController();
+    asked.set(id, controller);
+    let reply: ServiceInbound;
+    try {
+      if (!this.options.answer) throw new Error("This Host answers no questions from the service");
+      reply = { type: "answer", id, ok: true, result: await this.options.answer(request, controller.signal) };
+    } catch (error) {
+      reply = { type: "answer", id, ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      asked.delete(id);
+    }
+    if (!controller.signal.aborted) await this.send(child, reply).catch(() => {});
   }
 
   private startFailed(error: Error): void {
@@ -243,6 +274,49 @@ export class SupervisedService {
       child.send(message, (error) => (error ? reject(error) : resolve()));
     });
   }
+}
+
+let hostAsks: Map<string, { resolve(result: unknown): void; reject(error: Error): void }> | undefined;
+
+/**
+ * The service process's side of asking its Host; the Host's `answer` option replies. A cancel
+ * releases the caller at once and tells the Host.
+ */
+export function askHost(request: unknown, signal?: AbortSignal): Promise<unknown> {
+  if (!process.send) return Promise.reject(new Error("The service must be started by the Dock Host"));
+  if (!hostAsks) {
+    const pending = hostAsks = new Map();
+    process.on("message", (raw: ServiceInbound) => {
+      if (raw?.type !== "answer") return;
+      const waiting = pending.get(raw.id);
+      if (!waiting) return;
+      pending.delete(raw.id);
+      if (raw.ok) waiting.resolve(raw.result);
+      else waiting.reject(new Error(raw.error));
+    });
+    process.on("disconnect", () => {
+      for (const waiting of pending.values()) waiting.reject(new Error("The Dock Host disconnected"));
+      pending.clear();
+    });
+  }
+  const pending = hostAsks;
+  if (signal?.aborted) return Promise.reject(new Error("Cancelled"));
+  const id = randomUUID();
+  return new Promise<unknown>((resolve, reject) => {
+    const cancel = () => {
+      pending.delete(id);
+      reject(new Error("Cancelled"));
+      process.send?.({ type: "ask_cancel", id } satisfies ServiceOutbound, undefined, undefined, () => {});
+    };
+    const settle = <T>(done: (value: T) => void) => (value: T) => { signal?.removeEventListener("abort", cancel); done(value); };
+    pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+    signal?.addEventListener("abort", cancel, { once: true });
+    process.send!({ type: "ask", id, request } satisfies ServiceOutbound, undefined, undefined, (error) => {
+      if (!error) return;
+      pending.get(id)?.reject(error);
+      pending.delete(id);
+    });
+  });
 }
 
 /**

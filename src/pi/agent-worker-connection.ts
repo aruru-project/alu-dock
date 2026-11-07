@@ -6,9 +6,8 @@ import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js"
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentModelStateObservation, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
-import type { ModelAuthRequest } from "../model-service/protocol.js";
 import { parseAssistantRequest, type AssistantHostPort } from "../core/assistant.js";
-import type { ModelHostPort } from "../model-service/service-process.js";
+import { answerModelQuestion, type ModelHostPort } from "../model-service/service-process.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
 import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
@@ -291,9 +290,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     const controller = new AbortController();
     this.modelCalls.set(callId, controller);
     try {
-      if (args.op === "configuration") return await port.configuration(controller.signal);
-      if (args.op === "auth_state") return await port.authState(controller.signal);
-      return await port.auth(args.request as ModelAuthRequest, controller.signal);
+      return await answerModelQuestion(port, args, controller.signal);
     } finally {
       this.modelCalls.delete(callId);
     }

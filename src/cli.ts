@@ -310,7 +310,11 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   if (options.role !== "subhost" && catalogPath) {
     const { AssistantServiceProcess } = await import("./assistant/service-process.js");
     const workspacePath = join(homedir(), ".aludock", "assistant");
-    const service = new AssistantServiceProcess({ directory: join(dirname(catalogPath), "assistant"), workspacePath });
+    const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
+    const service = new AssistantServiceProcess({
+      directory: join(dirname(catalogPath), "assistant"), workspacePath, agentDir: managedPiAgentDir ?? getAgentDir(),
+      ...(modelService === undefined ? {} : { models: modelService }),
+    });
     assistantService = service;
     service.start().catch((error: unknown) => {
       process.stderr.write(`Alu Dock: the assistant service could not start; assistant Works cannot load her persona or memory until it does. ${error instanceof Error ? error.message : String(error)}\n`);

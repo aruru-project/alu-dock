@@ -13,6 +13,7 @@ import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 import { ModelServiceProcess } from "../../src/model-service/service-process.js";
 import { AssistantServiceProcess } from "../../src/assistant/service-process.js";
+import type { ExtractionTiming } from "../../src/assistant/extraction.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
 import { PlanGoalProvider } from "./plan-goal-provider.js";
 
@@ -35,6 +36,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   environment?: Record<string, string>;
   /** Run Main's assistant service, so Works can be opened as the assistant (card #295). */
   assistant?: boolean;
+  /** Shorter waits for her memory passes. */
+  assistantTiming?: Partial<ExtractionTiming>;
 }) {
   const root = await mkdtemp(join(tmpdir(), options.prefix));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
@@ -47,7 +50,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   });
   const modelService = options.modelService ? new ModelServiceProcess({ agentDir, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
   const assistantService = options.assistant
-    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), environment })
+    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
+      ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
     : undefined;
   const team = {
     root, cwd, agentDir, providers, workerPids, modelService, assistantService,
