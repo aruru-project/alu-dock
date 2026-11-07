@@ -96,8 +96,10 @@ pub(crate) async fn set_native_appearance(
 }
 
 /// Matches the Windows title bar's light or dark to the color theme, now and at
-/// the next start. Not async, so it runs on the main thread in the order the
-/// page chose: the last choice is the one shown and kept.
+/// the next start. Not async, so calls run one after another on the main
+/// thread and never interleave reading and writing the copy. The page sends one
+/// request at a time and then only its last choice (`stores/platform.ts`), so
+/// the last choice is the one shown and kept.
 ///
 /// Other desktops keep following the system: there the call would set the
 /// whole App's native look, and Linux puts the system's light or dark back
