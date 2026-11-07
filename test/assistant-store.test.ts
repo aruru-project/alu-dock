@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DatabaseSync } from "node:sqlite";
+
 import { AssistantStore } from "../src/assistant/store.js";
 import { parseAssistantSearchResult, type AssistantEntry } from "../src/core/assistant.js";
 
@@ -67,7 +69,7 @@ test("the assistant's memory pages through many rows without gaps, keeps a burst
   for (let batch = 0; batch < 12; batch += 1) {
     store.record({ sessionId: "many", cwd: "/w" }, Array.from({ length: 1_000 }, (_, index) => {
       const n = batch * 1_000 + index;
-      return entry(`m${n}`, undefined, new Date(start + n * 1_000).toISOString(), "user", n % 7 === 0 ? `第${n}条 猫猫` : `第${n}条`);
+      return entry(`m${n}`, undefined, new Date(start + n * 1_000).toISOString(), "user", `${n % 7 === 0 ? `第${n}条 猫猫` : `第${n}条`}${n < 30 ? " 旧" : ""}`);
     }), `m${batch * 1_000 + 999}`, {});
   }
   const expected = Array.from({ length: 12_000 }, (_, n) => n).filter((n) => n % 7 === 0).reverse().map((n) => `m${n}`);
@@ -79,15 +81,41 @@ test("the assistant's memory pages through many rows without gaps, keeps a burst
     cursor = page.nextCursor;
   } while (cursor !== undefined);
   assert.deepEqual(seen, expected);
+  // A short word said only in the oldest rows: the search has to go back window after window.
+  assert.deepEqual(store.search({ query: "旧", limit: 40 }).hits.map((hit) => hit.entryId), Array.from({ length: 30 }, (_, n) => `m${29 - n}`));
   // A short word with a long one goes the same way.
   assert.deepEqual(store.search({ query: "猫猫 第11", limit: 3 }).hits.map((hit) => hit.entryId), ["m11998", "m11991", "m11984"]);
   assert.deepEqual(store.search({ query: "猫猫 第1", from: new Date(start).toISOString(), to: new Date(start + 20_000).toISOString(), limit: 10 }).hits.map((hit) => hit.entryId), ["m14"]);
 
   const at = new Date(start - 60_000).toISOString();
   store.record({ sessionId: "burst", cwd: "/w" }, Array.from({ length: 1_100 }, (_, n) => entry(`b${n}`, n === 0 ? "before-resume" : `b${n - 1}`, at, "user", `连发 ${n}`)), "b1099", {});
-  const burst = store.search({ query: "连发", to: "2026-11-01T00:00:00.000Z", limit: 50 }).hits.map((hit) => hit.entryId);
+  // Up to the very millisecond they were said, all 1,100 count, though not all fit its IDs.
+  const burst: string[] = [];
+  let next: string | undefined;
+  do {
+    const page = store.search({ query: "连发", to: at, limit: 50, ...(next === undefined ? {} : { cursor: next }) });
+    burst.push(...page.hits.map((hit) => hit.entryId));
+    next = page.nextCursor;
+  } while (next !== undefined);
+  assert.equal(burst.length, 1_100);
   assert.deepEqual(burst.slice(0, 3), ["b1099", "b1098", "b1097"]);
+  assert.equal(store.search({ query: "连发", from: new Date(start - 59_999).toISOString(), limit: 50 }).hits.length, 0);
   const first = store.context({ sessionId: "burst", entryId: "b0", before: 5, after: 1 });
   assert.equal(first.entries[0]!.parentId, undefined);
   assert.equal(first.hasBefore, false);
+});
+
+// Data-layer review of 2026-11-07: a memory written by a newer Dock is refused and left exactly as it was.
+test("a memory whose layout this Dock does not know is left untouched", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-assistant-store-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "memory.sqlite");
+  const newer = new DatabaseSync(path);
+  newer.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema', '2');");
+  newer.close();
+  assert.throws(() => new AssistantStore(path), /cannot read/u);
+  const after = new DatabaseSync(path);
+  const tables = (after.prepare("SELECT name FROM sqlite_schema ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
+  after.close();
+  assert.deepEqual(tables, ["meta", "sqlite_autoindex_meta_1"]);
 });

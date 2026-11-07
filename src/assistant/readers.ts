@@ -117,7 +117,12 @@ export class AssistantReaders {
   private dispatch(): void {
     for (const thread of this.threads) {
       if (thread.read) continue;
-      const read = this.waiting.shift();
+      // A read whose time ran out while it waited is answered, not run.
+      let read = this.waiting.shift();
+      while (read && Date.now() > read.deadline) {
+        settle(read, new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE));
+        read = this.waiting.shift();
+      }
       if (!read) return;
       thread.read = read;
       thread.worker.postMessage({ id: read.id, task: read.task, deadline: read.deadline } satisfies ReaderMessage);
@@ -132,7 +137,9 @@ export class AssistantReaders {
       // A late answer to a read that timed out or was cancelled frees the thread and is dropped.
       if (!read || read.id !== answer.id) return;
       thread.read = undefined;
-      settle(read, answer.ok ? { result: answer.result } : isAssistantErrorCode(answer.code) ? new AssistantError(answer.code, answer.message) : new Error(answer.message));
+      // An answer that arrives after the deadline is late even if its timer has not run yet.
+      settle(read, Date.now() > read.deadline ? new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE)
+        : answer.ok ? { result: answer.result } : isAssistantErrorCode(answer.code) ? new AssistantError(answer.code, answer.message) : new Error(answer.message));
       this.dispatch();
     });
     // A thread that failed, or exited, is taken out; the read it held fails, and a new one starts later.

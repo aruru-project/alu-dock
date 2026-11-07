@@ -10,10 +10,9 @@ import { DEFAULT_PERSONA } from "./default-persona.js";
  * on Main. The owner may edit them by hand too; the revision is the content's digest, so a change
  * made anywhere is noticed by the next save that started from the older text.
  *
- * Saves made through the service never overwrite each other. A file saved in an editor at the very
- * moment the service replaces it (between its last check and the replace, well under a millisecond
- * after the text is on disk) can still be overwritten: an editor takes no part in the service's
- * turns, and files have no compare-and-replace.
+ * Saves made through the service never overwrite each other. A file saved in an editor in the short
+ * gap between the service's last check and its replace can still be overwritten: an editor takes no
+ * part in the service's turns, and files have no compare-and-replace.
  */
 export class AssistantDocuments {
   private tail: Promise<unknown> = Promise.resolve();

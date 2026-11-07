@@ -86,12 +86,14 @@ const DOCUMENT_SCHEMA = {
 type Notify = (message: string) => void;
 
 /**
- * For a session resumed or forked into this Work: its last entry when that happened. What came before
- * was not hers, or is kept under the session it came from. Held for this Worker's life, so a reload
- * keeps it; a Worker started again after the Host restarts no longer knows it, and a session Main
- * never recorded is then recorded from its start.
+ * Where each session this Worker has had became hers, set the first time the Worker sees it: a
+ * session it started (a new Work, /new, or one it reopened) is hers from its first entry (null); one
+ * resumed or forked into it, from after its last entry then, since what came before was not hers or
+ * is kept under the session it came from. Later visits (reload, switching away and back) keep the
+ * first answer. Held for this Worker's life: after a Host restart the new Worker sees a session
+ * afresh, and one Main never recorded is then recorded from its start.
  */
-const historyCutoffs = new Map<string, string | undefined>();
+const sessionStarts = new Map<string, string | null>();
 
 /**
  * What one session loaded from Main. Its first run asks and waits; when that fails, later runs go on
@@ -135,11 +137,11 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.on("session_start", (event, ctx) => {
       load = new SessionLoad(port);
       const sessionId = ctx.sessionManager.getSessionId();
-      if ((event.reason === "resume" || event.reason === "fork") && !historyCutoffs.has(sessionId)) {
-        historyCutoffs.set(sessionId, ctx.sessionManager.getEntries().at(-1)?.id);
+      if (!sessionStarts.has(sessionId)) {
+        sessionStarts.set(sessionId, event.reason === "resume" || event.reason === "fork" ? ctx.sessionManager.getEntries().at(-1)?.id ?? null : null);
       }
       // Like loading, catching up waits for the first run, after any replacement has finished.
-      recorder = new SessionRecorder(port, ctx.sessionManager, attachmentContextKey, historyCutoffs.get(sessionId),
+      recorder = new SessionRecorder(port, ctx.sessionManager, attachmentContextKey, sessionStarts.get(sessionId) ?? undefined,
         (message) => ctx.ui.notify(message, "warning"));
       const collision = pi.getAllTools().find((tool) => OWN_TOOLS.has(tool.name) && tool.sourceInfo.path !== EXTENSION_PATH);
       if (collision) {
