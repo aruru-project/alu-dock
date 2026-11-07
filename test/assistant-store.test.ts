@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -132,4 +135,32 @@ test("a memory whose layout this Dock does not know is left untouched", async (c
   const tables = (after.prepare("SELECT name FROM sqlite_schema ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
   after.close();
   assert.deepEqual(tables, ["meta", "sqlite_autoindex_meta_1"]);
+});
+
+// Card #295, owner's call on 2026-11-07: a backup is taken while the Host keeps running and holds
+// everything said up to the moment it was asked for.
+test("a backup taken while her memory is in use holds everything said until then", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-assistant-backup-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "state", "assistant");
+  await mkdir(directory, { recursive: true });
+  const store = new AssistantStore(join(directory, "memory.sqlite"));
+  context.after(() => store.close());
+  await writeFile(join(directory, "persona.md"), "阿露的人设");
+  await writeFile(join(directory, "notes.md"), "主人的设定");
+  // Still in the open write-ahead log, not yet in the database file itself.
+  store.record({ sessionId: "s", cwd: "/w" }, [entry("u1", undefined, "2026-11-07T08:00:00.000Z", "user", "备份之前说的话")], "u1", {});
+  const backup = join(root, "backups", "today");
+  const cli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+  const environment = { ...process.env, STATE_DIRECTORY: join(root, "state") };
+  await promisify(execFile)(process.execPath, [cli, "assistant:backup", backup], { env: environment });
+  store.record({ sessionId: "s", cwd: "/w" }, [entry("u2", "u1", "2026-11-07T08:01:00.000Z", "user", "备份之后说的话")], "u2", {});
+
+  assert.deepEqual((await readdir(backup)).sort(), ["memory.sqlite", "notes.md", "persona.md"]);
+  assert.equal(await readFile(join(backup, "notes.md"), "utf8"), "主人的设定");
+  const copy = new AssistantStore(join(backup, "memory.sqlite"));
+  const kept = copy.search({ query: "说的话", limit: 5 }).hits.map((hit) => hit.entryId);
+  copy.close();
+  assert.deepEqual(kept, ["u1"]);
+  await assert.rejects(promisify(execFile)(process.execPath, [cli, "assistant:backup", backup], { env: environment }), /already exists/u);
 });

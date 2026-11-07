@@ -87,6 +87,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "assistant:backup") {
+    await backupAssistantCommand(parsed.commandArgs);
+    return;
+  }
+
   if (parsed.command === "pi:install") {
     await installPiExtension(parsed.commandArgs);
     return;
@@ -713,6 +718,19 @@ function parseServeOptions(args: string[]): ServeOptions {
     ...(statePath ? { statePath } : {}),
     ...(joinFile ? { joinFile } : {}),
   };
+}
+
+async function backupAssistantCommand(args: string[]): Promise<void> {
+  if (args.length !== 1 || args[0]!.startsWith("-")) throw new Error("assistant:backup requires one new directory: aludock assistant:backup DIRECTORY");
+  const { backupAssistant } = await import("./assistant/backup.js");
+  const backup = await backupAssistant(join(dirname(defaultCatalogPath()), "assistant"), args[0]!);
+  const saved = [
+    ...(backup.documents.includes("persona") ? ["persona"] : []),
+    ...(backup.documents.includes("notes") ? ["notes"] : []),
+    ...(backup.memory ? ["recorded conversations"] : []),
+  ];
+  process.stdout.write(`Saved the assistant's ${saved.join(", ") || "directory (it was empty)"} in ${backup.directory}.\n`);
+  process.stdout.write("Anything said while the copy ran goes into the next backup.\n");
 }
 
 async function showWorkerDiagnostics(args: string[]): Promise<void> {

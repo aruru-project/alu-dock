@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import { serveRequests } from "../control/service-supervisor.js";
 import { parseAssistantRequest, parseAssistantSource, type AssistantSource } from "../core/assistant.js";
+import { ASSISTANT_DATABASE_FILE } from "./backup.js";
 import { AssistantDocuments } from "./documents.js";
 import { AssistantReaders } from "./readers.js";
 import { AssistantCore } from "./service.js";
@@ -15,7 +16,7 @@ async function main(): Promise<void> {
   if (!directory || !workspace || !process.send) throw new Error("The assistant service must be started by the Dock Host");
   const documents = new AssistantDocuments(directory);
   await documents.initialize();
-  const databasePath = join(directory, "memory.sqlite");
+  const databasePath = join(directory, ASSISTANT_DATABASE_FILE);
   // The writing connection creates the database before any reader opens it.
   const store = new AssistantStore(databasePath);
   const readers = new AssistantReaders({ databasePath });

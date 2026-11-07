@@ -64,7 +64,7 @@ export class AssistantDocuments {
     });
   }
 
-  private path(document: AssistantDocumentName): string { return join(this.directory, `${document}.md`); }
+  private path(document: AssistantDocumentName): string { return join(this.directory, documentFileName(document)); }
 
   private serialize<T>(work: () => Promise<T>): Promise<T> {
     const next = this.tail.then(work, work);
@@ -110,3 +110,5 @@ async function syncDirectory(directory: string): Promise<void> {
   const handle = await open(directory, "r");
   try { await handle.sync(); } finally { await handle.close(); }
 }
+
+export function documentFileName(document: AssistantDocumentName): string { return `${document}.md`; }
