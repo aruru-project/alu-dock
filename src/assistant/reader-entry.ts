@@ -18,4 +18,6 @@ port.on("message", (message: ReaderMessage) => {
     answer = { id: message.id, ok: false, message: error instanceof Error ? error.message : String(error), ...(typeof code === "string" ? { code } : {}) };
   }
   port.postMessage(answer);
+  // A connection that could not end its read is closed; this thread ends so a fresh one replaces it.
+  if (store.broken) setImmediate(() => { throw new Error("The memory reader's connection was closed"); });
 });

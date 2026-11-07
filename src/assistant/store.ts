@@ -258,15 +258,15 @@ export class AssistantStore {
       // Everything from here down is still to be read, unless this step reached the bottom.
       const reachedBottom = rows.length < wanted && end === undefined;
       position = rows.length === wanted ? rows.at(-1)!.id : low;
-      waiting.push(...rows);
-      waiting.sort(newestFirst);
+      // Only the best entries this page can still use wait; the rest come back on the next page.
+      waiting = waiting.concat(rows).sort(newestFirst).slice(0, wanted - hits.length);
       const ready = reachedBottom ? waiting.length : waiting.findIndex((row) => row.at_ms < Math.floor((position - 1) / ENTRY_IDS_PER_MS));
       const count = ready < 0 ? waiting.length : ready;
-      hits.push(...waiting.slice(0, count));
+      for (const row of waiting.slice(0, count)) hits.push(row);
       waiting = waiting.slice(count);
       if (hits.length >= wanted || reachedBottom || position <= lowest) break;
     }
-    hits.push(...waiting);
+    for (const row of waiting) hits.push(row);
     const page = hits.slice(0, request.limit);
     const sessions = new Map<string, AssistantSessionInfo>();
     const result: AssistantSearchHit[] = page.map((row) => {
@@ -278,11 +278,36 @@ export class AssistantStore {
     return { hits: result, ...(hits.length > request.limit && last ? { nextCursor: encodeCursor(last.at_ms, last.id) } : {}) };
   }
 
-  /** Runs reads in one transaction, so they all see the same committed state. */
+  /**
+   * Runs reads in one transaction, so they all see the same committed state. The transaction must end
+   * to let go of that state; if it cannot be ended, the connection is closed and `broken` set, and the
+   * reading thread is replaced.
+   */
   private snapshot<T>(read: () => T): T {
     this.db.exec("BEGIN");
-    try { return read(); }
-    finally { try { this.db.exec("COMMIT"); } catch { /* a read transaction has nothing to keep */ } }
+    let result: T;
+    try {
+      result = read();
+    } catch (error) {
+      // The read's own failure is the one to report; `broken` still tells the thread to go.
+      try { this.end(); } catch { /* reported through broken */ }
+      throw error;
+    }
+    this.end();
+    return result;
+  }
+
+  /** Whether this connection had to be closed because a read transaction would not end. */
+  broken = false;
+
+  private end(): void {
+    try { this.db.exec("COMMIT"); } catch { /* tried again below */ }
+    if (!this.db.isTransaction) return;
+    try { this.db.exec("ROLLBACK"); } catch { /* checked below */ }
+    if (!this.db.isTransaction) return;
+    this.broken = true;
+    try { this.db.close(); } catch { /* closing is all that is left */ }
+    throw new AssistantError("assistant_unavailable", "A memory reader could not end its read and is being replaced");
   }
 
   /** The entry with what came before it on its branch and what followed on the latest branch after it; at most about 2 × 50 lookups. */
