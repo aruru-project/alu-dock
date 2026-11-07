@@ -58,14 +58,15 @@ export const usePlatformStore = defineStore('platform', () => {
   async function sendNativeAppearance() {
     nativeAppearanceBusy = true
     try {
-      while (nativeAppearanceNext) {
+      // A store taken down without its page (a rebuilt App) leaves the platform to the new one.
+      while (nativeAppearanceNext && !disposed) {
         const next = nativeAppearanceNext
         nativeAppearanceNext = null
         const failure = await setNativeAppearance(next).then(() => '', (cause) => {
           console.error('Failed to match the window to the color theme.', cause)
           return nativeAppearanceFailure(next, cause)
         })
-        if (!nativeAppearanceNext) themeSyncError.value = failure
+        if (!nativeAppearanceNext && !disposed) themeSyncError.value = failure
       }
     } finally {
       nativeAppearanceBusy = false
@@ -176,6 +177,7 @@ export const usePlatformStore = defineStore('platform', () => {
 
   onScopeDispose(() => {
     disposed = true
+    nativeAppearanceNext = null
     app.flushLocalState()
     if (initialized) {
       window.removeEventListener('pagehide', flushDrafts)
