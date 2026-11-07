@@ -2,8 +2,9 @@ use crate::errors::CommandError;
 use serde::Deserialize;
 
 /// The page's color themes (`src/lib/theme.ts`). The page keeps the choice;
-/// Android also keeps a copy so its next start draws the window and the
-/// system bars in that theme before the page has loaded.
+/// Android and Windows also keep a copy so their next start draws the window
+/// in that theme before the page has loaded: Android its background and system
+/// bars, Windows the light or dark of its title bar.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ClientTheme {
@@ -13,7 +14,7 @@ pub(crate) enum ClientTheme {
 }
 
 impl ClientTheme {
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "android", desktop)), allow(dead_code))]
     fn as_str(self) -> &'static str {
         match self {
             Self::Classic => "classic",
@@ -21,7 +22,30 @@ impl ClientTheme {
             Self::Dawn => "dawn",
         }
     }
+
+    /// A device that never chose, or whose copy is unreadable, uses the
+    /// page's default (`DEFAULT_THEME` in `src/lib/theme.ts`).
+    #[cfg(any(desktop, test))]
+    fn from_saved(saved: &str) -> Self {
+        [Self::Classic, Self::Dusk, Self::Dawn]
+            .into_iter()
+            .find(|theme| theme.as_str() == saved.trim())
+            .unwrap_or(Self::Classic)
+    }
+
+    /// Dawn is the only light theme; the Windows title bar follows its light or dark.
+    #[cfg(any(desktop, test))]
+    fn window_theme(self) -> tauri::Theme {
+        match self {
+            Self::Dawn => tauri::Theme::Light,
+            Self::Classic | Self::Dusk => tauri::Theme::Dark,
+        }
+    }
 }
+
+/// Windows' copy of the choice, read before the window first shows.
+#[cfg(desktop)]
+const TITLE_BAR_THEME_FILE: &str = "color-theme";
 
 /// What `MainActivity.applyAppearance` reports; MainActivity.kt keeps the same numbers.
 #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
@@ -48,7 +72,7 @@ fn appearance_outcome(status: i32) -> Result<(), CommandError> {
     }
 }
 
-#[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", desktop)), allow(dead_code))]
 fn appearance_error(code: &str, message: &str) -> CommandError {
     CommandError {
         code: code.into(),
@@ -59,23 +83,119 @@ fn appearance_error(code: &str, message: &str) -> CommandError {
     }
 }
 
-/// Matches Android's status and navigation bars, its window background and
-/// the next start's splash screen to the page's color theme. Desktop windows
-/// have nothing to match.
+/// Matches the parts of the window the page cannot draw to its color theme:
+/// Android's status and navigation bars, window background and next start's
+/// splash screen.
+#[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) async fn set_native_appearance(
     app: tauri::AppHandle,
     theme: ClientTheme,
 ) -> Result<(), CommandError> {
-    #[cfg(target_os = "android")]
-    {
-        appearance_outcome(apply_android_appearance(&app, theme).await)
+    appearance_outcome(apply_android_appearance(&app, theme).await)
+}
+
+/// Matches the Windows title bar's light or dark to the color theme, now and at
+/// the next start. Not async, so calls run one after another on the main
+/// thread and never interleave reading and writing the copy. The page sends one
+/// request at a time and then only its last choice (`stores/platform.ts`), so
+/// the last choice is the one shown and kept.
+///
+/// Other desktops keep following the system: there the call would set the
+/// whole App's native look, and Linux puts the system's light or dark back
+/// whenever the system changes.
+#[cfg(desktop)]
+#[tauri::command]
+pub(crate) fn set_native_appearance(
+    app: tauri::AppHandle,
+    theme: ClientTheme,
+) -> Result<(), CommandError> {
+    if !cfg!(windows) {
+        return Ok(());
     }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = (app, theme);
-        Ok(())
+    apply_title_bar_theme(&app, theme)
+}
+
+#[cfg(not(any(target_os = "android", desktop)))]
+#[tauri::command]
+pub(crate) async fn set_native_appearance(
+    app: tauri::AppHandle,
+    theme: ClientTheme,
+) -> Result<(), CommandError> {
+    let _ = (app, theme);
+    Ok(())
+}
+
+/// Gives the title bar the theme's light or dark and keeps a copy for the
+/// next start. Windows hands WebView2 the same preference, so its own menus and
+/// prompts follow too; the page declares its own color-scheme and does not
+/// change. The page has switched either way; the error says which part did not
+/// follow.
+#[cfg(desktop)]
+fn apply_title_bar_theme(app: &tauri::AppHandle, theme: ClientTheme) -> Result<(), CommandError> {
+    use tauri::Manager;
+
+    let shown = app
+        .get_webview_window("main")
+        .is_some_and(|window| window.set_theme(Some(theme.window_theme())).is_ok());
+    let saved = save_title_bar_theme(app.path(), theme).is_ok();
+    if !shown {
+        return Err(appearance_error(
+            "title_bar_unavailable",
+            "窗口标题栏没能跟着换配色。",
+        ));
     }
+    if !saved {
+        return Err(appearance_error(
+            "title_bar_next_start_unavailable",
+            "配色已经换好，只是下次打开时窗口标题栏一开始可能还是原来的深浅。",
+        ));
+    }
+    Ok(())
+}
+
+/// Before the window first shows, gives its Windows title bar the light or dark
+/// of the theme this device chose last; the page confirms it once loaded.
+#[cfg(desktop)]
+pub(crate) fn show_saved_title_bar_theme(app: &tauri::App) {
+    use tauri::Manager;
+
+    if !cfg!(windows) {
+        return;
+    }
+    let theme = title_bar_theme_path(app.path())
+        .and_then(std::fs::read_to_string)
+        .map(|saved| ClientTheme::from_saved(&saved))
+        .unwrap_or(ClientTheme::Classic);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_theme(Some(theme.window_theme()));
+    }
+}
+
+#[cfg(desktop)]
+fn save_title_bar_theme<R: tauri::Runtime>(
+    paths: &tauri::path::PathResolver<R>,
+    theme: ClientTheme,
+) -> std::io::Result<()> {
+    let path = title_bar_theme_path(paths)?;
+    // Every page start confirms the theme; only a change is written.
+    if std::fs::read_to_string(&path).is_ok_and(|saved| saved == theme.as_str()) {
+        return Ok(());
+    }
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory)?;
+    }
+    std::fs::write(path, theme.as_str())
+}
+
+#[cfg(desktop)]
+fn title_bar_theme_path<R: tauri::Runtime>(
+    paths: &tauri::path::PathResolver<R>,
+) -> std::io::Result<std::path::PathBuf> {
+    paths
+        .app_local_data_dir()
+        .map(|directory| directory.join(TITLE_BAR_THEME_FILE))
+        .map_err(std::io::Error::other)
 }
 
 /// Runs `MainActivity.applyAppearance` on the UI thread and returns its status.
@@ -120,17 +240,50 @@ async fn apply_android_appearance(app: &tauri::AppHandle, theme: ClientTheme) ->
 
 #[cfg(test)]
 mod tests {
-    use super::appearance_outcome;
+    use super::{
+        APPEARANCE_APPLIED, APPEARANCE_SPLASH_FAILED, APPEARANCE_WINDOW_FAILED, ClientTheme,
+        appearance_outcome,
+    };
+
+    #[test]
+    fn a_saved_title_bar_theme_reads_back_and_anything_else_is_classic() {
+        for theme in [ClientTheme::Classic, ClientTheme::Dusk, ClientTheme::Dawn] {
+            assert_eq!(ClientTheme::from_saved(theme.as_str()), theme);
+        }
+        assert_eq!(ClientTheme::from_saved("dawn\n"), ClientTheme::Dawn);
+        assert_eq!(ClientTheme::from_saved(""), ClientTheme::Classic);
+        assert_eq!(ClientTheme::from_saved("sepia"), ClientTheme::Classic);
+    }
+
+    #[test]
+    fn only_dawn_gives_the_windows_title_bar_its_light() {
+        assert_eq!(ClientTheme::Dawn.window_theme(), tauri::Theme::Light);
+        assert_eq!(ClientTheme::Dusk.window_theme(), tauri::Theme::Dark);
+        assert_eq!(ClientTheme::Classic.window_theme(), tauri::Theme::Dark);
+    }
 
     #[test]
     fn android_reports_which_part_of_the_theme_did_not_follow() {
-        assert!(appearance_outcome(0).is_ok());
         assert_eq!(
-            appearance_outcome(1).unwrap_err().code,
+            (
+                APPEARANCE_APPLIED,
+                APPEARANCE_WINDOW_FAILED,
+                APPEARANCE_SPLASH_FAILED
+            ),
+            (0, 1, 2),
+            "MainActivity.applyAppearance reports these numbers"
+        );
+        assert!(appearance_outcome(APPEARANCE_APPLIED).is_ok());
+        assert_eq!(
+            appearance_outcome(APPEARANCE_WINDOW_FAILED)
+                .unwrap_err()
+                .code,
             "appearance_unavailable"
         );
         assert_eq!(
-            appearance_outcome(2).unwrap_err().code,
+            appearance_outcome(APPEARANCE_SPLASH_FAILED)
+                .unwrap_err()
+                .code,
             "splash_theme_unavailable"
         );
         assert_eq!(

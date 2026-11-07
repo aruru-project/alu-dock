@@ -25,7 +25,9 @@ export const usePlatformStore = defineStore('platform', () => {
   const theme = ref<ClientTheme>(readTheme(deviceStorage()))
   const themeSaveError = ref('')
   const themeSyncError = ref('')
-  let themeSyncRequest = 0
+  // The platform matches one theme at a time; see matchNativeAppearance.
+  let nativeAppearanceBusy = false
+  let nativeAppearanceNext: ClientTheme | null = null
   const desktopShell = ref<DesktopShellStatus | null>(null)
   const desktopShellBusy = ref(false)
   const unlisteners: UnlistenFn[] = []
@@ -43,21 +45,45 @@ export const usePlatformStore = defineStore('platform', () => {
   const themeName = (id: ClientTheme) => CLIENT_THEMES.find((option) => option.id === id)?.label ?? ''
   const themeLabel = computed(() => themeName(theme.value))
 
-  /** Android also draws its status bar, the window behind the page and the next start's splash screen;
-   * the page tells it which theme to match. Only the latest request decides what App settings reports. */
+  /** The page cannot draw some parts of the window: Android's status bar, the window behind the page and
+   * the next start's splash screen; the Windows title bar. The page tells the platform which theme to
+   * match, one request at a time: requests sent together may arrive in any order, and an earlier choice
+   * arriving last would win. A choice made meanwhile waits and replaces any choice still waiting, so the
+   * platform ends on the last choice, and only that one's result is told in App settings. */
   function matchNativeAppearance(next: ClientTheme) {
-    const request = ++themeSyncRequest
-    setNativeAppearance(next).then(() => {
-      if (request === themeSyncRequest) themeSyncError.value = ''
-    }, (cause) => {
-      console.error('Failed to match the system bars to the color theme.', cause)
-      if (request !== themeSyncRequest) return
-      const name = themeName(next)
-      // The page has switched either way; only say what did not follow.
-      themeSyncError.value = (cause as { code?: unknown } | null)?.code === 'splash_theme_unavailable'
-        ? `配色已经换好，只是下次打开客户端时，最先出现的启动画面可能还是原来的配色。可以再点一下「${name}」重试。`
-        : `状态栏没能跟着换成「${name}」，上面的图标可能看不清。可以再点一下「${name}」重试，还不行就重新打开客户端。`
-    })
+    nativeAppearanceNext = next
+    if (!nativeAppearanceBusy) void sendNativeAppearance()
+  }
+
+  async function sendNativeAppearance() {
+    nativeAppearanceBusy = true
+    try {
+      // A store taken down without its page (a rebuilt App) leaves the platform to the new one.
+      while (nativeAppearanceNext && !disposed) {
+        const next = nativeAppearanceNext
+        nativeAppearanceNext = null
+        const failure = await setNativeAppearance(next).then(() => '', (cause) => {
+          console.error('Failed to match the window to the color theme.', cause)
+          return nativeAppearanceFailure(next, cause)
+        })
+        if (!nativeAppearanceNext && !disposed) themeSyncError.value = failure
+      }
+    } finally {
+      nativeAppearanceBusy = false
+    }
+  }
+
+  /** The page has switched either way; only say what did not follow, and how to retry. */
+  function nativeAppearanceFailure(next: ClientTheme, cause: unknown) {
+    const name = themeName(next)
+    const told = new Map<unknown, string>([
+      ['appearance_unavailable', `状态栏没能跟着换成「${name}」，上面的图标可能看不清。可以再点一下「${name}」重试，还不行就重新打开客户端。`],
+      ['splash_theme_unavailable', `配色已经换好，只是下次打开客户端时，最先出现的启动画面可能还是原来的配色。可以再点一下「${name}」重试。`],
+      ['title_bar_unavailable', `窗口标题栏没能跟着换成「${name}」的深浅。可以再点一下「${name}」重试。`],
+      ['title_bar_next_start_unavailable', `配色已经换好，只是下次打开客户端时，窗口标题栏一开始可能还是原来的深浅。可以再点一下「${name}」重试。`],
+    ])
+    return told.get((cause as { code?: unknown } | null)?.code)
+      ?? `窗口没能完全跟着换成「${name}」。可以再点一下「${name}」重试，还不行就重新打开客户端。`
   }
 
   /** Takes effect at once; saving only decides whether the next start opens in it.
@@ -151,6 +177,7 @@ export const usePlatformStore = defineStore('platform', () => {
 
   onScopeDispose(() => {
     disposed = true
+    nativeAppearanceNext = null
     app.flushLocalState()
     if (initialized) {
       window.removeEventListener('pagehide', flushDrafts)
