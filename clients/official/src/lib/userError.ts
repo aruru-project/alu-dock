@@ -17,6 +17,8 @@ const SAFE_ERROR_CODES = new Set([
   'workspace_cache_unavailable', 'workspace_read_cancelled', 'workspace_read_invalid',
   'workspace_large_file_confirmation_required', 'workspace_preview_unsupported',
   'workspace_save_failed',
+  // Main says which memory a merged one lives on in, and what to change there instead.
+  'assistant_memory_merged',
 ])
 
 export interface UserErrorPresentation {

@@ -306,6 +306,10 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       if (!found) throw { code: 'assistant_memory_not_found', message: 'No memory has this number.' }
       if (found.revision !== args.revision) throw { code: 'assistant_memory_changed', message: 'The memory changed since it was read.' }
       const edit = args.edit as AssistantMemoryEdit
+      const into = preview.assistantMemories.find((item) => item.id === found.supersededBy)
+      if (edit.state === 'forgotten' && into?.state === 'active') {
+        throw { code: 'assistant_memory_merged', message: `这条记忆已经合并进 #${into.id}（“${into.text}”），只忘掉它的话，那一条里还留着同样的事。要忘掉，请忘掉 #${into.id}，或者把 #${into.id} 里的这部分改掉。这次没有改动。` }
+      }
       const at = new Date().toISOString()
       const history = preview.assistantMemoryHistory.get(found.id) ?? []
       if (edit.text !== undefined) history.unshift({ at, author: 'owner', action: 'rewritten', text: edit.text })

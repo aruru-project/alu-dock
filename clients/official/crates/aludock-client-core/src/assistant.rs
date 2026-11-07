@@ -561,8 +561,10 @@ impl DockClient {
         .await
     }
 
-    /// Changes what `edit` names. The Host refuses with `assistant_memory_changed`, changing
-    /// nothing, when `revision` is no longer the memory's.
+    /// Changes what `edit` names. The Host refuses, changing nothing, with
+    /// `assistant_memory_changed` when `revision` is no longer the memory's, and with
+    /// `assistant_memory_merged` when forgetting one whose words live on in the memory it
+    /// was merged into. Setting `resident`, even to what it is, makes it the owner's choice.
     pub async fn update_assistant_memory(
         &self,
         id: &str,

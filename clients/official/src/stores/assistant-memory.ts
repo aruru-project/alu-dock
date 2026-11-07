@@ -173,7 +173,13 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     history: [] as AssistantMemoryChange[],
     loading: false,
     error: '',
-    change: null as null | { kind: MemoryChangeKind; state: 'pending' | 'done' | 'failed'; message: string },
+    change: null as null | {
+      kind: MemoryChangeKind
+      state: 'pending' | 'done' | 'failed'
+      message: string
+      /** Deleting was refused because what it says lives on in the memory it was merged into. */
+      mergedInto?: string
+    },
   })
   let detailEpoch = 0
   /** Rewrites being typed, per connection and memory. */
@@ -235,10 +241,15 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
 
   const CHANGE_NAMES: Record<MemoryChangeKind, string> = { text: '改写', topic: '换分类', resident: '改用法', retired: '作废', forgotten: '删除', active: '恢复' }
 
-  function doneMessage(kind: MemoryChangeKind, memory: AssistantMemory) {
+  /** `before` is the memory as it was shown when the change was asked for. */
+  function doneMessage(kind: MemoryChangeKind, memory: AssistantMemory, before: AssistantMemory) {
     if (kind === 'text') return '已改写。'
     if (kind === 'topic') return `已移到「${memoryTopicLabel(memory.topic)}」。`
-    if (kind === 'resident') return memory.resident ? '已改成每次都带上：新开的助手会话会读到它。' : '已改成她查的时候才用：新开的助手会话不再带上它。'
+    // Choosing counts even when it stays the same: the background no longer changes it.
+    if (kind === 'resident' && memory.resident === before.resident) return `已定下：${memory.resident ? '每次都带上' : '她查的时候才用'}。后台整理不会再改这一项。`
+    if (kind === 'resident') return memory.resident
+      ? '已改成每次都带上：新开的助手会话会读到它，后台整理不会再改这一项。'
+      : '已改成她查的时候才用：新开的助手会话不再带上它，后台整理不会再改这一项。'
     if (kind === 'retired') return '已作废：她不再用这条，记录还留着，可以恢复。'
     if (kind === 'forgotten') return '已删除：她会忘掉这条，不再载入，原话也搜不到。可以在「已删除」里恢复。'
     return '已恢复：她又会用这条了。'
@@ -259,7 +270,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       replaceInList(changed)
       if (!here()) return
       if (newer(changed, detail.memory)) detail.memory = changed
-      detail.change = { kind, state: 'done', message: doneMessage(kind, changed) }
+      detail.change = { kind, state: 'done', message: doneMessage(kind, changed, memory) }
       void readMemory(memory.id)
     } catch (cause) {
       if (context.connectionId !== app.activeConnectionId) return
@@ -274,7 +285,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
         list.failure = `「${excerpt}」的${CHANGE_NAMES[kind]}没有完成：${message}`
         return
       }
-      detail.change = { kind, state: 'failed', message }
+      detail.change = { kind, state: 'failed', message, ...(code === 'assistant_memory_merged' && memory.supersededBy ? { mergedInto: memory.supersededBy } : {}) }
       // Changed first by her or the background: show what it is now; a rewrite being typed stays.
       if (code === 'assistant_memory_changed') void readMemory(memory.id)
     }

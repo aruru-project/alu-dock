@@ -1509,6 +1509,7 @@ try {
       memoryOf('3', 'preferences', '主人不吃香菜。', { resident: true, sources: [{ sessionId: 's1', entryId: 'e2', at }], sourceCount: 1 }),
       memoryOf('2', 'events', '主人下周三要去体检。', { author: 'assistant' }),
       memoryOf('1', 'owner', '主人养了一只猫。', { state: 'forgotten', author: 'owner', revision: 2 }),
+      memoryOf('4', 'events', '主人周三体检。', { state: 'retired', author: 'dreaming', revision: 2, supersededBy: '2' }),
     ]
     // Main does a change once per operation; the same operation sent again gets its answer again.
     const answered = new Map()
@@ -1531,6 +1532,8 @@ try {
         } else {
           changed = memories.find(item => item.id === args.id)
           if (args.revision !== changed.revision) throw { code: 'assistant_memory_changed', message: 'The memory changed since that revision.' }
+          const into = memories.find(item => item.id === changed.supersededBy)
+          if (args.edit.state === 'forgotten' && into?.state === 'active') throw { code: 'assistant_memory_merged', message: `这条记忆已经合并进 #${into.id}（“${into.text}”），只忘掉它的话，那一条里还留着同样的事。这次没有改动。` }
           Object.assign(changed, args.edit, { author: 'owner', revision: changed.revision + 1 })
         }
         answered.set(args.operationId, structuredClone(changed))
@@ -1564,9 +1567,13 @@ try {
     assert.ok(text(labelled('对话前后文')).includes('我不吃香菜哦') && text(page()).includes('这条记忆：主人不吃香菜。'))
     await click(page(), '← 返回这条记忆')
 
-    // Only her looking finds it from now on; the change names the version shown.
+    // Choosing what it already is keeps the background from changing it; then only her looking
+    // finds it. Each change names the version shown.
+    await click(labelled('什么时候用'), '每次都带上')
+    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [1, { resident: true }])
+    assert.ok(text(page()).includes('已定下：每次都带上') && text(page()).includes('后台整理不会再改'))
     await click(labelled('什么时候用'), '她查的时候才用')
-    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], ['3', 1, { resident: false }])
+    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], ['3', 2, { resident: false }])
     assert.ok(text(page()).includes('已改成她查的时候才用'))
     // Changed by her meanwhile: nothing is changed, the page shows it as it is now and keeps the rewrite.
     await click(page(), '改写')
@@ -1576,7 +1583,7 @@ try {
     assert.ok(text(page()).includes('刚被改过') && text(page()).includes('点外卖要避开'), text(page()))
     assert.equal(labelled('改写这条记忆').value, '主人不吃香菜和葱。', 'the rewrite being typed stays')
     await click(page(), '保存改写')
-    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [3, { text: '主人不吃香菜和葱。' }])
+    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [4, { text: '主人不吃香菜和葱。' }])
     assert.ok(text(page()).includes('已改写') && text(page()).includes('你改的'))
     // A deletion whose reply is lost is said once; sending it again is the same operation, done once.
     loseNextReply = true
@@ -1595,6 +1602,15 @@ try {
     await click(page(), '恢复')
     assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').edit], ['1', { state: 'active' }])
     assert.ok(text(page()).includes('已恢复'))
+    await click(page(), '← 返回列表')
+    // One merged into a memory still in use cannot be forgotten alone; Main says which, and it opens from here.
+    await click(page(), '已作废')
+    await click(labelled('记忆列表'), '主人周三体检')
+    await click(page(), '删除')
+    assert.ok(text(page()).includes('已经合并进 #2') && text(page()).includes('这次没有改动'), text(page()))
+    await click(page(), '去看合并后的那一条')
+    assert.equal(sent('assistant_memory').id, '2')
+    assert.ok(text(page()).includes('主人下周三要去体检。') && text(page()).includes('#2'))
     await click(page(), '← 返回列表')
 
     // The owner writes one; the newest heads the list.
@@ -1623,7 +1639,7 @@ try {
     assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
     await click(page(), '关闭')
     assistantNative = fallback; modelVisibilityNative = previousModels
-    console.log('PASS: assistant memories: newest and by topic, where one was said, kept for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, written by the owner, the model chosen from Main\'s and cleared')
+    console.log('PASS: assistant memories: newest and by topic, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, one merged elsewhere refused with a way to the other, written by the owner, the model chosen from Main\'s and cleared')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.

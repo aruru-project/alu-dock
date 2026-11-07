@@ -105,7 +105,7 @@ function input(event: Event) {
             <span v-if="item.state !== listState" class="memory-tag" :class="`is-${item.state}`">{{ memoryStateLabel(item.state) }}</span>
             <span v-if="item.state === 'active' && item.resident" class="memory-tag is-resident">每次都带上</span>
             <span v-if="memory.hasRewrite(item.id)" class="memory-tag is-draft">改写还没保存</span>
-            <span>{{ [memoryAuthorLabel(item), assistantTime(item.updatedAt)].filter(Boolean).join(' · ') }}</span>
+            <span>{{ [memoryAuthorLabel(item), assistantTime(item.updatedAt), `#${item.id}`].filter(Boolean).join(' · ') }}</span>
           </span>
         </button>
       </li>

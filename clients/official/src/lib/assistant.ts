@@ -72,7 +72,7 @@ export function memoryAuthorLabel(memory: Pick<AssistantMemory, 'author' | 'revi
 
 const ACTOR: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里', dreaming: '整理时', assistant: '她在对话里', owner: '你' }
 const ACTION: Record<Known<AssistantMemoryAction>, string> = {
-  added: '记下', rewritten: '改写', moved: '换了分类', resident: '改成每次都带上', query_only: '改成她查的时候才用',
+  added: '记下', rewritten: '改写', moved: '换了分类', resident: '设为每次都带上', query_only: '设为她查的时候才用',
   retired: '作废', forgotten: '删除', restored: '恢复', merged: '合并进另一条',
 }
 

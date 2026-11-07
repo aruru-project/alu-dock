@@ -24,8 +24,9 @@ const actionsHint = computed(() => {
 function setTopic(topic: AssistantMemoryTopic) {
   if (shown.value && topic !== shown.value.topic) void memory.changeMemory('topic', { topic })
 }
+// Choosing the option already shown still counts: from then on the background leaves it as chosen.
 function setResident(resident: boolean) {
-  if (shown.value && resident !== shown.value.resident) void memory.changeMemory('resident', { resident })
+  if (shown.value) void memory.changeMemory('resident', { resident })
 }
 function saveRewrite() {
   if (rewriteSaveable.value) void memory.changeMemory('text', { text: rewrite.value!.trim() })
@@ -57,9 +58,12 @@ function input(event: Event) {
           <button type="button" class="button primary" :disabled="pending || !rewriteSaveable" @click="saveRewrite">{{ pending && detail.change?.kind === 'text' ? '正在保存…' : '保存改写' }}</button>
         </div>
       </div>
-      <p class="memory-detail-meta">{{ [memoryAuthorLabel(shown), assistantTime(shown.updatedAt)].filter(Boolean).join(' · ') }}<template v-if="shown.revision > 1"> · 最早记于 {{ assistantTime(shown.createdAt) }}</template></p>
+      <p class="memory-detail-meta">{{ [`#${shown.id}`, memoryAuthorLabel(shown), assistantTime(shown.updatedAt)].filter(Boolean).join(' · ') }}<template v-if="shown.revision > 1"> · 最早记于 {{ assistantTime(shown.createdAt) }}</template></p>
 
-      <p v-if="detail.change" class="memory-change" :class="`is-${detail.change.state}`" :role="detail.change.state === 'failed' ? 'alert' : 'status'">{{ detail.change.message }}</p>
+      <p v-if="detail.change" class="memory-change" :class="`is-${detail.change.state}`" :role="detail.change.state === 'failed' ? 'alert' : 'status'">
+        {{ detail.change.message }}
+        <button v-if="detail.change.mergedInto" type="button" class="alu-link-button" @click="memory.openMemory(detail.change.mergedInto)">去看合并后的那一条</button>
+      </p>
 
       <template v-if="shown.state === 'active'">
         <div class="memory-field">
@@ -75,7 +79,7 @@ function input(event: Event) {
             <button type="button" role="radio" :class="{ 'is-active': !shown.resident }" :aria-checked="!shown.resident" :disabled="pending" @click="setResident(false)">她查的时候才用</button>
           </div>
         </div>
-        <p class="memory-hint">「每次都带上」的会写进每个新开的助手会话；「她查的时候才用」的，她搜记忆时才会找到。已经开着的会话要重新打开才会读到改动。</p>
+        <p class="memory-hint">「每次都带上」的会写进每个新开的助手会话；「她查的时候才用」的，她搜记忆时才会找到。在这里选过一次（点现在的选项也算），后台整理就不会再改这一项。已经开着的会话要重新打开才会读到改动。</p>
       </template>
 
       <div class="memory-actions">
@@ -90,7 +94,7 @@ function input(event: Event) {
         </template>
       </div>
       <p class="memory-hint">{{ actionsHint }}</p>
-      <p v-if="shown.supersededBy" class="memory-hint">整理时它被合并进了另一条。<button type="button" class="alu-link-button" @click="memory.openMemory(shown.supersededBy)">看那一条</button></p>
+      <p v-if="shown.supersededBy" class="memory-hint">整理时它被合并进了 #{{ shown.supersededBy }}。<button type="button" class="alu-link-button" @click="memory.openMemory(shown.supersededBy)">看那一条</button></p>
 
       <section class="memory-section" aria-label="出处">
         <h4>在哪里说的</h4>
