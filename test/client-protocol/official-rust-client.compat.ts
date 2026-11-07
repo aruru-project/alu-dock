@@ -64,6 +64,44 @@ test("official Rust client pages through saved sessions, newest conversation fir
   }
 });
 
+// Card #295: the official client reads and edits the assistant on a production Main, whose own
+// assistant service keeps her; her recorded conversation is seeded as the service stores it.
+test("official Rust client reads and edits the assistant on Main and finds her conversations", { timeout: 60_000 }, async (context) => {
+  assert.equal(process.platform, "linux", "test:client-protocol requires Linux isolated Unix-socket process semantics");
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-client-assistant-"));
+  const home = join(root, "home");
+  const agentDir = join(root, "agent");
+  const stateDirectory = join(root, "state");
+  const socket = join(root, "dock.sock");
+  let host: ChildProcess | undefined;
+  try {
+    await Promise.all([mkdir(home), mkdir(agentDir), mkdir(join(stateDirectory, "assistant"), { recursive: true, mode: 0o700 }), chmod(root, 0o700)]);
+    const { AssistantStore } = await import("../../src/assistant/store.js");
+    const memory = new AssistantStore(join(stateDirectory, "assistant", "memory.sqlite"));
+    memory.record({ sessionId: "gate-session", cwd: home, name: "闲聊" }, [
+      { entryId: "e1", at: "2026-11-01T10:00:00.000Z", kind: "user", text: "我家猫叫什么来着？" },
+      { entryId: "e2", parentId: "e1", at: "2026-11-01T10:00:05.000Z", kind: "assistant", text: "团子呀，这都忘了？", toolCalls: [{ name: "read", arguments: "{}" }] },
+    ], "e2", { workId: "gate-work", machine: "Main" });
+    memory.close();
+
+    host = spawn(process.execPath, ["dist/src/cli.js", "--socket", socket, "serve", "--dev", "--state", join(stateDirectory, "catalog.json")], {
+      cwd: process.cwd(), env: isolatedEnvironment(root, home, agentDir), stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderr: string[] = [];
+    host.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
+    await waitForReady(host, stderr);
+
+    const targetDirectory = resolve(process.env.CARGO_TARGET_DIR || "clients/official/target");
+    const gate = join(targetDirectory, "debug", "examples", "protocol_assistant");
+    const result = await run(gate, [socket, join(root, "client-identity"), "gate-session"], process.env, context.signal);
+    assert.equal(result.code, 0, `official Rust client failed:\n${result.stderr}`);
+    assert.match(result.stdout, /assistant gate: workspace=\S+ hits=1 context=2 day=2/u);
+  } finally {
+    await stopChild(host);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function isolatedEnvironment(root: string, home: string, agentDir: string): NodeJS.ProcessEnv {
   return isolatedProcessEnvironment(home, {
     XDG_CONFIG_HOME: join(root, "xdg-config"),
