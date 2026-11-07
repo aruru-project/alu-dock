@@ -63,4 +63,15 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
   assert.ok(systemPrompt(dog.body).includes("狗叫豆包"), "A reloaded session loads the latest notes");
   dog.text("豆包。");
   await settled(client, alu.id);
+
+  // Continued after a crash, the Work is still her.
+  process.kill(team.workerPids[0]!, "SIGKILL");
+  await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
+  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen", undefined, trust));
+  assert.equal((await client.status(alu.id)).assistant, true);
+  await client.prompt(alu.id, "还在吗？", "auto", "alu-back");
+  const back = await coordinator.request(5);
+  assert.ok(systemPrompt(back.body).includes("狗叫豆包"), "A continued Work loads her again");
+  back.text("在。");
+  await settled(client, alu.id);
 });
