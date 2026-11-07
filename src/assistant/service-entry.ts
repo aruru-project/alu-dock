@@ -19,12 +19,22 @@ async function main(): Promise<void> {
   // The writing connection creates the database before any reader opens it.
   const store = new AssistantStore(databasePath);
   const readers = new AssistantReaders({ databasePath });
-  process.once("exit", () => { try { store.close(); } catch { /* the process is ending */ } });
+  // The Host stops the service with SIGTERM: close the database rather than leave it to recovery.
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    void readers.close().finally(() => {
+      try { store.close(); } catch { /* already closed */ }
+      process.exit(0);
+    });
+  };
+  process.once("SIGTERM", stop);
   const core = new AssistantCore(documents, store, readers, workspace);
-  await serveRequests(async (raw) => {
+  await serveRequests(async (raw, signal) => {
     const message = raw as { request?: unknown; source?: AssistantSource };
-    return core.answer(parseAssistantRequest(message.request), parseAssistantSource(message.source));
-  });
+    return core.answer(parseAssistantRequest(message.request), parseAssistantSource(message.source), signal);
+  }, stop);
 }
 
 main().catch((error) => {

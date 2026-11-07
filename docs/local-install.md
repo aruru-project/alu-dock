@@ -117,7 +117,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\assistant\
 - `notes.md`：你亲手写的事实和规矩（比如聊天尺度、密钥文件的规矩、本机信息），和别的说法冲突时以这里为准。
 - `memory.sqlite`：她经历过的对话，她自己能按关键词和时间搜。Pi 自己的会话文件不动。
 
-通常在官方客户端的「助手」页里看和改，也可以直接编辑两个 Markdown 文件，或者让她自己改。改动对之后新开的助手会话生效；已经开着的会话在 reload、`/new` 或 Work 重新打开时换成最新的。备份时把整个 `assistant/` 目录一起保存。
+通常在官方客户端的「助手」页里看和改，也可以直接编辑两个 Markdown 文件，或者让她自己改。改动对之后新开的助手会话生效；已经开着的会话在 reload、`/new` 或 Work 重新打开时换成最新的。备份前先停掉 Host（`aludock service stop`），再复制整个 `assistant/` 目录；Host 运行时 `memory.sqlite` 旁边的 `-wal` 文件里可能还有没合进主文件的内容，只复制主文件会丢最近的对话。
 
 她在 Main 上还有自己的工作区 `~/.aludock/assistant`，不在任何项目里时在这里聊天、干杂活。这个目录新建的 Work 默认以助手身份打开。
 

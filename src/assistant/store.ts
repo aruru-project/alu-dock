@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 
 import {
+  ASSISTANT_TIME_RANGE_MS,
   ASSISTANT_TOOL_NAMES,
   AssistantError,
   MAX_ASSISTANT_RESULT_BYTES,
@@ -24,10 +25,16 @@ import {
  * when.
  *
  * An entry's row ID is its time in milliseconds times ENTRY_IDS_PER_MS plus a counter, so the rows,
- * and the full-text index that shares their IDs, are in time order. A search walks the index from the
- * newest match back and stops once it has enough, and a time range is a range of IDs; neither reads
- * every match first. The index cuts text into three-character pieces, so Chinese works without a
- * word list; words of one or two characters are checked row by row, newest first.
+ * and the full-text index that shares their IDs, are in time order, and a time range is a range of
+ * IDs. More than ENTRY_IDS_PER_MS entries said in one millisecond move on to the next free
+ * millisecond, so such an entry counts as said up to a few milliseconds later; times outside
+ * ASSISTANT_TIME_RANGE_MS are refused where entries enter.
+ *
+ * The index cuts text into three-character pieces, so Chinese works without a word list; words of one
+ * or two characters are checked with LIKE (letters A–Z in either case), row by row. A search goes from
+ * the newest entry back and stops once it has enough: with only indexed words it follows the index
+ * alone; otherwise it reads SCAN_WINDOW rows at a time and checks its deadline between them, since
+ * Node's synchronous SQLite cannot be interrupted from outside.
  *
  * One connection writes (the service's main thread); searches and context reads use their own
  * read connections on other threads (see readers.ts), which SQLite's WAL journal lets run alongside a write.
@@ -63,16 +70,17 @@ CREATE TRIGGER IF NOT EXISTS entries_delete AFTER DELETE ON entries BEGIN
 END;
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
 `;
+/** The database layout this code reads and writes; a newer one is refused rather than misread. */
+const SCHEMA_VERSION = "1";
 
-/** Room for entries said in the same millisecond; the rare overflow borrows the next free ID. */
+/** Room for entries said in the same millisecond. */
 const ENTRY_IDS_PER_MS = 1024;
 const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
-/** Words searched at once; more are ignored rather than refused. */
-const MAX_SEARCH_TERMS = 8;
 /** Pieces shorter than this cannot use the three-character index and are checked row by row. */
 const INDEXED_TERM_CHARS = 3;
-/** Index matches read per step while looking for enough entries that also hold the short words. */
-const SEARCH_STEP = 256;
+/** Rows one step of a search reads before it checks its deadline again. */
+const SCAN_WINDOW = 5_000;
+const TIMEOUT_MESSAGE = "这次查询超时，没有返回结果。请换个更具体的词，或者缩小时间范围再试。";
 
 interface EntryRow {
   id: number;
@@ -108,10 +116,18 @@ export class AssistantStore {
   /** `reader` opens a connection that only reads, for a thread that answers searches. */
   constructor(path: string, options: { reader?: boolean } = {}) {
     this.db = new DatabaseSync(path);
-    if (options.reader) {
-      this.db.exec("PRAGMA query_only = 1; PRAGMA busy_timeout = 5000;");
-    } else {
-      this.db.exec(SCHEMA);
+    try {
+      if (options.reader) {
+        this.db.exec("PRAGMA query_only = 1; PRAGMA busy_timeout = 5000;");
+      } else {
+        this.db.exec("PRAGMA busy_timeout = 5000;");
+        this.db.exec(SCHEMA);
+      }
+      const version = (this.db.prepare("SELECT value FROM meta WHERE key = 'schema'").get() as { value: string } | undefined)?.value;
+      if (version !== SCHEMA_VERSION) throw new Error(`The assistant's memory at ${path} has layout ${version ?? "unknown"}, which this Dock cannot read. It is left as it is.`);
+    } catch (error) {
+      this.db.close();
+      throw error;
     }
   }
 
@@ -148,65 +164,65 @@ export class AssistantStore {
       `).run(session.sessionId, session.sessionFile ?? null, session.cwd, session.name ?? null, source.workId ?? null, source.machine ?? null,
         first.at, first.ms, last.at, last.ms, throughEntryId);
       const known = this.db.prepare("SELECT 1 FROM entries WHERE session_id = ? AND entry_id = ?");
-      const latestAt = this.db.prepare("SELECT max(id) AS id FROM entries WHERE id >= ? AND id < ?");
-      const taken = this.db.prepare("SELECT 1 FROM entries WHERE id = ?");
+      const latestIn = this.db.prepare("SELECT max(id) AS id FROM entries WHERE id >= ? AND id < ?");
       const insert = this.db.prepare(`
         INSERT INTO entries (id, session_id, entry_id, parent_id, at, work_id, machine, kind, text, tool_name, tool_calls, truncated, search_text)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const entry of entries) {
         if (known.get(session.sessionId, entry.entryId)) continue;
-        const base = Date.parse(entry.at) * ENTRY_IDS_PER_MS;
-        const latest = (latestAt.get(base, base + ENTRY_IDS_PER_MS) as { id: number | null }).id;
-        let id = latest === null ? base : latest + 1;
-        while (taken.get(id)) id += 1;
-        insert.run(id, session.sessionId, entry.entryId, entry.parentId ?? null, entry.at, source.workId ?? null, source.machine ?? null,
+        // A parent this session has not kept, such as history before a resume, is not named.
+        const parentId = entry.parentId !== undefined && known.get(session.sessionId, entry.parentId) ? entry.parentId : null;
+        insert.run(this.nextId(latestIn, Date.parse(entry.at)), session.sessionId, entry.entryId, parentId, entry.at, source.workId ?? null, source.machine ?? null,
           entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searchText(entry));
       }
       this.db.exec("COMMIT");
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      // SQLite may already have rolled back (a full disk, an I/O error); the first error is the one to report.
+      try { this.db.exec("ROLLBACK"); } catch { /* no transaction was left open */ }
       throw error;
     }
     return { lastEntryId: throughEntryId };
   }
 
-  /** Newest first; every word must occur, in any letter case. Without words, everything in the time range. */
-  search(request: AssistantSearchRequest): AssistantSearchResult {
-    const terms = (request.query ?? "").trim().split(/\s+/u).filter((term) => term.length > 0).slice(0, MAX_SEARCH_TERMS);
+  /**
+   * Newest first; every word must occur. Without words, everything in the time range. Past `deadline`
+   * (a Date.now() time) it stops between steps and refuses with assistant_query_timeout.
+   */
+  search(request: AssistantSearchRequest, deadline = Number.POSITIVE_INFINITY): AssistantSearchResult {
+    const terms = (request.query ?? "").trim().split(/\s+/u).filter((term) => term.length > 0);
     const indexed = terms.filter((term) => [...term].length >= INDEXED_TERM_CHARS);
-    const short = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS).map((term) => term.toLowerCase());
-    const lowest = request.from === undefined ? Number.MIN_SAFE_INTEGER : boundary(request.from, "start") * ENTRY_IDS_PER_MS;
+    const short = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS);
+    const lowest = request.from === undefined ? MIN_ID : idAt(boundary(request.from, "start"));
     let below = Math.min(
-      request.to === undefined ? Number.MAX_SAFE_INTEGER : boundary(request.to, "end") * ENTRY_IDS_PER_MS,
-      request.cursor === undefined ? Number.MAX_SAFE_INTEGER : parseCursor(request.cursor),
+      request.to === undefined ? MAX_ID : idAt(boundary(request.to, "end")),
+      request.cursor === undefined ? MAX_ID : parseCursor(request.cursor),
     );
     const wanted = request.limit + 1;
+    const likes = short.map(() => "e.search_text LIKE ? ESCAPE '\\'");
+    const likeValues: SQLInputValue[] = short.map((term) => `%${term.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`);
+    const expression = indexed.map((term) => `"${term.replaceAll("\"", "\"\"")}"`).join(" AND ");
+    const fromIndex = (extra: string[]) => this.db.prepare(`SELECT e.* FROM entries_fts f JOIN entries e ON e.id = f.rowid
+      WHERE entries_fts MATCH ? AND f.rowid >= ? AND f.rowid < ? ${extra.map((condition) => `AND ${condition}`).join(" ")} ORDER BY f.rowid DESC LIMIT ?`);
     const rows: EntryRow[] = [];
-    if (indexed.length > 0) {
-      // Walk the index newest first; entries are read only for matches, and only until there are enough.
-      const matches = this.db.prepare("SELECT rowid FROM entries_fts WHERE entries_fts MATCH ? AND rowid >= ? AND rowid < ? ORDER BY rowid DESC LIMIT ?");
-      const read = this.db.prepare("SELECT * FROM entries WHERE id = ?");
-      const expression = indexed.map((term) => `"${term.replaceAll("\"", "\"\"")}"`).join(" AND ");
-      while (rows.length < wanted) {
-        const step = matches.all(expression, lowest, below, SEARCH_STEP) as Array<{ id?: number; rowid: number }>;
-        for (const match of step) {
-          const row = read.get(match.rowid) as unknown as EntryRow | undefined;
-          if (row && holdsAll(row.search_text, short)) rows.push(row);
-          if (rows.length >= wanted) break;
-        }
-        if (step.length < SEARCH_STEP) break;
-        below = step.at(-1)!.rowid;
-      }
+    if (indexed.length > 0 && short.length === 0) {
+      // The index alone: it is read newest first and the read stops at the limit.
+      rows.push(...fromIndex([]).all(expression, lowest, below, wanted) as unknown as EntryRow[]);
     } else {
-      const where = ["id >= ?", "id < ?", "search_text <> ''"];
-      const values: SQLInputValue[] = [lowest, below];
-      for (const term of short) {
-        where.push("search_text LIKE ? ESCAPE '\\'");
-        values.push(`%${term.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`);
+      const windowEnd = this.db.prepare("SELECT id FROM entries WHERE id >= ? AND id < ? ORDER BY id DESC LIMIT 1 OFFSET ?");
+      const step = indexed.length > 0
+        ? fromIndex(likes)
+        : this.db.prepare(`SELECT e.* FROM entries e WHERE e.id >= ? AND e.id < ? AND e.search_text <> '' ${likes.map((condition) => `AND ${condition}`).join(" ")} ORDER BY e.id DESC LIMIT ?`);
+      while (rows.length < wanted) {
+        if (Date.now() > deadline) throw new AssistantError("assistant_query_timeout", TIMEOUT_MESSAGE);
+        // [low, below) holds at most SCAN_WINDOW rows; the next window ends where this one began.
+        const end = windowEnd.get(lowest, below, SCAN_WINDOW - 1) as { id: number } | undefined;
+        const low = end?.id ?? lowest;
+        const need = wanted - rows.length;
+        rows.push(...(indexed.length > 0 ? step.all(expression, low, below, ...likeValues, need) : step.all(low, below, ...likeValues, need)) as unknown as EntryRow[]);
+        if (end === undefined) break;
+        below = low;
       }
-      // The primary key is in time order, so this reads newest first and stops at the limit.
-      rows.push(...this.db.prepare(`SELECT * FROM entries WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?`).all(...values, wanted) as unknown as EntryRow[]);
     }
     const page = rows.slice(0, request.limit);
     const sessions = new Map<string, AssistantSessionInfo>();
@@ -219,7 +235,7 @@ export class AssistantStore {
     return { hits, ...(rows.length > request.limit && last ? { nextCursor: encodeCursor(last.id) } : {}) };
   }
 
-  /** The entry with what came before it on its branch and what followed on the latest branch after it. */
+  /** The entry with what came before it on its branch and what followed on the latest branch after it; at most about 2 × 50 lookups. */
   context(request: AssistantContextRequest): AssistantContextResult {
     const byId = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND entry_id = ?");
     const latestChild = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND parent_id = ? ORDER BY id DESC LIMIT 1");
@@ -254,6 +270,15 @@ export class AssistantStore {
     return { session: saidIn(this.session(request.sessionId), kept.at(-1)!), entries: kept.map((row) => entries.get(row)!.entry), hasBefore, hasAfter };
   }
 
+  /** The ID for an entry said at `ms`: its millisecond's next free ID, or the next millisecond's when that is full. */
+  private nextId(latestIn: StatementSync, ms: number): number {
+    for (let base = idAt(ms); ; base += ENTRY_IDS_PER_MS) {
+      const latest = (latestIn.get(base, base + ENTRY_IDS_PER_MS) as { id: number | null }).id;
+      if (latest === null) return base;
+      if (latest + 1 < base + ENTRY_IDS_PER_MS) return latest + 1;
+    }
+  }
+
   private sessionStatement: StatementSync | undefined;
   private session(sessionId: string): AssistantSessionInfo {
     this.sessionStatement ??= this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
@@ -271,12 +296,12 @@ export class AssistantStore {
   }
 }
 
-/** Whether the text holds every short word, in any letter case, as SQL LIKE matches them. */
-function holdsAll(text: string, lowerTerms: readonly string[]): boolean {
-  if (lowerTerms.length === 0) return text.length > 0;
-  const lower = text.toLowerCase();
-  return lowerTerms.every((term) => lower.includes(term));
+/** The IDs of entries said at `ms`; times outside ASSISTANT_TIME_RANGE_MS are refused before they get here. */
+function idAt(ms: number): number {
+  return Math.max(MIN_ID, Math.min(MAX_ID, ms * ENTRY_IDS_PER_MS));
 }
+const MIN_ID = -ASSISTANT_TIME_RANGE_MS * ENTRY_IDS_PER_MS;
+const MAX_ID = ASSISTANT_TIME_RANGE_MS * ENTRY_IDS_PER_MS;
 
 /** The session as it was where this entry was said: the Work and machine of the entry itself. */
 function saidIn(session: AssistantSessionInfo, row: EntryRow): AssistantSessionInfo {

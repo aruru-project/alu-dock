@@ -10,7 +10,8 @@ const store = new AssistantStore((workerData as { databasePath: string }).databa
 port.on("message", (message: ReaderMessage) => {
   let answer: ReaderAnswer;
   try {
-    const result = message.task.op === "search" ? store.search(message.task.request) : store.context(message.task.request);
+    // A search stops itself at its next step past the asker's deadline; a context read is a few lookups.
+    const result = message.task.op === "search" ? store.search(message.task.request, message.deadline) : store.context(message.task.request);
     answer = { id: message.id, ok: true, result };
   } catch (error) {
     const code = (error as { code?: unknown })?.code;

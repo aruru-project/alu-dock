@@ -24,18 +24,19 @@ export class AssistantCore {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  async answer<R extends AssistantRequest>(request: R, source: AssistantSource): Promise<AssistantResultFor<R>> {
-    return await this.dispatch(request, source) as AssistantResultFor<R>;
+  /** `signal` ends the asker's wait for a read; a write already started finishes. */
+  async answer<R extends AssistantRequest>(request: R, source: AssistantSource, signal?: AbortSignal): Promise<AssistantResultFor<R>> {
+    return await this.dispatch(request, source, signal) as AssistantResultFor<R>;
   }
 
-  private async dispatch(request: AssistantRequest, source: AssistantSource): Promise<unknown> {
+  private async dispatch(request: AssistantRequest, source: AssistantSource, signal?: AbortSignal): Promise<unknown> {
     switch (request.op) {
       case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES };
       case "load": return this.preview();
       case "recorded": return this.store.recorded(request.sessionId);
       case "record": return this.store.record(request.session, request.entries, request.throughEntryId, source);
-      case "search": return this.readers.search(request);
-      case "context": return this.readers.context(request);
+      case "search": return this.readers.search(request, signal);
+      case "context": return this.readers.context(request, signal);
       case "document_get": return this.documents.get(request.document);
       case "document_set": return this.documents.set(request.document, request.text, request.baseRevision);
       case "document_edit": return this.documents.edit(request.document, request.oldText, request.newText);

@@ -86,6 +86,14 @@ const DOCUMENT_SCHEMA = {
 type Notify = (message: string) => void;
 
 /**
+ * For a session resumed or forked into this Work: its last entry when that happened. What came before
+ * was not hers, or is kept under the session it came from. Held for this Worker's life, so a reload
+ * keeps it; a Worker started again after the Host restarts no longer knows it, and a session Main
+ * never recorded is then recorded from its start.
+ */
+const historyCutoffs = new Map<string, string | undefined>();
+
+/**
  * What one session loaded from Main. Its first run asks and waits; when that fails, later runs go on
  * without her and ask again in the background. It asks at the first run rather than at session start,
  * because a reload or a new session cancels the Work's questions still open while it is replaced.
@@ -126,9 +134,12 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
 
     pi.on("session_start", (event, ctx) => {
       load = new SessionLoad(port);
-      // A resumed or forked session's earlier history was not hers, or is kept under its first session.
+      const sessionId = ctx.sessionManager.getSessionId();
+      if ((event.reason === "resume" || event.reason === "fork") && !historyCutoffs.has(sessionId)) {
+        historyCutoffs.set(sessionId, ctx.sessionManager.getEntries().at(-1)?.id);
+      }
       // Like loading, catching up waits for the first run, after any replacement has finished.
-      recorder = new SessionRecorder(port, ctx.sessionManager, attachmentContextKey, event.reason === "resume" || event.reason === "fork",
+      recorder = new SessionRecorder(port, ctx.sessionManager, attachmentContextKey, historyCutoffs.get(sessionId),
         (message) => ctx.ui.notify(message, "warning"));
       const collision = pi.getAllTools().find((tool) => OWN_TOOLS.has(tool.name) && tool.sourceInfo.path !== EXTENSION_PATH);
       if (collision) {
@@ -199,7 +210,7 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
 }
 
 /** Sends one session's new entries to Main, in order, from where Main last recorded it. */
-class SessionRecorder {
+export class SessionRecorder {
   private through: string | undefined;
   private known = false;
   private running: Promise<void> | undefined;
@@ -207,14 +218,14 @@ class SessionRecorder {
   private told = false;
 
   /**
-   * `fromNow`: when Main has not recorded this session, it starts at what the session already holds
-   * instead of from its first entry.
+   * `startAfter`: when Main has not recorded this session, it starts after this entry instead of from
+   * its first. It is fixed when the session came in, so entries written while Main was away are kept.
    */
   constructor(
     private readonly port: AssistantCallPort,
     private readonly session: ReadonlySessionManager,
     private readonly attachmentContextKey: Uint8Array,
-    private readonly fromNow: boolean,
+    private readonly startAfter: string | undefined,
     private readonly notify: Notify,
   ) {}
 
@@ -238,9 +249,9 @@ class SessionRecorder {
     const entries = this.session.getEntries();
     if (!this.known) {
       this.through = (await this.port.call({ op: "recorded", sessionId })).lastEntryId;
-      if (this.through === undefined && this.fromNow && entries.length > 0) {
-        await this.port.call({ op: "record", session: this.sessionInfo(sessionId), entries: [], throughEntryId: entries.at(-1)!.id });
-        this.through = entries.at(-1)!.id;
+      if (this.through === undefined && this.startAfter !== undefined) {
+        await this.port.call({ op: "record", session: this.sessionInfo(sessionId), entries: [], throughEntryId: this.startAfter });
+        this.through = this.startAfter;
       }
       this.known = true;
     }
@@ -261,23 +272,24 @@ class SessionRecorder {
       return parent?.id;
     };
     const session = this.sessionInfo(sessionId);
+    // The batch is a JSON array: its brackets, and a comma before every entry but the first.
     let batch: AssistantEntry[] = [];
-    let bytes = 0;
+    let bytes = 2;
     const send = async (throughEntryId: string) => {
       await this.port.call({ op: "record", session, entries: batch, throughEntryId });
       this.through = throughEntryId;
       batch = [];
-      bytes = 0;
+      bytes = 2;
     };
     for (const [index, entry] of pending.entries()) {
       const mapped = keeps(entry) ? assistantEntryOf(entry, this.attachmentContextKey) : undefined;
       if (!mapped) continue;
       const parentId = parentOf(entry);
       const item = fitBatch(parentId === undefined ? mapped : { ...mapped, parentId });
-      const size = Buffer.byteLength(JSON.stringify(item), "utf8");
+      const size = Buffer.byteLength(JSON.stringify(item), "utf8") + (batch.length > 0 ? 1 : 0);
       if (batch.length > 0 && bytes + size > MAX_ASSISTANT_RECORD_BATCH_BYTES) await send(pending[index - 1]!.id);
+      bytes += Buffer.byteLength(JSON.stringify(item), "utf8") + (batch.length > 0 ? 1 : 0);
       batch.push(item);
-      bytes += size;
     }
     await send(pending.at(-1)!.id);
   }
@@ -291,7 +303,7 @@ class SessionRecorder {
 
 /** An entry with many long tool calls keeps a shorter part of each, so it fits one batch alone. */
 function fitBatch(entry: AssistantEntry): AssistantEntry {
-  if (Buffer.byteLength(JSON.stringify(entry), "utf8") <= MAX_ASSISTANT_RECORD_BATCH_BYTES || entry.toolCalls === undefined) return entry;
+  if (Buffer.byteLength(JSON.stringify(entry), "utf8") + 2 <= MAX_ASSISTANT_RECORD_BATCH_BYTES || entry.toolCalls === undefined) return entry;
   return { ...entry, toolCalls: entry.toolCalls.map((call) => ({ name: cut(call.name, SQUEEZED_ARGUMENT_CHARS).text, arguments: cut(call.arguments, SQUEEZED_ARGUMENT_CHARS).text })), truncated: true };
 }
 

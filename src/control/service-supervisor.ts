@@ -45,6 +45,8 @@ interface Pending {
 }
 
 const RESTART_DELAYS_MS = [500, 1_000, 2_000, 5_000, 10_000, 30_000];
+/** A service that stayed up this long after saying it is ready starts its restart delays over. */
+const STABLE_RUN_MS = 60_000;
 
 /**
  * Starts and watches one service process. A crash fails the questions in flight and starts the
@@ -62,6 +64,7 @@ export class SupervisedService {
   private unavailable = false;
   private restarts = 0;
   private restartTimer: NodeJS.Timeout | undefined;
+  private stableTimer: NodeJS.Timeout | undefined;
   private readonly waiters = new Set<() => void>();
 
   constructor(private readonly options: SupervisedServiceOptions) {}
@@ -79,6 +82,7 @@ export class SupervisedService {
   async stop(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.restartTimer);
+    clearTimeout(this.stableTimer);
     const child = this.child;
     this.child = undefined;
     this.readyChild = undefined;
@@ -97,6 +101,8 @@ export class SupervisedService {
 
   async request(request: unknown, signal?: AbortSignal): Promise<unknown> {
     const child = await this.running(signal);
+    // A cancel that came while waiting for the service: the question is not sent.
+    if (signal?.aborted) throw new Error(this.options.cancelledMessage);
     const id = randomUUID();
     return new Promise<unknown>((resolve, reject) => {
       // The caller is released at once; a late answer is dropped.
@@ -167,6 +173,7 @@ export class SupervisedService {
         if (ended) return;
         ended = true;
         clearTimeout(startTimer);
+        clearTimeout(this.stableTimer);
         if (this.child === child) this.child = undefined;
         if (this.readyChild === child) this.readyChild = undefined;
         this.failPending(this.options.unavailable(`${this.options.label} stopped while answering (${how}).`), child);
@@ -178,7 +185,11 @@ export class SupervisedService {
           if (started) return;
           started = true;
           clearTimeout(startTimer);
-          this.restarts = 0;
+          // Only a service that keeps running starts its restart delays over; one that says it is
+          // ready and then falls over again and again keeps backing off.
+          clearTimeout(this.stableTimer);
+          this.stableTimer = setTimeout(() => { if (this.readyChild === child) this.restarts = 0; }, STABLE_RUN_MS);
+          this.stableTimer.unref();
           this.unavailable = false;
           this.readyChild = child;
           this.onFirstStart?.resolve();
@@ -236,9 +247,10 @@ export class SupervisedService {
 
 /**
  * The service process's side: answers each request with `answer`, relays cancels, and says it is
- * ready. Call it once the service is set up. A failed answer carries the error's `code` when it has one.
+ * ready. Call it once the service is set up. A failed answer carries the error's `code` when it has
+ * one. `stop` runs when the Host goes away; by default the process exits.
  */
-export async function serveRequests(answer: (request: unknown, signal: AbortSignal) => Promise<unknown>): Promise<void> {
+export async function serveRequests(answer: (request: unknown, signal: AbortSignal) => Promise<unknown>, stop: () => void = () => process.exit(0)): Promise<void> {
   if (!process.send) throw new Error("The service must be started by the Dock Host");
   const active = new Map<string, AbortController>();
   const send = (message: ServiceOutbound): Promise<void> => new Promise((resolve, reject) => {
@@ -265,7 +277,7 @@ export async function serveRequests(answer: (request: unknown, signal: AbortSign
     if (raw?.type === "request" && typeof raw.id === "string" && !active.has(raw.id)) void run(raw.id, raw.request);
     else if (raw?.type === "cancel" && typeof raw.id === "string") active.get(raw.id)?.abort();
   });
-  process.on("disconnect", () => process.exit(0));
+  process.on("disconnect", stop);
   await send({ type: "ready" });
 }
 

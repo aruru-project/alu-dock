@@ -32,6 +32,11 @@ export const MAX_ASSISTANT_RECORD_BATCH_BYTES = 384 * 1024;
 /** The entries of one context answer in UTF-8 JSON; the rest of that answer is small. */
 export const MAX_ASSISTANT_RESULT_BYTES = 768 * 1024;
 export const MAX_ASSISTANT_ID_CHARS = 128;
+/**
+ * Entry times the memory accepts, in milliseconds either side of 1970 (about the years 1717 to 2223):
+ * the store orders entries by time × 1024, which must stay a safe JavaScript integer.
+ */
+export const ASSISTANT_TIME_RANGE_MS = 8_000_000_000_000;
 export const MAX_ASSISTANT_NAME_CHARS = 1_024;
 export const MAX_ASSISTANT_REVISION_CHARS = 128;
 const MAX_PATH_CHARS = 16_384;
@@ -193,10 +198,12 @@ function parseEntry(input: unknown, field: string, closed: boolean): AssistantEn
     });
   }
   if (value.truncated !== undefined && value.truncated !== true) fail(`${field}.truncated must be true when present`);
+  const at = time(value.at, `${field}.at`);
+  if (Math.abs(Date.parse(at)) >= ASSISTANT_TIME_RANGE_MS) fail(`${field}.at is outside the times the memory keeps`);
   return {
     entryId: id(value.entryId, `${field}.entryId`),
     ...(parentId === undefined ? {} : { parentId }),
-    at: time(value.at, `${field}.at`),
+    at,
     kind: entryKind(value.kind, `${field}.kind`),
     text: text(value.text, `${field}.text`, MAX_ASSISTANT_ENTRY_TEXT_CHARS),
     ...(toolName === undefined ? {} : { toolName }),
@@ -246,6 +253,7 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         const sessionFile = optionalText(session.sessionFile, `${field}.session.sessionFile`, MAX_PATH_CHARS, 1);
         const name = optionalText(session.name, `${field}.session.name`, MAX_ASSISTANT_NAME_CHARS);
         if (!Array.isArray(value.entries)) fail(`${field}.entries must be a list`);
+        if (Buffer.byteLength(JSON.stringify(value.entries), "utf8") > MAX_ASSISTANT_RECORD_BATCH_BYTES) fail(`${field}.entries is larger than one batch may be`);
         return {
           op: "record",
           session: {
