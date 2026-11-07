@@ -117,6 +117,8 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'set_native_appearance') {
     if (failNativeAppearance === 'splash') throw { code: 'splash_theme_unavailable', message: '下次的启动画面没能跟着换配色。' }
+    if (failNativeAppearance === 'title-bar') throw { code: 'title_bar_unavailable', message: '窗口标题栏没能跟着换配色。' }
+    if (failNativeAppearance === 'title-bar-next-start') throw { code: 'title_bar_next_start_unavailable', message: '下次打开时的标题栏可能还是原来的深浅。' }
     if (failNativeAppearance) throw { code: 'appearance_unavailable', message: '状态栏没能跟着换配色。' }
     return
   }
@@ -2324,6 +2326,20 @@ try {
       failNativeAppearance = false
       await choose('晨光')
       assert.deepEqual(alerts(), [], 'a successful retry clears it')
+
+      // A desktop window whose title bar did not follow, now or (its copy not kept) at the next start.
+      failNativeAppearance = 'title-bar'
+      await choose('晨光')
+      const titleBarAlert = alerts().find(line => line.includes('标题栏'))
+      assert.ok(titleBarAlert && titleBarAlert.includes('再点一下「晨光」重试'), 'a title bar that did not follow is told, with a retry')
+      assert.equal(titleBarAlert.includes('状态栏'), false, 'a desktop window is not told about a status bar')
+      failNativeAppearance = 'title-bar-next-start'
+      await choose('晨光')
+      const nextStartAlert = alerts().find(line => line.includes('标题栏'))
+      assert.ok(nextStartAlert && nextStartAlert.includes('配色已经换好') && nextStartAlert.includes('下次打开'), 'a title bar that follows now but may not at the next start is told as such')
+      failNativeAppearance = false
+      await choose('晨光')
+      assert.deepEqual(alerts(), [], 'and a successful retry clears it')
 
       const pairedHosts = savedHosts
       savedHosts = []

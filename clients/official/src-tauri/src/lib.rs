@@ -142,6 +142,8 @@ pub fn run() {
                     }
                 }
             });
+            #[cfg(desktop)]
+            appearance::show_saved_desktop_theme(app);
             desktop_shell::finish_setup(app)?;
             Ok(())
         })

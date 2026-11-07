@@ -43,20 +43,26 @@ export const usePlatformStore = defineStore('platform', () => {
   const themeName = (id: ClientTheme) => CLIENT_THEMES.find((option) => option.id === id)?.label ?? ''
   const themeLabel = computed(() => themeName(theme.value))
 
-  /** Android also draws its status bar, the window behind the page and the next start's splash screen;
-   * the page tells it which theme to match. Only the latest request decides what App settings reports. */
+  /** The page cannot draw some parts of the window: Android's status bar, the window behind the page and
+   * the next start's splash screen; the desktop window's title bar. The page tells the platform which theme
+   * to match. Only the latest request decides what App settings reports. */
   function matchNativeAppearance(next: ClientTheme) {
     const request = ++themeSyncRequest
     setNativeAppearance(next).then(() => {
       if (request === themeSyncRequest) themeSyncError.value = ''
     }, (cause) => {
-      console.error('Failed to match the system bars to the color theme.', cause)
+      console.error('Failed to match the window to the color theme.', cause)
       if (request !== themeSyncRequest) return
       const name = themeName(next)
       // The page has switched either way; only say what did not follow.
-      themeSyncError.value = (cause as { code?: unknown } | null)?.code === 'splash_theme_unavailable'
-        ? `配色已经换好，只是下次打开客户端时，最先出现的启动画面可能还是原来的配色。可以再点一下「${name}」重试。`
-        : `状态栏没能跟着换成「${name}」，上面的图标可能看不清。可以再点一下「${name}」重试，还不行就重新打开客户端。`
+      const told = new Map<unknown, string>([
+        ['appearance_unavailable', `状态栏没能跟着换成「${name}」，上面的图标可能看不清。可以再点一下「${name}」重试，还不行就重新打开客户端。`],
+        ['splash_theme_unavailable', `配色已经换好，只是下次打开客户端时，最先出现的启动画面可能还是原来的配色。可以再点一下「${name}」重试。`],
+        ['title_bar_unavailable', `窗口标题栏没能跟着换成「${name}」的深浅。可以再点一下「${name}」重试。`],
+        ['title_bar_next_start_unavailable', `配色已经换好，只是下次打开客户端时，窗口标题栏一开始可能还是原来的深浅。可以再点一下「${name}」重试。`],
+      ])
+      themeSyncError.value = told.get((cause as { code?: unknown } | null)?.code)
+        ?? `窗口没能完全跟着换成「${name}」。可以再点一下「${name}」重试，还不行就重新打开客户端。`
     })
   }
 
