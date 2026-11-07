@@ -53,7 +53,7 @@ test("what she hears becomes a memory her next session starts with, naming where
 
 // Card #295: what the owner tells her to remember in a conversation is kept at once with where he
 // said it; what he has her forget is no longer loaded or found, not even the words it came from.
-test("she keeps what the owner tells her to remember, and once he has her forget it, it cannot be found", { timeout: 60_000 }, async (context) => {
+test("she keeps what the owner tells her to remember, forgets it so it cannot be found, and chooses the model that keeps her memories", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-remember-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
@@ -82,4 +82,11 @@ test("she keeps what the owner tells her to remember, and once he has her forget
   assert.deepEqual((await client.assistantSearch("体检")).hits, [], "Neither the memory nor the words it came from are found");
   const around = await client.assistantContext(said.session.sessionId, said.entryId, 0, 10);
   assert.ok(!JSON.stringify(around.entries).includes("体检"), "Reading around where it was said does not show it either");
+
+  // Card #295: she can also choose the model that keeps her memories, when the owner asks her to.
+  await client.prompt(alu.id, "整理记忆就用 coordinator 的 fixture 吧。", "auto", "alu-model");
+  (await coordinator.request(4)).tools({ id: "model", name: "assistant_memory", arguments: { action: "set_model", model: "coordinator/fixture" } });
+  (await coordinator.request(5)).text("换好了。");
+  await settled(client, alu.id);
+  assert.deepEqual(await client.assistantSettings(), { extractionModel: { provider: "coordinator", id: "fixture" } });
 });

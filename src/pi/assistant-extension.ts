@@ -21,6 +21,7 @@ import {
   type AssistantDocument,
   type AssistantDocumentName,
   type AssistantEntry,
+  type AssistantExtractionStatus,
   type AssistantMemory,
   type AssistantMemoryDetail,
   type AssistantMemoryList,
@@ -31,6 +32,7 @@ import {
   type AssistantResultFor,
   type AssistantSearchResult,
   type AssistantSessionInfo,
+  type AssistantSettings,
 } from "../core/assistant.js";
 import { extractDockAttachmentContext } from "./dock-attachment-context.js";
 import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
@@ -83,7 +85,7 @@ const READ_SCHEMA = {
 const MEMORY_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["add", "rewrite", "retire", "forget", "restore", "resident", "get", "list"] },
+    action: { type: "string", enum: ["add", "rewrite", "retire", "forget", "restore", "resident", "get", "list", "settings", "set_model"] },
     id: { type: "string", description: "The memory's number, as in #12 (without #); for every action but add and list." },
     topic: { type: "string", enum: [...ASSISTANT_MEMORY_TOPICS], description: "owner: who your owner is. preferences: what they like and how they want things. relationship: how the two of you get on. events: things you went through, with the day. self: what you decided about yourself. For add; rewrite may move a memory; list may filter by it." },
     text: { type: "string", maxLength: MAX_ASSISTANT_MEMORY_CHARS, description: "add and rewrite: one thing, as a sentence that makes sense on its own." },
@@ -94,6 +96,7 @@ const MEMORY_SCHEMA = {
       description: "add: where it was said, as sessionId and entryId from assistant_search.",
     },
     state: { type: "string", enum: [...ASSISTANT_MEMORY_STATES], description: "list: active (default), retired, or forgotten." },
+    model: { type: "string", description: "set_model: the model that keeps your memories, as provider/model-id from Main's model list, or none to stop." },
   },
   required: ["action"],
   additionalProperties: false,
@@ -221,14 +224,26 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.registerTool({
       name: "assistant_memory",
       label: "Memories",
-      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true. forget: forget one when your owner asks; the words it came from are not found by searches either. restore: bring back a retired or forgotten one. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic or state, newest first. Use it when your owner asks you to remember or forget something, or when something is clearly worth remembering. Changes apply to sessions that start later; this session already knows.",
+      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true. forget: forget one when your owner asks; the words it came from are not found by searches either. restore: bring back a retired or forgotten one. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic or state, newest first. settings: which model keeps your memories in the background and how that is going. set_model: change that model when your owner asks. Use it when your owner asks you to remember or forget something, or when something is clearly worth remembering. Changes apply to sessions that start later; this session already knows.",
       parameters: MEMORY_SCHEMA,
-      execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState }, _signal: unknown, _update: unknown, ctx: ExtensionContext) => {
+      execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState; model?: string }, _signal: unknown, _update: unknown, ctx: ExtensionContext) => {
         const needId = (): string => {
           if (params.id === undefined) throw new Error(`${params.action} needs the memory's id.`);
           return params.id.replace(/^#/u, "");
         };
         const current = async (): Promise<AssistantMemory> => (await port.call({ op: "memory_get", id: needId() })).memory;
+        if (params.action === "settings" || params.action === "set_model") {
+          let settings: AssistantSettings;
+          if (params.action === "set_model") {
+            const named = params.model?.trim();
+            if (!named) throw new Error("set_model needs model: provider/model-id, or none.");
+            const slash = named.indexOf("/");
+            if (named !== "none" && (slash <= 0 || slash === named.length - 1)) throw new Error("model must be provider/model-id, or none.");
+            settings = await port.call({ op: "settings_set", extractionModel: named === "none" ? null : { provider: named.slice(0, slash), id: named.slice(slash + 1) } });
+          } else settings = await port.call({ op: "settings_get" });
+          const { extraction } = await port.call({ op: "info" });
+          return { content: [{ type: "text", text: renderSettings(settings, extraction) }], details: { settings, extraction } };
+        }
         if (params.action === "list") {
           const list = await port.call({ op: "memory_list", ...(params.topic === undefined ? {} : { topic: params.topic }), ...(params.state === undefined ? {} : { state: params.state }), limit: 50 });
           return { content: [{ type: "text", text: renderMemories(list, params.state === undefined || params.state === "active" ? "Memories in use" : `${params.state} memories`) }], details: list };
@@ -484,6 +499,19 @@ function renderSearch(result: AssistantSearchResult): string {
 }
 
 const STATE_NAMES: Record<AssistantMemoryState, string> = { active: "in use", retired: "retired", forgotten: "forgotten" };
+
+function renderSettings(settings: AssistantSettings, extraction: AssistantExtractionStatus | undefined): string {
+  const model = settings.extractionModel;
+  return [
+    model === undefined ? "No model keeps your memories in the background: nothing is extracted from your conversations until your owner chooses one." : `Your memories are kept with ${model.provider}/${model.id}.`,
+    ...(extraction === undefined ? [] : [
+      `Now: ${extraction.state}; ${extraction.waitingSessions} conversation(s) have something new not read yet.`,
+      ...(extraction.lastRunAt === undefined ? [] : [`Last run: ${extraction.lastRunAt}.`]),
+      ...(extraction.lastError === undefined ? [] : [`Problem: ${extraction.lastError}`]),
+      ...(extraction.retryAt === undefined ? [] : [`Next try: ${extraction.retryAt}.`]),
+    ]),
+  ].join("\n");
+}
 
 function renderMemory(memory: AssistantMemory): string {
   const marks = [memory.topic, memory.resident ? "loaded every session" : "found when searched", ...(memory.state === "active" ? [] : [STATE_NAMES[memory.state]])];
