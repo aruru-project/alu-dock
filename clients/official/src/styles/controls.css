@@ -23,6 +23,9 @@
 .alu-switch { display: inline-flex; justify-self: start; align-self: flex-start; overflow: hidden; border: 1px solid var(--alu-border-light); border-radius: 8px; }
 .alu-switch button { min-height: 32px; padding: 0 12px; cursor: pointer; border: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .alu-switch button + button { border-left: 1px solid var(--alu-border-light); }
+/* How much of a length limit a text uses; past it, what to do. */
+.alu-counter { margin: 0; color: var(--alu-text-faint); font-size: var(--alu-micro-size); line-height: 1.5; text-align: right; }
+.alu-counter.is-over { color: var(--alu-danger); text-align: left; }
 /* An action inside a sentence. */
 .alu-link-button { padding: 0; cursor: pointer; border: 0; background: transparent; color: var(--alu-accent); font: inherit; text-decoration: underline; text-underline-offset: 3px; }
 @media (max-width: 1000px) {

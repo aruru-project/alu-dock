@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { assistantTime, memoryAuthorLabel, memoryChangeLabel, memoryStateLabel, memoryTopics } from '../lib/assistant'
+import { assistantTime, memoryAuthorLabel, memoryChangeLabel, memoryLength, memoryStateLabel, memoryTopics } from '../lib/assistant'
 import type { AssistantMemoryTopic } from '../lib/types'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
 import AssistantConversation from './AssistantConversation.vue'
@@ -9,10 +9,11 @@ import AssistantConversation from './AssistantConversation.vue'
 // One memory: its text, how it is used, what to do with it, where it was said and its changes.
 const memory = useAssistantMemoryStore()
 const { detail, source } = memory
-const { rewrite } = storeToRefs(memory)
+const { rewrite, memoryLimit } = storeToRefs(memory)
 const shown = computed(() => detail.memory)
 const pending = computed(() => detail.change?.state === 'pending')
-const rewriteSaveable = computed(() => !!rewrite.value?.trim() && rewrite.value.trim() !== shown.value?.text)
+const rewriteLength = computed(() => memoryLength(rewrite.value ?? '', memoryLimit.value))
+const rewriteSaveable = computed(() => !!rewrite.value?.trim() && rewrite.value.trim() !== shown.value?.text && !rewriteLength.value.over)
 const actionsHint = computed(() => {
   const state = shown.value?.state
   if (state === 'active') return '作废：这件事已经不成立了，留作记录，她不再用它。删除：她会忘掉这条，不再载入，原话也搜不到；可以在「已删除」里恢复。'
@@ -53,6 +54,7 @@ function input(event: Event) {
       <div v-else class="memory-rewrite">
         <p v-if="detail.change?.kind === 'text' && detail.change.state === 'failed'" class="memory-rewrite-now">现在的内容：{{ shown.text }}</p>
         <textarea class="memory-rewrite-input" :value="rewrite" aria-label="改写这条记忆" spellcheck="false" :disabled="pending" @input="input" />
+        <p class="alu-counter" :class="{ 'is-over': rewriteLength.over }" :role="rewriteLength.over ? 'alert' : undefined">{{ rewriteLength.label }}</p>
         <div class="memory-rewrite-actions">
           <button type="button" class="button secondary" :disabled="pending" @click="memory.cancelRewrite()">不改了</button>
           <button type="button" class="button primary" :disabled="pending || !rewriteSaveable" @click="saveRewrite">{{ pending && detail.change?.kind === 'text' ? '正在保存…' : '保存改写' }}</button>

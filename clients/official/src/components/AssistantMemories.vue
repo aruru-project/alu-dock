@@ -2,7 +2,7 @@
 import { computed, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { PenLine, RefreshCw } from '@lucide/vue'
-import { assistantTime, memoryAuthorLabel, memoryStateLabel, memoryTopicLabel, memoryTopics } from '../lib/assistant'
+import { assistantTime, memoryAuthorLabel, memoryLength, memoryStateLabel, memoryTopicLabel, memoryTopics } from '../lib/assistant'
 import { useAssistantMemoryStore, type MemoryView } from '../stores/assistant-memory'
 import AssistantMemoryDetail from './AssistantMemoryDetail.vue'
 
@@ -10,7 +10,7 @@ import AssistantMemoryDetail from './AssistantMemoryDetail.vue'
 const emit = defineEmits<{ settings: [] }>()
 const memory = useAssistantMemoryStore()
 const { list, detail } = memory
-const { extraction, draft } = storeToRefs(memory)
+const { extraction, draft, memoryLimit } = storeToRefs(memory)
 
 const views: Array<{ id: MemoryView; label: string }> = [
   { id: 'recent', label: '最近记住的' },
@@ -19,6 +19,7 @@ const views: Array<{ id: MemoryView; label: string }> = [
   { id: 'forgotten', label: '已删除' },
 ]
 const saving = computed(() => draft.value?.save?.state === 'pending')
+const draftLength = computed(() => memoryLength(draft.value?.text ?? '', memoryLimit.value))
 // A memory changed here since the list was read says how it stands now.
 const listState = computed(() => list.shown?.filter.state ?? 'active')
 
@@ -71,6 +72,7 @@ function input(event: Event) {
 
     <form v-if="draft?.open" class="memory-write" aria-label="写一条记忆" @submit.prevent="memory.writeMemory()">
       <textarea class="memory-write-input" :value="draft.text" aria-label="要她记住的事" placeholder="要她记住的一件事，比如：主人周末喜欢睡到自然醒。" spellcheck="false" :disabled="saving" @input="input" />
+      <p class="alu-counter" :class="{ 'is-over': draftLength.over }" :role="draftLength.over ? 'alert' : undefined">{{ draftLength.label }}</p>
       <div class="memory-write-field">
         <span>分类</span>
         <div class="alu-chips" role="radiogroup" aria-label="这条的分类">
@@ -87,7 +89,7 @@ function input(event: Event) {
       <p v-if="draft.save" class="memory-write-status" :class="{ 'is-error': draft.save.state === 'failed' }" :role="draft.save.state === 'failed' ? 'alert' : 'status'">{{ draft.save.message }}</p>
       <div class="memory-write-actions">
         <button type="button" class="button secondary" :disabled="saving" @click="memory.dropDraft()">不写了</button>
-        <button type="submit" class="button primary" :disabled="saving || !draft.text.trim()">{{ saving ? '正在保存…' : '记下' }}</button>
+        <button type="submit" class="button primary" :disabled="saving || !draft.text.trim() || draftLength.over > 0">{{ saving ? '正在保存…' : '记下' }}</button>
       </div>
     </form>
 
@@ -128,7 +130,7 @@ function input(event: Event) {
 .memory-toolbar .button { flex: 0 0 auto; }
 .memory-icon-button { display: grid; width: 36px; height: 36px; flex: 0 0 auto; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .memory-icon-button:hover:not(:disabled) { background: var(--alu-hover); color: var(--alu-text); }
-.memory-write { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--alu-accent-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.memory-write { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--alu-accent-border); border-radius: 10px; background: var(--alu-bg-raised); }
 .memory-write-input { min-height: 88px; width: 100%; padding: 10px 12px; resize: vertical; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-bg); color: var(--alu-text); font: 13px/1.7 var(--font-reading); }
 .memory-write-input:focus { outline: none; border-color: var(--alu-border-focus); }
 .memory-write-field { display: grid; grid-template-columns: 84px minmax(0, 1fr); align-items: center; gap: 10px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }

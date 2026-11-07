@@ -32,8 +32,8 @@ export interface MemoryDraft {
 
 const PAGE = 30
 const LOST = '连接中断，没收到结果。请稍后再试。'
-// Main's own wording for a refused memory names fields; the likely cause is the length.
-const NOT_TAKEN = '没有保存：Main 不接受这段内容，可能是太长了。请改短一些再存。'
+// Main's own wording for a request it cannot read names fields; the length is checked before sending.
+const NOT_TAKEN = 'Main 没有收下这次的内容，什么都没有改。请稍后重试。'
 
 function errorCode(cause: unknown) {
   return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
@@ -54,6 +54,10 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
   const assistant = useAssistantStore()
   const catalog = useModelCatalogStore()
   const extraction = computed(() => assistant.info?.extraction)
+  /** How long one memory may be, as Main says; 0 until it is known. */
+  const memoryLimit = computed(() => assistant.info?.maxMemoryChars ?? 0)
+  /** What is saved is the text without the spaces around it, counted as Main counts it. */
+  const tooLong = (text: string) => memoryLimit.value > 0 && text.trim().length > memoryLimit.value
 
   /**
    * The same request sent again after its reply was lost names the same operation, so Main
@@ -259,7 +263,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
   async function changeMemory(kind: MemoryChangeKind, edit: AssistantMemoryEdit) {
     const memory = detail.memory
     const context = app.connectionContext ? { ...app.connectionContext } : null
-    if (!memory || !context || detail.change?.state === 'pending') return
+    if (!memory || !context || detail.change?.state === 'pending' || (edit.text !== undefined && tooLong(edit.text))) return
     const here = () => context.connectionId === app.activeConnectionId && detail.id === memory.id
     detail.change = { kind, state: 'pending', message: '正在保存…' }
     try {
@@ -276,7 +280,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       if (context.connectionId !== app.activeConnectionId) return
       const code = errorCode(cause)
       const message = replyLost(cause) ? LOST
-        : code === 'invalid_request' && kind === 'text' ? NOT_TAKEN
+        : code === 'invalid_request' ? NOT_TAKEN
           : userErrorMessage(cause, '没有改成。请稍后重试。')
       if (!here()) {
         // Its page was left meanwhile; the list says it once.
@@ -330,7 +334,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     if (!context) return
     const entry = draftFor(context.connectionId)
     const memory = { topic: entry.topic, text: entry.text.trim(), resident: entry.resident }
-    if (!memory.text || entry.save?.state === 'pending') return
+    if (!memory.text || tooLong(memory.text) || entry.save?.state === 'pending') return
     entry.save = { state: 'pending', message: '正在保存…' }
     try {
       const added = await once([context.connectionId, 'add', memory], (operationId) => addAssistantMemory(memory, operationId, context))
@@ -418,7 +422,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
   })
 
   return {
-    extraction,
+    extraction, memoryLimit,
     list, loadMemories, moreMemories, showView, showTopic,
     detail, rewrite, hasRewrite, openMemory, closeMemory, readMemory, startRewrite, editRewrite, cancelRewrite, changeMemory,
     source: sourceReading.state, openSource, readSourceMore: sourceReading.readMore, closeSource: sourceReading.close,

@@ -271,7 +271,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'assistant_info': {
       await delay(80)
       const model = preview.assistantSettings.extractionModel
-      return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024,
+      return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024, maxMemoryChars: 1000,
         extraction: { state: model ? 'idle' : 'off', ...(model ? { model } : {}), waitingSessions: 2, lastRunAt: preview.ago(25) } }
     }
     case 'assistant_memories': {

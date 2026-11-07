@@ -50,6 +50,12 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   /** The assistant's page; her drafts are kept by the assistant store, so closing never asks. */
   const assistantOpen = ref(false)
   const assistantSection = ref<AssistantSection>('preview')
+  /** Her page steps back one level inside itself, if it can, before Back closes it. */
+  let assistantBack: (() => boolean) | null = null
+  function onAssistantBack(stepBack: () => boolean) {
+    assistantBack = stepBack
+    return () => { if (assistantBack === stepBack) assistantBack = null }
+  }
 
   const imagePreview = ref<ImagePreview | null>(null)
   const messageTextView = ref<{ title: string; text: string; markdown: boolean } | null>(null)
@@ -130,7 +136,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     else if (layer === 'app-settings') appSettingsOpen.value = false
     else if (layer === 'host-settings') hostSettingsOpen.value = false
     else if (layer === 'machine-settings') void closeMachineSettings().then((closed) => { if (!closed) syncBackHistory() })
-    else if (layer === 'assistant') assistantOpen.value = false
+    // A level stepped back inside her page keeps it open, so it takes its Back entry again.
+    else if (layer === 'assistant') { if (assistantBack?.()) syncBackHistory(); else assistantOpen.value = false }
     else if (layer === 'expanded') composerExpanded.value = false
     else if (layer === 'text') messageTextView.value = null
     else {
@@ -457,5 +464,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })
