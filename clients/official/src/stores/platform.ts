@@ -44,7 +44,7 @@ export const usePlatformStore = defineStore('platform', () => {
   const themeLabel = computed(() => themeName(theme.value))
 
   /** The page cannot draw some parts of the window: Android's status bar, the window behind the page and
-   * the next start's splash screen; the desktop window's title bar. The page tells the platform which theme
+   * the next start's splash screen; the Windows title bar. The page tells the platform which theme
    * to match. Only the latest request decides what App settings reports. */
   function matchNativeAppearance(next: ClientTheme) {
     const request = ++themeSyncRequest
