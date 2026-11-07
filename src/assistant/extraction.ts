@@ -238,8 +238,11 @@ export class AssistantExtraction {
     }
     const known = new Map(shown.memories.map((memory) => [memory.row.id, memory.row] as const));
     this.memories.write(() => {
+      // Words the owner had forgotten while the model was reading may not come back as a memory.
+      const forgotten = this.forgottenAmong(refs);
       for (const change of parsed.changes) {
         const sources = change.from.map((ref) => refs[ref - 1]!);
+        if (sources.some((row) => forgotten.has(row))) continue;
         if (change.do === "add") {
           this.memories.insert(change.topic, change.text, change.resident, "extraction", sources);
           continue;
@@ -247,10 +250,10 @@ export class AssistantExtraction {
         const row = this.changeable(change.id, known);
         if (!row) continue;
         if (change.do === "rewrite") {
-          this.memories.change(row, { text: change.text }, "extraction");
+          this.apply(row, { text: change.text }, "extraction", known);
           this.memories.addSources(row.id, sources);
         } else {
-          this.memories.change(row, { state: "retired" }, "extraction");
+          this.apply(row, { state: "retired" }, "extraction", known);
         }
       }
       this.advance(sessionId, through);
@@ -303,9 +306,9 @@ export class AssistantExtraction {
         if (change.do === "merge") { this.merge(change.ids, change.text, change.topic, change.resident, known); continue; }
         const row = this.changeable(change.id, known);
         if (!row) continue;
-        if (change.do === "rewrite") this.memories.change(row, { text: change.text }, "dreaming");
-        else if (change.do === "retire") this.memories.change(row, { state: "retired" }, "dreaming");
-        else if (row.resident_fixed === 0) this.memories.change(row, { resident: change.resident }, "dreaming");
+        if (change.do === "rewrite") this.apply(row, { text: change.text }, "dreaming", known);
+        else if (change.do === "retire") this.apply(row, { state: "retired" }, "dreaming", known);
+        else if (row.resident_fixed === 0) this.apply(row, { resident: change.resident }, "dreaming", known);
       }
       finish();
     });
@@ -326,12 +329,23 @@ export class AssistantExtraction {
       topic ?? parts[0]!.topic as AssistantMemoryTopic, text,
       fixed[0] ?? resident ?? parts.some((row) => row.resident === 1), "dreaming", sources, fixed.length === 1,
     );
-    for (const row of parts) this.memories.change(row, { state: "retired", supersededBy: merged.id }, "dreaming");
+    for (const row of parts) this.apply(row, { state: "retired", supersededBy: merged.id }, "dreaming", known);
+  }
+
+  /** Inside a write: one change, after which later changes of the same reply see this version. */
+  private apply(row: MemoryRow, change: Parameters<AssistantMemories["change"]>[1], author: "extraction" | "dreaming", known: Map<number, MemoryRow>): void {
+    known.set(row.id, this.memories.change(row, change, author));
+  }
+
+  /** Inside a write: the entries among `rows` that a forgotten memory names now. */
+  private forgottenAmong(rows: readonly number[]): Set<number> {
+    if (rows.length === 0) return new Set();
+    return new Set((this.db.prepare(`SELECT id FROM entries WHERE forgotten > 0 AND id IN (${rows.map(() => "?").join(", ")})`).all(...rows) as Array<{ id: number }>).map((row) => row.id));
   }
 
   /**
    * Inside a write: the memory as the model was shown it, if it may still change: in use, not last
-   * changed by the owner, and not changed by anyone since.
+   * changed by the owner, and not changed by anyone since but this same reply.
    */
   private changeable(id: number, known: Map<number, MemoryRow>): MemoryRow | undefined {
     const shown = known.get(id);

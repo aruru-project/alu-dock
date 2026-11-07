@@ -95,8 +95,26 @@ export class AssistantMemories {
     return this.write(() => {
       const row = this.row(Number(request.id));
       if (row.revision !== request.revision) throw new AssistantError("assistant_memory_changed", CHANGED);
+      if (request.state === "forgotten" && row.state !== "forgotten") {
+        // What it said lives on in the memory it was merged into; forgetting it alone would leave that.
+        const into = this.mergedInto(row);
+        if (into?.state === "active") {
+          throw new AssistantError("assistant_memory_merged", `这条记忆已经合并进 #${into.id}（“${into.text}”），只忘掉它的话，那一条里还留着同样的事。要忘掉，请忘掉 #${into.id}，或者把 #${into.id} 里的这部分改掉。这次没有改动。`);
+        }
+      }
       return this.memoryOf(this.change(row, request, author));
     });
+  }
+
+  /** The memory a merged one lives on in, following later merges; undefined for one never merged. */
+  private mergedInto(row: MemoryRow): MemoryRow | undefined {
+    let current = row;
+    const seen = new Set<number>([row.id]);
+    while (current.superseded_by !== null && !seen.has(current.superseded_by)) {
+      seen.add(current.superseded_by);
+      current = this.row(current.superseded_by);
+    }
+    return current === row ? undefined : current;
   }
 
   /** Runs `work` as one write transaction on the writing connection. */
@@ -135,7 +153,9 @@ export class AssistantMemories {
     const actions: Array<[AssistantMemoryAction, string | null]> = [];
     if (request.text !== undefined && request.text !== row.text) actions.push(["rewritten", request.text]);
     if (request.topic !== undefined && request.topic !== row.topic) actions.push(["moved", null]);
-    if (request.resident !== undefined && request.resident !== (row.resident === 1)) actions.push([request.resident ? "resident" : "query_only", null]);
+    // The owner choosing whether it is loaded counts even when it already was: from then on that choice is his.
+    const ownerChoosesLoading = author === "owner" && request.resident !== undefined && row.resident_fixed === 0;
+    if (request.resident !== undefined && (request.resident !== (row.resident === 1) || ownerChoosesLoading)) actions.push([request.resident ? "resident" : "query_only", null]);
     const state = request.state ?? row.state;
     if (state !== row.state) {
       actions.push([request.supersededBy !== undefined ? "merged" : state === "active" ? "restored" : state as "retired" | "forgotten", null]);
