@@ -167,7 +167,7 @@ export function parseCatalogProjection(input: unknown): CatalogProjection {
 function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecord {
   const value = object(input, field);
   exact(value, [
-    "id", "creationOperationId", "parentId", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
+    "id", "creationOperationId", "parentId", "assistant", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
     "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
@@ -200,6 +200,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     collaborationVersion: 1,
     dockToolsEnabled: value.collaborationVersion === undefined ? true : configuredDockTools,
     ...(value.parentId === undefined ? {} : { parentId: text(value.parentId, `${field}.parentId`, 128) }),
+    ...(value.assistant === undefined ? {} : { assistant: literalTrue(value.assistant, `${field}.assistant`) }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, `${field}.workerConfig`) }),
     executionChangedAt: value.executionChangedAt === undefined
       ? timestamp(value.createdAt, `${field}.createdAt`)
@@ -327,6 +328,11 @@ function positive(value: unknown, field: string): number {
 function boolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw new Error(`${field} must be boolean`);
   return value;
+}
+
+function literalTrue(value: unknown, field: string): true {
+  if (value !== true) throw new Error(`${field} must be true when present`);
+  return true;
 }
 
 function enumeration<const T extends readonly string[]>(value: unknown, field: string, allowed: T): T[number] {

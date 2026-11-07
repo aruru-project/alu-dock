@@ -30,6 +30,7 @@ import { MAX_MODEL_ANSWER_BYTES, parseModelServiceRequest, type ModelAuthRequest
 import { ModelServiceUnavailableError, type ModelHostPort } from "../model-service/service-process.js";
 import { ModelVisibilityError, filterWithHiddenModels, type HiddenModelsFile, type ModelList, type ModelVisibilityPort, type ModelVisibilityService } from "./model-visibility.js";
 import type { ChildModelsSource } from "./child-models.js";
+import { AssistantError, parseAssistantRequest, parseAssistantResult, type AssistantHostPort, type AssistantRequest, type AssistantResultFor, type AssistantSource } from "../core/assistant.js";
 import { parseChildModelEntries, withCurrentMachine, type ChildModelList } from "../core/dock-tools.js";
 import { parseModelRefs, parseModelVisibilityResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
 
@@ -75,26 +76,37 @@ type MachineWireRecord =
   | { kind: "machine_pong" };
 
 /**
- * What a SubHost asks Main about models: the model service's questions, and the model lists that
- * exist only on Main (card #303, decision 3).
+ * What a SubHost asks Main: the model service's questions and the model lists that exist only on
+ * Main (card #303, decision 3), and what its assistant Works ask the assistant service (card #295).
+ * The record names say "model" because they came first; the answers travel the same way.
  */
 type MachineModelQuestion =
   | ModelServiceRequest
   | { op: "hidden_models" }
   | { op: "visibility_get" }
   | { op: "visibility_set"; hidden: ModelRef[] }
-  | { op: "child_models" };
+  | { op: "child_models" }
+  /** `sourceNativeId` is the asking Work on that SubHost; Main names it by its own ID. */
+  | { op: "assistant"; sourceNativeId: string; request: AssistantRequest };
 
-/** Main's side of the SubHosts' model questions. */
+/** Main's side of the SubHosts' questions. */
 export interface MainModels {
   service?: ModelHostPort;
   visibility?: ModelVisibilityService;
   childModels?: ChildModelsSource;
+  assistant?: AssistantHostPort;
 }
 
 function parseMachineModelQuestion(raw: unknown): MachineModelQuestion {
   const value = wireObject(raw, "model question");
   if (value.op === "hidden_models" || value.op === "visibility_get" || value.op === "child_models") { wireExact(value, ["op"]); return { op: value.op }; }
+  if (value.op === "assistant") {
+    wireExact(value, ["op", "sourceNativeId", "request"]);
+    let request: AssistantRequest;
+    try { request = parseAssistantRequest(value.request); }
+    catch (error) { throw new Error(error instanceof Error ? error.message : "Assistant question is invalid"); }
+    return { op: "assistant", sourceNativeId: wireText(value.sourceNativeId, "assistant source", 128), request };
+  }
   if (value.op === "visibility_set") { wireExact(value, ["op", "hidden"]); return { op: "visibility_set", hidden: parseModelRefs(value.hidden, "hidden", "invalid_request") }; }
   return parseModelServiceRequest(value);
 }
@@ -868,7 +880,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
   private answerModelQuestion(connection: MainConnection, requestId: string, request: MachineModelQuestion): void {
     const socket = connection.socket;
     const fail = (error: unknown) => writeMachine(socket, { kind: "machine_model_failure", requestId, error: machineError(error) }).catch(() => {});
-    const { service, visibility, childModels } = this.options.models ?? {};
+    const { service, visibility, childModels, assistant } = this.options.models ?? {};
     if (connection.modelQuestions.has(requestId)) return;
     if (connection.modelQuestions.size >= MAX_MODEL_QUESTIONS) { void fail("Main is answering too many model questions from this machine. Try again shortly."); return; }
     const controller = new AbortController();
@@ -880,6 +892,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
           : request.op === "visibility_get" ? await (visibility ?? missing("a hidden-model list")).get()
           : request.op === "visibility_set" ? await (visibility ?? missing("a hidden-model list")).set(request.hidden)
           : request.op === "child_models" ? await (childModels ?? missing("a child Work model list")).read()
+          : request.op === "assistant" ? await (assistant ?? missing("the assistant")).request(request.request, await this.assistantSource(connection, request.sourceNativeId), controller.signal)
           : request.op === "configuration" ? await (service ?? missing("models")).configuration(controller.signal)
           : request.op === "auth_state" ? await (service ?? missing("models")).authState(controller.signal)
           : await (service ?? missing("models")).auth(request, controller.signal);
@@ -892,6 +905,13 @@ export class MainMachineController implements RemoteInstanceDirectory {
         connection.modelQuestions.delete(requestId);
       }
     })();
+  }
+
+  /** The asking Work by its Main ID when Main already knows it, and the machine by name. */
+  private async assistantSource(connection: MainConnection, sourceNativeId: string): Promise<AssistantSource> {
+    const machine = await this.options.state.get(connection.machine.id);
+    const route = machine?.routes.find((item) => item.nativeInstanceId === sourceNativeId);
+    return { ...(route ? { workId: route.mainInstanceId } : {}), machine: connection.machine.name };
   }
 
   private async completeInitialInventory(connection: MainConnection, hostEpoch: string, snapshots: InstanceSnapshot[]): Promise<void> {
@@ -1798,6 +1818,26 @@ export class SubHostModelPort implements ModelHostPort {
   configuration(signal: AbortSignal): Promise<ModelConfiguration> { return this.upstream.askModels({ op: "configuration" }, signal) as Promise<ModelConfiguration>; }
   authState(signal: AbortSignal): Promise<ModelAuthState> { return this.upstream.askModels({ op: "auth_state" }, signal) as Promise<ModelAuthState>; }
   auth(request: ModelAuthRequest, signal: AbortSignal): Promise<ModelAuthResult> { return this.upstream.askModels({ op: "auth", ...request }, signal) as Promise<ModelAuthResult>; }
+}
+
+/**
+ * A SubHost's assistant Works reach the assistant service on Main over the machine connection. The
+ * SubHost names the asking Work by its own ID; Main replaces it with the Main ID and the machine name.
+ */
+export class SubHostAssistantPort implements AssistantHostPort {
+  constructor(private readonly upstream: SubHostMachineConnection) {}
+
+  async request<R extends AssistantRequest>(request: R, source: AssistantSource, signal?: AbortSignal): Promise<AssistantResultFor<R>> {
+    if (source.workId === undefined) throw new Error("An assistant question from a SubHost names the asking Work");
+    let answer: unknown;
+    try {
+      answer = await this.upstream.askModels({ op: "assistant", sourceNativeId: source.workId, request }, signal ?? AbortSignal.timeout(MODEL_LIST_WAIT_MS));
+    } catch (error) {
+      if (error instanceof ModelServiceUnavailableError) throw new AssistantError("assistant_unavailable", "Main is offline, so this machine cannot reach the assistant. Reconnect it to Main.");
+      throw error;
+    }
+    return parseAssistantResult(request, answer);
+  }
 }
 
 /** How long a SubHost waits for Main's model lists; a Work's model questions carry their own cancel. */

@@ -2,10 +2,11 @@ import { join } from "node:path";
 
 import { FileModelsStore, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 
+import { serveRequests } from "../control/service-supervisor.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import type { ModelServiceRequest } from "./protocol.js";
 import { ModelServiceCore } from "./service.js";
-import { MODEL_SERVICE_AGENT_DIR_ENV, type ServiceInbound, type ServiceOutbound } from "./service-messages.js";
+import { MODEL_SERVICE_AGENT_DIR_ENV } from "./service-messages.js";
 
 /** The model service process. It holds Main's model configuration and credentials and nothing else: no Work, tools or sessions. */
 async function main(): Promise<void> {
@@ -19,34 +20,12 @@ async function main(): Promise<void> {
     await settings.reload();
     configurePiNetwork(settings);
   });
-  const active = new Map<string, AbortController>();
-
-  const send = (message: ServiceOutbound): Promise<void> => new Promise((resolve, reject) => {
-    if (!process.connected) { reject(new Error("The Dock Host disconnected")); return; }
-    process.send!(message, undefined, undefined, (error) => (error ? reject(error) : resolve()));
+  await serveRequests(async (raw, signal) => {
+    const request = raw as ModelServiceRequest;
+    return request.op === "configuration" ? await core.configuration()
+      : request.op === "auth_state" ? await core.authState()
+      : await core.auth(request, signal);
   });
-
-  const run = async (id: string, request: ModelServiceRequest): Promise<void> => {
-    const controller = new AbortController();
-    active.set(id, controller);
-    try {
-      const result = request.op === "configuration" ? await core.configuration()
-        : request.op === "auth_state" ? await core.authState()
-        : await core.auth(request, controller.signal);
-      await send({ type: "result", id, ok: true, result });
-    } catch (error) {
-      await send({ type: "result", id, ok: false, error: error instanceof Error ? error.message : String(error) }).catch(() => {});
-    } finally {
-      active.delete(id);
-    }
-  };
-
-  process.on("message", (raw: ServiceInbound) => {
-    if (raw?.type === "request" && typeof raw.id === "string" && !active.has(raw.id)) void run(raw.id, raw.request);
-    else if (raw?.type === "cancel" && typeof raw.id === "string") active.get(raw.id)?.abort();
-  });
-  process.on("disconnect", () => process.exit(0));
-  await send({ type: "ready" });
 }
 
 main().catch((error) => {

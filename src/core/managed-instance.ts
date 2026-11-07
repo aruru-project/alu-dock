@@ -224,6 +224,8 @@ export interface ManagedInstanceOptions {
   dockToolsEnabled?: boolean;
   /** Adapter-owned creation input; Dock persists it without interpreting fields. */
   workerConfig?: JsonObject;
+  /** Opened as the personal assistant (card #295); fixed at creation. */
+  assistant?: true;
 }
 
 interface AssistantOutcome {
@@ -387,6 +389,7 @@ export class ManagedInstance {
   private dockToolsEnabledValue = false;
   private readonly workerConfigValue: JsonObject | undefined;
   readonly parentId: string | undefined;
+  readonly assistant: boolean;
   // Runtime-only: trust_once must never become a persisted permission grant.
   private projectTrustedValue: boolean | undefined;
   private readonly deliverables = new InstanceDeliverables();
@@ -458,6 +461,7 @@ export class ManagedInstance {
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
     this.dockToolsEnabledValue = options.dockToolsEnabled ?? true;
     this.parentId = options.parentId;
+    this.assistant = options.assistant === true;
     this.projectTrustedValue = options.projectTrusted;
     this.workerConfigValue = options.workerConfig === undefined
       ? undefined
@@ -575,6 +579,7 @@ export class ManagedInstance {
       id: snapshot.id,
       creationOperationId: snapshot.creationOperationId,
       ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
+      ...(this.assistant ? { assistant: true as const } : {}),
       ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
       ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
       cwd: snapshot.cwd,
@@ -798,6 +803,7 @@ export class ManagedInstance {
       id: this.id,
       creationOperationId: this.creationOperationId,
       ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
+      ...(this.assistant ? { assistant: true as const } : {}),
       key: this.key,
       name: this.name,
       displayName: this.projectedDisplayName(),

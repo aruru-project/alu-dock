@@ -49,7 +49,8 @@ export type DockToolsRequest =
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
-  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }
+  /** `assistant` opens it as the personal assistant; without it the Work is not, whatever its directory's default says. */
+  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
   /** A child Work omits target: it can only message its parent. */
   | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer" };
 

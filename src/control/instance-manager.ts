@@ -57,6 +57,8 @@ export interface CreateInstanceMutation {
   trustChallengeId?: string;
   projectTrustDecision?: ProjectTrustChoice;
   workerConfig?: JsonObject;
+  /** Omitted: the directory's saved default decides (card #295). */
+  assistant?: boolean;
 }
 
 export interface SubmitCommandMutation {

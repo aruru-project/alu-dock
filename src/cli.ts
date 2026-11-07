@@ -17,6 +17,8 @@ import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/at
 import { ModelVisibilityService, ModelVisibilityStore, modelVisibilityStateRoot } from "./control/model-visibility.js";
 import { ChildModelsService, ChildModelsStore } from "./control/child-models.js";
 import type { ModelServiceProcess } from "./model-service/service-process.js";
+import type { AssistantServiceProcess } from "./assistant/service-process.js";
+import type { AssistantHostPort } from "./core/assistant.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultLocalEndpoint } from "./control/local-endpoint.js";
@@ -25,7 +27,7 @@ import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-acces
 import { WorkerIncidentStore, workerIncidentStoreRoot } from "./control/worker-incident-store.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
 import { MachineSettingsState, SubHostStatusReporter, machineSettingsStateRoot, machineStatePersistenceDiagnostic } from "./control/machine-settings-state.js";
-import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "./control/machine-transport.js";
+import { MainMachineController, SubHostAssistantPort, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "./control/machine-transport.js";
 import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./control/main-machine-dock-tools.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
 import { humanControlErrorText } from "./human-control-error.js";
@@ -207,6 +209,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   let host!: DockHost;
   let upstream: SubHostMachineConnection | undefined;
   let modelService: ModelServiceProcess | undefined;
+  let assistantService: AssistantServiceProcess | undefined;
   let subHostStatus: { state: MachineSettingsState; hostEpoch: string; reporter: SubHostStatusReporter } | undefined;
   try {
   let options = parseServeOptions(args);
@@ -296,11 +299,29 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       process.stderr.write(`Alu Dock: the model service could not start; Works on this machine cannot call models until it does. ${error instanceof Error ? error.message : String(error)}\n`);
     });
   }
+  // Main keeps the personal assistant: her persona, the owner's notes and her memory (card #295).
+  // Like the model service, one that cannot start leaves the Host running; assistant Works then say why.
+  let workerAssistantPort: AssistantHostPort | undefined;
+  if (options.role !== "subhost" && catalogPath) {
+    const { AssistantServiceProcess } = await import("./assistant/service-process.js");
+    const workspacePath = join(homedir(), ".aludock", "assistant");
+    const service = new AssistantServiceProcess({ directory: join(dirname(catalogPath), "assistant"), workspacePath });
+    assistantService = service;
+    service.start().catch((error: unknown) => {
+      process.stderr.write(`Alu Dock: the assistant service could not start; assistant Works cannot load her persona or memory until it does. ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+    await systemService.prepareAssistantWorkspace(workspacePath).catch((error: unknown) => {
+      process.stderr.write(`Alu Dock: the assistant's workspace ${workspacePath} could not be prepared. ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+    const machine = options.machineName ?? "Main";
+    workerAssistantPort = { request: (request, source, signal) => service.request(request, { ...source, machine }, signal) };
+  }
   // A SubHost's Works ask Main through the machine connection, set up below.
   let subHostModels: SubHostModelPort | undefined;
   const createManagedPiInstance = (input: Parameters<typeof createPiInstance>[0]) => createPiInstance({
     ...input,
     ...(modelService ?? subHostModels ? { modelHostPort: (modelService ?? subHostModels)! } : {}),
+    ...(workerAssistantPort === undefined ? {} : { assistantHostPort: workerAssistantPort }),
     ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
     ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
   });
@@ -338,6 +359,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     });
     upstream = upstreamConnection;
     subHostModels = new SubHostModelPort(upstreamConnection);
+    workerAssistantPort = new SubHostAssistantPort(upstreamConnection);
     // The hidden list and the child Work list exist only on Main.
     const mainModelLists = new SubHostModelLists(upstreamConnection);
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
@@ -349,6 +371,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       attachmentHostPort: attachmentService,
       dockToolsHostPort: dockToolsPort,
+      assistantAvailable: true,
     });
     host = new DockHost({
       socketPath: join(dirname(catalogPath as string), "subhost-private.sock"),
@@ -376,6 +399,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ...(durable ? { catalogStore: new FileCatalogStore(catalogPath as string), attachmentHostPort: attachmentService } : {}),
       ...(mainDockToolsPort ? { dockToolsHostPort: mainDockToolsPort } : {}),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
+      assistantAvailable: assistantService !== undefined,
     });
     if (options.role === "main" && durable) {
       remoteInstances = new MainMachineController({
@@ -389,6 +413,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
           ...(modelService === undefined ? {} : { service: modelService }),
           ...(modelVisibility === undefined ? {} : { visibility: modelVisibility }),
           ...(childModels === undefined ? {} : { childModels }),
+          ...(assistantService === undefined ? {} : { assistant: assistantService }),
         },
         localSnapshots: () => registry.list(),
       });
@@ -409,6 +434,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       modelVisibility,
       childModels,
       childModelsEditor: childModels,
+      ...(assistantService === undefined ? {} : { assistant: assistantService }),
     });
   }
 
@@ -463,6 +489,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     await upstream?.stop();
     await host?.stop();
     await modelService?.stop();
+    await assistantService?.stop();
     if (subHostStatus) {
       await subHostStatus.reporter.stop();
       await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});

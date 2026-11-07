@@ -33,6 +33,8 @@ import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { mainModelOwner } from "../model-service/owner.js";
+import { parseAssistantResult } from "../core/assistant.js";
+import type { AssistantCallPort } from "./assistant-extension.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -131,6 +133,10 @@ async function runWorker(): Promise<void> {
   // Each session gets its own runtime, so providers one session's extensions registered do not outlive it.
   const modelOwner = hostCapabilities.has("dock.models") ? mainModelOwner((args, signal) => callHost("dock.models", args, signal)) : undefined;
   const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
+  // Only a Work opened as the personal assistant is given her persona, notes and memory.
+  const assistantPort: AssistantCallPort | undefined = hostCapabilities.has("dock.assistant") ? {
+    call: async (request) => parseAssistantResult(request, await callHost("dock.assistant", { request })),
+  } : undefined;
   dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
     configure: async (action) => {
       if (action === "status") return { enabled: dockToolsBridge!.enabled };
@@ -173,6 +179,7 @@ async function runWorker(): Promise<void> {
       dockToolsBridge,
       ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
       ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
+      ...(assistantPort === undefined ? {} : { assistantPort }),
     });
   } catch (error) {
     // The Host learns why this Work could not start (an unavailable chosen model, an
@@ -347,8 +354,9 @@ function verifyDockContext(raw: unknown, expected: WorkerIdentity, runtimeGenera
   if (!Array.isArray(value.capabilities) || !value.capabilities.includes("dock.identity")) {
     throw new Error("Dock Worker identity capability was not authorized by Host");
   }
-  // dock.models is not ordinary: only a Host that offers model access grants it.
-  const known = new Set<string>([...ORDINARY_REVERSE_WORKER_CAPABILITIES, "dock.models"]);
+  // dock.models and dock.assistant are not ordinary: only a Host that offers model access grants the
+  // first, and only to an assistant Work the second.
+  const known = new Set<string>([...ORDINARY_REVERSE_WORKER_CAPABILITIES, "dock.models", "dock.assistant"]);
   const capabilities = new Set<ReverseWorkerCapability>();
   for (const capability of value.capabilities) {
     if (typeof capability !== "string" || !known.has(capability)) throw new Error("Host advertised an unknown Worker capability");

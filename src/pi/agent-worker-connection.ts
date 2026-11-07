@@ -7,6 +7,7 @@ import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../cor
 import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentModelStateObservation, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import type { ModelAuthRequest } from "../model-service/protocol.js";
+import { parseAssistantRequest, type AssistantHostPort } from "../core/assistant.js";
 import type { ModelHostPort } from "../model-service/service-process.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -39,6 +40,8 @@ export interface CreateAgentWorkerConnectionOptions {
   attachmentHostPort: InstanceAttachmentHostPort;
   /** Main's model service; with it the Worker takes its model configuration and credentials from Main. */
   modelHostPort?: ModelHostPort;
+  /** Given only to a Work opened as the personal assistant: her persona, notes and memory on Main. */
+  assistantHostPort?: AssistantHostPort;
   initialDockToolsEnabled: boolean;
   workName?: string;
   workerIncidentRecorder?: WorkerIncidentRecorder;
@@ -78,6 +81,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     this.expectedGeneration = identity.runtimeGeneration;
     if (!options.initialDockToolsEnabled) this.reverseCapabilities.delete("dock.tools");
     if (options.modelHostPort) this.reverseCapabilities.add("dock.models");
+    if (options.assistantHostPort) this.reverseCapabilities.add("dock.assistant");
     this.process = new PiWorkerProcess({
       identity,
       init: options.init,
@@ -265,6 +269,11 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
         result = await this.options.dockToolsHostPort.invokeDockTool(this.identity.instanceId, args.request as DockToolsRequest);
       } else if (capability === "dock.models") {
         result = await this.handleModelCall(callId, args);
+      } else if (capability === "dock.assistant") {
+        const port = this.options.assistantHostPort;
+        if (!port) throw new Error("This Work was not opened as the assistant");
+        // The Host names the Work; a Worker cannot record into another Work's name.
+        result = await port.request(parseAssistantRequest(args.request), { workId: this.identity.instanceId });
       } else {
         result = await this.options.attachmentHostPort.accessAttachments(this.identity.instanceId, args.request as AttachmentAccessRequest);
       }

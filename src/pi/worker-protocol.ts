@@ -12,6 +12,7 @@ import {
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
 import { MAX_PUBLISHED_FILE_REF_CHARS, PublishedFileUnavailableError } from "../core/published-file.js";
+import { parseAssistantRequest } from "../core/assistant.js";
 import { MAX_RESOURCE_CONTENT_REF_CHARS, ResourceContentError } from "../core/resource-content.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
@@ -72,8 +73,12 @@ export type UiCapability =
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
   | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.runtimeReload";
 
-/** dock.models is granted only by a Host that offers model access; its Workers then take the model configuration and credentials from Main. */
-export type DockCapability = "dock.identity" | "dock.tools.configure" | "dock.tools" | "dock.attachments" | "dock.models";
+/**
+ * dock.models is granted only by a Host that offers model access; its Workers then take the model
+ * configuration and credentials from Main. dock.assistant is granted only to a Work opened as the
+ * personal assistant (card #295).
+ */
+export type DockCapability = "dock.identity" | "dock.tools.configure" | "dock.tools" | "dock.attachments" | "dock.models" | "dock.assistant";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
   "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments",
@@ -527,6 +532,7 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
       else { keys("op", "request"); record(args.request, "Model request"); }
       return;
     }
+    case "dock.assistant": keys("request"); parseAssistantRequest(args.request); return;
     case "ui.select": keys("title", "options", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); stringArray(args.options, 256, 16_000, "Dialog options"); validateDialogOptions(args.optionsMeta); return;
     case "ui.confirm": keys("title", "message", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); boundedString(args.message, 16_000, "Dialog message", true); validateDialogOptions(args.optionsMeta); return;
     case "ui.input": keys("title", "placeholder", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.placeholder, 4_096); validateDialogOptions(args.optionsMeta); return;
@@ -549,6 +555,8 @@ export function validateDockCapabilityResult(capability: DockCapability, result:
   if (capability === "dock.identity") return;
   if (capability === "dock.attachments") { parseAttachmentAccessResult(result); return; }
   if (capability === "dock.models") { if (result !== null) record(result, "Model call result"); return; }
+  // The asking tool checks the answer against its own question with the assistant's parsers.
+  if (capability === "dock.assistant") { record(result, "Assistant answer"); return; }
   if (capability === "dock.tools.configure") {
     const value = record(result, "Dock tools configure result");
     exactKeys(value, ["enabled"], "Dock tools configure result");
@@ -717,7 +725,7 @@ function isAgentRequest(type: string): type is AgentRequest["type"] {
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
     "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.runtimeReload",
-    "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments", "dock.models",
+    "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments", "dock.models", "dock.assistant",
   ] as const, "Worker capability");
 }
 
