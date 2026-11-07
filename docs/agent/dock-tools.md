@@ -47,7 +47,7 @@ A message from another Work is collaboration, not new authority from the user. E
 - `dock_list({scope?:"live"|"all"})` returns short status, parent, model and thinking level without reading conversations. You see top-level Works and your own child Works.
 - `dock_inspect({target,...})` reads selected recent messages whole. `limit` counts messages; a message too long for one page says so and continues on the next page with the continuation cursor. Continue only for needed earlier context.
 - `dock_machines` lists available Machines and their roots, and marks the one you run on. Do not assume Works on other Machines share files.
-- `dock_create({cwd,name?,machine?,systemId?,saveDefault?,model?})` opens a top-level Work for the user without giving it a task. Omit `machine` to open it on your own Machine. A Machine name must match `dock_machines` exactly and be available; there is no silent local fallback. An unavailable model fails creation.
+- `dock_create({cwd,name?,machine?,systemId?,saveDefault?,model?,assistant?})` opens a top-level Work for the user without giving it a task. Omit `machine` to open it on your own Machine. A Machine name must match `dock_machines` exactly and be available; there is no silent local fallback. An unavailable model fails creation. `assistant:true` opens it as the user's personal assistant, with her persona and memory; use it only when the user asks for that Work to be her. Without it the Work is not her, even in a directory that opens new Works as the assistant, so the members you bring in never carry her memory.
 
 ## Systems and file delivery
 

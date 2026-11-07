@@ -83,6 +83,15 @@ Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加�
 - **例外**：只由扩展定义、Main 上没有的供应商用扩展自己的凭据；扩展只是给内置供应商或 Main 配置里的供应商加东西，不算。Bedrock、Vertex 的云账号由 Pi 在 Work 所在机器读取，Main 交不出去（用户 2026-11-05 接受）；它们能不能选仍由 Main 的凭据状态决定，所以两边都要配。
 - **机器连接**：Main 对同一台 SubHost 的回答一次发一份，配置的回答接近链路控制队列的上限，而那个队列满了拒绝、不等。SubHost 等一个问题的完整回答最多 120 秒，未答的问题最多 1024 个，回答累计不超过 `MAX_MODEL_ANSWER_BYTES`；断开或停止时未答的问题都失败。
 
+## 个人助手
+
+Dock 自带的个人助手（card #295，默认是阿露）由 Main 保管；新建 Work 时选了“以助手身份打开”的 Work 才和她有关。协议与目录默认见 [control](control.md#个人助手instanceassistantv1assistantv1)。
+
+- **助手服务**（`src/assistant/`）：Main 上 Host 监管的独立进程，和模型服务共用 `src/control/service-supervisor.ts` 的启动、重启与问答。它持有 Host 私有状态目录下 `assistant/` 里的人设 `persona.md`、主人的手写设定 `notes.md` 和 Node 自带 SQLite 的 `memory.sqlite`。人设文件不存在时用 Dock 自带的阿露人设新建，已经存在就不再覆盖，升级也不动。对话原文每条记着 Agent 的 session ID 和 entry ID、分支上的前一条、时间、所在 Work（Main ID）和机器；全文索引是 SQLite FTS5 的 trigram，三字及以上的词走索引，一两个字的词逐条比对。她自己的记忆工具调用和结果照样保存供读前后文，但不进搜索，免得旧搜索结果反复命中。Pi 的会话文件不改。
+- **路径**：只有助手 Work 的 Worker 被授予 `dock.assistant`。Worker 只问自己的 Host；Main 的 Host 转给助手服务并标上这个 Work 和 Main 的机器名，SubHost 的 Host 经机器连接转给 Main（与模型问题同一种 `machine_model_*` 记录，`op: "assistant"`），Main 把 SubHost 的 Work 换成 Main ID 并标上机器名。Worker 不能自报来源。客户端的 `assistant.*` 请求在 Main 上变成同一组问题。
+- **Pi adapter**（`src/pi/assistant-extension.ts`）：每次 session start（新建、reload、`/new`、resume、fork、Host 重启后 reopen）向 Main 取一份“她会读到什么”，写在带载入时间的 Pi prompt section `assistant` 里；这个会话一直用这份，后台不推送修改。取不到时 section 如实说明，每轮开始前再试。每轮结束（`agent_settled`）、压缩后和会话结束时，按 Pi 会话的条目顺序把 Main 还没记下的部分分批送去；从 Main 记录的最后一条接着送，重复送达不重复保存，送不到时下一轮或下次打开这个会话再补。保存用户、助手的文字和工具调用、工具结果、`!` 命令、压缩与分支摘要、扩展消息；不保存 thinking、系统提示和模型切换等记录。用户消息里 Dock 的附件元数据块去掉只留文件名。工具 `assistant_search`、`assistant_read`、`assistant_document` 分别搜对话、读前后文、读改人设和手写设定。
+- **子 Work 与协作成员**：`dock_spawn` 的子 Work 一律不是助手；`dock_create` 只在显式 `assistant: true` 时是，不套用目录默认。
+
 ## Worker 事故记录
 
 Host 对 Worker stderr 做有界尾部捕获，同时继续写入自己的 stderr，因此 Linux journal 与 Windows Host 窗口仍能显示即时输出。正常停止不产生事故记录；Worker 非预期退出、IPC 丢失或 transport deadline 导致所有权回收时，运行该 Worker 的 Host 在私有状态目录写入独立、不可变的 incident。记录包含 Machine、Work、runtime generation、退出原因、平台与保存的 stderr 尾部。

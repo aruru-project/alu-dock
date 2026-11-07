@@ -104,6 +104,23 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 名单不限制子 Work 能用哪个模型：你点名要的其他模型照样可以用。文件不存在时，父 Work 只会看到它自己的模型。Host 每次被问到时现读这个文件，改完不用重启；格式写错时，Agent 会看到错误原因并可以转告你，设置页也会指出问题，在页面上保存一次会写回正确的内容。
 
+## 个人助手
+
+Dock 自带一个个人助手，默认是阿露。新建 Work 时选「以助手身份打开」，这个 Work 就载入她的人设和你写给她的设定，对话也记进她的记忆；没选的 Work 和这些无关。在哪台机器上开都一样，资料只在 Main 上一份：
+
+```text
+Linux:   ~/.local/state/alu-dock/assistant/（managed service 为 STATE_DIRECTORY 下的 assistant/）
+Windows: %LOCALAPPDATA%\Alu Dock\assistant\
+```
+
+- `persona.md`：她的人设。没有这个文件时 Dock 用自带的阿露人设新建一份，之后不再覆盖，升级 Dock 也不动。想换成自己的助手，改它就行。
+- `notes.md`：你亲手写的事实和规矩（比如聊天尺度、密钥文件的规矩、本机信息），和别的说法冲突时以这里为准。
+- `memory.sqlite`：她经历过的对话，她自己能按关键词和时间搜。Pi 自己的会话文件不动。
+
+通常在官方客户端的「助手」页里看和改，也可以直接编辑两个 Markdown 文件，或者让她自己改。改动对之后新开的助手会话生效；已经开着的会话在 reload、`/new` 或 Work 重新打开时换成最新的。备份时把整个 `assistant/` 目录一起保存。
+
+她在 Main 上还有自己的工作区 `~/.aludock/assistant`，不在任何项目里时在这里聊天、干杂活。这个目录新建的 Work 默认以助手身份打开。
+
 ## Service 命令
 
 ```bash
