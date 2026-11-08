@@ -1011,6 +1011,9 @@ export class DockHost {
       case "assistant.memory.get":
       case "assistant.memory.add":
       case "assistant.memory.update":
+      case "assistant.timeline.list":
+      case "assistant.timeline.get":
+      case "assistant.timeline.update":
       case "assistant.settings.get":
       case "assistant.settings.set": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.answerAssistant(request));
@@ -1347,6 +1350,12 @@ export class DockHost {
       case "assistant.memory.update": {
         const { operationId, ...update } = request.params;
         return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "memory_update", ...update }));
+      }
+      case "assistant.timeline.list": return ask({ op: "timeline_list", ...request.params });
+      case "assistant.timeline.get": return ask({ op: "timeline_get", id: request.params.id });
+      case "assistant.timeline.update": {
+        const { operationId, ...update } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "timeline_update", ...update }));
       }
       case "assistant.settings.get": return ask({ op: "settings_get" });
       case "assistant.settings.set": {

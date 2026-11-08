@@ -15,6 +15,8 @@ import {
   type AssistantMemoryTopic,
   type AssistantMemoryUpdateRequest,
 } from "../core/assistant.js";
+import { timeBoundary } from "./store.js";
+import { readTransaction, writeTransaction } from "./transaction.js";
 
 /*
  * Her memories, kept in the same database as the conversations they came from (store.ts holds the
@@ -22,6 +24,9 @@ import {
  * `forgotten`, and both can be restored. While a memory is forgotten, the entries it names as where
  * it was said are not found by searches either, and read as forgotten (entries.forgotten counts
  * the forgotten memories naming each entry).
+ *
+ * A memory is dated by when it was said: the earliest place it was said, kept up to date as places
+ * are added; one written without a place is dated when it was written.
  *
  * Every change is one transaction on the writing connection and leaves a line in memory_changes.
  */
@@ -38,6 +43,8 @@ export interface MemoryRow {
   revision: number;
   superseded_by: number | null;
   resident_fixed: number;
+  said_at: string;
+  said_ms: number;
 }
 
 const NOT_FOUND = "没有找到这条记忆。它的编号可能写错了。";
@@ -53,6 +60,8 @@ export class AssistantMemories {
     if (request.topic !== undefined) { conditions.push("topic = ?"); values.push(request.topic); }
     if (request.resident !== undefined) { conditions.push("resident = ?"); values.push(request.resident ? 1 : 0); }
     if (request.author !== undefined) { conditions.push("author = ?"); values.push(request.author); }
+    if (request.from !== undefined) { conditions.push("said_ms >= ?"); values.push(timeBoundary(request.from, "start")); }
+    if (request.to !== undefined) { conditions.push("said_ms < ?"); values.push(timeBoundary(request.to, "end")); }
     for (const term of (request.query ?? "").trim().split(/\s+/u).filter((word) => word.length > 0)) {
       conditions.push("text LIKE ? ESCAPE '\\'");
       values.push(`%${term.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`);
@@ -119,32 +128,28 @@ export class AssistantMemories {
 
   /** Runs `work` as one write transaction on the writing connection. */
   write<T>(work: () => T): T {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = work();
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      try { this.db.exec("ROLLBACK"); } catch { /* SQLite already rolled back */ }
-      throw error;
-    }
+    return writeTransaction(this.db, work);
   }
 
   /** Inside `write`: a new memory naming `entryRows` as where it was said; `residentFixed` when the owner chose its loading. */
   insert(topic: AssistantMemoryTopic, text: string, resident: boolean, author: AssistantMemoryAuthor, entryRows: readonly number[], residentFixed = false): MemoryRow {
-    const at = this.now().toISOString();
-    const { lastInsertRowid } = this.db.prepare("INSERT INTO memories (topic, text, resident, state, author, created_at, updated_at, resident_fixed) VALUES (?, ?, ?, 'active', ?, ?, ?, ?)")
-      .run(topic, text, resident ? 1 : 0, author, at, at, residentFixed ? 1 : 0);
+    const now = this.now();
+    const at = now.toISOString();
+    const { lastInsertRowid } = this.db.prepare("INSERT INTO memories (topic, text, resident, state, author, created_at, updated_at, resident_fixed, said_at, said_ms) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)")
+      .run(topic, text, resident ? 1 : 0, author, at, at, residentFixed ? 1 : 0, at, now.getTime());
     const id = Number(lastInsertRowid);
     this.addSources(id, entryRows);
     this.log(id, at, author, "added", text);
     return this.row(id);
   }
 
-  /** Inside `write`: names more places a memory was said. */
+  /** Inside `write`: names more places a memory was said, and dates it by the earliest. */
   addSources(memoryId: number, entryRows: readonly number[]): void {
+    if (entryRows.length === 0) return;
     const insert = this.db.prepare("INSERT OR IGNORE INTO memory_sources (memory_id, entry_row) VALUES (?, ?)");
     for (const entryRow of new Set(entryRows)) insert.run(memoryId, entryRow);
+    const first = this.db.prepare("SELECT e.at, e.at_ms FROM memory_sources s JOIN entries e ON e.id = s.entry_row WHERE s.memory_id = ? ORDER BY e.at_ms LIMIT 1").get(memoryId) as { at: string; at_ms: number } | undefined;
+    if (first) this.db.prepare("UPDATE memories SET said_at = ?, said_ms = ? WHERE id = ?").run(first.at, first.at_ms, memoryId);
   }
 
   /** Inside `write`: applies the changes `request` names and logs each; the revision goes up once. */
@@ -194,6 +199,7 @@ export class AssistantMemories {
       author: row.author as AssistantMemoryAuthor,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      saidAt: row.said_at,
       revision: row.revision,
       sources: sources.map((source) => ({ sessionId: source.session_id, entryId: source.entry_id, at: source.at })),
       sourceCount: count,
@@ -211,12 +217,8 @@ export class AssistantMemories {
     this.db.prepare("INSERT INTO memory_changes (memory_id, at, author, action, text) VALUES (?, ?, ?, ?, ?)").run(memoryId, at, author, action, text);
   }
 
-  /** Several reads that should agree, in one read transaction. */
   private read<T>(work: () => T): T {
-    if (this.db.isTransaction) return work();
-    this.db.exec("BEGIN");
-    try { return work(); }
-    finally { if (this.db.isTransaction) this.db.exec("COMMIT"); }
+    return readTransaction(this.db, work);
   }
 }
 

@@ -15,10 +15,12 @@ import { AssistantReaders } from "./readers.js";
 import { AssistantCore } from "./service.js";
 import { ASSISTANT_AGENT_DIR_ENV, ASSISTANT_DIR_ENV, ASSISTANT_TIMING_ENV, ASSISTANT_WORKSPACE_ENV } from "./service-process.js";
 import { AssistantStore } from "./store.js";
+import { AssistantTimeline } from "./timeline.js";
 
 /**
- * The assistant service process on Main: her persona, the owner's notes, her recorded conversations
- * and her memories, which it extracts and tidies in the background with the model the owner chose.
+ * The assistant service process on Main: her persona, the owner's notes, her recorded conversations,
+ * and her memories and timeline, which it extracts and tidies in the background with the model the
+ * owner chose.
  */
 async function main(): Promise<void> {
   const directory = process.env[ASSISTANT_DIR_ENV];
@@ -34,10 +36,11 @@ async function main(): Promise<void> {
   const store = new AssistantStore(databasePath);
   const readers = new AssistantReaders({ databasePath });
   const memories = new AssistantMemories(store.connection);
+  const timeline = new AssistantTimeline(store.connection);
   // Main's model service answers for credentials through the Host, as it does for Works.
   const owner = mainModelOwner((args, signal) => askHost({ model: args }, signal));
   const models = new MainModelAccess(() => ModelRuntime.create({ owner }));
-  const extraction = new AssistantExtraction(store.connection, memories, documents, models, timing(),
+  const extraction = new AssistantExtraction(store.connection, memories, timeline, documents, models, timing(),
     (message) => process.stderr.write(`Alu Dock: ${message}\n`));
   // The Host stops the service with SIGTERM: close the database rather than leave it to recovery.
   let stopping = false;
@@ -50,7 +53,7 @@ async function main(): Promise<void> {
     });
   };
   process.once("SIGTERM", stop);
-  const core = new AssistantCore(documents, store, readers, memories, extraction, workspace);
+  const core = new AssistantCore(documents, store, readers, memories, timeline, extraction, workspace);
   await serveRequests(async (raw, signal) => {
     const message = raw as { request?: unknown; source?: AssistantSource };
     return core.answer(parseAssistantRequest(message.request), parseAssistantSource(message.source), signal);

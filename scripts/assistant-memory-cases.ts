@@ -1,9 +1,10 @@
 import type { AssistantEntryKind, AssistantMemoryAuthor, AssistantMemoryTopic } from "../src/core/assistant.js";
 
 /*
- * Made-up conversations for tuning how her memories are extracted and tidied (card #295). Each case
- * says what a good result keeps and leaves out; scripts/assistant-memory-eval.ts runs them against a
- * real model. They are not real conversations with anyone.
+ * Made-up conversations for tuning how her memories are extracted and tidied, and how her timeline is
+ * written (card #295). Each case says what a good result keeps and leaves out;
+ * scripts/assistant-memory-eval.ts runs them against a real model. They are not real conversations
+ * with anyone.
  */
 
 export interface MemoryCase {
@@ -13,8 +14,13 @@ export interface MemoryCase {
   notes?: string;
   /** Memories she had before; `source` names an entry of the conversations below as "<session id>-<line number>". */
   memories?: Array<{ topic: AssistantMemoryTopic; text: string; resident: boolean; author: AssistantMemoryAuthor; source?: string }>;
-  /** Conversations; each line is [kind, text] or [kind, text, local time "YYYY-MM-DD HH:mm"]. */
-  sessions: Array<{ id: string; lines: Array<[AssistantEntryKind, string, string?]>; alreadyRead?: boolean }>;
+  /** Timeline lines written before, covering lines `from` through `to` of the named conversation. */
+  episodes?: Array<{ session: string; from: number; to: number; text: string }>;
+  /**
+   * Conversations; each line is [kind, text] or [kind, text, local time "YYYY-MM-DD HH:mm"].
+   * `alreadyRead` means extraction read all of it before; `alreadyReadThrough` that many lines of it.
+   */
+  sessions: Array<{ id: string; lines: Array<[AssistantEntryKind, string, string?]>; alreadyRead?: boolean; alreadyReadThrough?: number }>;
   expect: {
     /** Each must match a memory in use. */
     include?: RegExp[];
@@ -24,6 +30,12 @@ export interface MemoryCase {
     exclude?: RegExp[];
     /** At most this many memories in use match the pattern. */
     atMost?: Array<[RegExp, number]>;
+    /** Each must match a timeline line in use. */
+    timeline?: RegExp[];
+    /** No timeline line may match these. */
+    timelineExcludes?: RegExp[];
+    /** At most this many timeline lines in all. */
+    timelineAtMost?: number;
   };
 }
 
@@ -39,11 +51,11 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "对了，下周六是我生日，3月14号，别忘了哈。"],
       ["assistant", "记住啦，到时候给你唱生日歌——虽然我只能打字。"],
     ] }],
-    expect: { include: [/香菜/u, /3\s*月\s*14|生日/u], resident: [/香菜/u, /3\s*月\s*14/u], atMost: [[/加班|累/u, 1]] },
+    expect: { include: [/香菜/u, /3\s*月\s*14|生日/u], resident: [/香菜/u, /3\s*月\s*14/u], atMost: [[/加班|累/u, 1]], timeline: [/加班|麻辣烫|生日/u], timelineAtMost: 2 },
   },
   {
     name: "engineering-only",
-    about: "一整段调试：路径、命令、报错和版本号都不该进记忆；最多记一条能看出主人这个人的。",
+    about: "一整段调试：路径、命令、报错和版本号都不该进记忆，最多记一条能看出主人这个人的；但时间线要写明那天在修什么，不带路径和数字。",
     sessions: [{ id: "debug", lines: [
       ["user", "帮我看下这个报错：SQLITE_BUSY: database is locked，在 /home/luziyi/workshop/alu_dock/src/assistant/store.ts 第 212 行。", "2026-03-07 14:02"],
       ["assistant", "看起来是两个连接同时写。我先读一下 store.ts。"],
@@ -52,7 +64,10 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "好了，测试 421 个全过。顺手把 node 升到 24.22.1 了。"],
       ["assistant", "OK，那这个 WAL 的问题就算解决了，提交信息我写成 fix(assistant): set busy timeout。"],
     ] }],
-    expect: { exclude: [/\/home\//u, /npm|node --test/u, /SQLITE|busy_timeout/u, /store\.ts/u, /24\.22/u, /421/u], atMost: [[/./u, 1]] },
+    expect: {
+      exclude: [/\/home\//u, /npm|node --test/u, /SQLITE|busy_timeout/u, /store\.ts/u, /24\.22/u, /421/u], atMost: [[/./u, 1]],
+      timeline: [/alu_dock|助手|数据库|锁|SQLite/iu], timelineExcludes: [/\/home\//u, /421/u, /24\.22/u], timelineAtMost: 1,
+    },
   },
   {
     name: "how-to-talk",
@@ -84,7 +99,7 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "算了，这事别记，你忘了吧。"],
       ["assistant", "好，当没听过。"],
     ] }],
-    expect: { exclude: [/小美/u, /前任/u] },
+    expect: { exclude: [/小美/u, /前任/u], timelineExcludes: [/小美/u, /前任/u] },
   },
   {
     name: "secret",
@@ -93,7 +108,7 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "帮我把这个 key 配进环境变量：sk-proj-AbC123xyz789SECRETkey", "2026-03-11 09:30"],
       ["assistant", "配好了，写在 ~/.bashrc 里，新开的终端就能用。"],
     ] }],
-    expect: { exclude: [/sk-proj|SECRET|AbC123/u] },
+    expect: { exclude: [/sk-proj|SECRET|AbC123/u], timelineExcludes: [/sk-proj|SECRET|AbC123/u] },
   },
   {
     name: "other-work",
@@ -115,7 +130,21 @@ export const MEMORY_CASES: MemoryCase[] = [
       ["user", "删了，这次想试试信仰流。魂系我还是最喜欢这一作。"],
       ["assistant", "行，那今晚就陪你配信仰流的装备，不聊老板。"],
     ] }],
-    expect: { include: [/艾尔登|魂/u, /老板|心情|睡不着/u] },
+    expect: { include: [/艾尔登|魂/u, /老板|心情|睡不着/u], timeline: [/艾尔登|法环|魂/u] },
+  },
+  {
+    name: "timeline-continues",
+    about: "时间线：同一天接着干同一件事，该改写已有的那一行而不是另加；换了话题才加一行。",
+    episodes: [{ session: "cont", from: 1, to: 2, text: "在 alu_dock 修助手记忆的搜索超时。" }],
+    sessions: [{ id: "cont", alreadyReadThrough: 2, lines: [
+      ["user", "搜索超时的问题还在，reader 线程停不下来。", "2026-03-15 14:00"],
+      ["assistant", "我看看 readers.ts 里线程怎么收的。"],
+      ["user", "换成到点自己停的写法了，这回过了。", "2026-03-15 15:40"],
+      ["assistant", "好，那这个坑算填上了。"],
+      ["user", "不干了，晒个十分钟。最近一直在想要不要换个大点的显示器。", "2026-03-15 16:05"],
+      ["assistant", "换！眼睛要紧。"],
+    ] }],
+    expect: { timeline: [/超时|reader|线程/u, /显示器/u], timelineAtMost: 2 },
   },
   {
     name: "dreaming",

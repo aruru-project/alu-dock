@@ -3,6 +3,7 @@ import {
   MAX_ASSISTANT_DOCUMENT_BYTES,
   MAX_ASSISTANT_MEMORY_CHARS,
   MAX_ASSISTANT_PREVIEW_BYTES,
+  type AssistantEpisode,
   type AssistantMemory,
   type AssistantMemoryAuthor,
   type AssistantMemoryTopic,
@@ -13,15 +14,19 @@ import {
 } from "../core/assistant.js";
 import type { AssistantDocuments } from "./documents.js";
 import type { AssistantExtraction } from "./extraction.js";
-import { localTime } from "./local-time.js";
+import { localSpan, localTime } from "../core/local-time.js";
 import type { AssistantMemories } from "./memories.js";
 import type { AssistantReaders } from "./readers.js";
 import type { AssistantStore } from "./store.js";
+import type { AssistantTimeline } from "./timeline.js";
 
 /** How a session she loads heads each topic of what she remembers. */
 const TOPIC_HEADINGS: Record<AssistantMemoryTopic, string> = {
   owner: "主人", preferences: "主人的喜好和习惯", relationship: "你们之间", events: "经历过的事", self: "你自己",
 };
+/** How much of her timeline a session loads: the lines of the last week, at most this many of the newest. */
+const LOADED_TIMELINE_DAYS = 7;
+const LOADED_TIMELINE_LINES = 40;
 
 /**
  * The assistant service's answers (card #295). It runs in its own process on Main, holds her persona,
@@ -36,6 +41,7 @@ export class AssistantCore {
     private readonly store: AssistantStore,
     private readonly readers: Pick<AssistantReaders, "search" | "context">,
     private readonly memories: AssistantMemories,
+    private readonly timeline: AssistantTimeline,
     private readonly extraction: Pick<AssistantExtraction, "status" | "settings" | "setModel">,
     private readonly workspacePath: string,
     private readonly now: () => Date = () => new Date(),
@@ -63,6 +69,9 @@ export class AssistantCore {
       case "memory_get": return this.memories.get(request.id);
       case "memory_add": { const { op: _op, ...add } = request; return this.memories.add(add, author); }
       case "memory_update": { const { op: _op, ...update } = request; return this.memories.update(update, author); }
+      case "timeline_list": { const { op: _op, ...list } = request; return this.timeline.list(list); }
+      case "timeline_get": return this.timeline.get(request.id);
+      case "timeline_update": { const { op: _op, ...update } = request; return this.timeline.update(update, author); }
       case "settings_get": return this.extraction.settings();
       case "settings_set": return this.extraction.setModel(request.extractionModel);
     }
@@ -81,14 +90,17 @@ export class AssistantCore {
     }
     const remembered = rememberedSection(this.memories.resident());
     if (remembered) parts.push(remembered);
+    const recent = timelineSection(this.timeline.recent(loaded.getTime() - LOADED_TIMELINE_DAYS * 86_400_000, LOADED_TIMELINE_LINES));
+    if (recent) parts.push(recent);
     parts.push([
       "## 记忆",
       "",
       `这份资料载入于 ${localTime(loaded)}。之后新记住或改过的东西不在这里；拿不准时先查，别凭印象说。`,
       "",
-      "- 用 assistant_search 按关键词和时间搜你记得的事和你们过去的对话，搜不到就换个说法再搜。",
+      "- 用 assistant_search 按关键词和时间搜你记得的事和你们过去的对话，搜不到就换个说法再搜。只给时间范围不给关键词，它先列那段时间的时间线，再列原话：被问“那天我们在干嘛”时这样查。",
       "- 用 assistant_read 看某一条前后的原话，包括当时调用的工具和查到的结果。",
       "- 用 assistant_memory 记下、改写、作废、忘掉或恢复一条记忆。主人让你记住或忘掉什么时用它；你自己觉得以后一定用得着的事，也可以记。",
+      "- 用 assistant_timeline 改写、忘掉或恢复时间线上的一行。时间线是后台按对话写的，主人说某一行写错了或不想留时用它。",
       "- 用 assistant_document 读和改你的人设（persona）和主人的手写设定（notes）。",
     ].join("\n"));
     const text = parts.filter((part) => part.length > 0).join("\n\n");
@@ -105,6 +117,19 @@ function rememberedSection(memories: readonly AssistantMemory[]): string | undef
     return lines.length === 0 ? undefined : `### ${TOPIC_HEADINGS[topic]}\n\n${lines.join("\n")}`;
   }).filter((group): group is string => group !== undefined);
   return ["## 你记得的事", "", "这些是你从过去和主人相处中记下的，每次都带着。括号里是记忆的编号，改写或忘掉时用。", "", ...groups.flatMap((group) => [group, ""])].join("\n").trim();
+}
+
+/** The latest week of her timeline, oldest first, so she knows what they have been up to. */
+function timelineSection(episodes: readonly AssistantEpisode[]): string | undefined {
+  if (episodes.length === 0) return undefined;
+  const lines = episodes.map((episode) => `- ${localSpan(new Date(episode.fromAt), new Date(episode.toAt))}：${episode.text}（#${episode.id}）`);
+  return [
+    "## 最近一周的时间线",
+    "",
+    "你们这几天在做什么、聊什么，一段一行，是后台按对话写的目录。更早的用 assistant_search 只给时间范围查。括号里是这一行的编号。",
+    "",
+    ...lines,
+  ].join("\n");
 }
 
 function fitPreview(text: string): string {

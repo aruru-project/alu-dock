@@ -84,9 +84,25 @@ CREATE TABLE IF NOT EXISTS memories (
   revision INTEGER NOT NULL DEFAULT 1,
   superseded_by INTEGER,
   -- The owner chose whether it is loaded every session; the background passes leave that as it is.
-  resident_fixed INTEGER NOT NULL DEFAULT 0
+  resident_fixed INTEGER NOT NULL DEFAULT 0,
+  -- When it was said: the earliest place it was said, or when it was written without one.
+  said_at TEXT NOT NULL DEFAULT '', said_ms INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS memories_state ON memories (state, id);
+CREATE INDEX IF NOT EXISTS memories_said ON memories (state, said_ms);
+-- Her timeline: one line per stretch of a conversation, from the first entry it covers to the last.
+CREATE TABLE IF NOT EXISTS episodes (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(session_id),
+  from_at TEXT NOT NULL, from_ms INTEGER NOT NULL,
+  to_at TEXT NOT NULL, to_ms INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  state TEXT NOT NULL, author TEXT NOT NULL,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS episodes_time ON episodes (state, from_ms, id);
+CREATE INDEX IF NOT EXISTS episodes_session ON episodes (session_id, state, to_ms);
 CREATE TABLE IF NOT EXISTS memory_sources (
   memory_id INTEGER NOT NULL REFERENCES memories(id),
   entry_row INTEGER NOT NULL REFERENCES entries(id),
@@ -99,11 +115,13 @@ CREATE TABLE IF NOT EXISTS memory_changes (
   at TEXT NOT NULL, author TEXT NOT NULL, action TEXT NOT NULL, text TEXT
 );
 CREATE INDEX IF NOT EXISTS memory_changes_memory ON memory_changes (memory_id, id);
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '2');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('max_shift_ms', '0');
 `;
 /** The database layout this code reads and writes; a newer one is refused rather than misread. */
-const SCHEMA_VERSION = "1";
+const SCHEMA_VERSION = "2";
+/** Layouts of earlier Docks that the writing connection brings up to date on opening. */
+const UPGRADABLE_VERSIONS = ["1"];
 
 /** Room for entries said in the same millisecond. */
 const ENTRY_IDS_PER_MS = 1024;
@@ -133,7 +151,7 @@ export interface EntryRow {
   forgotten: number;
 }
 
-interface SessionRow {
+export interface SessionRow {
   session_id: string;
   session_file: string | null;
   cwd: string | null;
@@ -162,10 +180,14 @@ export class AssistantStore {
         ? (this.db.prepare("SELECT value FROM meta WHERE key = 'schema'").get() as { value: string } | undefined)?.value
         : undefined;
       const fresh = tables.length === 0;
-      if (!(version === SCHEMA_VERSION || (fresh && !options.reader))) {
+      const upgradable = version !== undefined && UPGRADABLE_VERSIONS.includes(version) && !options.reader;
+      if (!(version === SCHEMA_VERSION || (fresh && !options.reader) || upgradable)) {
         throw new Error(`The assistant's memory at ${path} has ${fresh ? "not been set up" : `layout ${version ?? "unknown"}`}, which this Dock cannot read. It is left as it is.`);
       }
-      if (!options.reader) this.db.exec(SCHEMA);
+      if (!options.reader) {
+        if (version === "1") this.upgradeFrom1();
+        this.db.exec(SCHEMA);
+      }
     } catch (error) {
       this.db.close();
       throw error;
@@ -174,7 +196,30 @@ export class AssistantStore {
 
   close(): void { this.db.close(); }
 
-  /** The writing connection, shared with her memories (memories.ts) and extraction, which keep their rows beside the conversations. */
+  /**
+   * Layout 1 (the first Dock with memories) to 2: a memory is dated by when it was said, the
+   * earliest place it was said or else when it was written; the timeline's table SCHEMA then creates.
+   */
+  private upgradeFrom1(): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec("ALTER TABLE memories ADD COLUMN said_at TEXT NOT NULL DEFAULT ''; ALTER TABLE memories ADD COLUMN said_ms INTEGER NOT NULL DEFAULT 0;");
+      const memories = this.db.prepare("SELECT id, created_at FROM memories").all() as Array<{ id: number; created_at: string }>;
+      const first = this.db.prepare("SELECT e.at, e.at_ms FROM memory_sources s JOIN entries e ON e.id = s.entry_row WHERE s.memory_id = ? ORDER BY e.at_ms LIMIT 1");
+      const date = this.db.prepare("UPDATE memories SET said_at = ?, said_ms = ? WHERE id = ?");
+      for (const memory of memories) {
+        const said = first.get(memory.id) as { at: string; at_ms: number } | undefined;
+        date.run(said?.at ?? memory.created_at, said?.at_ms ?? Date.parse(memory.created_at), memory.id);
+      }
+      this.db.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* SQLite already rolled back */ }
+      throw error;
+    }
+  }
+
+  /** The writing connection, shared with her memories (memories.ts), her timeline and extraction, which keep their rows beside the conversations. */
   get connection(): DatabaseSync { return this.db; }
 
   /** The last entry of the Agent's session recorded so far, kept or not. */
@@ -259,8 +304,8 @@ export class AssistantStore {
     const indexed = terms.filter((term) => [...term].length >= INDEXED_TERM_CHARS);
     const short = terms.filter((term) => [...term].length < INDEXED_TERM_CHARS);
     const shift = Number((this.db.prepare("SELECT value FROM meta WHERE key = 'max_shift_ms'").get() as { value: string }).value);
-    const fromMs = request.from === undefined ? undefined : boundary(request.from, "start");
-    const toMs = request.to === undefined ? undefined : boundary(request.to, "end");
+    const fromMs = request.from === undefined ? undefined : timeBoundary(request.from, "start");
+    const toMs = request.to === undefined ? undefined : timeBoundary(request.to, "end");
     const after = request.cursor === undefined ? undefined : parseCursor(request.cursor);
     const lowest = fromMs === undefined ? Number.MIN_SAFE_INTEGER : idAt(fromMs);
     let position = Math.min(
@@ -405,18 +450,22 @@ export class AssistantStore {
   private sessionStatement: StatementSync | undefined;
   private session(sessionId: string): AssistantSessionInfo {
     this.sessionStatement ??= this.db.prepare("SELECT * FROM sessions WHERE session_id = ?");
-    const row = this.sessionStatement.get(sessionId) as unknown as SessionRow;
-    return {
-      sessionId: row.session_id,
-      ...(row.session_file ? { sessionFile: row.session_file } : {}),
-      ...(row.cwd ? { cwd: row.cwd } : {}),
-      ...(row.name ? { name: row.name } : {}),
-      ...(row.work_id ? { workId: row.work_id } : {}),
-      ...(row.machine ? { machine: row.machine } : {}),
-      startedAt: row.started_at,
-      lastAt: row.last_at,
-    };
+    return sessionInfoOf(this.sessionStatement.get(sessionId) as unknown as SessionRow);
   }
+}
+
+/** A recorded session as the asker sees it. */
+export function sessionInfoOf(row: SessionRow): AssistantSessionInfo {
+  return {
+    sessionId: row.session_id,
+    ...(row.session_file ? { sessionFile: row.session_file } : {}),
+    ...(row.cwd ? { cwd: row.cwd } : {}),
+    ...(row.name ? { name: row.name } : {}),
+    ...(row.work_id ? { workId: row.work_id } : {}),
+    ...(row.machine ? { machine: row.machine } : {}),
+    startedAt: row.started_at,
+    lastAt: row.last_at,
+  };
 }
 
 /** Where the IDs of a search bound at `ms` lie; a bound past every possible entry stays a safe integer. */
@@ -481,9 +530,9 @@ function characterStart(text: string, index: number): number {
 
 /**
  * A day without a time means Main's local day: `from` its start, `to` its end, so "until 2026-11-07"
- * includes that day.
+ * includes that day. The same reading serves the time ranges of memories and the timeline.
  */
-function boundary(value: string, side: "start" | "end"): number {
+export function timeBoundary(value: string, side: "start" | "end"): number {
   const day = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
   // A full time is included as given.
   if (!day) return side === "start" ? Date.parse(value) : Date.parse(value) + 1;

@@ -15,22 +15,26 @@ import {
 } from "./extraction-prompt.js";
 import type { AssistantMemories, MemoryRow } from "./memories.js";
 import type { EntryRow } from "./store.js";
+import type { AssistantTimeline, EpisodeRow } from "./timeline.js";
 
 /*
  * Her memories made in the background on Main (card #295), in two passes:
  *
  * - Extraction reads a recorded conversation once nobody has added to it for a while (or once a lot
  *   waits), a part at a time, and adds, rewrites or retires memories, each naming the entries it came
- *   from. A session's `extracted_through` marks how far it was read.
+ *   from. The same reading writes her timeline (timeline.ts): a line per stretch of the conversation
+ *   saying what they were doing, whose time is the first and last entry it covers; the session's
+ *   latest lines are shown so the model extends them rather than adds. A session's
+ *   `extracted_through` marks how far it was read.
  * - Dreaming, once everything is quiet, looks again at the memories changed since it last ran, checks
  *   each against the words it came from, merges what says the same, and keeps the part loaded every
- *   session small (see extraction-prompt.ts).
+ *   session small (see extraction-prompt.ts). It does not touch the timeline.
  *
  * One pass runs at a time, with the model chosen in the assistant's settings; without one, nothing
- * runs. Neither pass changes a memory the owner changed last, nor whether one is loaded every session
- * once the owner chose that. Changes are checked against what the model was shown, so one the owner
- * or the assistant made meanwhile is never overwritten. Open sessions are not told: they load the
- * latest memories when they start again.
+ * runs. Neither pass changes a memory or a timeline line the owner changed last, nor whether a memory
+ * is loaded every session once the owner chose that. Changes are checked against what the model was
+ * shown, so one the owner or the assistant made meanwhile is never overwritten. Open sessions are not
+ * told: they load the latest memories when they start again.
  */
 
 /** Sends one prompt to the chosen model and returns the text of its reply. */
@@ -80,6 +84,8 @@ const MEMORY_PROMPT_CHARS = 30_000;
 const DREAM_FOCUS = 60;
 const DREAM_RELATED_CHARS = 30_000;
 const SOURCES_PER_MEMORY = 3;
+/** A conversation's latest timeline lines shown to extraction, for it to extend. */
+const EPISODES_SHOWN = 5;
 
 type Job = { kind: "extract"; sessionId: string } | { kind: "dream" };
 
@@ -96,6 +102,7 @@ export class AssistantExtraction {
   constructor(
     private readonly db: DatabaseSync,
     private readonly memories: AssistantMemories,
+    private readonly timeline: AssistantTimeline,
     private readonly documents: Pick<AssistantDocuments, "get">,
     private readonly model: ExtractionModel,
     private readonly timing: ExtractionTiming = DEFAULT_EXTRACTION_TIMING,
@@ -203,6 +210,7 @@ export class AssistantExtraction {
     const rows = this.db.prepare("SELECT * FROM entries WHERE session_id = ? AND id > ? ORDER BY id LIMIT ?").all(sessionId, after, ENTRIES_PER_READ) as unknown as EntryRow[];
     const lines: string[] = [];
     const refs: number[] = [];
+    const rowById = new Map<number, EntryRow>();
     let through = after;
     let chars = 0;
     for (const row of rows) {
@@ -212,6 +220,7 @@ export class AssistantExtraction {
       if (line === undefined) continue;
       lines.push(line);
       refs.push(row.id);
+      rowById.set(row.id, row);
       chars += line.length;
     }
     if (lines.length === 0) {
@@ -221,8 +230,9 @@ export class AssistantExtraction {
     }
     const leadIn = this.leadIn(sessionId, after);
     const shown = this.shownForExtraction();
+    const shownEpisodes = this.timeline.latestOf(sessionId, EPISODES_SHOWN);
     const [persona, notes] = await Promise.all([this.documents.get("persona"), this.documents.get("notes")]);
-    const reply = await this.model.complete(model, extractionPrompt({ persona: persona.text, notes: notes.text, memories: shown.memories, omitted: shown.omitted, leadIn, lines }), this.cancel.signal);
+    const reply = await this.model.complete(model, extractionPrompt({ persona: persona.text, notes: notes.text, memories: shown.memories, omitted: shown.omitted, episodes: shownEpisodes, leadIn, lines }), this.cancel.signal);
     let parsed: ReturnType<typeof parseExtractionReply>;
     try {
       parsed = parseExtractionReply(reply, lines.length);
@@ -237,9 +247,23 @@ export class AssistantExtraction {
       throw new ExtractionModelError("提炼用的模型的回答不是约定的格式，这段对话稍后再试。");
     }
     const known = new Map(shown.memories.map((memory) => [memory.row.id, memory.row] as const));
+    const knownEpisodes = new Map(shownEpisodes.map((row) => [row.id, row] as const));
     this.memories.write(() => {
-      // Words the owner had forgotten while the model was reading may not come back as a memory.
+      // Words the owner had forgotten while the model was reading may not come back as a memory or a timeline line.
       const forgotten = this.forgottenAmong(refs);
+      for (const change of parsed.timeline) {
+        const sources = change.from.map((ref) => refs[ref - 1]!);
+        if (sources.some((row) => forgotten.has(row))) continue;
+        // The line covers the entries it names: from the earliest said to the latest.
+        const covered = sources.map((id) => rowById.get(id)!);
+        const first = covered.reduce((earliest, row) => (row.at_ms < earliest.at_ms ? row : earliest));
+        const last = covered.reduce((latest, row) => (row.at_ms > latest.at_ms ? row : latest));
+        const from = { at: first.at, at_ms: first.at_ms };
+        const to = { at: last.at, at_ms: last.at_ms };
+        if (change.do === "add") { this.timeline.insert(sessionId, from, to, change.text, "extraction"); continue; }
+        const row = this.changeableEpisode(change.id, knownEpisodes);
+        if (row) knownEpisodes.set(row.id, this.timeline.change(row, { text: change.text, from, to }, "extraction"));
+      }
       for (const change of parsed.changes) {
         const sources = change.from.map((ref) => refs[ref - 1]!);
         if (sources.some((row) => forgotten.has(row))) continue;
@@ -351,6 +375,15 @@ export class AssistantExtraction {
     const shown = known.get(id);
     if (!shown) return undefined;
     const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as unknown as MemoryRow | undefined;
+    if (!row || row.revision !== shown.revision || row.state !== "active" || row.author === "owner") return undefined;
+    return row;
+  }
+
+  /** Inside a write: the timeline line as the model was shown it, if it may still change: in use, not the owner's, and unchanged since. */
+  private changeableEpisode(id: number, known: Map<number, EpisodeRow>): EpisodeRow | undefined {
+    const shown = known.get(id);
+    if (!shown) return undefined;
+    const row = this.db.prepare("SELECT * FROM episodes WHERE id = ?").get(id) as unknown as EpisodeRow | undefined;
     if (!row || row.revision !== shown.revision || row.state !== "active" || row.author === "owner") return undefined;
     return row;
   }

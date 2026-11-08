@@ -10,7 +10,9 @@ const systemPrompt = (body: { messages?: Array<{ role: string; content?: unknown
 
 // Card #295: Dock turns her conversations into memories on Main with the model chosen in her
 // settings; each names where it was said, and her next session starts with those loaded every time.
-test("what she hears becomes a memory her next session starts with, naming where it was said", { timeout: 60_000 }, async (context) => {
+// The same reading writes her timeline, which her next session starts with too and which she sees
+// first when she looks up a time.
+test("what she hears becomes a memory and a timeline line her next session starts with, naming where it was said", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "memory"], {
     prefix: "alu-memory-", assistant: true, modelService: true,
     // A conversation is read a second after its last words; dreaming stays out of this test.
@@ -31,23 +33,33 @@ test("what she hears becomes a memory her next session starts with, naming where
   const read = JSON.stringify(reading.body.messages);
   assert.ok(read.includes("主人：我不吃香菜，以后点外卖记得避开。"), "Extraction reads what the owner said");
   assert.ok(read.includes("助手：记住啦，香菜退散～"), "Extraction reads what she answered");
-  reading.text("```json\n{\"changes\":[{\"do\":\"add\",\"topic\":\"preferences\",\"text\":\"主人不吃香菜，点外卖要避开。\",\"resident\":true,\"from\":[1]}]}\n```");
+  reading.text("```json\n{\"changes\":[{\"do\":\"add\",\"topic\":\"preferences\",\"text\":\"主人不吃香菜，点外卖要避开。\",\"resident\":true,\"from\":[1]}],\"timeline\":[{\"do\":\"add\",\"text\":\"聊外卖，主人交代不吃香菜。\",\"from\":[1,2]}]}\n```");
 
   await waitFor(async () => (await client.assistantMemories()).memories.length === 1, "The memory was not kept");
   const [kept] = (await client.assistantMemories()).memories;
   const said = (await client.assistantSearch("香菜")).hits.find((hit) => hit.kind === "user");
   assert.ok(said, "The owner's words are in her conversations");
   assert.deepEqual(
-    { text: kept!.text, topic: kept!.topic, resident: kept!.resident, author: kept!.author, sources: kept!.sources.map((source) => [source.sessionId, source.entryId]) },
-    { text: "主人不吃香菜，点外卖要避开。", topic: "preferences", resident: true, author: "extraction", sources: [[said.session.sessionId, said.entryId]] },
+    { text: kept!.text, topic: kept!.topic, resident: kept!.resident, author: kept!.author, saidAt: kept!.saidAt, sources: kept!.sources.map((source) => [source.sessionId, source.entryId]) },
+    { text: "主人不吃香菜，点外卖要避开。", topic: "preferences", resident: true, author: "extraction", saidAt: said.at, sources: [[said.session.sessionId, said.entryId]] },
   );
+  // The timeline line covers the owner's words and her answer, and says which Work it happened in.
+  const [line] = (await client.assistantTimeline()).episodes;
+  assert.deepEqual({ text: line!.text, fromAt: line!.fromAt, workId: line!.session.workId, author: line!.author }, { text: "聊外卖，主人交代不吃香菜。", fromAt: said.at, workId: alu.id, author: "extraction" });
 
-  // A session that starts again loads it; the one that was open was not told.
+  // A session that starts again loads both; the one that was open was not told.
   await client.reloadSession(alu.id, "alu-reload");
-  await client.prompt(alu.id, "晚饭点什么？", "auto", "alu-dinner");
+  await client.prompt(alu.id, "晚饭点什么？我们今天聊过啥来着？", "auto", "alu-dinner");
   const dinner = await coordinator.request(1);
   assert.ok(systemPrompt(dinner.body).includes("主人不吃香菜，点外卖要避开。"), "A new session starts with what she remembers");
-  dinner.text("麻辣烫，不要香菜。");
+  assert.ok(systemPrompt(dinner.body).includes("聊外卖，主人交代不吃香菜。"), "A new session starts with the week's timeline");
+  // Looking up a time shows the timeline before the words said then.
+  dinner.tools({ id: "today", name: "assistant_search", arguments: { from: new Date(Date.now() - 86_400_000).toISOString() } });
+  const looked = await coordinator.request(2);
+  const shown = JSON.stringify(looked.body.messages?.find((message) => message.role === "tool")?.content ?? "");
+  const lineAt = shown.indexOf("聊外卖，主人交代不吃香菜。");
+  assert.ok(lineAt >= 0 && lineAt < shown.indexOf("我不吃香菜，以后点外卖记得避开。"), `The timeline comes before the words said: ${shown}`);
+  looked.text("麻辣烫，不要香菜。今天就聊了外卖。");
   await settled(client, alu.id);
 });
 

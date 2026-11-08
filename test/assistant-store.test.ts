@@ -128,7 +128,7 @@ test("a memory whose layout this Dock does not know is left untouched", async (c
   context.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, "memory.sqlite");
   const newer = new DatabaseSync(path);
-  newer.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema', '2');");
+  newer.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO meta VALUES ('schema', '99');");
   newer.close();
   assert.throws(() => new AssistantStore(path), /cannot read/u);
   const after = new DatabaseSync(path);

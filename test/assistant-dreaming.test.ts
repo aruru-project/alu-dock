@@ -9,6 +9,7 @@ import { AssistantExtraction } from "../src/assistant/extraction.js";
 import type { ModelPrompt } from "../src/assistant/extraction-prompt.js";
 import { AssistantMemories } from "../src/assistant/memories.js";
 import { AssistantStore } from "../src/assistant/store.js";
+import { AssistantTimeline } from "../src/assistant/timeline.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 // Card #295, with "Components of agent memory" (Anthropic, 2026): what extraction keeps is later
@@ -22,7 +23,7 @@ test("her memories are checked against what was said and merged, and what the ow
   const memories = new AssistantMemories(store.connection);
   const prompts: ModelPrompt[] = [];
   let owners = "";
-  const extraction = new AssistantExtraction(store.connection, memories, documents, {
+  const extraction = new AssistantExtraction(store.connection, memories, new AssistantTimeline(store.connection), documents, {
     complete: async (_model, prompt) => {
       prompts.push(prompt);
       if (prompts.length === 1) {

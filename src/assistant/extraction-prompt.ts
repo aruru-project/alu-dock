@@ -1,12 +1,14 @@
 import {
   ASSISTANT_MEMORY_TOPICS,
   ASSISTANT_TOOL_NAMES,
+  MAX_ASSISTANT_EPISODE_CHARS,
   MAX_ASSISTANT_MEMORY_CHARS,
   type AssistantMemoryTopic,
 } from "../core/assistant.js";
-import { localMinute } from "./local-time.js";
+import { localMinute, localSpan } from "../core/local-time.js";
 import type { MemoryRow } from "./memories.js";
 import type { EntryRow } from "./store.js";
+import type { EpisodeRow } from "./timeline.js";
 
 /*
  * What the extraction model reads and how its reply is read back (card #295). The prompts say what
@@ -14,6 +16,10 @@ import type { EntryRow } from "./store.js";
  * must not cross are rules. Following "Components of agent memory" (Anthropic, 2026): fixed rules
  * about what to record made strong models remember worse, a small loaded layer is followed better,
  * and a later pass that checks memories against the original words corrects them.
+ *
+ * The same reading also writes her timeline (timeline.ts), which judges nothing: one line per stretch
+ * of the conversation saying what they were doing, work included, so that what did not become a
+ * memory is still there to turn to.
  *
  * The persona may describe any assistant, so the prompts call her "助手" and let the persona name her;
  * "主人" is the product's word for her owner.
@@ -40,15 +46,17 @@ const TOPICS_LINE = `记忆分五类（topic）：owner 主人这个人（身份
 
 const RESIDENT_LINE = `resident 决定这条是不是每次开会话都带上：认识主人很久的人不用想就知道的事填 true，比如他是谁、住在哪做什么、生日、明显的喜好和忌口、眼下生活里的大事（比如快要搬家、换工作）、他们之间说话做事的规矩、她答应过一直要做到的事；已经过去的某一天的事、只在聊到时才用得上的细节填 false，她需要时会去查。常驻的每条都写得精炼，同一件事别分成几条。`;
 
-const EXTRACTION_SYSTEM = `你替一位个人助手整理她的记忆。她是谁见下面的人设；她的使用者，下面称“主人”。
+const EXTRACTION_SYSTEM = `你替一位个人助手整理她的记忆，并记她的时间线。她是谁见下面的人设；她的使用者，下面称“主人”。
 
-记忆是为以后准备的：下次和主人聊天时，她要像一个认识主人很久的人，记得主人是什么样的人、他们之间怎么相处、一起经历过什么。每段对话的原话都会留着，她随时能搜；记忆要记的，是她以后不翻原话也该知道的事。做了什么工作、怎么做的，原话里都有，不必记：修了什么问题、升了什么版本、测试过没过，都不算经历。值得记的是这些事透露出的主人这个人、他们的关系，和一个老朋友以后会提起的经历：他难熬或高兴的时候、生活里的变化、对他要紧的事。什么值得记，由你判断。
+记忆是为以后准备的：下次和主人聊天时，她要像一个认识主人很久的人，记得主人是什么样的人、他们之间怎么相处、一起经历过什么。每段对话的原话都会留着，她随时能搜；记忆要记的，是她以后不翻原话也该知道的事。做了什么工作、怎么做的，原话里都有，时间线里也会写，记忆里不必记：修了什么问题、升了什么版本、测试过没过，这些细节都不是记忆。但主人这阵子在做什么项目、为什么做、对它多上心，是他生活的一部分，和别的事一样看值不值得记。值得记的是这些事透露出的主人这个人、他们的关系，和一个老朋友以后会提起的经历：他难熬或高兴的时候、生活里的变化、对他要紧的事。什么值得记，由你判断。
+
+时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。每行不超过 80 字，用主人平时说的语言；密码密钥、主人要她忘掉的事，时间线里同样不写。
 
 必须遵守：
 ${RULES_COMMON}
-- 每条写明出自这次对话的哪几条（方括号里的编号）。
+- 每条记忆、每行时间线都写明出自这次对话的哪几条（方括号里的编号）。
 - 和已有记忆说的是同一件事，就改写那一条，别另加；已有的记忆不再成立，就作废它。
-- 没有值得记的，就什么都不改。
+- 没有值得记的记忆，就不改记忆；时间线照常写。
 
 ${TOPICS_LINE}
 ${RESIDENT_LINE}
@@ -58,8 +66,11 @@ ${RESIDENT_LINE}
   {"do":"add","topic":"preferences","text":"……","resident":false,"from":[3,5]},
   {"do":"rewrite","id":"12","text":"……","from":[7]},
   {"do":"retire","id":"9","from":[8]}
+],"timeline":[
+  {"do":"add","text":"……","from":[1,2,3]},
+  {"do":"rewrite","id":"4","text":"……","from":[4,5]}
 ]}
-没有要改的就回复 {"changes":[]}。`;
+没有要改的记忆就让 changes 为空：{"changes":[],"timeline":[……]}。`;
 
 const DREAM_SYSTEM = `你替一位个人助手做一次记忆整理，就像人在睡觉时整理白天的经历。她是谁见下面的人设；她的使用者，下面称“主人”。整理的目的和记的时候一样：下次聊天时，她要像一个认识主人很久的人那样，记得主人和他们之间的事。
 
@@ -95,6 +106,8 @@ export interface ExtractionInput {
   memories: ShownMemory[];
   /** Memories in use left out to keep the prompt short. */
   omitted: number;
+  /** This conversation's latest timeline lines, oldest first, which the model may extend. */
+  episodes: EpisodeRow[];
   /** What came just before, already read. */
   leadIn: string[];
   /** The entries to read, numbered from 1 in this order. */
@@ -109,6 +122,8 @@ export function extractionPrompt(input: ExtractionInput): ModelPrompt {
       "## 已有的记忆",
       input.memories.length === 0 ? "（还没有。）" : input.memories.map((memory) => memoryLine(memory)).join("\n"),
       ...(input.omitted > 0 ? [`（另有 ${input.omitted} 条较早的不常驻记忆没有列出。）`] : []),
+      "## 这个会话已有的时间线（最近几行）",
+      input.episodes.length === 0 ? "（还没有。）" : input.episodes.map((row) => episodeLine(row)).join("\n"),
       ...(input.leadIn.length === 0 ? [] : ["## 前面已经读过的对话（帮你理解上下文，不从这里记）", input.leadIn.join("\n")]),
       "## 这次要读的对话（主人的话有时是别的 Work 转来的，不用区分）",
       input.lines.map((line, index) => `[${index + 1}] ${line}`).join("\n"),
@@ -158,6 +173,12 @@ function memoryLine(memory: ShownMemory): string {
   ];
   const sources = (memory.sources ?? []).map((source) => `\n    原话：${source}`).join("");
   return `[#${row.id}]（${marks.join("，")}）${row.text}${sources}`;
+}
+
+/** A timeline line as the model sees it; one the owner wrote last is marked, since it may not be rewritten. */
+function episodeLine(row: EpisodeRow): string {
+  const span = localSpan(new Date(row.from_ms), new Date(row.to_ms));
+  return `[#${row.id}] ${span}${row.author === "owner" ? "（主人定的，不能改）" : ""} ${row.text}`;
 }
 
 /** An entry as the model reads it, with its local time; undefined for what it need not read. */
@@ -216,6 +237,11 @@ export type ExtractionChange =
   | { do: "rewrite"; id: number; text: string; from: number[] }
   | { do: "retire"; id: number; from: number[] };
 
+/** A timeline line the model adds or extends, naming the numbered entries it covers. */
+export type TimelineChange =
+  | { do: "add"; text: string; from: number[] }
+  | { do: "rewrite"; id: number; text: string; from: number[] };
+
 export type DreamChange =
   | { do: "rewrite"; id: number; text: string }
   | { do: "retire"; id: number }
@@ -225,11 +251,23 @@ export type DreamChange =
 /** The reply is not the agreed JSON at all; single changes that do not fit are left out instead. */
 export class ReplyFormatError extends Error {}
 
-/** `lines`: how many numbered entries the prompt showed. */
-export function parseExtractionReply(reply: string, lines: number): { changes: ExtractionChange[]; skipped: number } {
+/** `lines`: how many numbered entries the prompt showed. A reply without `timeline` writes no line. */
+export function parseExtractionReply(reply: string, lines: number): { changes: ExtractionChange[]; timeline: TimelineChange[]; skipped: number } {
+  const body = replyObject(reply);
+  const rawChanges = replyChanges(body);
   let skipped = 0;
+  const timeline: TimelineChange[] = [];
+  for (const raw of Array.isArray(body.timeline) ? body.timeline as unknown[] : []) {
+    const change = record(raw);
+    const from = references(change?.from, lines);
+    const text = episodeText(change?.text);
+    if (change?.do === "add" && from.length > 0 && text !== undefined) { timeline.push({ do: "add", text, from }); continue; }
+    const id = memoryId(change?.id);
+    if (change?.do === "rewrite" && from.length > 0 && text !== undefined && id !== undefined) { timeline.push({ do: "rewrite", id, text, from }); continue; }
+    skipped += 1;
+  }
   const changes: ExtractionChange[] = [];
-  for (const raw of replyChanges(reply)) {
+  for (const raw of rawChanges) {
     const change = record(raw);
     const from = references(change?.from, lines);
     const kind = change?.do;
@@ -247,13 +285,13 @@ export function parseExtractionReply(reply: string, lines: number): { changes: E
     }
     skipped += 1;
   }
-  return { changes, skipped };
+  return { changes, timeline, skipped };
 }
 
 export function parseDreamReply(reply: string): { changes: DreamChange[]; skipped: number } {
   let skipped = 0;
   const changes: DreamChange[] = [];
-  for (const raw of replyChanges(reply)) {
+  for (const raw of replyChanges(replyObject(reply))) {
     const change = record(raw);
     const kind = change?.do;
     const id = memoryId(change?.id);
@@ -280,17 +318,22 @@ export function parseDreamReply(reply: string): { changes: DreamChange[]; skippe
   return { changes, skipped };
 }
 
-/** The reply's `changes`, from the first "{" to the last "}" so a fence or a remark around it does no harm. */
-function replyChanges(reply: string): unknown[] {
+/** The reply's JSON object, from the first "{" to the last "}" so a fence or a remark around it does no harm. */
+function replyObject(reply: string): Record<string, unknown> {
   const start = reply.indexOf("{");
   const end = reply.lastIndexOf("}");
   if (start < 0 || end < start) throw new ReplyFormatError("The reply holds no JSON object");
   let value: unknown;
   try { value = JSON.parse(reply.slice(start, end + 1)); }
   catch { throw new ReplyFormatError("The reply's JSON cannot be read"); }
-  const changes = record(value)?.changes;
-  if (!Array.isArray(changes)) throw new ReplyFormatError("The reply has no list of changes");
-  return changes;
+  const body = record(value);
+  if (!body) throw new ReplyFormatError("The reply is not a JSON object");
+  return body;
+}
+
+function replyChanges(body: Record<string, unknown>): unknown[] {
+  if (!Array.isArray(body.changes)) throw new ReplyFormatError("The reply has no list of changes");
+  return body.changes;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -302,9 +345,17 @@ function topicOf(value: unknown): AssistantMemoryTopic | undefined {
 }
 
 function memoryText(value: unknown): string | undefined {
+  return boundedText(value, MAX_ASSISTANT_MEMORY_CHARS);
+}
+
+function episodeText(value: unknown): string | undefined {
+  return boundedText(value, MAX_ASSISTANT_EPISODE_CHARS);
+}
+
+function boundedText(value: unknown, max: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.replace(/\s+/gu, " ").trim();
-  return text.length > 0 && text.length <= MAX_ASSISTANT_MEMORY_CHARS ? text : undefined;
+  return text.length > 0 && text.length <= max ? text : undefined;
 }
 
 function memoryId(value: unknown): number | undefined {

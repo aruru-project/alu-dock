@@ -34,6 +34,8 @@ import {
   parseAssistantMemoryUpdateParams,
   parseAssistantSearchParams,
   parseAssistantSettingsSetParams,
+  parseAssistantTimelineListParams,
+  parseAssistantTimelineUpdateParams,
   type AssistantContextRequest,
   type AssistantDocumentName,
   type AssistantMemoryAddRequest,
@@ -41,10 +43,13 @@ import {
   type AssistantMemoryUpdateRequest,
   type AssistantModelRef,
   type AssistantSearchRequest,
+  type AssistantTimelineListRequest,
+  type AssistantTimelineUpdateRequest,
 } from "../core/assistant.js";
 export {
   parseAssistantContextResult,
   parseAssistantDocument,
+  parseAssistantEpisode,
   parseAssistantInfo,
   parseAssistantMemory,
   parseAssistantMemoryDetail,
@@ -52,10 +57,12 @@ export {
   parseAssistantPreview,
   parseAssistantSearchResult,
   parseAssistantSettings,
+  parseAssistantTimelineList,
   type AssistantContextResult,
   type AssistantDocument,
   type AssistantDocumentName,
   type AssistantEntry,
+  type AssistantEpisode,
   type AssistantExtractionStatus,
   type AssistantInfo,
   type AssistantMemory,
@@ -66,6 +73,7 @@ export {
   type AssistantSearchHit,
   type AssistantSearchResult,
   type AssistantSessionInfo,
+  type AssistantTimelineList,
 } from "../core/assistant.js";
 import {
   MAX_DELIVERY_REF_CHARS,
@@ -432,6 +440,9 @@ export type ControlRequest =
   | Request<"assistant.memory.get", { id: string }>
   | Request<"assistant.memory.add", { operationId: string } & AssistantMemoryAddRequest>
   | Request<"assistant.memory.update", { operationId: string } & AssistantMemoryUpdateRequest>
+  | Request<"assistant.timeline.list", AssistantTimelineListRequest>
+  | Request<"assistant.timeline.get", { id: string }>
+  | Request<"assistant.timeline.update", { operationId: string } & AssistantTimelineUpdateRequest>
   | Request<"assistant.settings.get", Record<string, never>>
   | Request<"assistant.settings.set", { operationId: string; extractionModel: AssistantModelRef | null }>
   | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
@@ -531,6 +542,9 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "assistant.memory.get": { target: "directory", effect: "query", transport: "unary" },
   "assistant.memory.add": { target: "directory", effect: "command", transport: "unary" },
   "assistant.memory.update": { target: "directory", effect: "command", transport: "unary" },
+  "assistant.timeline.list": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.timeline.get": { target: "directory", effect: "query", transport: "unary" },
+  "assistant.timeline.update": { target: "directory", effect: "command", transport: "unary" },
   "assistant.settings.get": { target: "directory", effect: "query", transport: "unary" },
   "assistant.settings.set": { target: "directory", effect: "command", transport: "unary" },
   "resource.content": { target: "instance", effect: "query", transport: "unary" },
@@ -1336,8 +1350,19 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, [], "invalid_request");
       return { ...base, type, params: {} };
     case "assistant.memory.list":
-      exact(params, ["query", "topic", "state", "resident", "author", "cursor", "limit"], "invalid_request");
+      exact(params, ["query", "topic", "state", "resident", "author", "from", "to", "cursor", "limit"], "invalid_request");
       return { ...base, type, params: assistantParams(() => parseAssistantMemoryListParams(params, "params")) };
+    case "assistant.timeline.list":
+      exact(params, ["query", "from", "to", "state", "cursor", "limit"], "invalid_request");
+      return { ...base, type, params: assistantParams(() => parseAssistantTimelineListParams(params, "params")) };
+    case "assistant.timeline.get":
+      exact(params, ["id"], "invalid_request");
+      return { ...base, type, params: { id: assistantParams(() => parseAssistantMemoryId(params.id, "params.id")) } };
+    case "assistant.timeline.update": {
+      exact(params, ["operationId", "id", "revision", "text", "state"], "invalid_request");
+      const { operationId: _operationId, ...rest } = params;
+      return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantTimelineUpdateParams(rest, "params")) } };
+    }
     case "assistant.memory.get":
       exact(params, ["id"], "invalid_request");
       return { ...base, type, params: { id: assistantParams(() => parseAssistantMemoryId(params.id, "params.id")) } };

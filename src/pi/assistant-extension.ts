@@ -7,6 +7,7 @@ import {
   ASSISTANT_MEMORY_TOPICS,
   ASSISTANT_TOOL_NAMES,
   MAX_ASSISTANT_CONTEXT_SPAN,
+  MAX_ASSISTANT_EPISODE_CHARS,
   MAX_ASSISTANT_ID_CHARS,
   MAX_ASSISTANT_NAME_CHARS,
   MAX_ASSISTANT_ENTRY_TEXT_CHARS,
@@ -15,12 +16,15 @@ import {
   MAX_ASSISTANT_QUERY_CHARS,
   MAX_ASSISTANT_RECORD_BATCH_BYTES,
   MAX_ASSISTANT_SEARCH_LIMIT,
+  MAX_ASSISTANT_TIMELINE_LIST_LIMIT,
   MAX_ASSISTANT_TOOL_ARGUMENT_CHARS,
   MAX_ASSISTANT_TOOL_CALLS,
   type AssistantContextResult,
   type AssistantDocument,
   type AssistantDocumentName,
   type AssistantEntry,
+  type AssistantEpisode,
+  type AssistantEpisodeState,
   type AssistantExtractionStatus,
   type AssistantMemory,
   type AssistantMemoryDetail,
@@ -33,7 +37,9 @@ import {
   type AssistantSearchResult,
   type AssistantSessionInfo,
   type AssistantSettings,
+  type AssistantTimelineList,
 } from "../core/assistant.js";
+import { localSpan } from "../core/local-time.js";
 import { extractDockAttachmentContext } from "./dock-attachment-context.js";
 import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
@@ -41,8 +47,9 @@ import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
  * What makes a Pi Work the personal assistant (card #295). Each session start (new Work, reload,
  * /new, resume, reopen) loads her persona, the owner's notes, the memories loaded every session and
  * how to recall more from Main into a prompt section; the session keeps that copy until it starts
- * again. Her conversation goes to Main entry by entry, and her tools search her memories and
- * conversations, read around a hit, change her memories, and edit her persona and the owner's notes.
+ * again. Her conversation goes to Main entry by entry, and her tools search her memories, her
+ * timeline and her conversations, read around a hit, change her memories and timeline, and edit her
+ * persona and the owner's notes.
  */
 
 type ReadonlySessionManager = ExtensionContext["sessionManager"];
@@ -63,12 +70,28 @@ const SQUEEZED_ARGUMENT_CHARS = 200;
 const SEARCH_SCHEMA = {
   type: "object",
   properties: {
-    query: { type: "string", maxLength: MAX_ASSISTANT_QUERY_CHARS, description: "Keywords separated by spaces; every one must occur. Chinese works; try other wording when nothing is found. Omit it with from or to to list everything said in that time." },
+    query: { type: "string", maxLength: MAX_ASSISTANT_QUERY_CHARS, description: "Keywords separated by spaces; every one must occur. Chinese works; try other wording when nothing is found. Omit it with from or to to see what you were doing in that time and everything said then." },
     from: { type: "string", description: "Earliest time, as YYYY-MM-DD (the local day) or an ISO time." },
     to: { type: "string", description: "Latest time, as YYYY-MM-DD (including that day) or an ISO time." },
     cursor: { type: "string", description: "The cursor an earlier search returned, to read older results." },
     limit: { type: "integer", minimum: 1, maximum: MAX_ASSISTANT_SEARCH_LIMIT },
   },
+  additionalProperties: false,
+};
+const TIMELINE_SCHEMA = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["list", "rewrite", "forget", "restore"] },
+    id: { type: "string", description: "The line's number, as in #12 (without #); for rewrite, forget and restore." },
+    text: { type: "string", maxLength: MAX_ASSISTANT_EPISODE_CHARS, description: "rewrite: what the line should say, in one short sentence." },
+    query: { type: "string", maxLength: MAX_ASSISTANT_QUERY_CHARS, description: "list: keywords every line must contain." },
+    from: { type: "string", description: "list: earliest time, as YYYY-MM-DD (the local day) or an ISO time." },
+    to: { type: "string", description: "list: latest time, as YYYY-MM-DD (including that day) or an ISO time." },
+    state: { type: "string", enum: ["active", "forgotten"], description: "list: forgotten to see the lines that were forgotten; default active." },
+    cursor: { type: "string", description: "list: the cursor an earlier list returned, to read older lines." },
+    limit: { type: "integer", minimum: 1, maximum: MAX_ASSISTANT_TIMELINE_LIST_LIMIT },
+  },
+  required: ["action"],
   additionalProperties: false,
 };
 const READ_SCHEMA = {
@@ -199,14 +222,42 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.registerTool({
       name: "assistant_search",
       label: "Search memory",
-      description: "Search what you remember and your past conversations with your owner, by keywords, time, or both. Memories whose text has every keyword come first; then what was said, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
+      description: "Search what you remember, your timeline and your past conversations with your owner, by keywords, time, or both. Memories whose text has every keyword come first; then the timeline (one line per stretch of a conversation saying what the two of you were doing, which is how to answer \"what were we up to that day\"); then what was said, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
       parameters: SEARCH_SCHEMA,
       execute: async (_id: string, params: { query?: string; from?: string; to?: string; cursor?: string; limit?: number }) => {
         const query = params.query?.trim();
-        // Memories on the first page of a keyword search; the cursor pages through what was said.
-        const memories = query && params.cursor === undefined ? await port.call({ op: "memory_list", query, limit: 10 }) : undefined;
+        const firstPage = params.cursor === undefined;
         const result = await port.call({ op: "search", ...optional("query", params.query), ...optional("from", params.from), ...optional("to", params.to), ...optional("cursor", params.cursor), limit: params.limit ?? 10 });
-        return { content: [{ type: "text", text: [...(memories ? [renderMemories(memories, "Memories")] : []), renderSearch(result)].join("\n\n") }], details: { ...result, ...(memories ? { memories: memories.memories } : {}) } };
+        // Memories on the first page of a keyword search and the timeline on every first page; the cursor pages through what was said.
+        const memories = query && firstPage ? await port.call({ op: "memory_list", query, limit: 10 }) : undefined;
+        const timeline = firstPage
+          ? await port.call({ op: "timeline_list", ...(query ? { query } : {}), ...optional("from", params.from), ...optional("to", params.to), limit: query ? 10 : 20 })
+          : undefined;
+        const text = [...(memories ? [renderMemories(memories, "Memories")] : []), ...(timeline ? [renderTimeline(timeline)] : []), renderSearch(result)].join("\n\n");
+        return { content: [{ type: "text", text }], details: { ...result, ...(memories ? { memories: memories.memories } : {}), ...(timeline ? { episodes: timeline.episodes } : {}) } };
+      },
+    } as never);
+
+    pi.registerTool({
+      name: "assistant_timeline",
+      label: "Timeline",
+      description: "Your timeline: one line per stretch of a conversation saying what you and your owner were doing or talking about, written in the background as conversations are read. list: the lines of a time range or with keywords, newest first. rewrite: correct what a line says. forget: drop a line your owner does not want kept (what was said stays). restore: bring a forgotten line back. Use it when your owner says a line is wrong or should not be there; to look things up, assistant_search already shows the timeline.",
+      parameters: TIMELINE_SCHEMA,
+      execute: async (_id: string, params: { action: string; id?: string; text?: string; query?: string; from?: string; to?: string; state?: AssistantEpisodeState; cursor?: string; limit?: number }) => {
+        if (params.action === "list") {
+          const query = params.query?.trim();
+          const list = await port.call({ op: "timeline_list", ...(query ? { query } : {}), ...optional("from", params.from), ...optional("to", params.to), ...(params.state === undefined ? {} : { state: params.state }), ...optional("cursor", params.cursor), limit: params.limit ?? 20 });
+          return { content: [{ type: "text", text: renderTimeline(list) }], details: list };
+        }
+        if (params.id === undefined) throw new Error(`${params.action} needs the line's id.`);
+        const before = await port.call({ op: "timeline_get", id: params.id.replace(/^#/u, "") });
+        const change = params.action === "rewrite" ? (params.text === undefined ? undefined : { text: params.text })
+          : params.action === "forget" ? { state: "forgotten" as const }
+          : params.action === "restore" ? { state: "active" as const }
+          : undefined;
+        if (change === undefined) throw new Error(params.action === "rewrite" ? "rewrite needs text." : `Unknown action ${params.action}.`);
+        const episode = await port.call({ op: "timeline_update", id: before.id, revision: before.revision, ...change });
+        return { content: [{ type: "text", text: `Done: ${renderEpisode(episode)}\nSessions that start from now on see it as it is now.` }], details: episode };
       },
     } as never);
 
@@ -499,6 +550,20 @@ function renderSearch(result: AssistantSearchResult): string {
 }
 
 const STATE_NAMES: Record<AssistantMemoryState, string> = { active: "in use", retired: "retired", forgotten: "forgotten" };
+
+function renderEpisode(episode: AssistantEpisode): string {
+  const place = where(episode.session);
+  return `#${episode.id} ${localSpan(new Date(episode.fromAt), new Date(episode.toAt))}${place ? ` · ${place}` : ""}${episode.state === "active" ? "" : " · forgotten"}: ${episode.text}`;
+}
+
+function renderTimeline(list: AssistantTimelineList): string {
+  if (list.episodes.length === 0) return "Timeline: no line covers this.";
+  return [
+    "Timeline, newest first (what the two of you were doing; local time):",
+    ...list.episodes.map((episode) => `- ${renderEpisode(episode)}`),
+    ...(list.nextCursor === undefined ? [] : [`Older lines remain; list them with assistant_timeline and cursor "${list.nextCursor}".`]),
+  ].join("\n");
+}
 
 function renderSettings(settings: AssistantSettings, extraction: AssistantExtractionStatus | undefined): string {
   const model = settings.extractionModel;

@@ -46,7 +46,7 @@ const MAX_PATH_CHARS = 16_384;
 const MAX_CURSOR_CHARS = 256;
 
 /** The assistant's own tools; their calls and results are kept for context but not searched again. */
-export const ASSISTANT_TOOL_NAMES = ["assistant_search", "assistant_read", "assistant_document", "assistant_memory"] as const;
+export const ASSISTANT_TOOL_NAMES = ["assistant_search", "assistant_read", "assistant_document", "assistant_memory", "assistant_timeline"] as const;
 
 /**
  * What her memories are about. They describe the owner and the two of them, not the work they did:
@@ -74,6 +74,17 @@ export const MAX_ASSISTANT_MEMORY_SOURCES = 20;
 export const MAX_ASSISTANT_MEMORY_LIST_LIMIT = 100;
 /** Changes shown for one memory, newest first. */
 export const MAX_ASSISTANT_MEMORY_HISTORY = 50;
+/**
+ * Her timeline: one line per stretch of a conversation saying what the two of them were doing or
+ * talking about, written in the background beside her memories. It judges nothing; it is the table
+ * of contents she turns to for "what were we up to that day", and it says what she was working on
+ * even when no memory came of it. A line is in use or forgotten at the owner's word.
+ */
+export const ASSISTANT_EPISODE_STATES = ["active", "forgotten"] as const;
+export type AssistantEpisodeState = typeof ASSISTANT_EPISODE_STATES[number];
+/** One timeline line's text in characters. */
+export const MAX_ASSISTANT_EPISODE_CHARS = 300;
+export const MAX_ASSISTANT_TIMELINE_LIST_LIMIT = 100;
 const MAX_MODEL_PROVIDER_CHARS = 256;
 const MAX_MODEL_ID_CHARS = 512;
 const MEMORY_ID = /^[1-9][0-9]{0,14}$/u;
@@ -116,6 +127,8 @@ export interface AssistantMemory {
   author: AssistantMemoryAuthor;
   createdAt: string;
   updatedAt: string;
+  /** When it was said: the earliest place it was said, or when it was written without one. */
+  saidAt: string;
   /** Goes up with every change; an update names the revision it started from. */
   revision: number;
   /** The earliest places it was said, at most MAX_ASSISTANT_MEMORY_SOURCES of `sourceCount`. */
@@ -126,13 +139,18 @@ export interface AssistantMemory {
 }
 export interface AssistantMemoryChange { at: string; author: AssistantMemoryAuthor; action: AssistantMemoryAction; text?: string }
 export interface AssistantMemoryDetail { memory: AssistantMemory; history: AssistantMemoryChange[] }
-/** Newest first. Without `state`, the memories in use. Every word of `query` must occur. */
+/**
+ * Newest first. Without `state`, the memories in use. Every word of `query` must occur. `from` and
+ * `to` bound when a memory was said, as YYYY-MM-DD (Main's local day) or a time.
+ */
 export interface AssistantMemoryListRequest {
   query?: string;
   topic?: AssistantMemoryTopic;
   state?: AssistantMemoryState;
   resident?: boolean;
   author?: AssistantMemoryAuthor;
+  from?: string;
+  to?: string;
   cursor?: string;
   limit: number;
 }
@@ -147,6 +165,29 @@ export interface AssistantMemoryUpdateRequest {
   resident?: boolean;
   state?: AssistantMemoryState;
 }
+
+/** One line of her timeline: a stretch of one conversation, from the first entry it covers to the last. */
+export interface AssistantEpisode {
+  id: string;
+  session: AssistantSessionInfo;
+  fromAt: string;
+  toAt: string;
+  text: string;
+  state: AssistantEpisodeState;
+  /** Who wrote it last: extraction, the assistant in a conversation, or the owner. */
+  author: AssistantMemoryAuthor;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+}
+/**
+ * Newest first by when each stretch began. A time range lists every line that overlaps it; every
+ * word of `query` must occur. Without `state`, the lines in use.
+ */
+export interface AssistantTimelineListRequest { query?: string; from?: string; to?: string; state?: AssistantEpisodeState; cursor?: string; limit: number }
+export interface AssistantTimelineList { episodes: AssistantEpisode[]; nextCursor?: string }
+/** Rewrites a line or forgets or restores it, if nobody changed it since `revision`. */
+export interface AssistantTimelineUpdateRequest { id: string; revision: number; text?: string; state?: AssistantEpisodeState }
 
 export type AssistantEntryKind = "user" | "assistant" | "tool_result" | "bash" | "summary" | "notice";
 export interface AssistantToolCall { name: string; arguments: string }
@@ -212,6 +253,9 @@ export type AssistantRequest =
   | { op: "memory_get"; id: string }
   | ({ op: "memory_add" } & AssistantMemoryAddRequest)
   | ({ op: "memory_update" } & AssistantMemoryUpdateRequest)
+  | ({ op: "timeline_list" } & AssistantTimelineListRequest)
+  | { op: "timeline_get"; id: string }
+  | ({ op: "timeline_update" } & AssistantTimelineUpdateRequest)
   | { op: "settings_get" }
   /** `null` stops extraction. */
   | { op: "settings_set"; extractionModel: AssistantModelRef | null };
@@ -226,6 +270,8 @@ export type AssistantResultFor<R extends AssistantRequest> =
   : R extends { op: "memory_list" } ? AssistantMemoryList
   : R extends { op: "memory_get" } ? AssistantMemoryDetail
   : R extends { op: "memory_add" | "memory_update" } ? AssistantMemory
+  : R extends { op: "timeline_list" } ? AssistantTimelineList
+  : R extends { op: "timeline_get" | "timeline_update" } ? AssistantEpisode
   : R extends { op: "settings_get" | "settings_set" } ? AssistantSettings
   : AssistantDocument;
 
@@ -238,7 +284,8 @@ export interface AssistantHostPort {
 export const ASSISTANT_ERROR_CODES = [
   "assistant_unavailable", "assistant_document_changed", "assistant_document_too_large",
   "assistant_edit_not_found", "assistant_edit_ambiguous", "assistant_entry_not_found", "assistant_query_timeout",
-  "assistant_memory_not_found", "assistant_memory_changed", "assistant_memory_merged", "invalid_request",
+  "assistant_memory_not_found", "assistant_memory_changed", "assistant_memory_merged",
+  "assistant_episode_not_found", "assistant_episode_changed", "invalid_request",
 ] as const;
 export type AssistantErrorCode = typeof ASSISTANT_ERROR_CODES[number];
 export class AssistantError extends Error {
@@ -300,12 +347,18 @@ function flag(input: unknown, field: string): boolean {
   if (typeof input !== "boolean") fail(`${field} must be true or false`);
   return input as boolean;
 }
+/** A memory's or a timeline line's number. */
 function memoryId(input: unknown, field: string): string {
   if (typeof input !== "string" || !MEMORY_ID.test(input)) fail(`${field} must be a memory ID`);
   return input as string;
 }
 function memoryText(input: unknown, field: string): string {
   const value = text(input, field, MAX_ASSISTANT_MEMORY_CHARS);
+  if (value.trim().length === 0) fail(`${field} must not be empty`);
+  return value.trim();
+}
+function episodeText(input: unknown, field: string): string {
+  const value = text(input, field, MAX_ASSISTANT_EPISODE_CHARS);
   if (value.trim().length === 0) fail(`${field} must not be empty`);
   return value.trim();
 }
@@ -324,9 +377,35 @@ function parseMemoryList(value: Record<string, unknown>, field: string): Assista
     ...(value.state === undefined ? {} : { state: oneOf(value.state, ASSISTANT_MEMORY_STATES, `${field}.state`) }),
     ...(value.resident === undefined ? {} : { resident: flag(value.resident, `${field}.resident`) }),
     ...(value.author === undefined ? {} : { author: oneOf(value.author, ASSISTANT_MEMORY_AUTHORS, `${field}.author`) }),
+    ...(value.from === undefined ? {} : { from: time(value.from, `${field}.from`) }),
+    ...(value.to === undefined ? {} : { to: time(value.to, `${field}.to`) }),
     ...(cursor === undefined ? {} : { cursor }),
     limit: count(value.limit, `${field}.limit`, MAX_ASSISTANT_MEMORY_LIST_LIMIT, 1),
   };
+}
+
+function parseTimelineList(value: Record<string, unknown>, field: string): AssistantTimelineListRequest {
+  const query = optionalText(value.query, `${field}.query`, MAX_ASSISTANT_QUERY_CHARS);
+  const cursor = optionalText(value.cursor, `${field}.cursor`, MAX_CURSOR_CHARS, 1);
+  return {
+    ...(query === undefined || query.trim().length === 0 ? {} : { query }),
+    ...(value.from === undefined ? {} : { from: time(value.from, `${field}.from`) }),
+    ...(value.to === undefined ? {} : { to: time(value.to, `${field}.to`) }),
+    ...(value.state === undefined ? {} : { state: oneOf(value.state, ASSISTANT_EPISODE_STATES, `${field}.state`) }),
+    ...(cursor === undefined ? {} : { cursor }),
+    limit: count(value.limit, `${field}.limit`, MAX_ASSISTANT_TIMELINE_LIST_LIMIT, 1),
+  };
+}
+
+function parseTimelineUpdate(value: Record<string, unknown>, field: string): AssistantTimelineUpdateRequest {
+  const update: AssistantTimelineUpdateRequest = {
+    id: memoryId(value.id, `${field}.id`),
+    revision: count(value.revision, `${field}.revision`, Number.MAX_SAFE_INTEGER, 1),
+    ...(value.text === undefined ? {} : { text: episodeText(value.text, `${field}.text`) }),
+    ...(value.state === undefined ? {} : { state: oneOf(value.state, ASSISTANT_EPISODE_STATES, `${field}.state`) }),
+  };
+  if (update.text === undefined && update.state === undefined) fail(`${field} changes nothing`);
+  return update;
 }
 
 function parseMemoryAdd(value: Record<string, unknown>, field: string): AssistantMemoryAddRequest {
@@ -467,7 +546,7 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op", "document", "oldText", "newText"], field);
         return { op: "document_edit", document: documentName(value.document, `${field}.document`), oldText: text(value.oldText, `${field}.oldText`, MAX_ASSISTANT_DOCUMENT_BYTES, 1), newText: documentText(value.newText, `${field}.newText`) };
       case "memory_list":
-        only(value, ["op", "query", "topic", "state", "resident", "author", "cursor", "limit"], field);
+        only(value, ["op", "query", "topic", "state", "resident", "author", "from", "to", "cursor", "limit"], field);
         return { op: "memory_list", ...parseMemoryList(value, field) };
       case "memory_get":
         only(value, ["op", "id"], field);
@@ -478,6 +557,15 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
       case "memory_update":
         only(value, ["op", "id", "revision", "text", "topic", "resident", "state"], field);
         return { op: "memory_update", ...parseMemoryUpdate(value, field) };
+      case "timeline_list":
+        only(value, ["op", "query", "from", "to", "state", "cursor", "limit"], field);
+        return { op: "timeline_list", ...parseTimelineList(value, field) };
+      case "timeline_get":
+        only(value, ["op", "id"], field);
+        return { op: "timeline_get", id: memoryId(value.id, `${field}.id`) };
+      case "timeline_update":
+        only(value, ["op", "id", "revision", "text", "state"], field);
+        return { op: "timeline_update", ...parseTimelineUpdate(value, field) };
       case "settings_get":
         only(value, ["op"], field);
         return { op: "settings_get" };
@@ -508,6 +596,12 @@ export function parseAssistantMemoryAddParams(input: Record<string, unknown>, fi
 }
 export function parseAssistantMemoryUpdateParams(input: Record<string, unknown>, field: string): AssistantMemoryUpdateRequest {
   return question(() => parseMemoryUpdate(input, field));
+}
+export function parseAssistantTimelineListParams(input: Record<string, unknown>, field: string): AssistantTimelineListRequest {
+  return question(() => parseTimelineList(input, field));
+}
+export function parseAssistantTimelineUpdateParams(input: Record<string, unknown>, field: string): AssistantTimelineUpdateRequest {
+  return question(() => parseTimelineUpdate(input, field));
 }
 export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantModelRef | null {
   return question(() => parseSettingsSet(input, field));
@@ -582,6 +676,7 @@ export function parseAssistantMemory(input: unknown, field = "assistant memory")
       author: oneOf(value.author, ASSISTANT_MEMORY_AUTHORS, `${field}.author`),
       createdAt: time(value.createdAt, `${field}.createdAt`),
       updatedAt: time(value.updatedAt, `${field}.updatedAt`),
+      saidAt: time(value.saidAt, `${field}.saidAt`),
       revision: count(value.revision, `${field}.revision`, Number.MAX_SAFE_INTEGER, 1),
       sources: (value.sources as unknown[]).map((raw, index) => {
         const source = record(raw, `${field}.sources[${index}]`);
@@ -619,6 +714,33 @@ export function parseAssistantMemoryDetail(input: unknown, field = "assistant me
         };
       }),
     };
+  });
+}
+
+export function parseAssistantEpisode(input: unknown, field = "assistant timeline line"): AssistantEpisode {
+  return answer(() => {
+    const value = record(input, field);
+    return {
+      id: memoryId(value.id, `${field}.id`),
+      session: parseSession(value.session, `${field}.session`),
+      fromAt: time(value.fromAt, `${field}.fromAt`),
+      toAt: time(value.toAt, `${field}.toAt`),
+      text: text(value.text, `${field}.text`, MAX_ASSISTANT_EPISODE_CHARS, 1),
+      state: oneOf(value.state, ASSISTANT_EPISODE_STATES, `${field}.state`),
+      author: oneOf(value.author, ASSISTANT_MEMORY_AUTHORS, `${field}.author`),
+      createdAt: time(value.createdAt, `${field}.createdAt`),
+      updatedAt: time(value.updatedAt, `${field}.updatedAt`),
+      revision: count(value.revision, `${field}.revision`, Number.MAX_SAFE_INTEGER, 1),
+    };
+  });
+}
+
+export function parseAssistantTimelineList(input: unknown, field = "assistant timeline"): AssistantTimelineList {
+  return answer(() => {
+    const value = record(input, field);
+    if (!Array.isArray(value.episodes) || value.episodes.length > MAX_ASSISTANT_TIMELINE_LIST_LIMIT) fail(`${field}.episodes must list at most ${MAX_ASSISTANT_TIMELINE_LIST_LIMIT} lines`);
+    const nextCursor = optionalText(value.nextCursor, `${field}.nextCursor`, MAX_CURSOR_CHARS, 1);
+    return { episodes: (value.episodes as unknown[]).map((raw, index) => parseAssistantEpisode(raw, `${field}.episodes[${index}]`)), ...(nextCursor === undefined ? {} : { nextCursor }) };
   });
 }
 
@@ -687,6 +809,9 @@ export function parseAssistantResult<R extends AssistantRequest>(request: R, inp
     case "memory_get": return parseAssistantMemoryDetail(input) as AssistantResultFor<R>;
     case "memory_add":
     case "memory_update": return parseAssistantMemory(input) as AssistantResultFor<R>;
+    case "timeline_list": return parseAssistantTimelineList(input) as AssistantResultFor<R>;
+    case "timeline_get":
+    case "timeline_update": return parseAssistantEpisode(input) as AssistantResultFor<R>;
     case "settings_get":
     case "settings_set": return parseAssistantSettings(input) as AssistantResultFor<R>;
     default: return parseAssistantDocument(input) as AssistantResultFor<R>;
