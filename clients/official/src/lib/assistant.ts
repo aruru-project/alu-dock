@@ -27,6 +27,16 @@ export function assistantTime(value: string): string {
   return Number.isNaN(date.getTime()) ? value : timeFormat.format(date)
 }
 
+const clockFormat = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
+/** A stretch of time: "2026/11/07 14:00 – 18:30" within one local day, both dates across days. */
+export function assistantSpan(fromAt: string, toAt: string): string {
+  const from = new Date(fromAt)
+  const to = new Date(toAt)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return `${fromAt} – ${toAt}`
+  const sameDay = from.getFullYear() === to.getFullYear() && from.getMonth() === to.getMonth() && from.getDate() === to.getDate()
+  return `${timeFormat.format(from)} – ${sameDay ? clockFormat.format(to) : timeFormat.format(to)}`
+}
+
 /** UTF-8 size, the unit of the Host's document limit. */
 export function utf8Bytes(text: string): number {
   return new TextEncoder().encode(text).length

@@ -1354,6 +1354,8 @@ try {
     const editor = () => find(page(), item => item.type === 'textarea')
     const type = async value => { const input = editor(); input.value = value; input.props.onInput({ target: input }); await settle() }
     const session = { sessionId: 's1', name: '早上的闲聊', cwd: '/home/alu/.aludock/assistant', workId: 'other', machine: '工作站', startedAt: '2026-11-06T08:00:00.000Z', lastAt: '2026-11-06T08:30:00.000Z' }
+    // Her timeline: one line saying what that morning was about.
+    let line = { id: '7', session, fromAt: '2026-11-06T08:00:00.000Z', toAt: '2026-11-06T08:30:00.000Z', text: '早上聊天气和今天的日程。', state: 'active', author: 'extraction', createdAt: '2026-11-06T08:40:00.000Z', updatedAt: '2026-11-06T08:40:00.000Z', revision: 1 }
     const entryAt = (entryId, kind, text, extra = {}) => ({ entryId, at: '2026-11-06T08:05:00.000Z', kind, text, ...extra })
     let persona = { document: 'persona', text: '她说话简短。', revision: 'p1' }
     let notes = { document: 'notes', text: '早上先说天气。', revision: 'n1' }
@@ -1371,6 +1373,12 @@ try {
         if (args.baseRevision !== persona.revision) throw { code: 'assistant_document_changed', message: 'The document changed since it was read.' }
         persona = { document: 'persona', text: args.text, revision: `${persona.revision}+` }
         return structuredClone(persona)
+      }
+      if (command === 'assistant_timeline') return args.filter.query ? { episodes: [] } : { episodes: [structuredClone(line)] }
+      if (command === 'update_assistant_episode') {
+        if (args.revision !== line.revision) throw { code: 'assistant_episode_changed', message: 'The line changed since it was read.' }
+        line = { ...line, ...args.edit, author: 'owner', revision: line.revision + 1 }
+        return structuredClone(line)
       }
       if (command === 'assistant_search') return args.cursor
         ? { hits: [{ session: { ...session, sessionId: 's0', workId: 'retired', name: undefined }, entryId: 'old', at: '2026-11-01T08:00:00.000Z', kind: 'user', snippet: '上周的天气' }] }
@@ -1463,6 +1471,25 @@ try {
     const byDay = calls.filter(call => call.command === 'assistant_search').at(-1).args
     assert.equal(byDay.query, null, 'no words are needed with a day')
     assert.ok(byDay.from && byDay.to === null, 'the range starts at that day')
+    // Card #295: that time's timeline comes first, saying what the two of them were doing; a line can be rewritten and forgotten here.
+    const byDayTimeline = calls.filter(call => call.command === 'assistant_timeline').at(-1).args
+    assert.deepEqual([byDayTimeline.filter.from, byDayTimeline.filter.to, byDayTimeline.filter.query, byDayTimeline.cursor], [byDay.from, undefined, undefined, null], 'the timeline is asked for the same time')
+    const timeline = () => find(page(), item => item.props['aria-label'] === '时间线')
+    assert.ok(text(timeline()).includes('早上聊天气和今天的日程。') && text(timeline()).includes('早上的闲聊'), 'the day\'s timeline shows above the conversations')
+    await click(timeline(), '改写')
+    const lineEditor = find(timeline(), item => item.type === 'textarea')
+    lineEditor.value = '早上聊天气，提醒十点的评审。'; lineEditor['event:input']({ target: lineEditor }); await settle()
+    await click(timeline(), '保存')
+    const rewrite = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
+    assert.deepEqual([rewrite.id, rewrite.revision, rewrite.edit], ['7', 1, { text: '早上聊天气，提醒十点的评审。' }])
+    assert.ok(text(timeline()).includes('早上聊天气，提醒十点的评审。') && text(timeline()).includes('已改写') && text(timeline()).includes('你改过'), 'the line shows as rewritten')
+    await click(timeline(), '忘掉')
+    const forget = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
+    assert.deepEqual([forget.revision, forget.edit], [2, { state: 'forgotten' }], 'forgetting names the revision just read')
+    assert.ok(text(timeline()).includes('已忘掉') && button(timeline(), '恢复'), 'a forgotten line stays until the next search, with its way back')
+    await click(timeline(), '恢复')
+    assert.deepEqual(calls.filter(call => call.command === 'update_assistant_episode').at(-1).args.edit, { state: 'active' })
+    assert.ok(text(timeline()).includes('已恢复'))
     query.value = '天气'; query['event:input']({ target: query })
     from.value = ''; from['event:input']({ target: from }); await settle()
     find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
@@ -1494,7 +1521,7 @@ try {
     Object.assign(context, originalContext)
     app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
     await settle()
-    console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search by words or by day with more results, context reading back, opening the Work')
+    console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search by words or by day with more results, the day\'s timeline rewritten, forgotten and restored, context reading back, opening the Work')
   }
   // Card #295: her memories from the same page: the newest, by topic and those deleted, where one
   // was said, changing, deleting and restoring it, writing one, and the model that makes them.

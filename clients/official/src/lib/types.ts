@@ -772,6 +772,8 @@ export interface AssistantMemory {
   author: AssistantMemoryAuthor
   createdAt: string
   updatedAt: string
+  /** When it was said: the earliest place it was said, or when it was written without one. A Main before the timeline does not say. */
+  saidAt?: string
   /** A change names the revision it was made from. */
   revision: number
   /** The earliest places it was said, of `sourceCount`. */
@@ -787,6 +789,27 @@ export interface AssistantMemoryDetail { memory: AssistantMemory; history: Assis
 export interface AssistantMemoryFilter { query?: string; topic?: AssistantMemoryTopic; state?: AssistantMemoryState; resident?: boolean; author?: AssistantMemoryAuthor }
 /** What one change sets; the rest stays as it is. */
 export interface AssistantMemoryEdit { text?: string; topic?: AssistantMemoryTopic; resident?: boolean; state?: AssistantMemoryState }
+/** A timeline line is in use, or forgotten at the owner's word. */
+export type AssistantEpisodeState = 'active' | 'forgotten' | Unrecognized
+/** One line of her timeline: a stretch of one conversation, from the first entry it covers to the last, saying what the two of them were doing. */
+export interface AssistantEpisode {
+  id: string
+  session: AssistantSessionInfo
+  fromAt: string
+  toAt: string
+  text: string
+  state: AssistantEpisodeState
+  /** Who wrote it last: extraction, the assistant in a conversation, or the owner. */
+  author: AssistantMemoryAuthor
+  createdAt: string
+  updatedAt: string
+  revision: number
+}
+/** Newest first by when each stretch began. */
+export interface AssistantTimelineList { episodes: AssistantEpisode[]; nextCursor?: string }
+/** Which lines a list shows: those overlapping the time range and holding every word of `query`; without `state`, those in use. */
+export interface AssistantTimelineFilter { query?: string; from?: string; to?: string; state?: AssistantEpisodeState }
+export interface AssistantEpisodeEdit { text?: string; state?: AssistantEpisodeState }
 /** What a new assistant session loads now, and when it was put together. */
 export interface AssistantPreview { text: string; loadedAt: string }
 /** `persona`: who she is; `notes`: what the owner told her by hand. */

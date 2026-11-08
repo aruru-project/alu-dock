@@ -6,10 +6,11 @@ use crate::errors::CommandError;
 use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
-    AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantInfo,
-    AssistantMemory, AssistantMemoryDetail, AssistantMemoryEdit, AssistantMemoryFilter,
-    AssistantMemoryList, AssistantMemoryTopic, AssistantPreview, AssistantSearchResult,
-    AssistantSettings, AttachmentState, BashRunResult, ChildModelsResult, ChildModelsSetResult,
+    AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantEpisode,
+    AssistantEpisodeEdit, AssistantInfo, AssistantMemory, AssistantMemoryDetail,
+    AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList, AssistantMemoryTopic,
+    AssistantPreview, AssistantSearchResult, AssistantSettings, AssistantTimelineFilter,
+    AssistantTimelineList, AttachmentState, BashRunResult, ChildModelsResult, ChildModelsSetResult,
     DeliveryMode, ExtensionControlState, InstanceSnapshot, Machine, ModelRef,
     ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult, RestoredImageState,
     SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor,
@@ -741,6 +742,39 @@ pub(crate) async fn update_assistant_memory(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .update_assistant_memory(&id, revision, &edit, Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_timeline(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    filter: AssistantTimelineFilter,
+    cursor: Option<String>,
+    limit: u32,
+) -> Result<AssistantTimelineList, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_timeline(&filter, cursor.as_deref(), limit)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn update_assistant_episode(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+    revision: u64,
+    edit: AssistantEpisodeEdit,
+    operation_id: String,
+) -> Result<AssistantEpisode, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .update_assistant_episode(&id, revision, &edit, Some(&operation_id))
         .await
         .map_err(CommandError::from)
 }

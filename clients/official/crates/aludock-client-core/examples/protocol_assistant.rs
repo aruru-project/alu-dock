@@ -5,8 +5,8 @@ use std::{env, path::PathBuf};
 use aludock_client_core::{
     AssistantDocumentName, AssistantEntryKind, AssistantEntryRef, AssistantExtractionState,
     AssistantMemoryAction, AssistantMemoryAuthor, AssistantMemoryEdit, AssistantMemoryFilter,
-    AssistantMemoryState, AssistantMemoryTopic, ClientError, ConnectionRouter, DockClient,
-    IdentityStore, LocalDockEndpoint, MachineKind, ModelRef,
+    AssistantMemoryState, AssistantMemoryTopic, AssistantTimelineFilter, ClientError,
+    ConnectionRouter, DockClient, IdentityStore, LocalDockEndpoint, MachineKind, ModelRef,
 };
 
 #[tokio::main]
@@ -140,6 +140,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let listed = client.assistant_memories(&in_use, None, 20).await?;
     assert_eq!(listed.memories.len(), 1);
+    // A memory is dated by when it was said, not by when it was written.
+    assert_eq!(added.said_at.as_deref(), Some(hit.at.as_str()));
+
+    // Her timeline is written by the model, which this gate has none of: empty, and a line that
+    // does not exist is refused by its own code.
+    assert!(
+        client
+            .assistant_timeline(&AssistantTimelineFilter::default(), None, 20)
+            .await?
+            .episodes
+            .is_empty()
+    );
+    match client.assistant_episode("1").await {
+        Err(ClientError::Host { code, .. }) if code == "assistant_episode_not_found" => {}
+        other => return Err(format!("expected no timeline line, got {other:?}").into()),
+    }
 
     // Rewritten and loaded every session; a change from the version before is refused.
     let edit = |state| AssistantMemoryEdit {

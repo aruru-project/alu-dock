@@ -1,6 +1,6 @@
 //! The personal assistant kept on Main (card #295): her persona, the owner's hand-written
 //! notes, what a new assistant session loads, the conversations she took part in, the
-//! memories made from them and the model that makes them.
+//! memories and the timeline made from them and the model that makes them.
 //! Requests carry no `hostId`; the connected Main answers.
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -147,6 +147,10 @@ pub struct AssistantMemory {
     pub author: AssistantMemoryAuthor,
     pub created_at: String,
     pub updated_at: String,
+    /// When it was said: the earliest place it was said, or when it was written without one.
+    /// A Main before the timeline does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said_at: Option<String>,
     /// Goes up with every change; a change names the revision it was made from.
     pub revision: u64,
     /// The earliest places it was said, `source_count` in all.
@@ -212,6 +216,66 @@ pub struct AssistantMemoryEdit {
     pub resident: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<AssistantMemoryState>,
+}
+
+/// A timeline line is in use, or forgotten at the owner's word.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantEpisodeState {
+    Active,
+    Forgotten,
+}
+
+/// One line of her timeline: a stretch of one conversation, from the first entry it covers to
+/// the last, saying what the two of them were doing or talking about.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantEpisode {
+    pub id: String,
+    pub session: AssistantSessionInfo,
+    pub from_at: String,
+    pub to_at: String,
+    pub text: String,
+    pub state: AssistantEpisodeState,
+    /// Who wrote it last: extraction, the assistant in a conversation, or the owner.
+    pub author: AssistantMemoryAuthor,
+    pub created_at: String,
+    pub updated_at: String,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTimelineList {
+    /// Newest first by when each stretch began.
+    pub episodes: Vec<AssistantEpisode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Which timeline lines a list shows: those overlapping a time range, holding every word of
+/// `query`; without `state`, those in use.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantTimelineFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AssistantEpisodeState>,
+}
+
+/// What a change to one timeline line sets; a field left out stays as it is.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantEpisodeEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AssistantEpisodeState>,
 }
 
 /// The whole text a new assistant session loads now, and when it was put together.
@@ -404,6 +468,25 @@ struct MemoryUpdateParams<'a> {
 }
 
 #[derive(Serialize)]
+struct TimelineListParams<'a> {
+    #[serde(flatten)]
+    filter: &'a AssistantTimelineFilter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
+    limit: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EpisodeUpdateParams<'a> {
+    operation_id: &'a str,
+    id: &'a str,
+    revision: u64,
+    #[serde(flatten)]
+    edit: &'a AssistantEpisodeEdit,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsSetParams<'a> {
     operation_id: &'a str,
@@ -580,6 +663,62 @@ impl DockClient {
         self.request(
             "assistant.memory.update",
             &MemoryUpdateParams {
+                operation_id,
+                id,
+                revision,
+                edit,
+            },
+            ASSISTANT,
+            Some(operation_id),
+        )
+        .await
+    }
+
+    /// Her timeline, newest first: one line per stretch of a conversation saying what the two of
+    /// them were doing; a time range lists the lines overlapping it.
+    pub async fn assistant_timeline(
+        &self,
+        filter: &AssistantTimelineFilter,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<AssistantTimelineList> {
+        self.request(
+            "assistant.timeline.list",
+            &TimelineListParams {
+                filter,
+                cursor,
+                limit,
+            },
+            ASSISTANT,
+            None,
+        )
+        .await
+    }
+
+    pub async fn assistant_episode(&self, id: &str) -> Result<AssistantEpisode> {
+        self.request(
+            "assistant.timeline.get",
+            &MemoryGetParams { id },
+            ASSISTANT,
+            None,
+        )
+        .await
+    }
+
+    /// Rewrites a timeline line, forgets it or restores it. Main refuses with
+    /// `assistant_episode_changed`, changing nothing, when `revision` is no longer current.
+    pub async fn update_assistant_episode(
+        &self,
+        id: &str,
+        revision: u64,
+        edit: &AssistantEpisodeEdit,
+        operation_id: Option<&str>,
+    ) -> Result<AssistantEpisode> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        self.request(
+            "assistant.timeline.update",
+            &EpisodeUpdateParams {
                 operation_id,
                 id,
                 revision,

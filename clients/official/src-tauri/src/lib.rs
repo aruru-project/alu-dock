@@ -254,6 +254,8 @@ pub fn run() {
             work::assistant_memory,
             work::add_assistant_memory,
             work::update_assistant_memory,
+            work::assistant_timeline,
+            work::update_assistant_episode,
             work::assistant_settings,
             work::set_assistant_settings,
             work::list_workspace,

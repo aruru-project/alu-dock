@@ -2,8 +2,8 @@
 import { onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { BookUser, Brain, Eye, NotebookPen, RefreshCw, Search, Settings2, Sparkles, X } from '@lucide/vue'
-import { assistantEntryLabel, assistantSessionLabel, assistantTime } from '../lib/assistant'
-import type { AssistantSearchHit } from '../lib/types'
+import { assistantEntryLabel, assistantSessionLabel, assistantSpan, assistantTime } from '../lib/assistant'
+import type { AssistantEpisode, AssistantSearchHit } from '../lib/types'
 import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
@@ -18,8 +18,10 @@ const emit = defineEmits<{ close: [] }>()
 const app = useAppStore()
 const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
-const { search, reading } = assistant
+const { search, reading, lineEdit } = assistant
 const { preview, info, canSearch } = storeToRefs(assistant)
+/** One timeline line may say at most this much; Main refuses longer. */
+const LINE_CHARS = 300
 const surfaces = useSurfacesStore()
 const { assistantSection: section } = storeToRefs(surfaces)
 
@@ -64,6 +66,9 @@ onUnmounted(surfaces.onAssistantBack(() => {
 
 function hitPlace(hit: AssistantSearchHit) {
   return [assistantSessionLabel(hit.session), hit.session.machine].filter(Boolean).join(' · ')
+}
+function linePlace(line: AssistantEpisode) {
+  return [assistantSessionLabel(line.session), line.session.machine].filter(Boolean).join(' · ')
 }
 </script>
 
@@ -129,7 +134,7 @@ function hitPlace(hit: AssistantSearchHit) {
     <main v-else class="assistant-content">
       <div class="assistant-intro">
         <h3>搜索对话</h3>
-        <p>在她经历过的对话里找。几个词用空格分开，要全部出现才算找到；只选日期不填词，就列出那几天的对话。</p>
+        <p>在她经历过的对话里找。几个词用空格分开，要全部出现才算找到；只选日期不填词，就列出那几天的时间线和对话。时间线是后台按对话写的目录，一段一行，写那段时间你们在做什么；写错了可以改写或忘掉，你改过的行后台不再动。</p>
       </div>
       <form class="assistant-search" @submit.prevent="assistant.runSearch()">
         <input v-model="search.query" class="ui-dialog-input ui-dialog-search" type="search" placeholder="要找的词（选了日期可以不填）" aria-label="要找的词" spellcheck="false" />
@@ -142,6 +147,37 @@ function hitPlace(hit: AssistantSearchHit) {
       <AssistantConversation v-if="reading.place" :reading="reading" back-label="← 返回结果" @back="assistant.closeContext()" @more="assistant.readMore" />
 
       <template v-else-if="search.shown">
+        <section v-if="search.timelineSupported" class="assistant-timeline" aria-label="时间线">
+          <h4>时间线</h4>
+          <div v-if="search.timelineError && !search.episodes.length" class="assistant-error" role="alert"><span>{{ search.timelineError }}</span></div>
+          <ul v-else-if="search.episodes.length" class="assistant-timeline-list">
+            <li v-for="line in search.episodes" :key="line.id" class="assistant-timeline-line" :class="{ 'is-forgotten': line.state === 'forgotten' }">
+              <span class="assistant-timeline-meta"><span>{{ assistantSpan(line.fromAt, line.toAt) }}</span><span>{{ linePlace(line) }}</span><span v-if="line.author === 'owner'">你改过</span><span v-if="line.state === 'forgotten'">已忘掉</span></span>
+              <template v-if="lineEdit.id === line.id">
+                <textarea v-model="lineEdit.text" class="assistant-timeline-editor" rows="2" :maxlength="LINE_CHARS" aria-label="改写这一行" spellcheck="false" />
+                <span class="assistant-timeline-actions">
+                  <button type="button" class="button primary" :disabled="!!lineEdit.pending || !lineEdit.text.trim()" @click="assistant.saveLineEdit()">{{ lineEdit.pending === line.id ? '正在保存…' : '保存' }}</button>
+                  <button type="button" class="button secondary" :disabled="!!lineEdit.pending" @click="assistant.cancelLineEdit()">取消</button>
+                </span>
+              </template>
+              <template v-else>
+                <span class="assistant-timeline-text">{{ line.text }}</span>
+                <span class="assistant-timeline-actions">
+                  <button v-if="line.state === 'forgotten'" type="button" class="assistant-timeline-action" :disabled="!!lineEdit.pending" @click="assistant.restoreLine(line)">{{ lineEdit.pending === line.id ? '正在恢复…' : '恢复' }}</button>
+                  <template v-else>
+                    <button type="button" class="assistant-timeline-action" :disabled="!!lineEdit.pending" @click="assistant.startLineEdit(line)">改写</button>
+                    <button type="button" class="assistant-timeline-action" :disabled="!!lineEdit.pending" @click="assistant.forgetLine(line)">{{ lineEdit.pending === line.id ? '正在忘掉…' : '忘掉' }}</button>
+                  </template>
+                </span>
+              </template>
+              <p v-if="lineEdit.outcome?.id === line.id" class="assistant-timeline-outcome" :class="{ 'is-failed': lineEdit.outcome.state === 'failed' }" role="status">{{ lineEdit.outcome.message }}</p>
+            </li>
+          </ul>
+          <p v-else class="assistant-empty">{{ search.shown.query ? '时间线里没有提到这几个词的行。' : '这段时间还没有时间线：后台读过对话后才会写上。' }}</p>
+          <div v-if="search.timelineError && search.episodes.length" class="assistant-error" role="alert"><span>{{ search.timelineError }}</span></div>
+          <button v-if="search.episodesCursor" type="button" class="assistant-more" :disabled="search.loadingMoreEpisodes" @click="assistant.timelineMore()">{{ search.loadingMoreEpisodes ? '正在读取…' : '更早的时间线' }}</button>
+          <h4>对话</h4>
+        </section>
         <div class="assistant-results" role="list" aria-label="搜索结果">
           <button v-for="hit in search.hits" :key="`${hit.session.sessionId}:${hit.entryId}`" type="button" role="listitem" class="assistant-hit" @click="assistant.openContext(hit)">
             <span class="assistant-hit-meta"><span>{{ assistantTime(hit.at) }}</span><span>{{ hitPlace(hit) }}</span><span>{{ assistantEntryLabel(hit.kind) }}</span></span>
@@ -186,6 +222,21 @@ function hitPlace(hit: AssistantSearchHit) {
 .assistant-search > input { min-width: 180px; flex: 1 1 220px; }
 .assistant-search label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .assistant-search label input { width: 150px; }
+.assistant-timeline { display: grid; gap: 8px; }
+.assistant-timeline h4 { margin: 4px 0 0; color: var(--alu-text-dim); font-size: var(--alu-meta-size); font-weight: 650; }
+.assistant-timeline-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.assistant-timeline-line { display: grid; gap: 5px; padding: 9px 11px; border: 1px solid var(--alu-border); border-left: 3px solid var(--alu-accent-border); border-radius: 9px; background: var(--alu-bg-raised); }
+.assistant-timeline-line.is-forgotten { border-left-color: var(--alu-border); opacity: .7; }
+.assistant-timeline-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--alu-text-muted); font-size: var(--alu-micro-size); }
+.assistant-timeline-text { color: var(--alu-text); font: var(--alu-meta-size)/1.6 var(--font-reading); overflow-wrap: anywhere; white-space: pre-wrap; }
+.assistant-timeline-line.is-forgotten .assistant-timeline-text { text-decoration: line-through; }
+.assistant-timeline-editor { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--alu-border-light); border-radius: 7px; background: var(--alu-bg); color: var(--alu-text); font: var(--alu-meta-size)/1.6 var(--font-reading); resize: vertical; }
+.assistant-timeline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.assistant-timeline-action { padding: 2px 6px; cursor: pointer; border: 0; border-radius: 6px; background: transparent; color: var(--alu-accent); font-size: var(--alu-micro-size); }
+.assistant-timeline-action:hover:not(:disabled) { background: var(--alu-hover); }
+.assistant-timeline-action:disabled { cursor: default; opacity: .6; }
+.assistant-timeline-outcome { margin: 0; color: var(--alu-text-dim); font-size: var(--alu-micro-size); }
+.assistant-timeline-outcome.is-failed { color: var(--alu-danger); }
 .assistant-results { display: grid; gap: 6px; }
 .assistant-hit { display: grid; gap: 4px; width: 100%; padding: 9px 11px; cursor: pointer; border: 1px solid var(--alu-border); border-radius: 9px; background: var(--alu-bg-raised); text-align: left; }
 .assistant-hit:hover { border-color: var(--alu-border-light); background: var(--alu-hover); }

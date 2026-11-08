@@ -6,6 +6,8 @@ import type {
   AssistantContextResult,
   AssistantDocument,
   AssistantDocumentName,
+  AssistantEpisode,
+  AssistantEpisodeEdit,
   AssistantInfo,
   AssistantMemory,
   AssistantMemoryDetail,
@@ -16,6 +18,8 @@ import type {
   AssistantPreview,
   AssistantSearchResult,
   AssistantSettings,
+  AssistantTimelineFilter,
+  AssistantTimelineList,
   BootstrapPayload,
   CommandCompletionsResult,
   CommandContentResult,
@@ -692,6 +696,16 @@ export async function addAssistantMemory(memory: { topic: AssistantMemoryTopic; 
 /** The Host refuses with `assistant_memory_changed`, changing nothing, when `revision` is no longer current. */
 export async function updateAssistantMemory(id: string, revision: number, edit: AssistantMemoryEdit, operationId: string, context: ConnectionContext): Promise<AssistantMemory> {
   return native<AssistantMemory>('update_assistant_memory', { ...context, id, revision, edit, operationId })
+}
+
+/** Her timeline, newest first: one line per stretch of a conversation saying what the two of them were doing; a time range lists the lines overlapping it. */
+export async function listAssistantTimeline(filter: AssistantTimelineFilter, cursor: string | undefined, limit: number, context: ConnectionContext): Promise<AssistantTimelineList> {
+  return native<AssistantTimelineList>('assistant_timeline', { ...context, filter, cursor: cursor ?? null, limit })
+}
+
+/** Rewrites a line, forgets it or restores it. The Host refuses with `assistant_episode_changed`, changing nothing, when `revision` is no longer current. */
+export async function updateAssistantEpisode(id: string, revision: number, edit: AssistantEpisodeEdit, operationId: string, context: ConnectionContext): Promise<AssistantEpisode> {
+  return native<AssistantEpisode>('update_assistant_episode', { ...context, id, revision, edit, operationId })
 }
 
 export async function getAssistantSettings(context: ConnectionContext): Promise<AssistantSettings> {

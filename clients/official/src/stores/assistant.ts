@@ -2,12 +2,12 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
 import { useConversationReading } from '../lib/assistantReading'
 import {
-  getAssistantDocument, getAssistantInfo, getAssistantPreview, searchAssistant, setAssistantDocument,
+  getAssistantDocument, getAssistantInfo, getAssistantPreview, listAssistantTimeline, searchAssistant, setAssistantDocument, updateAssistantEpisode,
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
 import { replyLost } from '../lib/operationBinding'
 import type {
-  AssistantDocument, AssistantDocumentName, AssistantInfo, AssistantPreview, AssistantSearchHit, ConnectionContext,
+  AssistantDocument, AssistantDocumentName, AssistantEpisode, AssistantEpisodeEdit, AssistantInfo, AssistantPreview, AssistantSearchHit, ConnectionContext,
 } from '../lib/types'
 import { userErrorMessage } from '../lib/userError'
 import { useAppStore } from './app'
@@ -36,6 +36,8 @@ interface InfoEntry {
 }
 
 const SEARCH_PAGE = 20
+const TIMELINE_PAGE = 20
+const LOST = '连接中断，没收到结果。请稍后再试。'
 
 function errorCode(cause: unknown) {
   return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
@@ -214,7 +216,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     }
   }
 
-  // ── Searching her conversations ──
+  // ── Searching her conversations and her timeline ──
   const search = reactive({
     query: '', from: '', to: '',
     /** The search the list shows; reading more continues it, not the fields being edited. */
@@ -225,6 +227,13 @@ export const useAssistantStore = defineStore('assistant', () => {
     loadingMore: false,
     error: '',
     moreError: '',
+    /** The timeline lines of the same words and time, newest first, above what was said. */
+    episodes: [] as AssistantEpisode[],
+    episodesCursor: undefined as string | undefined,
+    loadingMoreEpisodes: false,
+    /** A Main before the timeline has none to show; nothing is said about it. */
+    timelineSupported: true,
+    timelineError: '',
   })
   let searchEpoch = 0
 
@@ -250,17 +259,102 @@ export const useAssistantStore = defineStore('assistant', () => {
     search.moreError = ''
     closeContext()
     try {
-      const page = await currentConnectionCall(app, (ctx) => searchAssistant(shown.query, shown, undefined, SEARCH_PAGE, ctx))
+      const [page, timeline] = await Promise.all([
+        currentConnectionCall(app, (ctx) => searchAssistant(shown.query, shown, undefined, SEARCH_PAGE, ctx)),
+        currentConnectionCall(app, (ctx) => listAssistantTimeline(timelineFilter(shown), undefined, TIMELINE_PAGE, ctx)).then((list) => ({ list }), (cause: unknown) => ({ cause })),
+      ])
       if (epoch !== searchEpoch) return
       search.shown = shown
       search.hits = page.hits
       search.nextCursor = page.nextCursor
+      lineEdit.id = ''
+      if ('list' in timeline) {
+        search.timelineSupported = true
+        search.timelineError = ''
+        search.episodes = timeline.list.episodes
+        search.episodesCursor = timeline.list.nextCursor
+      } else {
+        // An older Main does not know the timeline; the search itself still stands.
+        search.timelineSupported = errorCode(timeline.cause) !== 'unknown_request'
+        search.timelineError = search.timelineSupported ? userErrorMessage(timeline.cause, '暂时读不到这段时间的时间线。请稍后重试。') : ''
+        search.episodes = []
+        search.episodesCursor = undefined
+      }
     } catch (cause) {
       if (epoch === searchEpoch) search.error = userErrorMessage(cause, '这次没有搜成。请稍后重试。')
     } finally {
       if (epoch === searchEpoch) search.loading = false
     }
   }
+
+  function timelineFilter(shown: NonNullable<typeof search.shown>) {
+    return { ...(shown.query ? { query: shown.query } : {}), ...(shown.from ? { from: shown.from } : {}), ...(shown.to ? { to: shown.to } : {}) }
+  }
+
+  async function timelineMore() {
+    const shown = search.shown
+    const cursor = search.episodesCursor
+    if (!shown || !cursor || search.loadingMoreEpisodes || search.loading || shown.connectionId !== app.activeConnectionId) return
+    const epoch = searchEpoch
+    search.loadingMoreEpisodes = true
+    search.timelineError = ''
+    try {
+      const list = await currentConnectionCall(app, (ctx) => listAssistantTimeline(timelineFilter(shown), cursor, TIMELINE_PAGE, ctx))
+      if (epoch !== searchEpoch) return
+      search.episodes = [...search.episodes, ...list.episodes]
+      search.episodesCursor = list.nextCursor
+    } catch (cause) {
+      if (epoch === searchEpoch) search.timelineError = userErrorMessage(cause, '没有读到更多时间线。请重试。')
+    } finally {
+      if (epoch === searchEpoch) search.loadingMoreEpisodes = false
+    }
+  }
+
+  // ── Changing a timeline line: rewrite, forget, restore ──
+  /** The line being rewritten in place, and the outcome of the last change to any line. */
+  const lineEdit = reactive({
+    id: '',
+    text: '',
+    pending: '' as string,
+    outcome: null as null | { id: string; state: 'done' | 'failed'; message: string },
+  })
+  function startLineEdit(line: AssistantEpisode) {
+    if (lineEdit.pending) return
+    lineEdit.id = line.id
+    lineEdit.text = line.text
+    lineEdit.outcome = null
+  }
+  function cancelLineEdit() {
+    if (!lineEdit.pending) lineEdit.id = ''
+  }
+  function saveLineEdit() {
+    const line = search.episodes.find((item) => item.id === lineEdit.id)
+    const text = lineEdit.text.trim()
+    if (!line || !text || text === line.text) { lineEdit.id = ''; return }
+    return changeLine(line, { text })
+  }
+  /** Changes a line from the version shown; one changed meanwhile is refused, and the search read again shows it. */
+  async function changeLine(line: AssistantEpisode, edit: AssistantEpisodeEdit) {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    if (!context || lineEdit.pending) return
+    const epoch = searchEpoch
+    lineEdit.pending = line.id
+    lineEdit.outcome = null
+    try {
+      const changed = await updateAssistantEpisode(line.id, line.revision, edit, crypto.randomUUID(), context)
+      if (epoch !== searchEpoch) return
+      search.episodes = search.episodes.map((item) => (item.id === changed.id ? changed : item))
+      if (lineEdit.id === line.id) lineEdit.id = ''
+      lineEdit.outcome = { id: line.id, state: 'done', message: edit.text !== undefined ? '已改写。新开的助手会话按改后的读。' : edit.state === 'forgotten' ? '已忘掉这一行：不再列出、不再载入，它覆盖的原话还在。' : '已恢复这一行。' }
+    } catch (cause) {
+      if (epoch !== searchEpoch) return
+      lineEdit.outcome = { id: line.id, state: 'failed', message: replyLost(cause) ? LOST : userErrorMessage(cause, '没有改成。请稍后重试。') }
+    } finally {
+      if (epoch === searchEpoch) lineEdit.pending = ''
+    }
+  }
+  const forgetLine = (line: AssistantEpisode) => changeLine(line, { state: 'forgotten' })
+  const restoreLine = (line: AssistantEpisode) => changeLine(line, { state: 'active' })
 
   async function searchMore() {
     const shown = search.shown
@@ -293,7 +387,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   // A search or open conversation belongs to the connection it was read from.
   watch(() => app.activeConnectionId, () => {
     searchEpoch++
-    Object.assign(search, { shown: null, hits: [], nextCursor: undefined, loading: false, loadingMore: false, error: '', moreError: '' })
+    Object.assign(search, { shown: null, hits: [], nextCursor: undefined, loading: false, loadingMore: false, error: '', moreError: '', episodes: [], episodesCursor: undefined, loadingMoreEpisodes: false, timelineSupported: true, timelineError: '' })
+    Object.assign(lineEdit, { id: '', text: '', pending: '', outcome: null })
     closeContext()
   })
 
@@ -301,7 +396,8 @@ export const useAssistantStore = defineStore('assistant', () => {
     infos, available, info, current, loadInfo,
     editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
-    search, canSearch, runSearch, searchMore,
+    search, canSearch, runSearch, searchMore, timelineMore,
+    lineEdit, startLineEdit, cancelLineEdit, saveLineEdit, forgetLine, restoreLine,
     reading, openContext, readMore, closeContext,
   }
 })

@@ -5,8 +5,8 @@
 import type { InvokeArgs } from '@tauri-apps/api/core'
 import type { SessionContext } from '../lib/bridge'
 import type {
-  AssistantContextResult, AssistantDocument, AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter,
-  AssistantSearchResult, AssistantSettings, BootstrapPayload, ClientPreferences, CommandsResult, DesktopShellStatus, HostCatalog,
+  AssistantContextResult, AssistantDocument, AssistantEpisode, AssistantEpisodeEdit, AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter,
+  AssistantSearchResult, AssistantSettings, AssistantTimelineFilter, BootstrapPayload, ClientPreferences, CommandsResult, DesktopShellStatus, HostCatalog,
   ModelsResult, SavedSessionPage, SessionTree, SettingsResult, ToolsResult, Work, WorkspacePage,
 } from '../lib/types'
 
@@ -191,7 +191,7 @@ function sampleData() {
   const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
   const said = (entryId: string, minutes: number) => ({ sessionId: assistantSession.sessionId, entryId, at: ago(minutes) })
   const memory = (fields: Partial<AssistantMemory> & Pick<AssistantMemory, 'id' | 'topic' | 'text'>, minutes: number): AssistantMemory => ({
-    resident: false, state: 'active', author: 'extraction', createdAt: ago(minutes), updatedAt: ago(minutes), revision: 1, sources: [], sourceCount: 0, ...fields,
+    resident: false, state: 'active', author: 'extraction', createdAt: ago(minutes), updatedAt: ago(minutes), saidAt: fields.sources?.[0]?.at ?? ago(minutes), revision: 1, sources: [], sourceCount: 0, ...fields,
   })
   const assistantMemories: AssistantMemory[] = [
     memory({ id: '14', topic: 'preferences', text: '主人不吃香菜，点外卖要避开。', resident: true, sources: [said('a1', 50)], sourceCount: 1 }, 40),
@@ -207,11 +207,21 @@ function sampleData() {
     { at: item.createdAt, author: item.revision > 1 && item.author !== 'owner' ? 'extraction' as const : item.author, action: 'added' as const, text: item.text },
   ]]))
   const assistantSettings: AssistantSettings = { extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' } }
+  // Her timeline: what the two of them were doing, one line per stretch of a conversation, newest first.
+  const line = (id: string, fromMinutes: number, toMinutes: number, text: string, fields: Partial<AssistantEpisode> = {}): AssistantEpisode => ({
+    id, session: assistantSession, fromAt: ago(fromMinutes), toAt: ago(toMinutes), text, state: 'active', author: 'extraction', createdAt: ago(toMinutes), updatedAt: ago(toMinutes), revision: 1, ...fields,
+  })
+  const assistantTimeline: AssistantEpisode[] = [
+    line('5', 50, 40, '早上聊天气和今天的日程，提醒十点的评审要带伞。'),
+    line('4', 1500, 1380, '在 alu_dock 做助手记忆的后台提炼，调触发时机。', { session: { ...assistantSession, sessionId: 'preview-older', name: undefined, workId: 'preview-retired', cwd: '/workshop/alu_dock' } }),
+    line('3', 2900, 2800, '深夜睡不着，聊艾尔登法环的新档。', { author: 'owner', revision: 2 }),
+    line('2', 4300, 4200, '去体检前问了注意事项。', { state: 'forgotten', author: 'owner', revision: 2 }),
+  ]
 
   const clientPreferences: ClientPreferences = { revision: 1, windowsAwayDelay: 'one_minute', windowsAwaySupported: true }
   const desktopShell: DesktopShellStatus = { supported: false, hostReady: false, loginStartEnabled: false, autoStartLocalHost: false }
   return { previewCommands, previewModels, previewTools, previewSettings, previewSessions, previewTree, previewBootstrap, previewCatalog, clientPreferences, desktopShell,
-    assistantWorkspace, assistantDocuments, assistantSearch, assistantContext, assistantMemories, assistantMemoryHistory, assistantSettings, ago }
+    assistantWorkspace, assistantDocuments, assistantSearch, assistantContext, assistantMemories, assistantMemoryHistory, assistantTimeline, assistantSettings, ago }
 }
 
 let data: ReturnType<typeof sampleData> | undefined
@@ -290,6 +300,27 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       const found = preview.assistantMemories.find((item) => item.id === args.id)
       if (!found) throw { code: 'assistant_memory_not_found', message: 'No memory has this number.' }
       return { memory: structuredClone(found), history: structuredClone(preview.assistantMemoryHistory.get(found.id) ?? []) }
+    }
+    case 'assistant_timeline': {
+      await delay(160)
+      const filter = args.filter as AssistantTimelineFilter
+      const words = (filter.query ?? '').split(/\s+/u).filter(Boolean)
+      const from = filter.from ? Date.parse(filter.from) : Number.NEGATIVE_INFINITY
+      const to = filter.to ? Date.parse(filter.to) : Number.POSITIVE_INFINITY
+      const matching = preview.assistantTimeline
+        .filter((item) => item.state === (filter.state ?? 'active') && Date.parse(item.toAt) >= from && Date.parse(item.fromAt) < to
+          && words.every((word) => item.text.includes(word)) && (!args.cursor || Number(item.id) < Number(args.cursor)))
+        .sort((left, right) => Date.parse(right.fromAt) - Date.parse(left.fromAt))
+      const page = matching.slice(0, Number(args.limit))
+      return { episodes: structuredClone(page), ...(matching.length > page.length ? { nextCursor: page.at(-1)!.id } : {}) }
+    }
+    case 'update_assistant_episode': {
+      await delay(200)
+      const found = preview.assistantTimeline.find((item) => item.id === args.id)
+      if (!found) throw { code: 'assistant_episode_not_found', message: 'No timeline line has this number.' }
+      if (found.revision !== args.revision) throw { code: 'assistant_episode_changed', message: 'The line changed since it was read.' }
+      Object.assign(found, args.edit as AssistantEpisodeEdit, { author: 'owner', updatedAt: new Date().toISOString(), revision: found.revision + 1 })
+      return structuredClone(found)
     }
     case 'add_assistant_memory': {
       await delay(220)
