@@ -1,6 +1,5 @@
 import {
   ASSISTANT_MEMORY_TOPICS,
-  ASSISTANT_TOOL_NAMES,
   MAX_ASSISTANT_EPISODE_CHARS,
   MAX_ASSISTANT_MEMORY_CHARS,
   type AssistantMemoryTopic,
@@ -21,21 +20,21 @@ import type { EpisodeRow } from "./timeline.js";
  * of the conversation saying what they were doing, work included, so that what did not become a
  * memory is still there to turn to.
  *
+ * The model reads only what was said, by the owner, by her and by other Works, and every word of it
+ * (owner's decision of 2026-11-10): not what tools returned or which tools she called, not the
+ * summaries Pi writes when it compacts a conversation, which repeat what was said under a later time.
+ * Of her memories it is shown those loaded every session, as she is; the others it looks up with
+ * SEARCH_TOOL, as she does, rather than being handed a pile of them.
+ *
  * The persona may describe any assistant, so the prompts call her "助手" and let the persona name her;
  * "主人" is the product's word for her owner.
  */
 
-const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
-
-/** A conversation entry's words in a prompt; longer ones keep their start and end. */
-const SPOKEN_CHARS = 4_000;
-const TOOL_CALL_CHARS = 160;
-const TOOL_RESULT_CHARS = 300;
-const SUMMARY_CHARS = 2_000;
-/** What a memory being checked shows of each place it was said. */
-const SOURCE_CHARS = 300;
-const PERSONA_CHARS = 4_000;
-const NOTES_CHARS = 20_000;
+/** Rounds of searches the model may make before it answers. */
+export const SEARCH_ROUNDS = 3;
+/** Groups of words one search may look up, and memories it lists for each. */
+const SEARCH_QUERIES = 5;
+export const SEARCH_HITS = 15;
 
 const RULES_COMMON = `- 密码、密钥、令牌、证件号码这类东西不记。
 - 主人要她忘掉的事不记。
@@ -50,13 +49,15 @@ const EXTRACTION_SYSTEM = `你替一位个人助手整理她的记忆，并记�
 
 记忆是为以后准备的：下次和主人聊天时，她要像一个认识主人很久的人，记得主人是什么样的人、他们之间怎么相处、一起经历过什么。每段对话的原话都会留着，她随时能搜；记忆要记的，是她以后不翻原话也该知道的事。做了什么工作、怎么做的，原话里都有，时间线里也会写，记忆里不必记：修了什么问题、升了什么版本、测试过没过，这些细节都不是记忆。但主人这阵子在做什么项目、为什么做、对它多上心，是他生活的一部分，和别的事一样看值不值得记。值得记的是这些事透露出的主人这个人、他们的关系，和一个老朋友以后会提起的经历：他难熬或高兴的时候、生活里的变化、对他要紧的事。什么值得记，由你判断。
 
-时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。每行不超过 80 字，用主人平时说的语言；起止时间会自动标在行前，行里不用再写日期；密码密钥、主人要她忘掉的事，时间线里同样不写。
+时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字（路径、命令、版本号、测试个数都不写）。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。每行不超过 80 字，用主人平时说的语言；起止时间会自动标在行前，行里不用再写日期；密码密钥、主人要她忘掉的事，时间线里同样不写。
 
 必须遵守：
 ${RULES_COMMON}
 - 每条记忆、每行时间线都写明出自这次对话的哪几条（方括号里的编号）。
 - 和已有记忆说的是同一件事，就改写那一条，别另加；已有的记忆不再成立，就作废它。
 - 没有值得记的记忆，就不改记忆；时间线照常写。
+
+下面只列出了每次都带着的记忆（常驻的），其他记忆没有列出。打算新记、改写或作废记忆之前，先用 search_memories 查一查：这件事以前记过没有、有没有和它矛盾的旧记忆。查到了就改写或作废那一条，别另加一条。它按字面找：一组里用空格隔开的词都要原样出现在记忆里，所以一组最好只放一个词，一次多查几组、换几种说法（比如“上海”“搬家”“工作”）；最多查 ${SEARCH_ROUNDS} 轮。没有要记的就不用查。只能改写或作废列出的和查到的记忆。
 
 ${TOPICS_LINE}
 ${RESIDENT_LINE}
@@ -80,6 +81,8 @@ const DREAM_SYSTEM = `你替一位个人助手做一次记忆整理，就像人�
 - 让每次都带上的那部分（常驻）保持精炼：说同一件事的常驻记忆合成一条；常驻记忆里夹带的、已经过去的某一天的细节去掉（经历里有就行）；按下面 resident 的说明不该常驻的，改成不常驻（resident 设为 false）。带上的越精炼，她越容易照着做。
 - 没有把握就不要动。
 
+下面只列出了要看的记忆和常驻的记忆。要找和它们说同一件事、或和它们矛盾的其他记忆，用 search_memories 查；它按字面找，一组最好只放一个词，一次多查几组、换几种说法，最多查 ${SEARCH_ROUNDS} 轮。只能改写、作废、合并列出的和查到的记忆。
+
 必须遵守：
 ${RULES_COMMON}
 
@@ -95,17 +98,19 @@ ${RESIDENT_LINE}
 ]}
 没有要改的就回复 {"changes":[]}。`;
 
+/** Last in a prompt, so the answer that comes after any searches still keeps to the agreed form. */
+const ANSWER_REMINDER = "需要的话先查记忆；最后只回复一个 JSON 对象，格式照前面说的。每条要写出处的，把编号单独写成 from 数组，不要写进 text。";
+
 export interface ModelPrompt { system: string; prompt: string }
 
 /** A memory as the model sees it, with the words it came from when it is being checked. */
-export interface ShownMemory { row: MemoryRow; sources?: string[] }
+export interface ShownMemory { row: MemoryRow; sources?: string[]; unshownSources?: number }
 
 export interface ExtractionInput {
   persona: string;
   notes: string;
-  memories: ShownMemory[];
-  /** Memories in use left out to keep the prompt short. */
-  omitted: number;
+  /** The memories loaded every session; the model searches for the others. */
+  resident: ShownMemory[];
   /** This conversation's latest timeline lines, oldest first, which the model may extend. */
   episodes: EpisodeRow[];
   /** What came just before, already read. */
@@ -119,14 +124,14 @@ export function extractionPrompt(input: ExtractionInput): ModelPrompt {
     system: EXTRACTION_SYSTEM,
     prompt: [
       ...background(input.persona, input.notes),
-      "## 已有的记忆",
-      input.memories.length === 0 ? "（还没有。）" : input.memories.map((memory) => memoryLine(memory)).join("\n"),
-      ...(input.omitted > 0 ? [`（另有 ${input.omitted} 条较早的不常驻记忆没有列出。）`] : []),
+      "## 每次都带着的记忆（其他的用 search_memories 查）",
+      input.resident.length === 0 ? "（没有。）" : input.resident.map((memory) => memoryLine(memory)).join("\n"),
       "## 这个会话已有的时间线（最近几行）",
       input.episodes.length === 0 ? "（还没有。）" : input.episodes.map((row) => episodeLine(row)).join("\n"),
       ...(input.leadIn.length === 0 ? [] : ["## 前面已经读过的对话（帮你理解上下文，不从这里记）", input.leadIn.join("\n")]),
       "## 这次要读的对话（“Work 消息”是别的 Work 发给她的，不是主人说的：它做了什么可以写进时间线，但别把它的话当成主人的话或主人的情况记进记忆）",
       input.lines.map((line, index) => `[${index + 1}] ${line}`).join("\n"),
+      ANSWER_REMINDER,
     ].join("\n\n"),
   };
 }
@@ -136,9 +141,9 @@ export interface DreamInput {
   notes: string;
   /** Changed since the last pass, each with the words it came from. */
   focus: ShownMemory[];
-  /** Others in use to compare with: everything loaded every session and the same topics. */
-  related: ShownMemory[];
-  resident: { count: number; chars: number };
+  /** The others loaded every session, to compare with; the model searches for the rest. */
+  resident: ShownMemory[];
+  residentTotal: { count: number; chars: number };
 }
 
 export function dreamPrompt(input: DreamInput): ModelPrompt {
@@ -148,20 +153,53 @@ export function dreamPrompt(input: DreamInput): ModelPrompt {
       ...background(input.persona, input.notes),
       "## 最近变过的记忆",
       input.focus.map((memory) => memoryLine(memory)).join("\n"),
-      "## 其他相关的记忆（供对照）",
-      input.related.length === 0 ? "（没有。）" : input.related.map((memory) => memoryLine(memory)).join("\n"),
-      `## 常驻的记忆现在共 ${input.resident.count} 条，约 ${input.resident.chars} 字。`,
+      "## 其他常驻的记忆（供对照；不常驻的用 search_memories 查）",
+      input.resident.length === 0 ? "（没有。）" : input.resident.map((memory) => memoryLine(memory)).join("\n"),
+      `## 常驻的记忆现在共 ${input.residentTotal.count} 条，约 ${input.residentTotal.chars} 字。`,
+      ANSWER_REMINDER,
     ].join("\n\n"),
   };
 }
 
+/** Both documents whole: a rule the owner wrote anywhere in them counts. */
 function background(persona: string, notes: string): string[] {
   return [
     "## 她的人设",
-    clip(persona.trim(), PERSONA_CHARS) || "（没有写。）",
+    persona.trim() || "（没有写。）",
     "## 主人手写的设定",
-    clip(notes.trim(), NOTES_CHARS) || "（没有写。）",
+    notes.trim() || "（没有写。）",
   ];
+}
+
+/** The search the model may make of her memories while it reads, as a tool it calls. */
+export const SEARCH_TOOL = {
+  name: "search_memories",
+  description: `查她的记忆（只查在用的）。queries 是几组词，每组里用空格隔开的词都要原样出现在记忆里，所以一组最好只放一个词；每组最多列出 ${SEARCH_HITS} 条，新的在前。`,
+  parameters: {
+    type: "object",
+    properties: {
+      queries: { type: "array", items: { type: "string" }, minItems: 1, maxItems: SEARCH_QUERIES, description: "要查的几组词，比如 [\"上海\", \"搬家\", \"工作\"]。" },
+    },
+    required: ["queries"],
+    additionalProperties: false,
+  },
+} as const;
+
+/** The groups of words a search names, each split into the words that must all occur; undefined when it names none. */
+export function searchQueries(args: Record<string, unknown>): string[][] | undefined {
+  if (!Array.isArray(args.queries)) return undefined;
+  const queries = args.queries.filter((query): query is string => typeof query === "string")
+    .map((query) => query.trim().split(/\s+/u).filter((word) => word.length > 0)).filter((words) => words.length > 0)
+    .slice(0, SEARCH_QUERIES);
+  return queries.length === 0 ? undefined : queries;
+}
+
+/** What one search found, for each group of words. */
+export function searchResultText(found: ReadonlyArray<{ words: string[]; rows: MemoryRow[] }>): string {
+  return found.map(({ words, rows }) => [
+    `## ${words.join(" ")}`,
+    rows.length === 0 ? "（没有。）" : rows.map((row) => memoryLine({ row })).join("\n"),
+  ].join("\n")).join("\n\n");
 }
 
 function memoryLine(memory: ShownMemory): string {
@@ -171,7 +209,8 @@ function memoryLine(memory: ShownMemory): string {
     row.resident === 1 ? "常驻" : "不常驻",
     ...(row.author === "owner" ? ["主人定的"] : row.resident_fixed === 1 ? ["常驻由主人定"] : []),
   ];
-  const sources = (memory.sources ?? []).map((source) => `\n    原话：${source}`).join("");
+  const sources = (memory.sources ?? []).map((source) => `\n    原话：${source}`).join("")
+    + (memory.unshownSources ? `\n    （还有 ${memory.unshownSources} 处原话太长，没有列出。）` : "");
   return `[#${row.id}]（${marks.join("，")}）${row.text}${sources}`;
 }
 
@@ -181,56 +220,20 @@ function episodeLine(row: EpisodeRow): string {
   return `[#${row.id}] ${span}${row.author === "owner" ? "（主人定的，不能改）" : ""} ${row.text}`;
 }
 
-/** An entry as the model reads it, with its local time; undefined for what it need not read. */
-export function spokenLine(row: EntryRow, chars = SPOKEN_CHARS): string | undefined {
-  const words = spoken(row, chars);
-  return words === undefined ? undefined : `${localMinute(new Date(row.at))} ${words}`;
-}
-
-/** Where a memory came from, for checking it against the original words. */
-export function sourceLine(row: EntryRow): string | undefined {
-  return spokenLine(row, SOURCE_CHARS);
-}
-
-function spoken(row: EntryRow, chars: number): string | undefined {
+/**
+ * What was said in one entry as the model reads it, whole, with its local time; undefined for an
+ * entry that is not words said (see SPOKEN in store.ts) or that the owner had her forget. `tail`
+ * keeps only the last that many characters, for words already read and shown again as lead-in.
+ */
+export function spokenLine(row: EntryRow, tail?: number): string | undefined {
   // Forgotten: not to be remembered again.
   if (row.forgotten > 0) return undefined;
-  switch (row.kind) {
-    case "user": return row.text.trim().length === 0 ? undefined : `主人：${clip(row.text, chars)}`;
-    case "assistant": {
-      const calls = toolCalls(row.tool_calls).filter((call) => !OWN_TOOLS.has(call.name))
-        .map((call) => `（用了 ${call.name}：${clip(call.arguments, TOOL_CALL_CHARS)}）`);
-      const text = row.text.trim();
-      if (text.length === 0 && calls.length === 0) return undefined;
-      return `助手：${[clip(text, chars), ...calls].filter((part) => part.length > 0).join(" ")}`;
-    }
-    case "tool_result":
-      if (row.search_text.length === 0 || (row.tool_name !== null && OWN_TOOLS.has(row.tool_name))) return undefined;
-      return `（${row.tool_name ?? "工具"} 的结果）${clip(row.text, Math.min(chars, TOOL_RESULT_CHARS))}`;
-    case "bash": return `（主人在命令行执行）${clip(row.text, Math.min(chars, TOOL_RESULT_CHARS))}`;
-    case "summary": return `（之前对话的摘要）${clip(row.text, Math.min(chars, SUMMARY_CHARS))}`;
-    case "work": return `Work 消息：${clip(row.text, Math.min(chars, SUMMARY_CHARS))}`;
-    default: return undefined;
-  }
-}
-
-function toolCalls(json: string | null): Array<{ name: string; arguments: string }> {
-  if (json === null) return [];
-  try {
-    const calls = JSON.parse(json) as unknown;
-    return Array.isArray(calls) ? calls.filter((call): call is { name: string; arguments: string } => typeof call?.name === "string" && typeof call?.arguments === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-/** Runs of blank space become one; a longer text keeps its first two thirds and its last third. */
-export function clip(text: string, chars: number): string {
-  const flat = text.replace(/[ \t]+/gu, " ").replace(/\n{3,}/gu, "\n\n").trim();
-  const characters = [...flat];
-  if (characters.length <= chars) return flat;
-  const head = Math.floor(chars * 2 / 3);
-  return `${characters.slice(0, head).join("")}……（中间省略）……${characters.slice(characters.length - (chars - head)).join("")}`;
+  const speaker = row.kind === "user" ? "主人" : row.kind === "assistant" ? "助手" : row.kind === "work" ? "Work 消息" : undefined;
+  const words = row.text.replace(/[ \t]+/gu, " ").replace(/\n{3,}/gu, "\n\n").trim();
+  if (speaker === undefined || words.length === 0) return undefined;
+  const characters = [...words];
+  const kept = tail !== undefined && characters.length > tail ? `……${characters.slice(characters.length - tail).join("")}` : words;
+  return `${localMinute(new Date(row.at))} ${speaker}：${kept}`;
 }
 
 export type ExtractionChange =

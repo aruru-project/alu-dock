@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { ModelRuntime, SettingsManager, getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import { AssistantDocuments } from "../src/assistant/documents.js";
-import { AssistantExtraction } from "../src/assistant/extraction.js";
+import { AssistantExtraction, type ExtractionModel } from "../src/assistant/extraction.js";
 import { AssistantMemories } from "../src/assistant/memories.js";
 import { MainModelAccess } from "../src/assistant/model-access.js";
-import { AssistantStore } from "../src/assistant/store.js";
+import { AssistantStore, SPOKEN } from "../src/assistant/store.js";
 import { AssistantTimeline } from "../src/assistant/timeline.js";
 import { writeTransaction } from "../src/assistant/transaction.js";
 import type { AssistantEntry, AssistantEpisode, AssistantMemory, AssistantModelRef } from "../src/core/assistant.js";
@@ -28,7 +28,8 @@ import { MEMORY_CASES, type MemoryCase } from "./assistant-memory-cases.js";
  *
  *   npm run build && node dist/scripts/assistant-memory-eval.js --model PROVIDER/MODEL [--case NAME] [--agent-dir DIR] [--history]
  *
- * --history also lists every change of every memory, to see which pass decided what.
+ * --history also lists every change of every memory and, for each pass, the searches the model made
+ * and its answer, to see which pass decided what.
  */
 
 const CASE_TIMEOUT_MS = 10 * 60_000;
@@ -56,7 +57,20 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
   const memories = new AssistantMemories(store.connection);
   const timeline = new AssistantTimeline(store.connection);
   const problems: string[] = [];
-  const extraction = new AssistantExtraction(store.connection, memories, timeline, documents, new MainModelAccess(create),
+  const searches: string[] = [];
+  const access = new MainModelAccess(create);
+  const traced: ExtractionModel = {
+    complete: async (ref, prompt, signal, tools) => {
+      const pass = prompt.system.includes("时间线") && prompt.system.includes("这次对话的哪几条") ? "reading" : "dreaming";
+      const reply = await access.complete(ref, prompt, signal, tools && {
+        ...tools,
+        list: tools.list.map((tool) => ({ ...tool, run: (args: Record<string, unknown>) => { searches.push(`${pass} searched ${JSON.stringify(args)}`); return tool.run(args); } })),
+      });
+      searches.push(`${pass} answered ${reply.replace(/\s+/gu, " ")}`);
+      return reply;
+    },
+  };
+  const extraction = new AssistantExtraction(store.connection, memories, timeline, documents, traced,
     { idleMs: 0, busyChars: 1e9, chunkChars: 24_000, tickMs: 50, quietMs: 0, dreamChanges: 1, dreamIntervalMs: 1e15 },
     (message) => problems.push(message));
   try {
@@ -65,7 +79,7 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
       const readThrough = session.alreadyRead ? session.lines.length : session.alreadyReadThrough;
       if (readThrough !== undefined) {
         store.connection.prepare(`UPDATE sessions SET extracted_through = (SELECT id FROM entries WHERE session_id = ?1 AND entry_id = ?2),
-          waiting_chars = (SELECT coalesce(sum(length(search_text)), 0) FROM entries WHERE session_id = ?1 AND id > (SELECT id FROM entries WHERE session_id = ?1 AND entry_id = ?2))
+          waiting_chars = (SELECT coalesce(sum(length(text)), 0) FROM entries WHERE session_id = ?1 AND ${SPOKEN} AND id > (SELECT id FROM entries WHERE session_id = ?1 AND entry_id = ?2))
           WHERE session_id = ?1`).run(session.id, `${session.id}-${readThrough}`);
       }
     }
@@ -77,6 +91,11 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
         timeline.insert(episode.session, from, to, episode.text, "extraction");
       }
     });
+    // Older ones first, so the case's own memories are the newest of all.
+    for (const memory of fillers(item.fillerMemories ?? 0)) memories.add(memory, "extraction");
+    const fillerCount = item.fillerMemories ?? 0;
+    // They were tidied long ago: dreaming looks only at what changed since.
+    if (fillerCount > 0) store.connection.prepare("INSERT INTO meta (key, value) SELECT 'dreamed_through', max(id) FROM memory_changes").run();
     for (const memory of item.memories ?? []) {
       const [sessionId] = memory.source?.split(/-(?=\d+$)/u) ?? [];
       memories.add({ topic: memory.topic, text: memory.text, resident: memory.resident, ...(memory.source === undefined ? {} : { sources: [{ sessionId: sessionId!, entryId: memory.source }] }) }, memory.author);
@@ -90,8 +109,9 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     const status = extraction.status();
-    const inUse = memories.list({ limit: 100 }).memories;
-    const setAside = [...memories.list({ limit: 100, state: "retired" }).memories, ...memories.list({ limit: 100, state: "forgotten" }).memories];
+    // The filler memories, numbered first, are left out of what is judged and shown.
+    const inUse = all(memories, "active").filter((memory) => Number(memory.id) > fillerCount);
+    const setAside = [...all(memories, "retired"), ...all(memories, "forgotten")];
     const lines = timeline.list({ limit: 100 }).episodes.slice().reverse();
     const checks = judge(item, inUse, lines);
     process.stdout.write(`\n== ${item.name}: ${item.about}\n`);
@@ -101,8 +121,10 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
     for (const memory of inUse.slice().reverse()) process.stdout.write(`  + ${describe(memory)}${changes(memory)}\n`);
     for (const memory of setAside) process.stdout.write(`  - ${describe(memory)}${memory.supersededBy === undefined ? "" : ` → #${memory.supersededBy}`}${changes(memory)}\n`);
     if (inUse.length + setAside.length === 0) process.stdout.write("  (nothing kept)\n");
+    if (fillerCount > 0) process.stdout.write(`  (${all(memories, "active").filter((memory) => Number(memory.id) <= fillerCount).length} of ${fillerCount} older memories still in use, not shown)\n`);
     for (const line of lines) process.stdout.write(`  │ ${describeLine(line)}\n`);
     if (lines.length === 0) process.stdout.write("  │ (no timeline)\n");
+    if (history) for (const search of searches) process.stdout.write(`  ? ${search}\n`);
     if (status.lastError !== undefined) process.stdout.write(`  ! ${status.lastError}\n`);
     for (const problem of problems) process.stdout.write(`  ! ${problem}\n`);
     for (const check of checks) process.stdout.write(`  ${check.ok ? "✔" : "✘"} ${check.label}\n`);
@@ -112,6 +134,29 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
     store.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/** Every memory in `state`, newest first. */
+function all(memories: AssistantMemories, state: "active" | "retired" | "forgotten"): AssistantMemory[] {
+  const found: AssistantMemory[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = memories.list({ limit: 100, state, ...(cursor === undefined ? {} : { cursor }) });
+    found.push(...page.memories);
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return found;
+}
+
+/** `count` older memories, none loaded every session, about things a case does not talk about. */
+function fillers(count: number): Array<{ topic: "events" | "preferences"; text: string; resident: false }> {
+  const things = ["看完了一部动画", "通关了一个游戏", "读完了一本小说", "去了一家新开的咖啡店", "修好了家里的路由器", "和朋友打了一下午桌游", "学会了做一道菜", "换了新的机械键盘"];
+  return Array.from({ length: count }, (_, index) => {
+    const day = new Date(Date.UTC(2025, 0, 1) + index * 86_400_000).toISOString().slice(0, 10);
+    return index % 3 === 0
+      ? { topic: "preferences", text: `主人喜欢第 ${index} 号歌单里的歌，常在写代码时循环播放，说听着能静下心来。`, resident: false }
+      : { topic: "events", text: `${day}，主人${things[index % things.length]}，和她聊了好一阵，心情不错，说下次还想再来一次。`, resident: false };
+  });
 }
 
 /** Each line becomes an entry "<session>-<n>"; a line without a time is said 30 seconds after the one before. */

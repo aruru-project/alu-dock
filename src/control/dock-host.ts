@@ -1015,7 +1015,8 @@ export class DockHost {
       case "assistant.timeline.get":
       case "assistant.timeline.update":
       case "assistant.settings.get":
-      case "assistant.settings.set": {
+      case "assistant.settings.set":
+      case "assistant.reorganize": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.answerAssistant(request));
         return;
       }
@@ -1361,6 +1362,10 @@ export class DockHost {
       case "assistant.settings.set": {
         const { operationId, extractionModel } = request.params;
         return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", extractionModel }));
+      }
+      case "assistant.reorganize": {
+        const { operationId, extractionModel } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "reorganize", extractionModel }));
       }
     }
   }

@@ -43,7 +43,7 @@ export class AssistantCore {
     private readonly readers: Pick<AssistantReaders, "search" | "context">,
     private readonly memories: AssistantMemories,
     private readonly timeline: AssistantTimeline,
-    private readonly extraction: Pick<AssistantExtraction, "status" | "settings" | "setModel">,
+    private readonly extraction: Pick<AssistantExtraction, "status" | "settings" | "setModel" | "reorganize">,
     private readonly workspacePath: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -75,6 +75,7 @@ export class AssistantCore {
       case "timeline_update": { const { op: _op, ...update } = request; return this.timeline.update(update, author); }
       case "settings_get": return this.extraction.settings();
       case "settings_set": return this.extraction.setModel(request.extractionModel);
+      case "reorganize": return this.extraction.reorganize(request.extractionModel);
     }
   }
 

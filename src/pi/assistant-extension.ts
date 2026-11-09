@@ -10,7 +10,7 @@ import {
   MAX_ASSISTANT_EPISODE_CHARS,
   MAX_ASSISTANT_ID_CHARS,
   MAX_ASSISTANT_NAME_CHARS,
-  MAX_ASSISTANT_ENTRY_TEXT_CHARS,
+  assistantEntryTextLimit,
   MAX_ASSISTANT_MEMORY_CHARS,
   MAX_ASSISTANT_MEMORY_SOURCES,
   MAX_ASSISTANT_QUERY_CHARS,
@@ -453,10 +453,17 @@ export class SessionRecorder {
   }
 }
 
-/** An entry with many long tool calls keeps a shorter part of each, so it fits one batch alone. */
+/**
+ * An entry with many long tool calls keeps a shorter part of each, so it fits one batch alone; text
+ * so full of characters JSON must escape that it still does not fit keeps what does.
+ */
 function fitBatch(entry: AssistantEntry): AssistantEntry {
-  if (Buffer.byteLength(JSON.stringify(entry), "utf8") + 2 <= MAX_ASSISTANT_RECORD_BATCH_BYTES || entry.toolCalls === undefined) return entry;
-  return { ...entry, toolCalls: entry.toolCalls.map((call) => ({ name: cut(call.name, SQUEEZED_ARGUMENT_CHARS).text, arguments: cut(call.arguments, SQUEEZED_ARGUMENT_CHARS).text })), truncated: true };
+  const fits = (item: AssistantEntry) => Buffer.byteLength(JSON.stringify(item), "utf8") + 2 <= MAX_ASSISTANT_RECORD_BATCH_BYTES;
+  if (fits(entry)) return entry;
+  let fitted: AssistantEntry = entry.toolCalls === undefined ? entry
+    : { ...entry, toolCalls: entry.toolCalls.map((call) => ({ name: cut(call.name, SQUEEZED_ARGUMENT_CHARS).text, arguments: cut(call.arguments, SQUEEZED_ARGUMENT_CHARS).text })), truncated: true };
+  while (!fits(fitted) && fitted.text.length > 0) fitted = { ...fitted, text: cut(fitted.text, Math.floor(fitted.text.length * 0.9)).text, truncated: true };
+  return fitted;
 }
 
 type Block = { type: string; text?: string; name?: string; arguments?: unknown; thinking?: string };
@@ -519,7 +526,7 @@ function ownToolAction(input: unknown): Record<string, unknown> {
 }
 
 function withText<T extends { kind: AssistantEntry["kind"] }>(entry: T & { entryId: string; at: string }, text: string): Omit<AssistantEntry, "parentId"> {
-  const kept = cut(text, MAX_ASSISTANT_ENTRY_TEXT_CHARS);
+  const kept = cut(text, assistantEntryTextLimit(entry.kind));
   return { ...entry, text: kept.text, ...(kept.cut ? { truncated: true as const } : {}) } as Omit<AssistantEntry, "parentId">;
 }
 

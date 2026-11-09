@@ -12,6 +12,8 @@ export interface MemoryCase {
   /** What the case is about, for whoever reads the results. */
   about: string;
   notes?: string;
+  /** How many unrelated memories she had before all others, none loaded every session: what she must search past. */
+  fillerMemories?: number;
   /** Memories she had before; `source` names an entry of the conversations below as "<session id>-<line number>". */
   memories?: Array<{ topic: AssistantMemoryTopic; text: string; resident: boolean; author: AssistantMemoryAuthor; source?: string }>;
   /** Timeline lines written before, covering lines `from` through `to` of the named conversation. */
@@ -147,6 +149,26 @@ export const MEMORY_CASES: MemoryCase[] = [
     expect: { timeline: [/超时|reader|线程/u, /显示器/u], timelineAtMost: 2 },
   },
   {
+    name: "old-memory-found",
+    about: "三百条不常驻的旧记忆里有一条说主人在学日语；新对话说不学日语、改学韩语了。整理时只带着常驻的记忆，要自己搜到那条去改写或作废，不能新旧并存。",
+    fillerMemories: 300,
+    memories: [{ topic: "preferences", text: "主人在学日语，每天早上背单词。", resident: false, author: "extraction" }],
+    sessions: [{ id: "lang", lines: [
+      ["user", "日语我早就不学了，太难坚持。最近改学韩语，每天晚上跟着视频练发音。", "2026-03-16 21:30"],
+      ["assistant", "哈？又换？行吧，韩语加油，别又半途而废。"],
+    ] }],
+    expect: { include: [/韩语/u], exclude: [/^主人在学日语，每天早上背单词。$/u], atMost: [[/日语/u, 1]] },
+  },
+  {
+    name: "long-message",
+    about: "主人一口气发来六千多字的游记，过敏的事夹在正中间：整条要读完，不能只看开头结尾。",
+    sessions: [{ id: "trip", lines: [
+      ["user", longTrip(), "2026-03-17 22:10"],
+      ["assistant", "看完了！写得好长……不过芒果那段吓我一跳，以后我帮你盯着。"],
+    ] }],
+    expect: { include: [/芒果/u], timeline: [/黄山|游记|旅行|爬山/u] },
+  },
+  {
     name: "dreaming",
     about: "做梦：两条说同一件事的要合成一条，原话不支持的“养狗”要作废。",
     memories: [
@@ -162,3 +184,14 @@ export const MEMORY_CASES: MemoryCase[] = [
     expect: { include: [/辣/u], exclude: [/^主人养了一只狗。$/u], atMost: [[/辣/u, 1]] },
   },
 ];
+
+/** A long account of a trip with something worth remembering in the very middle. */
+function longTrip(): string {
+  const day = (index: number) => `第 ${index} 段：从山脚往上走了一个多小时，石阶很陡，路边的松树一棵接一棵，云从山谷里慢慢升上来，`
+    + `一会儿遮住对面的峰，一会儿又散开。休息的时候拍了几张照片，喝了半瓶水，继续往上爬。`;
+  const before = Array.from({ length: 40 }, (_, index) => day(index + 1)).join("\n");
+  const after = Array.from({ length: 40 }, (_, index) => day(index + 41)).join("\n");
+  return `给你看看我这次去黄山的游记，写得有点长：\n${before}\n`
+    + "中午在山上的小店吃饭，店家送了一盘芒果，我差点就吃了——我对芒果过敏，吃了会起一身疹子，上次进了医院，以后吃水果这件事你帮我多留意。\n"
+    + `${after}\n就这样，累死了，但是值。`;
+}

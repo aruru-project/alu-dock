@@ -12,7 +12,7 @@ const systemPrompt = (body: { messages?: Array<{ role: string; content?: unknown
 // settings; each names where it was said, and her next session starts with those loaded every time.
 // The same reading writes her timeline, which her next session starts with too and which she sees
 // first when she looks up a time.
-test("what she hears becomes a memory and a timeline line her next session starts with, naming where it was said", { timeout: 60_000 }, async (context) => {
+test("what she hears becomes a memory and a timeline line her next session starts with, naming where it was said, and starting over reads it all again", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "memory"], {
     prefix: "alu-memory-", assistant: true, modelService: true,
     // A conversation is read a second after its last words; dreaming stays out of this test.
@@ -33,7 +33,11 @@ test("what she hears becomes a memory and a timeline line her next session start
   const read = JSON.stringify(reading.body.messages);
   assert.ok(read.includes("主人：我不吃香菜，以后点外卖记得避开。"), "Extraction reads what the owner said");
   assert.ok(read.includes("助手：记住啦，香菜退散～"), "Extraction reads what she answered");
-  reading.text("```json\n{\"changes\":[{\"do\":\"add\",\"topic\":\"preferences\",\"text\":\"主人不吃香菜，点外卖要避开。\",\"resident\":true,\"from\":[1]}],\"timeline\":[{\"do\":\"add\",\"text\":\"聊外卖，主人交代不吃香菜。\",\"from\":[1,2]}]}\n```");
+  // Owner's decision of 2026-11-10: it looks up her other memories itself, and gets its answer before it replies.
+  reading.tools({ id: "look", name: "search_memories", arguments: { queries: ["香菜"] } });
+  const answered = await memory.request(1);
+  assert.ok(JSON.stringify(answered.body.messages?.find((message) => message.role === "tool")?.content ?? "").includes("香菜"), "The search is answered");
+  answered.text("```json\n{\"changes\":[{\"do\":\"add\",\"topic\":\"preferences\",\"text\":\"主人不吃香菜，点外卖要避开。\",\"resident\":true,\"from\":[1]}],\"timeline\":[{\"do\":\"add\",\"text\":\"聊外卖，主人交代不吃香菜。\",\"from\":[1,2]}]}\n```");
 
   await waitFor(async () => (await client.assistantMemories()).memories.length === 1, "The memory was not kept");
   const [kept] = (await client.assistantMemories()).memories;
@@ -69,6 +73,16 @@ test("what she hears becomes a memory and a timeline line her next session start
   assert.ok(shown.slice(lineAt, shown.indexOf("Found ", lineAt)).includes(`entryId=${said.entryId}`), `The timeline line says where its words are: ${shown}`);
   looked.text("麻辣烫，不要香菜。今天就聊了外卖。");
   await settled(client, alu.id);
+  (await memory.request(2)).text("{\"changes\":[],\"timeline\":[]}");
+  await waitFor(async () => (await client.assistantInfo()).extraction?.waitingSessions === 0, "The dinner was not read");
+
+  // The owner starts over: what the background made is set aside and everything is read again.
+  assert.deepEqual(await client.reorganizeAssistant({ provider: "memory", id: "fixture" }), { extractionModel: { provider: "memory", id: "fixture" }, retiredMemories: 1, removedLines: 1 });
+  assert.deepEqual((await client.assistantMemories()).memories, []);
+  assert.equal((await client.assistantMemories({ state: "retired" })).memories[0]?.id, kept!.id);
+  const again = await memory.request(3);
+  assert.ok(JSON.stringify(again.body.messages).includes("主人：我不吃香菜，以后点外卖记得避开。"), "The conversation is read again from its start");
+  again.text("{\"changes\":[],\"timeline\":[]}");
 });
 
 // Card #295: what the owner tells her to remember in a conversation is kept at once with where he

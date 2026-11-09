@@ -1,6 +1,7 @@
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 
 import {
+  ASSISTANT_SPOKEN_KINDS,
   ASSISTANT_TOOL_NAMES,
   AssistantError,
   MAX_ASSISTANT_RESULT_BYTES,
@@ -49,8 +50,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at TEXT NOT NULL, started_ms INTEGER NOT NULL,
   last_at TEXT NOT NULL, last_ms INTEGER NOT NULL,
   through_entry_id TEXT,
-  -- Extraction: the last entry row read for memories, the searchable characters recorded since, and
-  -- when (Main's clock) the latest of them arrived.
+  -- Extraction: the last entry row read for memories, the characters said (see SPOKEN) recorded since,
+  -- and when (Main's clock) the latest entry arrived.
   extracted_through INTEGER NOT NULL DEFAULT 0,
   waiting_chars INTEGER NOT NULL DEFAULT 0,
   recorded_ms INTEGER NOT NULL DEFAULT 0
@@ -124,11 +125,25 @@ CREATE TABLE IF NOT EXISTS memory_changes (
   at TEXT NOT NULL, author TEXT NOT NULL, action TEXT NOT NULL, text TEXT
 );
 CREATE INDEX IF NOT EXISTS memory_changes_memory ON memory_changes (memory_id, id);
+-- Parts of a conversation, after_row to through_row, that extraction passed over because the model's
+-- answers could not be read; due once a newly chosen model is to read them again.
+CREATE TABLE IF NOT EXISTS skipped_parts (
+  id INTEGER PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(session_id),
+  after_row INTEGER NOT NULL, through_row INTEGER NOT NULL,
+  due INTEGER NOT NULL DEFAULT 0
+);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('max_shift_ms', '0');
 `;
 /** The database layout this code reads and writes; a newer one is refused rather than misread. */
 const SCHEMA_VERSION = "1";
+
+/**
+ * The entries that are words said, by the owner, by her or by another Work, as an SQL condition on
+ * `entries`: what her memories and timeline are made from (ASSISTANT_SPOKEN_KINDS).
+ */
+export const SPOKEN = `kind IN (${ASSISTANT_SPOKEN_KINDS.map((kind) => `'${kind}'`).join(", ")}) AND text <> ''`;
 
 /** Room for entries said in the same millisecond. */
 const ENTRY_IDS_PER_MS = 1024;
@@ -240,6 +255,7 @@ export class AssistantStore {
       `);
       let shift = 0;
       let waiting = 0;
+      let inserted = 0;
       for (const entry of entries) {
         if (known.get(session.sessionId, entry.entryId)) continue;
         // A parent this session has not kept, such as history before a resume, is not named.
@@ -248,11 +264,13 @@ export class AssistantStore {
         const id = this.nextId(latestIn, ms);
         shift = Math.max(shift, Math.floor(id / ENTRY_IDS_PER_MS) - ms);
         const searched = searchText(entry);
-        waiting += searched.length;
+        if (ASSISTANT_SPOKEN_KINDS.includes(entry.kind) && entry.text.length > 0) waiting += entry.text.length;
+        inserted += 1;
         insert.run(id, session.sessionId, entry.entryId, parentId, entry.at, ms, source.workId ?? null, source.machine ?? null,
           entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searched);
       }
-      if (waiting > 0) this.db.prepare("UPDATE sessions SET waiting_chars = waiting_chars + ?, recorded_ms = ? WHERE session_id = ?").run(waiting, Date.now(), session.sessionId);
+      // Anything said or done keeps the conversation going; only words said wait to be read.
+      if (inserted > 0) this.db.prepare("UPDATE sessions SET waiting_chars = waiting_chars + ?, recorded_ms = ? WHERE session_id = ?").run(waiting, Date.now(), session.sessionId);
       if (shift > 0) this.db.prepare("UPDATE meta SET value = max(CAST(value AS INTEGER), ?) WHERE key = 'max_shift_ms'").run(shift);
       this.db.exec("COMMIT");
     } catch (error) {

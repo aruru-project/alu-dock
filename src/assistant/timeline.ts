@@ -90,9 +90,12 @@ export class AssistantTimeline {
     });
   }
 
-  /** One session's latest lines in use, oldest first: what extraction may extend. */
-  latestOf(sessionId: string, limit: number): EpisodeRow[] {
-    return (this.db.prepare("SELECT * FROM episodes WHERE session_id = ? AND state = 'active' ORDER BY to_ms DESC, id DESC LIMIT ?").all(sessionId, limit) as unknown as EpisodeRow[]).reverse();
+  /**
+   * One session's latest lines in use that began by `upToMs`, oldest first: what extraction may extend
+   * as it reads on from there. A part read again later sees the lines of its time, not those after it.
+   */
+  latestOf(sessionId: string, limit: number, upToMs: number): EpisodeRow[] {
+    return (this.db.prepare("SELECT * FROM episodes WHERE session_id = ? AND state = 'active' AND from_ms <= ? ORDER BY to_ms DESC, id DESC LIMIT ?").all(sessionId, upToMs, limit) as unknown as EpisodeRow[]).reverse();
   }
 
   /**

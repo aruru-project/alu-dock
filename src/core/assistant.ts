@@ -21,6 +21,18 @@ export const MAX_ASSISTANT_CONTEXT_SPAN = 50;
 export const ASSISTANT_CONTEXT_DEFAULT_SPAN = 6;
 /** One recorded entry's text; a longer tool output is cut here and stays whole in the Agent's own session file. */
 export const MAX_ASSISTANT_ENTRY_TEXT_CHARS = 32_000;
+/**
+ * What the owner, she or another Work said in one entry is kept whole up to this, far past anything
+ * said in practice (the longest in 150 of the owner's sessions was under 20 000), and well inside one
+ * recorded batch.
+ */
+export const MAX_ASSISTANT_SPOKEN_TEXT_CHARS = 100_000;
+/** The entries that are words said to someone, which her memories and timeline are made from. */
+export const ASSISTANT_SPOKEN_KINDS: readonly AssistantEntryKind[] = ["user", "assistant", "work"];
+/** How long one entry's text may be. */
+export function assistantEntryTextLimit(kind: AssistantEntryKind): number {
+  return ASSISTANT_SPOKEN_KINDS.includes(kind) ? MAX_ASSISTANT_SPOKEN_TEXT_CHARS : MAX_ASSISTANT_ENTRY_TEXT_CHARS;
+}
 export const MAX_ASSISTANT_TOOL_CALLS = 64;
 export const MAX_ASSISTANT_TOOL_ARGUMENT_CHARS = 2_000;
 /** A search hit's excerpt in UTF-16 code units, its "…" marks included. */
@@ -100,6 +112,12 @@ export interface AssistantSettings {
   extractionModel?: AssistantModelRef;
 }
 /**
+ * Starting over with `extractionModel`: what the background made is set aside, its memories among the
+ * retired (where each can be restored) and its timeline lines removed, and every conversation is read
+ * again from its start.
+ */
+export interface AssistantReorganizeResult { extractionModel: AssistantModelRef; retiredMemories: number; removedLines: number }
+/**
  * Extraction as it stands: `off` without a model; `idle` with nothing to do; `working` on a
  * conversation now; `failed` when the last try did not work, to be tried again at `retryAt`.
  */
@@ -108,6 +126,8 @@ export interface AssistantExtractionStatus {
   model?: AssistantModelRef;
   /** Conversations with something said since they were last read for memories. */
   waitingSessions: number;
+  /** Parts of conversations the model could not make sense of and that were passed over; a new model reads them again. */
+  skippedParts?: number;
   lastRunAt?: string;
   lastError?: string;
   retryAt?: string;
@@ -270,7 +290,8 @@ export type AssistantRequest =
   | ({ op: "timeline_update" } & AssistantTimelineUpdateRequest)
   | { op: "settings_get" }
   /** `null` stops extraction. */
-  | { op: "settings_set"; extractionModel: AssistantModelRef | null };
+  | { op: "settings_set"; extractionModel: AssistantModelRef | null }
+  | { op: "reorganize"; extractionModel: AssistantModelRef };
 
 export type AssistantResultFor<R extends AssistantRequest> =
   R extends { op: "info" } ? AssistantInfo
@@ -285,6 +306,7 @@ export type AssistantResultFor<R extends AssistantRequest> =
   : R extends { op: "timeline_list" } ? AssistantTimelineList
   : R extends { op: "timeline_get" | "timeline_update" } ? AssistantEpisode
   : R extends { op: "settings_get" | "settings_set" } ? AssistantSettings
+  : R extends { op: "reorganize" } ? AssistantReorganizeResult
   : AssistantDocument;
 
 /** What a Host offers its assistant Works and, on Main, its clients. */
@@ -451,6 +473,10 @@ function parseMemoryUpdate(value: Record<string, unknown>, field: string): Assis
   return update;
 }
 
+function parseReorganizeModel(value: Record<string, unknown>, field: string): AssistantModelRef {
+  return modelRef(value.extractionModel, `${field}.extractionModel`, true);
+}
+
 function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantModelRef | null {
   if (!("extractionModel" in value)) fail(`${field}.extractionModel is required`);
   return value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true);
@@ -474,12 +500,13 @@ function parseEntry(input: unknown, field: string, closed: boolean): AssistantEn
   if (value.truncated !== undefined && value.truncated !== true) fail(`${field}.truncated must be true when present`);
   const at = time(value.at, `${field}.at`);
   if (Math.abs(Date.parse(at)) >= ASSISTANT_TIME_RANGE_MS) fail(`${field}.at is outside the times the memory keeps`);
+  const kind = entryKind(value.kind, `${field}.kind`);
   return {
     entryId: id(value.entryId, `${field}.entryId`),
     ...(parentId === undefined ? {} : { parentId }),
     at,
-    kind: entryKind(value.kind, `${field}.kind`),
-    text: text(value.text, `${field}.text`, MAX_ASSISTANT_ENTRY_TEXT_CHARS),
+    kind,
+    text: text(value.text, `${field}.text`, assistantEntryTextLimit(kind)),
     ...(toolName === undefined ? {} : { toolName }),
     ...(toolCalls === undefined ? {} : { toolCalls }),
     ...(value.truncated === true ? { truncated: true as const } : {}),
@@ -584,6 +611,9 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
       case "settings_set":
         only(value, ["op", "extractionModel"], field);
         return { op: "settings_set", extractionModel: parseSettingsSet(value, field) };
+      case "reorganize":
+        only(value, ["op", "extractionModel"], field);
+        return { op: "reorganize", extractionModel: parseReorganizeModel(value, field) };
       default:
         return fail(`${field}.op is unknown`);
     }
@@ -617,6 +647,9 @@ export function parseAssistantTimelineUpdateParams(input: Record<string, unknown
 }
 export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantModelRef | null {
   return question(() => parseSettingsSet(input, field));
+}
+export function parseAssistantReorganizeParams(input: Record<string, unknown>, field: string): AssistantModelRef {
+  return question(() => parseReorganizeModel(input, field));
 }
 export function parseAssistantDocumentName(input: unknown, field: string): AssistantDocumentName {
   return question(() => documentName(input, field));
@@ -670,6 +703,7 @@ function parseExtractionStatus(input: unknown, field: string): AssistantExtracti
     state: oneOf(value.state, ["off", "idle", "working", "failed"] as const, `${field}.state`),
     ...(value.model === undefined ? {} : { model: modelRef(value.model, `${field}.model`, false) }),
     waitingSessions: count(value.waitingSessions, `${field}.waitingSessions`, Number.MAX_SAFE_INTEGER),
+    ...(value.skippedParts === undefined ? {} : { skippedParts: count(value.skippedParts, `${field}.skippedParts`, Number.MAX_SAFE_INTEGER) }),
     ...optionalTime("lastRunAt"),
     ...(lastError === undefined ? {} : { lastError }),
     ...optionalTime("retryAt"),
@@ -764,6 +798,16 @@ export function parseAssistantSettings(input: unknown, field = "assistant settin
     return value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) };
   });
 }
+export function parseAssistantReorganizeResult(input: unknown, field = "assistant reorganize"): AssistantReorganizeResult {
+  return answer(() => {
+    const value = record(input, field);
+    return {
+      extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false),
+      retiredMemories: count(value.retiredMemories, `${field}.retiredMemories`, Number.MAX_SAFE_INTEGER),
+      removedLines: count(value.removedLines, `${field}.removedLines`, Number.MAX_SAFE_INTEGER),
+    };
+  });
+}
 export function parseAssistantPreview(input: unknown, field = "assistant preview"): AssistantPreview {
   return answer(() => {
     const value = record(input, field);
@@ -828,6 +872,7 @@ export function parseAssistantResult<R extends AssistantRequest>(request: R, inp
     case "timeline_update": return parseAssistantEpisode(input) as AssistantResultFor<R>;
     case "settings_get":
     case "settings_set": return parseAssistantSettings(input) as AssistantResultFor<R>;
+    case "reorganize": return parseAssistantReorganizeResult(input) as AssistantResultFor<R>;
     default: return parseAssistantDocument(input) as AssistantResultFor<R>;
   }
 }

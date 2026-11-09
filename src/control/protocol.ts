@@ -33,6 +33,7 @@ import {
   parseAssistantMemoryListParams,
   parseAssistantMemoryUpdateParams,
   parseAssistantSearchParams,
+  parseAssistantReorganizeParams,
   parseAssistantSettingsSetParams,
   parseAssistantTimelineListParams,
   parseAssistantTimelineUpdateParams,
@@ -55,6 +56,7 @@ export {
   parseAssistantMemoryDetail,
   parseAssistantMemoryList,
   parseAssistantPreview,
+  parseAssistantReorganizeResult,
   parseAssistantSearchResult,
   parseAssistantSettings,
   parseAssistantTimelineList,
@@ -69,6 +71,7 @@ export {
   type AssistantMemoryDetail,
   type AssistantMemoryList,
   type AssistantPreview,
+  type AssistantReorganizeResult,
   type AssistantSettings,
   type AssistantSearchHit,
   type AssistantSearchResult,
@@ -445,6 +448,7 @@ export type ControlRequest =
   | Request<"assistant.timeline.update", { operationId: string } & AssistantTimelineUpdateRequest>
   | Request<"assistant.settings.get", Record<string, never>>
   | Request<"assistant.settings.set", { operationId: string; extractionModel: AssistantModelRef | null }>
+  | Request<"assistant.reorganize", { operationId: string; extractionModel: AssistantModelRef }>
   | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
@@ -547,6 +551,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "assistant.timeline.update": { target: "directory", effect: "command", transport: "unary" },
   "assistant.settings.get": { target: "directory", effect: "query", transport: "unary" },
   "assistant.settings.set": { target: "directory", effect: "command", transport: "unary" },
+  "assistant.reorganize": { target: "directory", effect: "command", transport: "unary" },
   "resource.content": { target: "instance", effect: "query", transport: "unary" },
   "command.catalog": { target: "instance", effect: "query", transport: "unary" },
   "command.content": { target: "instance", effect: "query", transport: "unary" },
@@ -1379,6 +1384,9 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "assistant.settings.set":
       exact(params, ["operationId", "extractionModel"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), extractionModel: assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
+    case "assistant.reorganize":
+      exact(params, ["operationId", "extractionModel"], "invalid_request");
+      return { ...base, type, params: { operationId: operationId(), extractionModel: assistantParams(() => parseAssistantReorganizeParams(params, "params")) } };
     case "assistant.document.get":
       exact(params, ["document"], "invalid_request");
       return { ...base, type, params: { document: assistantParams(() => parseAssistantDocumentName(params.document, "params.document")) } };
