@@ -357,6 +357,17 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       preview.assistantSettings = args.extractionModel ? { extractionModel: args.extractionModel as AssistantSettings['extractionModel'] } : {}
       return structuredClone(preview.assistantSettings)
     }
+    case 'reorganize_assistant': {
+      await delay(300)
+      // What the background made is set aside; what the owner or she wrote stays.
+      const made = preview.assistantMemories.filter((item) => item.state === 'active' && (item.author === 'extraction' || item.author === 'dreaming'))
+      for (const item of made) Object.assign(item, { state: 'retired', author: 'owner', revision: item.revision + 1, updatedAt: new Date().toISOString() })
+      const kept = preview.assistantTimeline.filter((item) => item.author !== 'extraction')
+      const removedLines = preview.assistantTimeline.length - kept.length
+      preview.assistantTimeline.splice(0, preview.assistantTimeline.length, ...kept)
+      preview.assistantSettings = { extractionModel: args.extractionModel as NonNullable<AssistantSettings['extractionModel']> }
+      return { extractionModel: structuredClone(preview.assistantSettings.extractionModel), retiredMemories: made.length, removedLines }
+    }
     case 'assistant_preview': {
       await delay(200)
       const { persona, notes } = preview.assistantDocuments

@@ -1582,6 +1582,7 @@ try {
       }
       if (command === 'assistant_settings') return model ? { extractionModel: model } : {}
       if (command === 'set_assistant_settings') { model = args.extractionModel ?? undefined; return model ? { extractionModel: model } : {} }
+      if (command === 'reorganize_assistant') { model = args.extractionModel; return { extractionModel: model, retiredMemories: 2, removedLines: 3 } }
       return fallback(command, args)
     }
     modelVisibilityNative = async () => ({
@@ -1685,6 +1686,13 @@ try {
     await click(choices, 'GPT mini')
     assert.deepEqual(sent('set_assistant_settings').extractionModel, { provider: 'openai', id: 'gpt-mini' })
     assert.ok(text(page()).includes('已保存') && text(page()).includes('1 段对话'), text(page()))
+    // Starting over with it says first what it sets aside and what stays, then reads everything again.
+    await click(page(), '用这个模型从头整理')
+    assert.ok(text(page()).includes('「GPT mini」') && text(page()).includes('挪进「已作废」') && text(page()).includes('都留着'), text(page()))
+    assert.equal(calls.some(call => call.command === 'reorganize_assistant'), false, 'nothing starts over before the owner confirms')
+    await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理')
+    assert.deepEqual(sent('reorganize_assistant').extractionModel, { provider: 'openai', id: 'gpt-mini' })
+    assert.ok(text(page()).includes('已开始从头整理') && text(page()).includes('2 条记忆') && text(page()).includes('3 行时间线'), text(page()))
     await click(page(), '整理记忆的模型')
     await click(find(page(), item => item.props.role === 'listbox'), '不整理')
     assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
@@ -1692,7 +1700,7 @@ try {
     systemBack(); await settle()
     assertSameReference(page(), undefined, 'Back at the top closes her page')
     assistantNative = fallback; modelVisibilityNative = previousModels
-    console.log('PASS: assistant memories: newest and by topic, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, one merged elsewhere refused with a way to the other, written by the owner within Main\'s length, the model chosen from Main\'s and cleared, Back one level at a time')
+    console.log('PASS: assistant memories: newest and by topic, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, one merged elsewhere refused with a way to the other, written by the owner within Main\'s length, the model chosen from Main\'s, started over with after a confirmation, and cleared, Back one level at a time')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.

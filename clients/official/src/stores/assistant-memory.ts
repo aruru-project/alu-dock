@@ -3,7 +3,7 @@ import { computed, reactive, watch } from 'vue'
 import { memoryTopicLabel } from '../lib/assistant'
 import { useConversationReading } from '../lib/assistantReading'
 import {
-  addAssistantMemory, getAssistantMemory, getAssistantSettings, listAssistantMemories, setAssistantSettings, updateAssistantMemory,
+  addAssistantMemory, getAssistantMemory, getAssistantSettings, listAssistantMemories, reorganizeAssistant, setAssistantSettings, updateAssistantMemory,
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
 import { onceAfterLostReply, replyLost } from '../lib/operationBinding'
@@ -370,6 +370,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     const epoch = ++settingsEpoch
     settings.loading = false
     settings.save = { state: 'pending', model, message: '正在保存…' }
+    if (restart.state !== 'pending') Object.assign(restart, { state: 'idle', message: '' })
     try {
       const saved = await once([context.connectionId, 'settings', model], (operationId) => setAssistantSettings(model, operationId, context))
       if (epoch !== settingsEpoch) return
@@ -380,6 +381,41 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     } catch (cause) {
       if (epoch !== settingsEpoch) return
       settings.save = { state: 'failed', model, message: replyLost(cause) ? LOST : userErrorMessage(cause, '没有保存成功，设置没有变。请稍后重试。') }
+    }
+    void assistant.loadInfo()
+  }
+
+  // ── Starting over with the chosen model ──
+  const restart = reactive({
+    /** `confirming` while the owner reads what starting over does. */
+    state: 'idle' as 'idle' | 'confirming' | 'pending' | 'done' | 'failed',
+    message: '',
+  })
+  function askRestart() {
+    if (settings.current?.extractionModel && restart.state !== 'pending') Object.assign(restart, { state: 'confirming', message: '' })
+  }
+  function cancelRestart() {
+    if (restart.state === 'confirming') Object.assign(restart, { state: 'idle', message: '' })
+  }
+  /** What the background made is set aside and every conversation is read again with the chosen model. */
+  async function startOver() {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    const chosen = settings.current?.extractionModel
+    if (!context || !chosen || restart.state === 'pending') return
+    const model = { provider: chosen.provider, id: chosen.id }
+    Object.assign(restart, { state: 'pending', message: '正在开始从头整理…' })
+    try {
+      const result = await once([context.connectionId, 'reorganize', model], (operationId) => reorganizeAssistant(model, operationId, context))
+      if (context.connectionId !== app.activeConnectionId) return
+      settings.current = { extractionModel: result.extractionModel }
+      Object.assign(restart, {
+        state: 'done',
+        message: `已开始从头整理：后台整理出的 ${result.retiredMemories} 条记忆挪进了「已作废」，它写的 ${result.removedLines} 行时间线清掉了。她正在把所有对话从头读一遍，读完之前，新开的会话里记忆不全。`,
+      })
+      if (list.shown) void loadMemories()
+    } catch (cause) {
+      if (context.connectionId !== app.activeConnectionId) return
+      Object.assign(restart, { state: 'failed', message: replyLost(cause) ? LOST : userErrorMessage(cause, '没能开始从头整理，记忆和时间线都没有动。请稍后重试。') })
     }
     void assistant.loadInfo()
   }
@@ -402,6 +438,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     Object.assign(list, { shown: null, memories: [], nextCursor: undefined, loading: false, loadingMore: false, error: '', moreError: '', notice: '', failure: '' })
     closeMemory()
     Object.assign(settings, { current: null, loading: false, error: '', save: null })
+    Object.assign(restart, { state: 'idle', message: '' })
   })
 
   return {
@@ -411,5 +448,6 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     source: sourceReading.state, openSource, readSourceMore: sourceReading.readMore, closeSource: sourceReading.close,
     draft, hasDrafts, startWriting, editDraft, dropDraft, writeMemory,
     settings, loadSettings, chooseModel, models, loadModels,
+    restart, askRestart, cancelRestart, startOver,
   }
 })

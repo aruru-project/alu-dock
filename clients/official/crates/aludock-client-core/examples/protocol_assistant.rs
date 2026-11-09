@@ -305,6 +305,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .extraction
         .ok_or("no status")?;
     assert_ne!(on.state, AssistantExtractionState::Off);
+    // Starting over keeps what the owner wrote and reads every conversation again with the model.
+    let again = client.reorganize_assistant(&model, None).await?;
+    assert_eq!(
+        (
+            again.extraction_model,
+            again.retired_memories,
+            again.removed_lines
+        ),
+        (model.clone(), 0, 0)
+    );
     assert!(
         client
             .set_assistant_settings(None, None)

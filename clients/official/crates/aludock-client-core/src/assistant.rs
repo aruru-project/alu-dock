@@ -45,6 +45,9 @@ pub struct AssistantExtractionStatus {
     pub model: Option<ModelRef>,
     /// Conversations with something said since they were last read for memories.
     pub waiting_sessions: u64,
+    /// Parts of conversations the model could not make sense of; a newly chosen model reads them again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped_parts: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<String>,
     /// Written for the owner. With `Idle`, a part of a conversation that was passed over.
@@ -60,6 +63,16 @@ pub struct AssistantExtractionStatus {
 pub struct AssistantSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_model: Option<ModelRef>,
+}
+
+/// Starting over with a model: how many memories the background made were set aside among the
+/// retired, and how many of its timeline lines were removed. Every conversation is read again.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantReorganizeResult {
+    pub extraction_model: ModelRef,
+    pub retired_memories: u64,
+    pub removed_lines: u64,
 }
 
 /// What a memory is about: the owner, his likes and habits, the two of them, what they went
@@ -502,6 +515,13 @@ struct SettingsSetParams<'a> {
     extraction_model: Option<&'a ModelRef>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReorganizeParams<'a> {
+    operation_id: &'a str,
+    extraction_model: &'a ModelRef,
+}
+
 impl DockClient {
     pub async fn assistant_info(&self) -> Result<AssistantInfo> {
         self.request("assistant.info", &NoParams {}, ASSISTANT, None)
@@ -754,6 +774,27 @@ impl DockClient {
         self.request(
             "assistant.settings.set",
             &SettingsSetParams {
+                operation_id,
+                extraction_model,
+            },
+            ASSISTANT,
+            Some(operation_id),
+        )
+        .await
+    }
+
+    /// Sets aside what the background made of her conversations and reads them all again with
+    /// `extraction_model`, which becomes the model that makes her memories.
+    pub async fn reorganize_assistant(
+        &self,
+        extraction_model: &ModelRef,
+        operation_id: Option<&str>,
+    ) -> Result<AssistantReorganizeResult> {
+        let generated = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated);
+        self.request(
+            "assistant.reorganize",
+            &ReorganizeParams {
                 operation_id,
                 extraction_model,
             },

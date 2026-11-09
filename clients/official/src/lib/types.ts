@@ -753,12 +753,16 @@ export interface AssistantExtractionStatus {
   model?: ModelRef
   /** Conversations with something said since they were last read for memories. */
   waitingSessions: number
+  /** Parts of conversations the model could not make sense of; a newly chosen model reads them again. */
+  skippedParts?: number
   lastRunAt?: string
   lastError?: string
   retryAt?: string
 }
 /** The model that makes her memories; without one nothing is made. */
 export interface AssistantSettings { extractionModel?: ModelRef }
+/** Starting over: how many memories the background made went among the retired, and how many of its timeline lines were removed. */
+export interface AssistantReorganizeResult { extractionModel: ModelRef; retiredMemories: number; removedLines: number }
 export type AssistantMemoryTopic = 'owner' | 'preferences' | 'relationship' | 'events' | 'self' | Unrecognized
 /** In use; set aside as no longer true (kept for the record); or forgotten at the owner's word. */
 export type AssistantMemoryState = 'active' | 'retired' | 'forgotten' | Unrecognized

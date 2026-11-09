@@ -258,6 +258,7 @@ pub fn run() {
             work::update_assistant_episode,
             work::assistant_settings,
             work::set_assistant_settings,
+            work::reorganize_assistant,
             work::list_workspace,
             work::system_catalog,
             work::system_content,

@@ -153,8 +153,8 @@ pub use assistant::{
     AssistantMemory, AssistantMemoryAction, AssistantMemoryAuthor, AssistantMemoryChange,
     AssistantMemoryDetail, AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList,
     AssistantMemorySource, AssistantMemoryState, AssistantMemoryTopic, AssistantPreview,
-    AssistantSearchHit, AssistantSearchResult, AssistantSessionInfo, AssistantSettings,
-    AssistantTimelineFilter, AssistantTimelineList, AssistantToolCall,
+    AssistantReorganizeResult, AssistantSearchHit, AssistantSearchResult, AssistantSessionInfo,
+    AssistantSettings, AssistantTimelineFilter, AssistantTimelineList, AssistantToolCall,
 };
 pub use child_models::{ChildModelsResult, ChildModelsSetResult};
 pub use model_visibility::{ModelRef, ModelVisibilityResult, ModelVisibilitySetResult};

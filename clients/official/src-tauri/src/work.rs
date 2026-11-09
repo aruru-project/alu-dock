@@ -9,13 +9,13 @@ use aludock_client_core::{
     AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantEpisode,
     AssistantEpisodeEdit, AssistantInfo, AssistantMemory, AssistantMemoryDetail,
     AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList, AssistantMemoryTopic,
-    AssistantPreview, AssistantSearchResult, AssistantSettings, AssistantTimelineFilter,
-    AssistantTimelineList, AttachmentState, BashRunResult, ChildModelsResult, ChildModelsSetResult,
-    DeliveryMode, ExtensionControlState, InstanceSnapshot, Machine, ModelRef,
-    ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult, RestoredImageState,
-    SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor,
-    SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor, WorkspacePage,
-    operation_association, project_queue_dequeue, resolve_machine_session_token,
+    AssistantPreview, AssistantReorganizeResult, AssistantSearchResult, AssistantSettings,
+    AssistantTimelineFilter, AssistantTimelineList, AttachmentState, BashRunResult,
+    ChildModelsResult, ChildModelsSetResult, DeliveryMode, ExtensionControlState, InstanceSnapshot,
+    Machine, ModelRef, ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult,
+    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
+    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
+    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
     restored_image_scope,
 };
 use serde::Serialize;
@@ -804,6 +804,22 @@ pub(crate) async fn set_assistant_settings(
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_assistant_settings(extraction_model.as_ref(), Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Starts her memories over with `extraction_model`. The operation is named by the page.
+#[tauri::command]
+pub(crate) async fn reorganize_assistant(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    extraction_model: ModelRef,
+    operation_id: String,
+) -> Result<AssistantReorganizeResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .reorganize_assistant(&extraction_model, Some(&operation_id))
         .await
         .map_err(CommandError::from)
 }

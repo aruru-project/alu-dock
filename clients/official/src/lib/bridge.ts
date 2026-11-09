@@ -16,6 +16,7 @@ import type {
   AssistantMemoryList,
   AssistantMemoryTopic,
   AssistantPreview,
+  AssistantReorganizeResult,
   AssistantSearchResult,
   AssistantSettings,
   AssistantTimelineFilter,
@@ -715,6 +716,11 @@ export async function getAssistantSettings(context: ConnectionContext): Promise<
 /** `null` stops making memories; those already made stay. */
 export async function setAssistantSettings(extractionModel: ModelRef | null, operationId: string, context: ConnectionContext): Promise<AssistantSettings> {
   return native<AssistantSettings>('set_assistant_settings', { ...context, extractionModel, operationId })
+}
+
+/** Sets aside what the background made of her conversations and reads them all again with `extractionModel`, which becomes the model that makes her memories. */
+export async function reorganizeAssistant(extractionModel: ModelRef, operationId: string, context: ConnectionContext): Promise<AssistantReorganizeResult> {
+  return native<AssistantReorganizeResult>('reorganize_assistant', { ...context, extractionModel, operationId })
 }
 
 export interface CreateWorkContinuation {

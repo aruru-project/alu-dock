@@ -11,7 +11,7 @@ import AluSelect from './AluSelect.vue'
 // Her settings on Main: the model that makes her memories, and how making them goes.
 const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
-const { settings } = memory
+const { settings, restart } = memory
 const { extraction, models } = storeToRefs(memory)
 
 const NO_MODEL = ''
@@ -46,6 +46,8 @@ const options = computed(() => {
   ]
 })
 const selected = computed(() => !settings.current && !saving.value ? NOT_READ : chosen.value ? modelKey(chosen.value) : NO_MODEL)
+/** The chosen model as the list names it. */
+const chosenLabel = computed(() => options.value.find((option) => option.value === selected.value)?.label ?? '')
 const placeholder = computed(() => settings.loading ? '正在读取…' : '没有读到现在的设置')
 const refreshing = computed(() => assistant.current?.state === 'loading' || !!assistant.current?.refreshing)
 
@@ -73,6 +75,18 @@ function choose(value: string) {
     <div v-if="settings.error" class="assistant-error" role="alert"><span>{{ settings.error }}</span><button type="button" class="button secondary" :disabled="settings.loading" @click="memory.loadSettings()">重试</button></div>
     <p v-if="settings.save && settings.save.state !== 'pending'" class="assistant-setting-saved" :class="{ 'is-error': settings.save.state === 'failed' }" :role="settings.save.state === 'failed' ? 'alert' : 'status'">{{ settings.save.message }}</p>
     <p v-else-if="settings.current && !settings.current.extractionModel && !saving" class="assistant-note is-warning" role="status">还没选模型，她不会从对话里自动记东西。选一个模型就会开始。</p>
+    <div v-if="settings.current?.extractionModel || restart.state !== 'idle'" class="assistant-restart">
+      <div v-if="restart.state === 'confirming'" class="assistant-restart-confirm" role="alertdialog" aria-labelledby="assistant-restart-what">
+        <p id="assistant-restart-what">她会用「{{ chosenLabel }}」把所有对话从头读一遍、重新整理：后台整理出的记忆挪进「已作废」，可以一条条恢复；后台写的时间线清掉。你写过或改过的，和她按你吩咐记下的，都留着。</p>
+        <p>对话多的话要读一阵，读完之前新开的会话里记忆不全；用掉的额度大致和当初整理这些对话加起来差不多。</p>
+        <div class="assistant-restart-actions">
+          <button type="button" class="button primary" @click="memory.startOver()">从头整理</button>
+          <button type="button" class="button secondary" @click="memory.cancelRestart()">取消</button>
+        </div>
+      </div>
+      <button v-else type="button" class="button secondary" :disabled="saving || restart.state === 'pending' || !settings.current?.extractionModel" @click="memory.askRestart()">{{ restart.state === 'pending' ? '正在开始…' : '用这个模型从头整理' }}</button>
+      <p v-if="restart.state === 'done' || restart.state === 'failed'" class="assistant-setting-saved" :class="{ 'is-error': restart.state === 'failed' }" :role="restart.state === 'failed' ? 'alert' : 'status'">{{ restart.message }}</p>
+    </div>
   </section>
 
   <section class="assistant-setting" aria-labelledby="assistant-extraction-status">
@@ -87,6 +101,7 @@ function choose(value: string) {
         <div><dt>等着整理</dt><dd>{{ extraction.waitingSessions ? `${extraction.waitingSessions} 段对话有新内容还没整理` : '没有' }}</dd></div>
         <div><dt>上次整理</dt><dd>{{ extraction.lastRunAt ? assistantTime(extraction.lastRunAt) : '还没有整理过' }}</dd></div>
         <div v-if="extraction.retryAt"><dt>下次重试</dt><dd>{{ assistantTime(extraction.retryAt) }}</dd></div>
+        <div v-if="extraction.skippedParts"><dt>没读成</dt><dd>{{ extraction.skippedParts }} 段对话模型没读懂，先跳过了。换一个模型或从头整理时会重新读。</dd></div>
       </dl>
       <p v-if="extraction.lastError" class="assistant-note is-warning" role="status">{{ extraction.lastError }}</p>
     </template>
@@ -112,6 +127,10 @@ function choose(value: string) {
 .assistant-setting-facts dd.is-working { color: var(--alu-running); }
 .assistant-setting-facts dd.is-off, .assistant-setting-facts dd.is-failed { color: var(--alu-warning-text); }
 .assistant-setting .button { min-height: 32px; padding: 0 11px; font-size: var(--alu-meta-size); }
+.assistant-restart { display: grid; gap: 8px; justify-items: start; }
+.assistant-restart-confirm { display: grid; gap: 8px; max-width: 640px; padding: 12px; border: 1px solid var(--alu-border); border-left: 3px solid var(--alu-warning-line); border-radius: 10px; background: var(--alu-bg); }
+.assistant-restart-confirm p { margin: 0; color: var(--alu-text); font-size: var(--alu-meta-size); line-height: 1.7; }
+.assistant-restart-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 640px) {
   .assistant-setting { padding: 12px; }
   .assistant-setting-facts div { grid-template-columns: 72px minmax(0, 1fr); }
