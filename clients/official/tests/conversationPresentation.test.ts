@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { projectRecordGroups, createLiveConversationProjector, shellRunQuote, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
-import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, turnDurationMs, turnHidingAnchor, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
+import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnDurationMs, turnHidingAnchor, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
 import type { HistoryRecord, ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
 const parts: ConversationProcessItem[] = [
@@ -280,6 +280,29 @@ assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolC
   assert.equal(record.status, 'failed')
   assert.equal(record.exitCode, 1)
   assert.equal(record.excludeFromContext, false)
+}
+
+// Card #666: a message from a parent or child Work is a card titled by its first line, which names that
+// Work; a final result and a stop notice are marked. It stays in view when its turn is collapsed.
+{
+  const workMessage = (recordId: string, text: string, metadata: Record<string, unknown>) => record(recordId, 'extension', [{ type: 'text', text }],
+    { kind: 'custom_message', customType: 'dock-work-message', display: true, metadata, timestamp: '2026-11-09T08:00:01Z' } as Partial<HistoryRecord>)
+  const items = projectRecordGroups([
+    record('u7', 'user', [{ type: 'text', text: '派人复审' }], { timestamp: '2026-11-09T08:00:00Z' }),
+    workMessage('w1', '[来自子 Work「Reviewer」]\n要不要加测试？', { from: 'child' }),
+    workMessage('w2', '[来自子 Work「Reviewer」· 已完成]\n**没问题**', { from: 'child', done: true }),
+    workMessage('w3', '[子 Work「Writer」异常停止]\n原因：被停止了', { from: 'child', stopped: true }),
+    record('a7', 'assistant', [{ type: 'text', text: '复审完成' }], { timestamp: '2026-11-09T08:00:09Z', stopReason: 'stop' }),
+  ])
+  assert.deepEqual(items.flatMap((item) => item.kind === 'record' ? [[item.title, item.panelClass, item.parts.map((part) => part.kind === 'assistant' ? part.text : part.kind)]] : []), [
+    ['来自子 Work「Reviewer」', 'alu-record-work-message', ['要不要加测试？']],
+    ['来自子 Work「Reviewer」· 已完成', 'alu-record-work-message is-done', ['**没问题**']],
+    ['子 Work「Writer」异常停止', 'alu-record-work-message is-stopped', ['原因：被停止了']],
+  ], '标题是来源行，正文不再重复它')
+  const [turn] = conversationSections(conversationRows(items))
+  assert.ok(turn?.kind === 'turn')
+  assert.deepEqual(turn.body.filter((row) => rowVisibleWhenCollapsed(row, turn.finalRowId)).map((row) => row.id), ['record:w1', 'record:w2', 'record:w3', 'record:a7'],
+    '收起这一轮时，其他 Work 的消息和最终回复都还在')
 }
 
 console.log('conversation presentation tests passed')

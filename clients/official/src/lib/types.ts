@@ -347,6 +347,9 @@ export interface ConversationRecord {
   excludeFromContext?: boolean
   label?: string
   stopReason?: string
+  /** Extension message record: which extension's message it is, and the facts it keeps beside its text. */
+  customType?: string
+  metadata?: unknown
   provider?: string | null
   modelId?: string | null
   /** System prompt record: the sections and tools it changes; its content holds the new texts. */
@@ -703,7 +706,8 @@ export type ConversationItem = (
   | ConversationTurnItem
   | ConversationProcessItem
   /** `readOnOpen`: the record's text is long and read only once the reader opens the panel; `entryId` names the record to read. */
-  | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[]; readOnOpen?: boolean; entryId?: string }
+  /** `keep`: a message from another Work, shown even when its turn is collapsed. */
+  | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[]; readOnOpen?: boolean; entryId?: string; keep?: boolean }
   | ShellRunItem
 
 ) & { sourceEntryIds?: string[]; turnId?: string }
