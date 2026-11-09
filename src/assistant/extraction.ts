@@ -179,7 +179,7 @@ export class AssistantExtraction {
       const made = this.db.prepare(`SELECT * FROM memories m WHERE m.state = 'active' AND m.resident_fixed = 0
         AND NOT EXISTS (SELECT 1 FROM memory_changes c WHERE c.memory_id = m.id AND c.author IN ('owner', 'assistant'))`).all() as unknown as MemoryRow[];
       for (const row of made) this.memories.change(row, { state: "retired" }, "owner");
-      const lines = this.db.prepare(`DELETE FROM episodes WHERE author = 'extraction'
+      const lines = this.db.prepare(`DELETE FROM episodes WHERE edited = 0
         AND NOT EXISTS (SELECT 1 FROM episodes_forgotten_with w WHERE w.episode_id = episodes.id)`).run();
       this.db.prepare("DELETE FROM skipped_parts").run();
       this.db.prepare(`UPDATE sessions SET extracted_through = 0, waiting_chars = (SELECT coalesce(sum(length(text)), 0) FROM entries
@@ -372,6 +372,7 @@ export class AssistantExtraction {
 
   /** Checks the memories changed since the last dream against what they came from and tidies them. */
   private async dream(model: AssistantModelRef): Promise<void> {
+    const generation = this.generation;
     const dreamedThrough = Number(this.meta("dreamed_through") ?? 0);
     const { latest } = this.db.prepare("SELECT coalesce(max(id), 0) AS latest FROM memory_changes").get() as { latest: number };
     const focusRows = this.dreamFocus(dreamedThrough, latest, DREAM_FOCUS);
@@ -408,6 +409,8 @@ export class AssistantExtraction {
     const [persona, notes] = await Promise.all([this.documents.get("persona"), this.documents.get("notes")]);
     const reply = await this.model.complete(model, dreamPrompt({ persona: persona.text, notes: notes.text, focus, resident, residentTotal }), this.cancel.signal,
       { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+    // Everything is being read again from the start: the old model's tidying is not wanted.
+    if (generation !== this.generation) return;
     let parsed: ReturnType<typeof parseDreamReply>;
     try {
       parsed = parseDreamReply(reply);

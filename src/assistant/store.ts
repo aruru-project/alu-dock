@@ -92,8 +92,9 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS memories_state ON memories (state, id);
 CREATE INDEX IF NOT EXISTS memories_said ON memories (state, said_ms);
 -- Her timeline: one line per stretch of a conversation, from the first entry it covers (from_row) to the last.
+-- Its ID is never used again once removed: a client or a session may still name it.
 CREATE TABLE IF NOT EXISTS episodes (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES sessions(session_id),
   from_row INTEGER NOT NULL REFERENCES entries(id),
   from_at TEXT NOT NULL, from_ms INTEGER NOT NULL,
@@ -101,7 +102,9 @@ CREATE TABLE IF NOT EXISTS episodes (
   text TEXT NOT NULL,
   state TEXT NOT NULL, author TEXT NOT NULL,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-  revision INTEGER NOT NULL DEFAULT 1
+  revision INTEGER NOT NULL DEFAULT 1,
+  -- The owner or she changed it by hand at some point, even if extraction extended it since; starting over keeps it.
+  edited INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS episodes_time ON episodes (state, from_ms, id);
 CREATE INDEX IF NOT EXISTS episodes_session ON episodes (session_id, state, to_ms);

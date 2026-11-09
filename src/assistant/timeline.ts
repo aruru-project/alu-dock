@@ -43,6 +43,7 @@ export interface EpisodeRow {
   created_at: string;
   updated_at: string;
   revision: number;
+  edited: number;
 }
 
 /** An end of the stretch a line covers: the entry's row and when it was said. */
@@ -107,7 +108,9 @@ export class AssistantTimeline {
       const row = this.row(Number(request.id));
       if (row.revision !== request.revision) throw new AssistantError("assistant_episode_changed", CHANGED);
       if (request.state !== undefined) this.db.prepare("DELETE FROM episodes_forgotten_with WHERE episode_id = ?").run(row.id);
-      return this.episodeOf(this.change(row, { text: request.text, state: request.state }, author));
+      this.change(row, { text: request.text, state: request.state }, author);
+      this.db.prepare("UPDATE episodes SET edited = 1 WHERE id = ?").run(row.id);
+      return this.episodeOf(this.row(row.id));
     });
   }
 

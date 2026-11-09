@@ -10,6 +10,7 @@ import type { ModelPrompt } from "../src/assistant/extraction-prompt.js";
 import { AssistantMemories } from "../src/assistant/memories.js";
 import { AssistantStore } from "../src/assistant/store.js";
 import { AssistantTimeline } from "../src/assistant/timeline.js";
+import { writeTransaction } from "../src/assistant/transaction.js";
 import type { AssistantEntry } from "../src/core/assistant.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
@@ -112,10 +113,10 @@ test("a part the model could not make sense of is noted and read again once anot
 test("starting over sets aside what the background made, keeps what the owner and she wrote, and reads everything again in the order it was said", { timeout: 30_000 }, async (context) => {
   const reads: string[] = [];
   let again = false;
-  const { say, extraction, memories, timeline } = await setUp(context, async (_model, prompt) => {
+  const { say, extraction, memories, timeline, store } = await setUp(context, async (_model, prompt) => {
     const words = readThisTime(prompt);
     reads.push(words);
-    if (again) return NOTHING;
+    if (again) return words.includes("上海") ? JSON.stringify({ changes: [], timeline: [{ do: "add", text: "又读到去上海的事。", from: [1] }] }) : NOTHING;
     const city = words.includes("上海") ? "上海" : "杭州";
     return JSON.stringify({ changes: [{ do: "add", topic: "events", text: `主人去了${city}。`, resident: false, from: [1] }], timeline: [{ do: "add", text: `聊去${city}的事。`, from: [1] }] });
   });
@@ -131,16 +132,21 @@ test("starting over sets aside what the background made, keeps what the owner an
   const owners = memories.update({ id: shanghai!.id, revision: shanghai!.revision, text: "主人周一去上海出差。" }, "owner");
   const hers = memories.add({ topic: "self", text: "她答应主人出差时提醒带充电器。", resident: true }, "assistant");
   const [hangzhouLine, shanghaiLine] = timeline.list({ limit: 10 }).episodes;
-  const ownersLine = timeline.update({ id: hangzhouLine!.id, revision: hangzhouLine!.revision, text: "周三在杭州（主人写的）。" }, "owner");
+  // She corrects a line at the owner's word, and reading on extends it since.
+  const corrected = timeline.update({ id: hangzhouLine!.id, revision: hangzhouLine!.revision, text: "周三在杭州（她改正的）。" }, "assistant");
+  writeTransaction(store.connection, () => timeline.change(timeline.row(Number(corrected.id)), { text: "周三在杭州，后来又聊了一会儿。" }, "extraction"));
 
   again = true;
   reads.length = 0;
   assert.deepEqual(extraction.reorganize({ provider: "memory", id: "second" }), { extractionModel: { provider: "memory", id: "second" }, retiredMemories: 1, removedLines: 1 });
   assert.deepEqual(memories.list({ limit: 10 }).memories.map((memory) => memory.id).sort(), [owners.id, hers.id].sort(), "What the owner and she wrote stays");
   assert.deepEqual(memories.list({ limit: 10, state: "retired" }).memories.map((memory) => memory.id), [hangzhou!.id], "What the background made can be found among the retired");
-  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [ownersLine.id]);
+  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [corrected.id], "A line she corrected stays though reading extended it since");
   assert.throws(() => timeline.get(shanghaiLine!.id));
   assert.deepEqual(extraction.settings(), { extractionModel: { provider: "memory", id: "second" } });
   await waitFor(() => reads.length === 2 && extraction.status().waitingSessions === 0, "The conversations were not read again");
   assert.ok(reads[0]!.includes("上海") && reads[1]!.includes("杭州"), "Read again in the order it was said");
+  // Review of 2026-11-10: a client or a session still naming the removed line must not reach the new one.
+  const fresh = timeline.list({ limit: 10, query: "又读到" }).episodes[0];
+  assert.ok(fresh && fresh.id !== shanghaiLine!.id, `The new line takes a new number: ${fresh?.id}`);
 });
