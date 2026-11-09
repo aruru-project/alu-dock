@@ -222,18 +222,20 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.registerTool({
       name: "assistant_search",
       label: "Search memory",
-      description: "Search what you remember, your timeline and your past conversations with your owner, by keywords, time, or both. Memories whose text has every keyword come first; then the timeline (one line per stretch of a conversation saying what the two of you were doing, which is how to answer \"what were we up to that day\"); then what was said, newest first. Each hit names its sessionId and entryId; use assistant_read to see what was said around it. When nothing is found, try other words before saying you do not remember.",
+      description: "Search what you remember, your timeline and your past conversations with your owner, by keywords, time, or both. Memories come first: those whose text has every keyword and that were said in the time given; then the timeline (one line per stretch of a conversation saying what the two of you were doing, which is how to answer \"what were we up to that day\"); then what was said, newest first. Each timeline line and each hit names a sessionId and entryId; use assistant_read to see what was said there. When nothing is found, try other words before saying you do not remember.",
       parameters: SEARCH_SCHEMA,
       execute: async (_id: string, params: { query?: string; from?: string; to?: string; cursor?: string; limit?: number }) => {
         const query = params.query?.trim();
         const firstPage = params.cursor === undefined;
         const result = await port.call({ op: "search", ...optional("query", params.query), ...optional("from", params.from), ...optional("to", params.to), ...optional("cursor", params.cursor), limit: params.limit ?? 10 });
-        // Memories on the first page of a keyword search and the timeline on every first page; the cursor pages through what was said.
-        const memories = query && firstPage ? await port.call({ op: "memory_list", query, limit: 10 }) : undefined;
+        // Memories and the timeline on the first page, under the same words and time; the cursor pages through what was said.
+        const memories = firstPage && (query || params.from !== undefined || params.to !== undefined)
+          ? await port.call({ op: "memory_list", ...(query ? { query } : {}), ...optional("from", params.from), ...optional("to", params.to), limit: 10 })
+          : undefined;
         const timeline = firstPage
           ? await port.call({ op: "timeline_list", ...(query ? { query } : {}), ...optional("from", params.from), ...optional("to", params.to), limit: query ? 10 : 20 })
           : undefined;
-        const text = [...(memories ? [renderMemories(memories, "Memories")] : []), ...(timeline ? [renderTimeline(timeline)] : []), renderSearch(result)].join("\n\n");
+        const text = [...(memories ? [renderMemories(memories, query ? "Memories" : "Memories said then")] : []), ...(timeline ? [renderTimeline(timeline)] : []), renderSearch(result)].join("\n\n");
         return { content: [{ type: "text", text }], details: { ...result, ...(memories ? { memories: memories.memories } : {}), ...(timeline ? { episodes: timeline.episodes } : {}) } };
       },
     } as never);
@@ -275,7 +277,7 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.registerTool({
       name: "assistant_memory",
       label: "Memories",
-      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true. forget: forget one when your owner asks; the words it came from are not found by searches either. restore: bring back a retired or forgotten one. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic or state, newest first. settings: which model keeps your memories in the background and how that is going. set_model: change that model when your owner asks. Use it when your owner asks you to remember or forget something, or when something is clearly worth remembering. Changes apply to sessions that start later; this session already knows.",
+      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true. forget: forget one when your owner asks; the words it came from are not found by searches either, and the timeline lines covering them are forgotten with it. restore: bring back a retired or forgotten one, with the timeline lines that went with it. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic or state, newest first. settings: which model keeps your memories in the background and how that is going. set_model: change that model when your owner asks. Use it when your owner asks you to remember or forget something, or when something is clearly worth remembering. Changes apply to sessions that start later; this session already knows.",
       parameters: MEMORY_SCHEMA,
       execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState; model?: string }, _signal: unknown, _update: unknown, ctx: ExtensionContext) => {
         const needId = (): string => {
@@ -553,7 +555,10 @@ const STATE_NAMES: Record<AssistantMemoryState, string> = { active: "in use", re
 
 function renderEpisode(episode: AssistantEpisode): string {
   const place = where(episode.session);
-  return `#${episode.id} ${localSpan(new Date(episode.fromAt), new Date(episode.toAt))}${place ? ` · ${place}` : ""}${episode.state === "active" ? "" : " · forgotten"}: ${episode.text}`;
+  return [
+    `#${episode.id} ${localSpan(new Date(episode.fromAt), new Date(episode.toAt))}${place ? ` · ${place}` : ""}${episode.state === "active" ? "" : " · forgotten"}: ${episode.text}`,
+    `   starts at sessionId=${episode.session.sessionId} entryId=${episode.entryId}`,
+  ].join("\n");
 }
 
 function renderTimeline(list: AssistantTimelineList): string {

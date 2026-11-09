@@ -251,18 +251,23 @@ export class AssistantExtraction {
     this.memories.write(() => {
       // Words the owner had forgotten while the model was reading may not come back as a memory or a timeline line.
       const forgotten = this.forgottenAmong(refs);
+      // A line tells of everything in its stretch, so it may not span any of them either.
+      const forgottenAt = [...forgotten].map((id) => rowById.get(id)!.at_ms);
       for (const change of parsed.timeline) {
         const sources = change.from.map((ref) => refs[ref - 1]!);
-        if (sources.some((row) => forgotten.has(row))) continue;
         // The line covers the entries it names: from the earliest said to the latest.
         const covered = sources.map((id) => rowById.get(id)!);
         const first = covered.reduce((earliest, row) => (row.at_ms < earliest.at_ms ? row : earliest));
         const last = covered.reduce((latest, row) => (row.at_ms > latest.at_ms ? row : latest));
-        const from = { at: first.at, at_ms: first.at_ms };
-        const to = { at: last.at, at_ms: last.at_ms };
-        if (change.do === "add") { this.timeline.insert(sessionId, from, to, change.text, "extraction"); continue; }
-        const row = this.changeableEpisode(change.id, knownEpisodes);
+        const from = { row: first.id, at: first.at, at_ms: first.at_ms };
+        const to = { row: last.id, at: last.at, at_ms: last.at_ms };
+        const row = change.do === "rewrite" ? this.changeableEpisode(change.id, knownEpisodes) : undefined;
+        if (change.do === "rewrite" && !row) continue;
+        const spanFrom = Math.min(row?.from_ms ?? first.at_ms, first.at_ms);
+        const spanTo = Math.max(row?.to_ms ?? last.at_ms, last.at_ms);
+        if (forgottenAt.some((at) => at >= spanFrom && at <= spanTo)) continue;
         if (row) knownEpisodes.set(row.id, this.timeline.change(row, { text: change.text, from, to }, "extraction"));
+        else this.timeline.insert(sessionId, from, to, change.text, "extraction");
       }
       for (const change of parsed.changes) {
         const sources = change.from.map((ref) => refs[ref - 1]!);

@@ -69,11 +69,11 @@ async function runCase(item: MemoryCase, model: AssistantModelRef, create: () =>
           WHERE session_id = ?1`).run(session.id, `${session.id}-${readThrough}`);
       }
     }
-    const bound = store.connection.prepare("SELECT at, at_ms FROM entries WHERE session_id = ? AND entry_id = ?");
+    const bound = store.connection.prepare("SELECT id AS row, at, at_ms FROM entries WHERE session_id = ? AND entry_id = ?");
     writeTransaction(store.connection, () => {
       for (const episode of item.episodes ?? []) {
-        const from = bound.get(episode.session, `${episode.session}-${episode.from}`) as { at: string; at_ms: number };
-        const to = bound.get(episode.session, `${episode.session}-${episode.to}`) as { at: string; at_ms: number };
+        const from = bound.get(episode.session, `${episode.session}-${episode.from}`) as { row: number; at: string; at_ms: number };
+        const to = bound.get(episode.session, `${episode.session}-${episode.to}`) as { row: number; at: string; at_ms: number };
         timeline.insert(episode.session, from, to, episode.text, "extraction");
       }
     });

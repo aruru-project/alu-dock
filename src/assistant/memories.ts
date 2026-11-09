@@ -16,6 +16,7 @@ import {
   type AssistantMemoryUpdateRequest,
 } from "../core/assistant.js";
 import { timeBoundary } from "./store.js";
+import { forgetLinesWith, restoreLinesWith } from "./timeline.js";
 import { readTransaction, writeTransaction } from "./transaction.js";
 
 /*
@@ -23,7 +24,8 @@ import { readTransaction, writeTransaction } from "./transaction.js";
  * layout). Nothing is ever deleted: a memory set aside is `retired`, one the owner wants gone is
  * `forgotten`, and both can be restored. While a memory is forgotten, the entries it names as where
  * it was said are not found by searches either, and read as forgotten (entries.forgotten counts
- * the forgotten memories naming each entry).
+ * the forgotten memories naming each entry); the timeline lines covering those words are forgotten
+ * with it and come back with it (timeline.ts).
  *
  * A memory is dated by when it was said: the earliest place it was said, kept up to date as places
  * are added; one written without a place is dated when it was written.
@@ -164,9 +166,12 @@ export class AssistantMemories {
     const state = request.state ?? row.state;
     if (state !== row.state) {
       actions.push([request.supersededBy !== undefined ? "merged" : state === "active" ? "restored" : state as "retired" | "forgotten", null]);
-      // Entries said where a forgotten memory came from are hidden while it stays forgotten.
+      // Entries said where a forgotten memory came from are hidden while it stays forgotten, and the
+      // timeline lines telling of them go with it.
       const step = state === "forgotten" ? 1 : row.state === "forgotten" ? -1 : 0;
       if (step !== 0) this.db.prepare("UPDATE entries SET forgotten = forgotten + ? WHERE id IN (SELECT entry_row FROM memory_sources WHERE memory_id = ?)").run(step, row.id);
+      if (step === 1) forgetLinesWith(this.db, row.id, at);
+      if (step === -1) restoreLinesWith(this.db, row.id, at);
     }
     if (actions.length === 0) return row;
     this.db.prepare(`UPDATE memories SET text = ?, topic = ?, resident = ?, state = ?, author = ?, updated_at = ?, revision = revision + 1,

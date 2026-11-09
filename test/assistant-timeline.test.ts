@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { AssistantDocuments } from "../src/assistant/documents.js";
@@ -17,8 +16,9 @@ import { waitFor } from "./support/plan-goal-provider.js";
 
 // Card #295: beside her memories, Dock keeps a timeline of what the two of them were doing, one line
 // per stretch of a conversation, work included. A new session starts with the last week of it, a
-// day of it is found by time, and a line the owner wrote stays his.
-test("what they were doing each day becomes a timeline: a week of it opens every session, a day of it is found by time, and the owner's line stays his", { timeout: 30_000 }, async (context) => {
+// day of it is found by time, a line the owner wrote stays his, and what the owner has her forget is
+// not loaded or found in it either.
+test("what they were doing each day becomes a timeline: a week of it opens every session, a day of it is found by time, the owner's line stays his, and it forgets what she forgets", { timeout: 30_000 }, async (context) => {
   // Days and local times below are Main's local day; fix the zone so they read the same everywhere.
   process.env.TZ = "Asia/Shanghai";
   const root = await mkdtemp(join(tmpdir(), "alu-timeline-"));
@@ -61,13 +61,14 @@ test("what they were doing each day becomes a timeline: a week of it opens every
   extraction.start();
   await waitFor(() => timeline.list({ limit: 10 }).episodes.length === 2, "The timeline was not written");
 
-  // Newest first; each line covers the entries it named, as they were said, and says where it happened.
+  // Newest first; each line covers the entries it named, as they were said, says where it happened
+  // and where its words can be read from.
   const [game, work] = timeline.list({ limit: 10 }).episodes;
   assert.deepEqual(
-    [game, work].map((line) => [line!.text, line!.fromAt, line!.toAt, line!.author, line!.session.sessionId, line!.session.name]),
+    [game, work].map((line) => [line!.text, line!.fromAt, line!.toAt, line!.author, line!.session.sessionId, line!.session.name, line!.entryId]),
     [
-      ["深夜聊艾尔登法环的法师新档。", "2026-11-06T13:00:00.000Z", "2026-11-06T13:00:10.000Z", "extraction", "s", "阿露"],
-      ["在 alu_dock 修助手记忆的搜索超时。", "2026-11-05T07:00:00.000Z", "2026-11-05T07:25:00.000Z", "extraction", "s", "阿露"],
+      ["深夜聊艾尔登法环的法师新档。", "2026-11-06T13:00:00.000Z", "2026-11-06T13:00:10.000Z", "extraction", "s", "阿露", "u2"],
+      ["在 alu_dock 修助手记忆的搜索超时。", "2026-11-05T07:00:00.000Z", "2026-11-05T07:25:00.000Z", "extraction", "s", "阿露", "u1"],
     ],
   );
   ids = { work: work!.id, game: game!.id };
@@ -96,8 +97,10 @@ test("what they were doing each day becomes a timeline: a week of it opens every
   assert.deepEqual([timeline.get(work!.id).text, timeline.get(work!.id).revision], [his.text, his.revision], "The owner's line is not rewritten by extraction");
 
   // A new session loads the last week of the timeline, oldest first, not what is older.
+  store.record({ sessionId: "old", cwd: "/home/owner" }, [{ entryId: "o1", at: "2026-10-20T02:00:00.000Z", kind: "user", text: "三周前的一句话。" }], "o1", {});
+  const o1 = store.connection.prepare("SELECT id FROM entries WHERE entry_id = 'o1'").get() as { id: number };
   const older = writeTransaction(store.connection, () =>
-    timeline.insert("s", { at: "2026-10-20T02:00:00.000Z", at_ms: Date.parse("2026-10-20T02:00:00.000Z") }, { at: "2026-10-20T03:00:00.000Z", at_ms: Date.parse("2026-10-20T03:00:00.000Z") }, "三周前在做别的。", "extraction"));
+    timeline.insert("old", { row: o1.id, at: "2026-10-20T02:00:00.000Z", at_ms: Date.parse("2026-10-20T02:00:00.000Z") }, { row: o1.id, at: "2026-10-20T03:00:00.000Z", at_ms: Date.parse("2026-10-20T03:00:00.000Z") }, "三周前在做别的。", "extraction"));
   const readers = { search: () => Promise.reject(new Error("not read here")), context: () => Promise.reject(new Error("not read here")) };
   const core = new AssistantCore(documents, store, readers as never, memories, timeline, extraction, root, () => new Date("2026-11-08T02:00:00.000Z"));
   const loaded = (await core.answer({ op: "load" }, {})).text;
@@ -113,32 +116,13 @@ test("what they were doing each day becomes a timeline: a week of it opens every
   assert.equal(timeline.update({ id: game!.id, revision: forgotten.revision, state: "active" }, "owner").state, "active");
   // A stale revision changes nothing.
   assert.throws(() => timeline.update({ id: game!.id, revision: forgotten.revision, text: "过期的改动" }, "owner"), (error: unknown) => (error as { code?: string }).code === "assistant_episode_changed");
-});
 
-// Card #295: the memories kept by the first Dock with memories open again after the upgrade, each
-// dated by when it was said.
-test("memories kept by the previous Dock open again, dated by when they were said", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "alu-timeline-upgrade-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const path = join(root, "memory.sqlite");
-  const first = new AssistantStore(path);
-  first.record({ sessionId: "s", cwd: "/w" }, [{ entryId: "u1", at: "2026-10-01T10:00:00.000Z", kind: "user", text: "我不吃香菜。" }], "u1", {});
-  const memories = new AssistantMemories(first.connection, () => new Date("2026-10-02T00:00:00.000Z"));
-  memories.add({ topic: "preferences", text: "主人不吃香菜。", resident: true, sources: [{ sessionId: "s", entryId: "u1" }] }, "extraction");
-  memories.add({ topic: "owner", text: "主人手写的一条。", resident: true }, "owner");
-  first.close();
-  // What the previous Dock left behind: no timeline, and memories without a time said.
-  const old = new DatabaseSync(path);
-  old.exec("DROP INDEX memories_said; ALTER TABLE memories DROP COLUMN said_at; ALTER TABLE memories DROP COLUMN said_ms; DROP TABLE episodes; UPDATE meta SET value = '1' WHERE key = 'schema';");
-  old.close();
-
-  const store = new AssistantStore(path);
-  context.after(() => store.close());
-  const upgraded = new AssistantMemories(store.connection).list({ limit: 10 }).memories;
-  assert.deepEqual(upgraded.map((memory) => [memory.text, memory.saidAt]), [
-    ["主人手写的一条。", "2026-10-02T00:00:00.000Z"],
-    ["主人不吃香菜。", "2026-10-01T10:00:00.000Z"],
-  ]);
-  assert.deepEqual(new AssistantTimeline(store.connection).list({ limit: 10 }).episodes, []);
-  assert.equal((store.connection.prepare("SELECT value FROM meta WHERE key = 'schema'").get() as { value: string }).value, "2");
+  // The owner has her forget what she remembered from that night: the night's line may tell the same,
+  // so it is no longer listed or loaded either, and the work line is untouched; restoring the memory
+  // brings the line back.
+  const gone = memories.update({ id: liked!.id, revision: memories.get(liked!.id).memory.revision, state: "forgotten" }, "owner");
+  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [work!.id, String(older.id)]);
+  assert.ok(!(await core.answer({ op: "load" }, {})).text.includes("信仰流"), "A forgotten memory's night is not loaded from the timeline");
+  memories.update({ id: liked!.id, revision: gone.revision, state: "active" }, "owner");
+  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [game!.id, work!.id, String(older.id)]);
 });

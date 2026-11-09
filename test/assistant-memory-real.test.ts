@@ -43,9 +43,13 @@ test("what she hears becomes a memory and a timeline line her next session start
     { text: kept!.text, topic: kept!.topic, resident: kept!.resident, author: kept!.author, saidAt: kept!.saidAt, sources: kept!.sources.map((source) => [source.sessionId, source.entryId]) },
     { text: "主人不吃香菜，点外卖要避开。", topic: "preferences", resident: true, author: "extraction", saidAt: said.at, sources: [[said.session.sessionId, said.entryId]] },
   );
-  // The timeline line covers the owner's words and her answer, and says which Work it happened in.
+  // The timeline line covers the owner's words and her answer, says which Work it happened in, and
+  // starts where the owner said it.
   const [line] = (await client.assistantTimeline()).episodes;
-  assert.deepEqual({ text: line!.text, fromAt: line!.fromAt, workId: line!.session.workId, author: line!.author }, { text: "聊外卖，主人交代不吃香菜。", fromAt: said.at, workId: alu.id, author: "extraction" });
+  assert.deepEqual(
+    { text: line!.text, fromAt: line!.fromAt, workId: line!.session.workId, author: line!.author, entryId: line!.entryId },
+    { text: "聊外卖，主人交代不吃香菜。", fromAt: said.at, workId: alu.id, author: "extraction", entryId: said.entryId },
+  );
 
   // A session that starts again loads both; the one that was open was not told.
   await client.reloadSession(alu.id, "alu-reload");
@@ -53,12 +57,16 @@ test("what she hears becomes a memory and a timeline line her next session start
   const dinner = await coordinator.request(1);
   assert.ok(systemPrompt(dinner.body).includes("主人不吃香菜，点外卖要避开。"), "A new session starts with what she remembers");
   assert.ok(systemPrompt(dinner.body).includes("聊外卖，主人交代不吃香菜。"), "A new session starts with the week's timeline");
-  // Looking up a time shows the timeline before the words said then.
+  // Looking up a time shows the memories said then and the timeline before the words said then, and
+  // the timeline line says where to read its words.
   dinner.tools({ id: "today", name: "assistant_search", arguments: { from: new Date(Date.now() - 86_400_000).toISOString() } });
   const looked = await coordinator.request(2);
   const shown = JSON.stringify(looked.body.messages?.find((message) => message.role === "tool")?.content ?? "");
   const lineAt = shown.indexOf("聊外卖，主人交代不吃香菜。");
-  assert.ok(lineAt >= 0 && lineAt < shown.indexOf("我不吃香菜，以后点外卖记得避开。"), `The timeline comes before the words said: ${shown}`);
+  const wordsAt = shown.indexOf("我不吃香菜，以后点外卖记得避开。");
+  assert.ok(shown.indexOf("主人不吃香菜，点外卖要避开。") >= 0 && shown.indexOf("主人不吃香菜，点外卖要避开。") < lineAt, `The memory said then comes first: ${shown}`);
+  assert.ok(lineAt >= 0 && lineAt < wordsAt, `The timeline comes before the words said: ${shown}`);
+  assert.ok(shown.slice(lineAt, shown.indexOf("Found ", lineAt)).includes(`entryId=${said.entryId}`), `The timeline line says where its words are: ${shown}`);
   looked.text("麻辣烫，不要香菜。今天就聊了外卖。");
   await settled(client, alu.id);
 });

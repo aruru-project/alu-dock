@@ -86,14 +86,15 @@ CREATE TABLE IF NOT EXISTS memories (
   -- The owner chose whether it is loaded every session; the background passes leave that as it is.
   resident_fixed INTEGER NOT NULL DEFAULT 0,
   -- When it was said: the earliest place it was said, or when it was written without one.
-  said_at TEXT NOT NULL DEFAULT '', said_ms INTEGER NOT NULL DEFAULT 0
+  said_at TEXT NOT NULL, said_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS memories_state ON memories (state, id);
 CREATE INDEX IF NOT EXISTS memories_said ON memories (state, said_ms);
--- Her timeline: one line per stretch of a conversation, from the first entry it covers to the last.
+-- Her timeline: one line per stretch of a conversation, from the first entry it covers (from_row) to the last.
 CREATE TABLE IF NOT EXISTS episodes (
   id INTEGER PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(session_id),
+  from_row INTEGER NOT NULL REFERENCES entries(id),
   from_at TEXT NOT NULL, from_ms INTEGER NOT NULL,
   to_at TEXT NOT NULL, to_ms INTEGER NOT NULL,
   text TEXT NOT NULL,
@@ -103,6 +104,14 @@ CREATE TABLE IF NOT EXISTS episodes (
 );
 CREATE INDEX IF NOT EXISTS episodes_time ON episodes (state, from_ms, id);
 CREATE INDEX IF NOT EXISTS episodes_session ON episodes (session_id, state, to_ms);
+-- Timeline lines forgotten along with a memory because they cover words it came from; restoring the
+-- memory brings back those no other forgotten memory still holds.
+CREATE TABLE IF NOT EXISTS episodes_forgotten_with (
+  memory_id INTEGER NOT NULL REFERENCES memories(id),
+  episode_id INTEGER NOT NULL REFERENCES episodes(id),
+  PRIMARY KEY (memory_id, episode_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS episodes_forgotten_with_episode ON episodes_forgotten_with (episode_id);
 CREATE TABLE IF NOT EXISTS memory_sources (
   memory_id INTEGER NOT NULL REFERENCES memories(id),
   entry_row INTEGER NOT NULL REFERENCES entries(id),
@@ -115,13 +124,11 @@ CREATE TABLE IF NOT EXISTS memory_changes (
   at TEXT NOT NULL, author TEXT NOT NULL, action TEXT NOT NULL, text TEXT
 );
 CREATE INDEX IF NOT EXISTS memory_changes_memory ON memory_changes (memory_id, id);
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '2');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema', '1');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('max_shift_ms', '0');
 `;
 /** The database layout this code reads and writes; a newer one is refused rather than misread. */
-const SCHEMA_VERSION = "2";
-/** Layouts of earlier Docks that the writing connection brings up to date on opening. */
-const UPGRADABLE_VERSIONS = ["1"];
+const SCHEMA_VERSION = "1";
 
 /** Room for entries said in the same millisecond. */
 const ENTRY_IDS_PER_MS = 1024;
@@ -180,14 +187,10 @@ export class AssistantStore {
         ? (this.db.prepare("SELECT value FROM meta WHERE key = 'schema'").get() as { value: string } | undefined)?.value
         : undefined;
       const fresh = tables.length === 0;
-      const upgradable = version !== undefined && UPGRADABLE_VERSIONS.includes(version) && !options.reader;
-      if (!(version === SCHEMA_VERSION || (fresh && !options.reader) || upgradable)) {
+      if (!(version === SCHEMA_VERSION || (fresh && !options.reader))) {
         throw new Error(`The assistant's memory at ${path} has ${fresh ? "not been set up" : `layout ${version ?? "unknown"}`}, which this Dock cannot read. It is left as it is.`);
       }
-      if (!options.reader) {
-        if (version === "1") this.upgradeFrom1();
-        this.db.exec(SCHEMA);
-      }
+      if (!options.reader) this.db.exec(SCHEMA);
     } catch (error) {
       this.db.close();
       throw error;
@@ -195,29 +198,6 @@ export class AssistantStore {
   }
 
   close(): void { this.db.close(); }
-
-  /**
-   * Layout 1 (the first Dock with memories) to 2: a memory is dated by when it was said, the
-   * earliest place it was said or else when it was written; the timeline's table SCHEMA then creates.
-   */
-  private upgradeFrom1(): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      this.db.exec("ALTER TABLE memories ADD COLUMN said_at TEXT NOT NULL DEFAULT ''; ALTER TABLE memories ADD COLUMN said_ms INTEGER NOT NULL DEFAULT 0;");
-      const memories = this.db.prepare("SELECT id, created_at FROM memories").all() as Array<{ id: number; created_at: string }>;
-      const first = this.db.prepare("SELECT e.at, e.at_ms FROM memory_sources s JOIN entries e ON e.id = s.entry_row WHERE s.memory_id = ? ORDER BY e.at_ms LIMIT 1");
-      const date = this.db.prepare("UPDATE memories SET said_at = ?, said_ms = ? WHERE id = ?");
-      for (const memory of memories) {
-        const said = first.get(memory.id) as { at: string; at_ms: number } | undefined;
-        date.run(said?.at ?? memory.created_at, said?.at_ms ?? Date.parse(memory.created_at), memory.id);
-      }
-      this.db.prepare("UPDATE meta SET value = '2' WHERE key = 'schema'").run();
-      this.db.exec("COMMIT");
-    } catch (error) {
-      try { this.db.exec("ROLLBACK"); } catch { /* SQLite already rolled back */ }
-      throw error;
-    }
-  }
 
   /** The writing connection, shared with her memories (memories.ts), her timeline and extraction, which keep their rows beside the conversations. */
   get connection(): DatabaseSync { return this.db; }

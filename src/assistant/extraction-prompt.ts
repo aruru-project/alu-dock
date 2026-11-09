@@ -50,7 +50,7 @@ const EXTRACTION_SYSTEM = `你替一位个人助手整理她的记忆，并记�
 
 记忆是为以后准备的：下次和主人聊天时，她要像一个认识主人很久的人，记得主人是什么样的人、他们之间怎么相处、一起经历过什么。每段对话的原话都会留着，她随时能搜；记忆要记的，是她以后不翻原话也该知道的事。做了什么工作、怎么做的，原话里都有，时间线里也会写，记忆里不必记：修了什么问题、升了什么版本、测试过没过，这些细节都不是记忆。但主人这阵子在做什么项目、为什么做、对它多上心，是他生活的一部分，和别的事一样看值不值得记。值得记的是这些事透露出的主人这个人、他们的关系，和一个老朋友以后会提起的经历：他难熬或高兴的时候、生活里的变化、对他要紧的事。什么值得记，由你判断。
 
-时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。每行不超过 80 字，用主人平时说的语言；密码密钥、主人要她忘掉的事，时间线里同样不写。
+时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。每行不超过 80 字，用主人平时说的语言；起止时间会自动标在行前，行里不用再写日期；密码密钥、主人要她忘掉的事，时间线里同样不写。
 
 必须遵守：
 ${RULES_COMMON}
@@ -252,10 +252,9 @@ export type DreamChange =
 export class ReplyFormatError extends Error {}
 
 /** `lines`: how many numbered entries the prompt showed. A reply without `timeline` writes no line. */
-export function parseExtractionReply(reply: string, lines: number): { changes: ExtractionChange[]; timeline: TimelineChange[]; skipped: number } {
+export function parseExtractionReply(reply: string, lines: number): { changes: ExtractionChange[]; timeline: TimelineChange[] } {
   const body = replyObject(reply);
   const rawChanges = replyChanges(body);
-  let skipped = 0;
   const timeline: TimelineChange[] = [];
   for (const raw of Array.isArray(body.timeline) ? body.timeline as unknown[] : []) {
     const change = record(raw);
@@ -263,8 +262,7 @@ export function parseExtractionReply(reply: string, lines: number): { changes: E
     const text = episodeText(change?.text);
     if (change?.do === "add" && from.length > 0 && text !== undefined) { timeline.push({ do: "add", text, from }); continue; }
     const id = memoryId(change?.id);
-    if (change?.do === "rewrite" && from.length > 0 && text !== undefined && id !== undefined) { timeline.push({ do: "rewrite", id, text, from }); continue; }
-    skipped += 1;
+    if (change?.do === "rewrite" && from.length > 0 && text !== undefined && id !== undefined) timeline.push({ do: "rewrite", id, text, from });
   }
   const changes: ExtractionChange[] = [];
   for (const raw of rawChanges) {
@@ -281,15 +279,13 @@ export function parseExtractionReply(reply: string, lines: number): { changes: E
       if (id !== undefined && text !== undefined) { changes.push({ do: "rewrite", id, text, from }); continue; }
     } else if (kind === "retire") {
       const id = memoryId(change!.id);
-      if (id !== undefined) { changes.push({ do: "retire", id, from }); continue; }
+      if (id !== undefined) changes.push({ do: "retire", id, from });
     }
-    skipped += 1;
   }
-  return { changes, timeline, skipped };
+  return { changes, timeline };
 }
 
-export function parseDreamReply(reply: string): { changes: DreamChange[]; skipped: number } {
-  let skipped = 0;
+export function parseDreamReply(reply: string): { changes: DreamChange[] } {
   const changes: DreamChange[] = [];
   for (const raw of replyChanges(replyObject(reply))) {
     const change = record(raw);
@@ -311,11 +307,9 @@ export function parseDreamReply(reply: string): { changes: DreamChange[]; skippe
       }
     } else if (kind === "resident" && id !== undefined && typeof change!.resident === "boolean") {
       changes.push({ do: "resident", id, resident: change!.resident });
-      continue;
     }
-    skipped += 1;
   }
-  return { changes, skipped };
+  return { changes };
 }
 
 /** The reply's JSON object, from the first "{" to the last "}" so a fence or a remark around it does no harm. */

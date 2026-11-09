@@ -78,7 +78,8 @@ export const MAX_ASSISTANT_MEMORY_HISTORY = 50;
  * Her timeline: one line per stretch of a conversation saying what the two of them were doing or
  * talking about, written in the background beside her memories. It judges nothing; it is the table
  * of contents she turns to for "what were we up to that day", and it says what she was working on
- * even when no memory came of it. A line is in use or forgotten at the owner's word.
+ * even when no memory came of it. A line is in use or forgotten: at the owner's word, or along with a
+ * forgotten memory whose words it covers.
  */
 export const ASSISTANT_EPISODE_STATES = ["active", "forgotten"] as const;
 export type AssistantEpisodeState = typeof ASSISTANT_EPISODE_STATES[number];
@@ -111,8 +112,11 @@ export interface AssistantExtractionStatus {
   lastError?: string;
   retryAt?: string;
 }
-/** `maxMemoryChars`: how long one memory may be, in characters (UTF-16 code units), for a client to say before saving. */
-export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; extraction?: AssistantExtractionStatus }
+/**
+ * `maxMemoryChars` and `maxEpisodeChars`: how long one memory and one timeline line may be, in
+ * characters (UTF-16 code units), for a client to say before saving.
+ */
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; maxEpisodeChars: number; extraction?: AssistantExtractionStatus }
 
 /** Where something was said: an entry of a recorded conversation. */
 export interface AssistantMemorySource { sessionId: string; entryId: string; at: string }
@@ -166,10 +170,14 @@ export interface AssistantMemoryUpdateRequest {
   state?: AssistantMemoryState;
 }
 
-/** One line of her timeline: a stretch of one conversation, from the first entry it covers to the last. */
+/**
+ * One line of her timeline: a stretch of one conversation, from the first entry it covers to the last.
+ * `entryId` is that first entry, where the words it sums up can be read from.
+ */
 export interface AssistantEpisode {
   id: string;
   session: AssistantSessionInfo;
+  entryId: string;
   fromAt: string;
   toAt: string;
   text: string;
@@ -644,6 +652,7 @@ export function parseAssistantInfo(input: unknown, field = "assistant info"): As
       workspacePath: text(value.workspacePath, `${field}.workspacePath`, MAX_PATH_CHARS, 1),
       maxDocumentBytes: count(value.maxDocumentBytes, `${field}.maxDocumentBytes`, Number.MAX_SAFE_INTEGER, 1),
       maxMemoryChars: count(value.maxMemoryChars, `${field}.maxMemoryChars`, Number.MAX_SAFE_INTEGER, 1),
+      maxEpisodeChars: count(value.maxEpisodeChars, `${field}.maxEpisodeChars`, Number.MAX_SAFE_INTEGER, 1),
       ...(value.extraction === undefined ? {} : { extraction: parseExtractionStatus(value.extraction, `${field}.extraction`) }),
     };
   });
@@ -723,6 +732,7 @@ export function parseAssistantEpisode(input: unknown, field = "assistant timelin
     return {
       id: memoryId(value.id, `${field}.id`),
       session: parseSession(value.session, `${field}.session`),
+      entryId: id(value.entryId, `${field}.entryId`),
       fromAt: time(value.fromAt, `${field}.fromAt`),
       toAt: time(value.toAt, `${field}.toAt`),
       text: text(value.text, `${field}.text`, MAX_ASSISTANT_EPISODE_CHARS, 1),
