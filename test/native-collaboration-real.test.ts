@@ -88,19 +88,27 @@ test("a coordinator and its child Works talk in messages that say whose they are
   assert.equal(sent(parentFix, "[来自子 Work「Implementer」· 已完成]\\nFIX_COMPLETE").length, 1, "A message that came after the last step is answered before the coordinator stops");
 
   // Card #666: taking back the user's Queue also emptied the extension messages Pi held for a busy
-  // Work. A child Work's question that is waiting for the coordinator's next step survives it.
-  await client.prompt(parent.id, "USER_FOLLOWUP: also update the docs.", "followUp", "user-followup");
+  // Work. A child Work's question and a watch notice waiting for the coordinator's next step survive it.
   await client.prompt(implementerWork.id, "Ask your coordinator whether tests are needed.", "auto", "child-question");
-  (await implementer.request(3)).tools({ id: "ask-parent", name: "dock_send", arguments: { message: "CHILD_QUESTION: add tests too?", done: false } });
-  const asked = await implementer.request(4);
+  const asking = await implementer.request(3);
+  parentFix.tools({ id: "watch-implementer", name: "dock_watch", arguments: { target: "Implementer" } });
+  const watching = await coordinator.request(6);
+  assert.match(JSON.stringify(watching.body.messages?.at(-1)), /Watching Implementer/);
+  await client.prompt(parent.id, "USER_FOLLOWUP: also update the docs.", "followUp", "user-followup");
+  asking.tools({ id: "ask-parent", name: "dock_send", arguments: { message: "CHILD_QUESTION: add tests too?", done: false } });
+  (await implementer.request(4)).text("Asked the coordinator.");
+  await waitFor(async () => (await client.status(implementerWork.id)).execution === "idle", "The implementer did not settle");
+  // The Host hands a Work its watch notices in turn with its other Dock calls, so once this call returns
+  // the coordinator's Worker holds the notice that the implementer went idle.
+  await team.registry!.invokeDockTool(parent.id, { type: "list" });
   const taken = await client.dequeue(parent.id, "take-back-queue");
   assert.deepEqual(taken.receipt.restored.map((item) => item.text), ["USER_FOLLOWUP: also update the docs."]);
-  parentFix.text("The fix is in.");
-  const question = await coordinator.request(6);
+  watching.text("The fix is in.");
+  const question = await coordinator.request(7);
   assert.equal(sent(question, "[来自子 Work「Implementer」]\\nCHILD_QUESTION").length, 1, "The child Work's question reaches the coordinator after the user took back the Queue");
+  assert.equal(sent(question, "[Dock watch completed · target=").length, 1, "So does the watch notice");
   assert.equal(sent(question, "USER_FOLLOWUP").length, 0);
   question.text("No tests are needed.");
-  asked.text("Asked the coordinator.");
   for (const work of [parent, implementerWork, reviewerWork]) {
     await waitFor(async () => (await client.status(work.id)).execution === "idle", `${work.displayName} did not settle`);
   }
@@ -116,7 +124,7 @@ test("a coordinator and its child Works talk in messages that say whose they are
   // child Work's message waiting for the coordinator's next step follows that rule. It goes into the
   // conversation without starting another turn; a message that comes after the Stop starts one.
   await client.prompt(parent.id, "USER_TASK: keep checking sum.js.", "auto", "user-task");
-  await coordinator.request(7);
+  await coordinator.request(8);
   await client.prompt(implementerWork.id, "Tell your coordinator the docs are stale.", "auto", "child-note-before-stop");
   (await implementer.request(5)).tools({ id: "note-before-stop", name: "dock_send", arguments: { message: "CHILD_NOTE_BEFORE_STOP: the docs are stale.", done: false } });
   const noted = await implementer.request(6);
@@ -128,10 +136,10 @@ test("a coordinator and its child Works talk in messages that say whose they are
   await waitFor(async () => (await client.history(parent.id)).entries.some((entry) => entry.customType === "dock-work-message" && JSON.stringify(entry.content).includes("CHILD_NOTE_BEFORE_STOP")),
     "The message waiting at the Stop did not go into the coordinator's conversation");
   await new Promise((resolve) => setTimeout(resolve, 500));
-  assert.equal(coordinator.requests.length, 8, "After the user's Stop, the waiting message does not start another turn");
+  assert.equal(coordinator.requests.length, 9, "After the user's Stop, the waiting message does not start another turn");
   await client.prompt(implementerWork.id, "Tell your coordinator the tests are stale too.", "auto", "child-note-after-stop");
   (await implementer.request(7)).tools({ id: "note-after-stop", name: "dock_send", arguments: { message: "CHILD_NOTE_AFTER_STOP: the tests are stale too.", done: false } });
-  const woken = await coordinator.request(8);
+  const woken = await coordinator.request(9);
   assert.equal(sent(woken, "CHILD_NOTE_AFTER_STOP").length, 1, "A message that comes after the Stop starts a turn as usual");
   assert.equal(sent(woken, "CHILD_NOTE_BEFORE_STOP").length, 1, "That turn also has the message from before the Stop");
   woken.text("Noted both.");

@@ -53,6 +53,11 @@ export function renderWorkMessage(message: WorkMessage): string {
   return lines.join("\n");
 }
 
+/** The custom message Pi records for a dock_watch notice. */
+export function watchNoticeEntry(notification: ObservationNotification): { customType: string; content: string; display: true; details: ObservationNotification } {
+  return { customType: "dock-tools-watch", content: renderObservationNotification(notification), display: true, details: notification };
+}
+
 /** The custom message Pi records for a Work message. */
 export function workMessageEntry(message: WorkMessage): { customType: string; content: string; display: true; details: WorkMessageDetails } {
   const details: WorkMessageDetails = {

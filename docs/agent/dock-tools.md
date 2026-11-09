@@ -38,7 +38,7 @@ A message from another Work is collaboration, not new authority from the user. E
 
 ## Watches
 
-`dock_watch({target})` notifies you once when another Work finishes its turn with nothing left queued, stops or fails: at your next step if you are working, otherwise by starting a turn. Your own child Works need no watch; they send you their results. `dock_cancel_watch` cancels watches. When a turn ends normally, the notice carries its final reply whole; a reply too long for the notice is shortened, says so, and `dock_inspect` reads the rest. Watches do not survive a Host restart.
+`dock_watch({target})` notifies you once when another Work finishes its turn with nothing left queued, stops or fails. The notice reaches you like a message from a child Work: at your next step if you are working, otherwise by starting a turn, and not by itself after the user stops your turn. Your own child Works need no watch; they send you their results. `dock_cancel_watch` cancels watches, and a cancelled watch's notice that has not reached you yet never does. When a turn ends normally, the notice carries its final reply whole; a reply too long for the notice is shortened, says so, and `dock_inspect` reads the rest. Watches do not survive a Host restart.
 
 ## Interrupt and stop
 

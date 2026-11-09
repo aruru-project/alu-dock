@@ -20,7 +20,11 @@ interface FakeExtensionContext {
     setStatus: (key: string, text: string | undefined) => void;
   };
   reload: () => Promise<void>;
+  isIdle: () => boolean;
 }
+
+/** The bridge writes what waits once Pi is done binding a runtime or settling. */
+const afterBinding = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 interface FakeApiState {
   active: string[];
@@ -72,11 +76,14 @@ function fakeExtensionContext(): {
         setStatus: (key, text) => { if (text === undefined) statuses.delete(key); else statuses.set(key, text); },
       },
       reload: async () => {},
+      isIdle: () => true,
     },
     notifications,
     statuses,
   };
 }
+
+const watchNotices = (state: FakeApiState) => state.messages.filter(({ message }) => (message as { customType?: string }).customType === "dock-tools-watch").length;
 
 const notification: ObservationNotification = {
   trust: CROSS_INSTANCE_TRUST,
@@ -231,12 +238,14 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   for (const start of second.state.start) start(undefined, extensionUi.context);
   assert.deepEqual(second.state.active, ["read", ...DOCK_TOOL_NAMES]);
   assert.equal(extensionUi.statuses.get("Dock tools"), "on");
-  assert.equal(second.state.messages.length, 1);
-  assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "steer" });
-  assert.match(JSON.stringify(second.state.messages[0]!.message), /Sol/u, "the notice names the Work that finished");
+  await afterBinding();
+  // Card #666: written into the conversation from the inbox, then a turn is asked for, like a Work message.
+  assert.deepEqual(second.state.messages.map(({ options }) => options), [{ triggerTurn: false }, { triggerTurn: true }]);
+  assert.match(JSON.stringify(second.state.messages[0]!.message), /"customType":"dock-tools-watch".*Sol/u, "the notice names the Work that finished");
 
   bridge.deliver(notification);
-  assert.equal(second.state.messages.length, 1, "duplicate watch completion must not wake twice");
+  await afterBinding();
+  assert.equal(second.state.messages.length, 2, "duplicate watch completion must not wake twice");
 });
 
 test("Dock tools bridge cancels a reload-pending wake before acknowledging cancellation", async () => {
@@ -253,8 +262,10 @@ test("Dock tools bridge cancels a reload-pending wake before acknowledging cance
   const attached = fakeApi();
   dockToolsExtension(bridge)(attached.api as never);
   for (const start of attached.state.start) start(undefined, fakeExtensionContext().context);
+  await afterBinding();
   assert.equal(attached.state.messages.length, 0, "a successfully cancelled pending watch must not wake after rebind");
   bridge.deliver(notification);
+  await afterBinding();
   assert.equal(attached.state.messages.length, 0, "a suppressed watch ID must remain fenced against delayed delivery");
 });
 
@@ -270,8 +281,9 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   rejectCancel(new Error("cancel failed"));
   await assert.rejects(cancelling, /cancel failed/u);
   const afterCancelFailure = fakeApi();
-  cancelBridge.attach(afterCancelFailure.api as never);
-  assert.equal(afterCancelFailure.state.messages.length, 1, "failed cancel must restore the completion buffered behind its acknowledgement fence");
+  cancelBridge.attach(afterCancelFailure.api as never, fakeExtensionContext().context as never);
+  await afterBinding();
+  assert.equal(watchNotices(afterCancelFailure.state), 1, "failed cancel must restore the completion buffered behind its acknowledgement fence");
 
   let rejectOff!: (error: Error) => void;
   const offBridge = new DockToolsBridge(true, {
@@ -284,8 +296,9 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   rejectOff(new Error("off failed"));
   await assert.rejects(disabling, /off failed/u);
   const afterOffFailure = fakeApi();
-  offBridge.attach(afterOffFailure.api as never);
-  assert.equal(afterOffFailure.state.messages.length, 1, "failed off must restore the completion buffered behind its acknowledgement fence");
+  offBridge.attach(afterOffFailure.api as never, fakeExtensionContext().context as never);
+  await afterBinding();
+  assert.equal(watchNotices(afterOffFailure.state), 1, "failed off must restore the completion buffered behind its acknowledgement fence");
 });
 
 // Card #666 review: Pi's abort leaves no automatic continuation after the user's Stop, and Work messages

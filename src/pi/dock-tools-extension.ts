@@ -27,7 +27,7 @@ import { THINKING_LEVELS } from "../core/agent-worker.js";
 import {
   renderChildWait,
   renderDockToolsResult,
-  renderObservationNotification,
+  watchNoticeEntry,
   workMessageEntry,
   WORK_WAKE_TYPE,
   type DescribedModel,
@@ -199,23 +199,27 @@ interface ObservedMessage {
   errorMessage?: string;
 }
 
+/** What waits to go into the conversation: a message from a parent or child Work, or a watch notice. */
+type InboxItem = { kind: "work"; message: WorkMessage } | { kind: "watch"; notification: ObservationNotification };
+
 /** Worker-level bridge survives Pi resource reloads while API closures do not. */
 export class DockToolsBridge {
   private api: ExtensionAPI | undefined;
   private context: ExtensionContext | undefined;
   private enabledValue: boolean;
-  private readonly pendingNotifications = new Map<string, ObservationNotification>();
+  /** Watches whose notice went into the inbox: at most one notice per watch. */
   private readonly deliveredWatchIds = new Set<string>();
   private readonly suppressedWatchIds = new Set<string>();
-  private readonly fencedNotifications = new Map<string, ObservationNotification>();
+  /** While a cancel or off waits for the Host, nothing from the inbox goes into the conversation. */
   private deliveryFenceDepth = 0;
   /**
-   * Work messages that reached this Worker and are not in the conversation yet, oldest first. Pi's own
-   * queues are not used: taking back the user's Queue empties them, extension messages included.
+   * What reached this Worker and is not in the conversation yet, oldest first: Work messages and watch
+   * notices. Pi's own queues are not used: taking back the user's Queue empties them, extension messages
+   * included.
    */
-  private readonly inbox: WorkMessage[] = [];
+  private readonly inbox: InboxItem[] = [];
   /**
-   * Work messages went into the conversation, or go in at the end of this step, and no reply has started
+   * Inbox items went into the conversation, or go in at the end of this step, and no reply has started
    * since. Tracked where they are handed over: Pi tells extensions about messages of its run only, not
    * about extension messages it writes.
    */
@@ -241,17 +245,14 @@ export class DockToolsBridge {
 
   get enabled(): boolean { return this.enabledValue; }
 
-  /** Binds the current runtime. Work messages arrive even when the tools are unavailable. */
+  /** Binds the current runtime; what waited meanwhile goes in now. Messages arrive even when the tools are unavailable. */
   attach(api: ExtensionAPI, context?: ExtensionContext, toolsAvailable = true): () => void {
     this.api = api;
     this.context = context;
     // A message left unanswered belongs to the conversation it was written into.
     this.awaitingReply = false;
     this.turnRequested = false;
-    if (toolsAvailable) {
-      this.applyToolVisibility(api);
-      if (this.enabledValue && this.deliveryFenceDepth === 0) this.flushPendingNotifications();
-    }
+    if (toolsAvailable) this.applyToolVisibility(api);
     this.deliverWorkMessagesSoon();
     return () => {
       if (this.api !== api) return;
@@ -264,14 +265,20 @@ export class DockToolsBridge {
   receive(message: WorkMessage): void {
     if (this.children.receive(message)) return;
     this.stoppedByUser = false;
-    this.inbox.push(message);
+    this.inbox.push({ kind: "work", message });
     this.deliverWorkMessages();
   }
 
   /** Child Work messages that arrived during the current step, for a dock_wait that starts now. */
   takeArrivedChildMessages(): WorkMessage[] {
-    const arrived = this.inbox.filter((message) => message.from.relation === "child");
-    for (const message of arrived) this.inbox.splice(this.inbox.indexOf(message), 1);
+    const arrived: WorkMessage[] = [];
+    for (let index = 0; index < this.inbox.length;) {
+      const item = this.inbox[index]!;
+      if (item.kind === "work" && item.message.from.relation === "child") {
+        arrived.push(item.message);
+        this.inbox.splice(index, 1);
+      } else index += 1;
+    }
     return arrived;
   }
 
@@ -339,15 +346,17 @@ export class DockToolsBridge {
     } catch { /* The runtime is being replaced; the next one delivers them. */ }
   }
 
-  /** Hands waiting messages to Pi in arrival order: written at once while idle, after the current step while busy. */
+  /** Hands waiting items to Pi in arrival order: written at once while idle, after the current step while busy. */
   private handOver(api: ExtensionAPI): void {
+    // A cancel or off waiting for the Host decides first which watch notices may still go in.
+    if (this.deliveryFenceDepth > 0) return;
     while (this.inbox.length > 0) {
-      const message = this.inbox[0]!;
-      api.sendMessage(workMessageEntry(message), { triggerTurn: false });
+      const item = this.inbox[0]!;
+      api.sendMessage<unknown>(item.kind === "work" ? workMessageEntry(item.message) : watchNoticeEntry(item.notification), { triggerTurn: false });
       this.inbox.shift();
       this.awaitingReply = true;
       // New work from the parent is owed a report again, whatever the child Work sent it before.
-      if (this.child && message.from.relation === "parent") {
+      if (item.kind === "work" && this.child && item.message.from.relation === "parent") {
         this.turn.hasParentWork = true;
         this.turn.reachedParent = false;
       }
@@ -383,7 +392,7 @@ export class DockToolsBridge {
       const result = await this.port.configure(action);
       this.enabledValue = result.enabled;
       // Off cancels every watch on the Host. Messages from child Works still arrive.
-      if (!result.enabled) this.suppressEveryPendingNotification();
+      if (!result.enabled) this.withdrawWatchNotices();
       if (this.api) this.applyToolVisibility(this.api);
       return result.enabled;
     } catch (error) {
@@ -402,9 +411,9 @@ export class DockToolsBridge {
       try {
         const result = await this.port.invoke(request);
         if (result.type === "cancel") {
-          if (request.watchId === undefined) this.suppressEveryPendingNotification();
-          else this.suppressAndRemove(request.watchId);
-          for (const watchId of result.cancelledWatchIds) this.suppressAndRemove(watchId);
+          if (request.watchId === undefined) this.withdrawWatchNotices();
+          else this.withdrawWatchNotice(request.watchId);
+          for (const watchId of result.cancelledWatchIds) this.withdrawWatchNotice(watchId);
         }
         return result;
       } finally {
@@ -417,83 +426,43 @@ export class DockToolsBridge {
     return result;
   }
 
+  /**
+   * A watch notice joins the inbox with the Work messages, so it reaches the Agent the same way. While a
+   * cancel or off waits for the Host it waits too, even with the tools already shown as off.
+   */
   deliver(notification: ObservationNotification): void {
-    if (this.suppressedWatchIds.has(notification.watchId) || this.deliveredWatchIds.has(notification.watchId)) return;
-    if (this.deliveryFenceDepth > 0) {
-      this.addBounded(this.fencedNotifications, notification);
+    const { watchId } = notification;
+    if (this.suppressedWatchIds.has(watchId) || this.deliveredWatchIds.has(watchId)) return;
+    if (!this.enabledValue && this.deliveryFenceDepth === 0) {
+      this.suppress(watchId);
       return;
     }
-    if (!this.enabledValue) {
-      this.suppressAndRemove(notification.watchId);
-      return;
-    }
-    if (!this.api) {
-      if (!this.pendingNotifications.has(notification.watchId)
-        && this.pendingNotifications.size >= MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
-        throw new Error("Dock tools completion queue is full");
-      }
-      this.pendingNotifications.set(notification.watchId, notification);
-      return;
-    }
-    this.sendNotification(this.api, notification);
-  }
-
-  private flushPendingNotifications(): void {
-    const api = this.api;
-    if (!api || !this.enabledValue || this.deliveryFenceDepth > 0) return;
-    for (const [watchId, notification] of this.pendingNotifications) {
-      try {
-        this.sendNotification(api, notification);
-        this.pendingNotifications.delete(watchId);
-      } catch { /* Keep the one-shot completion for the next binding rather than fail reload. */ }
-    }
+    this.markDelivered(watchId);
+    this.stoppedByUser = false;
+    this.inbox.push({ kind: "watch", notification });
+    this.deliverWorkMessages();
   }
 
   private beginDeliveryFence(): void { this.deliveryFenceDepth += 1; }
 
   private endDeliveryFence(): void {
     this.deliveryFenceDepth -= 1;
-    if (this.deliveryFenceDepth !== 0) return;
-    const buffered = [...this.fencedNotifications.values()];
-    this.fencedNotifications.clear();
-    for (const notification of buffered) this.deliver(notification);
-    this.flushPendingNotifications();
+    if (this.deliveryFenceDepth === 0) this.deliverWorkMessages();
   }
 
-  private suppressEveryPendingNotification(): void {
-    for (const watchId of this.pendingNotifications.keys()) this.suppress(watchId);
-    for (const watchId of this.fencedNotifications.keys()) this.suppress(watchId);
-    this.pendingNotifications.clear();
-    this.fencedNotifications.clear();
-  }
-
-  private suppressAndRemove(watchId: string): void {
+  /** A cancelled watch's notice that is not in the conversation yet never goes in; a late copy is dropped. */
+  private withdrawWatchNotice(watchId: string): void {
     this.suppress(watchId);
-    this.pendingNotifications.delete(watchId);
-    this.fencedNotifications.delete(watchId);
+    const index = this.inbox.findIndex((item) => item.kind === "watch" && item.notification.watchId === watchId);
+    if (index >= 0) this.inbox.splice(index, 1);
   }
 
-  private addBounded(target: Map<string, ObservationNotification>, notification: ObservationNotification): void {
-    if (!target.has(notification.watchId) && target.size >= MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
-      throw new Error("Dock tools completion queue is full");
-    }
-    target.set(notification.watchId, notification);
+  private withdrawWatchNotices(): void {
+    for (const item of [...this.inbox]) if (item.kind === "watch") this.withdrawWatchNotice(item.notification.watchId);
   }
 
-  private sendNotification(api: ExtensionAPI, notification: ObservationNotification): void {
-    api.sendMessage({
-      customType: "dock-tools-watch",
-      content: renderObservationNotification(notification),
-      display: true,
-      details: notification,
-      // The watcher asked to hear this. While it works the notice joins its next step;
-      // queued behind the whole turn it arrived only after the watcher had moved on.
-    }, { triggerTurn: true, deliverAs: "steer" });
-    this.markDelivered(notification);
-  }
-
-  private markDelivered(notification: ObservationNotification): void {
-    this.deliveredWatchIds.add(notification.watchId);
+  private markDelivered(watchId: string): void {
+    this.deliveredWatchIds.add(watchId);
     while (this.deliveredWatchIds.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       this.deliveredWatchIds.delete(this.deliveredWatchIds.values().next().value!);
     }
