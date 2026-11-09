@@ -221,7 +221,7 @@ async function runWorker(): Promise<void> {
       }
       const accepted = envelope.kind === "agent_request" ? isAcceptedRequest(envelope.request.type)
         : envelope.kind === "agent_control"
-          && (envelope.control.type === "dispose" || envelope.control.type === "observation_delivery");
+          && (envelope.control.type === "dispose" || envelope.control.type === "observation_delivery" || envelope.control.type === "work_message");
       if (accepted) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
       let result: unknown;
       if (envelope.kind === "agent_request") {
@@ -237,6 +237,9 @@ async function runWorker(): Promise<void> {
       } else if (envelope.kind === "agent_control") {
         if (envelope.control.type === "observation_delivery") {
           dockToolsBridge!.deliver(envelope.control.notification);
+          result = null;
+        } else if (envelope.control.type === "work_message") {
+          dockToolsBridge!.receive(envelope.control.message);
           result = null;
         } else result = await runtime!.control(envelope.control);
       } else {

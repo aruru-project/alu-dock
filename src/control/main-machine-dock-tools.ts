@@ -2,7 +2,7 @@ import { requireHumanTarget } from "../human-target.js";
 import { assertChildMayRequest, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { OperationLedger } from "./operation-ledger.js";
 import { createDockSystem, readDockSystem } from "./system-tools.js";
-import { withCurrentMachine, type DockToolsHostPort, type DockToolsMutationPort, type DockToolsRequest, type DockToolsResult, type ObservationDeliverySink } from "../core/dock-tools.js";
+import { withCurrentMachine, type DockToolsHostPort, type DockToolsMutationPort, type DockToolsRequest, type DockToolsResult, type LocalDockToolsHostPort, type ObservationDeliverySink } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { DockClient } from "./dock-client.js";
@@ -66,7 +66,6 @@ export class MainMachineDockToolsAuthority {
       if (result.type !== "watch" || result.status !== "completed" || !await this.onSubHost(sourceMachineId)) return result;
       return { ...result, completion: withReplyShortened(result.completion, SUBHOST_REPLY_CHARS) };
     }
-    const notifyWhenDone = (childId: string, acceptedAt: string) => this.observation.notifyWhenDone(sourceMainId, childId, acceptedAt);
     const send: DockToolsMutationPort["send"] = async (input) => {
       const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery ?? "followUp", input.operationId);
       return { target: observationStatus(result.instance), receipt: result.receipt };
@@ -74,7 +73,6 @@ export class MainMachineDockToolsAuthority {
     if (request.type === "spawn") return spawnDockWorker(source, request, {
       create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
       send,
-      notifyWhenDone,
     });
     if (request.type === "interrupt" || request.type === "stop") {
       const target = requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), request.target);
@@ -95,14 +93,8 @@ export class MainMachineDockToolsAuthority {
     if (request.type === "send") return sendDockMessage(source, request, {
       send,
       resolveTarget: (target) => requireHumanTarget(snapshots.filter(item => dockTargetVisible(source, item)), target),
-      parent: (parentId) => {
-        const parent = snapshots.find((item) => item.id === parentId);
-        if (!parent) throw new Error("The Work that created you is no longer available.");
-        return parent;
-      },
-      notifyWhenDone,
     });
-    throw new Error("File delivery and the model list for child Works are answered by the source Host");
+    throw new Error("File delivery, the model list for child Works and messages between a Work and its child Works are answered by the source Host");
   }
 
   async cancelSource(sourceMainId: string): Promise<void> {
@@ -148,7 +140,7 @@ export class MainMachineDockToolsAuthority {
 }
 
 export class MainMachineDockToolsPort implements DockToolsHostPort {
-  constructor(private readonly options: { local: () => DockToolsHostPort; authority: () => MainMachineDockToolsAuthority; mainHostId: () => Promise<string> }) {}
+  constructor(private readonly options: { local: () => LocalDockToolsHostPort; authority: () => MainMachineDockToolsAuthority; mainHostId: () => Promise<string> }) {}
   dockToolsEnabled(sourceInstanceId: string): boolean { return this.options.local().dockToolsEnabled(sourceInstanceId); }
   async configureDockTools(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }> {
     const result = await this.options.local().configureDockTools(sourceInstanceId, enabled, operationId);
@@ -156,7 +148,8 @@ export class MainMachineDockToolsPort implements DockToolsHostPort {
     return result;
   }
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
+    const local = this.options.local();
+    if (request.type === "deliver" || request.type === "models" || local.answersLocally(sourceInstanceId, request)) return local.invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
     return this.options.mainHostId().then(async (hostId) => withCurrentMachine(await this.options.authority().invoke(sourceInstanceId, hostId, request), hostId));
   }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { BoundaryResult, ExtensionAPI, ExtensionContext, ExtensionFactory, ToolExecutionEndEvent } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 
 import {
@@ -8,8 +8,10 @@ import {
   MAX_DOCK_TOOL_MESSAGE_CHARS,
   MAX_DOCK_TOOL_NAME_CHARS,
   MAX_DOCK_TOOL_TARGET_CHARS,
+  shortenLastWords,
   type DockToolsRequest,
   type DockToolsResult,
+  type WorkMessage,
 } from "../core/dock-tools.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { MAX_ALLOWED_TOOLS, MAX_ALLOWED_TOOL_NAME_CHARS } from "../core/worker-tool-policy.js";
@@ -22,8 +24,19 @@ import {
   type ObservationNotification,
 } from "../core/instance-observation.js";
 import { THINKING_LEVELS } from "../core/agent-worker.js";
-import { renderChildWait, renderDockToolsResult, renderObservationNotification, type DescribedModel, type ModelFacts, type RenderContext } from "./dock-tools-client.js";
-import { ChildReplies, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./child-replies.js";
+import {
+  renderChildWait,
+  renderDockToolsResult,
+  renderObservationNotification,
+  workMessageEntry,
+  WORK_MESSAGE_TYPE,
+  WORK_WAKE_TYPE,
+  type DescribedModel,
+  type ModelFacts,
+  type RenderContext,
+  type WorkMessageDetails,
+} from "./dock-tools-client.js";
+import { ChildMessages, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./child-messages.js";
 
 export const DOCK_TOOL_NAMES = [
   "dock_spawn",
@@ -125,7 +138,7 @@ const SEND_SCHEMA = {
   properties: {
     target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
     message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS },
-    delivery: { type: "string", enum: ["followUp", "steer"], description: "Default followUp lets the current turn finish; steer deliberately supplies guidance during the turn." },
+    delivery: { type: "string", enum: ["followUp", "steer"], description: "For another top-level Work only: default followUp lets its current turn finish; steer deliberately supplies guidance during the turn. A child Work of yours always gets the message at its next step." },
   },
   required: ["target", "message"],
   additionalProperties: false,
@@ -133,16 +146,19 @@ const SEND_SCHEMA = {
 const WAIT_SCHEMA = {
   type: "object",
   properties: {
-    target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS, description: "One child Work's name or id. Omit to wait for any child Work that owes you a reply." },
-    all: { type: "boolean", description: "Wait until every awaited child Work has replied instead of the first." },
+    target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS, description: "One child Work's name or id: wait for its final result. Omit to wait for the first message from any child Work." },
+    all: { type: "boolean", description: "Wait until every child Work you handed work to has sent its final result or stopped." },
     timeoutSeconds: { type: "integer", minimum: 1, maximum: MAX_WAIT_SECONDS, description: `Default ${DEFAULT_WAIT_SECONDS}.` },
   },
   additionalProperties: false,
 };
 const CHILD_SEND_SCHEMA = {
   type: "object",
-  properties: { message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS } },
-  required: ["message"],
+  properties: {
+    message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS },
+    done: { type: "boolean", description: "true: this is your final result for the work your parent handed you; your turn ends after sending it. false: something your parent must know before then, such as a question that blocks you; keep working." },
+  },
+  required: ["message", "done"],
   additionalProperties: false,
 };
 
@@ -165,16 +181,47 @@ export interface DockToolsCallPort {
   invoke(request: DockToolsRequest): Promise<DockToolsResult>;
 }
 
+/** What a child Work's current turn did with its parent's work, to tell its parent when it stops without reporting. */
+interface ChildTurn {
+  /** The first prompt a child Work gets is the task it was created for; later ones are the user's own. */
+  taskSeen: boolean;
+  /** The task or a parent message reached the conversation during this turn. */
+  hasParentWork: boolean;
+  /** The last call of the turn so far delivered a message to the parent. */
+  reachedParent: boolean;
+  lastWords?: string;
+  failure?: string;
+}
+
+/** The parts of a Pi message the bridge reads. */
+interface ObservedMessage {
+  role: string;
+  customType?: string;
+  details?: unknown;
+  content?: unknown;
+  stopReason?: string;
+  errorMessage?: string;
+}
+
 /** Worker-level bridge survives Pi resource reloads while API closures do not. */
 export class DockToolsBridge {
   private api: ExtensionAPI | undefined;
+  private context: ExtensionContext | undefined;
   private enabledValue: boolean;
   private readonly pendingNotifications = new Map<string, ObservationNotification>();
   private readonly deliveredWatchIds = new Set<string>();
   private readonly suppressedWatchIds = new Set<string>();
   private readonly fencedNotifications = new Map<string, ObservationNotification>();
   private deliveryFenceDepth = 0;
-  readonly childReplies = new ChildReplies();
+  /**
+   * Work messages that reached this Worker and are not in the conversation yet, oldest first. Pi's own
+   * queues are not used: taking back the user's Queue empties them, extension messages included.
+   */
+  private readonly inbox: WorkMessage[] = [];
+  /** A Work message is in the conversation and no reply has started since. */
+  private unanswered = false;
+  private readonly turn: ChildTurn = { taskSeen: false, hasParentWork: false, reachedParent: false };
+  readonly children = new ChildMessages();
   readonly toolNames: readonly string[];
 
   constructor(initiallyEnabled: boolean, private readonly port: DockToolsCallPort, readonly child = false) {
@@ -184,11 +231,126 @@ export class DockToolsBridge {
 
   get enabled(): boolean { return this.enabledValue; }
 
-  attach(api: ExtensionAPI): () => void {
+  /** Binds the current runtime. Work messages arrive even when the tools are unavailable. */
+  attach(api: ExtensionAPI, context?: ExtensionContext, toolsAvailable = true): () => void {
     this.api = api;
-    this.applyToolVisibility(api);
-    if (this.enabledValue && this.deliveryFenceDepth === 0) this.flushPendingNotifications();
-    return () => { if (this.api === api) this.api = undefined; };
+    this.context = context;
+    // A message left unanswered belongs to the conversation it was written into.
+    this.unanswered = false;
+    if (toolsAvailable) {
+      this.applyToolVisibility(api);
+      if (this.enabledValue && this.deliveryFenceDepth === 0) this.flushPendingNotifications();
+    }
+    this.deliverWorkMessagesSoon();
+    return () => {
+      if (this.api !== api) return;
+      this.api = undefined;
+      this.context = undefined;
+    };
+  }
+
+  /** A message from this Work's parent or child Work, or Dock's notice about a child Work. */
+  receive(message: WorkMessage): void {
+    if (this.children.receive(message)) return;
+    this.inbox.push(message);
+    this.deliverWorkMessages();
+  }
+
+  /** Child Work messages that arrived during the current step, for a dock_wait that starts now. */
+  takeArrivedChildMessages(): WorkMessage[] {
+    const arrived = this.inbox.filter((message) => message.from.relation === "child");
+    for (const message of arrived) this.inbox.splice(this.inbox.indexOf(message), 1);
+    return arrived;
+  }
+
+  /**
+   * At the end of a step (Pi's turn_end and agent_before_settle): waiting messages join the conversation
+   * right after it, and the Agent gets one more request to answer them instead of stopping.
+   */
+  atStepEnd(): BoundaryResult | undefined {
+    const api = this.api;
+    if (!api) return undefined;
+    let handed: boolean;
+    try { handed = this.handOver(api); } catch { return undefined; }
+    return handed || this.unanswered ? { continue: true } : undefined;
+  }
+
+  settled(aborted: boolean): void {
+    if (this.child) this.reportUnreportedStop(aborted);
+    // What came after the last step, or went unanswered in a stopped turn, starts the next turn once Pi has settled.
+    this.deliverWorkMessagesSoon();
+  }
+
+  /** Pi defers what is sent while it settles or binds a runtime; deliver once it is done. */
+  deliverWorkMessagesSoon(): void { setTimeout(() => this.deliverWorkMessages(), 0); }
+
+  runStarting(messageType: "user" | "custom"): void {
+    if (!this.child || messageType !== "user" || this.turn.taskSeen) return;
+    this.turn.taskSeen = true;
+    this.turn.hasParentWork = true;
+  }
+
+  messageStarted(message: ObservedMessage): void {
+    if (message.role === "assistant") this.unanswered = false;
+  }
+
+  messageEnded(message: ObservedMessage): void {
+    if (message.role === "custom" && message.customType === WORK_MESSAGE_TYPE) {
+      this.unanswered = true;
+      // New work from the parent is owed a report again, whatever this turn sent it before.
+      if (this.child && (message.details as Partial<WorkMessageDetails> | undefined)?.from === "parent") {
+        this.turn.hasParentWork = true;
+        this.turn.reachedParent = false;
+      }
+      return;
+    }
+    if (!this.child || message.role !== "assistant") return;
+    const text = textOf(message.content);
+    if (text) this.turn.lastWords = text;
+    this.turn.failure = message.stopReason === "error" ? message.errorMessage ?? "" : undefined;
+  }
+
+  toolEnded(event: Pick<ToolExecutionEndEvent, "toolName" | "isError" | "parentToolCallId">): void {
+    if (!this.child || event.parentToolCallId !== undefined) return;
+    this.turn.reachedParent = event.toolName === "dock_send" && !event.isError;
+  }
+
+  /** An idle Work takes waiting messages now and starts a turn for them; a busy one takes them at the end of its step. */
+  private deliverWorkMessages(): void {
+    const api = this.api, context = this.context;
+    if (!api || !context) return;
+    try {
+      if (!context.isIdle() || (this.inbox.length === 0 && !this.unanswered)) return;
+      this.handOver(api);
+      api.sendMessage({ customType: WORK_WAKE_TYPE, content: "", display: false }, { triggerTurn: true });
+    } catch { /* The runtime is being replaced; the next one delivers them. */ }
+  }
+
+  /** Hands waiting messages to Pi in arrival order: written at once while idle, after the current step while busy. */
+  private handOver(api: ExtensionAPI): boolean {
+    let handed = false;
+    while (this.inbox.length > 0) {
+      api.sendMessage(workMessageEntry(this.inbox[0]!), { triggerTurn: false });
+      this.inbox.shift();
+      handed = true;
+    }
+    return handed;
+  }
+
+  /**
+   * A child Work's turn that carried its parent's work ended, and its last call did not reach the parent.
+   * The Host tells the parent if a result is still owed; the child Work is not asked to report again.
+   */
+  private reportUnreportedStop(aborted: boolean): void {
+    const { hasParentWork, reachedParent, lastWords, failure } = this.turn;
+    Object.assign(this.turn, { hasParentWork: false, reachedParent: false, lastWords: undefined, failure: undefined });
+    if (!hasParentWork || reachedParent) return;
+    void this.port.invoke({
+      type: "unreported_stop",
+      reason: aborted ? "aborted" : failure !== undefined ? "failed" : "ended",
+      ...(!aborted && failure ? { error: shortenLastWords(failure) } : {}),
+      ...(lastWords === undefined ? {} : { lastWords: shortenLastWords(lastWords) }),
+    }).catch(() => { /* Dock tools are off or the Host is gone: no one can be told. */ });
   }
 
   async configure(action: "on" | "off" | "status"): Promise<boolean> {
@@ -203,11 +365,8 @@ export class DockToolsBridge {
     try {
       const result = await this.port.configure(action);
       this.enabledValue = result.enabled;
-      if (!result.enabled) {
-        // Off cancels every watch on the Host, so no awaited reply will come.
-        this.suppressEveryPendingNotification();
-        this.childReplies.cancelAll();
-      }
+      // Off cancels every watch on the Host. Messages from child Works still arrive.
+      if (!result.enabled) this.suppressEveryPendingNotification();
       if (this.api) this.applyToolVisibility(this.api);
       return result.enabled;
     } catch (error) {
@@ -226,11 +385,7 @@ export class DockToolsBridge {
       try {
         const result = await this.port.invoke(request);
         if (result.type === "cancel") {
-          if (request.watchId === undefined) {
-            // Cancelling every watch includes the ones that bring children's replies back.
-            this.suppressEveryPendingNotification();
-            this.childReplies.cancelAll();
-          }
+          if (request.watchId === undefined) this.suppressEveryPendingNotification();
           else this.suppressAndRemove(request.watchId);
           for (const watchId of result.cancelledWatchIds) this.suppressAndRemove(watchId);
         }
@@ -239,9 +394,9 @@ export class DockToolsBridge {
         this.endDeliveryFence();
       }
     }
-    const before = this.childReplies.position;
+    const before = this.children.position;
     const result = await this.port.invoke(request);
-    this.childReplies.noteWork(result, before);
+    this.children.noteWork(result, before);
     return result;
   }
 
@@ -253,10 +408,6 @@ export class DockToolsBridge {
     }
     if (!this.enabledValue) {
       this.suppressAndRemove(notification.watchId);
-      return;
-    }
-    if (this.childReplies.take(notification)) {
-      this.markDelivered(notification);
       return;
     }
     if (!this.api) {
@@ -321,7 +472,6 @@ export class DockToolsBridge {
       // The watcher asked to hear this. While it works the notice joins its next step;
       // queued behind the whole turn it arrived only after the watcher had moved on.
     }, { triggerTurn: true, deliverAs: "steer" });
-    this.childReplies.noteReply(notification);
     this.markDelivered(notification);
   }
 
@@ -348,13 +498,14 @@ export class DockToolsBridge {
 export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
   return (pi) => {
     registerDockToolsSwitch(pi, bridge);
+    registerWorkMessages(pi, bridge);
     if (bridge.child) {
       registerChildTools(pi, bridge);
       return;
     }
     pi.registerTool({
       name: "dock_spawn", label: "Start a child Work",
-      description: toolDescription("Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so. It starts with only the task unless withContext gives it a copy of your conversation. It appears under you in Dock, reports only to you and cannot reach other Works. Its final reply is delivered to you when it finishes, at your next step if you are still working; send further instructions with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
+      description: toolDescription("Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so. It starts with only the task unless withContext gives it a copy of your conversation. It appears under you in Dock, talks only to you and cannot reach other Works. It sends you its final result, and any question it must ask first, as messages from it that reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
       parameters: SPAWN_SCHEMA,
       execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => {
         const thinkingAsked = params.thinkingLevel ?? pi.getThinkingLevel();
@@ -363,10 +514,10 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     } as never);
     pi.registerTool({
       name: "dock_wait", label: "Wait for child Works",
-      description: toolDescription("Wait in this turn until a child Work you handed work to replies; all=true waits for every one of them, target for one. Their final replies come back here instead of arriving separately. Returns early when a message reaches you, such as the user's or a child Work's question, or when the user cancels. Use it only when your turn must not end, such as during a Dock Goal, whose next round would start as soon as your turn ends; otherwise end your turn and the replies wake you."),
+      description: toolDescription("Wait in this turn for your child Works: until the first message from any of them, until target sends its final result, or with all=true until every child Work you handed work to has sent its final result or stopped. Messages from child Works that arrive meanwhile come back here instead of separately; one that is not a final result, such as a question, ends the wait at once. Returns early when the user's message reaches you or the user cancels. Use it only when your turn must not end, such as during a Dock Goal, whose next round would start as soon as your turn ends; otherwise end your turn and the messages wake you."),
       parameters: WAIT_SCHEMA,
       execute: async (_toolCallId: string, params: { target?: string; all?: boolean; timeoutSeconds?: number }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: { hasPendingMessages(): boolean }) => {
-        const result = await bridge.childReplies.wait(params, signal, () => ctx.hasPendingMessages());
+        const result = await bridge.children.wait(params, signal, () => ctx.hasPendingMessages(), bridge.takeArrivedChildMessages());
         return { content: [{ type: "text", text: renderChildWait(result) }], details: result };
       },
     } as never);
@@ -415,7 +566,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_watch",
       label: "Watch a Work",
-      description: toolDescription("Get a notification when another Work becomes idle, stops or fails. Returns immediately; continue other work while waiting. The notification reaches you at your next step if you are still working."),
+      description: toolDescription("Get a notification when another Work becomes idle, stops or fails. Returns immediately; continue other work while waiting. The notification reaches you at your next step if you are still working. Your own child Works need no watch: they send you their results."),
       parameters: REQUIRED_TARGET_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string }) => toolResult(await bridge.invoke({ type: "watch", target: params.target })),
     } as never);
@@ -459,7 +610,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_send",
       label: "Send a Dock message",
-      description: toolDescription("Send a message to another Work with your authenticated sender identity. By default it starts an idle Work or queues behind its current turn. Use delivery=steer only for deliberate mid-turn guidance. A child Work you created replies to you when it finishes. Do not send acknowledgment-only messages: each one wakes the other Work."),
+      description: toolDescription("Send a message to another Work with your authenticated sender identity. A child Work of yours gets it at its next step as a message from you, and its answers come back the same way. Another top-level Work is started if idle, or gets it after its current turn; use delivery=steer only for deliberate mid-turn guidance. Do not send acknowledgment-only messages: each one wakes the other Work."),
       parameters: SEND_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string; message: string; delivery?: "followUp" | "steer" }) => toolResult(await bridge.invoke({
         type: "send",
@@ -499,22 +650,58 @@ function registerDockToolsSwitch(pi: ExtensionAPI, bridge: DockToolsBridge): voi
       pi.setActiveTools(pi.getActiveTools().filter((name) => !bridge.toolNames.includes(name)));
       ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "unavailable" : undefined);
       ctx.ui.notify(`Dock tools are unavailable because ${collision.name} is already registered.`, "error");
+      detach = bridge.attach(pi, ctx, false);
       return;
     }
-    detach = bridge.attach(pi);
+    detach = bridge.attach(pi, ctx);
     ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "on" : undefined);
   });
   pi.on("session_shutdown", () => detach());
+}
+
+/**
+ * Messages between this Work and its parent or child Works join the conversation the way the user's
+ * steering does (card #666): at once with a new turn when idle, at the end of the current step when busy.
+ */
+function registerWorkMessages(pi: ExtensionAPI, bridge: DockToolsBridge): void {
+  pi.on("turn_end", () => bridge.atStepEnd());
+  pi.on("agent_before_settle", () => bridge.atStepEnd());
+  pi.on("agent_settled", (event) => bridge.settled(event.aborted));
+  pi.on("session_compact", () => bridge.deliverWorkMessagesSoon());
+  pi.on("session_compact_failed", () => bridge.deliverWorkMessagesSoon());
+  pi.on("before_agent_start", (event) => { bridge.runStarting(event.messageType); });
+  pi.on("message_start", (event) => bridge.messageStarted(event.message as ObservedMessage));
+  pi.on("message_end", (event) => { bridge.messageEnded(event.message as ObservedMessage); });
+  pi.on("tool_execution_end", (event) => bridge.toolEnded(event));
+  // The marker that starts a turn for an idle Work is not something the model reads.
+  pi.on("context", (event) => event.messages.some(isWorkWake)
+    ? { messages: event.messages.filter((message) => !isWorkWake(message)) }
+    : undefined);
+}
+
+function isWorkWake(message: { role: string; customType?: string }): boolean {
+  return message.role === "custom" && message.customType === WORK_WAKE_TYPE;
 }
 
 function registerChildTools(pi: ExtensionAPI, bridge: DockToolsBridge): void {
   pi.registerTool({
     name: "dock_send",
     label: "Message your parent",
-    description: toolDescription("Send a message to the Work that created you. When you finish work it handed you, your final reply already reaches it, so use this only for something it must know before then, such as a question that blocks you. It reaches your parent at its next step, even while it is working. Do not send acknowledgments or progress reports."),
+    description: toolDescription("Send a message to the Work that created you; it reaches your parent at its next step, even while it is working. Your parent sees only what you send this way. done: true sends your final result for the work it handed you, and your turn ends. done: false is for something it must know before then, such as a question that blocks you; keep working afterwards. Do not send acknowledgments or progress reports."),
     parameters: CHILD_SEND_SCHEMA,
-    execute: async (_toolCallId: string, params: { message: string }) => toolResult(await bridge.invoke({ type: "send", operationId: randomUUID(), message: params.message })),
+    execute: async (_toolCallId: string, params: { message: string; done: boolean }) => {
+      const result = toolResult(await bridge.invoke({ type: "send", operationId: randomUUID(), message: params.message, done: params.done }));
+      // A final result ends the turn: nothing the model would write after it reaches the parent.
+      return params.done ? { ...result, terminate: true } : result;
+    },
   } as never);
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((block) => block !== null && typeof block === "object" && (block as { type?: unknown }).type === "text" && typeof (block as { text?: unknown }).text === "string"
+    ? [(block as { text: string }).text] : []).join("\n").trim();
 }
 
 function isDockToolsAction(value: string): value is DockToolsAction {

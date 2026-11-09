@@ -286,40 +286,51 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   assert.deepEqual(reviewer.executor.model, { provider: "routed-reviewer", id: "fixture" });
   assert.equal(reviewer.executor.thinkingLevel, "low");
   assert.deepEqual(reviewing.toolNames.sort(), ["dock_send", "read"]);
-  // The child Work's message and its final reply both find the parent through Main.
-  reviewing.tools({ id: "routed-note", name: "dock_send", arguments: { message: "ROUTED_NOTE" } });
+  // Card #666: a child Work and its parent run on the same SubHost, which carries their messages itself.
+  reviewing.tools({ id: "routed-note", name: "dock_send", arguments: { message: "ROUTED_NOTE", done: false } });
   const noted = await reviewerProvider.request(1);
-  assert.match(JSON.stringify(noted.body.messages?.filter(message => message.role === "tool").at(-1)), /Sent a Dock message/);
+  assert.match(JSON.stringify(noted.body.messages?.filter(message => message.role === "tool").at(-1)), /Your message reached your parent Work/);
   let routedReply = "ROUTED_REVIEW_FINDING";
   for (let index = 0; routedReply.length < 20_000; index += 1) routedReply += ` finding-${index}`;
   routedReply += " ROUTED_END";
-  noted.text(routedReply);
-  assert.equal(waiting.closed, false, "A routed message must not interrupt its busy recipient");
+  // It reads on and then answers in its own conversation without sending it, so its parent is told it stopped.
+  noted.tools({ id: "routed-read", name: "read", arguments: { path: join(workspace, "notes.txt") } });
+  (await reviewerProvider.request(2)).text(routedReply);
+  assert.equal(waiting.closed, false, "A message must not interrupt its busy recipient");
   waiting.text("Waiting for the independent report.");
-  let next = 3, sawNote = false, sawReply = false, inspected = false;
+  let next = 3, sawNote = false, sawStop = false, inspected = false;
   while (next < 12 && !(sawNote && inspected)) {
     const request = await coordinatorProvider.request(next++);
     const transcript = JSON.stringify(request.body.messages);
-    sawNote ||= transcript.includes("ROUTED_NOTE");
-    if (!sawReply && transcript.includes("ROUTED_REVIEW_FINDING")) {
-      sawReply = true;
-      // A released SubHost drops its whole Main connection over a reply past 16,000 characters.
-      assert.ok(transcript.includes("[…shortened; dock_inspect shows the whole reply]"), "Main shortens the reply for a Work on a SubHost and says so");
-      assert.ok(!transcript.includes("ROUTED_END"));
+    sawNote ||= transcript.includes("[来自子 Work「Routed reviewer」]\\nROUTED_NOTE");
+    if (!sawStop && transcript.includes("[子 Work「Routed reviewer」异常停止]")) {
+      sawStop = true;
+      assert.ok(transcript.includes("> ROUTED_REVIEW_FINDING") && transcript.includes("[…shortened]") && !transcript.includes("ROUTED_END"), "The notice quotes the start of what the reviewer said last");
       request.tools({ id: "routed-inspect", name: "dock_inspect", arguments: { target: reviewer.id } });
       continue;
     }
-    if (sawReply && !inspected) {
+    if (sawStop && !inspected) {
       inspected = true;
       assert.ok(JSON.stringify(request.body.messages?.filter(message => message.role === "tool").at(-1)).includes(routedReply), "dock_inspect through Main reads the whole reply");
+      // Main's ID for the child Work, from dock_spawn and dock_list, reaches it on the SubHost too.
+      request.tools({ id: "routed-followup", name: "dock_send", arguments: { target: reviewer.id, message: "ROUTED_FOLLOWUP: send your finding." } });
+      continue;
     }
     request.text("Received the routed report.");
   }
-  assert.ok(sawNote && sawReply && inspected, "The routed parent must receive its child Work's message and final reply, and read the whole reply");
+  assert.ok(sawNote && sawStop && inspected, "The routed parent must receive its child Work's message and stop notice, and read the whole reply");
+  const followup = await reviewerProvider.request(3);
+  assert.ok(JSON.stringify(followup.body.messages).includes("[来自父 Work「Remote work」]\\nROUTED_FOLLOWUP"));
+  followup.tools({ id: "routed-done", name: "dock_send", arguments: { message: "ROUTED_DONE", done: true } });
   await waitFor(async () => {
-    while (coordinatorProvider.requests.length > next) coordinatorProvider.requests[next++]!.text("Received completion.");
-    return (await client.status(remote.id)).execution === "idle";
-  }, "Routed coordinator did not settle");
+    while (coordinatorProvider.requests.length > next) {
+      const request = coordinatorProvider.requests[next++]!;
+      request.text(JSON.stringify(request.body.messages).includes("[来自子 Work「Routed reviewer」· 已完成]\\nROUTED_DONE") ? "ROUTED_RESULT_SEEN" : "Received completion.");
+    }
+    return (await client.status(remote.id)).execution === "idle"
+      && coordinatorProvider.requests.some((request) => JSON.stringify(request.body.messages).includes("ROUTED_DONE"));
+  }, "Routed coordinator did not settle with its child Work's final result");
+  assert.equal(reviewerProvider.requests.length, 4, "The final result ended the routed child Work's turn");
 
   // A Work on a SubHost sees which Machine it is on, and a wrong Machine name gets the real names.
   await client.prompt(remote.id, "Which Machine are you on?", "auto", "routed-machines");

@@ -16,6 +16,7 @@ import type {
   ToolsResult,
 } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
+import type { WorkMessage } from "./dock-tools.js";
 import type { PublishedFileDto } from "./published-file.js";
 import type { SourceFileIdentity } from "./source-file.js";
 
@@ -293,6 +294,8 @@ export type AgentWorkerControl =
   | { type: "resolve_file_source"; kind: AgentFileSource["kind"]; ref: string }
   | { type: "wait_for_idle" }
   | { type: "observation_delivery"; notification: ObservationNotification }
+  /** A message from this Work's parent or child Work, or Dock's notice about a child Work. */
+  | { type: "work_message"; message: WorkMessage }
   /** Copy the conversation so far into a new session for a child working in `cwd`; returns its file. */
   | { type: "branch_for_child"; cwd: string }
   | { type: "dispose" };

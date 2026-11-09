@@ -9,13 +9,17 @@ import { exited, startNativeTeam, trustOnce } from "./support/native-team.js";
 
 // Only provider HTTP replies are scripted; the Host, Pi Workers and their processes are real.
 // Where a test checks what the Host itself allows, it calls the Host as a Worker's tool would.
-test("a coordinator delegates to an implementer and an independent reviewer and hears each one's reply", { timeout: 90_000 }, async (context) => {
+// Card #666: a child Work's words used to reach its parent as the user's message, in the user's Queue.
+// They are now Work messages that say whose they are, and reach a busy Work at its next step.
+test("a coordinator and its child Works talk in messages that say whose they are, never through the user's Queue", { timeout: 90_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "implementer", "reviewer"], { prefix: "alu-native-team-" });
   const { cwd, workerPids } = team;
   const { coordinator, implementer, reviewer } = team.providers;
   const bugPath = join(cwd, "sum.js");
   await writeFile(bugPath, "export const sum = (a, b) => a - b;\n");
   const client = await team.startHost();
+  const sent = (request: { body: { messages?: Array<{ role: string; content?: unknown }> } }, text: string) =>
+    (request.body.messages ?? []).filter((message) => JSON.stringify(message.content ?? "").includes(text));
 
   // The user's coordinator runs a reasoning model at high thinking. A child Work on a model
   // without thinking levels keeps the parent's level as nearly as it can, and the parent is told.
@@ -36,7 +40,7 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
     model: { provider: "reviewer", id: "fixture" }, thinkingLevel: "low", allowedTools: ["read"],
   } });
   const reviewerFirst = await reviewer.request(0);
-  let parentWaiting = await coordinator.request(2);
+  const parentBusy = await coordinator.request(2);
   const members = await client.list();
   const implementerWork = members.find((work) => work.displayName === "Implementer")!;
   const reviewerWork = members.find((work) => work.displayName === "Reviewer")!;
@@ -50,70 +54,97 @@ test("a coordinator delegates to an implementer and an independent reviewer and 
   assert.deepEqual(reviewerFirst.toolNames.sort(), ["dock_send", "read"]);
   assert.deepEqual(implementerFirst.toolNames.sort(), ["dock_send", "read", "write"]);
 
-  // The reviewer only reads and answers. Its final reply reaches the coordinator in the
-  // completion notice, without the reviewer sending it or the coordinator reading it back.
+  // The reviewer reads and sends its finding as its final result, which ends its turn.
   reviewerFirst.tools({ id: "review-read", name: "read", arguments: { path: bugPath } });
   const reviewResult = await reviewer.request(1);
   assert.ok(JSON.stringify(reviewResult.body.messages).includes("a - b"));
-  reviewResult.text("REVIEW_FINDING: sum subtracts; change a - b to a + b.");
-  parentWaiting.text("Waiting for the independent review.");
-  const parentFinding = await coordinator.request(3);
-  assert.ok(JSON.stringify(parentFinding.body.messages).includes("REVIEW_FINDING"));
+  reviewResult.tools({ id: "review-done", name: "dock_send", arguments: { message: "REVIEW_FINDING: sum subtracts; change a - b to a + b.", done: true } });
+  await waitFor(async () => (await client.status(reviewerWork.id)).execution === "idle", "The reviewer's turn did not end with its final result");
+  assert.equal(reviewer.requests.length, 2, "A final result ends the child Work's turn without another model request");
+  assert.equal((await client.status(parent.id)).pending.total, 0, "A child Work's message never joins the user's Queue");
 
-  // The coordinator relays the finding. It queues behind the implementer's current turn.
+  // The busy coordinator gets the finding at its next step, marked as the reviewer's final result.
+  parentBusy.tools({ id: "parent-keeps-working", name: "read", arguments: { path: bugPath } });
+  const parentFinding = await coordinator.request(3);
+  assert.equal(sent(parentFinding, "[来自子 Work「Reviewer」· 已完成]\\nREVIEW_FINDING").length, 1, "The finding arrives once, saying whose final result it is");
+
+  // The coordinator relays the finding. The busy implementer gets it at its next step, from its parent.
   parentFinding.tools({ id: "relay-finding", name: "dock_send", arguments: {
     target: implementerWork.id, message: "REVIEW_FINDING: approved; change a - b to a + b.",
   } });
-  parentWaiting = await coordinator.request(4);
-  assert.equal(implementerFirst.closed, false, "The parent's message must not interrupt its child Work's turn");
+  const parentWaiting = await coordinator.request(4);
+  assert.match(JSON.stringify(parentWaiting.body.messages?.at(-1)), /Sent to child Work Implementer/);
   implementerFirst.text("Ready to apply the independent finding.");
   const implementerFollowup = await implementer.request(1);
-  assert.ok(JSON.stringify(implementerFollowup.body.messages).includes("REVIEW_FINDING"));
-  assert.ok(JSON.stringify(implementerFollowup.body.messages).includes("Coordinator"));
+  assert.equal(sent(implementerFollowup, "[来自父 Work「Coordinator」]\\nREVIEW_FINDING: approved").length, 1);
   implementerFollowup.tools({ id: "fix", name: "write", arguments: { path: bugPath, content: "export const sum = (a, b) => a + b;\n" } });
-  (await implementer.request(2)).text("FIX_COMPLETE: sum.js now adds.");
+  (await implementer.request(2)).tools({ id: "fix-done", name: "dock_send", arguments: { message: "FIX_COMPLETE: sum.js now adds.", done: true } });
   assert.equal(await readFile(bugPath, "utf8"), "export const sum = (a, b) => a + b;\n");
+  await waitFor(async () => (await client.status(implementerWork.id)).execution === "idle", "The implementer's turn did not end with its final result");
   parentWaiting.text("Waiting for the fix.");
   const parentFix = await coordinator.request(5);
-  assert.ok(JSON.stringify(parentFix.body.messages).includes("FIX_COMPLETE"));
+  assert.equal(sent(parentFix, "[来自子 Work「Implementer」· 已完成]\\nFIX_COMPLETE").length, 1, "A message that came after the last step is answered before the coordinator stops");
 
-  // Handing an idle child Work more work also brings its next reply back.
-  parentFix.tools({ id: "request-final-review", name: "dock_send", arguments: {
-    target: reviewerWork.id, message: "FINAL_REVIEW_REQUEST: reread sum.js and report whether the fix is correct.",
-  } });
-  parentWaiting = await coordinator.request(6);
-  const finalReview = await reviewer.request(2);
-  assert.ok(JSON.stringify(finalReview.body.messages).includes("FINAL_REVIEW_REQUEST"));
-  finalReview.tools({ id: "final-review-read", name: "read", arguments: { path: bugPath } });
-  const correctedRead = await reviewer.request(3);
-  assert.ok(JSON.stringify(correctedRead.body.messages).includes("a + b"), "The reviewer sees the actual file, not only the implementer's claim");
-  correctedRead.text("FINAL_REVIEW_PASS: sum.js now adds a + b.");
-  parentWaiting.text("Waiting for the final review.");
-  const parentPass = await coordinator.request(7);
-  assert.ok(JSON.stringify(parentPass.body.messages).includes("FINAL_REVIEW_PASS"));
-  parentPass.text("Implementation and independent review are complete.");
+  // Card #666: taking back the user's Queue also emptied the extension messages Pi held for a busy
+  // Work. A child Work's question that is waiting for the coordinator's next step survives it.
+  await client.prompt(parent.id, "USER_FOLLOWUP: also update the docs.", "followUp", "user-followup");
+  await client.prompt(implementerWork.id, "Ask your coordinator whether tests are needed.", "auto", "child-question");
+  (await implementer.request(3)).tools({ id: "ask-parent", name: "dock_send", arguments: { message: "CHILD_QUESTION: add tests too?", done: false } });
+  const asked = await implementer.request(4);
+  const taken = await client.dequeue(parent.id, "take-back-queue");
+  assert.deepEqual(taken.receipt.restored.map((item) => item.text), ["USER_FOLLOWUP: also update the docs."]);
+  parentFix.text("The fix is in.");
+  const question = await coordinator.request(6);
+  assert.equal(sent(question, "[来自子 Work「Implementer」]\\nCHILD_QUESTION").length, 1, "The child Work's question reaches the coordinator after the user took back the Queue");
+  assert.equal(sent(question, "USER_FOLLOWUP").length, 0);
+  question.text("No tests are needed.");
+  asked.text("Asked the coordinator.");
   for (const work of [parent, implementerWork, reviewerWork]) {
     await waitFor(async () => (await client.status(work.id)).execution === "idle", `${work.displayName} did not settle`);
   }
 
-  // A child Work's one Dock tool reaches its parent, whoever started the child Work's turn.
-  // Real-model trial 2026-11-03: a parent busy for 20 minutes got its child Works' messages
-  // only after its turn, all stale by then. A busy parent now gets one at its next step.
-  await client.prompt(parent.id, "Keep checking the workspace.", "auto", "parent-busy");
-  const parentBusy = await coordinator.request(8);
-  await client.prompt(implementerWork.id, "Ask your coordinator whether tests are needed.", "auto", "child-question");
-  (await implementer.request(3)).tools({ id: "ask-parent", name: "dock_send", arguments: { message: "CHILD_QUESTION: add tests too?" } });
-  const asked = await implementer.request(4);
-  parentBusy.tools({ id: "parent-keeps-working", name: "read", arguments: { path: bugPath } });
-  const question = await coordinator.request(9);
-  assert.ok(JSON.stringify(question.body.messages).includes("CHILD_QUESTION"), "A child Work's message reaches its busy parent at the parent's next step");
-  assert.ok(JSON.stringify(question.body.messages).includes("Agent message from \\\"Implementer\\\""));
-  question.text("No tests are needed.");
-  asked.text("Asked the coordinator.");
-  for (const work of [parent, implementerWork]) {
-    await waitFor(async () => (await client.status(work.id)).execution === "idle", `${work.displayName} did not settle after the question`);
+  // In the coordinator's own conversation these are messages from its child Works, not the user's.
+  const records = (await client.history(parent.id)).entries;
+  for (const marker of ["REVIEW_FINDING: sum subtracts", "FIX_COMPLETE", "CHILD_QUESTION"]) {
+    const holding = records.filter((entry) => JSON.stringify(entry.content).includes(marker));
+    assert.deepEqual(holding.map((entry) => `${entry.kind}:${entry.source}:${entry.customType}`), ["custom_message:extension:dock-work-message"], marker);
   }
+});
 
+// Card #666: a child Work that stopped without its result left its parent waiting, unless the parent read it back.
+test("a child Work that stops without giving its parent the result is reported to the parent, unless the user started that turn", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "reviewer"], { prefix: "alu-native-stop-" });
+  const { coordinator, reviewer } = team.providers;
+  const client = await team.startHost();
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "stop-create", trust));
+  await client.prompt(parent.id, "Get an independent review.", "auto", "stop-start");
+  (await coordinator.request(0)).tools({ id: "spawn", name: "dock_spawn", arguments: { name: "Reviewer", task: "Review the workspace.", model: { provider: "reviewer", id: "fixture" }, allowedTools: ["read"] } });
+  const review = await reviewer.request(0);
+  (await coordinator.request(1)).text("Waiting for the review.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
+  const child = (await client.list()).find((work) => work.parentId === parent.id)!;
+
+  // The reviewer answers in its own conversation and ends its turn without sending anything.
+  review.text("REVIEW_NOTES: naming is inconsistent.");
+  const told = JSON.stringify((await coordinator.request(2)).body.messages);
+  assert.ok(told.includes("[子 Work「Reviewer」异常停止]") && told.includes("没有把结果发给你就结束了这一轮"), "The idle coordinator is woken and told why the reviewer stopped");
+  assert.ok(told.includes("> REVIEW_NOTES: naming is inconsistent."), "The notice quotes what the reviewer said last");
+  coordinator.requests[2]!.text("I will check on the reviewer.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle after the notice");
+
+  // User decision (card #666): a turn the user starts by talking to the child Work does not count.
+  await client.prompt(child.id, "USER_QUESTION: what did you check?", "auto", "user-chat");
+  (await reviewer.request(1)).text("I checked the naming.");
+  await waitFor(async () => (await client.status(child.id)).execution === "idle", "The reviewer did not settle after the user's question");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(coordinator.requests.length, 3, "The coordinator is not told about the user's own conversation with its child Work");
+
+  // Stopped by the user while it still owes the result, the reviewer is reported once more.
+  await client.stop(child.id, "user-stops-reviewer");
+  const stopped = JSON.stringify((await coordinator.request(3)).body.messages);
+  assert.ok(stopped.includes("被停止了") && stopped.includes("> I checked the naming."));
+  coordinator.requests[3]!.text("Noted.");
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle after the stop notice");
 });
 
 // User decision 2026-10-31: a child Work talks only to its parent, and the runtime holds it
@@ -276,9 +307,9 @@ test("a coordinator in a Goal hands a child Work its conversation, waits for it 
   assert.ok(seen.includes("USER_NOTE") && seen.includes("a message reached you"));
   interrupted.tools({ id: "wait-again", name: "dock_wait", arguments: {} });
 
-  review.text("REVIEW_DONE: naming is fine.");
+  review.tools({ id: "review-done", name: "dock_send", arguments: { message: "REVIEW_DONE: naming is fine.", done: true } });
   const replied = JSON.stringify((await coordinator.request(4)).body.messages);
-  assert.equal(replied.split("REVIEW_DONE").length - 1, 1, "The reply arrives once, as the wait's result");
+  assert.equal(replied.split("REVIEW_DONE").length - 1, 1, "The result arrives once, as the wait's result");
   assert.doesNotMatch(replied, /Dock Goal: 2\/2/, "Waiting did not spend another Goal round");
   coordinator.requests[4]!.tools({ id: "done", name: "goal_update", arguments: { status: "complete", summary: "Reviewed", evidence: ["REVIEW_DONE"] } });
   (await coordinator.request(5)).text("The review is complete.");
@@ -325,7 +356,7 @@ test("a coordinator sees its own model and only the models the user lists for ch
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
 });
 
-test("a child Work's long final reply reaches its parent whole, and dock_inspect reads it whole", { timeout: 60_000 }, async (context) => {
+test("a child Work's long result reaches its parent whole", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "writer"], { prefix: "alu-native-long-reply-" });
   const { coordinator, writer } = team.providers;
   const client = await team.startHost();
@@ -337,19 +368,15 @@ test("a child Work's long final reply reaches its parent whole, and dock_inspect
   const writing = await writer.request(0);
   const waiting = await coordinator.request(1);
 
-  // Longer than both the 8,000-character history preview and the earlier 16,000-character reply bound.
+  // Longer than both the 8,000-character history preview and the 16,000-character bound a reply once had.
   let reply = "BRAINSTORM_START";
   for (let index = 0; reply.length < 20_000; index += 1) reply += ` idea-${index}`;
   reply += " BRAINSTORM_END";
-  writing.text(reply);
+  writing.tools({ id: "brainstorm-done", name: "dock_send", arguments: { message: reply, done: true } });
   waiting.text("Waiting for the brainstorm.");
   const delivered = await coordinator.request(2);
-  assert.ok(JSON.stringify(delivered.body.messages).includes(reply), "The parent hears the child's whole final reply");
-
-  delivered.tools({ id: "inspect-writer", name: "dock_inspect", arguments: { target: "Writer" } });
-  const inspected = await coordinator.request(3);
-  assert.ok(JSON.stringify(inspected.body.messages!.at(-1)).includes(reply), "dock_inspect shows the whole reply");
-  inspected.text("Read the whole brainstorm.");
+  assert.ok(JSON.stringify(delivered.body.messages).includes(reply), "The parent hears the child's whole result");
+  delivered.text("Read the whole brainstorm.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle");
 });
 

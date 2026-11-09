@@ -7,6 +7,7 @@ import {
   type ObservationNotification,
   type ObservationResult,
 } from "../src/core/instance-observation.js";
+import type { WorkMessage } from "../src/core/dock-tools.js";
 import {
   DOCK_TOOL_NAMES,
   DockToolsBridge,
@@ -288,45 +289,36 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
 });
 
 // Cloud review of abb061b: dock_wait waited up to 30 minutes for a child Work that would never
-// reply, when its reply came before its task's result, or after its watches were cancelled.
-test("dock_wait waits only for child Works whose reply is still to come", async () => {
+// report, when its result came before its task's result.
+test("dock_wait waits only for child Works that still owe a result", async () => {
   const child = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
-  // The Host makes a new watch each time it hands a child work.
-  let watches = 0;
-  const reply = (id: string) => ({ ...notification, watchId: `watch-${++watches}`, target: child(id) });
+  const final = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: `RESULT ${id}`, done: true });
   let bridge!: DockToolsBridge;
-  let deliverBeforeReturning: string | undefined;
-  let enabled = true;
+  let finishBeforeReturning: string | undefined;
   bridge = new DockToolsBridge(true, {
-    configure: async (action) => ({ enabled: action === "status" ? enabled : (enabled = action === "on") }),
+    configure: async () => ({ enabled: true }),
     invoke: async (request) => {
-      if (request.type === "cancel") return { type: "cancel", cancelledWatchIds: [] };
       const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
-      // The Host delivers a child Work's reply as soon as it has one, even before its call returns.
-      if (deliverBeforeReturning === id) bridge.deliver(reply(id));
+      // The Host hands a child Work's message over as soon as it is sent, even before this call returns.
+      if (finishBeforeReturning === id) bridge.receive(final(id));
       return request.type === "spawn"
         ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
-        : { type: "send", target: child(id), receipt: { delivery: "followUp", queued: false, acceptedAt: notification.firedAt } };
+        : { type: "work_message", to: "child", target: child(id), acceptedAt: notification.firedAt };
     },
   });
-  bridge.attach(fakeApi().api as never);
-  const wait = () => bridge.childReplies.wait({ timeoutSeconds: 1 }, undefined, () => false);
+  const wait = () => bridge.children.wait({ timeoutSeconds: 1 }, undefined, () => false, []);
 
-  deliverBeforeReturning = "failed-at-once";
-  await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "failed-at-once", task: "Review." });
-  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the spawn result is not awaited");
+  finishBeforeReturning = "finished-at-once";
+  await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "finished-at-once", task: "Review." });
+  assert.equal((await wait()).ended, "nothing_pending", "a result that came before the spawn result is not awaited");
+  await bridge.invoke({ type: "send", operationId: "send-fast", target: "finished-at-once", message: "Again." });
+  assert.equal((await wait()).ended, "nothing_pending", "a result that came before the send result is not awaited");
 
-  deliverBeforeReturning = "failed-at-once";
-  await bridge.invoke({ type: "send", operationId: "send-fast", target: "failed-at-once", message: "Again." });
-  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the send result is not awaited");
-
-  deliverBeforeReturning = undefined;
-  await bridge.invoke({ type: "spawn", operationId: "spawn-cancelled", name: "cancelled", task: "Review." });
-  await bridge.invoke({ type: "cancel" });
-  assert.equal((await wait()).ended, "nothing_pending", "cancelling every watch leaves no reply to wait for");
-
-  await bridge.invoke({ type: "spawn", operationId: "spawn-off", name: "switched-off", task: "Review." });
-  await bridge.configure("off");
-  await bridge.configure("on");
-  assert.equal((await wait()).ended, "nothing_pending", "turning Dock tools off cancels the replies being waited for");
+  finishBeforeReturning = undefined;
+  await bridge.invoke({ type: "spawn", operationId: "spawn-owing", name: "owing", task: "Review." });
+  const waiting = wait();
+  bridge.receive(final("owing"));
+  const result = await waiting;
+  assert.equal(result.ended, "received");
+  assert.deepEqual(result.messages.map((message) => message.type === "message" ? message.text : ""), ["RESULT owing"], "the result comes back as the wait's own result");
 });

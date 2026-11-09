@@ -17,6 +17,7 @@ import {
   type DockToolsMutationPort,
   type DockToolsRequest,
   type DockToolsResult,
+  type LocalDockToolsHostPort,
 } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
@@ -26,7 +27,8 @@ import { InstanceBusyError, InstanceNotActiveError, type InstanceLifecycle, type
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
-import { assertChildMayRequest, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
+import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
+import { WorkMessages } from "./work-messages.js";
 import {
   catalogReopenSessionFile,
   catalogSnapshotFromRecord,
@@ -147,7 +149,7 @@ function newestInstanceFirst(left: InstanceSnapshot, right: InstanceSnapshot): n
   return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
 }
 
-export class DockRegistry implements DockToolsHostPort {
+export class DockRegistry implements LocalDockToolsHostPort {
   readonly hostEpoch: string;
   readonly startedAt: string;
   readonly systemService: SystemService | undefined;
@@ -165,6 +167,7 @@ export class DockRegistry implements DockToolsHostPort {
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
   private readonly observationService: InstanceObservationService;
+  private readonly workMessages: WorkMessages;
   private readonly attachmentHostPort: InstanceAttachmentHostPort;
   private readonly dockToolsHostPort: DockToolsHostPort;
   private dockToolsMutationPort: DockToolsMutationPort | undefined;
@@ -223,6 +226,11 @@ export class DockRegistry implements DockToolsHostPort {
         });
       },
       sourceAuthorized: (instanceId) => this.dockToolsEnabled(instanceId),
+    });
+    this.workMessages = new WorkMessages({
+      live: () => this.instances.values(),
+      get: (instanceId) => this.instances.get(instanceId),
+      now: () => new Date().toISOString(),
     });
   }
 
@@ -337,6 +345,7 @@ export class DockRegistry implements DockToolsHostPort {
     instance.markCatalogCommitted();
     this.instances.set(id, instance);
     this.trackInstanceForObservation(instance);
+    if (input.child !== undefined) this.workMessages.childStarted(id);
     if (!parentActive()) {
       // The parent stopped while this child was starting; it leaves with its parent.
       await this.stop(id, randomUUID()).catch(() => {});
@@ -568,10 +577,29 @@ export class DockRegistry implements DockToolsHostPort {
     return this.observationService.attachSink(sourceInstanceId, sink);
   }
 
+  /** What passes between a Work and its own child Works: they all run here, so this Host answers it without Main. */
+  answersLocally(sourceInstanceId: string, request: DockToolsRequest): boolean {
+    let source: InstanceSnapshot;
+    try { source = this.getSnapshot(sourceInstanceId); } catch { return false; }
+    if (source.parentId !== undefined) return this.instances.has(sourceInstanceId);
+    if (request.type !== "send" && request.type !== "interrupt" && request.type !== "stop") return false;
+    return request.target !== undefined && this.workMessages.ownChild(source, request.target) !== undefined;
+  }
+
+  noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): void {
+    if (result.type !== "spawn") return;
+    const creation = childCreationOperation(spawnOperationId);
+    const child = [...this.instances.values()].find((instance) => instance.parentId === sourceInstanceId && instance.creationOperationId === creation);
+    if (child) this.workMessages.rememberMainIdentity(child.id, { child: result.instance.id, ...(result.instance.parentId === undefined ? {} : { parent: result.instance.parentId }) });
+  }
+
   async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
     this.assertDockToolsSource(sourceInstanceId);
     const source = this.getSnapshot(sourceInstanceId);
     assertChildMayRequest(source, request);
+    if (request.type === "unreported_stop") return this.workMessages.unreportedStop(source, request);
+    const child = request.type === "send" || request.type === "interrupt" || request.type === "stop" ? this.ownChild(source, request.target) : undefined;
+    if (request.type === "send" && (source.parentId !== undefined || child !== undefined)) return this.workMessages.send(source, request, child);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
       return this.observationService.observe(sourceInstanceId, request);
     }
@@ -587,9 +615,14 @@ export class DockRegistry implements DockToolsHostPort {
     }
     // The list belongs to this Host's machine, where the source's child Works run.
     if (request.type === "models") return { type: "models", ...await mutations.childModels() };
-    const notifyWhenDone = (childId: string, acceptedAt: string) => this.observationService.notifyWhenDone(sourceInstanceId, childId, acceptedAt);
-    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input), notifyWhenDone });
+    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) });
     if (request.type === "interrupt" || request.type === "stop") {
+      if (child) {
+        // The parent takes back the work it handed out, so nothing is owed for it any more.
+        this.workMessages.release(child.id);
+        await mutations[request.type](child.id, request.operationId);
+        return { type: request.type, instance: this.workMessages.forParent(child.snapshot()) };
+      }
       const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
       return { type: request.type, instance: await mutations[request.type](target.id, request.operationId) };
     }
@@ -597,9 +630,14 @@ export class DockRegistry implements DockToolsHostPort {
     return sendDockMessage(source, request, {
       send: (input) => mutations.send(input),
       resolveTarget: (target) => this.observationService.resolveTarget(sourceInstanceId, target),
-      parent: (parentId) => this.getSnapshot(parentId),
-      notifyWhenDone,
     });
+  }
+
+  private ownChild(source: InstanceSnapshot, target: string | undefined): ManagedInstance | undefined {
+    if (target === undefined) return undefined;
+    const child = this.workMessages.ownChild(source, target);
+    if (child === "ambiguous") throw new Error(`More than one of your child Works matches ${target}; use its id from dock_list.`);
+    return child;
   }
 
   observationStatus(instanceId: string) {
@@ -623,6 +661,9 @@ export class DockRegistry implements DockToolsHostPort {
       // Children leave with their parent however it stops. The owning Host observes
       // the real runtime lifecycle, never Main's offline projection.
       if (snapshot.lifecycle === "stopping" || snapshot.lifecycle === "runtime_error") void this.retireChildren(instance);
+      if (instance.parentId !== undefined && (snapshot.lifecycle === "stopping" || snapshot.lifecycle === "stopped" || snapshot.lifecycle === "runtime_error")) {
+        this.workMessages.childLeaving(instance);
+      }
       if (snapshot.lifecycle === "stopping" || snapshot.lifecycle === "stopped") void this.observationService.cancelSource(instance.id);
       if (snapshot.lifecycle === "stopped" || snapshot.lifecycle === "host_lost" || snapshot.lifecycle === "runtime_error") {
         detachSink();
@@ -638,6 +679,7 @@ export class DockRegistry implements DockToolsHostPort {
       this.instanceObservationSinkDetachments.get(id)?.();
       this.instanceObservationSinkDetachments.delete(id);
     }
+    this.workMessages.forget(instanceIds);
     await this.observationService.forgetInstances(instanceIds);
   }
 
