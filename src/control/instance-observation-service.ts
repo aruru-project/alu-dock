@@ -81,8 +81,6 @@ interface ObservationWatch {
   sourceInstanceId: string;
   targetInstanceId: string;
   unsubscribe: () => void;
-  /** When the work being waited for was accepted; an earlier idle belongs to earlier work. */
-  after?: string;
 }
 
 export class InstanceObservationService {
@@ -119,18 +117,6 @@ export class InstanceObservationService {
     return this.withSource(sourceInstanceId, async () => {
       await commit();
       if (!enabled) this.cancelLocked(sourceInstanceId);
-    });
-  }
-
-  /**
-   * For work a target accepted at `acceptedAt`: the source hears the target's final reply
-   * once it finishes that work, even if it already has by now.
-   */
-  notifyWhenDone(sourceInstanceId: string, targetInstanceId: string, acceptedAt: string): Promise<void> {
-    return this.withSource(sourceInstanceId, async () => {
-      this.assertSourceAuthorized(sourceInstanceId);
-      const result = await this.watchLocked(sourceInstanceId, this.port.getSnapshot(targetInstanceId), acceptedAt);
-      if (result.type === "watch" && result.status === "completed") await this.deliverLocked(sourceInstanceId, result.completion);
     });
   }
 
@@ -318,14 +304,10 @@ export class InstanceObservationService {
     return blocks;
   }
 
-  private async watchLocked(sourceInstanceId: string, target: InstanceSnapshot, after?: string): Promise<ObservationResult> {
+  private async watchLocked(sourceInstanceId: string, target: InstanceSnapshot): Promise<ObservationResult> {
     // One watch per pair: a second one would wake the source twice for the same finish.
     const existing = [...this.watches.values()].find((watch) => watch.sourceInstanceId === sourceInstanceId && watch.targetInstanceId === target.id);
-    if (existing) {
-      // A newer handoff moves the finish line, so an earlier finish no longer counts.
-      if (after !== undefined && (existing.after === undefined || after > existing.after)) existing.after = after;
-      return { type: "watch", status: "watching", receipt: existing.receipt };
-    }
+    if (existing) return { type: "watch", status: "watching", receipt: existing.receipt };
     const activeForSource = [...this.watches.values()].filter((watch) => watch.sourceInstanceId === sourceInstanceId).length;
     if (activeForSource >= MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       throw new Error(`Dock observation is limited to ${MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE} active watches per source instance`);
@@ -336,10 +318,10 @@ export class InstanceObservationService {
       target: observationStatus(target),
       registeredAt: this.now(),
     };
-    const immediateReason = observationTerminalReason(target, after);
+    const immediateReason = observationTerminalReason(target);
     if (immediateReason) return { type: "watch", status: "completed", completion: await this.completion(receipt, immediateReason, receipt.target, finishedWithReply(target, immediateReason)) };
     const unsubscribe = this.port.subscribe(target.id, (snapshot) => {
-      const reason = observationTerminalReason(snapshot, this.watches.get(watchId)?.after ?? after);
+      const reason = observationTerminalReason(snapshot);
       if (!reason) return;
       const captured = observationStatus(snapshot);
       const withReply = finishedWithReply(snapshot, reason);
@@ -350,9 +332,9 @@ export class InstanceObservationService {
     if (!unsubscribe) {
       return { type: "watch", status: "completed", completion: notification(receipt, "execution_unavailable", unavailableStatus(receipt.target, this.now()), this.now()) };
     }
-    this.watches.set(watchId, { receipt, sourceInstanceId, targetInstanceId: target.id, unsubscribe, ...(after === undefined ? {} : { after }) });
+    this.watches.set(watchId, { receipt, sourceInstanceId, targetInstanceId: target.id, unsubscribe });
     const afterSubscribe = this.port.getSnapshot(target.id);
-    const racedReason = observationTerminalReason(afterSubscribe, after);
+    const racedReason = observationTerminalReason(afterSubscribe);
     if (!racedReason) return { type: "watch", status: "watching", receipt };
     const withReply = finishedWithReply(afterSubscribe, racedReason);
     const completion = await this.completeWatchLocked(watchId, racedReason, observationStatus(afterSubscribe), false, withReply);
@@ -538,13 +520,10 @@ function unavailableStatus(status: ObservedInstanceStatus, timestamp: string): O
   return { ...status, lifecycle: "stopped", execution: "unavailable", compacting: false, executionChangedAt: timestamp, runStartedAt: undefined };
 }
 
-function observationTerminalReason(snapshot: InstanceSnapshot, after?: string): ObservationTerminalReason | undefined {
+function observationTerminalReason(snapshot: InstanceSnapshot): ObservationTerminalReason | undefined {
   if (snapshot.lifecycle === "stopped") return "stopped";
   if (snapshot.lifecycle === "host_lost") return "host_lost";
   if (snapshot.lifecycle === "runtime_error") return "runtime_error";
-  // Work accepted at `after` ends in an idle that began then or later; an older idle is the
-  // previous work's, which Main's copy of a SubHost Work can still show.
-  if (after !== undefined && snapshot.executionChangedAt < after) return undefined;
   if (snapshot.execution === "failed") return "execution_failed";
   if (snapshot.execution === "unavailable") return "execution_unavailable";
   // Queued input starts another run, so the Work is not done while any is waiting.

@@ -1,5 +1,6 @@
 import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
 import {
+  MAX_CHILD_LAST_WORDS_CHARS,
   MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
   MAX_DOCK_TOOL_NAME_CHARS,
@@ -7,6 +8,8 @@ import {
   MAX_CHILD_MODEL_PROBLEM_CHARS,
   parseChildModelEntries,
   type DockToolsRequest,
+  type WorkMessage,
+  type WorkMessageSender,
 } from "./dock-tools.js";
 import { parseDeliverableDto } from "./instance-deliverables.js";
 import {
@@ -93,14 +96,54 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       ...(machine === undefined ? {} : { machine }),
     };
   }
-  exactKeys(value, ["type", "operationId", "target", "message", "delivery"], "Dock send request");
+  if (value.type === "unreported_stop") {
+    exactKeys(value, ["type", "reason", "error", "lastWords"], "Unreported stop");
+    return {
+      type: "unreported_stop",
+      reason: oneOf(value.reason, ["ended", "aborted", "failed"] as const, "Stop reason"),
+      ...(value.error === undefined ? {} : { error: boundedString(value.error, MAX_CHILD_LAST_WORDS_CHARS, "Stop error") }),
+      ...(value.lastWords === undefined ? {} : { lastWords: boundedString(value.lastWords, MAX_CHILD_LAST_WORDS_CHARS, "Last words") }),
+    };
+  }
+  exactKeys(value, ["type", "operationId", "target", "message", "delivery", "done"], "Dock send request");
   if (value.type !== "send") throw new Error("Dock tools request type is invalid");
+  if (value.done !== undefined && typeof value.done !== "boolean") throw new Error("done must be true or false");
   return {
     type: "send",
     operationId: boundedString(value.operationId, 128, "Dock send operation ID"),
     ...(value.target === undefined ? {} : { target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Dock send target") }),
     message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
     ...(value.delivery === undefined ? {} : { delivery: oneOf(value.delivery, ["followUp", "steer"] as const, "Message delivery") }),
+    ...(value.done === undefined ? {} : { done: value.done }),
+  };
+}
+
+/** Shared by the Host that writes a Work message and the Worker that receives it. */
+export function parseWorkMessage(raw: unknown): WorkMessage {
+  const value = record(raw, "Work message");
+  const from = parseWorkMessageSender(value.from);
+  if (value.type === "message") {
+    exactKeys(value, ["type", "from", "text", "done"], "Work message");
+    if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
+    return { type: "message", from, text: boundedString(value.text, MAX_DOCK_TOOL_MESSAGE_CHARS, "Work message text"), ...(value.done === true ? { done: true as const } : {}) };
+  }
+  exactKeys(value, ["type", "from", "reason", "error", "lastWords"], "Work message");
+  if (value.type !== "child_stopped" || from.relation !== "child") throw new Error("Work message type is invalid");
+  return {
+    type: "child_stopped", from,
+    reason: oneOf(value.reason, ["ended", "aborted", "failed", "stopped", "crashed"] as const, "Child stop reason"),
+    ...(value.error === undefined ? {} : { error: boundedString(value.error, MAX_CHILD_LAST_WORDS_CHARS, "Child stop error") }),
+    ...(value.lastWords === undefined ? {} : { lastWords: boundedString(value.lastWords, MAX_CHILD_LAST_WORDS_CHARS, "Child last words") }),
+  };
+}
+
+function parseWorkMessageSender(raw: unknown): WorkMessageSender {
+  const value = record(raw, "Work message sender");
+  exactKeys(value, ["relation", "id", "name"], "Work message sender");
+  return {
+    relation: oneOf(value.relation, ["parent", "child"] as const, "Work message sender relation"),
+    id: boundedString(value.id, 128, "Work message sender ID"),
+    name: boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Work message sender name"),
   };
 }
 
@@ -179,6 +222,19 @@ export function parseDockToolsResult(raw: unknown): void {
     exactKeys(value, ["type", "instance", "defaultSaved"], "Dock create result");
     if (value.defaultSaved !== undefined && typeof value.defaultSaved !== "boolean") throw new Error("Invalid defaultSaved");
     validateObservedStatus(value.instance);
+    return;
+  }
+  if (value.type === "work_message") {
+    exactKeys(value, ["type", "to", "target", "acceptedAt", "done"], "Work message result");
+    oneOf(value.to, ["parent", "child"] as const, "Work message recipient");
+    validateObservedStatus(value.target);
+    timestampString(value.acceptedAt, "Work message acceptance time");
+    if (value.done !== undefined && value.done !== true) throw new Error("Work message done flag is invalid");
+    return;
+  }
+  if (value.type === "unreported_stop") {
+    exactKeys(value, ["type", "notified"], "Unreported stop result");
+    if (typeof value.notified !== "boolean") throw new Error("Unreported stop result is invalid");
     return;
   }
   exactKeys(value, ["type", "target", "receipt", "error"], "Dock send result");

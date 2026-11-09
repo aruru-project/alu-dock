@@ -41,6 +41,39 @@ export function parseChildModelEntries(input: unknown): ModelRef[] {
   });
 }
 
+/** Who sent a Work message, as its recipient knows them. */
+export interface WorkMessageSender {
+  relation: "parent" | "child";
+  /** The sender's ID as the recipient's own Dock tools name it. */
+  id: string;
+  name: string;
+}
+
+/** How a child Work that still owed its parent a result stopped. */
+export type ChildStopReason = "ended" | "aborted" | "failed" | "stopped" | "crashed";
+/** The most of a stopped child Work's last reply (or its error) its parent's notice quotes. */
+export const MAX_CHILD_LAST_WORDS_CHARS = 16_000;
+const LAST_WORDS_SHORTENED = "\n[…shortened]";
+
+/** What a notice quotes of a stopped child Work's text, at most MAX_CHILD_LAST_WORDS_CHARS. */
+export function shortenLastWords(text: string): string {
+  if (text.length <= MAX_CHILD_LAST_WORDS_CHARS) return text;
+  let end = MAX_CHILD_LAST_WORDS_CHARS - LAST_WORDS_SHORTENED.length;
+  const high = text.charCodeAt(end - 1);
+  if (high >= 0xd800 && high <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}${LAST_WORDS_SHORTENED}`;
+}
+
+/**
+ * What passes between a Work and its parent or child Works. The Host both run on writes it into the
+ * recipient's conversation as a message from that Work, never as the user's (card #666).
+ */
+export type WorkMessage =
+  /** `done` marks a child Work's final result for the work it was handed. */
+  | { type: "message"; from: WorkMessageSender; text: string; done?: true }
+  /** Dock's notice that a child Work stopped while it still owed this Work a result. */
+  | { type: "child_stopped"; from: WorkMessageSender; reason: ChildStopReason; error?: string; lastWords?: string };
+
 export type DockToolsRequest =
   | ObservationRequest
   | { type: "machines" }
@@ -50,8 +83,10 @@ export type DockToolsRequest =
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
   | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }
-  /** A child Work omits target: it can only message its parent. */
-  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer" };
+  /** A child Work omits target: it can only message its parent, and `done` says whether this is its final result. */
+  | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
+  /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */
+  | { type: "unreported_stop"; reason: Extract<ChildStopReason, "ended" | "aborted" | "failed">; error?: string; lastWords?: string };
 
 /** What the Host creates for dock_create, plus what dock_spawn chooses for a child. */
 export type DockCreateInput = Extract<DockToolsRequest, { type: "create" }> & {
@@ -86,15 +121,28 @@ export type DockToolsResult =
     type: "send";
     target: ObservedInstanceStatus;
     receipt: Pick<CommandReceipt, "delivery" | "queued" | "acceptedAt">;
-    /** The message was delivered, but its child Work's reply will not come back. */
+    /** Set by an older Main: the message was delivered, but its child Work's reply will not come back. */
     error?: string;
-  };
+  }
+  /** A message between a Work and its parent or child Work, taken by the recipient's Worker. */
+  | { type: "work_message"; to: "parent" | "child"; target: ObservedInstanceStatus; acceptedAt: string; done?: true }
+  | { type: "unreported_stop"; notified: boolean };
 
 export interface DockToolsHostPort {
   dockToolsEnabled(sourceInstanceId: string): boolean;
   configureDockTools(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }>;
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult>;
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void;
+}
+
+/**
+ * The Host a Work runs on, which also runs its child Works. It answers what passes between a Work and
+ * its own child Works itself, so those messages need neither Main nor a SubHost's link to it.
+ */
+export interface LocalDockToolsHostPort extends DockToolsHostPort {
+  answersLocally(sourceInstanceId: string, request: DockToolsRequest): boolean;
+  /** A SubHost learns the ID Main gave a child Work created here through Main, so its parent can name it by that ID. */
+  noteSpawnedChild(sourceInstanceId: string, spawnOperationId: string, result: DockToolsResult): void;
 }
 
 export interface DockToolsMutationPort {

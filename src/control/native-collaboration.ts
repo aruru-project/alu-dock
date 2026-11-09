@@ -3,82 +3,60 @@ import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from ".
 import type { InstanceSnapshot } from "../core/instance-dto.js";
 import { systemToolOperation } from "./system-tools.js";
 
-/** A child Work talks only to its parent: the one Dock request it may make is a message. */
+/** A child Work talks only to its parent: it may message it, and its Worker reports a turn that ended without doing so. */
 export function assertChildMayRequest(source: Pick<InstanceSnapshot, "parentId">, request: DockToolsRequest): void {
-  if (source.parentId !== undefined && request.type !== "send") {
-    throw new Error("A child Work can only message the Work that created it. Finish the task and reply, or use dock_send to ask it something.");
+  if (source.parentId !== undefined && request.type !== "send" && request.type !== "unreported_stop") {
+    throw new Error("A child Work can only message the Work that created it. Use dock_send to ask it something or to give it your result.");
   }
 }
 
-/**
- * Who a message goes to, and when. A child always reaches its parent at the parent's next
- * step, even mid-turn: it sends only what the parent must know before the child finishes.
- * A top-level Work names its target and by default lets the target's current turn finish.
- */
-export function messageTarget(
-  source: Pick<InstanceSnapshot, "parentId">,
-  request: { target?: string; delivery?: "followUp" | "steer" },
-): { parentId: string; delivery: "auto" } | { target: string; delivery: "followUp" | "steer" } {
-  if (source.parentId !== undefined) return { parentId: source.parentId, delivery: "auto" };
-  if (request.target === undefined) throw new Error("Name the Work to message with target.");
-  return { target: request.target, delivery: request.delivery ?? "followUp" };
+/** The creation of the child Work a spawn request makes; a SubHost finds the child it created for Main by it. */
+export function childCreationOperation(spawnOperationId: string): string {
+  return systemToolOperation(spawnOperationId, "create");
 }
 
 /**
- * After work reaches a child Work: arrange for its reply to come back, or say plainly that it
- * will not. The work itself was accepted, so the caller must not send it again.
+ * Messages between a Work and its own child Works go through the Host they both run on (card #666).
+ * One that reaches Main came from a machine whose Alu Dock is older, or named a child Work its machine did not find.
  */
-export async function arrangeReply(notifyWhenDone: () => Promise<void>): Promise<string | undefined> {
-  try {
-    await notifyWhenDone();
-    return undefined;
-  } catch (error) {
-    return `It was accepted, but Dock cannot deliver the child Work's reply to you. Read it later with dock_inspect; do not send it again. ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
+const CHILD_MESSAGES_ELSEWHERE = "Messages between a Work and its child Works are delivered by the machine they run on, and that machine did not take this one. Name the child Work as dock_list shows it; if that does not help, update Alu Dock on that machine.";
 
-/** Delivers the child's reply to the parent once it finishes the work it accepted at `acceptedAt`. */
-type NotifyWhenDone = (childId: string, acceptedAt: string) => Promise<void>;
-
-/** One message path for local and Main-routed sources. The owning Host resolves targets and delivers. */
+/** A top-level Work's message to another top-level Work, through the target's input, for local and Main-routed sources. */
 export async function sendDockMessage(
   source: InstanceSnapshot,
   request: Extract<DockToolsRequest, { type: "send" }>,
   port: Pick<DockToolsMutationPort, "send"> & {
     /** Resolves a named target among the Works this source may see. */
     resolveTarget(target: string): InstanceSnapshot;
-    parent(parentId: string): InstanceSnapshot;
-    notifyWhenDone: NotifyWhenDone;
   },
 ): Promise<Extract<DockToolsResult, { type: "send" }>> {
-  const recipient = messageTarget(source, request);
-  const target = "parentId" in recipient ? port.parent(recipient.parentId) : port.resolveTarget(recipient.target);
+  if (source.parentId !== undefined) throw new Error(CHILD_MESSAGES_ELSEWHERE);
+  if (request.target === undefined) throw new Error("Name the Work to message with target.");
+  const target = port.resolveTarget(request.target);
+  if (target.parentId === source.id || request.done !== undefined) throw new Error(CHILD_MESSAGES_ELSEWHERE);
   const { target: delivered, receipt } = await port.send({
     operationId: request.operationId,
     instanceId: target.id,
     message: dockMessageText(source.displayName, request.message),
-    delivery: recipient.delivery,
+    delivery: request.delivery ?? "followUp",
   });
-  // A parent hears back from its child each time it hands the child more work.
-  const replyError = target.parentId === source.id ? await arrangeReply(() => port.notifyWhenDone(target.id, receipt.acceptedAt)) : undefined;
-  return {
-    type: "send", target: delivered,
-    receipt: { delivery: receipt.delivery, queued: receipt.queued, acceptedAt: receipt.acceptedAt },
-    ...(replyError === undefined ? {} : { error: replyError }),
-  };
+  return { type: "send", target: delivered, receipt: { delivery: receipt.delivery, queued: receipt.queued, acceptedAt: receipt.acceptedAt } };
 }
 
-/** One orchestration path for local and Main-routed children. The owning Host performs each effect. */
+/**
+ * One orchestration path for local and Main-routed children. The owning Host performs each effect. The task
+ * reaches the child as its first prompt, since its conversation has not started; its result comes back as a message.
+ */
 export async function spawnDockWorker(
   source: InstanceSnapshot,
   request: Extract<DockToolsRequest, { type: "spawn" }>,
-  port: Pick<DockToolsMutationPort, "create" | "send"> & { notifyWhenDone: NotifyWhenDone },
+  port: Pick<DockToolsMutationPort, "create" | "send">,
 ): Promise<Extract<DockToolsResult, { type: "spawn" }>> {
   // User decision 2026-11-04: a child Work keeps its parent's thinking level, on another model too.
   // A model without that level starts at the nearest one it has, as Pi does when a Work changes model.
   const thinkingLevel = request.thinkingLevel ?? source.executor.thinkingLevel;
   const created = await port.create({
-    type: "create", operationId: systemToolOperation(request.operationId, "create"),
+    type: "create", operationId: childCreationOperation(request.operationId),
     cwd: request.cwd ?? source.cwd, name: request.name,
     model: request.model ?? source.executor.model,
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
@@ -96,6 +74,5 @@ export async function spawnDockWorker(
     // The child exists; an interrupted response cannot prove the task was never accepted.
     return { type: "spawn", instance: created.instance, taskStatus: "failed", error: `Worker created, but task acceptance was not confirmed. Inspect this worker before sending the task again. ${error instanceof Error ? error.message : String(error)}` };
   }
-  const replyError = await arrangeReply(() => port.notifyWhenDone(created.instance.id, sent.receipt.acceptedAt));
-  return { type: "spawn", instance: sent.target, taskStatus: "accepted", ...(replyError === undefined ? {} : { error: replyError }) };
+  return { type: "spawn", instance: sent.target, taskStatus: "accepted" };
 }

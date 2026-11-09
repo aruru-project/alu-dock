@@ -5,9 +5,68 @@ import {
   type ObservationResult,
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
-import type { DockToolsResult, ChildModelList } from "../core/dock-tools.js";
+import { MAX_CHILD_LAST_WORDS_CHARS, type DockToolsResult, type ChildModelList, type ChildStopReason, type WorkMessage } from "../core/dock-tools.js";
 import { modelLabel } from "../core/instance-display-name.js";
 import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS } from "../control/protocol.js";
+import type { ChildWaitResult } from "./child-messages.js";
+
+/**
+ * A message between a Work and its parent or child Work in the conversation (card #666). The model reads it
+ * as user text, so its first line says whose words it is; clients show it as a message from that Work.
+ */
+export const WORK_MESSAGE_TYPE = "dock-work-message";
+/** Hidden marker that starts a turn for Work messages an idle Work just took; the model never reads it. */
+export const WORK_WAKE_TYPE = "dock-work-wake";
+
+/** What clients use to style a Work message; its first line already says it to the model and the reader. */
+export interface WorkMessageDetails {
+  from: "parent" | "child";
+  done?: true;
+  stopped?: true;
+}
+
+const CHILD_STOP_REASONS: Record<ChildStopReason, string> = {
+  ended: "没有把结果发给你就结束了这一轮",
+  aborted: "这一轮被中断了",
+  failed: "这一轮出错停下了",
+  stopped: "被停止了",
+  crashed: "崩溃了",
+};
+
+/** The first line of a Work message: who it is from, and whether it is a final result. */
+export function workMessageSourceLine(message: WorkMessage): string {
+  const name = inline(message.from.name);
+  if (message.type === "child_stopped") return `[子 Work「${name}」异常停止]`;
+  if (message.from.relation === "parent") return `[来自父 Work「${name}」]`;
+  return message.done ? `[来自子 Work「${name}」· 已完成]` : `[来自子 Work「${name}」]`;
+}
+
+export function renderWorkMessage(message: WorkMessage): string {
+  const head = workMessageSourceLine(message);
+  if (message.type === "message") return `${head}\n${message.text}`;
+  const lines = [head, `原因：${CHILD_STOP_REASONS[message.reason]}${message.error ? `：${inline(message.error, MAX_CHILD_LAST_WORDS_CHARS)}` : ""}`];
+  // A blank line ends the quote, so what follows is not read as the child Work's words.
+  if (message.lastWords !== undefined) lines.push("它最后说的话：", ...message.lastWords.replace(/\r\n?|[\u2028\u2029]/gu, "\n").split("\n").map((line) => `> ${line}`), "");
+  lines.push(message.reason === "stopped" || message.reason === "crashed"
+    ? "它已经停下，不会再回复；它的对话记录留在磁盘上。"
+    : "它还欠你结果。用 dock_inspect 看它做到哪了；要它接着做，用 dock_send 发消息给它；不再需要就用 dock_stop 停掉它。");
+  return lines.join("\n");
+}
+
+/** The custom message Pi records for a dock_watch notice. */
+export function watchNoticeEntry(notification: ObservationNotification): { customType: string; content: string; display: true; details: ObservationNotification } {
+  return { customType: "dock-tools-watch", content: renderObservationNotification(notification), display: true, details: notification };
+}
+
+/** The custom message Pi records for a Work message. */
+export function workMessageEntry(message: WorkMessage): { customType: string; content: string; display: true; details: WorkMessageDetails } {
+  const details: WorkMessageDetails = {
+    from: message.from.relation,
+    ...(message.type === "message" && message.done ? { done: true as const } : {}),
+    ...(message.type === "child_stopped" ? { stopped: true as const } : {}),
+  };
+  return { customType: WORK_MESSAGE_TYPE, content: renderWorkMessage(message), display: true, details };
+}
 
 /** What the Worker's Pi knows about a model it can run now. */
 export interface DescribedModel {
@@ -37,7 +96,7 @@ export function renderDockToolsResult(result: DockToolsResult, context: RenderCo
     const used = result.instance.thinkingLevel;
     const nearest = context.thinkingAsked === undefined || used === undefined || used === context.thinkingAsked
       ? "" : ` Its model has no thinking level ${context.thinkingAsked}, so it runs at ${used}, the nearest it has.`;
-    return `Created child Work ${statusLine(result.instance, new Date().toISOString())}.${nearest} ${result.error ?? "It is working on the task; its final reply will be delivered to you when it finishes."}`;
+    return `Created child Work ${statusLine(result.instance, new Date().toISOString())}.${nearest} ${result.error ?? "It is working on the task. Its final result reaches you as a message from it, at your next step if you are still working."}`;
   }
   if (result.type === "interrupt" || result.type === "stop") return `${result.type === "interrupt" ? "Interrupted current turn of" : "Stopped"} ${identity(result.instance)}.`;
   if (result.type === "system_catalog") {
@@ -75,8 +134,15 @@ export function renderDockToolsResult(result: DockToolsResult, context: RenderCo
     return `${result.defaultSaved ? "Directory default saved. " : ""}Created ${identity(result.instance)} in ${inline(result.instance.cwd, 180)}. Collaboration tools are available in the new work.`;
   }
   if (result.type === "send") {
-    return `Sent a Dock message to ${identity(result.target)}${result.receipt.queued ? "; it is waiting in that instance’s Queue" : ""}. The message carries your worker identity.${result.error !== undefined ? ` ${result.error}` : result.target.parentId === undefined ? "" : " Its reply will be delivered to you when it finishes."}`;
+    return `Sent a Dock message to ${identity(result.target)}${result.receipt.queued ? "; it is waiting in that instance’s Queue" : ""}. The message carries your worker identity.${result.error === undefined ? "" : ` ${result.error}`}`;
   }
+  if (result.type === "work_message") {
+    if (result.to === "parent") return result.done
+      ? "Your final result reached your parent Work. Your turn ends here."
+      : "Your message reached your parent Work. Keep working; its answer arrives as a message from it.";
+    return `Sent to child Work ${identity(result.target)}; it reads it at its next step. Its answers and its final result reach you as messages from it.`;
+  }
+  if (result.type === "unreported_stop") return result.notified ? "Your parent Work was told you stopped." : "Nothing was owed to your parent Work.";
   return renderObservationResult(result);
 }
 
@@ -109,25 +175,17 @@ export function renderObservationNotification(notification: ObservationNotificat
     : `${header}\nIts final reply:\n${notification.target.reply}`;
 }
 
-/** What dock_wait saw: the replies it took, and why it stopped waiting. */
-export interface ChildWaitResult {
-  replies: ObservationNotification[];
-  /** Child Works that still owe a reply. */
-  waiting: ObservedInstanceStatus[];
-  ended: "replied" | "nothing_pending" | "message" | "timeout" | "cancelled";
-  timeoutSeconds?: number;
-}
-
 export function renderChildWait(result: ChildWaitResult): string {
+  const received = result.messages.length === 0 ? "" : result.messages.length === 1 ? "A message from a child Work arrived." : `${result.messages.length} messages from child Works arrived.`;
   const head = {
-    replied: `${result.replies.length === 1 ? "A child Work replied" : `${result.replies.length} child Works replied`}.`,
-    nothing_pending: "No child Work reply is pending: every child Work you handed work to has already replied or stopped.",
-    message: "Stopped waiting because a message reached you; it follows this result.",
-    timeout: `Stopped waiting after ${result.timeoutSeconds} seconds.`,
-    cancelled: "Stopped waiting.",
+    received,
+    nothing_pending: "No child Work owes you a result: every child Work you handed work to has sent its final result or stopped.",
+    message: `Stopped waiting because a message reached you; it follows this result.${received ? ` ${received}` : ""}`,
+    timeout: `Stopped waiting after ${result.timeoutSeconds} seconds.${received ? ` ${received}` : ""}`,
+    cancelled: `Stopped waiting.${received ? ` ${received}` : ""}`,
   }[result.ended];
-  const still = result.waiting.length === 0 ? "" : `\nStill working: ${result.waiting.map(quotedIdentity).join(", ")}`;
-  return [head + still, ...result.replies.map((notification) => renderObservationNotification(notification))].join("\n\n");
+  const still = result.waiting.length === 0 ? "" : `\nStill working: ${result.waiting.map((child) => `"${inline(child.name)}" id=${inline(child.id)}`).join(", ")}`;
+  return [head + still, ...result.messages.map(renderWorkMessage)].join("\n\n");
 }
 
 /** Your own model first, then the models the user picked, with what each supports. */

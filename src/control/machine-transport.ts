@@ -13,7 +13,7 @@ import { createServer, connect, type Server as TlsServer, type TLSSocket } from 
 import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
 import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { StaleRuntimeGenerationError, type InstanceSnapshot } from "../core/managed-instance.js";
-import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
+import type { DockToolsHostPort, DockToolsRequest, DockToolsResult, LocalDockToolsHostPort } from "../core/dock-tools.js";
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
@@ -1869,7 +1869,7 @@ function machineError(error: unknown): string {
 export class SubHostDockToolsPort implements DockToolsHostPort {
   constructor(private readonly options: {
     upstream: SubHostMachineConnection;
-    local: () => DockToolsHostPort;
+    local: () => LocalDockToolsHostPort;
   }) {}
 
   dockToolsEnabled(sourceInstanceId: string): boolean { return this.options.local().dockToolsEnabled(sourceInstanceId); }
@@ -1879,10 +1879,16 @@ export class SubHostDockToolsPort implements DockToolsHostPort {
     return result;
   }
   invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    // File delivery and the model list for child Works belong to this machine.
-    if (request.type === "deliver" || request.type === "models") return this.options.local().invokeDockTool(sourceInstanceId, request);
+    // File delivery, the model list for child Works and what passes between a Work and its own
+    // child Works belong to this machine, which runs them all.
+    const local = this.options.local();
+    if (request.type === "deliver" || request.type === "models" || local.answersLocally(sourceInstanceId, request)) return local.invokeDockTool(sourceInstanceId, request);
     if (!this.dockToolsEnabled(sourceInstanceId)) return Promise.reject(new Error("Dock tools are off for this instance. Use /dock-tools on first."));
-    return this.options.upstream.invokeDockTool(sourceInstanceId, request).then((result) => withCurrentMachine(result, this.options.upstream.machineId()));
+    return this.options.upstream.invokeDockTool(sourceInstanceId, request).then((result) => {
+      // Main names the new child Work by its own ID; remember it so the parent can use that ID here.
+      if (request.type === "spawn") local.noteSpawnedChild(sourceInstanceId, request.operationId, result);
+      return withCurrentMachine(result, this.options.upstream.machineId());
+    });
   }
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void {
     return this.options.upstream.attachObservationSink(sourceInstanceId, sink);

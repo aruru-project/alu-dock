@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { TLSSocket } from "node:tls";
 
-import type { DockToolsHostPort } from "../src/core/dock-tools.js";
+import type { LocalDockToolsHostPort } from "../src/core/dock-tools.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
@@ -702,7 +702,9 @@ test("SubHost file delivery remains local while Main is offline", async () => {
     configureDockTools: async () => ({ enabled: true }),
     invokeDockTool: async (_source: string, request: { type: string }) => { delivered = request.type === "deliver"; return { type: "deliver" as const, deliverable: { deliveryRef: "delivery", name: "file.txt", sizeBytes: 1 } }; },
     attachObservationSink: () => () => {},
-  } as DockToolsHostPort;
+    answersLocally: () => false,
+    noteSpawnedChild: () => {},
+  } as LocalDockToolsHostPort;
   const upstream = { invokeDockTool: async () => { throw new Error("Main offline"); } } as unknown as SubHostMachineConnection;
   const port = new SubHostDockToolsPort({ upstream, local: () => local });
   const result = await port.invokeDockTool("native", { type: "deliver", path: "/tmp/file.txt" });

@@ -188,6 +188,7 @@ export {
 import { projectAgentNavigateResult } from "./session-tree.js";
 import { classifyControlRequest, type ResourceContentResult, type SessionTreeResult } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
+import type { WorkMessage } from "./dock-tools.js";
 
 interface AgentEventTransition {
   kind: string;
@@ -657,6 +658,22 @@ export class ManagedInstance {
 
   deliverObservation(notification: ObservationNotification): Promise<void> {
     return this.session.control({ type: "observation_delivery", notification }).then(() => undefined);
+  }
+
+  /** Resolves once the Worker holds the message; it writes it into the conversation at the Agent's next step. */
+  deliverWorkMessage(message: WorkMessage): Promise<void> {
+    return this.session.control({ type: "work_message", message }).then(() => undefined);
+  }
+
+  /** The Agent's last saved reply, from the Host's own copy of the conversation, so it is there after the Worker is gone too. */
+  lastAgentReply(): string | undefined {
+    const entries = this.journal.historyPage(undefined, 20).entries;
+    for (const entry of entries.reverse()) {
+      if (entry.kind !== "message" || entry.source !== "assistant") continue;
+      const text = entry.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n").trim();
+      if (text) return text;
+    }
+    return undefined;
   }
 
   async disposeUnpublished(): Promise<void> {

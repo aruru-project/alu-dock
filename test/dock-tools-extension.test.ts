@@ -7,6 +7,7 @@ import {
   type ObservationNotification,
   type ObservationResult,
 } from "../src/core/instance-observation.js";
+import type { DockToolsRequest, WorkMessage } from "../src/core/dock-tools.js";
 import {
   DOCK_TOOL_NAMES,
   DockToolsBridge,
@@ -19,7 +20,11 @@ interface FakeExtensionContext {
     setStatus: (key: string, text: string | undefined) => void;
   };
   reload: () => Promise<void>;
+  isIdle: () => boolean;
 }
+
+/** The bridge writes what waits once Pi is done binding a runtime or settling. */
+const afterBinding = () => new Promise((resolve) => setTimeout(resolve, 5));
 
 interface FakeApiState {
   active: string[];
@@ -71,11 +76,14 @@ function fakeExtensionContext(): {
         setStatus: (key, text) => { if (text === undefined) statuses.delete(key); else statuses.set(key, text); },
       },
       reload: async () => {},
+      isIdle: () => true,
     },
     notifications,
     statuses,
   };
 }
+
+const watchNotices = (state: FakeApiState) => state.messages.filter(({ message }) => (message as { customType?: string }).customType === "dock-tools-watch").length;
 
 const notification: ObservationNotification = {
   trust: CROSS_INSTANCE_TRUST,
@@ -230,12 +238,14 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   for (const start of second.state.start) start(undefined, extensionUi.context);
   assert.deepEqual(second.state.active, ["read", ...DOCK_TOOL_NAMES]);
   assert.equal(extensionUi.statuses.get("Dock tools"), "on");
-  assert.equal(second.state.messages.length, 1);
-  assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "steer" });
-  assert.match(JSON.stringify(second.state.messages[0]!.message), /Sol/u, "the notice names the Work that finished");
+  await afterBinding();
+  // Card #666: written into the conversation from the inbox, then a turn is asked for, like a Work message.
+  assert.deepEqual(second.state.messages.map(({ options }) => options), [{ triggerTurn: false }, { triggerTurn: true }]);
+  assert.match(JSON.stringify(second.state.messages[0]!.message), /"customType":"dock-tools-watch".*Sol/u, "the notice names the Work that finished");
 
   bridge.deliver(notification);
-  assert.equal(second.state.messages.length, 1, "duplicate watch completion must not wake twice");
+  await afterBinding();
+  assert.equal(second.state.messages.length, 2, "duplicate watch completion must not wake twice");
 });
 
 test("Dock tools bridge cancels a reload-pending wake before acknowledging cancellation", async () => {
@@ -252,8 +262,10 @@ test("Dock tools bridge cancels a reload-pending wake before acknowledging cance
   const attached = fakeApi();
   dockToolsExtension(bridge)(attached.api as never);
   for (const start of attached.state.start) start(undefined, fakeExtensionContext().context);
+  await afterBinding();
   assert.equal(attached.state.messages.length, 0, "a successfully cancelled pending watch must not wake after rebind");
   bridge.deliver(notification);
+  await afterBinding();
   assert.equal(attached.state.messages.length, 0, "a suppressed watch ID must remain fenced against delayed delivery");
 });
 
@@ -269,8 +281,9 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   rejectCancel(new Error("cancel failed"));
   await assert.rejects(cancelling, /cancel failed/u);
   const afterCancelFailure = fakeApi();
-  cancelBridge.attach(afterCancelFailure.api as never);
-  assert.equal(afterCancelFailure.state.messages.length, 1, "failed cancel must restore the completion buffered behind its acknowledgement fence");
+  cancelBridge.attach(afterCancelFailure.api as never, fakeExtensionContext().context as never);
+  await afterBinding();
+  assert.equal(watchNotices(afterCancelFailure.state), 1, "failed cancel must restore the completion buffered behind its acknowledgement fence");
 
   let rejectOff!: (error: Error) => void;
   const offBridge = new DockToolsBridge(true, {
@@ -283,50 +296,117 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   rejectOff(new Error("off failed"));
   await assert.rejects(disabling, /off failed/u);
   const afterOffFailure = fakeApi();
-  offBridge.attach(afterOffFailure.api as never);
-  assert.equal(afterOffFailure.state.messages.length, 1, "failed off must restore the completion buffered behind its acknowledgement fence");
+  offBridge.attach(afterOffFailure.api as never, fakeExtensionContext().context as never);
+  await afterBinding();
+  assert.equal(watchNotices(afterOffFailure.state), 1, "failed off must restore the completion buffered behind its acknowledgement fence");
+});
+
+// Card #666 review: Pi's abort leaves no automatic continuation after the user's Stop, and Work messages
+// follow that rule. One that arrived after the stopped turn's last step is still in the inbox when the
+// turn settles; real Workers cannot time that, so the bridge is driven directly.
+test("after the user's Stop, a waiting Work message joins the conversation without starting a turn", async () => {
+  const bridge = new DockToolsBridge(true, { configure: async () => ({ enabled: true }), invoke: async () => assert.fail("no Dock call") });
+  const { api, state } = fakeApi();
+  let idle = false;
+  bridge.attach(api as never, { isIdle: () => idle } as never);
+  const message = (text: string): WorkMessage => ({ type: "message", from: { relation: "child", id: "child", name: "Reviewer" }, text });
+  bridge.receive(message("ARRIVED_DURING_THE_STOPPED_TURN"));
+  assert.equal(state.messages.length, 0, "A busy Work takes the message at the end of its step");
+  idle = true;
+  bridge.settled(true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(state.messages.map(({ options }) => options), [{ triggerTurn: false }], "The message is written, and no turn starts");
+  bridge.receive(message("CAME_AFTER_THE_STOP"));
+  assert.deepEqual(state.messages.slice(1).map(({ options }) => options), [{ triggerTurn: false }, { triggerTurn: true }], "A message after the Stop starts a turn as usual");
+});
+
+// Card #666 review, full-suite run 2026-11-09: a child Work's message reached its parent while Pi settled
+// the parent's turn. Pi holds a turn asked for then until it has settled, the delivery after settling asked
+// again, and the parent ran one turn too many.
+test("a turn asked for while the Work settles is asked for once", async () => {
+  const bridge = new DockToolsBridge(true, { configure: async () => ({ enabled: true }), invoke: async () => assert.fail("no Dock call") });
+  const { api, state } = fakeApi();
+  // While Pi settles, no run is active, and the turn asked for has not started yet.
+  bridge.attach(api as never, { isIdle: () => true } as never);
+  bridge.receive({ type: "message", from: { relation: "child", id: "child", name: "Reviewer" }, text: "ARRIVED_WHILE_SETTLING" });
+  bridge.settled(false);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(state.messages.map(({ options }) => options), [{ triggerTurn: false }, { triggerTurn: true }], "The message is written and one turn is asked for");
 });
 
 // Cloud review of abb061b: dock_wait waited up to 30 minutes for a child Work that would never
-// reply, when its reply came before its task's result, or after its watches were cancelled.
-test("dock_wait waits only for child Works whose reply is still to come", async () => {
-  const child = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
-  // The Host makes a new watch each time it hands a child work.
-  let watches = 0;
-  const reply = (id: string) => ({ ...notification, watchId: `watch-${++watches}`, target: child(id) });
+// report, when its result came before its task's result.
+test("dock_wait waits only for child Works that still owe a result", async () => {
+  // Dock gives a child Work its own ID; the name is what the parent called it.
+  const ids: Record<string, string> = { "Reviewer #1": "w-reviewer-1" };
+  const child = (name: string) => ({ ...notification.target, id: ids[name] ?? name, name, parentId: "parent" });
+  const final = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: `RESULT ${id}`, done: true });
   let bridge!: DockToolsBridge;
-  let deliverBeforeReturning: string | undefined;
-  let enabled = true;
+  let finishBeforeReturning: string | undefined;
   bridge = new DockToolsBridge(true, {
-    configure: async (action) => ({ enabled: action === "status" ? enabled : (enabled = action === "on") }),
+    configure: async () => ({ enabled: true }),
     invoke: async (request) => {
-      if (request.type === "cancel") return { type: "cancel", cancelledWatchIds: [] };
       const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
-      // The Host delivers a child Work's reply as soon as it has one, even before its call returns.
-      if (deliverBeforeReturning === id) bridge.deliver(reply(id));
-      return request.type === "spawn"
-        ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
-        : { type: "send", target: child(id), receipt: { delivery: "followUp", queued: false, acceptedAt: notification.firedAt } };
+      // The Host hands a child Work's message over as soon as it is sent, even before this call returns.
+      if (finishBeforeReturning === id) bridge.receive(final(id));
+      return request.type === "spawn" ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
+        : request.type === "interrupt" ? { type: "interrupt", instance: child(id) }
+          : { type: "work_message", to: "child", target: child(id), acceptedAt: notification.firedAt };
     },
   });
-  bridge.attach(fakeApi().api as never);
-  const wait = () => bridge.childReplies.wait({ timeoutSeconds: 1 }, undefined, () => false);
+  const wait = () => bridge.children.wait({ timeoutSeconds: 1 }, undefined, () => false, []);
 
-  deliverBeforeReturning = "failed-at-once";
-  await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "failed-at-once", task: "Review." });
-  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the spawn result is not awaited");
+  finishBeforeReturning = "finished-at-once";
+  await bridge.invoke({ type: "spawn", operationId: "spawn-fast", name: "finished-at-once", task: "Review." });
+  assert.equal((await wait()).ended, "nothing_pending", "a result that came before the spawn result is not awaited");
+  await bridge.invoke({ type: "send", operationId: "send-fast", target: "finished-at-once", message: "Again." });
+  assert.equal((await wait()).ended, "nothing_pending", "a result that came before the send result is not awaited");
 
-  deliverBeforeReturning = "failed-at-once";
-  await bridge.invoke({ type: "send", operationId: "send-fast", target: "failed-at-once", message: "Again." });
-  assert.equal((await wait()).ended, "nothing_pending", "a reply that came before the send result is not awaited");
+  finishBeforeReturning = undefined;
+  await bridge.invoke({ type: "spawn", operationId: "spawn-owing", name: "owing", task: "Review." });
+  const waiting = wait();
+  bridge.receive(final("owing"));
+  const result = await waiting;
+  assert.equal(result.ended, "received");
+  assert.deepEqual(result.messages.map((message) => message.type === "message" ? message.text : ""), ["RESULT owing"], "the result comes back as the wait's own result");
 
-  deliverBeforeReturning = undefined;
-  await bridge.invoke({ type: "spawn", operationId: "spawn-cancelled", name: "cancelled", task: "Review." });
-  await bridge.invoke({ type: "cancel" });
-  assert.equal((await wait()).ended, "nothing_pending", "cancelling every watch leaves no reply to wait for");
+  // Astra review of #666: a message names its sender by display name, which drops characters such as
+  // "#" from the name the parent used; waiting for that name still ends with the result.
+  await bridge.invoke({ type: "spawn", operationId: "spawn-named", name: "Reviewer #1", task: "Review." });
+  const named = bridge.children.wait({ target: "Reviewer #1", timeoutSeconds: 1 }, undefined, () => false, []);
+  bridge.receive({ type: "message", from: { relation: "child", id: "w-reviewer-1", name: "Reviewer 1" }, text: "RESULT named", done: true });
+  assert.equal((await named).ended, "received", "the result of the child Work named by the wait ends it");
 
-  await bridge.invoke({ type: "spawn", operationId: "spawn-off", name: "switched-off", task: "Review." });
-  await bridge.configure("off");
-  await bridge.configure("on");
-  assert.equal((await wait()).ended, "nothing_pending", "turning Dock tools off cancels the replies being waited for");
+  // Astra review of #666: a child Work its parent interrupted owes nothing more, so waiting for all does not wait for it.
+  await bridge.invoke({ type: "spawn", operationId: "spawn-taken-back", name: "taken-back", task: "Review." });
+  await bridge.invoke({ type: "interrupt", operationId: "interrupt-taken-back", target: "taken-back" });
+  assert.equal((await bridge.children.wait({ all: true, timeoutSeconds: 1 }, undefined, () => false, [])).ended, "nothing_pending");
+});
+
+// Astra review of #666: a child Work may send its final result in the same step as another call. Pi then
+// goes on to one more request, and that must not make the parent hear that the child stopped without reporting.
+test("a child Work that sends its final result alongside another call is not reported as stopped", () => {
+  const childBridge = () => {
+    const invoked: DockToolsRequest[] = [];
+    const bridge = new DockToolsBridge(true, {
+      configure: async () => ({ enabled: true }),
+      invoke: async (request) => { invoked.push(request); return { type: "unreported_stop", notified: true }; },
+    }, true);
+    bridge.runStarting("user");
+    return { bridge, invoked };
+  };
+  const sent = { toolName: "dock_send", isError: false, result: { details: { type: "work_message", to: "parent", done: true } } };
+  const wrote = { toolName: "write", isError: false, result: {} };
+
+  const finished = childBridge();
+  finished.bridge.toolEnded(sent);
+  finished.bridge.toolEnded(wrote);
+  finished.bridge.settled(false);
+  assert.deepEqual(finished.invoked, [], "the parent already has the result");
+
+  const unfinished = childBridge();
+  unfinished.bridge.toolEnded({ ...sent, result: { details: { type: "work_message", to: "parent" } } });
+  unfinished.bridge.toolEnded(wrote);
+  unfinished.bridge.settled(false);
+  assert.deepEqual(unfinished.invoked.map((request) => request.type), ["unreported_stop"], "a turn that only asked something and went on is still reported");
 });
