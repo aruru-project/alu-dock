@@ -34,7 +34,8 @@ export class ChildMessages {
   get position(): number { return this.count; }
 
   noteWork(result: DockToolsResult, before: number): void {
-    if (result.type === "stop") {
+    // Stopping or interrupting a child Work takes its work back; Dock tells nothing more about it.
+    if (result.type === "stop" || result.type === "interrupt") {
       this.owed.delete(result.instance.id);
       return;
     }
@@ -76,6 +77,8 @@ export class ChildMessages {
     const named = (child: { id: string; name: string }) => child.id === request.target || child.name === request.target;
     const chosen = request.target === undefined ? owed : owed.filter(named);
     if (chosen.length > 1 && request.target !== undefined) throw new Error(`More than one child Work is named ${request.target}; use its id.`);
+    // Messages name their sender by ID and display name, which may differ from the name asked for.
+    const chosenIds = new Set(chosen.map((child) => child.id));
     const timeoutSeconds = request.timeoutSeconds ?? DEFAULT_WAIT_SECONDS;
     const messages: WorkMessage[] = [];
     let ended: ChildWaitResult["ended"] | undefined;
@@ -85,7 +88,7 @@ export class ChildMessages {
     const take = (message: WorkMessage): void => {
       messages.push(message);
       if (!finished(message)) finish("received");
-      else if (request.all === true ? chosen.every((child) => !this.owed.has(child.id)) : request.target === undefined || named(message.from)) finish("received");
+      else if (request.all === true ? chosen.every((child) => !this.owed.has(child.id)) : request.target === undefined || chosenIds.has(message.from.id)) finish("received");
     };
     for (const message of arrived) take(message);
     const result = (): ChildWaitResult => ({

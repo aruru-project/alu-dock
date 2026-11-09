@@ -7,7 +7,7 @@ import {
   type ObservationNotification,
   type ObservationResult,
 } from "../src/core/instance-observation.js";
-import type { WorkMessage } from "../src/core/dock-tools.js";
+import type { DockToolsRequest, WorkMessage } from "../src/core/dock-tools.js";
 import {
   DOCK_TOOL_NAMES,
   DockToolsBridge,
@@ -337,7 +337,9 @@ test("a turn asked for while the Work settles is asked for once", async () => {
 // Cloud review of abb061b: dock_wait waited up to 30 minutes for a child Work that would never
 // report, when its result came before its task's result.
 test("dock_wait waits only for child Works that still owe a result", async () => {
-  const child = (id: string) => ({ ...notification.target, id, name: id, parentId: "parent" });
+  // Dock gives a child Work its own ID; the name is what the parent called it.
+  const ids: Record<string, string> = { "Reviewer #1": "w-reviewer-1" };
+  const child = (name: string) => ({ ...notification.target, id: ids[name] ?? name, name, parentId: "parent" });
   const final = (id: string): WorkMessage => ({ type: "message", from: { relation: "child", id, name: id }, text: `RESULT ${id}`, done: true });
   let bridge!: DockToolsBridge;
   let finishBeforeReturning: string | undefined;
@@ -347,9 +349,9 @@ test("dock_wait waits only for child Works that still owe a result", async () =>
       const id = request.type === "spawn" ? request.name : (request as { target: string }).target;
       // The Host hands a child Work's message over as soon as it is sent, even before this call returns.
       if (finishBeforeReturning === id) bridge.receive(final(id));
-      return request.type === "spawn"
-        ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
-        : { type: "work_message", to: "child", target: child(id), acceptedAt: notification.firedAt };
+      return request.type === "spawn" ? { type: "spawn", instance: child(id), taskStatus: "accepted" }
+        : request.type === "interrupt" ? { type: "interrupt", instance: child(id) }
+          : { type: "work_message", to: "child", target: child(id), acceptedAt: notification.firedAt };
     },
   });
   const wait = () => bridge.children.wait({ timeoutSeconds: 1 }, undefined, () => false, []);
@@ -367,4 +369,44 @@ test("dock_wait waits only for child Works that still owe a result", async () =>
   const result = await waiting;
   assert.equal(result.ended, "received");
   assert.deepEqual(result.messages.map((message) => message.type === "message" ? message.text : ""), ["RESULT owing"], "the result comes back as the wait's own result");
+
+  // Astra review of #666: a message names its sender by display name, which drops characters such as
+  // "#" from the name the parent used; waiting for that name still ends with the result.
+  await bridge.invoke({ type: "spawn", operationId: "spawn-named", name: "Reviewer #1", task: "Review." });
+  const named = bridge.children.wait({ target: "Reviewer #1", timeoutSeconds: 1 }, undefined, () => false, []);
+  bridge.receive({ type: "message", from: { relation: "child", id: "w-reviewer-1", name: "Reviewer 1" }, text: "RESULT named", done: true });
+  assert.equal((await named).ended, "received", "the result of the child Work named by the wait ends it");
+
+  // Astra review of #666: a child Work its parent interrupted owes nothing more, so waiting for all does not wait for it.
+  await bridge.invoke({ type: "spawn", operationId: "spawn-taken-back", name: "taken-back", task: "Review." });
+  await bridge.invoke({ type: "interrupt", operationId: "interrupt-taken-back", target: "taken-back" });
+  assert.equal((await bridge.children.wait({ all: true, timeoutSeconds: 1 }, undefined, () => false, [])).ended, "nothing_pending");
+});
+
+// Astra review of #666: a child Work may send its final result in the same step as another call. Pi then
+// goes on to one more request, and that must not make the parent hear that the child stopped without reporting.
+test("a child Work that sends its final result alongside another call is not reported as stopped", () => {
+  const childBridge = () => {
+    const invoked: DockToolsRequest[] = [];
+    const bridge = new DockToolsBridge(true, {
+      configure: async () => ({ enabled: true }),
+      invoke: async (request) => { invoked.push(request); return { type: "unreported_stop", notified: true }; },
+    }, true);
+    bridge.runStarting("user");
+    return { bridge, invoked };
+  };
+  const sent = { toolName: "dock_send", isError: false, result: { details: { type: "work_message", to: "parent", done: true } } };
+  const wrote = { toolName: "write", isError: false, result: {} };
+
+  const finished = childBridge();
+  finished.bridge.toolEnded(sent);
+  finished.bridge.toolEnded(wrote);
+  finished.bridge.settled(false);
+  assert.deepEqual(finished.invoked, [], "the parent already has the result");
+
+  const unfinished = childBridge();
+  unfinished.bridge.toolEnded({ ...sent, result: { details: { type: "work_message", to: "parent" } } });
+  unfinished.bridge.toolEnded(wrote);
+  unfinished.bridge.settled(false);
+  assert.deepEqual(unfinished.invoked.map((request) => request.type), ["unreported_stop"], "a turn that only asked something and went on is still reported");
 });

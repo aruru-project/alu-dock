@@ -187,6 +187,11 @@ interface ChildTurn {
   hasParentWork: boolean;
   /** The last call of the turn so far delivered a message to the parent. */
   reachedParent: boolean;
+  /**
+   * The final result reached the parent in this turn and no parent work came after it. Other calls made in
+   * the same step do not undo it: Pi ends a turn after a batch only when every call in it ends the turn.
+   */
+  resultSent: boolean;
   lastWords?: string;
   failure?: string;
 }
@@ -234,7 +239,7 @@ export class DockToolsBridge {
    * once done, so asking again then would run one turn too many.
    */
   private turnRequested = false;
-  private readonly turn: ChildTurn = { taskSeen: false, hasParentWork: false, reachedParent: false };
+  private readonly turn: ChildTurn = { taskSeen: false, hasParentWork: false, reachedParent: false, resultSent: false };
   readonly children = new ChildMessages();
   readonly toolNames: readonly string[];
 
@@ -328,9 +333,11 @@ export class DockToolsBridge {
     this.turn.failure = message.stopReason === "error" ? message.errorMessage ?? "" : undefined;
   }
 
-  toolEnded(event: Pick<ToolExecutionEndEvent, "toolName" | "isError" | "parentToolCallId">): void {
+  toolEnded(event: Pick<ToolExecutionEndEvent, "toolName" | "isError" | "parentToolCallId" | "result">): void {
     if (!this.child || event.parentToolCallId !== undefined) return;
-    this.turn.reachedParent = event.toolName === "dock_send" && !event.isError;
+    const sent = event.toolName === "dock_send" && !event.isError;
+    if (sent && (event.result as { details?: { done?: unknown } } | undefined)?.details?.done === true) this.turn.resultSent = true;
+    this.turn.reachedParent = sent || this.turn.resultSent;
   }
 
   /** An idle Work takes waiting messages now and starts a turn for them; a busy one takes them at the end of its step. */
@@ -359,6 +366,7 @@ export class DockToolsBridge {
       if (item.kind === "work" && this.child && item.message.from.relation === "parent") {
         this.turn.hasParentWork = true;
         this.turn.reachedParent = false;
+        this.turn.resultSent = false;
       }
     }
   }
@@ -369,7 +377,7 @@ export class DockToolsBridge {
    */
   private reportUnreportedStop(aborted: boolean): void {
     const { hasParentWork, reachedParent, lastWords, failure } = this.turn;
-    Object.assign(this.turn, { hasParentWork: false, reachedParent: false, lastWords: undefined, failure: undefined });
+    Object.assign(this.turn, { hasParentWork: false, reachedParent: false, resultSent: false, lastWords: undefined, failure: undefined });
     if (!hasParentWork || reachedParent) return;
     void this.port.invoke({
       type: "unreported_stop",
