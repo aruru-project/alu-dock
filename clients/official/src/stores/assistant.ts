@@ -5,7 +5,7 @@ import {
   getAssistantDocument, getAssistantInfo, getAssistantPreview, listAssistantTimeline, searchAssistant, setAssistantDocument, updateAssistantEpisode,
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
-import { replyLost } from '../lib/operationBinding'
+import { onceAfterLostReply, replyLost } from '../lib/operationBinding'
 import type {
   AssistantDocument, AssistantDocumentName, AssistantEpisode, AssistantEpisodeEdit, AssistantInfo, AssistantPreview, AssistantSearchHit, ConnectionContext,
 } from '../lib/types'
@@ -231,8 +231,6 @@ export const useAssistantStore = defineStore('assistant', () => {
     episodes: [] as AssistantEpisode[],
     episodesCursor: undefined as string | undefined,
     loadingMoreEpisodes: false,
-    /** A Main before the timeline has none to show; nothing is said about it. */
-    timelineSupported: true,
     timelineError: '',
   })
   let searchEpoch = 0
@@ -268,18 +266,10 @@ export const useAssistantStore = defineStore('assistant', () => {
       search.hits = page.hits
       search.nextCursor = page.nextCursor
       lineEdit.id = ''
-      if ('list' in timeline) {
-        search.timelineSupported = true
-        search.timelineError = ''
-        search.episodes = timeline.list.episodes
-        search.episodesCursor = timeline.list.nextCursor
-      } else {
-        // An older Main does not know the timeline; the search itself still stands.
-        search.timelineSupported = errorCode(timeline.cause) !== 'unknown_request'
-        search.timelineError = search.timelineSupported ? userErrorMessage(timeline.cause, '暂时读不到这段时间的时间线。请稍后重试。') : ''
-        search.episodes = []
-        search.episodesCursor = undefined
-      }
+      // The search stands even when the timeline could not be read this time.
+      search.timelineError = 'list' in timeline ? '' : userErrorMessage(timeline.cause, '暂时读不到这段时间的时间线。请稍后重试。')
+      search.episodes = 'list' in timeline ? timeline.list.episodes : []
+      search.episodesCursor = 'list' in timeline ? timeline.list.nextCursor : undefined
     } catch (cause) {
       if (epoch === searchEpoch) search.error = userErrorMessage(cause, '这次没有搜成。请稍后重试。')
     } finally {
@@ -333,7 +323,11 @@ export const useAssistantStore = defineStore('assistant', () => {
     if (!line || !text || text === line.text) { lineEdit.id = ''; return }
     return changeLine(line, { text })
   }
-  /** Changes a line from the version shown; one changed meanwhile is refused, and the search read again shows it. */
+  const once = onceAfterLostReply()
+  /**
+   * Changes a line from the version shown; one changed meanwhile is refused, and the search read again
+   * shows it. The same change sent again after its reply was lost is made once.
+   */
   async function changeLine(line: AssistantEpisode, edit: AssistantEpisodeEdit) {
     const context = app.connectionContext ? { ...app.connectionContext } : null
     if (!context || lineEdit.pending) return
@@ -341,7 +335,8 @@ export const useAssistantStore = defineStore('assistant', () => {
     lineEdit.pending = line.id
     lineEdit.outcome = null
     try {
-      const changed = await updateAssistantEpisode(line.id, line.revision, edit, crypto.randomUUID(), context)
+      const changed = await once([context.connectionId, 'line', line.id, line.revision, edit],
+        (operationId) => updateAssistantEpisode(line.id, line.revision, edit, operationId, context))
       if (epoch !== searchEpoch) return
       search.episodes = search.episodes.map((item) => (item.id === changed.id ? changed : item))
       if (lineEdit.id === line.id) lineEdit.id = ''
@@ -383,11 +378,15 @@ export const useAssistantStore = defineStore('assistant', () => {
   function openContext(hit: AssistantSearchHit) {
     return hitReading.open({ sessionId: hit.session.sessionId, entryId: hit.entryId, session: hit.session })
   }
+  /** The words a timeline line sums up, from the first it covers. */
+  function openLine(line: AssistantEpisode) {
+    return hitReading.open({ sessionId: line.session.sessionId, entryId: line.entryId, session: line.session })
+  }
 
   // A search or open conversation belongs to the connection it was read from.
   watch(() => app.activeConnectionId, () => {
     searchEpoch++
-    Object.assign(search, { shown: null, hits: [], nextCursor: undefined, loading: false, loadingMore: false, error: '', moreError: '', episodes: [], episodesCursor: undefined, loadingMoreEpisodes: false, timelineSupported: true, timelineError: '' })
+    Object.assign(search, { shown: null, hits: [], nextCursor: undefined, loading: false, loadingMore: false, error: '', moreError: '', episodes: [], episodesCursor: undefined, loadingMoreEpisodes: false, timelineError: '' })
     Object.assign(lineEdit, { id: '', text: '', pending: '', outcome: null })
     closeContext()
   })
@@ -396,7 +395,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     infos, available, info, current, loadInfo,
     editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
-    search, canSearch, runSearch, searchMore, timelineMore,
+    search, canSearch, runSearch, searchMore, timelineMore, openLine,
     lineEdit, startLineEdit, cancelLineEdit, saveLineEdit, forgetLine, restoreLine,
     reading, openContext, readMore, closeContext,
   }

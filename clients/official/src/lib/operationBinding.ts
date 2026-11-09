@@ -44,6 +44,27 @@ export function replyLost(cause: unknown): boolean {
   return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true
 }
 
+/**
+ * Sends requests so that the same request sent again after its reply was lost names the same
+ * operation, and the Host does it at most once. Any answer ends that.
+ */
+export function onceAfterLostReply() {
+  const unsettled = new Map<string, string>()
+  return async function once<T>(request: unknown[], send: (operationId: string) => Promise<T>): Promise<T> {
+    const key = JSON.stringify(request)
+    const operationId = unsettled.get(key) ?? crypto.randomUUID()
+    try {
+      const result = await send(operationId)
+      unsettled.delete(key)
+      return result
+    } catch (cause) {
+      if (replyLost(cause)) unsettled.set(key, operationId)
+      else unsettled.delete(key)
+      throw cause
+    }
+  }
+}
+
 // Whether these took effect shows in the conversation: a compaction notice, the new
 // Session or branch, the Reload notice, the shell command's row. A lost reply adds
 // nothing to it, so it is not told.

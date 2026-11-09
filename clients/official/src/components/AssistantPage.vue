@@ -20,8 +20,6 @@ const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
 const { search, reading, lineEdit } = assistant
 const { preview, info, canSearch } = storeToRefs(assistant)
-/** One timeline line may say at most this much; Main refuses longer. */
-const LINE_CHARS = 300
 const surfaces = useSurfacesStore()
 const { assistantSection: section } = storeToRefs(surfaces)
 
@@ -147,14 +145,14 @@ function linePlace(line: AssistantEpisode) {
       <AssistantConversation v-if="reading.place" :reading="reading" back-label="← 返回结果" @back="assistant.closeContext()" @more="assistant.readMore" />
 
       <template v-else-if="search.shown">
-        <section v-if="search.timelineSupported" class="assistant-timeline" aria-label="时间线">
+        <section class="assistant-timeline" aria-label="时间线">
           <h4>时间线</h4>
           <div v-if="search.timelineError && !search.episodes.length" class="assistant-error" role="alert"><span>{{ search.timelineError }}</span></div>
           <ul v-else-if="search.episodes.length" class="assistant-timeline-list">
             <li v-for="line in search.episodes" :key="line.id" class="assistant-timeline-line" :class="{ 'is-forgotten': line.state === 'forgotten' }">
               <span class="assistant-timeline-meta"><span>{{ assistantSpan(line.fromAt, line.toAt) }}</span><span>{{ linePlace(line) }}</span><span v-if="line.author === 'owner'">你改过</span><span v-if="line.state === 'forgotten'">已忘掉</span></span>
               <template v-if="lineEdit.id === line.id">
-                <textarea v-model="lineEdit.text" class="assistant-timeline-editor" rows="2" :maxlength="LINE_CHARS" aria-label="改写这一行" spellcheck="false" />
+                <textarea v-model="lineEdit.text" class="assistant-timeline-editor" rows="2" :maxlength="info?.maxEpisodeChars" aria-label="改写这一行" spellcheck="false" />
                 <span class="assistant-timeline-actions">
                   <button type="button" class="button primary" :disabled="!!lineEdit.pending || !lineEdit.text.trim()" @click="assistant.saveLineEdit()">{{ lineEdit.pending === line.id ? '正在保存…' : '保存' }}</button>
                   <button type="button" class="button secondary" :disabled="!!lineEdit.pending" @click="assistant.cancelLineEdit()">取消</button>
@@ -163,6 +161,7 @@ function linePlace(line: AssistantEpisode) {
               <template v-else>
                 <span class="assistant-timeline-text">{{ line.text }}</span>
                 <span class="assistant-timeline-actions">
+                  <button type="button" class="assistant-timeline-action" @click="assistant.openLine(line)">看原话</button>
                   <button v-if="line.state === 'forgotten'" type="button" class="assistant-timeline-action" :disabled="!!lineEdit.pending" @click="assistant.restoreLine(line)">{{ lineEdit.pending === line.id ? '正在恢复…' : '恢复' }}</button>
                   <template v-else>
                     <button type="button" class="assistant-timeline-action" :disabled="!!lineEdit.pending" @click="assistant.startLineEdit(line)">改写</button>

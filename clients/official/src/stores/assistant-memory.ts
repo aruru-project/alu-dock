@@ -6,7 +6,7 @@ import {
   addAssistantMemory, getAssistantMemory, getAssistantSettings, listAssistantMemories, setAssistantSettings, updateAssistantMemory,
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
-import { replyLost } from '../lib/operationBinding'
+import { onceAfterLostReply, replyLost } from '../lib/operationBinding'
 import type {
   AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemorySource,
   AssistantMemoryTopic, AssistantSettings, ModelRef,
@@ -59,24 +59,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
   /** What is saved is the text without the spaces around it, counted as Main counts it. */
   const tooLong = (text: string) => memoryLimit.value > 0 && text.trim().length > memoryLimit.value
 
-  /**
-   * The same request sent again after its reply was lost names the same operation, so Main
-   * does it at most once. Any answer ends that.
-   */
-  const unsettled = new Map<string, string>()
-  async function once<T>(request: unknown[], send: (operationId: string) => Promise<T>): Promise<T> {
-    const key = JSON.stringify(request)
-    const operationId = unsettled.get(key) ?? crypto.randomUUID()
-    try {
-      const result = await send(operationId)
-      unsettled.delete(key)
-      return result
-    } catch (cause) {
-      if (replyLost(cause)) unsettled.set(key, operationId)
-      else unsettled.delete(key)
-      throw cause
-    }
-  }
+  const once = onceAfterLostReply()
 
   // ── The list ──
   const list = reactive({

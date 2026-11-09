@@ -16,6 +16,8 @@ pub struct AssistantInfo {
     pub max_document_bytes: u64,
     /// In UTF-16 code units, as a JavaScript string counts them.
     pub max_memory_chars: u64,
+    /// One timeline line, in UTF-16 code units.
+    pub max_episode_chars: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction: Option<AssistantExtractionStatus>,
 }
@@ -148,9 +150,7 @@ pub struct AssistantMemory {
     pub created_at: String,
     pub updated_at: String,
     /// When it was said: the earliest place it was said, or when it was written without one.
-    /// A Main before the timeline does not say.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub said_at: Option<String>,
+    pub said_at: String,
     /// Goes up with every change; a change names the revision it was made from.
     pub revision: u64,
     /// The earliest places it was said, `source_count` in all.
@@ -218,12 +218,16 @@ pub struct AssistantMemoryEdit {
     pub state: Option<AssistantMemoryState>,
 }
 
-/// A timeline line is in use, or forgotten at the owner's word.
+/// A timeline line is in use, or forgotten: at the owner's word, or along with a forgotten
+/// memory whose words it covers.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AssistantEpisodeState {
     Active,
     Forgotten,
+    /// Any value this client build does not know; newer Hosts may add values.
+    #[serde(other)]
+    Unrecognized,
 }
 
 /// One line of her timeline: a stretch of one conversation, from the first entry it covers to
@@ -233,6 +237,8 @@ pub enum AssistantEpisodeState {
 pub struct AssistantEpisode {
     pub id: String,
     pub session: AssistantSessionInfo,
+    /// The first entry it covers, where its words can be read from.
+    pub entry_id: String,
     pub from_at: String,
     pub to_at: String,
     pub text: String,
@@ -869,17 +875,31 @@ mod tests {
             "memories": [{
                 "id": "7", "topic": "places", "text": "主人住在海边。", "resident": true,
                 "state": "active", "author": "someone-new", "createdAt": "2026-11-07T10:00:00.000Z",
-                "updatedAt": "2026-11-07T10:00:00.000Z", "revision": 1, "sources": [], "sourceCount": 0,
-                "confidence": 0.9
+                "updatedAt": "2026-11-07T10:00:00.000Z", "saidAt": "2026-11-06T21:00:00.000Z",
+                "revision": 1, "sources": [], "sourceCount": 0, "confidence": 0.9
             }]
         }))
         .unwrap();
         assert_eq!(list.memories[0].topic, AssistantMemoryTopic::Unrecognized);
         assert_eq!(list.memories[0].author, AssistantMemoryAuthor::Unrecognized);
+        let timeline: AssistantTimelineList = serde_json::from_value(serde_json::json!({
+            "episodes": [{
+                "id": "3", "session": { "sessionId": "s1", "startedAt": "2026-11-06T08:00:00.000Z", "lastAt": "2026-11-06T08:30:00.000Z" },
+                "entryId": "e2", "fromAt": "2026-11-06T08:04:00.000Z", "toAt": "2026-11-06T08:30:00.000Z",
+                "text": "早上聊天气。", "state": "archived", "author": "extraction",
+                "createdAt": "2026-11-06T08:40:00.000Z", "updatedAt": "2026-11-06T08:40:00.000Z", "revision": 1
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            timeline.episodes[0].state,
+            AssistantEpisodeState::Unrecognized
+        );
         let info: AssistantInfo = serde_json::from_value(serde_json::json!({
             "workspacePath": "/home/alu/.aludock/assistant",
             "maxDocumentBytes": 262144,
             "maxMemoryChars": 1000,
+            "maxEpisodeChars": 300,
             "extraction": { "state": "paused", "waitingSessions": 2 }
         }))
         .unwrap();

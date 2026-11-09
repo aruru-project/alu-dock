@@ -60,7 +60,7 @@ function input(event: Event) {
           <button type="button" class="button primary" :disabled="pending || !rewriteSaveable" @click="saveRewrite">{{ pending && detail.change?.kind === 'text' ? '正在保存…' : '保存改写' }}</button>
         </div>
       </div>
-      <p class="memory-detail-meta">{{ [`#${shown.id}`, memoryAuthorLabel(shown), assistantTime(shown.updatedAt)].filter(Boolean).join(' · ') }}<template v-if="shown.revision > 1"> · 最早记于 {{ assistantTime(shown.createdAt) }}</template><template v-if="shown.saidAt && shown.saidAt !== shown.createdAt"> · 说起于 {{ assistantTime(shown.saidAt) }}</template></p>
+      <p class="memory-detail-meta">{{ [`#${shown.id}`, memoryAuthorLabel(shown), assistantTime(shown.updatedAt)].filter(Boolean).join(' · ') }}<template v-if="shown.revision > 1"> · 最早记于 {{ assistantTime(shown.createdAt) }}</template><template v-if="shown.saidAt !== shown.createdAt"> · 说起于 {{ assistantTime(shown.saidAt) }}</template></p>
 
       <p v-if="detail.change" class="memory-change" :class="`is-${detail.change.state}`" :role="detail.change.state === 'failed' ? 'alert' : 'status'">
         {{ detail.change.message }}

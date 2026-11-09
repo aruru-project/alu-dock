@@ -735,10 +735,10 @@ export interface SystemCatalogResult {
 export interface SystemDefaultSetResult { selection: SystemCandidate }
 
 /**
- * The personal assistant kept on Main (card #295). `maxMemoryChars` is how long one memory may be,
- * in UTF-16 code units as a string's length counts them.
+ * The personal assistant kept on Main (card #295). `maxMemoryChars` and `maxEpisodeChars` are how
+ * long one memory and one timeline line may be, in UTF-16 code units as a string's length counts them.
  */
-export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; extraction?: AssistantExtractionStatus }
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; maxEpisodeChars: number; extraction?: AssistantExtractionStatus }
 /**
  * Making memories from her conversations in the background: `off` without a model; `failed` when
  * the last try did not work, tried again at `retryAt`. `lastError` is written for the owner; with
@@ -772,8 +772,8 @@ export interface AssistantMemory {
   author: AssistantMemoryAuthor
   createdAt: string
   updatedAt: string
-  /** When it was said: the earliest place it was said, or when it was written without one. A Main before the timeline does not say. */
-  saidAt?: string
+  /** When it was said: the earliest place it was said, or when it was written without one. */
+  saidAt: string
   /** A change names the revision it was made from. */
   revision: number
   /** The earliest places it was said, of `sourceCount`. */
@@ -789,12 +789,14 @@ export interface AssistantMemoryDetail { memory: AssistantMemory; history: Assis
 export interface AssistantMemoryFilter { query?: string; topic?: AssistantMemoryTopic; state?: AssistantMemoryState; resident?: boolean; author?: AssistantMemoryAuthor }
 /** What one change sets; the rest stays as it is. */
 export interface AssistantMemoryEdit { text?: string; topic?: AssistantMemoryTopic; resident?: boolean; state?: AssistantMemoryState }
-/** A timeline line is in use, or forgotten at the owner's word. */
+/** A timeline line is in use, or forgotten: at the owner's word, or along with a forgotten memory whose words it covers. */
 export type AssistantEpisodeState = 'active' | 'forgotten' | Unrecognized
 /** One line of her timeline: a stretch of one conversation, from the first entry it covers to the last, saying what the two of them were doing. */
 export interface AssistantEpisode {
   id: string
   session: AssistantSessionInfo
+  /** The first entry it covers, where its words can be read from. */
+  entryId: string
   fromAt: string
   toAt: string
   text: string

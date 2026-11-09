@@ -48,7 +48,7 @@ let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, chil
 // Card #295: Main keeps the assistant; the spare Host is an older Main without her.
 let assistantNative = (command, args) => {
   if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
-  if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 1000 }
+  if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 1000, maxEpisodeChars: 300 }
   throw new Error(`Unexpected assistant call: ${command}`)
 }
 // The fake Host's Work list: extra records it lists, and Works it has retired.
@@ -1355,7 +1355,7 @@ try {
     const type = async value => { const input = editor(); input.value = value; input.props.onInput({ target: input }); await settle() }
     const session = { sessionId: 's1', name: '早上的闲聊', cwd: '/home/alu/.aludock/assistant', workId: 'other', machine: '工作站', startedAt: '2026-11-06T08:00:00.000Z', lastAt: '2026-11-06T08:30:00.000Z' }
     // Her timeline: one line saying what that morning was about.
-    let line = { id: '7', session, fromAt: '2026-11-06T08:00:00.000Z', toAt: '2026-11-06T08:30:00.000Z', text: '早上聊天气和今天的日程。', state: 'active', author: 'extraction', createdAt: '2026-11-06T08:40:00.000Z', updatedAt: '2026-11-06T08:40:00.000Z', revision: 1 }
+    let line = { id: '7', session, entryId: 'e2', fromAt: '2026-11-06T08:00:00.000Z', toAt: '2026-11-06T08:30:00.000Z', text: '早上聊天气和今天的日程。', state: 'active', author: 'extraction', createdAt: '2026-11-06T08:40:00.000Z', updatedAt: '2026-11-06T08:40:00.000Z', revision: 1 }
     const entryAt = (entryId, kind, text, extra = {}) => ({ entryId, at: '2026-11-06T08:05:00.000Z', kind, text, ...extra })
     let persona = { document: 'persona', text: '她说话简短。', revision: 'p1' }
     let notes = { document: 'notes', text: '早上先说天气。', revision: 'n1' }
@@ -1490,6 +1490,11 @@ try {
     await click(timeline(), '恢复')
     assert.deepEqual(calls.filter(call => call.command === 'update_assistant_episode').at(-1).args.edit, { state: 'active' })
     assert.ok(text(timeline()).includes('已恢复'))
+    // Like a hit, a line leads back to the words it sums up, from the first.
+    await click(timeline(), '看原话')
+    const lineWords = calls.filter(call => call.command === 'assistant_context').at(-1).args
+    assert.deepEqual([lineWords.sessionId, lineWords.entryId], ['s1', 'e2'])
+    await click(page(), '返回结果')
     query.value = '天气'; query['event:input']({ target: query })
     from.value = ''; from['event:input']({ target: from }); await settle()
     find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
@@ -1539,7 +1544,7 @@ try {
     const list = () => text(labelled('记忆列表') ?? element('none'))
     const rows = () => all(page(), item => item.props.class === 'memory-row-text').map(text)
     const at = '2026-11-07T10:00:00.000Z'
-    const memoryOf = (id, topic, text, extra = {}) => ({ id, topic, text, resident: false, state: 'active', author: 'extraction', createdAt: at, updatedAt: at, revision: 1, sources: [], sourceCount: 0, ...extra })
+    const memoryOf = (id, topic, text, extra = {}) => ({ id, topic, text, resident: false, state: 'active', author: 'extraction', createdAt: at, updatedAt: at, saidAt: at, revision: 1, sources: [], sourceCount: 0, ...extra })
     const memories = [
       memoryOf('3', 'preferences', '主人不吃香菜。', { resident: true, sources: [{ sessionId: 's1', entryId: 'e2', at }], sourceCount: 1 }),
       memoryOf('2', 'events', '主人下周三要去体检。', { author: 'assistant' }),
@@ -1551,7 +1556,7 @@ try {
     let model, loseNextReply = false
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
-      if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, extraction: model ? { state: 'idle', model, waitingSessions: 1 } : { state: 'off', waitingSessions: 1 } }
+      if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: model ? { state: 'idle', model, waitingSessions: 1 } : { state: 'off', waitingSessions: 1 } }
       if (command === 'assistant_memories') return { memories: structuredClone(memories.filter(item => item.state === (args.filter.state ?? 'active') && (!args.filter.topic || item.topic === args.filter.topic))) }
       if (command === 'assistant_memory') {
         const found = memories.find(item => item.id === args.id)

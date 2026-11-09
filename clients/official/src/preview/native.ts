@@ -209,7 +209,7 @@ function sampleData() {
   const assistantSettings: AssistantSettings = { extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' } }
   // Her timeline: what the two of them were doing, one line per stretch of a conversation, newest first.
   const line = (id: string, fromMinutes: number, toMinutes: number, text: string, fields: Partial<AssistantEpisode> = {}): AssistantEpisode => ({
-    id, session: assistantSession, fromAt: ago(fromMinutes), toAt: ago(toMinutes), text, state: 'active', author: 'extraction', createdAt: ago(toMinutes), updatedAt: ago(toMinutes), revision: 1, ...fields,
+    id, session: assistantSession, entryId: 'a1', fromAt: ago(fromMinutes), toAt: ago(toMinutes), text, state: 'active', author: 'extraction', createdAt: ago(toMinutes), updatedAt: ago(toMinutes), revision: 1, ...fields,
   })
   const assistantTimeline: AssistantEpisode[] = [
     line('5', 50, 40, '早上聊天气和今天的日程，提醒十点的评审要带伞。'),
@@ -281,7 +281,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'assistant_info': {
       await delay(80)
       const model = preview.assistantSettings.extractionModel
-      return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024, maxMemoryChars: 1000,
+      return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024, maxMemoryChars: 1000, maxEpisodeChars: 300,
         extraction: { state: model ? 'idle' : 'off', ...(model ? { model } : {}), waitingSessions: 2, lastRunAt: preview.ago(25) } }
     }
     case 'assistant_memories': {
@@ -326,7 +326,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       await delay(220)
       const at = new Date().toISOString()
       const id = String(Math.max(...preview.assistantMemories.map((item) => Number(item.id))) + 1)
-      const added: AssistantMemory = { id, topic: args.topic as AssistantMemory['topic'], text: String(args.text), resident: args.resident === true, state: 'active', author: 'owner', createdAt: at, updatedAt: at, revision: 1, sources: [], sourceCount: 0 }
+      const added: AssistantMemory = { id, topic: args.topic as AssistantMemory['topic'], text: String(args.text), resident: args.resident === true, state: 'active', author: 'owner', createdAt: at, updatedAt: at, saidAt: at, revision: 1, sources: [], sourceCount: 0 }
       preview.assistantMemories.push(added)
       preview.assistantMemoryHistory.set(id, [{ at, author: 'owner', action: 'added', text: added.text }])
       return structuredClone(added)

@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listed = client.assistant_memories(&in_use, None, 20).await?;
     assert_eq!(listed.memories.len(), 1);
     // A memory is dated by when it was said, not by when it was written.
-    assert_eq!(added.said_at.as_deref(), Some(hit.at.as_str()));
+    assert_eq!(added.said_at, hit.at);
 
     // Her timeline is written by the model, which this gate has none of: empty, and a line that
     // does not exist is refused by its own code.
