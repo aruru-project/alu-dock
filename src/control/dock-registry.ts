@@ -619,7 +619,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (request.type === "interrupt" || request.type === "stop") {
       if (child) {
         // The parent takes back the work it handed out, so nothing is owed for it any more.
-        this.workMessages.release(child.id);
+        this.workMessages.release(child.id, request.type === "interrupt");
         await mutations[request.type](child.id, request.operationId);
         return { type: request.type, instance: this.workMessages.forParent(child.snapshot()) };
       }

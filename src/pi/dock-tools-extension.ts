@@ -29,12 +29,10 @@ import {
   renderDockToolsResult,
   renderObservationNotification,
   workMessageEntry,
-  WORK_MESSAGE_TYPE,
   WORK_WAKE_TYPE,
   type DescribedModel,
   type ModelFacts,
   type RenderContext,
-  type WorkMessageDetails,
 } from "./dock-tools-client.js";
 import { ChildMessages, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./child-messages.js";
 
@@ -185,7 +183,7 @@ export interface DockToolsCallPort {
 interface ChildTurn {
   /** The first prompt a child Work gets is the task it was created for; later ones are the user's own. */
   taskSeen: boolean;
-  /** The task or a parent message reached the conversation during this turn. */
+  /** The task or a parent message went into the conversation for this turn. */
   hasParentWork: boolean;
   /** The last call of the turn so far delivered a message to the parent. */
   reachedParent: boolean;
@@ -196,8 +194,6 @@ interface ChildTurn {
 /** The parts of a Pi message the bridge reads. */
 interface ObservedMessage {
   role: string;
-  customType?: string;
-  details?: unknown;
   content?: unknown;
   stopReason?: string;
   errorMessage?: string;
@@ -218,8 +214,22 @@ export class DockToolsBridge {
    * queues are not used: taking back the user's Queue empties them, extension messages included.
    */
   private readonly inbox: WorkMessage[] = [];
-  /** A Work message is in the conversation and no reply has started since. */
-  private unanswered = false;
+  /**
+   * Work messages went into the conversation, or go in at the end of this step, and no reply has started
+   * since. Tracked where they are handed over: Pi tells extensions about messages of its run only, not
+   * about extension messages it writes.
+   */
+  private awaitingReply = false;
+  /**
+   * The user stopped the last turn. Like the user's own waiting input after Stop, what is already here joins
+   * the conversation without starting another turn; a new message, or a turn started otherwise, ends this.
+   */
+  private stoppedByUser = false;
+  /**
+   * A turn was asked for and has not started. Pi holds a turn asked for while it settles and starts it
+   * once done, so asking again then would run one turn too many.
+   */
+  private turnRequested = false;
   private readonly turn: ChildTurn = { taskSeen: false, hasParentWork: false, reachedParent: false };
   readonly children = new ChildMessages();
   readonly toolNames: readonly string[];
@@ -236,7 +246,8 @@ export class DockToolsBridge {
     this.api = api;
     this.context = context;
     // A message left unanswered belongs to the conversation it was written into.
-    this.unanswered = false;
+    this.awaitingReply = false;
+    this.turnRequested = false;
     if (toolsAvailable) {
       this.applyToolVisibility(api);
       if (this.enabledValue && this.deliveryFenceDepth === 0) this.flushPendingNotifications();
@@ -252,6 +263,7 @@ export class DockToolsBridge {
   /** A message from this Work's parent or child Work, or Dock's notice about a child Work. */
   receive(message: WorkMessage): void {
     if (this.children.receive(message)) return;
+    this.stoppedByUser = false;
     this.inbox.push(message);
     this.deliverWorkMessages();
   }
@@ -270,14 +282,19 @@ export class DockToolsBridge {
   atStepEnd(): BoundaryResult | undefined {
     const api = this.api;
     if (!api) return undefined;
-    let handed: boolean;
-    try { handed = this.handOver(api); } catch { return undefined; }
-    return handed || this.unanswered ? { continue: true } : undefined;
+    try { this.handOver(api); } catch { return undefined; }
+    return this.awaitingReply ? { continue: true } : undefined;
   }
 
   settled(aborted: boolean): void {
     if (this.child) this.reportUnreportedStop(aborted);
-    // What came after the last step, or went unanswered in a stopped turn, starts the next turn once Pi has settled.
+    // Pi's abort leaves no automatic continuation after the user stops a turn, and these messages join
+    // that rule. Otherwise what came after the last step, or went unanswered, starts the next turn.
+    if (aborted) {
+      this.stoppedByUser = true;
+      this.awaitingReply = false;
+    }
+    // Pi defers what is sent while it settles; deliver once it is done.
     this.deliverWorkMessagesSoon();
   }
 
@@ -285,25 +302,19 @@ export class DockToolsBridge {
   deliverWorkMessagesSoon(): void { setTimeout(() => this.deliverWorkMessages(), 0); }
 
   runStarting(messageType: "user" | "custom"): void {
+    // The new turn answers whatever waits in the conversation.
+    this.stoppedByUser = false;
+    this.turnRequested = false;
     if (!this.child || messageType !== "user" || this.turn.taskSeen) return;
     this.turn.taskSeen = true;
     this.turn.hasParentWork = true;
   }
 
   messageStarted(message: ObservedMessage): void {
-    if (message.role === "assistant") this.unanswered = false;
+    if (message.role === "assistant") this.awaitingReply = false;
   }
 
   messageEnded(message: ObservedMessage): void {
-    if (message.role === "custom" && message.customType === WORK_MESSAGE_TYPE) {
-      this.unanswered = true;
-      // New work from the parent is owed a report again, whatever this turn sent it before.
-      if (this.child && (message.details as Partial<WorkMessageDetails> | undefined)?.from === "parent") {
-        this.turn.hasParentWork = true;
-        this.turn.reachedParent = false;
-      }
-      return;
-    }
     if (!this.child || message.role !== "assistant") return;
     const text = textOf(message.content);
     if (text) this.turn.lastWords = text;
@@ -320,21 +331,27 @@ export class DockToolsBridge {
     const api = this.api, context = this.context;
     if (!api || !context) return;
     try {
-      if (!context.isIdle() || (this.inbox.length === 0 && !this.unanswered)) return;
+      if (!context.isIdle()) return;
       this.handOver(api);
+      if (this.stoppedByUser || !this.awaitingReply || this.turnRequested) return;
       api.sendMessage({ customType: WORK_WAKE_TYPE, content: "", display: false }, { triggerTurn: true });
+      this.turnRequested = true;
     } catch { /* The runtime is being replaced; the next one delivers them. */ }
   }
 
   /** Hands waiting messages to Pi in arrival order: written at once while idle, after the current step while busy. */
-  private handOver(api: ExtensionAPI): boolean {
-    let handed = false;
+  private handOver(api: ExtensionAPI): void {
     while (this.inbox.length > 0) {
-      api.sendMessage(workMessageEntry(this.inbox[0]!), { triggerTurn: false });
+      const message = this.inbox[0]!;
+      api.sendMessage(workMessageEntry(message), { triggerTurn: false });
       this.inbox.shift();
-      handed = true;
+      this.awaitingReply = true;
+      // New work from the parent is owed a report again, whatever the child Work sent it before.
+      if (this.child && message.from.relation === "parent") {
+        this.turn.hasParentWork = true;
+        this.turn.reachedParent = false;
+      }
     }
-    return handed;
   }
 
   /**

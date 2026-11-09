@@ -25,8 +25,13 @@ type WorkMessageResult = Extract<DockToolsResult, { type: "work_message" }>;
  * through the user's input.
  */
 export class WorkMessages {
-  /** Child Works that owe their parent a result: from their task, and again after each parent message, until a final message. */
+  /**
+   * Child Works that owe their parent a result, for the stops and crashes this Host sees itself: from their
+   * task, again after each parent message and each turn that ended without reporting, until a final message.
+   */
   private readonly owing = new Set<string>();
+  /** Child Works whose parent interrupted them since it last sent them work: the parent needs no notice of that stop. */
+  private readonly interruptedByParent = new Set<string>();
   /** Per recipient, so the messages between one pair arrive in the order they were sent. */
   private readonly deliveries = new Map<string, Promise<void>>();
   private readonly mainIdentities = new Map<string, MainIdentity>();
@@ -69,13 +74,21 @@ export class WorkMessages {
       if (!owedBefore) this.owing.delete(child.id);
       throw error;
     }
+    this.interruptedByParent.delete(child.id);
     return { type: "work_message", to: "child", target: this.forParent(child.snapshot()), acceptedAt: this.port.now() };
   }
 
-  /** A child Work's turn ended without its last call reaching its parent; the parent hears of it if a result is still owed. */
+  /**
+   * A child Work's Worker saw a turn carry its parent's work and end without its last call reaching the
+   * parent, so the parent hears of it. Whether a final message came earlier does not matter: a parent
+   * message and that final message can cross in one step. The child Work owes the result again.
+   */
   async unreportedStop(source: InstanceSnapshot, request: Extract<DockToolsRequest, { type: "unreported_stop" }>): Promise<Extract<DockToolsResult, { type: "unreported_stop" }>> {
     const parent = source.parentId === undefined ? undefined : this.port.get(source.parentId);
-    if (!this.owing.has(source.id) || !parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
+    if (!parent || parent.snapshot().lifecycle !== "active") return { type: "unreported_stop", notified: false };
+    // The parent interrupted this turn itself and took the work back.
+    if (request.reason === "aborted" && this.interruptedByParent.delete(source.id)) return { type: "unreported_stop", notified: false };
+    this.owing.add(source.id);
     await this.deliver(parent, {
       type: "child_stopped", from: this.childSender(source), reason: request.reason,
       ...(request.error === undefined ? {} : { error: request.error }),
@@ -85,7 +98,10 @@ export class WorkMessages {
   }
 
   /** The parent took the work back by interrupting or stopping its child Work itself. */
-  release(childId: string): void { this.owing.delete(childId); }
+  release(childId: string, interrupted: boolean): void {
+    this.owing.delete(childId);
+    if (interrupted) this.interruptedByParent.add(childId);
+  }
 
   /** A child Work is stopping or crashed. Its parent hears of it if a result was still owed, unless the parent is leaving too. */
   childLeaving(child: ManagedInstance): void {
@@ -119,6 +135,7 @@ export class WorkMessages {
   forget(instanceIds: readonly string[]): void {
     for (const id of instanceIds) {
       this.owing.delete(id);
+      this.interruptedByParent.delete(id);
       this.mainIdentities.delete(id);
     }
   }

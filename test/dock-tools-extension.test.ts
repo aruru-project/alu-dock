@@ -288,6 +288,39 @@ test("Dock tools bridge restores fenced completions when cancel or off fails", a
   assert.equal(afterOffFailure.state.messages.length, 1, "failed off must restore the completion buffered behind its acknowledgement fence");
 });
 
+// Card #666 review: Pi's abort leaves no automatic continuation after the user's Stop, and Work messages
+// follow that rule. One that arrived after the stopped turn's last step is still in the inbox when the
+// turn settles; real Workers cannot time that, so the bridge is driven directly.
+test("after the user's Stop, a waiting Work message joins the conversation without starting a turn", async () => {
+  const bridge = new DockToolsBridge(true, { configure: async () => ({ enabled: true }), invoke: async () => assert.fail("no Dock call") });
+  const { api, state } = fakeApi();
+  let idle = false;
+  bridge.attach(api as never, { isIdle: () => idle } as never);
+  const message = (text: string): WorkMessage => ({ type: "message", from: { relation: "child", id: "child", name: "Reviewer" }, text });
+  bridge.receive(message("ARRIVED_DURING_THE_STOPPED_TURN"));
+  assert.equal(state.messages.length, 0, "A busy Work takes the message at the end of its step");
+  idle = true;
+  bridge.settled(true);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(state.messages.map(({ options }) => options), [{ triggerTurn: false }], "The message is written, and no turn starts");
+  bridge.receive(message("CAME_AFTER_THE_STOP"));
+  assert.deepEqual(state.messages.slice(1).map(({ options }) => options), [{ triggerTurn: false }, { triggerTurn: true }], "A message after the Stop starts a turn as usual");
+});
+
+// Card #666 review, full-suite run 2026-11-09: a child Work's message reached its parent while Pi settled
+// the parent's turn. Pi holds a turn asked for then until it has settled, the delivery after settling asked
+// again, and the parent ran one turn too many.
+test("a turn asked for while the Work settles is asked for once", async () => {
+  const bridge = new DockToolsBridge(true, { configure: async () => ({ enabled: true }), invoke: async () => assert.fail("no Dock call") });
+  const { api, state } = fakeApi();
+  // While Pi settles, no run is active, and the turn asked for has not started yet.
+  bridge.attach(api as never, { isIdle: () => true } as never);
+  bridge.receive({ type: "message", from: { relation: "child", id: "child", name: "Reviewer" }, text: "ARRIVED_WHILE_SETTLING" });
+  bridge.settled(false);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(state.messages.map(({ options }) => options), [{ triggerTurn: false }, { triggerTurn: true }], "The message is written and one turn is asked for");
+});
+
 // Cloud review of abb061b: dock_wait waited up to 30 minutes for a child Work that would never
 // report, when its result came before its task's result.
 test("dock_wait waits only for child Works that still owe a result", async () => {

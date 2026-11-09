@@ -7,6 +7,10 @@ import type { DockToolsRequest } from "../src/core/dock-tools.js";
 import { waitFor, type PlanGoalProvider } from "./support/plan-goal-provider.js";
 import { exited, startNativeTeam, trustOnce } from "./support/native-team.js";
 
+/** The messages of a model request whose content includes `text`. */
+const sent = (request: { body: { messages?: Array<{ role: string; content?: unknown }> } }, text: string) =>
+  (request.body.messages ?? []).filter((message) => JSON.stringify(message.content ?? "").includes(text));
+
 // Only provider HTTP replies are scripted; the Host, Pi Workers and their processes are real.
 // Where a test checks what the Host itself allows, it calls the Host as a Worker's tool would.
 // Card #666: a child Work's words used to reach its parent as the user's message, in the user's Queue.
@@ -18,8 +22,6 @@ test("a coordinator and its child Works talk in messages that say whose they are
   const bugPath = join(cwd, "sum.js");
   await writeFile(bugPath, "export const sum = (a, b) => a - b;\n");
   const client = await team.startHost();
-  const sent = (request: { body: { messages?: Array<{ role: string; content?: unknown }> } }, text: string) =>
-    (request.body.messages ?? []).filter((message) => JSON.stringify(message.content ?? "").includes(text));
 
   // The user's coordinator runs a reasoning model at high thinking. A child Work on a model
   // without thinking levels keeps the parent's level as nearly as it can, and the parent is told.
@@ -109,6 +111,34 @@ test("a coordinator and its child Works talk in messages that say whose they are
     const holding = records.filter((entry) => JSON.stringify(entry.content).includes(marker));
     assert.deepEqual(holding.map((entry) => `${entry.kind}:${entry.source}:${entry.customType}`), ["custom_message:extension:dock-work-message"], marker);
   }
+
+  // Card #666 review: after the user stops a turn, Pi's abort leaves no automatic continuation, and a
+  // child Work's message waiting for the coordinator's next step follows that rule. It goes into the
+  // conversation without starting another turn; a message that comes after the Stop starts one.
+  await client.prompt(parent.id, "USER_TASK: keep checking sum.js.", "auto", "user-task");
+  await coordinator.request(7);
+  await client.prompt(implementerWork.id, "Tell your coordinator the docs are stale.", "auto", "child-note-before-stop");
+  (await implementer.request(5)).tools({ id: "note-before-stop", name: "dock_send", arguments: { message: "CHILD_NOTE_BEFORE_STOP: the docs are stale.", done: false } });
+  const noted = await implementer.request(6);
+  // Pi's abort waits for the Work to go idle, so a turn started right after the stopped one holds the Stop open.
+  const stopping = client.abortRestoreQueue(parent.id, "user-stops-coordinator");
+  await Promise.race([stopping, new Promise((_resolve, reject) => setTimeout(() => reject(new Error("The user's Stop did not finish: the coordinator started another turn")), 5_000))]);
+  await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not stop");
+  noted.text("Told the coordinator.");
+  await waitFor(async () => (await client.history(parent.id)).entries.some((entry) => entry.customType === "dock-work-message" && JSON.stringify(entry.content).includes("CHILD_NOTE_BEFORE_STOP")),
+    "The message waiting at the Stop did not go into the coordinator's conversation");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(coordinator.requests.length, 8, "After the user's Stop, the waiting message does not start another turn");
+  await client.prompt(implementerWork.id, "Tell your coordinator the tests are stale too.", "auto", "child-note-after-stop");
+  (await implementer.request(7)).tools({ id: "note-after-stop", name: "dock_send", arguments: { message: "CHILD_NOTE_AFTER_STOP: the tests are stale too.", done: false } });
+  const woken = await coordinator.request(8);
+  assert.equal(sent(woken, "CHILD_NOTE_AFTER_STOP").length, 1, "A message that comes after the Stop starts a turn as usual");
+  assert.equal(sent(woken, "CHILD_NOTE_BEFORE_STOP").length, 1, "That turn also has the message from before the Stop");
+  woken.text("Noted both.");
+  (await implementer.request(8)).text("Told the coordinator again.");
+  for (const work of [parent, implementerWork]) {
+    await waitFor(async () => (await client.status(work.id)).execution === "idle", `${work.displayName} did not settle after the Stop`);
+  }
 });
 
 // Card #666: a child Work that stopped without its result left its parent waiting, unless the parent read it back.
@@ -116,6 +146,15 @@ test("a child Work that stops without giving its parent the result is reported t
   const team = await startNativeTeam(context, ["coordinator", "reviewer"], { prefix: "alu-native-stop-" });
   const { coordinator, reviewer } = team.providers;
   const client = await team.startHost();
+  /** Answers the coordinator's requests from `start` on until one shows `text`, and returns it unanswered. */
+  const coordinatorSees = async (start: number, text: string) => {
+    for (let index = start; index < start + 3; index += 1) {
+      const request = await coordinator.request(index);
+      if (JSON.stringify(request.body.messages).includes(text)) return request;
+      request.text("Noted.");
+    }
+    return assert.fail(`The coordinator was not told ${text}`);
+  };
   const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "stop-create", trust));
   await client.prompt(parent.id, "Get an independent review.", "auto", "stop-start");
   (await coordinator.request(0)).tools({ id: "spawn", name: "dock_spawn", arguments: { name: "Reviewer", task: "Review the workspace.", model: { provider: "reviewer", id: "fixture" }, allowedTools: ["read"] } });
@@ -126,24 +165,44 @@ test("a child Work that stops without giving its parent the result is reported t
 
   // The reviewer answers in its own conversation and ends its turn without sending anything.
   review.text("REVIEW_NOTES: naming is inconsistent.");
-  const told = JSON.stringify((await coordinator.request(2)).body.messages);
-  assert.ok(told.includes("[子 Work「Reviewer」异常停止]") && told.includes("没有把结果发给你就结束了这一轮"), "The idle coordinator is woken and told why the reviewer stopped");
-  assert.ok(told.includes("> REVIEW_NOTES: naming is inconsistent."), "The notice quotes what the reviewer said last");
-  coordinator.requests[2]!.text("I will check on the reviewer.");
+  const told = await coordinator.request(2);
+  const firstNotice = JSON.stringify(told.body.messages);
+  assert.ok(firstNotice.includes("[子 Work「Reviewer」异常停止]") && firstNotice.includes("没有把结果发给你就结束了这一轮"), "The idle coordinator is woken and told why the reviewer stopped");
+  assert.ok(firstNotice.includes("> REVIEW_NOTES: naming is inconsistent."), "The notice quotes what the reviewer said last");
+
+  // Card #666 review: a parent message and the child Work's final result for earlier work crossed in one
+  // step. The child Work then worked on the message and stopped without reporting; the parent must hear of it.
+  told.tools({ id: "ask-files", name: "dock_send", arguments: { target: "Reviewer", message: "PARENT_ASK: which files did you read?" } });
+  const asked = await reviewer.request(1);
+  assert.equal(sent(asked, "[来自父 Work「Coordinator」]\\nPARENT_ASK").length, 1, "The parent's message wakes the idle reviewer");
+  (await coordinator.request(3)).tools({ id: "ask-tests", name: "dock_send", arguments: { target: "Reviewer", message: "PARENT_MORE: check the tests as well." } });
+  const parentWaits = await coordinator.request(4);
+  asked.tools({ id: "files-done", name: "dock_send", arguments: { message: "FILES: sum.js", done: true } });
+  const more = await reviewer.request(2);
+  assert.equal(sent(more, "[来自父 Work「Coordinator」]\\nPARENT_MORE").length, 1, "The second message reaches the reviewer after its final result");
+  more.text("The tests look fine.");
+  await waitFor(async () => (await client.status(child.id)).execution === "idle", "The reviewer did not settle");
+  parentWaits.text("Waiting for the files.");
+  const secondNotice = await coordinatorSees(5, "[子 Work「Reviewer」异常停止]");
+  assert.ok(coordinator.requests.some((request) => sent(request, "[来自子 Work「Reviewer」· 已完成]\\nFILES").length === 1), "The final result for the first question arrives as such");
+  assert.ok(JSON.stringify(secondNotice.body.messages).includes("> The tests look fine."), "The notice quotes what the reviewer said on the second message");
+  secondNotice.text("I will look at the tests myself.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle after the notice");
+  const answered = coordinator.requests.length;
 
   // User decision (card #666): a turn the user starts by talking to the child Work does not count.
   await client.prompt(child.id, "USER_QUESTION: what did you check?", "auto", "user-chat");
-  (await reviewer.request(1)).text("I checked the naming.");
+  (await reviewer.request(3)).text("I checked the naming.");
   await waitFor(async () => (await client.status(child.id)).execution === "idle", "The reviewer did not settle after the user's question");
   await new Promise((resolve) => setTimeout(resolve, 500));
-  assert.equal(coordinator.requests.length, 3, "The coordinator is not told about the user's own conversation with its child Work");
+  assert.equal(coordinator.requests.length, answered, "The coordinator is not told about the user's own conversation with its child Work");
 
-  // Stopped by the user while it still owes the result, the reviewer is reported once more.
+  // Stopped by the user, the reviewer is reported once more: it still owes the second answer, although
+  // its final result for the first question came after that question was sent.
   await client.stop(child.id, "user-stops-reviewer");
-  const stopped = JSON.stringify((await coordinator.request(3)).body.messages);
+  const stopped = JSON.stringify((await coordinator.request(answered)).body.messages);
   assert.ok(stopped.includes("被停止了") && stopped.includes("> I checked the naming."));
-  coordinator.requests[3]!.text("Noted.");
+  coordinator.requests[answered]!.text("Noted.");
   await waitFor(async () => (await client.status(parent.id)).execution === "idle", "The coordinator did not settle after the stop notice");
 });
 
