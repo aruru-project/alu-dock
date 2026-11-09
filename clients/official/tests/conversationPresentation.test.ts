@@ -305,4 +305,16 @@ assert.equal(turnToolCallsLabel({ status: 'completed', toolCalls: 3, failedToolC
     '收起这一轮时，其他 Work 的消息和最终回复都还在')
 }
 
+// Astra review of #666: a child Work's turn ends right after it sends its parent the final result, so its
+// own history shows that turn as finished, not as cut off.
+{
+  const turnEndedBy = (metadata: Record<string, unknown>, isError = false) => projectRecordGroups([
+    record('u8', 'user', [{ type: 'text', text: '复审 sum.js' }], { timestamp: '2026-11-09T08:00:00Z' }),
+    record('a8', 'assistant', [{ type: 'tool_call', toolCallId: 'c8', toolName: 'dock_send', args: { message: '没问题', done: true } }], { timestamp: '2026-11-09T08:00:05Z', stopReason: 'toolUse' }),
+    record('t8', 'tool', [{ type: 'tool_result', toolCallId: 'c8', toolName: 'dock_send', text: 'Your final result reached your parent Work.', isError }], { timestamp: '2026-11-09T08:00:06Z', toolCallId: 'c8', isError, metadata }),
+  ]).find((item) => item.kind === 'turn')
+  assert.equal(turnEndedBy({ type: 'work_message', to: 'parent', done: true })?.status, 'completed', '交了最终结果的一轮是完成的')
+  assert.equal(turnEndedBy({ type: 'work_message', to: 'parent' })?.status, 'interrupted', '只发了中途消息就停住的一轮仍是未完成')
+}
+
 console.log('conversation presentation tests passed')

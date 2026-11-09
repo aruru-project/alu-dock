@@ -683,8 +683,9 @@ function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
     const status: ConversationTurnStatus = lastAssistant?.error || lastAssistant?.stopReason === 'error' ? 'failed'
       : lastAssistant?.stopReason === 'aborted' ? 'aborted'
       // Only the last turn can still be unfinished; an earlier one that ends in a
-      // tool call was continued by the next user message (a steer).
-      : position === openers.length - 1 && (!lastAssistant || lastAssistant.stopReason === 'toolUse') ? 'interrupted'
+      // tool call was continued by the next user message (a steer). A child Work's
+      // turn ends right after it sends its parent the final result (card #666).
+      : position === openers.length - 1 && (!lastAssistant || lastAssistant.stopReason === 'toolUse') && !endsWithFinalResult(records) ? 'interrupted'
       : 'completed'
     const turnId = `turn:${user.recordId}`
     const item: ConversationTurnItem = {
@@ -697,6 +698,13 @@ function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
     for (let index = opener; index <= end; index++) turns.set(index, turn)
   })
   return turns
+}
+
+/** The turn's last record is a child Work's final result reaching its parent, which ends the turn by design. */
+function endsWithFinalResult(records: ConversationRecord[]): boolean {
+  const last = records.at(-1)
+  const facts = last?.source === 'tool' && !last.isError && isRecord(last.metadata) ? last.metadata : undefined
+  return facts?.type === 'work_message' && facts.to === 'parent' && facts.done === true
 }
 
 function lastWhere<T>(values: T[], predicate: (value: T) => boolean): T | undefined {
