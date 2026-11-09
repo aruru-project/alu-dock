@@ -114,7 +114,7 @@ export const MEMORY_CASES: MemoryCase[] = [
     name: "other-work",
     about: "别的 Work 发来的任务通知：和主人这个人无关，最好什么都不记。",
     sessions: [{ id: "relay", lines: [
-      ["user", "[来自 Work「构建机」] 任务完成：release 1.4.2 已打包，产物在 dist/，用时 6 分 12 秒。", "2026-03-12 16:05"],
+      ["work", "[来自子 Work「构建机」· 已完成]\n任务完成：release 1.4.2 已打包，产物在 dist/，用时 6 分 12 秒。", "2026-03-12 16:05"],
       ["assistant", "收到，打包好了，我跟主人说一声。"],
     ] }],
     expect: { exclude: [/1\.4\.2|dist\/|6 分/u], atMost: [[/./u, 0]] },

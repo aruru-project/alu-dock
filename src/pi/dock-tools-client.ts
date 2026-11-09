@@ -17,6 +17,8 @@ import type { ChildWaitResult } from "./child-messages.js";
 export const WORK_MESSAGE_TYPE = "dock-work-message";
 /** Hidden marker that starts a turn for Work messages an idle Work just took; the model never reads it. */
 export const WORK_WAKE_TYPE = "dock-work-wake";
+/** A dock_watch notice in the conversation. */
+export const WATCH_NOTICE_TYPE = "dock-tools-watch";
 
 /** What clients use to style a Work message; its first line already says it to the model and the reader. */
 export interface WorkMessageDetails {
@@ -55,7 +57,7 @@ export function renderWorkMessage(message: WorkMessage): string {
 
 /** The custom message Pi records for a dock_watch notice. */
 export function watchNoticeEntry(notification: ObservationNotification): { customType: string; content: string; display: true; details: ObservationNotification } {
-  return { customType: "dock-tools-watch", content: renderObservationNotification(notification), display: true, details: notification };
+  return { customType: WATCH_NOTICE_TYPE, content: renderObservationNotification(notification), display: true, details: notification };
 }
 
 /** The custom message Pi records for a Work message. */

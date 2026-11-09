@@ -197,7 +197,11 @@ export interface AssistantTimelineList { episodes: AssistantEpisode[]; nextCurso
 /** Rewrites a line or forgets or restores it, if nobody changed it since `revision`. */
 export interface AssistantTimelineUpdateRequest { id: string; revision: number; text?: string; state?: AssistantEpisodeState }
 
-export type AssistantEntryKind = "user" | "assistant" | "tool_result" | "bash" | "summary" | "notice";
+/**
+ * `work`: what another Work said to her (card #666): a child Work's message, a dock_watch notice, or another
+ * Work's message delivered into her input. It is never the owner's words.
+ */
+export type AssistantEntryKind = "user" | "assistant" | "tool_result" | "bash" | "summary" | "notice" | "work";
 export interface AssistantToolCall { name: string; arguments: string }
 /** One entry of a conversation, as the assistant service keeps it. */
 export interface AssistantEntry {
@@ -341,7 +345,7 @@ function documentText(input: unknown, field: string): string {
   }
   return value;
 }
-const ENTRY_KINDS: readonly AssistantEntryKind[] = ["user", "assistant", "tool_result", "bash", "summary", "notice"];
+const ENTRY_KINDS: readonly AssistantEntryKind[] = ["user", "assistant", "tool_result", "bash", "summary", "notice", "work"];
 function entryKind(input: unknown, field: string): AssistantEntryKind {
   if (!ENTRY_KINDS.includes(input as AssistantEntryKind)) fail(`${field} is unknown`);
   return input as AssistantEntryKind;

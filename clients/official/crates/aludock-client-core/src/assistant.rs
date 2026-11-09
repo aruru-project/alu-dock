@@ -317,6 +317,8 @@ pub enum AssistantEntryKind {
     Bash,
     Summary,
     Notice,
+    /// What another Work said to her, never the owner's words.
+    Work,
     /// Any value this client build does not know; newer Hosts may add values.
     #[serde(other)]
     Unrecognized,

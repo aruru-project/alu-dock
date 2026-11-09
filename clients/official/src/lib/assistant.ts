@@ -11,6 +11,7 @@ export function assistantEntryLabel(kind: AssistantEntryKind, toolName?: string)
   if (kind === 'bash') return '命令'
   if (kind === 'summary') return '摘要'
   if (kind === 'notice') return '提示'
+  if (kind === 'work') return '别的 Work'
   return '其他'
 }
 

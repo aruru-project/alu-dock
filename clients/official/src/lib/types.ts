@@ -821,7 +821,8 @@ export interface AssistantPreview { text: string; loadedAt: string }
 /** `persona`: who she is; `notes`: what the owner told her by hand. */
 export type AssistantDocumentName = 'persona' | 'notes'
 export interface AssistantDocument { document: AssistantDocumentName; text: string; revision: string }
-export type AssistantEntryKind = 'user' | 'assistant' | 'tool_result' | 'bash' | 'summary' | 'notice' | Unrecognized
+/** `work`: what another Work said to her, never the owner's words. */
+export type AssistantEntryKind = 'user' | 'assistant' | 'tool_result' | 'bash' | 'summary' | 'notice' | 'work' | Unrecognized
 export interface AssistantSessionInfo {
   sessionId: string
   cwd?: string

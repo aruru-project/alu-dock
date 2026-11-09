@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+
 import { AssistantDocuments } from "../src/assistant/documents.js";
 import { AssistantExtraction } from "../src/assistant/extraction.js";
 import type { ModelPrompt } from "../src/assistant/extraction-prompt.js";
@@ -12,6 +14,7 @@ import { AssistantCore } from "../src/assistant/service.js";
 import { AssistantStore } from "../src/assistant/store.js";
 import { AssistantTimeline } from "../src/assistant/timeline.js";
 import { writeTransaction } from "../src/assistant/transaction.js";
+import { assistantEntryOf } from "../src/pi/assistant-extension.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 // Card #295: beside her memories, Dock keeps a timeline of what the two of them were doing, one line
@@ -125,4 +128,41 @@ test("what they were doing each day becomes a timeline: a week of it opens every
   assert.ok(!(await core.answer({ op: "load" }, {})).text.includes("信仰流"), "A forgotten memory's night is not loaded from the timeline");
   memories.update({ id: liked!.id, revision: gone.revision, state: "active" }, "owner");
   assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [game!.id, work!.id, String(older.id)]);
+});
+
+// Owner's decision 2026-11-09 (#295 after #666): what another Work says to her — a child Work's message,
+// or another Work's message Dock delivered into her input — is kept as that Work's words, and extraction
+// reads it as such, never as the owner's.
+test("what another Work says to her is kept and read as that Work's words, never as the owner's", { timeout: 30_000 }, async (context) => {
+  const at = "2026-11-09T08:00:00.000Z";
+  const entries = [
+    { type: "custom_message", id: "w1", parentId: null, timestamp: at, customType: "dock-work-message", content: "[来自子 Work「构建机」· 已完成]\n打包好了。", display: true },
+    { type: "message", id: "w2", parentId: "w1", timestamp: at, message: { role: "user", content: '[Agent message from "Reviewer"]\n复审通过。', timestamp: 0 } },
+    { type: "custom_message", id: "w3", parentId: "w2", timestamp: at, customType: "dock-work-wake", content: "", display: false },
+    { type: "message", id: "u1", parentId: "w3", timestamp: at, message: { role: "user", content: "晚上吃什么？", timestamp: 0 } },
+  ] as unknown as SessionEntry[];
+  const kept = entries.map((entry) => assistantEntryOf(entry, new Uint8Array(32)));
+  assert.deepEqual(kept.map((entry) => entry?.kind), ["work", "work", undefined, "user"], "a Work's words are not the owner's, and the marker that only starts a turn is not kept");
+
+  const root = await mkdtemp(join(tmpdir(), "alu-work-words-"));
+  const store = new AssistantStore(join(root, "memory.sqlite"));
+  const documents = new AssistantDocuments(root);
+  await documents.initialize();
+  const memories = new AssistantMemories(store.connection);
+  const prompts: ModelPrompt[] = [];
+  const extraction = new AssistantExtraction(store.connection, memories, new AssistantTimeline(store.connection), documents, {
+    complete: async (_model, prompt) => { prompts.push(prompt); return JSON.stringify({ changes: [], timeline: [] }); },
+  }, { idleMs: 0, busyChars: 1e9, chunkChars: 24_000, tickMs: 10, quietMs: 1e15, dreamChanges: 1e9, dreamIntervalMs: 1e15 });
+  context.after(async () => { await extraction.stop(); store.close(); await rm(root, { recursive: true, force: true }); });
+  store.record({ sessionId: "s", cwd: "/home/owner" }, [
+    { ...kept[0]!, entryId: "w1" },
+    { ...kept[1]!, entryId: "w2", parentId: "w1" },
+    { ...kept[3]!, entryId: "u1", parentId: "w2" },
+  ], "u1", {});
+  extraction.setModel({ provider: "memory", id: "fixture" });
+  extraction.start();
+  await waitFor(() => prompts.length === 1, "The conversation was not read");
+  const read = prompts[0]!.prompt;
+  assert.ok(read.includes("Work 消息：[来自子 Work「构建机」· 已完成]") && read.includes('Work 消息：[Agent message from "Reviewer"]'), read);
+  assert.ok(read.includes("主人：晚上吃什么？") && !read.includes("主人：[来自子 Work") && !read.includes("主人：[Agent message"), read);
 });

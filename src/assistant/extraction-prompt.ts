@@ -125,7 +125,7 @@ export function extractionPrompt(input: ExtractionInput): ModelPrompt {
       "## 这个会话已有的时间线（最近几行）",
       input.episodes.length === 0 ? "（还没有。）" : input.episodes.map((row) => episodeLine(row)).join("\n"),
       ...(input.leadIn.length === 0 ? [] : ["## 前面已经读过的对话（帮你理解上下文，不从这里记）", input.leadIn.join("\n")]),
-      "## 这次要读的对话（主人的话有时是别的 Work 转来的，不用区分）",
+      "## 这次要读的对话（“Work 消息”是别的 Work 发给她的，不是主人说的：它做了什么可以写进时间线，但别把它的话当成主人的话或主人的情况记进记忆）",
       input.lines.map((line, index) => `[${index + 1}] ${line}`).join("\n"),
     ].join("\n\n"),
   };
@@ -209,6 +209,7 @@ function spoken(row: EntryRow, chars: number): string | undefined {
       return `（${row.tool_name ?? "工具"} 的结果）${clip(row.text, Math.min(chars, TOOL_RESULT_CHARS))}`;
     case "bash": return `（主人在命令行执行）${clip(row.text, Math.min(chars, TOOL_RESULT_CHARS))}`;
     case "summary": return `（之前对话的摘要）${clip(row.text, Math.min(chars, SUMMARY_CHARS))}`;
+    case "work": return `Work 消息：${clip(row.text, Math.min(chars, SUMMARY_CHARS))}`;
     default: return undefined;
   }
 }

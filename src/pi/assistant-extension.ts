@@ -39,8 +39,10 @@ import {
   type AssistantSettings,
   type AssistantTimelineList,
 } from "../core/assistant.js";
+import { isDockMessageText } from "../core/dock-tools.js";
 import { localSpan } from "../core/local-time.js";
 import { extractDockAttachmentContext } from "./dock-attachment-context.js";
+import { WATCH_NOTICE_TYPE, WORK_MESSAGE_TYPE, WORK_WAKE_TYPE } from "./dock-tools-client.js";
 import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
 /*
@@ -459,15 +461,25 @@ function fitBatch(entry: AssistantEntry): AssistantEntry {
 
 type Block = { type: string; text?: string; name?: string; arguments?: unknown; thinking?: string };
 
+/** Extension messages in which another Work speaks to this one (card #666). */
+const WORK_SPEAKS = new Set<string>([WORK_MESSAGE_TYPE, WATCH_NOTICE_TYPE]);
+
+/** An extension message: another Work's words, or another notice; undefined for the marker that only starts a turn. */
+function extensionEntry(base: { entryId: string; at: string }, customType: unknown, content: string | readonly Block[] | undefined): Omit<AssistantEntry, "parentId"> | undefined {
+  if (customType === WORK_WAKE_TYPE) return undefined;
+  return withText({ ...base, kind: typeof customType === "string" && WORK_SPEAKS.has(customType) ? "work" : "notice" }, contentText(content));
+}
+
 /**
  * What Main keeps of one session entry; undefined for what is not part of the conversation. Her own
  * memory tools keep only what she did (the action), not the words they carried or returned: those
- * live in her memories and conversations already, where forgetting reaches them.
+ * live in her memories and conversations already, where forgetting reaches them. What another Work
+ * says to her is kept as its words, never as the owner's.
  */
 export function assistantEntryOf(entry: SessionEntry, attachmentContextKey: Uint8Array): Omit<AssistantEntry, "parentId"> | undefined {
   const base = { entryId: entry.id, at: entry.timestamp };
   if (entry.type === "compaction" || entry.type === "branch_summary") return withText({ ...base, kind: "summary" }, entry.summary);
-  if (entry.type === "custom_message") return withText({ ...base, kind: "notice" }, contentText(entry.content));
+  if (entry.type === "custom_message") return extensionEntry(base, entry.customType, entry.content as string | Block[]);
   if (entry.type !== "message") return undefined;
   const message = entry.message as unknown as { role: string } & Record<string, unknown>;
   switch (message.role) {
@@ -475,7 +487,8 @@ export function assistantEntryOf(entry: SessionEntry, attachmentContextKey: Uint
       const raw = contentText(message.content as string | Block[]);
       const { text, attachments } = extractDockAttachmentContext(raw, attachmentContextKey);
       const files = attachments?.length ? `\n[attachments: ${attachments.map((attachment) => attachment.name).join(", ")}]` : "";
-      return withText({ ...base, kind: "user" }, `${text}${files}`);
+      // Another Work's message delivered into her input, as dock_send between top-level Works does.
+      return withText({ ...base, kind: isDockMessageText(text) ? "work" : "user" }, `${text}${files}`);
     }
     case "assistant": {
       const blocks = Array.isArray(message.content) ? message.content as Block[] : [];
@@ -491,7 +504,7 @@ export function assistantEntryOf(entry: SessionEntry, attachmentContextKey: Uint
     case "bashExecution":
       return withText({ ...base, kind: "bash" }, `$ ${String(message.command ?? "")}\n${String(message.output ?? "")}`);
     case "custom":
-      return withText({ ...base, kind: "notice" }, contentText(message.content as string | Block[]));
+      return extensionEntry(base, message.customType, message.content as string | Block[]);
     case "branchSummary":
     case "compactionSummary":
       return withText({ ...base, kind: "summary" }, String(message.summary ?? ""));
@@ -534,7 +547,7 @@ function where(session: AssistantSessionInfo): string {
 }
 
 const SPEAKERS: Record<AssistantEntry["kind"], string> = {
-  user: "user", assistant: "you", tool_result: "tool result", bash: "shell command", summary: "summary", notice: "notice",
+  user: "user", assistant: "you", tool_result: "tool result", bash: "shell command", summary: "summary", notice: "notice", work: "another Work",
 };
 
 function renderSearch(result: AssistantSearchResult): string {

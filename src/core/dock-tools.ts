@@ -165,6 +165,11 @@ export function dockMessageText(sourceDisplayName: string, message: string): str
   return `[Agent message from ${JSON.stringify(safeName)}]\n${message}`;
 }
 
+/** Whether a Work's input is another Work's message that dockMessageText wrapped, not its user speaking. */
+export function isDockMessageText(text: string): boolean {
+  return /^\[Agent message from "(?:[^"\\\n]|\\.)*"\]\n/u.test(text);
+}
+
 /**
  * The Host a Work runs on marks that Work's Machine in Main's list. Main's answer to a SubHost never
  * carries the mark, so a SubHost of an earlier release still accepts it.
