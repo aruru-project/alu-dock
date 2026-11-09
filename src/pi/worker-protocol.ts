@@ -52,7 +52,7 @@ import {
   MAX_STOP_CLEANUP_ERRORS,
 } from "../core/instance-dto.js";
 import type { SettingKey } from "../core/config-projection.js";
-import { parseDockToolsRequest, parseDockToolsResult, parseObservationNotification } from "../core/dock-tools-codec.js";
+import { parseDockToolsRequest, parseDockToolsResult, parseObservationNotification, parseWorkMessage } from "../core/dock-tools-codec.js";
 import { MAX_DOCK_TRANSFER_BYTES } from "../core/transport-bounds.js";
 
 export const PI_WORKER_PROTOCOL = "alu-dock-pi-worker";
@@ -700,7 +700,7 @@ function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
 
 function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
   const value = record(raw, "Worker Agent control");
-  const type = oneOf(value.type, ["activate", "resolve_session_target", "resolve_file_source", "wait_for_idle", "observation_delivery", "branch_for_child", "dispose"], "Worker Agent control type");
+  const type = oneOf(value.type, ["activate", "resolve_session_target", "resolve_file_source", "wait_for_idle", "observation_delivery", "work_message", "branch_for_child", "dispose"], "Worker Agent control type");
   if (type === "resolve_file_source") {
     exactKeys(value, ["type", "kind", "ref"], "Worker source resolution");
     const kind = oneOf(value.kind, ["published", "resource"], "Worker file source kind");
@@ -708,6 +708,7 @@ function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
   }
   if (type === "resolve_session_target") { exactKeys(value, ["type", "sessionFile"], "Worker Agent control"); return { type, sessionFile: boundedString(value.sessionFile, 16_384, "Session file") }; }
   if (type === "observation_delivery") { exactKeys(value, ["type", "notification"], "Worker Agent control"); return { type, notification: parseObservationNotification(value.notification) }; }
+  if (type === "work_message") { exactKeys(value, ["type", "message"], "Worker Agent control"); return { type, message: parseWorkMessage(value.message) }; }
   if (type === "branch_for_child") { exactKeys(value, ["type", "cwd"], "Worker Agent control"); return { type, cwd: privateSourcePath(value.cwd) }; }
   exactKeys(value, ["type"], "Worker Agent control"); return { type };
 }

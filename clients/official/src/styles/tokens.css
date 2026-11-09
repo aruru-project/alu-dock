@@ -212,6 +212,9 @@
   --alu-code-block-text: #c9d8f0; /* 代码块、原文、工具预览里的等宽字 */
   --alu-mono-text: #d4e3ee; /* 命令输出、文件预览里的等宽字 */
   --alu-tool-accent: #fbbf24; /* 工具名、展开箭头、工具记录的边线 */
+  --alu-work-message-line: #7ec8e0; /* 父子 Work 之间消息卡片的边线和标题 */
+  --alu-work-message-done: #82d7b5; /* 子 Work「已完成」结果卡片的边线和标题 */
+  --alu-work-message-stopped: #f6c56f; /* 子 Work 异常停止提醒卡片的边线和标题 */
   --alu-tool-bg: #121318;
   --alu-tool-border: #524b33;
   --alu-tool-divider: #373836;
@@ -438,6 +441,9 @@
   --alu-code-block-text: #d0d0da;
   --alu-mono-text: #d0d0da;
   --alu-tool-accent: #bcbcc8;
+  --alu-work-message-line: #a0afee;
+  --alu-work-message-done: #a3d7ba;
+  --alu-work-message-stopped: #eccf92;
   --alu-tool-bg: #1e1f27;
   --alu-tool-border: #33343f;
   --alu-tool-divider: #2c2d37;
@@ -663,6 +669,9 @@
   --alu-code-block-text: #343344;
   --alu-mono-text: #343344;
   --alu-tool-accent: #4e4e60;
+  --alu-work-message-line: #4a56a0;
+  --alu-work-message-done: #256d4c;
+  --alu-work-message-stopped: #8a5619;
   --alu-tool-bg: #f9f8fc;
   --alu-tool-border: #dbdbe6;
   --alu-tool-divider: #e1e2eb;

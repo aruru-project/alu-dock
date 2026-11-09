@@ -57,7 +57,7 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
 
       <details v-else-if="row.kind === 'record' && row.folded" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id" @toggle="emit('recordToggle', row.id, detailsOpen($event))"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /><template v-if="row.readOnOpen && row.entryId && recordState"><div v-if="recordState(row.entryId).loading" class="msg-notice alu-record-reading">正在读取这条记录的全文…</div><div v-else-if="recordState(row.entryId).error" class="msg-error alu-record-reading">{{ recordState(row.entryId).error }} <button type="button" class="message-text-action" @click="emit('retryRecord', row.entryId)">重试</button></div></template></div></details>
 
-      <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
+      <section v-else-if="row.kind === 'record'" class="conversation-row alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingParts" :tool-open="toolOpen" :image-resource="imageResource" :collapsed="collapsed && !row.keep" :final-row="finalRow" @tool-toggle="(id, event) => emit('toolToggle', id, event)" @image-request="emit('imageRequest', $event)" @image-preview="emit('imagePreview', $event)" @image-failed="emit('imageFailed', $event)" /></div></section>
 
       <div v-else-if="row.kind === 'notice'" class="conversation-row alu-live-notice-row" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
 
@@ -208,6 +208,30 @@ const detailsOpen = (event: Event) => (event.target as { open?: boolean } | null
 .alu-record-body { min-width: 0; }
 .alu-record-summary { border-left-color: var(--alu-accent-border); }
 .alu-record-extension { border-left-color: var(--alu-highlight); }
+/* A message from this Work's parent or child Work: a card whose title says whose words they are. */
+.alu-record-work-message {
+  margin: 12px 0 12px 68px;
+  padding: 10px 14px;
+  border-left-width: 3px;
+  border-left-color: var(--alu-work-message-line);
+  border-radius: 0 10px 10px 0;
+  color: var(--alu-text);
+  background: rgb(var(--alu-overlay-rgb) / 0.03);
+}
+.alu-record-work-message .alu-record-title {
+  margin-bottom: 6px;
+  color: var(--alu-work-message-line);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+.alu-record-work-message.is-done { border-left-color: var(--alu-work-message-done); }
+.alu-record-work-message.is-done .alu-record-title { color: var(--alu-work-message-done); }
+.alu-record-work-message.is-stopped { border-left-color: var(--alu-work-message-stopped); }
+.alu-record-work-message.is-stopped .alu-record-title { color: var(--alu-work-message-stopped); }
+@media (max-width: 1000px) {
+  .alu-record-work-message { margin-left: 0; }
+}
 .alu-record-tool { border-left-color: var(--alu-tool-accent); }
 /* A user shell command stands beside the Agent's rows, aligned with its content. */
 .alu-shell-row { margin: 6px 0 6px 68px; max-width: calc(100% - 68px); }

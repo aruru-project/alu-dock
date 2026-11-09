@@ -92,10 +92,11 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   context.after(async () => {
     team.onCleanup?.();
     team.client?.closeActiveConnections();
+    // A failed test can leave a model request unanswered, and the Host's stop would wait for that turn.
+    await Promise.all(Object.values<PlanGoalProvider>(providers).map((provider) => provider.stop()));
     await team.host?.stop().catch(() => {});
     await modelService?.stop();
     await assistantService?.stop();
-    await Promise.all(Object.values<PlanGoalProvider>(providers).map((provider) => provider.stop()));
     await rm(root, { recursive: true, force: true });
   });
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));

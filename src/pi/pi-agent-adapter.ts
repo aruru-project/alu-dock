@@ -180,7 +180,7 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
 
 export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker managed by Alu Dock. Your work can continue after a terminal disconnects, and Alu Dock clients may observe or control this Work through Dock protocols. Pi remains authoritative for its settings, credentials, extensions, project resources, and Session history. Use \`aludock pi:install <source>\` when the user asks you to install a Pi package through the bundled Pi runtime; do not require a separate system Pi installation.`;
 
-export const ALU_DOCK_CHILD_GUIDANCE = "You are a child Work that another Dock Work, your parent, created for its task. When you finish work your parent handed you, your final reply is delivered to it automatically, so put your result there and do not send it again. Use dock_send only for something your parent must know before then, such as a question that blocks you; never send acknowledgments or progress reports. You cannot reach any other Work.";
+export const ALU_DOCK_CHILD_GUIDANCE = "You are a child Work that another Dock Work, your parent, created for its task. You and your parent work at the same time, and it sees only what you send it with dock_send. While you work, send with done: false what it should know or answer now, such as a finding that affects its work, a question or a point to agree on, then keep working; never send acknowledgments or empty progress. When you finish the work it handed you, send your result with done: true, which ends your turn. Your parent's messages to you begin with [来自父 Work「its name」]. When the user talks to you directly, answer the user. You cannot reach any other Work.";
 
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
@@ -618,6 +618,7 @@ export class PiAgentAdapter {
       }
       case "wait_for_idle": await this.waitForIdle(); return null;
       case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
+      case "work_message": throw new Error("Work messages must be handled by the Worker bridge");
       case "branch_for_child": return this.branchForChild(request.cwd);
       case "dispose": return this.dispose();
     }

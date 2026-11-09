@@ -133,7 +133,7 @@ export function partVisibleWhenCollapsed(part: ConversationProcessItem, finalRow
 }
 
 export function rowVisibleWhenCollapsed(row: ConversationRow, finalRowId: string | undefined): boolean {
-  if (row.kind === 'user' || row.id === finalRowId) return true
+  if (row.kind === 'user' || row.id === finalRowId || (row.kind === 'record' && row.keep)) return true
   if (row.kind === 'assistant-group' || row.kind === 'record') return row.parts.some((part) => partVisibleWhenCollapsed(part, false))
   if (row.kind === 'notice') return row.tone !== 'info'
   return false
@@ -182,7 +182,7 @@ export function turnHidingAnchor(sections: readonly ConversationSection[], ancho
       if (row.kind !== 'assistant-group' && row.kind !== 'record') continue
       const part = row.parts.find((candidate) => candidate.id === anchorId)
       if (!part) continue
-      const visible = rowVisibleWhenCollapsed(row, section.finalRowId) && partVisibleWhenCollapsed(part, row.id === section.finalRowId)
+      const visible = rowVisibleWhenCollapsed(row, section.finalRowId) && ((row.kind === 'record' && row.keep === true) || partVisibleWhenCollapsed(part, row.id === section.finalRowId))
       return visible ? undefined : section
     }
   }

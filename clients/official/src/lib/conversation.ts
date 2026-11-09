@@ -32,6 +32,8 @@ interface RecordGroup {
   records: ConversationRecord[]
 }
 
+/** A message between a Work and its parent or child Work; its first line says whose it is (card #666). */
+const WORK_MESSAGE_TYPE = 'dock-work-message'
 const COMMAND_PREVIEW_CHARS = 320
 const CONTENT_PREVIEW_CHARS = 280
 const EDIT_SIDE_PREVIEW_CHARS = 120
@@ -681,8 +683,9 @@ function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
     const status: ConversationTurnStatus = lastAssistant?.error || lastAssistant?.stopReason === 'error' ? 'failed'
       : lastAssistant?.stopReason === 'aborted' ? 'aborted'
       // Only the last turn can still be unfinished; an earlier one that ends in a
-      // tool call was continued by the next user message (a steer).
-      : position === openers.length - 1 && (!lastAssistant || lastAssistant.stopReason === 'toolUse') ? 'interrupted'
+      // tool call was continued by the next user message (a steer). A child Work's
+      // turn ends right after it sends its parent the final result (card #666).
+      : position === openers.length - 1 && (!lastAssistant || lastAssistant.stopReason === 'toolUse') && !endsWithFinalResult(records) ? 'interrupted'
       : 'completed'
     const turnId = `turn:${user.recordId}`
     const item: ConversationTurnItem = {
@@ -695,6 +698,13 @@ function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
     for (let index = opener; index <= end; index++) turns.set(index, turn)
   })
   return turns
+}
+
+/** The turn's last record is a child Work's final result reaching its parent, which ends the turn by design. */
+function endsWithFinalResult(records: ConversationRecord[]): boolean {
+  const last = records.at(-1)
+  const facts = last?.source === 'tool' && !last.isError && isRecord(last.metadata) ? last.metadata : undefined
+  return facts?.type === 'work_message' && facts.to === 'parent' && facts.done === true
 }
 
 function lastWhere<T>(values: T[], predicate: (value: T) => boolean): T | undefined {
@@ -755,7 +765,7 @@ function projectGroup(group: RecordGroup, output: ConversationItem[], byEntryId:
     return
   }
   if (first.kind === 'custom_message') {
-    output.push(projectPanel(group, '扩展消息', 'alu-record-extension', false))
+    output.push(first.customType === WORK_MESSAGE_TYPE ? projectWorkMessage(group, first) : projectPanel(group, '扩展消息', 'alu-record-extension', false))
     return
   }
 
@@ -849,6 +859,22 @@ function contextEditTarget(target?: ConversationRecord) {
   if (target?.kind !== 'message') return '一条较早的记录'
   if (target.source === 'assistant') return target.error || target.stopReason === 'error' ? '一条失败的回复' : target.stopReason === 'aborted' ? '一条中止的回复' : '一条回复'
   return target.source === 'tool' ? '一条工具结果' : target.source === 'user' ? '你的一条消息' : '一条较早的记录'
+}
+
+/** A card for a message from another Work: its first line, which names that Work, is the title. It stays in
+ * view when its turn is collapsed, since it is what the other Work said, not this Work's process. */
+function projectWorkMessage(group: RecordGroup, record: ConversationRecord): Extract<ConversationItem, { kind: 'record' }> {
+  const parts = projectRecordContent(group)
+  const head = parts.find((part) => part.kind === 'assistant')
+  let title = '来自另一个 Work 的消息'
+  if (head?.kind === 'assistant') {
+    const end = head.text.indexOf('\n')
+    title = (end < 0 ? head.text : head.text.slice(0, end)).replace(/^\[(.*)\]$/u, '$1')
+    head.text = end < 0 ? '' : head.text.slice(end + 1)
+  }
+  const facts = isRecord(record.metadata) ? record.metadata : {}
+  const state = facts.stopped === true ? ' is-stopped' : facts.done === true ? ' is-done' : ''
+  return { id: group.key, kind: 'record', title, panelClass: `alu-record-work-message${state}`, folded: false, keep: true, parts: parts.filter((part) => part !== head || head.text) }
 }
 
 function projectPanel(group: RecordGroup, title: string, panelClass: string, folded: boolean): Extract<ConversationItem, { kind: 'record' }> {
