@@ -3,6 +3,24 @@ import { convertFileSrc, invoke, type InvokeArgs, type InvokeOptions } from '@ta
 import { previewNative } from '../preview/native'
 import type { ClientTheme } from './theme'
 import type {
+  AssistantContextResult,
+  AssistantDocument,
+  AssistantDocumentName,
+  AssistantEpisode,
+  AssistantEpisodeEdit,
+  AssistantInfo,
+  AssistantMemory,
+  AssistantMemoryDetail,
+  AssistantMemoryEdit,
+  AssistantMemoryFilter,
+  AssistantMemoryList,
+  AssistantMemoryTopic,
+  AssistantPreview,
+  AssistantReorganizeResult,
+  AssistantSearchResult,
+  AssistantSettings,
+  AssistantTimelineFilter,
+  AssistantTimelineList,
   BootstrapPayload,
   CommandCompletionsResult,
   CommandContentResult,
@@ -630,8 +648,84 @@ export async function systemContent(cwd: string, id: string, context: Connection
   return native<ResourceContentResult>('system_content', { ...context, cwd, id, targetHostId, offset: offset ?? null, revision: revision ?? null })
 }
 
-export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string): Promise<SystemDefaultSetResult> {
-  return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId })
+/** `assistant` also remembers (true) or forgets (false) opening new Works here as the assistant; omitted, the directory keeps its choice. */
+export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
+  return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId, assistant: assistant ?? null })
+}
+
+/** The assistant lives on Main, so the connected Host answers; there is no machine to choose. */
+export async function getAssistantInfo(context: ConnectionContext): Promise<AssistantInfo> {
+  return native<AssistantInfo>('assistant_info', { ...context })
+}
+
+export async function getAssistantPreview(context: ConnectionContext): Promise<AssistantPreview> {
+  return native<AssistantPreview>('assistant_preview', { ...context })
+}
+
+export async function getAssistantDocument(document: AssistantDocumentName, context: ConnectionContext): Promise<AssistantDocument> {
+  return native<AssistantDocument>('assistant_document', { ...context, document })
+}
+
+/** Replaces the whole document; the Host refuses when `baseRevision` is no longer current. */
+export async function setAssistantDocument(document: AssistantDocumentName, text: string, baseRevision: string, context: ConnectionContext): Promise<AssistantDocument> {
+  return native<AssistantDocument>('set_assistant_document', { ...context, document, text, baseRevision })
+}
+
+/** Words that must all appear; with a time range they may be left out to list that time's conversations. */
+export async function searchAssistant(query: string | undefined, range: { from?: string; to?: string }, cursor: string | undefined, limit: number, context: ConnectionContext): Promise<AssistantSearchResult> {
+  return native<AssistantSearchResult>('assistant_search', { ...context, query: query ?? null, from: range.from ?? null, to: range.to ?? null, cursor: cursor ?? null, limit })
+}
+
+export async function getAssistantContext(sessionId: string, entryId: string, before: number, after: number, context: ConnectionContext): Promise<AssistantContextResult> {
+  return native<AssistantContextResult>('assistant_context', { ...context, sessionId, entryId, before, after })
+}
+
+/** Her memories, newest first. */
+export async function listAssistantMemories(filter: AssistantMemoryFilter, cursor: string | undefined, limit: number, context: ConnectionContext): Promise<AssistantMemoryList> {
+  return native<AssistantMemoryList>('assistant_memories', { ...context, filter, cursor: cursor ?? null, limit })
+}
+
+export async function getAssistantMemory(id: string, context: ConnectionContext): Promise<AssistantMemoryDetail> {
+  return native<AssistantMemoryDetail>('assistant_memory', { ...context, id })
+}
+
+/** The same `operationId` adds it at most once, so a retry after a lost reply names it again. */
+export async function addAssistantMemory(memory: { topic: AssistantMemoryTopic; text: string; resident: boolean }, operationId: string, context: ConnectionContext): Promise<AssistantMemory> {
+  return native<AssistantMemory>('add_assistant_memory', { ...context, ...memory, operationId })
+}
+
+/** The Host refuses with `assistant_memory_changed`, changing nothing, when `revision` is no longer current. */
+export async function updateAssistantMemory(id: string, revision: number, edit: AssistantMemoryEdit, operationId: string, context: ConnectionContext): Promise<AssistantMemory> {
+  return native<AssistantMemory>('update_assistant_memory', { ...context, id, revision, edit, operationId })
+}
+
+/** Her timeline, newest first: one line per stretch of a conversation saying what the two of them were doing; a time range lists the lines overlapping it. */
+export async function listAssistantTimeline(filter: AssistantTimelineFilter, cursor: string | undefined, limit: number, context: ConnectionContext): Promise<AssistantTimelineList> {
+  return native<AssistantTimelineList>('assistant_timeline', { ...context, filter, cursor: cursor ?? null, limit })
+}
+
+/** One line as it is now; read after a change to it was refused as out of date. */
+export async function getAssistantEpisode(id: string, context: ConnectionContext): Promise<AssistantEpisode> {
+  return native<AssistantEpisode>('assistant_episode', { ...context, id })
+}
+
+/** Rewrites a line, forgets it or restores it. The Host refuses with `assistant_episode_changed`, changing nothing, when `revision` is no longer current. */
+export async function updateAssistantEpisode(id: string, revision: number, edit: AssistantEpisodeEdit, operationId: string, context: ConnectionContext): Promise<AssistantEpisode> {
+  return native<AssistantEpisode>('update_assistant_episode', { ...context, id, revision, edit, operationId })
+}
+
+export async function getAssistantSettings(context: ConnectionContext): Promise<AssistantSettings> {
+  return native<AssistantSettings>('assistant_settings', { ...context })
+}
+
+/** `null` stops making memories; those already made stay. */
+export async function setAssistantSettings(extractionModel: ModelRef | null, operationId: string, context: ConnectionContext): Promise<AssistantSettings> {
+  return native<AssistantSettings>('set_assistant_settings', { ...context, extractionModel, operationId })
+}
+
+/** Sets aside what the background made of her conversations and reads them all again with `extractionModel`, which becomes the model that makes her memories. */
+export async function reorganizeAssistant(extractionModel: ModelRef, operationId: string, context: ConnectionContext): Promise<AssistantReorganizeResult> {
+  return native<AssistantReorganizeResult>('reorganize_assistant', { ...context, extractionModel, operationId })
 }
 
 export interface CreateWorkContinuation {
@@ -665,10 +759,13 @@ export async function createWork(
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
   workerConfig?: Record<string, unknown>,
+  /** Open as the assistant (true) or, against a directory that does, not (false); omitted, the Host uses the directory's saved choice. */
+  assistant?: boolean,
 ): Promise<Work> {
   return native<Work>('create_work', {
     ...context, cwd,
     workerConfig: workerConfig ?? null,
+    assistant: assistant ?? null,
     name: name || null,
     targetHostId: targetHostId ?? null,
     operationId: continuation?.operationId ?? null,

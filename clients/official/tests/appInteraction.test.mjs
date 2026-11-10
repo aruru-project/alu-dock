@@ -45,6 +45,12 @@ let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, childModelsNative, saveChildModelsNative
+// Card #295: Main keeps the assistant; the spare Host is an older Main without her.
+let assistantNative = (command, args) => {
+  if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
+  if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 1000, maxEpisodeChars: 300 }
+  throw new Error(`Unexpected assistant call: ${command}`)
+}
 // The fake Host's Work list: extra records it lists, and Works it has retired.
 let extraListed = [], holdWorkCatalog, reopenNative
 const retiredWorks = new Set()
@@ -174,6 +180,7 @@ const invoke = async (command, args = {}) => {
   if (command === 'set_model_visibility') return saveModelVisibilityNative(args)
   if (command === 'child_models') return childModelsNative(args)
   if (command === 'set_child_models') return saveChildModelsNative(args)
+  if (/(^|_)assistant(_|$)/.test(command)) return assistantNative(command, args)
   if (command === 'consume_operation') {
     if (consumeFailures.has(args.operationId)) throw { code: 'io_error', message: 'fixture acknowledgement unavailable' }
     nativeResults.delete(args.operationId); return
@@ -1333,6 +1340,780 @@ try {
     assert.equal(all(find(dialog(), item => item.props['aria-label'] === '显示中的模型'), item => item.type === 'button' && String(item.props.class).includes('model-row')).length, 2)
     await click(dialog(), '关闭')
     console.log('PASS: Host settings child Work models: second section keeps its draft, saves the list on Main, reports after closing, stops at 50')
+  }
+  // Card #295: the assistant's page from the sidebar: what she reads, her persona and notes, her conversations.
+  {
+    const page = () => find(container, item => item.props['aria-labelledby'] === 'assistant-title')
+    const entry = () => find(container, item => item.type === 'button' && item.props['aria-label'] === '助手')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || item.props.title === label || text(item).includes(label)))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(target, `button exists: ${label}`)
+      assert.equal(!!target.props.disabled, false, `${label} is available`)
+      target.props.onClick(); await settle()
+    }
+    const editor = () => find(page(), item => item.type === 'textarea')
+    const type = async value => { const input = editor(); input.value = value; input.props.onInput({ target: input }); await settle() }
+    const typeInto = async (input, value) => { input.value = value; (input.props.onInput ?? input['event:input'])({ target: input }); await settle() }
+    const session = { sessionId: 's1', name: '早上的闲聊', cwd: '/home/alu/.aludock/assistant', workId: 'other', machine: '工作站', startedAt: '2026-11-06T08:00:00.000Z', lastAt: '2026-11-06T08:30:00.000Z' }
+    // Her timeline: one line saying what that morning was about; later parts add a second.
+    const lineOf = (id, text) => ({ id, session, entryId: 'e2', fromAt: '2026-11-06T08:00:00.000Z', toAt: '2026-11-06T08:30:00.000Z', text, state: 'active', author: 'extraction', createdAt: '2026-11-06T08:40:00.000Z', updatedAt: '2026-11-06T08:40:00.000Z', revision: 1 })
+    const timelineLines = [lineOf('7', '早上聊天气和今天的日程。')]
+    // A held reply lands when the test lets it go; while pages are tested, the timeline gives one line a page.
+    let holdLineChange, holdPage, holdSearch, failLineChange = false, loseLineReply = false, linesPaged = false
+    // Main does a change to a line once per operation; the same operation asked again gets its first answer, a refusal too.
+    const lineAnswers = new Map()
+    const entryAt = (entryId, kind, text, extra = {}) => ({ entryId, at: '2026-11-06T08:05:00.000Z', kind, text, ...extra })
+    let persona = { document: 'persona', text: '她说话简短。', revision: 'p1' }
+    let notes = { document: 'notes', text: '早上先说天气。', revision: 'n1' }
+    const fallback = assistantNative
+    assistantNative = async (command, args) => {
+      if (args.connectionId === 'spare' || command === 'assistant_info') return fallback(command, args)
+      if (command === 'assistant_preview') return { text: `${persona.text}\n${notes.text}`, loadedAt: '2026-11-07T09:00:00.000Z' }
+      if (command === 'assistant_document') return structuredClone(args.document === 'persona' ? persona : notes)
+      if (command === 'set_assistant_document' && args.document === 'notes') {
+        // The save lands, but its reply is lost on the way back.
+        notes = { document: 'notes', text: args.text, revision: 'n2' }
+        throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed' }
+      }
+      if (command === 'set_assistant_document') {
+        if (args.baseRevision !== persona.revision) throw { code: 'assistant_document_changed', message: 'The document changed since it was read.' }
+        persona = { document: 'persona', text: args.text, revision: `${persona.revision}+` }
+        return structuredClone(persona)
+      }
+      if (command === 'assistant_timeline') {
+        if (args.filter.query) return { episodes: [] }
+        const matching = timelineLines.filter(item => item.state === (args.filter.state ?? 'active'))
+        if (!linesPaged) return { episodes: structuredClone(matching) }
+        const start = Number(args.cursor ?? 0)
+        const answer = { episodes: structuredClone(matching.slice(start, start + 1)), ...(start + 1 < matching.length ? { nextCursor: String(start + 1) } : {}) }
+        return args.cursor && holdPage ? new Promise(resolve => holdPage(() => resolve(answer))) : answer
+      }
+      if (command === 'assistant_episode') return structuredClone(timelineLines.find(item => item.id === args.id))
+      if (command === 'update_assistant_episode') {
+        const change = () => {
+          let first = lineAnswers.get(args.operationId)
+          if (!first) {
+            try {
+              if (failLineChange) throw { code: 'assistant_unavailable', message: 'The assistant service is not running.' }
+              const found = timelineLines.find(item => item.id === args.id)
+              if (args.revision !== found.revision) throw { code: 'assistant_episode_changed', message: 'The line changed since it was read.' }
+              Object.assign(found, args.edit, { author: 'owner', revision: found.revision + 1 })
+              first = { line: structuredClone(found) }
+            } catch (error) { first = { error } }
+            lineAnswers.set(args.operationId, first)
+            if (loseLineReply) { loseLineReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
+          }
+          if (first.error) throw first.error
+          return structuredClone(first.line)
+        }
+        return holdLineChange ? new Promise((resolve, reject) => holdLineChange(() => { try { resolve(change()) } catch (error) { reject(error) } })) : change()
+      }
+      if (command === 'assistant_search') {
+        const answer = args.cursor
+          ? { hits: [{ session: { ...session, sessionId: 's0', workId: 'retired', name: undefined }, entryId: 'old', at: '2026-11-01T08:00:00.000Z', kind: 'user', snippet: '上周的天气' }] }
+          : { hits: [{ session, entryId: 'e3', at: '2026-11-06T08:05:00.000Z', kind: 'assistant', snippet: '…今天上午有雨…' }], nextCursor: 'c2' }
+        if (args.cursor) return holdPage ? new Promise(resolve => holdPage(() => resolve(answer))) : answer
+        return holdSearch ? new Promise(resolve => holdSearch(() => resolve(answer))) : answer
+      }
+      // Reading back asks for nothing after the entry it starts from.
+      if (command === 'assistant_context') return args.after === 0
+        ? { session, entries: [entryAt('e0', 'user', '早'), entryAt('e1', 'assistant', '早上好')], hasBefore: false, hasAfter: true }
+        : { session, entries: [entryAt('e1', 'assistant', '早上好'), entryAt('e2', 'user', '今天天气怎么样？'), entryAt('e3', 'assistant', '今天上午有雨。', { toolCalls: [{ name: 'bash', arguments: '{"command":"weather"}' }] }), entryAt('e4', 'tool_result', '小雨', { toolName: 'bash', truncated: true })], hasBefore: true, hasAfter: true }
+      throw new Error(`Unexpected assistant call: ${command}`)
+    }
+    // A Work opened as the assistant carries a small mark in the list and the top bar.
+    extraListed = [{ ...otherWork, id: 'helper', displayName: 'Helper Work', assistant: true }]
+    await app.refreshWorksQuietly(); await settle()
+    const helperRow = find(container, item => String(item.props.class ?? '').includes('alu-instance-row') && text(item).includes('Helper Work'))
+    assert.ok(find(helperRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag') && text(item) === '助手'), 'her Work is marked in the list')
+    const plainRow = all(container, item => String(item.props.class ?? '').split(' ').includes('alu-instance-row')).find(row => row !== helperRow)
+    assertSameReference(find(plainRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag')), undefined, 'other Works carry no mark')
+    const original = JSON.parse(JSON.stringify(app.selectedWork))
+    app.applyWorkSnapshot({ ...original, assistant: true }); await settle()
+    assert.ok(find(container, item => String(item.props.class ?? '').includes('alu-nav-assistant-tag')), 'and in the top bar')
+    app.applyWorkSnapshot(original); extraListed = []; await app.refreshWorksQuietly(); await settle()
+
+    // An older Main has no assistant, so there is no entry; Main with her has one.
+    const previousCatalogFailure = failCatalog, originalContext = { ...context }
+    failCatalog = false
+    await app.switchHost('spare'); await settle()
+    assertSameReference(entry(), undefined, 'a Main without the assistant shows no entry')
+    await app.switchHost('host'); await settle(); app.selectWork('work'); await settle()
+    assert.ok(entry(), 'Main with the assistant has her entry in the sidebar')
+    await click(container, '助手')
+    assert.ok(page(), 'the entry opens her page')
+    assert.ok(text(page()).includes('她说话简短。') && text(page()).includes('生成于'), 'it starts with the whole text a new session of hers reads')
+
+    // Persona: an unsaved draft survives switching sections and closing the page.
+    await click(page(), '人设')
+    assert.equal(editor().value, '她说话简短。')
+    // (#295 review) Past Main's size limit the save button stayed live and the save was refused. Now the
+    // document is not sent, and the page says how short it must get.
+    await type('字'.repeat(90000))
+    assert.equal(button(page(), '保存').props.disabled, true, 'a document over the limit cannot be saved')
+    assert.ok(text(page()).includes('请删到 256 KB 以内'), 'the page says how short it must get')
+    await type('她说话简短，先给结论。')
+    assert.ok(text(page()).includes('有改动还没有保存'))
+    await click(page(), '手写设定')
+    assert.equal(editor().value, '早上先说天气。')
+    await click(page(), '人设')
+    assert.equal(editor().value, '她说话简短，先给结论。', 'switching sections keeps the draft')
+    await click(page(), '关闭')
+    assertSameReference(page(), undefined, 'closing asks nothing: the draft is kept')
+    assert.ok(text(entry()).includes('有改动还没有保存'), 'the sidebar says a draft is waiting')
+    await click(container, '助手')
+    assert.equal(editor().value, '她说话简短，先给结论。', 'reopening shows the draft')
+
+    // Saved elsewhere meanwhile: this save is refused, the draft stays, and the user chooses with the newer version in view.
+    persona = { document: 'persona', text: '她说话简短。会用敬语。', revision: 'p2' }
+    await click(page(), '保存')
+    const firstSave = calls.filter(call => call.command === 'set_assistant_document').at(-1).args
+    assert.deepEqual([firstSave.document, firstSave.text, firstSave.baseRevision], ['persona', '她说话简短，先给结论。', 'p1'], 'a save names the version it was edited from')
+    assert.ok(text(page()).includes('在别处被改过') && text(page()).includes('草稿还在'), text(page()))
+    assert.equal(editor().value, '她说话简短，先给结论。')
+    await click(page(), '读取最新内容')
+    assert.ok(text(page()).includes('她说话简短。会用敬语。'), 'the version saved elsewhere is shown')
+    assert.equal(button(page(), '保存').props.disabled, true, 'saving waits for the user to choose between the two')
+    await click(page(), '保留我的草稿')
+    await click(page(), '保存')
+    assert.equal(calls.filter(call => call.command === 'set_assistant_document').at(-1).args.baseRevision, 'p2', 'the user\'s choice saves over the newer version')
+    assert.ok(text(page()).includes('已保存'))
+    assert.equal(persona.text, '她说话简短，先给结论。')
+    assert.equal(text(entry()).includes('有改动还没有保存'), false)
+    // A save whose reply is lost is told once; reading the current version settles whether it went through.
+    await click(page(), '手写设定')
+    await type('早上先说天气，再说日程。')
+    await click(page(), '保存')
+    assert.ok(text(page()).includes('没收到保存结果') && text(page()).includes('草稿还在'))
+    await click(page(), '读取最新内容')
+    assert.ok(text(page()).includes('和你的草稿一样'), 'the lost save did go through, and the page says so')
+    assert.equal(button(page(), '保存').props.disabled, true, 'nothing is left to save')
+
+    // Searching her conversations, reading around a hit, and opening the Work it happened in.
+    await click(page(), '搜索对话')
+    const query = find(page(), item => item.props['aria-label'] === '要找的词')
+    query.value = '天气'; query['event:input']({ target: query }); await settle()
+    find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const search = calls.filter(call => call.command === 'assistant_search').at(-1).args
+    assert.deepEqual([search.query, search.from, search.to, search.cursor], ['天气', null, null, null])
+    const results = () => find(page(), item => item.props['aria-label'] === '搜索结果')
+    assert.ok(text(results()).includes('今天上午有雨') && text(results()).includes('早上的闲聊') && text(results()).includes('工作站'), 'a hit shows where it happened and the text around it')
+    await click(page(), '更多结果')
+    assert.equal(calls.filter(call => call.command === 'assistant_search').at(-1).args.cursor, 'c2')
+    assert.ok(text(results()).includes('上周的天气'))
+    // A time range alone lists that time's conversations ("昨天聊了什么").
+    query.value = ''; query['event:input']({ target: query })
+    const from = find(page(), item => item.props['aria-label'] === '从哪天开始')
+    from.value = '2026-11-06'; from['event:input']({ target: from }); await settle()
+    find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const byDay = calls.filter(call => call.command === 'assistant_search').at(-1).args
+    assert.equal(byDay.query, null, 'no words are needed with a day')
+    assert.ok(byDay.from && byDay.to === null, 'the range starts at that day')
+    // Card #295: that time's timeline comes first, saying what the two of them were doing; a line can be rewritten and forgotten here.
+    const byDayTimeline = calls.filter(call => call.command === 'assistant_timeline').at(-1).args
+    assert.deepEqual([byDayTimeline.filter.from, byDayTimeline.filter.to, byDayTimeline.filter.query, byDayTimeline.cursor], [byDay.from, undefined, undefined, null], 'the timeline is asked for the same time')
+    const timeline = () => find(page(), item => item.props['aria-label'] === '时间线')
+    const withClass = name => item => String(item.props.class ?? '').split(' ').includes(name)
+    const rows = () => all(timeline(), withClass('assistant-timeline-line'))
+    assert.ok(text(timeline()).includes('早上聊天气和今天的日程。') && text(timeline()).includes('早上的闲聊'), 'the day\'s timeline shows above the conversations')
+    await click(timeline(), '改写')
+    await typeInto(find(timeline(), item => item.type === 'textarea'), '早上聊天气，提醒十点的评审。')
+    await click(timeline(), '保存')
+    const rewrite = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
+    assert.deepEqual([rewrite.id, rewrite.revision, rewrite.edit], ['7', 1, { text: '早上聊天气，提醒十点的评审。' }])
+    assert.ok(text(timeline()).includes('早上聊天气，提醒十点的评审。') && text(timeline()).includes('已改写') && text(timeline()).includes('你改过'), 'the line shows as rewritten')
+    await click(rows()[0], '忘掉')
+    const forget = calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
+    assert.deepEqual([forget.revision, forget.edit], [2, { state: 'forgotten' }], 'forgetting names the revision just read')
+    assert.ok(text(timeline()).includes('已忘掉') && button(timeline(), '恢复'), 'a forgotten line stays until the next search, with its way back')
+    await click(timeline(), '恢复')
+    assert.deepEqual(calls.filter(call => call.command === 'update_assistant_episode').at(-1).args.edit, { state: 'active' })
+    assert.ok(text(timeline()).includes('已恢复'))
+    const submitSearch = async () => { find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle() }
+    const editorOf = row => find(row, item => item.type === 'textarea')
+    const lineChange = () => calls.filter(call => call.command === 'update_assistant_episode').at(-1).args
+    const notices = () => all(page(), withClass('assistant-timeline-notice')).map(text)
+    // Each part below starts from two lines of its own, freshly searched. A Host never hands out an
+    // earlier version of a line under the same number, so each part's lines carry new numbers.
+    let lineSets = 0
+    const twoLines = async () => {
+      lineSets++
+      timelineLines.splice(0, timelineLines.length, lineOf(`${lineSets}7`, '早上聊天气和日程。'), lineOf(`${lineSets}8`, '午饭时聊周末去哪。'))
+      await submitSearch()
+    }
+    // (#295 review) A change still on its way when the owner searches again left every line's buttons
+    // grey for good and never said what became of it. The new results' other lines stay usable, and
+    // the change is told when it lands, done or not: on its line if the new results list it, else
+    // above them.
+    {
+      await twoLines()
+      let letGo
+      holdLineChange = release => { letGo = release }
+      await click(rows()[0], '忘掉')
+      await submitSearch()
+      assert.equal(!!button(rows()[1], '改写').props.disabled, false, 'another line can be changed while that change is on its way')
+      holdLineChange = undefined; letGo(); await settle()
+      assert.ok(text(rows()[0]).includes('已忘掉：不再列出'), 'a change the search overtook is told once it is done')
+      assert.equal(!!button(rows()[0], '恢复'), true, 'and its line shows as it is now')
+      holdLineChange = release => { letGo = release }
+      await click(rows()[0], '恢复')
+      await submitSearch()
+      failLineChange = true; holdLineChange = undefined; letGo(); await settle()
+      failLineChange = false
+      assert.ok(notices().some(said => said.includes('早上聊天气') && said.includes('恢复没有完成')), 'one that did not work is told too')
+    }
+    // (#295 review) Searching again while 「更多结果」 or 「更早的时间线」 was still reading left the button
+    // on 「正在读取…」 for good. The page on its way is dropped and the buttons read again.
+    {
+      linesPaged = true
+      await twoLines()
+      const releases = []
+      holdPage = release => releases.push(release)
+      await click(page(), '更多结果'); await click(timeline(), '更早的时间线')
+      await submitSearch()
+      holdPage = undefined; for (const release of releases) release()
+      await settle()
+      assert.equal(rows().length, 1, 'a page asked for before the new search does not join its results')
+      await click(timeline(), '更早的时间线')
+      assert.equal(rows().length, 2, 'the next page of the new results joins them')
+      await click(page(), '更多结果')
+      assert.ok(text(results()).includes('上周的天气'))
+      linesPaged = false
+    }
+    // (#295 review) A rewrite refused because she changed the line meanwhile told the owner to search
+    // again, which threw the rewrite away. That line alone is read again and shown, what was typed
+    // stays, and it saves from the version now shown.
+    {
+      await twoLines()
+      await click(rows()[1], '改写')
+      await typeInto(editorOf(rows()[1]), '午饭时商量周末去爬山。')
+      Object.assign(timelineLines[1], { text: '午饭时聊周末的安排。', revision: 2, author: 'assistant' })
+      await click(rows()[1], '保存')
+      assert.equal(calls.filter(call => call.command === 'assistant_episode').at(-1)?.args.id, timelineLines[1].id, 'that line is read again')
+      assert.ok(text(rows()[1]).includes('午饭时聊周末的安排。'), 'the line shows as it is now')
+      assert.equal(editorOf(rows()[1])?.value, '午饭时商量周末去爬山。', 'what was typed stays')
+      await click(rows()[1], '保存')
+      assert.deepEqual([lineChange().revision, lineChange().edit], [2, { text: '午饭时商量周末去爬山。' }], 'saving again names the version just read')
+      assert.ok(text(rows()[1]).includes('已改写'))
+    }
+    // (#295 review) Starting to rewrite a second line, or searching again, dropped the rewrite being typed.
+    {
+      await twoLines()
+      await click(rows()[0], '改写')
+      await typeInto(editorOf(rows()[0]), '早上聊天气，写到一半')
+      await click(rows()[1], '改写')
+      assert.equal(editorOf(rows()[0])?.value, '早上聊天气，写到一半', 'the first line keeps what was typed')
+      await submitSearch()
+      assert.equal(editorOf(rows()[0])?.value, '早上聊天气，写到一半', 'searching again keeps it too')
+      await click(rows()[0], '取消'); await click(rows()[1], '取消')
+    }
+    // (#295 review) A forgotten line could only be restored from the results it was forgotten in. The
+    // timeline now lists the forgotten lines of the same words and days, and restores from there.
+    {
+      await twoLines()
+      await click(rows()[0], '忘掉')
+      await submitSearch()
+      assert.equal(rows().length, 1, 'a forgotten line is not among those in use')
+      await click(timeline(), '已忘掉的')
+      const asked = calls.filter(call => call.command === 'assistant_timeline').at(-1).args.filter
+      assert.deepEqual([asked.state, asked.from, asked.query], ['forgotten', byDay.from, undefined], 'the forgotten lines of the same days are asked for')
+      assert.ok(rows().length === 1 && text(rows()[0]).includes('早上聊天气'))
+      await click(rows()[0], '恢复')
+      assert.deepEqual([lineChange().id, lineChange().edit], [timelineLines[0].id, { state: 'active' }])
+      await click(timeline(), '在用的')
+      assert.equal(rows().length, 2, 'the restored line is back among those in use')
+    }
+    // (#295 review 2) A rewrite sent from this Host, the Host switched away and back, the rewrite typed on:
+    // the late answer of that save threw away what was typed since, and said nothing. The save stays
+    // shown as on its way on its own Host, clears only the text it was sent with, and is told.
+    {
+      await twoLines()
+      await click(rows()[0], '改写')
+      await typeInto(editorOf(rows()[0]), '早上聊天气，提醒带伞。')
+      let letGo
+      holdLineChange = release => { letGo = release }
+      await click(rows()[0], '保存')
+      holdLineChange = undefined
+      await app.switchHost('spare'); await settle()
+      await app.switchHost('host'); await settle(); app.selectWork('work'); await settle()
+      if (!page()) await click(container, '助手')
+      await submitSearch()
+      await typeInto(editorOf(rows()[0]), '早上聊天气，提醒带伞和评审。')
+      assert.equal(button(rows()[0], '正在保存…')?.props.disabled, true, 'back on its Host the save still shows as on its way')
+      letGo(); await settle()
+      assert.equal(editorOf(rows()[0])?.value, '早上聊天气，提醒带伞和评审。', 'what was typed after the save was sent stays')
+      assert.ok(text(rows()[0]).includes('早上聊天气，提醒带伞。') && text(rows()[0]).includes('已改写'), 'the line shows what was saved, and the save is told')
+      await click(rows()[0], '取消')
+    }
+    // (#295 review 2) A search whose timeline was already read when a line was rewritten, and whose
+    // results arrived after the save: they put the line's older text back over the one just saved.
+    // (The other order, the search first and the change after, is the part further up.)
+    {
+      await twoLines()
+      let finishSearch
+      holdSearch = release => { finishSearch = release }
+      await submitSearch()
+      holdSearch = undefined
+      await click(rows()[0], '改写')
+      await typeInto(editorOf(rows()[0]), '早上聊天气，定了周末爬山。')
+      await click(rows()[0], '保存')
+      assert.ok(text(rows()[0]).includes('早上聊天气，定了周末爬山。'), 'the saved text shows while the search is still on its way')
+      finishSearch(); await settle()
+      assert.ok(text(rows()[0]).includes('早上聊天气，定了周末爬山。') && !text(rows()[0]).includes('早上聊天气和日程。'), 'results read before the save do not put the older text back')
+    }
+    // (#295 review 2) A save Main refused for the moment and whose answer was lost, then the line read
+    // again by a new search: saving again repeated the old operation and was answered with the first
+    // refusal. The line having been read since, it is a new operation.
+    {
+      await twoLines()
+      await click(rows()[0], '改写')
+      await typeInto(editorOf(rows()[0]), '早上聊天气，约了下午茶。')
+      failLineChange = true; loseLineReply = true
+      await click(rows()[0], '保存')
+      failLineChange = false
+      assert.ok(text(rows()[0]).includes('连接中断，没收到结果'))
+      await submitSearch()
+      await click(rows()[0], '保存')
+      assert.ok(text(rows()[0]).includes('早上聊天气，约了下午茶。') && text(rows()[0]).includes('已改写'), 'the save is made, not answered with the first refusal')
+    }
+    // (#295 review 3) The same search still on its way and the line saved, then the lines switched to
+    // those forgotten and back: the lines read alone had caught up, and the search's own older lines
+    // were taken after all when it was answered.
+    {
+      await twoLines()
+      let finishSearch
+      holdSearch = release => { finishSearch = release }
+      await submitSearch()
+      holdSearch = undefined
+      await click(rows()[0], '改写')
+      await typeInto(editorOf(rows()[0]), '早上聊天气，订了周五的餐厅。')
+      await click(rows()[0], '保存')
+      await click(timeline(), '已忘掉的'); await click(timeline(), '在用的')
+      assert.ok(text(rows()[0]).includes('早上聊天气，订了周五的餐厅。'), 'the lines read again show the saved text')
+      finishSearch(); await settle()
+      assert.ok(text(rows()[0]).includes('早上聊天气，订了周五的餐厅。') && !text(rows()[0]).includes('早上聊天气和日程。'), 'the search answered last does not put the older text back')
+    }
+    // (#295 review 3) A rewrite sent, and before its answer the box typed back to what the line read:
+    // once saved, that is a rewrite of the saved text, yet it was dropped as "nothing typed" when
+    // its line left the list, before or after the answer.
+    {
+      await twoLines()
+      const first = timelineLines[0].text
+      let letGo
+      await click(rows()[0], '改写')
+      await typeInto(editorOf(rows()[0]), '早上聊天气，改了一版。')
+      holdLineChange = release => { letGo = release }
+      await click(rows()[0], '保存')
+      holdLineChange = undefined
+      await typeInto(editorOf(rows()[0]), first)
+      letGo(); await settle()
+      await click(timeline(), '已忘掉的'); await click(timeline(), '在用的')
+      assert.ok(text(rows()[0]).includes('早上聊天气，改了一版。'), 'the line reads as saved')
+      assert.equal(editorOf(rows()[0])?.value, first, 'the rewrite back to the earlier text is still there')
+      await click(rows()[0], '取消')
+    }
+    // The same when the line leaves the list before the save is answered.
+    {
+      await twoLines()
+      const second = timelineLines[1].text
+      let letGo
+      await click(rows()[1], '改写')
+      await typeInto(editorOf(rows()[1]), '午饭时聊周末，改了一版。')
+      holdLineChange = release => { letGo = release }
+      await click(rows()[1], '保存')
+      holdLineChange = undefined
+      await typeInto(editorOf(rows()[1]), second)
+      await click(timeline(), '已忘掉的')
+      letGo(); await settle()
+      await click(timeline(), '在用的')
+      assert.equal(editorOf(rows()[1])?.value, second, 'nor is it dropped when its line leaves the list while the save is on its way')
+      await click(rows()[1], '取消')
+    }
+    // Like a hit, a line leads back to the words it sums up, from the first.
+    await click(timeline(), '看原话')
+    const lineWords = calls.filter(call => call.command === 'assistant_context').at(-1).args
+    assert.deepEqual([lineWords.sessionId, lineWords.entryId], ['s1', 'e2'])
+    await click(page(), '返回结果')
+    query.value = '天气'; query['event:input']({ target: query })
+    from.value = ''; from['event:input']({ target: from }); await settle()
+    find(page(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    await click(page(), '更多结果')
+    await click(results(), '今天上午有雨')
+    const around = calls.filter(call => call.command === 'assistant_context').at(-1).args
+    assert.deepEqual([around.sessionId, around.entryId], ['s1', 'e3'])
+    const reading = () => find(page(), item => item.props['aria-label'] === '对话前后文')
+    assert.ok(text(reading()).includes('今天天气怎么样？') && text(reading()).includes('调用 bash') && text(reading()).includes('只显示前一部分'))
+    await click(reading(), '往前再读')
+    const earlier = calls.filter(call => call.command === 'assistant_context').at(-1).args
+    assert.ok(earlier.entryId === 'e1' && earlier.before > 0 && earlier.after === 0, 'reading back continues from the first entry shown and asks only for earlier ones')
+    const said = all(reading(), item => String(item.props.class ?? '') === 'assistant-entry-text').map(text)
+    assert.deepEqual(said.slice(0, 3), ['早', '早上好', '今天天气怎么样？'], 'the earlier entry joins once at the top, without repeating the edge')
+    assertSameReference(button(reading(), '往前再读'), undefined, 'nothing earlier is left')
+    // Android Back leaves the conversation for the results; her page stays and keeps its Back entry.
+    const pageEntries = historyDepth
+    systemBack(); await settle()
+    assert.equal(!!page(), true, 'Back inside her page keeps it open')
+    assert.equal(!!reading(), false, 'Back leaves the conversation')
+    assert.equal(!!results(), true, 'the results show again')
+    assert.equal(historyDepth, pageEntries)
+    await click(results(), '今天上午有雨')
+    await click(reading(), '打开这个 Work')
+    assertSameReference(page(), undefined)
+    assert.equal(app.selectedWork.id, 'other', 'the conversation\'s Work, still in the list, opens')
+    app.selectWork('work'); await settle()
+    assistantNative = fallback; failCatalog = previousCatalogFailure
+    Object.assign(context, originalContext)
+    app.catalog = { ...app.catalog, selectionGeneration: originalContext.selectionGeneration }
+    await settle()
+    console.log('PASS: assistant: entry only with Main\'s assistant, Work mark, preview, persona draft kept across sections and closing, a document over the limit not sent, refused save keeps the draft and offers the newer version, a lost save reply settled by reading again, search by words or by day with more results, the day\'s timeline rewritten, forgotten and restored, a line change overtaken by a new search still told, more buttons reading again after a new search, a refused rewrite kept beside the line read again, rewrites kept across lines and searches, forgotten lines listed and restored, a save answered after its Host was left and shown again keeps what was typed since, results read before a save do not undo it, a save refused once is made anew after the line was read again, lines switched during a search do not bring the older text back, a rewrite typed back to the earlier text while its save was on its way is kept, context reading back, opening the Work')
+  }
+  // Card #295: her memories from the same page: the newest, by topic and those deleted, where one
+  // was said, changing, deleting and restoring it, writing one, and the model that makes them.
+  {
+    const page = () => find(container, item => item.props['aria-labelledby'] === 'assistant-title')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || text(item).includes(label)))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(target, `button exists: ${label}`)
+      assert.equal(!!target.props.disabled, false, `${label} is available`)
+      target.props.onClick(); await settle()
+    }
+    const labelled = label => find(page(), item => item.props['aria-label'] === label)
+    const type = async (label, value) => { const input = labelled(label); input.value = value; input.props.onInput({ target: input }); await settle() }
+    const sent = command => calls.filter(call => call.command === command).at(-1).args
+    const list = () => text(labelled('记忆列表') ?? element('none'))
+    const rows = () => all(page(), item => item.props.class === 'memory-row-text').map(text)
+    const at = '2026-11-07T10:00:00.000Z'
+    const memoryOf = (id, topic, text, extra = {}) => ({ id, topic, text, resident: false, state: 'active', author: 'extraction', createdAt: at, updatedAt: at, saidAt: at, revision: 1, sources: [], sourceCount: 0, ...extra })
+    const memories = [
+      memoryOf('3', 'preferences', '主人不吃香菜。', { resident: true, sources: [{ sessionId: 's1', entryId: 'e2', at }], sourceCount: 1 }),
+      memoryOf('2', 'events', '主人下周三要去体检。', { author: 'assistant' }),
+      memoryOf('1', 'owner', '主人养了一只猫。', { state: 'forgotten', author: 'owner', revision: 2 }),
+      memoryOf('4', 'events', '主人周三体检。', { state: 'retired', author: 'dreaming', revision: 2, supersededBy: '2' }),
+    ]
+    // Main does a change once per operation; the same operation sent again gets its answer again.
+    const answered = new Map()
+    let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings
+    const fallback = assistantNative, previousModels = modelVisibilityNative
+    assistantNative = async (command, args) => {
+      if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: !model ? { state: 'off', waitingSessions: 1 }
+        : troubled ? { state: 'failed', model, waitingSessions: 1, skippedParts: 3, lastRunAt: at, lastError: '模型服务暂时连不上，稍后会自动再试。', retryAt: '2026-11-07T11:00:00.000Z' }
+          : { state: 'idle', model, waitingSessions: 1 } }
+      if (command === 'assistant_memories') {
+        const matching = memories.filter(item => item.state === (args.filter.state ?? 'active') && (!args.filter.topic || item.topic === args.filter.topic) && (!args.filter.query || item.text.includes(args.filter.query)))
+        if (!memoriesPaged) return { memories: structuredClone(matching) }
+        // While pages are tested, one memory a page; a held page arrives when the test lets it go.
+        const start = Number(args.cursor ?? 0)
+        const answer = { memories: structuredClone(matching.slice(start, start + 1)), ...(start + 1 < matching.length ? { nextCursor: String(start + 1) } : {}) }
+        return args.cursor && holdMemoryPage ? new Promise(resolve => holdMemoryPage(() => resolve(answer))) : answer
+      }
+      if (command === 'assistant_memory') {
+        const found = memories.find(item => item.id === args.id)
+        return { memory: structuredClone(found), history: [{ at, author: found.author, action: 'added', text: found.text }] }
+      }
+      if (command === 'assistant_context') return { session: { sessionId: args.sessionId, name: '午饭闲聊', startedAt: at, lastAt: at }, entries: [{ entryId: 'e2', at, kind: 'user', text: '我不吃香菜哦。' }], hasBefore: false, hasAfter: false }
+      if (command === 'update_assistant_memory' || command === 'add_assistant_memory') {
+        if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
+        let changed
+        if (command === 'add_assistant_memory') {
+          changed = memoryOf(String(memories.length + 1), args.topic, args.text, { resident: args.resident, author: 'owner' })
+          memories.unshift(changed)
+        } else {
+          changed = memories.find(item => item.id === args.id)
+          if (args.revision !== changed.revision) throw { code: 'assistant_memory_changed', message: 'The memory changed since that revision.' }
+          const into = memories.find(item => item.id === changed.supersededBy)
+          if (args.edit.state === 'forgotten' && into?.state === 'active') throw { code: 'assistant_memory_merged', message: `这条记忆已经合并进 #${into.id}（“${into.text}”），只忘掉它的话，那一条里还留着同样的事。这次没有改动。` }
+          Object.assign(changed, args.edit, { author: 'owner', revision: changed.revision + 1 })
+        }
+        answered.set(args.operationId, structuredClone(changed))
+        if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
+        return structuredClone(changed)
+      }
+      if (command === 'assistant_settings') return model ? { extractionModel: model } : {}
+      if (command === 'set_assistant_settings' || command === 'reorganize_assistant') {
+        const done = () => {
+          if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
+          model = args.extractionModel ?? undefined
+          if (command === 'reorganize_assistant') startedOver++
+          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : model ? { extractionModel: model } : {}
+          answered.set(args.operationId, structuredClone(result))
+          if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
+          return result
+        }
+        // Delayed, the request reaches Main when the test lets it go; held, Main does it now and only its answer waits.
+        if (delaySettings) return new Promise((resolve, reject) => delaySettings(() => { try { resolve(done()) } catch (error) { reject(error) } }))
+        const result = done()
+        return holdSettings ? new Promise(resolve => holdSettings(() => resolve(result))) : result
+      }
+      return fallback(command, args)
+    }
+    modelVisibilityNative = async () => ({
+      models: [{ provider: 'openai', id: 'gpt-mini', name: 'GPT mini', reasoning: false }, { provider: 'openai', id: 'gpt-nano', name: 'GPT nano', reasoning: false }, { provider: 'openai', id: 'set-aside', name: 'Set aside', reasoning: false }],
+      total: 3, truncated: false, hidden: [{ provider: 'openai', id: 'set-aside' }],
+    })
+
+    await click(container, '助手')
+    // (#295 review) With no model chosen her page said so only under 「记忆」 and 「设置」, never on the
+    // section it opens on. Any section says it now, one step from the setting.
+    assert.equal(button(page(), '搜索对话').props['aria-current'], 'page', 'the page opens on the section last shown')
+    assert.ok(text(page()).includes('还没选整理记忆的模型'), 'the section it opens on says no model is chosen')
+    await click(page(), '去选模型')
+    assert.equal(button(page(), '设置').props['aria-current'], 'page', 'one step leads to the setting')
+    await click(page(), '记忆')
+    assert.deepEqual(sent('assistant_memories').filter, {}, 'the newest in use come first')
+    assert.ok(list().includes('主人不吃香菜') && list().includes('体检') && !list().includes('猫'), list())
+    assert.ok(list().includes('从对话里记下') && list().includes('她在对话里记下'), 'each says who wrote it')
+    assert.ok(text(page()).includes('还没选整理记忆的模型'), 'without a model the page says nothing is made into memories')
+    // (#295 review) Refreshing while 「更多」 was still reading left it on 「正在读取…」 for good. The page
+    // on its way is dropped and the button reads again.
+    {
+      memoriesPaged = true
+      await click(page(), '刷新记忆')
+      let releasePage
+      holdMemoryPage = release => { releasePage = release }
+      await click(page(), '更多')
+      await click(page(), '刷新记忆')
+      holdMemoryPage = undefined; releasePage(); await settle()
+      assert.equal(rows().length, 1, 'a page asked for before the refresh does not join the refreshed list')
+      await click(page(), '更多')
+      assert.equal(rows().length, 2, 'the next page of the refreshed list joins it')
+      memoriesPaged = false
+      await click(page(), '刷新记忆')
+    }
+    // Finding by words: the list follows them once submitted, and shows everything again when they are cleared.
+    const words = labelled('在记忆里找')
+    words.value = '体检'; words['event:input']({ target: words }); await settle()
+    find(page(), item => item.type === 'form' && item.props.role === 'search').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual(sent('assistant_memories').filter, { query: '体检' })
+    assert.deepEqual(rows(), ['主人下周三要去体检。'])
+    words.value = ''; words['event:input']({ target: words }); await settle()
+    assert.equal(rows().length, 2, 'clearing the words shows the whole list again')
+    await click(page(), '按分类')
+    await click(page(), '喜好和习惯')
+    assert.deepEqual(sent('assistant_memories').filter, { topic: 'preferences' })
+    assert.ok(list().includes('香菜') && !list().includes('体检'))
+
+    // Where it was said, read in the conversation; Android Back returns to the memory.
+    await click(labelled('记忆列表'), '主人不吃香菜')
+    await click(page(), '看原话')
+    assert.deepEqual([sent('assistant_context').sessionId, sent('assistant_context').entryId], ['s1', 'e2'])
+    assert.ok(text(labelled('对话前后文')).includes('我不吃香菜哦') && text(page()).includes('这条记忆：主人不吃香菜。'))
+    systemBack(); await settle()
+    assert.equal(!!page(), true, 'Back inside her page keeps it open')
+    assert.equal(!!labelled('对话前后文'), false)
+    assert.ok(text(labelled('这条记忆')).includes('在哪里说的'), 'Back from where it was said shows the memory')
+
+    // Choosing what it already is keeps the background from changing it; then only her looking
+    // finds it. Each change names the version shown.
+    await click(labelled('什么时候用'), '每次都带上')
+    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [1, { resident: true }])
+    assert.ok(text(page()).includes('已定下：每次都带上') && text(page()).includes('后台整理不会再改'))
+    await click(labelled('什么时候用'), '她查的时候才用')
+    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], ['3', 2, { resident: false }])
+    assert.ok(text(page()).includes('已改成她查的时候才用'))
+    // Changed by her meanwhile: nothing is changed, the page shows it as it is now and keeps the rewrite.
+    await click(page(), '改写')
+    await type('改写这条记忆', '主人不吃香菜和葱。')
+    Object.assign(memories[0], { text: '主人不吃香菜，点外卖要避开。', revision: memories[0].revision + 1, author: 'assistant' })
+    await click(page(), '保存改写')
+    assert.ok(text(page()).includes('刚被改过') && text(page()).includes('点外卖要避开'), text(page()))
+    assert.equal(labelled('改写这条记忆').value, '主人不吃香菜和葱。', 'the rewrite being typed stays')
+    await click(page(), '保存改写')
+    assert.deepEqual([sent('update_assistant_memory').revision, sent('update_assistant_memory').edit], [4, { text: '主人不吃香菜和葱。' }])
+    assert.ok(text(page()).includes('已改写') && text(page()).includes('你改的'))
+    // A deletion whose reply is lost is said once; sending it again is the same operation, done once.
+    loseNextReply = true
+    await click(page(), '删除')
+    const lost = sent('update_assistant_memory').operationId
+    assert.ok(text(page()).includes('连接中断，没收到结果'))
+    await click(page(), '删除')
+    assert.equal(sent('update_assistant_memory').operationId, lost)
+    assert.ok(text(page()).includes('已删除') && !!button(page(), '恢复'), 'the deleted memory can be restored from here')
+    await click(page(), '← 返回列表')
+
+    // Restored from those deleted.
+    await click(page(), '已删除')
+    assert.deepEqual(sent('assistant_memories').filter, { state: 'forgotten' })
+    await click(labelled('记忆列表'), '主人养了一只猫')
+    await click(page(), '恢复')
+    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').edit], ['1', { state: 'active' }])
+    assert.ok(text(page()).includes('已恢复'))
+    // Set aside as no longer true: she stops using it, and it can be restored.
+    await click(page(), '作废')
+    assert.deepEqual([sent('update_assistant_memory').id, sent('update_assistant_memory').edit], ['1', { state: 'retired' }])
+    assert.ok(text(page()).includes('已作废：') && !!button(page(), '恢复'), 'the page says it is set aside and offers the way back')
+    await click(page(), '← 返回列表')
+    // One merged into a memory still in use cannot be deleted alone; the page says which in its own
+    // words (Main's speak of forgetting, the page of deleting), and that one opens from here.
+    await click(page(), '已作废')
+    await click(labelled('记忆列表'), '主人周三体检')
+    await click(page(), '删除')
+    assert.ok(text(page()).includes('合并进 #2') && text(page()).includes('没有删除') && !text(page()).includes('只忘掉它'), text(page()))
+    await click(page(), '去看合并后的那一条')
+    assert.equal(sent('assistant_memory').id, '2')
+    assert.ok(text(page()).includes('主人下周三要去体检。') && text(page()).includes('#2'))
+    systemBack(); await settle()
+    assert.equal(!!page(), true, 'Back inside her page keeps it open')
+    assert.equal(!!labelled('这条记忆'), false)
+    assert.equal(!!labelled('记忆列表'), true, 'Back from a memory shows the list')
+
+    // The owner writes one; the newest heads the list.
+    await click(page(), '最近记住的')
+    await click(page(), '写一条')
+    // Main's limit is told while writing; past it nothing is saved until it is short enough.
+    await type('要她记住的事', '她答应过每周五下班前提醒主人整理这一周做完的工作。')
+    assert.ok(text(labelled('写一条记忆')).includes('超出 5 字') && text(labelled('写一条记忆')).includes('请删到 20 字以内'), text(labelled('写一条记忆')))
+    assert.equal(button(labelled('写一条记忆'), '记下').props.disabled, true)
+    await type('要她记住的事', '她答应过每周五提醒整理工作。')
+    assert.ok(text(labelled('写一条记忆')).includes('14 / 20'))
+    await click(labelled('这条的分类'), '她自己')
+    await click(labelled('这条什么时候用'), '每次都带上')
+    labelled('写一条记忆').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual([sent('add_assistant_memory').topic, sent('add_assistant_memory').text, sent('add_assistant_memory').resident], ['self', '她答应过每周五提醒整理工作。', true])
+    assert.equal(rows()[0], '她答应过每周五提醒整理工作。')
+    assert.ok(text(page()).includes('已记下'))
+
+    // The model that makes memories: Main's models less the hidden ones; choosing one starts it.
+    await click(page(), '设置')
+    await click(page(), '刷新模型列表')
+    assert.ok(text(page()).includes('还没选模型') && text(page()).includes('没在整理'))
+    await click(page(), '整理记忆的模型')
+    const choices = find(page(), item => item.props.role === 'listbox')
+    assert.ok(text(choices).includes('GPT mini') && !text(choices).includes('Set aside'), 'hidden models are not offered')
+    const choose = async name => {
+      if (!find(page(), item => item.props.role === 'listbox')) await click(page(), '整理记忆的模型')
+      await click(find(page(), item => item.props.role === 'listbox'), name)
+    }
+    // (#295 review 2) A choice whose reply was lost left the list on the earlier choice; picking that one
+    // again, to take the choice back, sent nothing, and Main went on with the model it had saved.
+    {
+      loseNextReply = true
+      await choose('GPT mini')
+      assert.ok(text(page()).includes('连接中断，没收到结果'))
+      await choose('不整理')
+      assert.equal(model, undefined, 'Main stopped making memories')
+      assert.ok(text(page()).includes('已停止整理'))
+    }
+    // (#295 review) A choice whose reply was lost (Main did save it), then another that was answered:
+    // choosing the first again repeated the old operation, so Main kept the other model while the
+    // page said the first was saved. It is a new operation now, and Main has what the page says.
+    {
+      loseNextReply = true
+      await choose('GPT mini')
+      assert.ok(text(page()).includes('连接中断，没收到结果'))
+      await choose('GPT nano')
+      await choose('GPT mini')
+      assert.ok(text(page()).includes('已保存'))
+      assert.deepEqual(model, { provider: 'openai', id: 'gpt-mini' }, 'Main has the model the page says is saved')
+    }
+    // (#295 review) While a choice is being saved the page says so in words, not only by greying the list.
+    {
+      let finishSave
+      holdSettings = release => { finishSave = release }
+      await choose('GPT nano')
+      assert.ok(text(page()).includes('正在保存'), 'saving is said while it is on its way')
+      holdSettings = undefined; finishSave(); await settle()
+    }
+    await choose('GPT mini')
+    assert.deepEqual(sent('set_assistant_settings').extractionModel, { provider: 'openai', id: 'gpt-mini' })
+    assert.ok(text(page()).includes('已保存') && text(page()).includes('1 段对话'), text(page()))
+    // How making memories goes: the parts it could not read, why the last try failed and when it tries again.
+    troubled = true
+    await click(page(), '刷新')
+    const status = () => text(find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status'))
+    assert.ok(status().includes('没读成') && status().includes('3 段') && status().includes('等着自动再试') && status().includes('下次重试') && status().includes('模型服务暂时连不上'), status())
+    troubled = false
+    await click(page(), '刷新')
+    // Starting over with it says first what it sets aside and what stays, then reads everything again.
+    await click(page(), '用这个模型从头整理')
+    assert.ok(text(page()).includes('「GPT mini」') && text(page()).includes('挪进「已作废」') && text(page()).includes('都留着'), text(page()))
+    assert.equal(calls.some(call => call.command === 'reorganize_assistant'), false, 'nothing starts over before the owner confirms')
+    await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理')
+    assert.deepEqual(sent('reorganize_assistant').extractionModel, { provider: 'openai', id: 'gpt-mini' })
+    assert.ok(text(page()).includes('已开始从头整理') && text(page()).includes('2 条记忆') && text(page()).includes('3 行时间线'), text(page()))
+    const startOver = async () => { await click(page(), '用这个模型从头整理'); await click(find(page(), item => item.props.role === 'alertdialog'), '从头整理') }
+    // (#295 review 2) Starting over still on its way when another model was chosen and saved: the late
+    // answer of the start-over put its own model back in the list, though Main had the one chosen after.
+    {
+      let finishStartOver
+      holdSettings = release => { finishStartOver = release }
+      await startOver()
+      holdSettings = undefined
+      await choose('GPT nano')
+      assert.ok(text(page()).includes('已保存'))
+      finishStartOver(); await settle()
+      assert.ok(text(page()).includes('已开始从头整理'), 'the start-over is still told')
+      assert.deepEqual(model, { provider: 'openai', id: 'gpt-nano' })
+      assert.ok(text(button(page(), '整理记忆的模型')).includes('GPT nano'), 'the list shows the model Main has')
+      await choose('GPT mini')
+      // The other way round on Main, the choice first and then the start-over with the earlier model:
+      // which came last cannot be told from the answers, so the settings are read again, and the
+      // page says Main holds another model than the one it reported saved.
+      let reachMain
+      delaySettings = release => { reachMain = release }
+      await startOver()
+      delaySettings = undefined
+      await choose('GPT nano')
+      reachMain(); await settle()
+      assert.ok(text(button(page(), '整理记忆的模型')).includes('GPT mini') && text(page()).includes('和刚才保存的不一样'), 'the list follows Main, and the page says the saved choice did not last')
+    }
+    // (#295 review) Starting over whose reply was lost, asked for again after her settings were read
+    // anew (the page was opened again): the old operation was repeated, so Main did not start over
+    // while the page said it had. It is a new operation now.
+    {
+      loseNextReply = true
+      await startOver()
+      assert.ok(text(page()).includes('连接中断，没收到结果'))
+      const before = startedOver
+      await click(page(), '关闭'); await click(container, '助手')
+      await startOver()
+      assert.ok(text(page()).includes('已开始从头整理'))
+      assert.equal(startedOver, before + 1, 'Main started over when the page says so')
+    }
+    // (#295 review 3) A choice or a start-over not yet answered, the Host left and shown again, and a
+    // second one begun: the late answer of the first ended the second's "on its way" on the page,
+    // freeing the list and the button while the second was still being done.
+    {
+      const catalogFailed = failCatalog, contextBefore = { ...context }
+      failCatalog = false
+      const leaveAndReturn = async () => {
+        await app.switchHost('spare'); await settle()
+        await app.switchHost('host'); await settle(); app.selectWork('work'); await settle()
+        if (!page()) await click(container, '助手')
+      }
+      const held = []
+      holdSettings = release => held.push(release)
+      {
+        await choose('GPT nano')
+        await leaveAndReturn()
+        await choose('GPT mini')
+        held.shift()(); await settle()
+        assert.ok(text(page()).includes('正在保存'), 'the second choice still shows as being saved')
+        held.shift()(); await settle()
+        assert.ok(text(page()).includes('已保存') && text(button(page(), '整理记忆的模型')).includes('GPT mini'))
+      }
+      {
+        await startOver()
+        await leaveAndReturn()
+        await startOver()
+        held.shift()(); await settle()
+        assert.equal(button(page(), '正在开始…')?.props.disabled, true, 'the second start-over still shows as on its way')
+        held.shift()(); await settle()
+        assert.ok(text(page()).includes('已开始从头整理'))
+      }
+      holdSettings = undefined
+      failCatalog = catalogFailed
+      Object.assign(context, contextBefore)
+      app.catalog = { ...app.catalog, selectionGeneration: contextBefore.selectionGeneration }
+      await settle()
+    }
+    await click(page(), '整理记忆的模型')
+    await click(find(page(), item => item.props.role === 'listbox'), '不整理')
+    assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
+    // At the top of a section, Back closes her page.
+    systemBack(); await settle()
+    assertSameReference(page(), undefined, 'Back at the top closes her page')
+    assistantNative = fallback; modelVisibilityNative = previousModels
+    console.log('PASS: assistant memories: no model said on whichever section opens, newest and by topic, 「更多」 reading again after a refresh, found by words, where one was said, kept as chosen and then for her looking, a rewrite refused after her change keeps the draft, a lost deletion sent again as the same operation, restored from those deleted, set aside, one merged elsewhere refused in the page\'s words with a way to the other, written by the owner within Main\'s length, the model chosen from Main\'s with saving said, the choice shown picked again after a lost reply, a choice and a start-over after a lost reply made anew, a start-over answered after a later choice not putting its model back, a late answer not ending a later choice or start-over still on its way, what could not be read and when it is tried again, started over with after a confirmation, and cleared, Back one level at a time')
   }
   // Normal command/model dialogs cover an Extension answer; they must not
   // destroy it, and dismissal gives that answer priority over the old trigger.

@@ -122,8 +122,11 @@ export class SystemService {
     const { candidates, warnings } = await this.sources(cwd);
     if (initializationWarning) warnings.unshift(initializationWarning);
     let defaultSelection: SystemCandidate | undefined;
+    let defaultAssistant = false;
     try {
-      const id = await this.savedDefaultId(cwd);
+      const saved = await this.savedDefault(cwd);
+      defaultAssistant = saved?.assistant === true;
+      const id = saved?.id;
       if (id !== undefined) {
         defaultSelection = candidates.find((item) => item.id === id && !item.warning);
         if (!defaultSelection) throw this.defaultUnavailable();
@@ -131,26 +134,51 @@ export class SystemService {
     } catch {
       warnings.push("本目录保存的 system 无法使用。请重新选择；需要时再明确保存目录默认。");
     }
-    return this.page(cwd, candidates, warnings, cursor, limit, defaultSelection);
+    return this.page(cwd, candidates, warnings, cursor, limit, defaultSelection, defaultAssistant);
   }
 
-  /** Creation defaults belong to the owning Host, regardless of the requesting Client. */
-  async resolveWorkerConfig(cwd: string, provided?: JsonObject): Promise<JsonObject | undefined> {
-    if (this.provider.hasExplicitSelection(provided)) return provided;
+  /**
+   * Creation defaults belong to the owning Host, regardless of the requesting Client: the saved
+   * system unless one was chosen, and opening as the assistant unless the creator said either way.
+   */
+  async resolveCreation(cwd: string, provided?: JsonObject, assistant?: boolean): Promise<{ workerConfig?: JsonObject; assistant: boolean }> {
+    const explicitSystem = this.provider.hasExplicitSelection(provided);
+    if (explicitSystem && assistant !== undefined) return { ...(provided === undefined ? {} : { workerConfig: provided }), assistant };
     cwd = await this.directory(cwd);
-    const id = await this.savedDefaultId(cwd);
-    if (id === undefined) return provided;
+    // A system chosen on the creation page still works over a broken default, which that page showed
+    // as a warning with the assistant switch off.
+    const saved = explicitSystem ? await this.savedDefault(cwd).catch(() => undefined) : await this.savedDefault(cwd);
+    const resolvedAssistant = assistant ?? saved?.assistant === true;
+    if (explicitSystem || saved?.id === undefined) return { ...(provided === undefined ? {} : { workerConfig: provided }), assistant: resolvedAssistant };
     try {
-      const selection = await this.selected(cwd, id);
-      return this.provider.workerConfig(selection, provided);
+      const selection = await this.selected(cwd, saved.id);
+      return { workerConfig: this.provider.workerConfig(selection, provided), assistant: resolvedAssistant };
     } catch { throw this.defaultUnavailable(); }
+  }
+
+  /**
+   * The assistant's own working directory opens new Works as her unless its saved default says
+   * otherwise. A default already there is left as it is.
+   */
+  async prepareAssistantWorkspace(path: string): Promise<void> {
+    const file = join(path, ".aludock", "system-default.json");
+    await mkdir(dirname(file), { recursive: true });
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      const handle = await open(temporary, "wx", 0o600);
+      try { await handle.writeFile(JSON.stringify({ assistant: true }) + "\n"); await handle.sync(); }
+      finally { await handle.close(); }
+      try { await link(temporary, file); }
+      catch (error) { if (errorCode(error) !== "EEXIST") throw error; }
+    } finally { await rm(temporary, { force: true }); }
   }
 
   private defaultUnavailable(): ProtocolValidationError {
     return new ProtocolValidationError("system_default_unavailable", "无法使用本目录保存的 system 默认。请检查 .aludock/system-default.json 及其所选文件，或明确选择其他 system 后重试。");
   }
 
-  private async savedDefaultId(cwd: string): Promise<string | undefined> {
+  /** `{id?, assistant?}`: the system chosen for this directory and whether new Works open as the assistant. */
+  private async savedDefault(cwd: string): Promise<{ id?: string; assistant?: true } | undefined> {
     const path = join(cwd, ".aludock", "system-default.json");
     try { await lstat(path); }
     catch (error) {
@@ -159,12 +187,17 @@ export class SystemService {
     }
     try {
       const saved: unknown = JSON.parse(await readAll(path));
-      if (saved === null || typeof saved !== "object" || Object.keys(saved).length !== 1 || typeof (saved as { id?: unknown }).id !== "string") throw new Error();
-      return (saved as { id: string }).id;
+      if (saved === null || typeof saved !== "object" || Array.isArray(saved)) throw new Error();
+      const value = saved as { id?: unknown; assistant?: unknown };
+      const keys = Object.keys(value);
+      if (keys.length === 0 || keys.some((key) => key !== "id" && key !== "assistant")) throw new Error();
+      if (value.id !== undefined && typeof value.id !== "string") throw new Error();
+      if (value.assistant !== undefined && value.assistant !== true) throw new Error();
+      return { ...(value.id === undefined ? {} : { id: value.id }), ...(value.assistant === true ? { assistant: true as const } : {}) };
     } catch { throw this.defaultUnavailable(); }
   }
 
-  private page(cwd: string, candidates: SystemCandidate[], warnings: string[], cursor: SystemCatalogCursor | undefined, limit: number, defaultSelection?: SystemCandidate): SystemCatalogResult {
+  private page(cwd: string, candidates: SystemCandidate[], warnings: string[], cursor: SystemCatalogCursor | undefined, limit: number, defaultSelection?: SystemCandidate, defaultAssistant = false): SystemCatalogResult {
     const revision = createHash("sha256").update(JSON.stringify(candidates)).digest("hex");
     const offset = cursor?.offset ?? 0;
     if (cursor && (cursor.revision !== revision || offset >= candidates.length)) throw new ProtocolValidationError("resource_unavailable", "system 列表已变化。请重新打开选择列表。");
@@ -179,6 +212,7 @@ export class SystemService {
     return { cwd, candidates: page, total: candidates.length, revision, warnings,
       ...(defaultSelection ? { defaultSelection } : {}),
       ...(next < candidates.length ? { nextCursor: { revision, offset: next } } : {}),
+      ...(defaultAssistant ? { defaultAssistant: true as const } : {}),
     };
   }
 
@@ -201,15 +235,20 @@ export class SystemService {
     return readResourceContent(await this.contentPath(cwd, id), offset, revision);
   }
 
-  async setDefault(cwd: string, id: string): Promise<SystemDefaultSetResult> {
+  /**
+   * Saves the directory's system. `assistant` says whether new Works open as the assistant; without
+   * it the directory keeps what it had, so a client that does not show the switch cannot clear it.
+   */
+  async setDefault(cwd: string, id: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
     cwd = await this.directory(cwd);
     const selection = await this.selected(cwd, id);
+    const keepsAssistant = assistant ?? (await this.savedDefault(cwd).catch(() => undefined))?.assistant === true;
     const path = join(cwd, ".aludock", "system-default.json");
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       await mkdir(dirname(path), { recursive: true });
       const handle = await open(temporary, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify({ id }) + "\n"); await handle.sync(); }
+      try { await handle.writeFile(JSON.stringify(keepsAssistant ? { id, assistant: true } : { id }) + "\n"); await handle.sync(); }
       finally { await handle.close(); }
       await rename(temporary, path);
     } catch { throw new ProtocolValidationError("system_default_unavailable", "无法保存本目录的 system 选择。请检查 .aludock 的写入权限后重试；本次仍可单独选择。"); }

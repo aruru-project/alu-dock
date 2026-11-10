@@ -1,4 +1,5 @@
 mod actions;
+mod assistant;
 mod attachment_jobs;
 mod attachments;
 mod capabilities;
@@ -145,6 +146,16 @@ pub use systems::{
     SystemSourceKind,
 };
 
+pub use assistant::{
+    AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantEntry,
+    AssistantEntryKind, AssistantEntryRef, AssistantEpisode, AssistantEpisodeEdit,
+    AssistantEpisodeState, AssistantExtractionState, AssistantExtractionStatus, AssistantInfo,
+    AssistantMemory, AssistantMemoryAction, AssistantMemoryAuthor, AssistantMemoryChange,
+    AssistantMemoryDetail, AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList,
+    AssistantMemorySource, AssistantMemoryState, AssistantMemoryTopic, AssistantPreview,
+    AssistantReorganizeResult, AssistantSearchHit, AssistantSearchResult, AssistantSessionInfo,
+    AssistantSettings, AssistantTimelineFilter, AssistantTimelineList, AssistantToolCall,
+};
 pub use child_models::{ChildModelsResult, ChildModelsSetResult};
 pub use model_visibility::{ModelRef, ModelVisibilityResult, ModelVisibilitySetResult};
 

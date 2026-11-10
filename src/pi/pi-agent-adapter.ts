@@ -40,6 +40,7 @@ import {
   type DockAttachmentCallPort,
 } from "./dock-attachments-extension.js";
 import { appendDockAttachmentContext, extractDockAttachmentContext } from "./dock-attachment-context.js";
+import { assistantExtension, type AssistantCallPort } from "./assistant-extension.js";
 import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import { hardenWindowsPrivatePath, noFollowFlag } from "../platform/private-state.js";
 
@@ -240,6 +241,8 @@ export interface CreatePiAgentAdapterOptions {
   sessionManager?: SessionManager;
   dockToolsBridge?: DockToolsBridge;
   dockAttachmentPort?: DockAttachmentCallPort;
+  /** Given only to a Work opened as the personal assistant (card #295). */
+  assistantPort?: AssistantCallPort;
 }
 
 interface BindingToken { active: boolean }
@@ -3645,6 +3648,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
+          ...(options.assistantPort === undefined ? [] : [{ name: "alu-dock-assistant", factory: assistantExtension(options.assistantPort, attachmentContextKey) }]),
           ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
         extensionsOverride: ownCanonicalShowImage,

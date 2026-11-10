@@ -82,7 +82,8 @@ export type DockToolsRequest =
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
-  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }
+  /** `assistant` opens it as the personal assistant; without it the Work is not, whatever its directory's default says. */
+  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
   /** A child Work omits target: it can only message its parent, and `done` says whether this is its final result. */
   | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
   /** A child Work's turn ended without its last call reaching its parent. Dock tells the parent if a result is still owed. */
@@ -162,6 +163,11 @@ export interface DockToolsMutationPort {
 export function dockMessageText(sourceDisplayName: string, message: string): string {
   const safeName = sourceDisplayName.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim() || "another Dock instance";
   return `[Agent message from ${JSON.stringify(safeName)}]\n${message}`;
+}
+
+/** Whether a Work's input is another Work's message that dockMessageText wrapped, not its user speaking. */
+export function isDockMessageText(text: string): boolean {
+  return /^\[Agent message from "(?:[^"\\\n]|\\.)*"\]\n/u.test(text);
 }
 
 /**

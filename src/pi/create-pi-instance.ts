@@ -21,6 +21,7 @@ import { resolvePiReopenTarget } from "./pi-session-target.js";
 import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerProcessTimeouts } from "./worker-process.js";
 import type { ModelHostPort } from "../model-service/service-process.js";
+import type { AssistantHostPort } from "../core/assistant.js";
 
 export interface CreatePiInstanceOptions {
   child?: DockChildStart;
@@ -54,6 +55,10 @@ export interface CreatePiInstanceOptions {
   workerIncidentRecorder?: WorkerIncidentRecorder;
   /** Main's model service. Without it the Worker uses this machine's own Pi model configuration. */
   modelHostPort?: ModelHostPort;
+  /** Opened as the personal assistant (card #295); needs `assistantHostPort`. */
+  assistant?: true;
+  /** How this Host reaches the assistant service on Main; only an assistant Work is given it. */
+  assistantHostPort?: AssistantHostPort;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
@@ -66,6 +71,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const dockToolsHostPort = options.dockToolsHostPort ?? unavailableDockToolsHostPort;
   const attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
   const dockToolsEnabled = options.dockToolsEnabled ?? options.dockToolsHostPort !== undefined;
+  if (options.assistant && !options.assistantHostPort) throw new Error("This Host cannot reach the assistant, so the Work cannot be opened as her");
   const created = await AgentWorkerConnection.create({
     identity: {
       hostEpoch,
@@ -92,6 +98,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     attachmentHostPort,
     initialDockToolsEnabled: dockToolsEnabled,
     ...(options.modelHostPort === undefined ? {} : { modelHostPort: options.modelHostPort }),
+    ...(options.assistant ? { assistantHostPort: options.assistantHostPort } : {}),
     ...(options.name === undefined ? {} : { workName: options.name }),
     ...(options.workerIncidentRecorder === undefined ? {} : { workerIncidentRecorder: options.workerIncidentRecorder }),
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
@@ -132,6 +139,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       initialHistory,
       dockToolsEnabled,
       ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
+      ...(options.assistant ? { assistant: true as const } : {}),
     });
     await runtime.control({ type: "activate" });
     instance.synchronizeModelState();

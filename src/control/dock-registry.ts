@@ -27,6 +27,7 @@ import { InstanceBusyError, InstanceNotActiveError, type InstanceLifecycle, type
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
+import { ProtocolValidationError } from "./protocol.js";
 import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
 import { WorkMessages } from "./work-messages.js";
 import {
@@ -59,6 +60,8 @@ export interface InstanceFactoryInput {
   dockToolsEnabled: boolean;
   /** Adapter-owned creation input; the Registry only validates, persists, and relays it. */
   workerConfig?: JsonObject;
+  /** Opened as the personal assistant (card #295); fixed at creation and kept for reopen. */
+  assistant?: true;
 }
 
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
@@ -71,9 +74,11 @@ export interface CreateRegistryInstanceInput {
   trustChallengeId?: string;
   projectTrustDecision?: ProjectTrustChoice;
   workerConfig?: JsonObject;
+  /** Omitted: the directory's saved default decides. A child Work is never the assistant. */
+  assistant?: boolean;
 }
 
-export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "child"> {
+export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig" | "child" | "assistant"> {
   key: string;
 }
 
@@ -190,8 +195,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
       reopenTargetResolver?: ReopenTargetResolver;
       attachmentHostPort?: InstanceAttachmentHostPort;
       dockToolsHostPort?: DockToolsHostPort;
+      /** This Host can reach the assistant service, so a Work may be opened as the assistant. */
+      assistantAvailable?: boolean;
     } = {},
   ) {
+    this.assistantAvailableValue = options.assistantAvailable === true;
     if (options.catalogCommitPort && options.catalogStore) throw new Error("Configure either catalogCommitPort or catalogStore, not both");
     this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.startedAt = options.startedAt ?? new Date().toISOString();
@@ -236,6 +244,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
 
   private readonly trustPreflight: CreateTrustPreflight | undefined;
   private readonly reopenTargetResolver: ReopenTargetResolver | undefined;
+  private readonly assistantAvailableValue: boolean;
+  /** Whether a Work here can be opened as the assistant. */
+  get assistantAvailable(): boolean { return this.assistantAvailableValue; }
 
   async initializeCatalog(): Promise<void> {
     if (!this.catalogStore) return;
@@ -305,11 +316,20 @@ export class DockRegistry implements LocalDockToolsHostPort {
     parent: ManagedInstance | undefined,
     parentActive: () => boolean,
   ): Promise<ManagedInstance> {
+    // A child Work never carries the assistant's memory, whatever its directory's default says (card #295).
+    if (parent !== undefined && input.assistant === true) throw new ProtocolValidationError("invalid_request", "A child Work cannot be opened as the assistant.");
     const resolution = await this.resolveCreationTrust(input, parent);
     const cwd = resolution.canonicalCwd;
-    const resolvedConfig = this.systemService
-      ? await this.systemService.resolveWorkerConfig(cwd, input.workerConfig)
-      : input.workerConfig;
+    const creation = this.systemService
+      ? await this.systemService.resolveCreation(cwd, input.workerConfig, parent === undefined ? input.assistant : false)
+      : { workerConfig: input.workerConfig, assistant: parent === undefined && input.assistant === true };
+    const resolvedConfig = creation.workerConfig;
+    const assistant = creation.assistant;
+    if (assistant && !this.assistantAvailableValue) {
+      throw new ProtocolValidationError("assistant_unavailable", input.assistant === true
+        ? "这台机器的 Dock 用不了助手，没有创建 Work。请换一台能用助手的机器，或者不以助手身份打开。"
+        : "这个目录默认以助手身份打开新 Work，但这台机器的 Dock 用不了助手，所以没有创建。请在创建时关掉「以助手身份打开」，或者换一台能用助手的机器。");
+    }
     const workerConfig = resolvedConfig === undefined
       ? undefined
       : cloneWorkerConfig(resolvedConfig, "Worker configuration");
@@ -320,7 +340,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.child === undefined ? {} : { child: { parentId: input.child.parentId, ...(input.child.allowedTools === undefined ? {} : { allowedTools: input.child.allowedTools }) } }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.child === undefined ? {} : { child: { parentId: input.child.parentId, ...(input.child.allowedTools === undefined ? {} : { allowedTools: input.child.allowedTools }) } }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -519,6 +539,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       attachmentHostPort: this.attachmentHostPort,
       dockToolsEnabled: record.dockToolsEnabled ?? true,
       ...(record.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration") }),
+      ...(record.assistant ? { assistant: true as const } : {}),
     });
     if (
       candidate.id !== record.id

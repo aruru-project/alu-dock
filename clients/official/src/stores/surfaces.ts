@@ -11,6 +11,8 @@ export type ImagePreview =
  * surface and the Escape/Back handling depend on it. */
 /** Host 设置 sections: the hidden-model list, or Main's child Work model list. */
 export type MachineSettingsSection = 'hidden' | 'children'
+/** The assistant page's sections (card #295). */
+export type AssistantSection = 'preview' | 'persona' | 'notes' | 'memories' | 'search' | 'settings'
 
 export const useSurfacesStore = defineStore('surfaces', () => {
   const app = useAppStore()
@@ -45,6 +47,15 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const machineSettingsSection = ref<MachineSettingsSection>('hidden')
   /** The page has unsaved changes; closing it asks first. */
   const machineSettingsDirty = ref(false)
+  /** The assistant's page; her drafts are kept by the assistant store, so closing never asks. */
+  const assistantOpen = ref(false)
+  const assistantSection = ref<AssistantSection>('preview')
+  /** Her page steps back one level inside itself, if it can, before Back closes it. */
+  let assistantBack: (() => boolean) | null = null
+  function onAssistantBack(stepBack: () => boolean) {
+    assistantBack = stepBack
+    return () => { if (assistantBack === stepBack) assistantBack = null }
+  }
 
   const imagePreview = ref<ImagePreview | null>(null)
   const messageTextView = ref<{ title: string; text: string; markdown: boolean } | null>(null)
@@ -56,10 +67,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   const dockToolsTrigger = ref<HTMLButtonElement | null>(null)
   const dockToolsPopoverStyle = ref<Record<string, string>>({})
-  type Surface = 'image' | 'text' | 'expanded' | 'control' | 'app-settings' | 'machine-settings' | 'directory-host' | 'confirm'
+  type Surface = 'image' | 'text' | 'expanded' | 'control' | 'app-settings' | 'machine-settings' | 'assistant' | 'directory-host' | 'confirm'
   const surfaceElements = shallowReactive(new Map<Surface, HTMLElement>())
   const modalSurface = computed(() => {
-    for (const key of ['confirm', 'machine-settings', 'directory-host', 'app-settings', 'control', 'expanded', 'text', 'image'] as const) {
+    for (const key of ['confirm', 'machine-settings', 'assistant', 'directory-host', 'app-settings', 'control', 'expanded', 'text', 'image'] as const) {
       const element = surfaceElements.get(key)
       if (element) return element
     }
@@ -71,7 +82,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
   let modalTrigger: HTMLElement | null = null
 
-  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || machineSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
+  const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || machineSettingsOpen.value || assistantOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
 
   /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
      每一层打开的浮层/抽屉各压入一个占位历史条目，返回键触发 popstate 时只关闭最上面
@@ -87,6 +98,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     'app-settings': () => appSettingsOpen.value,
     'host-settings': () => hostSettingsOpen.value,
     'machine-settings': () => machineSettingsOpen.value,
+    assistant: () => assistantOpen.value,
     expanded: () => composerExpanded.value,
     image: () => !!imagePreview.value,
     text: () => !!messageTextView.value,
@@ -124,6 +136,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     else if (layer === 'app-settings') appSettingsOpen.value = false
     else if (layer === 'host-settings') hostSettingsOpen.value = false
     else if (layer === 'machine-settings') void closeMachineSettings().then((closed) => { if (!closed) syncBackHistory() })
+    // A level stepped back inside her page keeps it open, so it takes its Back entry again.
+    else if (layer === 'assistant') { if (assistantBack?.()) syncBackHistory(); else assistantOpen.value = false }
     else if (layer === 'expanded') composerExpanded.value = false
     else if (layer === 'text') messageTextView.value = null
     else {
@@ -226,6 +240,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
       return
     }
     machineSettingsOpen.value = false
+    assistantOpen.value = false
     workspaceBrowserOpen.value = false
     deliveryOpen.value = false
     directoryOpen.value = false
@@ -430,6 +445,11 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     // open-watch never moves focus; without this the keyboard stays on the page behind.
     if (handoff) void nextTick(() => { if (machineSettingsOpen.value) focusModalInitial(surfaceElements.get('machine-settings')) })
   }
+  /** Opens the assistant's page on the section last shown. */
+  function openAssistant() {
+    rememberModalTrigger(); assistantOpen.value = true
+    appSettingsOpen.value = false; hostSettingsOpen.value = false; directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
+  }
   function openDeliveryTray() { rememberModalTrigger(); app.workDrawerOpen = false; deliveryOpen.value = true }
   function closeWorkPanels() { deliveryOpen.value = false; workspaceBrowserOpen.value = false }
   function retirePreview(kind: ImagePreview['kind'], key?: string) {
@@ -444,5 +464,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

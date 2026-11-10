@@ -39,6 +39,8 @@ export const MAX_CATALOG_LAST_ERROR_CHARS = 2_048;
 export interface CatalogInstanceRecord {
   /** Set on a child Work: the top-level Work it belongs to. */
   parentId?: string;
+  /** Opened as the personal assistant (card #295); a reopen keeps it. */
+  assistant?: true;
   id: string;
   creationOperationId: string;
   key?: string;
@@ -184,6 +186,8 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.collaborationVersion !== undefined && record.collaborationVersion !== 1) throw new Error("Catalog collaboration version is unsupported");
   if (record.dockToolsEnabled !== undefined && typeof record.dockToolsEnabled !== "boolean") throw new Error("Catalog Dock tools switch must be boolean");
   if (record.parentId !== undefined) requiredBoundedText(record.parentId, 128, "Catalog parent ID");
+  if (record.assistant !== undefined && record.assistant !== true) throw new Error("Catalog assistant mark must be true when present");
+  if (record.assistant === true && record.parentId !== undefined) throw new Error("A child Work cannot be the assistant");
   if (record.workerConfig !== undefined) cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration");
   timestamp(record.createdAt, "Catalog createdAt");
   timestamp(record.updatedAt, "Catalog updatedAt");

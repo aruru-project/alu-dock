@@ -36,6 +36,8 @@ export interface EventCursor { hostEpoch: string; instanceId: string; runtimeGen
 
 export interface Work {
   parentId?: string
+  /** Opened as the personal assistant: it loads her persona and memory. Fixed at creation. */
+  assistant?: true
   id: string
   hostId?: string
   key?: string
@@ -729,8 +731,127 @@ export interface SystemCatalogResult {
   warnings: string[]
   defaultSelection?: SystemCandidate
   nextCursor?: SystemCatalogCursor
+  /** This directory opens new Works as the assistant unless the creator says otherwise. */
+  defaultAssistant?: true
+  /** The connected Host takes the "open as the assistant" choice (its hello, read by the Rust core). */
+  assistantChoice: boolean
 }
 export interface SystemDefaultSetResult { selection: SystemCandidate }
+
+/**
+ * The personal assistant kept on Main (card #295). `maxMemoryChars` and `maxEpisodeChars` are how
+ * long one memory and one timeline line may be, in UTF-16 code units as a string's length counts them.
+ */
+export interface AssistantInfo { workspacePath: string; maxDocumentBytes: number; maxMemoryChars: number; maxEpisodeChars: number; extraction?: AssistantExtractionStatus }
+/**
+ * Making memories from her conversations in the background: `off` without a model; `failed` when
+ * the last try did not work, tried again at `retryAt`. `lastError` is written for the owner; with
+ * `idle` it tells of a part that was passed over.
+ */
+export interface AssistantExtractionStatus {
+  state: 'off' | 'idle' | 'working' | 'failed' | Unrecognized
+  model?: ModelRef
+  /** Conversations with something said since they were last read for memories. */
+  waitingSessions: number
+  /** Parts passed over: the model's answer made no sense, or its service kept refusing the part. Another model, or starting over, reads them again. */
+  skippedParts?: number
+  lastRunAt?: string
+  lastError?: string
+  retryAt?: string
+}
+/** The model that makes her memories; without one nothing is made. */
+export interface AssistantSettings { extractionModel?: ModelRef }
+/** Starting over: how many memories the background made went among the retired, and how many of its timeline lines were removed. */
+export interface AssistantReorganizeResult { extractionModel: ModelRef; retiredMemories: number; removedLines: number }
+export type AssistantMemoryTopic = 'owner' | 'preferences' | 'relationship' | 'events' | 'self' | Unrecognized
+/** In use; set aside as no longer true (kept for the record); or forgotten at the owner's word. */
+export type AssistantMemoryState = 'active' | 'retired' | 'forgotten' | Unrecognized
+/** Who made the latest change; the client's changes are the owner's. */
+export type AssistantMemoryAuthor = 'extraction' | 'dreaming' | 'assistant' | 'owner' | Unrecognized
+export type AssistantMemoryAction = 'added' | 'rewritten' | 'moved' | 'resident' | 'query_only' | 'retired' | 'forgotten' | 'restored' | 'merged' | Unrecognized
+export interface AssistantMemorySource { sessionId: string; entryId: string; at: string }
+export interface AssistantMemory {
+  id: string
+  topic: AssistantMemoryTopic
+  text: string
+  /** Loaded into every new assistant session; otherwise found only when she looks. */
+  resident: boolean
+  state: AssistantMemoryState
+  author: AssistantMemoryAuthor
+  createdAt: string
+  updatedAt: string
+  /** When it was said: the earliest place it was said, or when it was written without one. */
+  saidAt: string
+  /** A change names the revision it was made from. */
+  revision: number
+  /** The earliest places it was said, of `sourceCount`. */
+  sources: AssistantMemorySource[]
+  sourceCount: number
+  /** The memory it was merged into. */
+  supersededBy?: string
+}
+export interface AssistantMemoryList { memories: AssistantMemory[]; nextCursor?: string }
+export interface AssistantMemoryChange { at: string; author: AssistantMemoryAuthor; action: AssistantMemoryAction; text?: string }
+export interface AssistantMemoryDetail { memory: AssistantMemory; history: AssistantMemoryChange[] }
+/** Which memories a list shows, newest first; without `state`, those in use. */
+export interface AssistantMemoryFilter { query?: string; topic?: AssistantMemoryTopic; state?: AssistantMemoryState }
+/** What one change sets; the rest stays as it is. */
+export interface AssistantMemoryEdit { text?: string; topic?: AssistantMemoryTopic; resident?: boolean; state?: AssistantMemoryState }
+/** A timeline line is in use, or forgotten: at the owner's word, or along with a forgotten memory whose words it covers. */
+export type AssistantEpisodeState = 'active' | 'forgotten' | Unrecognized
+/** One line of her timeline: a stretch of one conversation, from the first entry it covers to the last, saying what the two of them were doing. */
+export interface AssistantEpisode {
+  id: string
+  session: AssistantSessionInfo
+  /** The first entry it covers, where its words can be read from. */
+  entryId: string
+  fromAt: string
+  toAt: string
+  text: string
+  state: AssistantEpisodeState
+  /** Who wrote it last: extraction, the assistant in a conversation, or the owner. */
+  author: AssistantMemoryAuthor
+  createdAt: string
+  updatedAt: string
+  revision: number
+}
+/** Newest first by when each stretch began. */
+export interface AssistantTimelineList { episodes: AssistantEpisode[]; nextCursor?: string }
+/** Which lines a list shows: those overlapping the time range and holding every word of `query`; without `state`, those in use. */
+export interface AssistantTimelineFilter { query?: string; from?: string; to?: string; state?: AssistantEpisodeState }
+export interface AssistantEpisodeEdit { text?: string; state?: AssistantEpisodeState }
+/** What a new assistant session loads now, and when it was put together. */
+export interface AssistantPreview { text: string; loadedAt: string }
+/** `persona`: who she is; `notes`: what the owner told her by hand. */
+export type AssistantDocumentName = 'persona' | 'notes'
+export interface AssistantDocument { document: AssistantDocumentName; text: string; revision: string }
+/** `work`: what another Work said to her, never the owner's words. */
+export type AssistantEntryKind = 'user' | 'assistant' | 'tool_result' | 'bash' | 'summary' | 'notice' | 'work' | Unrecognized
+export interface AssistantSessionInfo {
+  sessionId: string
+  cwd?: string
+  name?: string
+  /** The Work's ID when this was recorded; that Work may have stopped since. */
+  workId?: string
+  /** The machine's name. */
+  machine?: string
+  startedAt: string
+  lastAt: string
+}
+export interface AssistantSearchHit { session: AssistantSessionInfo; entryId: string; at: string; kind: AssistantEntryKind; snippet: string }
+export interface AssistantSearchResult { hits: AssistantSearchHit[]; nextCursor?: string }
+export interface AssistantEntry {
+  entryId: string
+  parentId?: string
+  at: string
+  kind: AssistantEntryKind
+  text: string
+  toolName?: string
+  toolCalls?: Array<{ name: string; arguments: string }>
+  /** The text was cut; the whole of it stays in the Agent's own session file. */
+  truncated?: true
+}
+export interface AssistantContextResult { session: AssistantSessionInfo; entries: AssistantEntry[]; hasBefore: boolean; hasAfter: boolean }
 
 /** Native default instructions; excludes this call's conversation and extension payload. */
 export interface CompactionPromptTemplatesResult {

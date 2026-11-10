@@ -76,7 +76,8 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: "system", ...input, ...(machine === undefined ? {} : { machine }) };
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine", "systemId", "saveDefault", "model", "assistant"], "Dock create request");
+    if (value.assistant !== undefined && typeof value.assistant !== "boolean") throw new Error("assistant must be boolean");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
@@ -90,6 +91,7 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
       ...(systemId === undefined ? {} : { systemId }),
       ...(value.saveDefault === undefined ? {} : { saveDefault: value.saveDefault }),
       ...(model === undefined ? {} : { model }),
+      ...(value.assistant === true ? { assistant: true } : {}),
       operationId: boundedString(value.operationId, 128, "Dock create operation ID"),
       cwd,
       ...(name === undefined ? {} : { name }),

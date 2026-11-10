@@ -4,6 +4,7 @@ import { storeToRefs } from 'pinia'
 import HostSettingsPanel from './HostSettingsPanel.vue'
 import AppSettings from './AppSettings.vue'
 import MachineSettings from './MachineSettings.vue'
+import AssistantPage from './AssistantPage.vue'
 import ControlCenter from './ControlCenter.vue'
 import NewWorkDialog from './NewWorkDialog.vue'
 import MessageTextDialog from './MessageTextDialog.vue'
@@ -17,7 +18,7 @@ import { useWorkActionsStore } from '../stores/work-actions'
 const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const surfaces = useSurfacesStore()
-const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsDirty, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
+const { directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsDirty, assistantOpen, messageTextView, dockToolsPopoverStyle, directoryBusy } = storeToRefs(surfaces)
 const { settleConfirm, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, pulseCommandPalette, bindSurface } = surfaces
 const { restoreQueue, prefillSlashCommand } = useInputStore()
 const { refreshCurrent } = useObservationStore()
@@ -92,6 +93,14 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
   </Transition>
 
   <Transition name="fade">
+    <div v-if="assistantOpen" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+      <section :ref="element => bindSurface('assistant', element)" class="assistant-surface" role="dialog" aria-modal="true" aria-labelledby="assistant-title" tabindex="-1" @wheel="handleModalWheel">
+        <AssistantPage @close="closeModal" />
+      </section>
+    </div>
+  </Transition>
+
+  <Transition name="fade">
     <div v-if="directoryOpen || hostSettingsOpen" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
       <section :ref="element => bindSurface('directory-host', element)" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide', { 'ui-dialog-size-auto': newWorkCompact }] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'" @wheel="handleModalWheel">
         <NewWorkDialog
@@ -160,6 +169,12 @@ const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 .machine-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-window-edge-glint) 30%, var(--alu-accent) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
 @media (max-width: 640px) {
   .machine-settings-surface { width: 100%; height: min(94vh, 820px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
+}
+/* The assistant's page: her documents need room to read and write. */
+.assistant-surface { position: relative; display: grid; width: min(980px, calc(100vw - 48px)); height: min(760px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: var(--alu-window-bg); box-shadow: var(--alu-settings-shadow); }
+.assistant-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-accent) 30%, var(--alu-window-edge-glint) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
+@media (max-width: 640px) {
+  .assistant-surface { width: 100%; height: min(94vh, 820px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
 }
 /* Connection and pairing is a task surface, not a wall of equally weighted forms. */
 .host-settings-surface {

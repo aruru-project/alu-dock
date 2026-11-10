@@ -6,12 +6,17 @@ use crate::errors::CommandError;
 use crate::observation::FollowState;
 use crate::sessions::parse_trust_continuation;
 use aludock_client_core::{
-    AttachmentState, BashRunResult, ChildModelsResult, ChildModelsSetResult, DeliveryMode,
-    ExtensionControlState, InstanceSnapshot, Machine, ModelRef, ModelVisibilityResult,
-    ModelVisibilitySetResult, ResourceContentResult, RestoredImageState, SafeQueueDequeueResult,
-    SessionTokenState, StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult,
-    SystemDefaultSetResult, WorkspaceCursor, WorkspacePage, operation_association,
-    project_queue_dequeue, resolve_machine_session_token, restored_image_scope,
+    AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantEpisode,
+    AssistantEpisodeEdit, AssistantInfo, AssistantMemory, AssistantMemoryDetail,
+    AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList, AssistantMemoryTopic,
+    AssistantPreview, AssistantReorganizeResult, AssistantSearchResult, AssistantSettings,
+    AssistantTimelineFilter, AssistantTimelineList, AttachmentState, BashRunResult,
+    ChildModelsResult, ChildModelsSetResult, DeliveryMode, ExtensionControlState, InstanceSnapshot,
+    Machine, ModelRef, ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult,
+    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
+    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
+    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
+    restored_image_scope,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -573,6 +578,267 @@ pub(crate) async fn set_child_models(
         .map_err(CommandError::from)
 }
 
+/// The assistant lives on Main, so the connected Host answers every assistant request.
+#[tauri::command]
+pub(crate) async fn assistant_info(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+) -> Result<AssistantInfo, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_info()
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_preview(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+) -> Result<AssistantPreview, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_preview()
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_document(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    document: AssistantDocumentName,
+) -> Result<AssistantDocument, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_document(document)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// A whole-document replace from a named version: an unknown outcome is settled by reading
+/// the document again, so like `set_child_models` it does not join the Work operation results.
+#[tauri::command]
+pub(crate) async fn set_assistant_document(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    document: AssistantDocumentName,
+    text: String,
+    base_revision: String,
+) -> Result<AssistantDocument, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_assistant_document(document, &text, &base_revision, None)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn assistant_search(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    query: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    cursor: Option<String>,
+    limit: u32,
+) -> Result<AssistantSearchResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_search(
+            query.as_deref(),
+            from.as_deref(),
+            to.as_deref(),
+            cursor.as_deref(),
+            limit,
+        )
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_context(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    session_id: String,
+    entry_id: String,
+    before: u32,
+    after: u32,
+) -> Result<AssistantContextResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_context(&session_id, &entry_id, before, after)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_memories(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    filter: AssistantMemoryFilter,
+    cursor: Option<String>,
+    limit: u32,
+) -> Result<AssistantMemoryList, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_memories(&filter, cursor.as_deref(), limit)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_memory(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+) -> Result<AssistantMemoryDetail, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_memory(&id)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// The page names the operation: after a lost reply, the same request sent again names it
+/// too, so the Host adds or changes the memory at most once. Like the document save, these
+/// do not join the Work operation results.
+#[tauri::command]
+pub(crate) async fn add_assistant_memory(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    topic: AssistantMemoryTopic,
+    text: String,
+    resident: bool,
+    operation_id: String,
+) -> Result<AssistantMemory, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .add_assistant_memory(topic, &text, resident, &[], Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn update_assistant_memory(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+    revision: u64,
+    edit: AssistantMemoryEdit,
+    operation_id: String,
+) -> Result<AssistantMemory, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .update_assistant_memory(&id, revision, &edit, Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_timeline(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    filter: AssistantTimelineFilter,
+    cursor: Option<String>,
+    limit: u32,
+) -> Result<AssistantTimelineList, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_timeline(&filter, cursor.as_deref(), limit)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// One timeline line as it is now; read after a change to it was refused as out of date.
+#[tauri::command]
+pub(crate) async fn assistant_episode(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+) -> Result<AssistantEpisode, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_episode(&id)
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn update_assistant_episode(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+    revision: u64,
+    edit: AssistantEpisodeEdit,
+    operation_id: String,
+) -> Result<AssistantEpisode, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .update_assistant_episode(&id, revision, &edit, Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub(crate) async fn assistant_settings(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+) -> Result<AssistantSettings, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_settings()
+        .await
+        .map_err(CommandError::from)
+}
+
+/// `None` stops making memories. The operation is named by the page, as for memory changes.
+#[tauri::command]
+pub(crate) async fn set_assistant_settings(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    extraction_model: Option<ModelRef>,
+    operation_id: String,
+) -> Result<AssistantSettings, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .set_assistant_settings(extraction_model.as_ref(), Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Starts her memories over with `extraction_model`. The operation is named by the page.
+#[tauri::command]
+pub(crate) async fn reorganize_assistant(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    extraction_model: ModelRef,
+    operation_id: String,
+) -> Result<AssistantReorganizeResult, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .reorganize_assistant(&extraction_model, Some(&operation_id))
+        .await
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub(crate) async fn system_catalog(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
@@ -621,6 +887,7 @@ pub(crate) async fn system_content(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn set_system_default(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     operations: tauri::State<'_, aludock_client_core::OperationAssociations>,
@@ -630,6 +897,7 @@ pub(crate) async fn set_system_default(
     cwd: String,
     id: String,
     target_host_id: Option<String>,
+    assistant: Option<bool>,
 ) -> Result<SystemDefaultSetResult, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
@@ -646,7 +914,13 @@ pub(crate) async fn set_system_default(
     operations
         .execute(association, async move {
             client
-                .set_system_default(&cwd, &id, target_host_id.as_deref(), Some(&operation_id))
+                .set_system_default(
+                    &cwd,
+                    &id,
+                    target_host_id.as_deref(),
+                    Some(&operation_id),
+                    assistant,
+                )
                 .await
                 .map_err(CommandError::from)
         })
@@ -741,6 +1015,7 @@ pub(crate) async fn create_work(
     name: Option<String>,
     target_host_id: Option<String>,
     worker_config: Option<serde_json::Map<String, Value>>,
+    assistant: Option<bool>,
     operation_id: Option<String>,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
@@ -772,6 +1047,7 @@ pub(crate) async fn create_work(
                     operation_id.as_deref(),
                     target_host_id.as_deref(),
                     worker_config.as_ref(),
+                    assistant,
                 )
                 .await
                 .map_err(CommandError::from)

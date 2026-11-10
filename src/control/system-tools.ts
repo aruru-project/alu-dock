@@ -22,8 +22,11 @@ export async function createDockSystem(port: SystemPort, input: DockCreateInput,
     ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
   };
   const modelConfig = Object.keys(starting).length === 0 ? undefined : starting;
+  // An Agent's top-level Work is the assistant only when it asked; the directory's default does not
+  // apply, so collaboration members never carry her memory (card #295). A child never is.
+  const assistant = input.child === undefined ? input.assistant === true : undefined;
   if (input.systemId === undefined) {
-    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig, input.child);
+    const instance = await port.create(input.cwd, input.name, input.operationId, undefined, hostId, modelConfig, input.child, assistant);
     return { type: "create", instance: observationStatus(instance) };
   }
   let page = await port.systemCatalog(input.cwd, hostId);
@@ -40,7 +43,7 @@ export async function createDockSystem(port: SystemPort, input: DockCreateInput,
     saved = true;
   }
   try {
-    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig }, input.child);
+    const instance = await port.create(first.cwd, input.name, input.operationId, undefined, hostId, { ...selection.workerConfig, ...modelConfig }, input.child, assistant);
     return { type: "create", instance: observationStatus(instance), ...(saved ? { defaultSaved: true } : {}) };
   } catch (error) {
     if (saved && error instanceof Error) error.message = `Directory default saved. Work creation did not return success; check Dock before trying again. ${error.message}`;

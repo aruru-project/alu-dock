@@ -103,6 +103,7 @@ export function catalogSnapshotFromRecord(
     id: record.id,
     creationOperationId: record.creationOperationId,
     ...(record.parentId === undefined ? {} : { parentId: record.parentId }),
+    ...(record.assistant ? { assistant: true as const } : {}),
     ...(record.key === undefined ? {} : { key: record.key }),
     ...(record.name === undefined ? {} : { name: record.name }),
     displayName: projectInstanceDisplayName(record),

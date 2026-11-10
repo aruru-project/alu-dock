@@ -15,6 +15,8 @@ import { SYSTEM_TEMPLATES_CAPABILITY } from "./protocol.js";
 import { CHILD_MODELS_CAPABILITY, MODEL_VISIBILITY_CAPABILITY } from "./protocol.js";
 import { ModelVisibilityError, type ModelVisibilityPort } from "./model-visibility.js";
 import type { ChildModelsEditor, ChildModelsSource } from "./child-models.js";
+import { AssistantError, type AssistantHostPort, type AssistantRequest } from "../core/assistant.js";
+import { ASSISTANT_CAPABILITY, INSTANCE_ASSISTANT_CAPABILITY } from "./protocol.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -166,6 +168,8 @@ export interface DockHostOptions {
   childModels?: ChildModelsSource;
   /** Main edits that list for every machine; a SubHost leaves it out. */
   childModelsEditor?: ChildModelsEditor;
+  /** Main's assistant service, for clients to read and edit her persona and notes and search her conversations (card #295). */
+  assistant?: AssistantHostPort;
   listen?: boolean;
 }
 
@@ -199,6 +203,7 @@ export class DockHost {
   private readonly modelVisibility: ModelVisibilityPort | undefined;
   private readonly childModels: ChildModelsSource | undefined;
   private readonly childModelsEditor: ChildModelsEditor | undefined;
+  private readonly assistant: AssistantHostPort | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -225,7 +230,7 @@ export class DockHost {
       systemCatalog: (cwd: string, _hostId?: string, cursor?: import("./protocol.js").SystemCatalogCursor, limit?: number) => requireSystems().catalog(cwd, cursor, limit),
       systemContent: (cwd: string, id: string, _hostId?: string, offset?: number, revision?: string) => requireSystems().content(cwd, id, offset, revision),
       setSystemDefault: (cwd: string, id: string, _hostId?: string, operationId = randomUUID()) => this.operationLedger.run(operationId, "system.default.set", { cwd, id, operationId }, () => requireSystems().setDefault(cwd, id)),
-      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject, child?: import("../core/dock-tools.js").DockChildSelection) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig, ...(child === undefined ? {} : { child }) })).instance,
+      create: async (cwd: string, name?: string, operationId = randomUUID(), _trust?: unknown, _hostId?: string, workerConfig?: import("../core/json-value.js").JsonObject, child?: import("../core/dock-tools.js").DockChildSelection, assistant?: boolean) => (await this.instanceManager.create({ cwd, name, operationId, workerConfig, ...(child === undefined ? {} : { child }), ...(assistant === undefined ? {} : { assistant }) })).instance,
     };
     const requireSystems = () => {
       if (!this.systemService) throw new ProtocolValidationError("capability_missing", "This Host does not provide system selection. Update the Host and retry.");
@@ -262,6 +267,7 @@ export class DockHost {
     this.modelVisibility = options.modelVisibility;
     this.childModels = options.childModels;
     this.childModelsEditor = options.childModelsEditor;
+    this.assistant = options.assistant;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (!this.systemService && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(SYSTEM_TEMPLATES_CAPABILITY);
@@ -269,6 +275,9 @@ export class DockHost {
     // A Main that routes to SubHosts keeps its own list too (the CLI always gives it a state directory).
     if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
     if (!this.childModelsEditor) capabilities.delete(CHILD_MODELS_CAPABILITY);
+    if (!this.assistant) capabilities.delete(ASSISTANT_CAPABILITY);
+    // A Main that routes to SubHosts lets them answer for themselves.
+    if (!this.registry.assistantAvailable && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(INSTANCE_ASSISTANT_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
@@ -992,6 +1001,25 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, result);
         return;
       }
+      case "assistant.info":
+      case "assistant.preview":
+      case "assistant.document.get":
+      case "assistant.document.set":
+      case "assistant.search":
+      case "assistant.context":
+      case "assistant.memory.list":
+      case "assistant.memory.get":
+      case "assistant.memory.add":
+      case "assistant.memory.update":
+      case "assistant.timeline.list":
+      case "assistant.timeline.get":
+      case "assistant.timeline.update":
+      case "assistant.settings.get":
+      case "assistant.settings.set":
+      case "assistant.reorganize": {
+        this.sendSuccessAndEnd(socket, request.requestId, await this.answerAssistant(request));
+        return;
+      }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -1038,7 +1066,7 @@ export class DockHost {
           : request.type === "system.content"
           ? await this.systemService.content(request.params.cwd, request.params.id, request.params.offset, request.params.revision)
           : await this.operationLedger.run(request.params.operationId, request.type, params,
-            () => this.systemService!.setDefault(request.params.cwd, request.params.id));
+            () => this.systemService!.setDefault(request.params.cwd, request.params.id, request.params.assistant));
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "workspace.list": {
@@ -1297,6 +1325,50 @@ export class DockHost {
       throw new InstanceWorkspaceError("instance_not_active", "This work is not active, so its files cannot be opened. Open the work and try again.");
     }
     return new InstanceWorkspace(snapshot.id, snapshot.cwd);
+  }
+
+  /** The client's assistant requests become the same questions her own Works ask Main's assistant service. */
+  private async answerAssistant(request: Extract<ControlRequest, { type: `assistant.${string}` }>): Promise<unknown> {
+    const assistant = this.assistant;
+    if (!assistant) throw new ProtocolValidationError("capability_missing", "助手只能在 Main 上管理。请连接 Main 后再试。");
+    // A client is the owner's own hand: its changes are the owner's, which the background leaves alone.
+    const ask = (question: AssistantRequest) => assistant.request(question, { owner: true });
+    switch (request.type) {
+      case "assistant.info": return ask({ op: "info" });
+      case "assistant.preview": return ask({ op: "load" });
+      case "assistant.document.get": return ask({ op: "document_get", document: request.params.document });
+      case "assistant.document.set": {
+        const { operationId, document, text, baseRevision } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "document_set", document, text, baseRevision }));
+      }
+      case "assistant.search": return ask({ op: "search", ...request.params });
+      case "assistant.context": return ask({ op: "context", ...request.params });
+      case "assistant.memory.list": return ask({ op: "memory_list", ...request.params });
+      case "assistant.memory.get": return ask({ op: "memory_get", id: request.params.id });
+      case "assistant.memory.add": {
+        const { operationId, ...add } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "memory_add", ...add }));
+      }
+      case "assistant.memory.update": {
+        const { operationId, ...update } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "memory_update", ...update }));
+      }
+      case "assistant.timeline.list": return ask({ op: "timeline_list", ...request.params });
+      case "assistant.timeline.get": return ask({ op: "timeline_get", id: request.params.id });
+      case "assistant.timeline.update": {
+        const { operationId, ...update } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "timeline_update", ...update }));
+      }
+      case "assistant.settings.get": return ask({ op: "settings_get" });
+      case "assistant.settings.set": {
+        const { operationId, extractionModel } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", extractionModel }));
+      }
+      case "assistant.reorganize": {
+        const { operationId, extractionModel } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "reorganize", extractionModel }));
+      }
+    }
   }
 
   private async streamConversationImage(request: Extract<ControlRequest, { type: "conversation.image" }>, socket: Socket): Promise<void> {
@@ -1695,6 +1767,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof AttachmentIntegrityError) return { code: error.code, message: error.message };
   if (error instanceof AttachmentUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof ModelVisibilityError) return { code: error.code, message: error.message, retryable: error.retryable };
+  if (error instanceof AssistantError) return { code: error.code, message: error.message, ...(error.code === "assistant_unavailable" ? { retryable: true } : {}) };
   if (error instanceof RoutedControlError) return { code: error.code, message: error.message, retryable: error.retryable, ...(error.details === undefined ? {} : { details: error.details }) };
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };

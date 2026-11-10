@@ -355,6 +355,8 @@ export interface EventCursor {
 export interface InstanceSnapshot {
   /** Set on a child Work: the top-level Work it belongs to. */
   parentId?: string;
+  /** Opened as the personal assistant: it loads her persona and memory, and its conversation becomes hers. */
+  assistant?: true;
   id: string;
   creationOperationId: string;
   /** Stable Machine identity from machine.list; supplied by the Main Host boundary. */

@@ -12,6 +12,8 @@ import { ChildModelsStore } from "../../src/control/child-models.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 import { ModelServiceProcess } from "../../src/model-service/service-process.js";
+import { AssistantServiceProcess } from "../../src/assistant/service-process.js";
+import type { ExtractionTiming } from "../../src/assistant/extraction.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
 import { PlanGoalProvider } from "./plan-goal-provider.js";
 
@@ -32,6 +34,10 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   serviceEnvironment?: Record<string, string>;
   /** Overrides for every process, such as NO_PROXY. */
   environment?: Record<string, string>;
+  /** Run Main's assistant service, so Works can be opened as the assistant (card #295). */
+  assistant?: boolean;
+  /** Shorter waits for her memory passes. */
+  assistantTiming?: Partial<ExtractionTiming>;
 }) {
   const root = await mkdtemp(join(tmpdir(), options.prefix));
   const cwd = join(root, "workspace"), agentDir = join(root, "agent"), sessionDir = join(root, "sessions"), home = join(root, "home");
@@ -43,8 +49,12 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     ...options.environment,
   });
   const modelService = options.modelService ? new ModelServiceProcess({ agentDir, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
+  const assistantService = options.assistant
+    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
+      ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
+    : undefined;
   const team = {
-    root, cwd, agentDir, providers, workerPids, modelService,
+    root, cwd, agentDir, providers, workerPids, modelService, assistantService,
     registry: undefined as DockRegistry | undefined,
     host: undefined as DockHost | undefined,
     client: undefined as DockClient | undefined,
@@ -53,12 +63,14 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     onCleanup: undefined as (() => void) | undefined,
     async startHost(): Promise<DockClient> {
       await modelService?.start();
+      await assistantService?.start();
       const registry = new DockRegistry(async (input) => {
         const instance = await createPiInstance({
           ...input, agentDir, sessionDir,
           onWorkerSpawn: (pid) => workerPids.push(pid),
           workerEnvironment: environment,
           ...(modelService === undefined ? {} : { modelHostPort: modelService }),
+          ...(assistantService === undefined ? {} : { assistantHostPort: { request: (request, source, signal) => assistantService.request(request, { ...source, machine: "Main" }, signal) } }),
         });
         const hold = input.child === undefined ? undefined : team.holdNextChild;
         team.holdNextChild = undefined;
@@ -69,9 +81,10 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
         reopenTargetResolver: { resolve: resolvePiReopenTarget },
         trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
+        assistantAvailable: assistantService !== undefined,
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root) });
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }) });
       await team.host.start();
       return team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
     },
@@ -83,6 +96,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     await Promise.all(Object.values<PlanGoalProvider>(providers).map((provider) => provider.stop()));
     await team.host?.stop().catch(() => {});
     await modelService?.stop();
+    await assistantService?.stop();
     await rm(root, { recursive: true, force: true });
   });
   await Promise.all([cwd, agentDir, sessionDir, home].map((path) => mkdir(path)));

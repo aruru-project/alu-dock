@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_none()
     );
     let saved = client
-        .set_system_default(cwd, &chosen.id, host_id, Some("system-save-gate"))
+        .set_system_default(cwd, &chosen.id, host_id, Some("system-save-gate"), None)
         .await?;
     assert_eq!(saved.selection.id, chosen.id);
     let default = client
@@ -86,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(operation),
             host_id,
             Some(&chosen.worker_config),
+            None,
         )
         .await;
     let challenge = match first {
@@ -110,6 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(operation),
             host_id,
             Some(&chosen.worker_config),
+            None,
         )
         .await?;
     // Independent public SDK observation: controlled 0.99.2-dock.1, Pi source

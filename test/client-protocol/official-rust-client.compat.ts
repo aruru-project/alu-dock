@@ -64,6 +64,53 @@ test("official Rust client pages through saved sessions, newest conversation fir
   }
 });
 
+// Card #295: the official client reads and edits the assistant on a production Main, whose own
+// assistant service keeps her; her recorded conversation and one line of her timeline are seeded as
+// the service stores them (the timeline is written by a model, which this gate has none of). Her
+// memories are written, changed, forgotten and restored by the owner there, a timeline line is
+// rewritten, forgotten and restored, and the model that makes them is chosen and cleared; no model
+// is called.
+test("official Rust client reads and edits the assistant on Main, finds her conversations and manages her memories", { timeout: 60_000 }, async (context) => {
+  assert.equal(process.platform, "linux", "test:client-protocol requires Linux isolated Unix-socket process semantics");
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-client-assistant-"));
+  const home = join(root, "home");
+  const agentDir = join(root, "agent");
+  const stateDirectory = join(root, "state");
+  const socket = join(root, "dock.sock");
+  let host: ChildProcess | undefined;
+  try {
+    await Promise.all([mkdir(home), mkdir(agentDir), mkdir(join(stateDirectory, "assistant"), { recursive: true, mode: 0o700 }), chmod(root, 0o700)]);
+    const { AssistantStore } = await import("../../src/assistant/store.js");
+    const memory = new AssistantStore(join(stateDirectory, "assistant", "memory.sqlite"));
+    memory.record({ sessionId: "gate-session", cwd: home, name: "闲聊" }, [
+      { entryId: "e1", at: "2026-11-01T10:00:00.000Z", kind: "user", text: "我家猫叫什么来着？" },
+      { entryId: "e2", parentId: "e1", at: "2026-11-01T10:00:05.000Z", kind: "assistant", text: "团子呀，这都忘了？", toolCalls: [{ name: "read", arguments: "{}" }] },
+    ], "e2", { workId: "gate-work", machine: "Main" });
+    const { AssistantTimeline } = await import("../../src/assistant/timeline.js");
+    const { writeTransaction } = await import("../../src/assistant/transaction.js");
+    const rows = memory.connection.prepare("SELECT id, at, at_ms FROM entries WHERE session_id = 'gate-session' ORDER BY id").all() as Array<{ id: number; at: string; at_ms: number }>;
+    writeTransaction(memory.connection, () => new AssistantTimeline(memory.connection).insert("gate-session",
+      { row: rows[0]!.id, at: rows[0]!.at, at_ms: rows[0]!.at_ms }, { row: rows[1]!.id, at: rows[1]!.at, at_ms: rows[1]!.at_ms }, "下午闲聊，问起猫的名字。", "extraction"));
+    memory.close();
+
+    host = spawn(process.execPath, ["dist/src/cli.js", "--socket", socket, "serve", "--dev", "--state", join(stateDirectory, "catalog.json")], {
+      cwd: process.cwd(), env: isolatedEnvironment(root, home, agentDir), stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stderr: string[] = [];
+    host.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
+    await waitForReady(host, stderr);
+
+    const targetDirectory = resolve(process.env.CARGO_TARGET_DIR || "clients/official/target");
+    const gate = join(targetDirectory, "debug", "examples", "protocol_assistant");
+    const result = await run(gate, [socket, join(root, "client-identity"), "gate-session"], process.env, context.signal);
+    assert.equal(result.code, 0, `official Rust client failed:\n${result.stderr}`);
+    assert.match(result.stdout, /assistant gate: workspace=\S+ hits=1 context=2 day=2 history=5 waiting=1 lines=1/u);
+  } finally {
+    await stopChild(host);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function isolatedEnvironment(root: string, home: string, agentDir: string): NodeJS.ProcessEnv {
   return isolatedProcessEnvironment(home, {
     XDG_CONFIG_HOME: join(root, "xdg-config"),

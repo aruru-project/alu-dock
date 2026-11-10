@@ -15,11 +15,26 @@
 .alu-session-form { display: flex; min-height: 0; flex: 1; flex-direction: column; padding-top: 10px; }
 .alu-session-form > label { display: flex; min-height: 0; flex: 1; flex-direction: column; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .alu-session-form > label > span { padding: 5px 16px 0; }
+/* Picking one of a few at once: chips that wrap, or a two-way switch. The chosen one is a selected item. */
+.alu-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.alu-chip { min-height: 30px; padding: 0 11px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 999px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); }
+.alu-chip:hover:where(:not(.is-active):not(:disabled)), .alu-switch button:hover:where(:not(.is-active):not(:disabled)) { background: var(--alu-hover); color: var(--alu-text); }
+.alu-chip.is-active, .alu-switch button.is-active { border-color: var(--alu-highlight-border); background: var(--alu-highlight-bg); color: var(--alu-highlight); }
+.alu-switch { display: inline-flex; justify-self: start; align-self: flex-start; overflow: hidden; border: 1px solid var(--alu-border-light); border-radius: 8px; }
+.alu-switch button { min-height: 32px; padding: 0 12px; cursor: pointer; border: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.alu-switch button + button { border-left: 1px solid var(--alu-border-light); }
+/* How much of a length limit a text uses; past it, what to do. */
+.alu-counter { margin: 0; color: var(--alu-text-faint); font-size: var(--alu-micro-size); line-height: 1.5; text-align: right; }
+.alu-counter.is-over { color: var(--alu-danger); text-align: left; }
+/* An action inside a sentence. */
+.alu-link-button { padding: 0; cursor: pointer; border: 0; background: transparent; color: var(--alu-accent); font: inherit; text-decoration: underline; text-underline-offset: 3px; }
 @media (max-width: 1000px) {
   .pairing-actions .button { min-height: 46px; }
 }
 @media (max-width: 640px) {
   .pairing-actions .button { width: 100%; }
+  .alu-switch { display: flex; justify-self: stretch; align-self: stretch; }
+  .alu-switch button { flex: 1 1 0; }
 }
 .alu-agent-activity-spinner {
   width: 14px;

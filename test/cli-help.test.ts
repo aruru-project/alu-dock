@@ -63,7 +63,7 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
 });
 
 test("every public human command supports equivalent local help forms", async () => {
-  for (const command of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "pi:install", "update"]) {
+  for (const command of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "pi:install", "update", "assistant:backup"]) {
     const [flag, topic] = await Promise.all([
       runCli([command, "--help"]),
       runCli(["help", command]),
