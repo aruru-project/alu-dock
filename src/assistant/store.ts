@@ -122,6 +122,22 @@ CREATE TABLE IF NOT EXISTS memory_sources (
   PRIMARY KEY (memory_id, entry_row)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS memory_sources_entry ON memory_sources (entry_row);
+-- Entries hidden with a forgotten memory besides the places it was said: what was said in answer to
+-- those places, the exchange in which the owner asked for it to be forgotten, and the summaries Pi
+-- wrote of those conversations afterwards. The rows last while the memory stays forgotten.
+CREATE TABLE IF NOT EXISTS memory_hides (
+  memory_id INTEGER NOT NULL REFERENCES memories(id),
+  entry_row INTEGER NOT NULL REFERENCES entries(id),
+  PRIMARY KEY (memory_id, entry_row)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS memory_hides_entry ON memory_hides (entry_row);
+-- Where the owner asked for a memory to be forgotten, when Main had not recorded that entry yet: the
+-- exchange is hidden as it arrives.
+CREATE TABLE IF NOT EXISTS memory_asks (
+  session_id TEXT NOT NULL, entry_id TEXT NOT NULL,
+  memory_id INTEGER NOT NULL REFERENCES memories(id),
+  PRIMARY KEY (session_id, entry_id, memory_id)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS memory_changes (
   id INTEGER PRIMARY KEY,
   memory_id INTEGER NOT NULL REFERENCES memories(id),
@@ -147,6 +163,30 @@ const SCHEMA_VERSION = "1";
  * `entries`: what her memories and timeline are made from (ASSISTANT_SPOKEN_KINDS).
  */
 export const SPOKEN = `kind IN (${ASSISTANT_SPOKEN_KINDS.map((kind) => `'${kind}'`).join(", ")}) AND text <> ''`;
+
+/**
+ * What is said or done in answer within an exchange, as an SQL condition on `entries`: her words, what
+ * her tools returned and the notices between them. They follow the words they answer: while those are
+ * forgotten, the answers are not found either, since they tell the same thing. The owner's next
+ * words, another Work's, or a command the owner ran start a new exchange.
+ */
+export const ANSWER = "kind IN ('assistant', 'tool_result', 'notice')";
+const ANSWER_KINDS = new Set<AssistantEntryKind>(["assistant", "tool_result", "notice"]);
+/**
+ * Inside a write: notes that something was forgotten just now, a memory with what it hides or a
+ * timeline line. A background pass that was shown things before this happened may have been shown
+ * the very thing, so it keeps nothing of what it made and reads again (extraction.ts).
+ */
+export function noteForgetting(db: DatabaseSync): void {
+  db.prepare("INSERT INTO meta (key, value) VALUES ('forgettings', '1') ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1").run();
+}
+/** How many times something was forgotten so far. */
+export function forgettings(db: DatabaseSync): number {
+  return Number((db.prepare("SELECT value FROM meta WHERE key = 'forgettings'").get() as { value: string } | undefined)?.value ?? 0);
+}
+
+/** The entries a forgotten memory hides, as an SQL list of entry rows for the memory bound as ?1. */
+export const HIDDEN_WITH = "SELECT entry_row FROM memory_sources WHERE memory_id = ?1 UNION SELECT entry_row FROM memory_hides WHERE memory_id = ?1";
 
 /** Room for entries said in the same millisecond. */
 const ENTRY_IDS_PER_MS = 1024;
@@ -232,6 +272,12 @@ export class AssistantStore {
     const times = entries.map((entry) => ({ at: entry.at, ms: Date.parse(entry.at) }));
     const first = times.reduce((earliest, time) => (time.ms < earliest.ms ? time : earliest), times[0] ?? { at: now, ms: Date.parse(now) });
     const last = times.reduce((latest, time) => (time.ms > latest.ms ? time : latest), first);
+    // A batch without entries only moves the mark: a session's times are those of what was said in it.
+    const moveTimes = entries.length === 0 ? "" : `
+          started_at = CASE WHEN excluded.started_ms < started_ms THEN excluded.started_at ELSE started_at END,
+          started_ms = min(started_ms, excluded.started_ms),
+          last_at = CASE WHEN excluded.last_ms > last_ms THEN excluded.last_at ELSE last_at END,
+          last_ms = max(last_ms, excluded.last_ms),`;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare(`
@@ -242,35 +288,34 @@ export class AssistantStore {
           cwd = excluded.cwd,
           name = coalesce(excluded.name, name),
           work_id = coalesce(excluded.work_id, work_id),
-          machine = coalesce(excluded.machine, machine),
-          started_at = CASE WHEN excluded.started_ms < started_ms THEN excluded.started_at ELSE started_at END,
-          started_ms = min(started_ms, excluded.started_ms),
-          last_at = CASE WHEN excluded.last_ms > last_ms THEN excluded.last_at ELSE last_at END,
-          last_ms = max(last_ms, excluded.last_ms),
+          machine = coalesce(excluded.machine, machine),${moveTimes}
           through_entry_id = excluded.through_entry_id
       `).run(session.sessionId, session.sessionFile ?? null, session.cwd, session.name ?? null, source.workId ?? null, source.machine ?? null,
         first.at, first.ms, last.at, last.ms, throughEntryId);
-      const known = this.db.prepare("SELECT 1 FROM entries WHERE session_id = ? AND entry_id = ?");
+      const known = this.db.prepare("SELECT id, forgotten, kind FROM entries WHERE session_id = ? AND entry_id = ?");
       const latestIn = this.db.prepare("SELECT max(id) AS id FROM entries WHERE id >= ? AND id < ?");
       const insert = this.db.prepare(`
-        INSERT INTO entries (id, session_id, entry_id, parent_id, at, at_ms, work_id, machine, kind, text, tool_name, tool_calls, truncated, search_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO entries (id, session_id, entry_id, parent_id, at, at_ms, work_id, machine, kind, text, tool_name, tool_calls, truncated, search_text, forgotten)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+      const hide = this.db.prepare("INSERT OR IGNORE INTO memory_hides (memory_id, entry_row) VALUES (?, ?)");
       let shift = 0;
       let waiting = 0;
       let inserted = 0;
       for (const entry of entries) {
         if (known.get(session.sessionId, entry.entryId)) continue;
         // A parent this session has not kept, such as history before a resume, is not named.
-        const parentId = entry.parentId !== undefined && known.get(session.sessionId, entry.parentId) ? entry.parentId : null;
+        const parent = entry.parentId === undefined ? undefined : known.get(session.sessionId, entry.parentId) as { id: number; forgotten: number; kind: string } | undefined;
         const ms = Date.parse(entry.at);
         const id = this.nextId(latestIn, ms);
         shift = Math.max(shift, Math.floor(id / ENTRY_IDS_PER_MS) - ms);
         const searched = searchText(entry);
+        const hiding = this.hidingMemories(session.sessionId, entry, parent);
         if (ASSISTANT_SPOKEN_KINDS.includes(entry.kind) && entry.text.length > 0) waiting += entry.text.length;
         inserted += 1;
-        insert.run(id, session.sessionId, entry.entryId, parentId, entry.at, ms, source.workId ?? null, source.machine ?? null,
-          entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searched);
+        insert.run(id, session.sessionId, entry.entryId, parent ? entry.parentId! : null, entry.at, ms, source.workId ?? null, source.machine ?? null,
+          entry.kind, entry.text, entry.toolName ?? null, entry.toolCalls === undefined ? null : JSON.stringify(entry.toolCalls), entry.truncated ? 1 : 0, searched, hiding.length);
+        for (const memoryId of hiding) hide.run(memoryId, id);
       }
       // Anything said or done keeps the conversation going; only words said wait to be read.
       if (inserted > 0) this.db.prepare("UPDATE sessions SET waiting_chars = waiting_chars + ?, recorded_ms = ? WHERE session_id = ?").run(waiting, Date.now(), session.sessionId);
@@ -282,6 +327,28 @@ export class AssistantStore {
       throw error;
     }
     return { lastEntryId: throughEntryId };
+  }
+
+  /**
+   * The forgotten memories a new entry is hidden with, as it arrives, by the rules memories.ts hides
+   * the entries already there with: an answer follows the words it answers, but not a summary, which
+   * is hidden for what its conversation said before and says nothing of what comes after; a summary
+   * repeats whatever its conversation said before it; and the exchange the owner asked in, named
+   * before it was recorded, is hidden now.
+   */
+  private hidingMemories(sessionId: string, entry: AssistantEntry, parent: { id: number; forgotten: number; kind: string } | undefined): number[] {
+    let rows: Array<{ id: number }> = [];
+    if (ANSWER_KINDS.has(entry.kind) && parent !== undefined && parent.forgotten > 0 && parent.kind !== "summary") {
+      rows = this.db.prepare(`SELECT s.memory_id AS id FROM memory_sources s JOIN memories m ON m.id = s.memory_id WHERE s.entry_row = ?1 AND m.state = 'forgotten'
+        UNION SELECT memory_id FROM memory_hides WHERE entry_row = ?1`).all(parent.id) as Array<{ id: number }>;
+    } else if (entry.kind === "summary" && this.db.prepare("SELECT 1 FROM entries WHERE session_id = ? AND forgotten > 0 LIMIT 1").get(sessionId)) {
+      rows = this.db.prepare(`SELECT s.memory_id AS id FROM memory_sources s JOIN memories m ON m.id = s.memory_id JOIN entries e ON e.id = s.entry_row
+          WHERE e.session_id = ?1 AND m.state = 'forgotten'
+        UNION SELECT h.memory_id FROM memory_hides h JOIN entries e ON e.id = h.entry_row WHERE e.session_id = ?1`).all(sessionId) as Array<{ id: number }>;
+    }
+    const asked = this.db.prepare("SELECT memory_id AS id FROM memory_asks WHERE session_id = ? AND entry_id = ?").all(sessionId, entry.entryId) as Array<{ id: number }>;
+    if (asked.length > 0) this.db.prepare("DELETE FROM memory_asks WHERE session_id = ? AND entry_id = ?").run(sessionId, entry.entryId);
+    return [...new Set([...rows, ...asked].map((row) => row.id))];
   }
 
   /**

@@ -15,7 +15,7 @@ import {
   type AssistantMemoryTopic,
   type AssistantMemoryUpdateRequest,
 } from "../core/assistant.js";
-import { timeBoundary } from "./store.js";
+import { ANSWER, HIDDEN_WITH, noteForgetting, timeBoundary } from "./store.js";
 import { forgetLinesWith, restoreLinesWith } from "./timeline.js";
 import { readTransaction, writeTransaction } from "./transaction.js";
 
@@ -24,8 +24,12 @@ import { readTransaction, writeTransaction } from "./transaction.js";
  * layout). Nothing is ever deleted: a memory set aside is `retired`, one the owner wants gone is
  * `forgotten`, and both can be restored. While a memory is forgotten, the entries it names as where
  * it was said are not found by searches either, and read as forgotten (entries.forgotten counts
- * the forgotten memories naming each entry); the timeline lines covering those words are forgotten
- * with it and come back with it (timeline.ts).
+ * the forgotten memories hiding each entry). So are the entries that tell the same thing by their
+ * place in the conversation (memory_hides): what was said in answer to those places, the exchange
+ * in which the owner asked her to forget it, and the summaries Pi wrote of those conversations
+ * afterwards. The timeline lines covering those words are forgotten with it and come back with it
+ * (timeline.ts). Other places where the same thing happens to be said stay as they are; a forgotten
+ * memory stays on record so that the background does not make it again (extraction.ts).
  *
  * A memory is dated by when it was said: the earliest place it was said, kept up to date as places
  * are added; one written without a place is dated when it was written.
@@ -102,7 +106,8 @@ export class AssistantMemories {
     });
   }
 
-  update(request: AssistantMemoryUpdateRequest, author: AssistantMemoryAuthor): AssistantMemory {
+  /** `askedAt`: the entry in which the owner asked for this change; forgetting hides that exchange too. */
+  update(request: AssistantMemoryUpdateRequest, author: AssistantMemoryAuthor, askedAt?: { sessionId: string; entryId: string }): AssistantMemory {
     return this.write(() => {
       const row = this.row(Number(request.id));
       if (row.revision !== request.revision) throw new AssistantError("assistant_memory_changed", CHANGED);
@@ -113,8 +118,46 @@ export class AssistantMemories {
           throw new AssistantError("assistant_memory_merged", `这条记忆已经合并进 #${into.id}（“${into.text}”），只忘掉它的话，那一条里还留着同样的事。要忘掉，请忘掉 #${into.id}，或者把 #${into.id} 里的这部分改掉。这次没有改动。`);
         }
       }
-      return this.memoryOf(this.change(row, request, author));
+      const asked = askedAt === undefined ? undefined
+        : this.db.prepare("SELECT id FROM entries WHERE session_id = ? AND entry_id = ?").get(askedAt.sessionId, askedAt.entryId) as { id: number } | undefined;
+      // An exchange Main has not recorded yet is noted, and hidden when it arrives (store.ts).
+      if (askedAt !== undefined && !asked && request.state === "forgotten") {
+        this.db.prepare("INSERT OR IGNORE INTO memory_asks (session_id, entry_id, memory_id) VALUES (?, ?, ?)").run(askedAt.sessionId, askedAt.entryId, row.id);
+      }
+      return this.memoryOf(this.change(row, { ...request, ...(asked ? { askedRow: asked.id } : {}) }, author));
     });
+  }
+
+  /** The entries a forgotten memory hides now. */
+  private hidden(memoryId: number): Set<number> {
+    return new Set((this.db.prepare(HIDDEN_WITH).all(memoryId) as Array<{ entry_row: number }>).map((row) => row.entry_row));
+  }
+
+  /**
+   * Inside a write, as a memory is forgotten: notes what goes with the places it was said. That is
+   * the exchange the owner asked in (`askedRow`), everything said in answer to any of these, on
+   * every branch, and the summaries written of those conversations afterwards. A summary ends the
+   * answers before it: what follows it is not hidden for it (store.ts keeps to the same rule for
+   * entries that arrive later).
+   */
+  private hideWith(memoryId: number, askedRow: number | undefined): void {
+    const note = this.db.prepare("INSERT OR IGNORE INTO memory_hides (memory_id, entry_row) VALUES (?, ?)");
+    if (askedRow !== undefined) note.run(memoryId, askedRow);
+    type Place = { id: number; session_id: string; entry_id: string };
+    const places = this.db.prepare(`SELECT id, session_id, entry_id FROM entries WHERE id IN (${HIDDEN_WITH}) AND kind <> 'summary'`).all(memoryId) as unknown as Place[];
+    const answers = this.db.prepare(`SELECT id, session_id, entry_id FROM entries WHERE session_id = ? AND parent_id = ? AND ${ANSWER}`);
+    const seen = new Set(places.map((place) => place.id));
+    for (let place = places.pop(); place !== undefined; place = places.pop()) {
+      for (const answer of answers.all(place.session_id, place.entry_id) as unknown as Place[]) {
+        if (seen.has(answer.id)) continue;
+        seen.add(answer.id);
+        note.run(memoryId, answer.id);
+        places.push(answer);
+      }
+    }
+    this.db.prepare(`INSERT OR IGNORE INTO memory_hides (memory_id, entry_row)
+      SELECT ?1, s.id FROM entries s WHERE s.kind = 'summary' AND EXISTS (
+        SELECT 1 FROM entries e WHERE e.session_id = s.session_id AND e.id < s.id AND e.kind <> 'summary' AND e.id IN (${HIDDEN_WITH}))`).run(memoryId);
   }
 
   /** The memory a merged one lives on in, following later merges; undefined for one never merged. */
@@ -155,7 +198,7 @@ export class AssistantMemories {
   }
 
   /** Inside `write`: applies the changes `request` names and logs each; the revision goes up once. */
-  change(row: MemoryRow, request: Omit<AssistantMemoryUpdateRequest, "id" | "revision"> & { supersededBy?: number }, author: AssistantMemoryAuthor): MemoryRow {
+  change(row: MemoryRow, request: Omit<AssistantMemoryUpdateRequest, "id" | "revision"> & { supersededBy?: number; askedRow?: number }, author: AssistantMemoryAuthor): MemoryRow {
     const at = this.now().toISOString();
     const actions: Array<[AssistantMemoryAction, string | null]> = [];
     if (request.text !== undefined && request.text !== row.text) actions.push(["rewritten", request.text]);
@@ -164,14 +207,22 @@ export class AssistantMemories {
     const ownerChoosesLoading = author === "owner" && request.resident !== undefined && row.resident_fixed === 0;
     if (request.resident !== undefined && (request.resident !== (row.resident === 1) || ownerChoosesLoading)) actions.push([request.resident ? "resident" : "query_only", null]);
     const state = request.state ?? row.state;
-    if (state !== row.state) {
-      actions.push([request.supersededBy !== undefined ? "merged" : state === "active" ? "restored" : state as "retired" | "forgotten", null]);
-      // Entries said where a forgotten memory came from are hidden while it stays forgotten, and the
-      // timeline lines telling of them go with it.
-      const step = state === "forgotten" ? 1 : row.state === "forgotten" ? -1 : 0;
-      if (step !== 0) this.db.prepare("UPDATE entries SET forgotten = forgotten + ? WHERE id IN (SELECT entry_row FROM memory_sources WHERE memory_id = ?)").run(step, row.id);
-      if (step === 1) forgetLinesWith(this.db, row.id, at);
-      if (step === -1) restoreLinesWith(this.db, row.id, at);
+    if (state !== row.state) actions.push([request.supersededBy !== undefined ? "merged" : state === "active" ? "restored" : state as "retired" | "forgotten", null]);
+    // The entries where a forgotten memory was said, and those that go with them, are hidden while
+    // it stays forgotten, and the timeline lines telling of them go with it. Asked again to forget
+    // what is forgotten already, the new request is hidden too: each entry counts once per memory.
+    if (state === "forgotten" && (row.state !== "forgotten" || request.askedRow !== undefined)) {
+      const counted = row.state === "forgotten" ? this.hidden(row.id) : new Set<number>();
+      noteForgetting(this.db);
+      this.hideWith(row.id, request.askedRow);
+      const count = this.db.prepare("UPDATE entries SET forgotten = forgotten + 1 WHERE id = ?");
+      for (const entryRow of this.hidden(row.id)) if (!counted.has(entryRow)) count.run(entryRow);
+      forgetLinesWith(this.db, row.id, at);
+    } else if (state !== "forgotten" && row.state === "forgotten") {
+      this.db.prepare(`UPDATE entries SET forgotten = forgotten - 1 WHERE id IN (${HIDDEN_WITH})`).run(row.id);
+      this.db.prepare("DELETE FROM memory_hides WHERE memory_id = ?").run(row.id);
+      this.db.prepare("DELETE FROM memory_asks WHERE memory_id = ?").run(row.id);
+      restoreLinesWith(this.db, row.id, at);
     }
     if (actions.length === 0) return row;
     this.db.prepare(`UPDATE memories SET text = ?, topic = ?, resident = ?, state = ?, author = ?, updated_at = ?, revision = revision + 1,

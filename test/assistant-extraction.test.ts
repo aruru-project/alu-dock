@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { AssistantDocuments } from "../src/assistant/documents.js";
-import { AssistantExtraction, type ExtractionModel } from "../src/assistant/extraction.js";
+import { AssistantExtraction, ExtractionModelError, type ExtractionModel } from "../src/assistant/extraction.js";
 import type { ModelPrompt } from "../src/assistant/extraction-prompt.js";
 import { AssistantMemories } from "../src/assistant/memories.js";
 import { AssistantStore } from "../src/assistant/store.js";
@@ -19,7 +19,9 @@ import { waitFor } from "./support/plan-goal-provider.js";
 // part it could not read is read again by the next model; and the owner can start over with another
 // model, which reads every conversation again in the order things were said.
 
-const NOTHING = JSON.stringify({ changes: [], timeline: [] });
+/** No memory worth keeping; the part read still lands on the timeline, as every reply must. */
+const LINE = [{ do: "add", text: "聊了几句。", from: [1] }];
+const NOTHING = JSON.stringify({ changes: [], timeline: LINE });
 
 async function setUp(context: TestContext, complete: ExtractionModel["complete"], options: { chunkChars?: number; now?: () => number } = {}) {
   const root = await mkdtemp(join(tmpdir(), "alu-extraction-"));
@@ -40,6 +42,9 @@ async function setUp(context: TestContext, complete: ExtractionModel["complete"]
 function readThisTime(prompt: ModelPrompt): string {
   return prompt.prompt.slice(prompt.prompt.indexOf("## 这次要读的对话"));
 }
+
+/** Whether a prompt asks the model to read a conversation, rather than only whether it answers at all (asked after a call failed). */
+const reads = (prompt: ModelPrompt): boolean => prompt.prompt.includes("## 这次要读的对话");
 
 test("the background reads every word said to her, whole, and not what tools returned or what compaction summed up", { timeout: 30_000 }, async (context) => {
   const prompts: ModelPrompt[] = [];
@@ -74,7 +79,7 @@ test("the background looks up an old memory instead of being handed them all, an
     prompts.push(prompt);
     found = tools!.list[0]!.run({ queries: ["日语"] });
     const id = /\[#(\d+)\]/u.exec(found)?.[1];
-    return JSON.stringify({ changes: [{ do: "rewrite", id, text: "主人不学日语了，改学韩语。", from: [1] }], timeline: [] });
+    return JSON.stringify({ changes: [{ do: "rewrite", id, text: "主人不学日语了，改学韩语。", from: [1] }], timeline: LINE });
   });
   memories.add({ topic: "owner", text: "主人的猫叫团子。", resident: true }, "owner");
   const old = memories.add({ topic: "preferences", text: "主人在学日语，每天早上背单词。", resident: false }, "extraction");
@@ -96,7 +101,7 @@ test("a part the model could not make sense of is noted and read again once anot
   let clock = Date.parse("2026-11-10T00:00:00.000Z");
   const { say, extraction, memories } = await setUp(context, async (model) => model.id === "weak"
     ? "我看不太懂你要什么。"
-    : JSON.stringify({ changes: [{ do: "add", topic: "owner", text: "主人对芒果过敏。", resident: true, from: [1] }], timeline: [] }),
+    : JSON.stringify({ changes: [{ do: "add", topic: "owner", text: "主人对芒果过敏。", resident: true, from: [1] }], timeline: LINE }),
   { now: () => (clock += 3_600_000) });
   say("fruit", [{ entryId: "u1", at: "2026-11-09T13:30:00.000Z", kind: "user", text: "我对芒果过敏，吃了会起疹子。" }]);
   extraction.setModel({ provider: "memory", id: "weak" });
@@ -149,4 +154,149 @@ test("starting over sets aside what the background made, keeps what the owner an
   // Review of 2026-11-10: a client or a session still naming the removed line must not reach the new one.
   const fresh = timeline.list({ limit: 10, query: "又读到" }).episodes[0];
   assert.ok(fresh && fresh.id !== shanghaiLine!.id, `The new line takes a new number: ${fresh?.id}`);
+});
+
+// Review of 2026-11-10 (card #295), reproduced before the fix: a conversation the model service refused
+// every time was tried over and over while every later conversation waited behind it, unread. The
+// same must hold when the other conversation failed once too, as in a short outage (independent
+// review of the fix: the conversation that always fails then took every later try).
+test("a conversation the model service keeps refusing does not hold the others up, and is set aside for another model to read", { timeout: 30_000 }, async (context) => {
+  // The clock runs an hour on at every look, so every wait before another try is over at once.
+  let clock = Date.parse("2026-11-10T00:00:00.000Z");
+  const asked: string[] = [];
+  // A short outage at the start: the first try at each conversation fails, and the model answers nothing.
+  let outage = 4;
+  const { say, extraction, memories } = await setUp(context, async (model, prompt) => {
+    if (reads(prompt)) asked.push(readThisTime(prompt).includes("咖啡") ? "first" : "second");
+    if (outage > 0) { outage -= 1; throw new ExtractionModelError("The model service is not reachable."); }
+    // Asked whether it answers at all, the model does: the trouble is with the one conversation.
+    if (!reads(prompt)) return "好";
+    const first = asked.at(-1) === "first";
+    if (first && model.id === "strict") throw new ExtractionModelError("The provider refused this request.");
+    return JSON.stringify({ changes: [{ do: "add", topic: "preferences", text: first ? "主人爱喝咖啡。" : "主人喜欢喝乌龙茶。", resident: false, from: [1] }], timeline: LINE });
+  }, { now: () => (clock += 3_600_000) });
+  say("first", [{ entryId: "a1", at: "2026-11-01T02:00:00.000Z", kind: "user", text: "我每天早上都要喝咖啡。" }]);
+  say("second", [{ entryId: "b1", at: "2026-11-02T02:00:00.000Z", kind: "user", text: "我喜欢喝乌龙茶。" }]);
+  extraction.setModel({ provider: "memory", id: "strict" });
+  extraction.start();
+  await waitFor(() => extraction.status().skippedParts === 1 && extraction.status().waitingSessions === 0, "The refused conversation was not set aside");
+  assert.deepEqual(memories.list({ limit: 10 }).memories.map((memory) => memory.text), ["主人喜欢喝乌龙茶。"], "The other conversation was read");
+  assert.deepEqual(asked.slice(0, 2), ["first", "second"], "The other conversation is read right after the refusal, not after the retries");
+
+  extraction.setModel({ provider: "memory", id: "lenient" });
+  await waitFor(() => memories.list({ limit: 10 }).memories.length === 2, "The conversation set aside was not read by the next model");
+  assert.equal(extraction.status().skippedParts, undefined);
+});
+
+// Review of 2026-11-10 (card #295): the background saw only the memories in use, so a conversation read
+// again, as after starting over, made anew what the owner had set aside or had her forget.
+test("starting over does not bring back what the owner set aside or had her forget", { timeout: 30_000 }, async (context) => {
+  let again = false;
+  let shown = "";
+  const { say, extraction, memories } = await setUp(context, async (_model, prompt, _signal, tools) => {
+    const words = readThisTime(prompt);
+    if (again) shown += tools!.list[0]!.run({ queries: ["A公司", "花生"] });
+    // The model makes of the words what it made of them the first time, whatever its search showed.
+    return JSON.stringify({ changes: [
+      ...(words.includes("A公司") ? [{ do: "add", topic: "owner", text: "主人在A公司上班。", resident: false, from: [1] }] : []),
+      ...(words.includes("花生") ? [{ do: "add", topic: "owner", text: "主人对花生过敏。", resident: false, from: [2] }] : []),
+    ], timeline: LINE });
+  });
+  say("old", [
+    { entryId: "u1", at: "2026-10-01T02:00:00.000Z", kind: "user", text: "我在A公司上班。" },
+    { entryId: "u2", parentId: "u1", at: "2026-10-01T02:01:00.000Z", kind: "user", text: "对了，我花生过敏。" },
+  ]);
+  extraction.setModel({ provider: "memory", id: "first" });
+  extraction.start();
+  await waitFor(() => memories.list({ limit: 10 }).memories.length === 2, "The conversation was not read");
+  const [allergy, work] = memories.list({ limit: 10 }).memories;
+  memories.update({ id: work!.id, revision: work!.revision, state: "retired" }, "owner");
+  memories.update({ id: allergy!.id, revision: allergy!.revision, state: "forgotten" }, "owner");
+
+  again = true;
+  extraction.reorganize({ provider: "memory", id: "second" });
+  await waitFor(() => shown.length > 0 && extraction.status().waitingSessions === 0, "The conversation was not read again");
+  assert.deepEqual(memories.list({ limit: 10 }).memories, [], "Neither is in use again");
+  assert.ok(shown.includes("主人在A公司上班。") && shown.includes("主人对花生过敏。"), `The background's search shows what is not to be recorded again: ${shown}`);
+});
+
+// Independent review of 2026-11-10 (card #295): a conversation is set aside only when the trouble is its
+// own. One call failed for its own reasons, another conversation was read fine, then the model service
+// went down: the earlier success must not count as proof that the service works now. And a model that
+// answers a short question but can read no conversation at all (its settings, what every reading
+// carries) has no trouble with any one of them. Set aside wrongly, a conversation would stay unread
+// until the owner chose another model.
+test("no conversation is set aside while the model service answers nothing, or while none can be read at all", { timeout: 30_000 }, async (context) => {
+  for (const trouble of ["the service goes down", "no reading works"] as const) {
+    let clock = Date.parse("2026-11-10T00:00:00.000Z");
+    let down = false;
+    let failed = 0;
+    const { say, extraction, memories } = await setUp(context, async (_model, prompt) => {
+      if (down) {
+        failed += 1;
+        throw new ExtractionModelError("The model service is not reachable.");
+      }
+      if (!reads(prompt)) return "好";
+      if (trouble === "no reading works" || readThisTime(prompt).includes("咖啡")) {
+        failed += 1;
+        throw new ExtractionModelError("The provider refused this request.");
+      }
+      // The other conversation is read, and then the service goes down.
+      down = true;
+      return JSON.stringify({ changes: [{ do: "add", topic: "preferences", text: "主人喜欢喝乌龙茶。", resident: false, from: [1] }], timeline: LINE });
+    }, { now: () => (clock += 3_600_000) });
+    say("first", [{ entryId: "a1", at: "2026-11-01T02:00:00.000Z", kind: "user", text: "我每天早上都要喝咖啡。" }]);
+    say("second", [{ entryId: "b1", at: "2026-11-02T02:00:00.000Z", kind: "user", text: "我喜欢喝乌龙茶。" }]);
+    extraction.setModel({ provider: "memory", id: "fixture" });
+    extraction.start();
+    // Many more failures than it takes to set a conversation aside when the trouble is its own.
+    await waitFor(() => failed >= 16, `${trouble}: the conversations were not tried again`);
+    const read = trouble === "the service goes down" ? 1 : 0;
+    assert.deepEqual([extraction.status().state, extraction.status().skippedParts, extraction.status().waitingSessions], ["failed", undefined, 2 - read], `${trouble}: they wait to be read; nothing is set aside`);
+    assert.equal(memories.list({ limit: 10 }).memories.length, read, trouble);
+    await extraction.stop();
+  }
+});
+
+/** One conversation whose first words became a memory and a timeline line, and whose next words are being read while `meanwhile` happens. */
+async function readOnWhile(context: TestContext, meanwhile: (made: { memoryId: string; lineId: string }, parts: Awaited<ReturnType<typeof setUp>>) => void, answer: (lineId: string) => object) {
+  let round = 0;
+  let during = (): void => {};
+  let lineId = "";
+  const parts = await setUp(context, async () => {
+    round += 1;
+    if (round === 1) return JSON.stringify({ changes: [{ do: "add", topic: "owner", text: "主人对花生过敏。", resident: false, from: [1] }], timeline: [{ do: "add", text: "聊到主人花生过敏。", from: [1] }] });
+    if (round === 2) { during(); return JSON.stringify({ changes: [], timeline: [answer(lineId)] }); }
+    return JSON.stringify({ changes: [], timeline: [{ do: "add", text: "说起周末去爬山。", from: [1] }] });
+  });
+  const { say, extraction, memories, timeline } = parts;
+  say("s", [{ entryId: "u1", at: "2026-11-09T02:00:00.000Z", kind: "user", text: "我对花生过敏。" }]);
+  extraction.setModel({ provider: "memory", id: "fixture" });
+  extraction.start();
+  await waitFor(() => memories.list({ limit: 10 }).memories.length === 1 && timeline.list({ limit: 10 }).episodes.length === 1, "The first words were not read");
+  lineId = timeline.list({ limit: 10 }).episodes[0]!.id;
+  during = () => meanwhile({ memoryId: memories.list({ limit: 10 }).memories[0]!.id, lineId }, parts);
+  say("s", [{ entryId: "u2", parentId: "u1", at: "2026-11-09T03:00:00.000Z", kind: "user", text: "周末去爬山吧，多带点吃的。" }]);
+  await waitFor(() => round >= 3 && extraction.status().waitingSessions === 0, "The next words were not read again");
+  return timeline.list({ limit: 10 }).episodes.map((line) => line.text);
+}
+
+// Independent review of 2026-11-10 (card #295): the model is shown the conversation's timeline and her
+// memories beside the words it reads. When the owner has her forget something while it reads, what it
+// writes may still tell of it, also on a line of its own about the new words. Nothing of that answer
+// is kept, and the words are read again without what was forgotten.
+test("what she forgets while the background is reading does not come back on the timeline", { timeout: 30_000 }, async (context) => {
+  const lines = await readOnWhile(context,
+    ({ memoryId }, { memories }) => { memories.update({ id: memoryId, revision: memories.get(memoryId).memory.revision, state: "forgotten" }, "owner"); },
+    () => ({ do: "add", text: "商量周末爬山，准备不含花生的吃的。", from: [1] }));
+  assert.deepEqual(lines, ["说起周末去爬山。"]);
+});
+
+// The same review: a line the owner puts right while the model reads on is not extended from what it
+// said before, nor is the old wording kept on a line beside it.
+test("a timeline line the owner rewrites while the background is reading is not written over or repeated", { timeout: 30_000 }, async (context) => {
+  const lines = await readOnWhile(context,
+    ({ lineId }, { timeline }) => { timeline.update({ id: lineId, revision: timeline.get(lineId).revision, text: "主人说起他对花生过敏（其实是轻微不耐受）。" }, "owner"); },
+    (lineId) => ({ do: "rewrite", id: lineId, text: "聊到主人花生过敏，后来说起周末去爬山。", from: [1] }));
+  assert.deepEqual(lines, ["说起周末去爬山。", "主人说起他对花生过敏（其实是轻微不耐受）。"]);
 });

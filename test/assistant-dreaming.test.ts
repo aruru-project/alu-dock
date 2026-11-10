@@ -32,7 +32,7 @@ test("her memories are checked against what was said and merged, and what the ow
           { do: "add", topic: "owner", text: "主人又熬夜到两点。", resident: true, from: [3] },
           { do: "add", topic: "preferences", text: "主人睡前总要刷B站。", resident: true, from: [4] },
           { do: "rewrite", id: owners, text: "主人养了一只猫。", from: [1] },
-        ] });
+        ], timeline: [{ do: "add", text: "聊熬夜和睡前的习惯。", from: [1, 4] }] });
       }
       const [habit, second, first] = memories.list({ limit: 10, author: "extraction" }).memories.map((memory) => memory.id);
       return `整理好了：\n${JSON.stringify({ changes: [
@@ -76,4 +76,33 @@ test("her memories are checked against what was said and merged, and what the ow
   // Its own changes are not tidied again: without this the passes would call the model forever.
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(prompts.length, 2);
+});
+
+// Independent review of 2026-11-10 (card #295): what the owner set aside is not made again by the
+// background, also not by tidying two other memories into one that says the very same thing.
+test("tidying does not merge memories into one the owner set aside", { timeout: 30_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dreaming-barred-"));
+  const store = new AssistantStore(join(root, "memory.sqlite"));
+  const documents = new AssistantDocuments(root);
+  await documents.initialize();
+  const memories = new AssistantMemories(store.connection);
+  let dreams = 0;
+  const extraction = new AssistantExtraction(store.connection, memories, new AssistantTimeline(store.connection), documents, {
+    complete: async () => {
+      dreams += 1;
+      const [second, first] = memories.list({ limit: 10 }).memories.map((memory) => memory.id);
+      return JSON.stringify({ changes: [{ do: "merge", ids: [second, first], text: "主人在A公司上班。" }] });
+    },
+  }, { idleMs: 0, busyChars: 1e9, chunkChars: 24_000, tickMs: 10, quietMs: 0, dreamChanges: 1, dreamIntervalMs: 1e15 });
+  context.after(async () => { await extraction.stop(); store.close(); await rm(root, { recursive: true, force: true }); });
+
+  const wrong = memories.add({ topic: "owner", text: "主人在A公司上班。", resident: false }, "extraction");
+  memories.update({ id: wrong.id, revision: wrong.revision, state: "retired" }, "owner");
+  memories.add({ topic: "owner", text: "主人在A公司做后端。", resident: false }, "extraction");
+  memories.add({ topic: "owner", text: "主人在A公司待了三年。", resident: false }, "extraction");
+  extraction.setModel({ provider: "memory", id: "fixture" });
+  extraction.start();
+  await waitFor(() => dreams === 1 && extraction.status().state === "idle", "The memories were not tidied");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(memories.list({ limit: 10 }).memories.map((memory) => memory.text), ["主人在A公司待了三年。", "主人在A公司做后端。"], "Both stay as they are, and nothing says it again");
 });

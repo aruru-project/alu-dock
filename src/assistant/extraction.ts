@@ -18,7 +18,7 @@ import {
   type ShownMemory,
 } from "./extraction-prompt.js";
 import type { AssistantMemories, MemoryRow } from "./memories.js";
-import { SPOKEN, type EntryRow } from "./store.js";
+import { SPOKEN, forgettings, type EntryRow } from "./store.js";
 import type { AssistantTimeline, EpisodeRow } from "./timeline.js";
 
 /*
@@ -30,22 +30,30 @@ import type { AssistantTimeline, EpisodeRow } from "./timeline.js";
  *   waiting, the one whose unread words are oldest goes first, so memories follow the order things
  *   were said in. The same reading writes her timeline (timeline.ts): a line per stretch of the
  *   conversation saying what they were doing, whose time is the first and last entry it covers; the
- *   session's latest lines are shown so the model extends them rather than adds. A session's
- *   `extracted_through` marks how far it was read. A part whose answers could not be read is passed
- *   over and noted in skipped_parts, to be read again once another model is chosen.
+ *   session's latest lines are shown so the model extends them rather than adds; every part read
+ *   lands on a line. A session's `extracted_through` marks how far it was read. A part this model
+ *   cannot read is passed over and noted in skipped_parts, to be read again once another model is
+ *   chosen: one whose answers could not be read, or one whose call kept failing while the model
+ *   answered a question of a few words each time. A part that fails does not hold the others up:
+ *   they are read first, and it is tried again after them.
  * - Dreaming, once everything is quiet, looks again at the memories changed since it last ran, checks
  *   each against the words it came from, merges what says the same, and keeps the part loaded every
  *   session small (see extraction-prompt.ts). It does not touch the timeline.
  *
  * Either pass is shown the memories loaded every session and looks up the others with a search the
- * model calls (SEARCH_TOOL), as she does in a conversation.
+ * model calls (SEARCH_TOOL), as she does in a conversation. The search also shows what is on record
+ * as not to be made again (BARRED): what the owner had her forget, and what he or she set aside.
+ * A conversation read again later, as after starting over, would otherwise bring those back.
  *
  * One pass runs at a time, with the model chosen in the assistant's settings; without one, nothing
  * runs. Starting over (reorganize) sets aside what the background made and reads everything again.
  * Neither pass changes a memory or a timeline line the owner changed last, nor whether a memory
  * is loaded every session once the owner chose that. Changes are checked against what the model was
- * shown, so one the owner or the assistant made meanwhile is never overwritten. Open sessions are not
- * told: they load the latest memories when they start again.
+ * shown, so one the owner or the assistant made meanwhile is never overwritten. When something was
+ * forgotten while the model read, it may have been shown that very thing, in the words it read, the
+ * lines of the timeline or the memories beside them: nothing of its reply is kept and the pass runs
+ * again on what is left. Open sessions are not told: they load the latest memories when they start
+ * again.
  */
 
 /** A tool the model may call while it reads; `run` answers it at once. */
@@ -90,6 +98,24 @@ export const DEFAULT_EXTRACTION_TIMING: ExtractionTiming = {
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
 /** A part the model answered in a form that cannot be read this many times is passed over. */
 const UNREADABLE_ATTEMPTS = 3;
+/**
+ * So is a part whose call failed this many times in a row while the model answered PROBE right after
+ * each, once the model has read some other part in the meantime.
+ */
+const REFUSED_ATTEMPTS = 3;
+/**
+ * Asked right after a part's call failed, to tell that part's trouble from an outage: a model that
+ * answers this is reachable now. Costs a few tokens, and only when a call has failed. It does not show
+ * that a whole reading works (the persona, the tools, the length), which is why a part is passed over
+ * only once another part was read too.
+ */
+const PROBE: ModelPrompt = { system: "这是一次连通检查。", prompt: "只回复一个字：好。" };
+/**
+ * Memories on record as not to be made again, as an SQL condition on `memories`: forgotten at the
+ * owner's word, or set aside by the owner or by her in a conversation. What the background itself
+ * set aside (a merged part, a memory starting over put away) is not among them.
+ */
+const BARRED = "(state = 'forgotten' OR (state = 'retired' AND author IN ('owner', 'assistant')))";
 const ENTRIES_PER_READ = 400;
 /** Words already read shown again before a part, for its start to make sense: the last of them, up to this much. */
 const LEAD_IN_ENTRIES = 8;
@@ -105,17 +131,28 @@ const EPISODES_SHOWN = 5;
 
 /** A part passed over, being read again from after `after` through `through`. */
 interface SkippedPart { id: number; after: number; through: number }
-type Job = { kind: "extract"; sessionId: string; part?: SkippedPart } | { kind: "dream" };
+/** `key` names what a pass reads, so that failures of the same part are counted together. */
+type Job = { kind: "extract"; key: string; sessionId: string; part?: SkippedPart } | { kind: "dream"; key: string };
+/**
+ * A part whose model call failed: how often, when it may be tried again, after how many failures in a
+ * row the model was found working, and whether the model read anything else since this part first failed.
+ */
+interface Refusal { attempts: number; notBefore: number; proven: number; othersRead: boolean }
 
 export class AssistantExtraction {
   private timer: NodeJS.Timeout | undefined;
   private running: Promise<void> | undefined;
   private stopped = true;
-  private readonly cancel = new AbortController();
-  private failure: { message: string; retryAt: number; attempts: number } | undefined;
+  private cancel = new AbortController();
+  /** Why the last pass failed, for the owner to know, until a pass works again. */
+  private failure: string | undefined;
+  /** Failed passes in a row, and when the next may start: an outage is not hammered. */
+  private streak = 0;
+  private retryAt = 0;
   /** The last part passed over, for the owner to know. */
   private notice: string | undefined;
   private readonly unreadable = new Map<string, number>();
+  private readonly refused = new Map<string, Refusal>();
   /** Goes up when everything is read again, so a pass started before does not apply what it made. */
   private generation = 0;
 
@@ -132,6 +169,7 @@ export class AssistantExtraction {
 
   start(): void {
     this.stopped = false;
+    if (this.cancel.signal.aborted) this.cancel = new AbortController();
     this.schedule(0);
   }
 
@@ -145,7 +183,7 @@ export class AssistantExtraction {
 
   /** Whether a pass runs or one is due now; what the evaluation script waits on. */
   busy(): boolean {
-    return this.running !== undefined || (this.settings().extractionModel !== undefined && !this.failure && this.nextJob(this.now()) !== undefined);
+    return this.running !== undefined || (this.settings().extractionModel !== undefined && this.streak === 0 && this.nextJob(this.now()) !== undefined);
   }
 
   settings(): AssistantSettings {
@@ -178,7 +216,8 @@ export class AssistantExtraction {
     const counts = this.memories.write(() => {
       const made = this.db.prepare(`SELECT * FROM memories m WHERE m.state = 'active' AND m.resident_fixed = 0
         AND NOT EXISTS (SELECT 1 FROM memory_changes c WHERE c.memory_id = m.id AND c.author IN ('owner', 'assistant'))`).all() as unknown as MemoryRow[];
-      for (const row of made) this.memories.change(row, { state: "retired" }, "owner");
+      // Set aside as the background's own doing: what the owner himself set aside is not made again (BARRED), these are.
+      for (const row of made) this.memories.change(row, { state: "retired" }, "extraction");
       const lines = this.db.prepare(`DELETE FROM episodes WHERE edited = 0
         AND NOT EXISTS (SELECT 1 FROM episodes_forgotten_with w WHERE w.episode_id = episodes.id)`).run();
       this.db.prepare("DELETE FROM skipped_parts").run();
@@ -195,8 +234,11 @@ export class AssistantExtraction {
   /** After the owner's change: earlier failures are forgotten and the next pass may start at once. */
   private restart(): void {
     this.failure = undefined;
+    this.streak = 0;
+    this.retryAt = 0;
     this.notice = undefined;
     this.unreadable.clear();
+    this.refused.clear();
     if (!this.running) this.schedule(0);
   }
 
@@ -205,15 +247,16 @@ export class AssistantExtraction {
     const { count } = this.db.prepare("SELECT count(*) AS count FROM sessions WHERE waiting_chars > 0").get() as { count: number };
     const { skipped } = this.db.prepare("SELECT count(*) AS skipped FROM skipped_parts").get() as { skipped: number };
     const lastRun = this.meta("last_run_ms");
-    const problem = this.failure?.message ?? this.notice;
+    const problem = this.failure ?? this.notice;
+    const failed = this.streak > 0;
     return {
-      state: model === undefined ? "off" : this.failure ? "failed" : this.running ? "working" : "idle",
+      state: model === undefined ? "off" : failed ? "failed" : this.running ? "working" : "idle",
       ...(model === undefined ? {} : { model }),
       waitingSessions: count,
       ...(skipped === 0 ? {} : { skippedParts: skipped }),
       ...(lastRun === undefined ? {} : { lastRunAt: new Date(Number(lastRun)).toISOString() }),
       ...(problem === undefined ? {} : { lastError: problem }),
-      ...(this.failure ? { retryAt: new Date(this.failure.retryAt).toISOString() } : {}),
+      ...(failed ? { retryAt: new Date(this.retryAt).toISOString() } : {}),
     };
   }
 
@@ -230,14 +273,16 @@ export class AssistantExtraction {
     // Choosing a model starts it again.
     if (model === undefined) return;
     const now = this.now();
-    if (this.failure && now < this.failure.retryAt) { this.schedule(this.failure.retryAt - now); return; }
+    if (now < this.retryAt) { this.schedule(this.retryAt - now); return; }
     const job = this.nextJob(now);
     if (!job) { this.schedule(this.timing.tickMs); return; }
     this.running = (async () => {
       try {
-        if (job.kind === "extract") await this.extract(job.sessionId, model, job.part);
-        else await this.dream(model);
+        if (job.kind === "extract") await this.extract(job, model);
+        else await this.dream(job, model);
         this.failure = undefined;
+        this.streak = 0;
+        this.retryAt = 0;
         this.setMeta("last_run_ms", String(this.now()));
       } catch (error) {
         if (!this.stopped) this.fail(error);
@@ -245,33 +290,59 @@ export class AssistantExtraction {
     })().finally(() => {
       this.running = undefined;
       // Straight on to the next part; a failure waits for its retry.
-      this.schedule(this.failure ? this.failure.retryAt - this.now() : 0);
+      this.schedule(this.retryAt - this.now());
     });
   }
 
+  /**
+   * What to do next: a part passed over that is due again, then the conversation whose unread words
+   * are oldest, then dreaming once all is quiet. A part whose model call failed gives way to everything
+   * that has not failed, so one conversation the model service refuses does not hold up the others;
+   * it is tried again after them, once its own wait is over. Of several that failed, the one waiting
+   * longest goes first, so they take turns and one that always fails cannot keep the others from
+   * their next try.
+   */
   private nextJob(now: number): Job | undefined {
-    const part = this.db.prepare("SELECT id, session_id, after_row, through_row FROM skipped_parts WHERE due = 1 ORDER BY after_row LIMIT 1")
-      .get() as { id: number; session_id: string; after_row: number; through_row: number } | undefined;
-    if (part) return { kind: "extract", sessionId: part.session_id, part: { id: part.id, after: part.after_row, through: part.through_row } };
-    const session = this.db.prepare(`SELECT s.session_id FROM sessions s WHERE s.waiting_chars > 0 AND (s.recorded_ms <= ? OR s.waiting_chars >= ?)
-      ORDER BY (SELECT min(id) FROM entries WHERE entries.session_id = s.session_id AND entries.id > s.extracted_through AND ${SPOKEN}) LIMIT 1`)
-      .get(now - this.timing.idleMs, this.timing.busyChars) as { session_id: string } | undefined;
-    if (session) return { kind: "extract", sessionId: session.session_id };
+    // One more than the parts that failed: enough to find one that has not, if there is any.
+    const room = this.refused.size + 1;
+    const parts = this.db.prepare("SELECT id, session_id, after_row, through_row FROM skipped_parts WHERE due = 1 ORDER BY after_row LIMIT ?")
+      .all(room) as Array<{ id: number; session_id: string; after_row: number; through_row: number }>;
+    const sessions = this.db.prepare(`SELECT s.session_id, s.extracted_through FROM sessions s WHERE s.waiting_chars > 0 AND (s.recorded_ms <= ? OR s.waiting_chars >= ?)
+      ORDER BY (SELECT min(id) FROM entries WHERE entries.session_id = s.session_id AND entries.id > s.extracted_through AND ${SPOKEN}) LIMIT ?`)
+      .all(now - this.timing.idleMs, this.timing.busyChars, room) as Array<{ session_id: string; extracted_through: number }>;
+    const reading: Job[] = [
+      ...parts.map((part) => ({ kind: "extract" as const, key: `part ${part.id}:${part.after_row}`, sessionId: part.session_id, part: { id: part.id, after: part.after_row, through: part.through_row } })),
+      ...sessions.map((session) => ({ kind: "extract" as const, key: `${session.session_id}:${session.extracted_through}`, sessionId: session.session_id })),
+    ];
+    const fresh = reading.find((job) => !this.refused.has(job.key));
+    if (fresh) return fresh;
+    const dream = this.dreamDue(now);
+    if (dream && !this.refused.has(dream.key)) return dream;
+    const due = (job: Job): number => this.refused.get(job.key)!.notBefore;
+    return [...reading, ...(dream ? [dream] : [])].filter((job) => now >= due(job))
+      .reduce<Job | undefined>((first, job) => (first === undefined || due(job) < due(first) ? job : first), undefined);
+  }
+
+  /** Dreaming, once nothing was recorded anywhere for a while and enough memories changed or enough time passed. */
+  private dreamDue(now: number): Job | undefined {
     const { latest } = this.db.prepare("SELECT max(recorded_ms) AS latest FROM sessions").get() as { latest: number | null };
     if (latest !== null && latest > now - this.timing.quietMs) return undefined;
+    const dreamedThrough = Number(this.meta("dreamed_through") ?? 0);
     const { changed } = this.db.prepare(`SELECT count(DISTINCT m.id) AS changed FROM memory_changes c JOIN memories m ON m.id = c.memory_id
-      WHERE c.id > ? AND c.author IN ('extraction', 'assistant') AND m.state = 'active' AND m.author <> 'owner'`).get(Number(this.meta("dreamed_through") ?? 0)) as { changed: number };
+      WHERE c.id > ? AND c.author IN ('extraction', 'assistant') AND m.state = 'active' AND m.author <> 'owner'`).get(dreamedThrough) as { changed: number };
     if (changed === 0) return undefined;
     const dreamed = Number(this.meta("dreamed_ms") ?? 0);
-    return changed >= this.timing.dreamChanges || now - dreamed >= this.timing.dreamIntervalMs ? { kind: "dream" } : undefined;
+    return changed >= this.timing.dreamChanges || now - dreamed >= this.timing.dreamIntervalMs ? { kind: "dream", key: `dream:${dreamedThrough}` } : undefined;
   }
 
   /**
    * Reads the next part of one conversation, or of a part passed over before, and applies what the
    * model makes of it.
    */
-  private async extract(sessionId: string, model: AssistantModelRef, part?: SkippedPart): Promise<void> {
+  private async extract(job: Extract<Job, { kind: "extract" }>, model: AssistantModelRef): Promise<void> {
+    const { sessionId, part, key } = job;
     const generation = this.generation;
+    const forgetting = forgettings(this.db);
     const after = part?.after ?? (this.db.prepare("SELECT extracted_through FROM sessions WHERE session_id = ?").get(sessionId) as { extracted_through: number }).extracted_through;
     const rows = this.db.prepare(`SELECT * FROM entries WHERE session_id = ? AND id > ? AND id <= ? AND ${SPOKEN} ORDER BY id LIMIT ?`)
       .all(sessionId, after, part?.through ?? Number.MAX_SAFE_INTEGER, ENTRIES_PER_READ) as unknown as EntryRow[];
@@ -295,31 +366,51 @@ export class AssistantExtraction {
     if (lines.length === 0) {
       // Nothing in this part to read: words the owner had her forget.
       this.memories.write(read);
+      this.refused.delete(key);
       return;
     }
+    /** This model cannot read the part: it is noted for the next model, and reading goes on past it. */
+    const setAside = () => this.memories.write(() => {
+      if (part) this.db.prepare("UPDATE skipped_parts SET due = 0 WHERE id = ?").run(part.id);
+      else {
+        this.db.prepare("INSERT INTO skipped_parts (session_id, after_row, through_row) VALUES (?, ?, ?)").run(sessionId, after, through);
+        this.advance(sessionId, through);
+      }
+    });
     const leadIn = this.leadIn(sessionId, after);
     const resident = this.residentShown();
     const shownEpisodes = this.timeline.latestOf(sessionId, EPISODES_SHOWN, rowById.get(refs[0]!)!.at_ms);
     const found = new Map<number, MemoryRow>();
     const [persona, notes] = await Promise.all([this.documents.get("persona"), this.documents.get("notes")]);
-    const reply = await this.model.complete(model, extractionPrompt({ persona: persona.text, notes: notes.text, resident, episodes: shownEpisodes, leadIn, lines }), this.cancel.signal,
-      { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+    let reply: string;
+    try {
+      reply = await this.model.complete(model, extractionPrompt({ persona: persona.text, notes: notes.text, resident, episodes: shownEpisodes, leadIn, lines }), this.cancel.signal,
+        { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+    } catch (error) {
+      // Everything is being read again from the start, or the service is stopping: not this part's
+      // failure, neither before nor after asking whether the model answers at all. Nor is it when
+      // something was forgotten meanwhile: the part is no longer what the model was sent.
+      if (generation !== this.generation || this.outdated(forgetting, key)) return;
+      if (this.stopped) throw error;
+      const working = await this.answers(model);
+      if (generation !== this.generation || this.outdated(forgetting, key)) return;
+      if (this.stopped || !this.refuse(key, working)) throw error;
+      setAside();
+      this.notice = "有一段对话，整理记忆用的模型每次都读不成（模型服务对这一段一直报错，问它别的它答得出），这段先跳过了。已经记下是哪段，换一个模型或从头整理时会重新读它。";
+      this.log(`Assistant extraction passed over part of session ${sessionId} after repeated failures: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     // Everything is being read again from the start: what this pass made is not wanted.
     if (generation !== this.generation) return;
-    const key = `${part ? `part ${part.id}` : sessionId}:${after}`;
+    this.answered(key);
     let parsed: ReturnType<typeof parseExtractionReply>;
     try {
       parsed = parseExtractionReply(reply, lines.length);
     } catch (error) {
       if (!(error instanceof ReplyFormatError)) throw error;
+      if (this.outdated(forgetting, key)) return;
       if (this.passOver(key)) {
-        this.memories.write(() => {
-          if (part) this.db.prepare("UPDATE skipped_parts SET due = 0 WHERE id = ?").run(part.id);
-          else {
-            this.db.prepare("INSERT INTO skipped_parts (session_id, after_row, through_row) VALUES (?, ?, ?)").run(sessionId, after, through);
-            this.advance(sessionId, through);
-          }
-        });
+        setAside();
         this.notice = "整理记忆用的模型对一段对话的回答看不懂，试了三次都这样，这段先跳过了。已经记下是哪段，换一个模型或从头整理时会重新读它。经常这样的话，在助手设置里换一个更强的模型。";
         this.log(`Assistant extraction passed over part of session ${sessionId}: ${error.message}`);
         return;
@@ -329,10 +420,11 @@ export class AssistantExtraction {
     const known = new Map([...resident.map((memory) => memory.row), ...found.values()].map((row) => [row.id, row] as const));
     const knownEpisodes = new Map(shownEpisodes.map((row) => [row.id, row] as const));
     this.memories.write(() => {
-      // Words the owner had forgotten while the model was reading may not come back as a memory or a timeline line.
-      const forgotten = this.forgottenAmong(refs);
-      // A line tells of everything in its stretch, so it may not span any of them either.
-      const forgottenAt = [...forgotten].map((id) => rowById.get(id)!.at_ms);
+      // Something was forgotten while the model read: it may have been shown that very thing, and any
+      // line or memory it wrote may tell of it. A line it rewrites was changed meanwhile: it wrote from
+      // what was put right since. None of this reply is kept; the part is read again as things are now.
+      if (this.outdated(forgetting, key)) return;
+      if (parsed.timeline.some((change) => change.do === "rewrite" && this.changedSince(change.id, knownEpisodes))) return;
       for (const change of parsed.timeline) {
         const sources = change.from.map((ref) => refs[ref - 1]!);
         // The line covers the entries it names: from the earliest said to the latest.
@@ -341,24 +433,23 @@ export class AssistantExtraction {
         const last = covered.reduce((latest, row) => (row.at_ms > latest.at_ms ? row : latest));
         const from = { row: first.id, at: first.at, at_ms: first.at_ms };
         const to = { row: last.id, at: last.at, at_ms: last.at_ms };
+        // A line that may not be rewritten (the owner's, or one the model was not shown) keeps its
+        // words; what was read now still lands on the timeline, on a line of its own.
         const row = change.do === "rewrite" ? this.changeableEpisode(change.id, knownEpisodes) : undefined;
-        if (change.do === "rewrite" && !row) continue;
-        const spanFrom = Math.min(row?.from_ms ?? first.at_ms, first.at_ms);
-        const spanTo = Math.max(row?.to_ms ?? last.at_ms, last.at_ms);
-        if (forgottenAt.some((at) => at >= spanFrom && at <= spanTo)) continue;
         if (row) knownEpisodes.set(row.id, this.timeline.change(row, { text: change.text, from, to }, "extraction"));
         else this.timeline.insert(sessionId, from, to, change.text, "extraction");
       }
       for (const change of parsed.changes) {
         const sources = change.from.map((ref) => refs[ref - 1]!);
-        if (sources.some((row) => forgotten.has(row))) continue;
         if (change.do === "add") {
-          this.memories.insert(change.topic, change.text, change.resident, "extraction", sources);
+          // Word for word what the owner had her forget or set aside: not made again, whatever the model made of the search.
+          if (!this.barred(change.text)) this.memories.insert(change.topic, change.text, change.resident, "extraction", sources);
           continue;
         }
         const row = this.changeable(change.id, known);
         if (!row) continue;
         if (change.do === "rewrite") {
+          if (this.barred(change.text)) continue;
           this.apply(row, { text: change.text }, "extraction", known);
           this.memories.addSources(row.id, sources);
         } else {
@@ -371,8 +462,9 @@ export class AssistantExtraction {
   }
 
   /** Checks the memories changed since the last dream against what they came from and tidies them. */
-  private async dream(model: AssistantModelRef): Promise<void> {
+  private async dream(job: Extract<Job, { kind: "dream" }>, model: AssistantModelRef): Promise<void> {
     const generation = this.generation;
+    const forgetting = forgettings(this.db);
     const dreamedThrough = Number(this.meta("dreamed_through") ?? 0);
     const { latest } = this.db.prepare("SELECT coalesce(max(id), 0) AS latest FROM memory_changes").get() as { latest: number };
     const focusRows = this.dreamFocus(dreamedThrough, latest, DREAM_FOCUS);
@@ -407,16 +499,31 @@ export class AssistantExtraction {
     const residentTotal = this.db.prepare("SELECT count(*) AS count, coalesce(sum(length(text)), 0) AS chars FROM memories WHERE state = 'active' AND resident = 1").get() as { count: number; chars: number };
     const found = new Map<number, MemoryRow>();
     const [persona, notes] = await Promise.all([this.documents.get("persona"), this.documents.get("notes")]);
-    const reply = await this.model.complete(model, dreamPrompt({ persona: persona.text, notes: notes.text, focus, resident, residentTotal }), this.cancel.signal,
-      { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+    let reply: string;
+    try {
+      reply = await this.model.complete(model, dreamPrompt({ persona: persona.text, notes: notes.text, focus, resident, residentTotal }), this.cancel.signal,
+        { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+    } catch (error) {
+      if (generation !== this.generation || this.outdated(forgetting, job.key)) return;
+      if (this.stopped) throw error;
+      const working = await this.answers(model);
+      if (generation !== this.generation || this.outdated(forgetting, job.key)) return;
+      if (this.stopped || !this.refuse(job.key, working)) throw error;
+      this.memories.write(finish);
+      this.notice = "整理记忆时，模型服务对这一批记忆一直报错（问它别的它答得出），这次整理跳过了。记忆都还在，只是这一批没有对照原话再检查。";
+      this.log(`Assistant dreaming passed over its changes after repeated failures: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     // Everything is being read again from the start: the old model's tidying is not wanted.
     if (generation !== this.generation) return;
+    this.answered(job.key);
     let parsed: ReturnType<typeof parseDreamReply>;
     try {
       parsed = parseDreamReply(reply);
     } catch (error) {
       if (!(error instanceof ReplyFormatError)) throw error;
-      if (this.passOver(`dream:${dreamedThrough}`)) {
+      if (this.outdated(forgetting, job.key)) return;
+      if (this.passOver(job.key)) {
         this.memories.write(finish);
         this.notice = "整理记忆时，模型的回答看不懂，试了三次都这样，这次整理跳过了。经常这样的话，在助手设置里换一个更强的模型。";
         this.log(`Assistant dreaming passed over its changes: ${error.message}`);
@@ -426,21 +533,25 @@ export class AssistantExtraction {
     }
     const known = new Map([...focus, ...resident].map((memory) => memory.row).concat([...found.values()]).map((row) => [row.id, row] as const));
     this.memories.write(() => {
+      // Something was forgotten while the model looked: these memories are looked at again as they are now.
+      if (this.outdated(forgetting, job.key)) return;
       for (const change of parsed.changes) {
         if (change.do === "merge") { this.merge(change.ids, change.text, change.topic, change.resident, known); continue; }
         const row = this.changeable(change.id, known);
         if (!row) continue;
-        if (change.do === "rewrite") this.apply(row, { text: change.text }, "dreaming", known);
+        if (change.do === "rewrite") { if (!this.barred(change.text)) this.apply(row, { text: change.text }, "dreaming", known); }
         else if (change.do === "retire") this.apply(row, { state: "retired" }, "dreaming", known);
         else if (row.resident_fixed === 0) this.apply(row, { resident: change.resident }, "dreaming", known);
       }
       finish();
     });
-    this.unreadable.delete(`dream:${dreamedThrough}`);
+    this.unreadable.delete(job.key);
   }
 
   /** Inside a write: one new memory said wherever its parts were, which are retired into it. */
   private merge(ids: number[], text: string, topic: AssistantMemoryTopic | undefined, resident: boolean | undefined, known: Map<number, MemoryRow>): void {
+    // Its parts stay as they are when the merged memory would say what is not to be made again.
+    if (this.barred(text)) return;
     const rows = ids.map((id) => this.changeable(id, known));
     if (rows.some((row) => row === undefined)) return;
     const parts = rows as MemoryRow[];
@@ -461,12 +572,6 @@ export class AssistantExtraction {
     known.set(row.id, this.memories.change(row, change, author));
   }
 
-  /** Inside a write: the entries among `rows` that a forgotten memory names now. */
-  private forgottenAmong(rows: readonly number[]): Set<number> {
-    if (rows.length === 0) return new Set();
-    return new Set((this.db.prepare(`SELECT id FROM entries WHERE forgotten > 0 AND id IN (${rows.map(() => "?").join(", ")})`).all(...rows) as Array<{ id: number }>).map((row) => row.id));
-  }
-
   /**
    * Inside a write: the memory as the model was shown it, if it may still change: in use, not last
    * changed by the owner, and not changed by anyone since but this same reply.
@@ -477,6 +582,26 @@ export class AssistantExtraction {
     const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(id) as unknown as MemoryRow | undefined;
     if (!row || row.revision !== shown.revision || row.state !== "active" || row.author === "owner") return undefined;
     return row;
+  }
+
+  /**
+   * Whether something was forgotten since a pass took `forgetting` at its start. What the model was
+   * sent is then no longer what is there: nothing it made is kept, and its failure is not counted
+   * against the part, which is read again as it is now.
+   */
+  private outdated(forgetting: number, key: string): boolean {
+    if (forgettings(this.db) === forgetting) return false;
+    this.unreadable.delete(key);
+    this.refused.delete(key);
+    return true;
+  }
+
+  /** Inside a write: whether a timeline line shown to the model is no longer as it was shown: forgotten, removed or changed since. */
+  private changedSince(id: number, known: Map<number, EpisodeRow>): boolean {
+    const shown = known.get(id);
+    if (!shown) return false;
+    const row = this.db.prepare("SELECT revision, state FROM episodes WHERE id = ?").get(id) as { revision: number; state: string } | undefined;
+    return !row || row.revision !== shown.revision || row.state !== "active";
   }
 
   /** Inside a write: the timeline line as the model was shown it, if it may still change: in use, not the owner's, and unchanged since. */
@@ -530,9 +655,10 @@ export class AssistantExtraction {
         const queries = searchQueries(args);
         if (queries === undefined) return "queries 要给至少一组词。";
         return searchResultText(queries.map((words) => {
-          const rows = this.db.prepare(`SELECT * FROM memories WHERE state = 'active' ${words.map(() => "AND text LIKE ? ESCAPE '\\'").join(" ")} ORDER BY id DESC LIMIT ?`)
+          // Those in use, which may then be changed, and those on record as not to be made again.
+          const rows = this.db.prepare(`SELECT * FROM memories WHERE (state = 'active' OR ${BARRED}) ${words.map(() => "AND text LIKE ? ESCAPE '\\'").join(" ")} ORDER BY id DESC LIMIT ?`)
             .all(...words.map((word) => `%${word.replace(/[\\%_]/gu, (character) => `\\${character}`)}%`), SEARCH_HITS) as unknown as MemoryRow[];
-          for (const row of rows) found.set(row.id, row);
+          for (const row of rows) if (row.state === "active") found.set(row.id, row);
           return { words, rows };
         }));
       },
@@ -555,6 +681,15 @@ export class AssistantExtraction {
     return rows.map((row) => spokenLine(row)).filter((line): line is string => line !== undefined);
   }
 
+  /**
+   * Inside a write: whether a memory saying exactly this is on record as not to be made again.
+   * Whatever the model made of its search, the background writes no memory in those very words: not
+   * as a new one, a rewritten one or a merged one.
+   */
+  private barred(text: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM memories WHERE ${BARRED} AND text = ? LIMIT 1`).get(text) !== undefined;
+  }
+
   /** Counts an unreadable reply for one part; true once it is to be passed over. */
   private passOver(key: string): boolean {
     const attempts = (this.unreadable.get(key) ?? 0) + 1;
@@ -563,15 +698,46 @@ export class AssistantExtraction {
     return true;
   }
 
+  /**
+   * Counts a failed model call for one part; true once it is to be passed over. `working`: the model
+   * answered PROBE right after this failure. A part is passed over when the trouble is its own: its
+   * call failed REFUSED_ATTEMPTS times in a row with the model reachable each time, and the model
+   * read some other part since it first failed. A failure with the model not answering is an outage
+   * and starts that count again; and while no part can be read at all, the trouble is with the
+   * readings themselves (the model, its settings, what every reading carries), not with one part.
+   * Either way nothing is passed over. Until then the part waits, longer each time, and everything
+   * else goes first.
+   */
+  private refuse(key: string, working: boolean): boolean {
+    const refusal = this.refused.get(key) ?? { attempts: 0, notBefore: 0, proven: 0, othersRead: false };
+    refusal.attempts += 1;
+    refusal.proven = working ? refusal.proven + 1 : 0;
+    if (refusal.proven >= REFUSED_ATTEMPTS && refusal.othersRead) { this.refused.delete(key); return true; }
+    refusal.notBefore = this.now() + RETRY_DELAYS_MS[Math.min(refusal.attempts - 1, RETRY_DELAYS_MS.length - 1)]!;
+    this.refused.set(key, refusal);
+    return false;
+  }
+
+  /** Whether the model answers at all right now. */
+  private async answers(model: AssistantModelRef): Promise<boolean> {
+    try { await this.model.complete(model, PROBE, this.cancel.signal); return true; }
+    catch { return false; }
+  }
+
+  /** The model answered a reading of `key`: that part no longer fails, and readings as such work. */
+  private answered(key: string): void {
+    this.refused.delete(key);
+    for (const refusal of this.refused.values()) refusal.othersRead = true;
+  }
+
   private fail(error: unknown): void {
-    const attempts = (this.failure?.attempts ?? 0) + 1;
-    const retryAt = this.now() + RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)]!;
+    this.streak += 1;
+    this.retryAt = this.now() + RETRY_DELAYS_MS[Math.min(this.streak - 1, RETRY_DELAYS_MS.length - 1)]!;
     const reason = error instanceof Error ? error.message : String(error);
-    const message = error instanceof ExtractionModelError
+    this.failure = error instanceof ExtractionModelError
       ? reason
       : `整理记忆时出错了（${reason}）。稍后会自动再试；一直这样的话，看看 Main 上的 Dock Host 日志。`;
-    this.failure = { message, retryAt, attempts };
-    this.log(`Assistant memory pass failed (attempt ${attempts}): ${reason}`);
+    this.log(`Assistant memory pass failed (${this.streak} in a row): ${reason}`);
   }
 
   private meta(key: string): string | undefined {

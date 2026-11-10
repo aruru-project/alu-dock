@@ -45,8 +45,8 @@ test("what they were doing each day becomes a timeline: a week of it opens every
         });
       }
       return `好的：\n${JSON.stringify({ changes: [], timeline: [
-        // The owner rewrote this line meanwhile: his words stay.
-        { do: "rewrite", id: ids.work, text: "模型想改掉主人写的行。", from: [1] },
+        // The owner rewrote this line meanwhile: his words stay, and what the model read gets a line of its own.
+        { do: "rewrite", id: ids.work, text: "主人改过那行之后接着说的事。", from: [1] },
         { do: "rewrite", id: ids.game, text: "深夜聊艾尔登法环，新档从法师换成信仰流。", from: [1, 2] },
       ] })}`;
     },
@@ -98,8 +98,14 @@ test("what they were doing each day becomes a timeline: a week of it opens every
   const extended = timeline.get(game!.id);
   assert.deepEqual([extended.text, extended.fromAt, extended.toAt, extended.author], ["深夜聊艾尔登法环，新档从法师换成信仰流。", "2026-11-06T13:00:00.000Z", "2026-11-06T13:30:05.000Z", "extraction"]);
   assert.deepEqual([timeline.get(work!.id).text, timeline.get(work!.id).revision], [his.text, his.revision], "The owner's line is not rewritten by extraction");
+  // Review of 2026-11-10, reproduced before the fix: what was read after the owner changed a line was
+  // dropped with the refused rewrite, and that stretch of the conversation had no line at all.
+  const [own] = timeline.list({ limit: 10, query: "接着说的事" }).episodes;
+  assert.deepEqual([own?.text, own?.fromAt, own?.toAt, own?.entryId], ["主人改过那行之后接着说的事。", "2026-11-06T13:30:00.000Z", "2026-11-06T13:30:00.000Z", "u3"], "What was read still lands on the timeline");
 
-  // A new session loads the last week of the timeline, oldest first, not what is older.
+  // A new session loads the last week of the timeline, oldest first, not what is older. The older
+  // line is written here by hand, so the background stops reading first.
+  await extraction.stop();
   store.record({ sessionId: "old", cwd: "/home/owner" }, [{ entryId: "o1", at: "2026-10-20T02:00:00.000Z", kind: "user", text: "三周前的一句话。" }], "o1", {});
   const o1 = store.connection.prepare("SELECT id FROM entries WHERE entry_id = 'o1'").get() as { id: number };
   const older = writeTransaction(store.connection, () =>
@@ -113,7 +119,7 @@ test("what they were doing each day becomes a timeline: a week of it opens every
 
   // A line the owner does not want is forgotten, not loaded or listed, and can come back.
   const forgotten = timeline.update({ id: game!.id, revision: extended.revision, state: "forgotten" }, "owner");
-  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [work!.id, String(older.id)]);
+  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [own!.id, work!.id, String(older.id)]);
   assert.ok(!(await core.answer({ op: "load" }, {})).text.includes("信仰流"));
   assert.deepEqual(timeline.list({ limit: 10, state: "forgotten" }).episodes.map((line) => line.id), [game!.id]);
   assert.equal(timeline.update({ id: game!.id, revision: forgotten.revision, state: "active" }, "owner").state, "active");
@@ -124,10 +130,10 @@ test("what they were doing each day becomes a timeline: a week of it opens every
   // so it is no longer listed or loaded either, and the work line is untouched; restoring the memory
   // brings the line back.
   const gone = memories.update({ id: liked!.id, revision: memories.get(liked!.id).memory.revision, state: "forgotten" }, "owner");
-  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [work!.id, String(older.id)]);
+  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [own!.id, work!.id, String(older.id)]);
   assert.ok(!(await core.answer({ op: "load" }, {})).text.includes("信仰流"), "A forgotten memory's night is not loaded from the timeline");
   memories.update({ id: liked!.id, revision: gone.revision, state: "active" }, "owner");
-  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [game!.id, work!.id, String(older.id)]);
+  assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [own!.id, game!.id, work!.id, String(older.id)]);
 });
 
 // Owner's decision 2026-11-09 (#295 after #666): what another Work says to her — a child Work's message,
@@ -151,7 +157,7 @@ test("what another Work says to her is kept and read as that Work's words, never
   const memories = new AssistantMemories(store.connection);
   const prompts: ModelPrompt[] = [];
   const extraction = new AssistantExtraction(store.connection, memories, new AssistantTimeline(store.connection), documents, {
-    complete: async (_model, prompt) => { prompts.push(prompt); return JSON.stringify({ changes: [], timeline: [] }); },
+    complete: async (_model, prompt) => { prompts.push(prompt); return JSON.stringify({ changes: [], timeline: [{ do: "add", text: "子 Work 交回了结果。", from: [1] }] }); },
   }, { idleMs: 0, busyChars: 1e9, chunkChars: 24_000, tickMs: 10, quietMs: 1e15, dreamChanges: 1e9, dreamIntervalMs: 1e15 });
   context.after(async () => { await extraction.stop(); store.close(); await rm(root, { recursive: true, force: true }); });
   store.record({ sessionId: "s", cwd: "/home/owner" }, [

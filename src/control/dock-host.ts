@@ -1331,7 +1331,8 @@ export class DockHost {
   private async answerAssistant(request: Extract<ControlRequest, { type: `assistant.${string}` }>): Promise<unknown> {
     const assistant = this.assistant;
     if (!assistant) throw new ProtocolValidationError("capability_missing", "助手只能在 Main 上管理。请连接 Main 后再试。");
-    const ask = (question: AssistantRequest) => assistant.request(question, {});
+    // A client is the owner's own hand: its changes are the owner's, which the background leaves alone.
+    const ask = (question: AssistantRequest) => assistant.request(question, { owner: true });
     switch (request.type) {
       case "assistant.info": return ask({ op: "info" });
       case "assistant.preview": return ask({ op: "load" });

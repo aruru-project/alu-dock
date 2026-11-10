@@ -9,7 +9,7 @@ import {
   type AssistantTimelineListRequest,
   type AssistantTimelineUpdateRequest,
 } from "../core/assistant.js";
-import { sessionInfoOf, timeBoundary, type SessionRow } from "./store.js";
+import { HIDDEN_WITH, noteForgetting, sessionInfoOf, timeBoundary, type SessionRow } from "./store.js";
 import { readTransaction, writeTransaction } from "./transaction.js";
 
 /*
@@ -108,6 +108,7 @@ export class AssistantTimeline {
       const row = this.row(Number(request.id));
       if (row.revision !== request.revision) throw new AssistantError("assistant_episode_changed", CHANGED);
       if (request.state !== undefined) this.db.prepare("DELETE FROM episodes_forgotten_with WHERE episode_id = ?").run(row.id);
+      if (request.state === "forgotten" && row.state !== "forgotten") noteForgetting(this.db);
       this.change(row, { text: request.text, state: request.state }, author);
       this.db.prepare("UPDATE episodes SET edited = 1 WHERE id = ?").run(row.id);
       return this.episodeOf(this.row(row.id));
@@ -165,13 +166,15 @@ export class AssistantTimeline {
 }
 
 /**
- * Inside a write, as memory `memoryId` is forgotten at `at`: forgets the lines in use covering words it
- * came from and notes which it took; a line another forgotten memory took is noted for this one too.
+ * Inside a write, as memory `memoryId` is forgotten at `at`: forgets the lines in use covering the
+ * words hidden with it (where it was said, the answers to that, the exchange it was asked in) and
+ * notes which it took; a line another forgotten memory took is noted for this one too. A summary
+ * hidden with it takes no line: it was written long after the words it repeats.
  */
 export function forgetLinesWith(db: DatabaseSync, memoryId: number, at: string): void {
   const lines = db.prepare(`SELECT DISTINCT p.id, p.state FROM episodes p
     JOIN entries e ON e.session_id = p.session_id AND e.at_ms BETWEEN p.from_ms AND p.to_ms
-    WHERE e.id IN (SELECT entry_row FROM memory_sources WHERE memory_id = ?)
+    WHERE e.id IN (${HIDDEN_WITH}) AND e.kind <> 'summary'
       AND (p.state = 'active' OR EXISTS (SELECT 1 FROM episodes_forgotten_with w WHERE w.episode_id = p.id))`).all(memoryId) as Array<{ id: number; state: string }>;
   const note = db.prepare("INSERT OR IGNORE INTO episodes_forgotten_with (memory_id, episode_id) VALUES (?, ?)");
   const forget = db.prepare("UPDATE episodes SET state = 'forgotten', updated_at = ?, revision = revision + 1 WHERE id = ?");

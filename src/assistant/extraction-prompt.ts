@@ -4,7 +4,7 @@ import {
   MAX_ASSISTANT_MEMORY_CHARS,
   type AssistantMemoryTopic,
 } from "../core/assistant.js";
-import { localMinute, localSpan } from "../core/local-time.js";
+import { localDay, localMinute, localSpan } from "../core/local-time.js";
 import type { MemoryRow } from "./memories.js";
 import type { EntryRow } from "./store.js";
 import type { EpisodeRow } from "./timeline.js";
@@ -24,7 +24,9 @@ import type { EpisodeRow } from "./timeline.js";
  * (owner's decision of 2026-11-10): not what tools returned or which tools she called, not the
  * summaries Pi writes when it compacts a conversation, which repeat what was said under a later time.
  * Of her memories it is shown those loaded every session, as she is; the others it looks up with
- * SEARCH_TOOL, as she does, rather than being handed a pile of them.
+ * SEARCH_TOOL, as she does, rather than being handed a pile of them. That search also shows what the
+ * owner had her forget and what he or she set aside, marked as not to be recorded again: without
+ * them the model, reading an old conversation, would make the same memory once more.
  *
  * The persona may describe any assistant, so the prompts call her "助手" and let the persona name her;
  * "主人" is the product's word for her owner.
@@ -37,7 +39,7 @@ const SEARCH_QUERIES = 5;
 export const SEARCH_HITS = 15;
 
 const RULES_COMMON = `- 密码、密钥、令牌、证件号码这类东西不记。
-- 主人要她忘掉的事不记。
+- 主人要她忘掉的事不记。查记忆时会看到标着“主人让忘掉的”和“已作废”的旧记忆：让忘掉的事不要再记，除非这次读到主人明确说要重新记住它；已作废的是后来判定不对或不再成立的事，这次读到的话如果是在它作废之前说的，就不要照着再记，作废之后主人又说起才按新说的记。这两种都不能改写、作废或合并。
 - 主人手写的设定优先：别重复它，也别和它矛盾。标着“主人定的”的记忆不能改写，也不能作废；标着“常驻由主人定”的，不能改它常驻与否。
 - 一条只写一件事，写成单独看也懂的陈述句，称呼用“主人”和她的名字，不超过 150 字，用主人平时说的语言。推测要写明是推测。长期成立的事写成长期的样子（比如生日只写月日），某一天的事写明是哪天。`;
 
@@ -49,7 +51,7 @@ const EXTRACTION_SYSTEM = `你替一位个人助手整理她的记忆，并记�
 
 记忆是为以后准备的：下次和主人聊天时，她要像一个认识主人很久的人，记得主人是什么样的人、他们之间怎么相处、一起经历过什么。每段对话的原话都会留着，她随时能搜；记忆要记的，是她以后不翻原话也该知道的事。做了什么工作、怎么做的，原话里都有，时间线里也会写，记忆里不必记：修了什么问题、升了什么版本、测试过没过，这些细节都不是记忆。但主人这阵子在做什么项目、为什么做、对它多上心，是他生活的一部分，和别的事一样看值不值得记。值得记的是这些事透露出的主人这个人、他们的关系，和一个老朋友以后会提起的经历：他难熬或高兴的时候、生活里的变化、对他要紧的事。什么值得记，由你判断。
 
-时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字（路径、命令、版本号、测试个数都不写）。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。每行不超过 80 字，用主人平时说的语言；起止时间会自动标在行前，行里不用再写日期；密码密钥、主人要她忘掉的事，时间线里同样不写。
+时间线是另一回事：像日记的目录，一行写清一段时间里主人在做什么、聊什么（例：“在 alu_dock 做助手记忆的后台提炼，调触发时机”“深夜睡不着，聊艾尔登法环的新档”），以后她被问起“那天我们在干嘛”时翻它。时间线不挑重要不重要，工程上的事也照实写——在哪个项目做什么、卡在哪、做完没有——但不写细节和数字（路径、命令、版本号、测试个数都不写）。下面列着这个会话已有的行：这次读到的还是同一天同一件事，就改写那一行（rewrite），把新读到的加进去，别丢掉它原来说的；换了一天，或者话题明显换了，才新加一行（add）。标着“主人定的，不能改”的行不要改写：接着它的事另加一行，只写这次读到的。这次读到的每段对话都要落在某一行里，所以每次至少新加或改写一行。每行不超过 80 字，用主人平时说的语言；起止时间会自动标在行前，行里不用再写日期；密码密钥、主人要她忘掉的事，时间线里同样不写。
 
 必须遵守：
 ${RULES_COMMON}
@@ -71,7 +73,7 @@ ${RESIDENT_LINE}
   {"do":"add","text":"……","from":[1,2,3]},
   {"do":"rewrite","id":"4","text":"……","from":[4,5]}
 ]}
-没有要改的记忆就让 changes 为空：{"changes":[],"timeline":[……]}。`;
+没有要改的记忆就让 changes 为空：{"changes":[],"timeline":[……]}；timeline 不能为空。`;
 
 const DREAM_SYSTEM = `你替一位个人助手做一次记忆整理，就像人在睡觉时整理白天的经历。她是谁见下面的人设；她的使用者，下面称“主人”。整理的目的和记的时候一样：下次聊天时，她要像一个认识主人很久的人那样，记得主人和他们之间的事。
 
@@ -174,7 +176,7 @@ function background(persona: string, notes: string): string[] {
 /** The search the model may make of her memories while it reads, as a tool it calls. */
 export const SEARCH_TOOL = {
   name: "search_memories",
-  description: `查她的记忆（只查在用的）。queries 是几组词，每组里用空格隔开的词都要原样出现在记忆里，所以一组最好只放一个词；每组最多列出 ${SEARCH_HITS} 条，新的在前。`,
+  description: `查她的记忆：在用的，以及主人让忘掉的和已作废的（会标出来，不能改，也别再记）。queries 是几组词，每组里用空格隔开的词都要原样出现在记忆里，所以一组最好只放一个词；每组最多列出 ${SEARCH_HITS} 条，新的在前。`,
   parameters: {
     type: "object",
     properties: {
@@ -204,11 +206,14 @@ export function searchResultText(found: ReadonlyArray<{ words: string[]; rows: M
 
 function memoryLine(memory: ShownMemory): string {
   const { row } = memory;
-  const marks = [
-    row.topic,
-    row.resident === 1 ? "常驻" : "不常驻",
-    ...(row.author === "owner" ? ["主人定的"] : row.resident_fixed === 1 ? ["常驻由主人定"] : []),
-  ];
+  // One the owner had her forget, or that he or she set aside: on record so that it is not made again.
+  const marks = row.state === "forgotten" ? ["主人让忘掉的，别再记"]
+    : row.state === "retired" ? [`已作废（${localDay(new Date(row.updated_at))}），这之前说的别再照着记`]
+    : [
+      row.topic,
+      row.resident === 1 ? "常驻" : "不常驻",
+      ...(row.author === "owner" ? ["主人定的"] : row.resident_fixed === 1 ? ["常驻由主人定"] : []),
+    ];
   const sources = (memory.sources ?? []).map((source) => `\n    原话：${source}`).join("")
     + (memory.unshownSources ? `\n    （还有 ${memory.unshownSources} 处原话太长，没有列出。）` : "");
   return `[#${row.id}]（${marks.join("，")}）${row.text}${sources}`;
@@ -255,12 +260,17 @@ export type DreamChange =
 /** The reply is not the agreed JSON at all; single changes that do not fit are left out instead. */
 export class ReplyFormatError extends Error {}
 
-/** `lines`: how many numbered entries the prompt showed. A reply without `timeline` writes no line. */
+/**
+ * `lines`: how many numbered entries the prompt showed. Every part read is to land on the timeline, so
+ * a reply that adds or extends no line is not in the agreed form: it is asked again rather than
+ * leaving that stretch of the conversation without a line.
+ */
 export function parseExtractionReply(reply: string, lines: number): { changes: ExtractionChange[]; timeline: TimelineChange[] } {
   const body = replyObject(reply);
   const rawChanges = replyChanges(body);
+  if (!Array.isArray(body.timeline)) throw new ReplyFormatError("The reply has no timeline");
   const timeline: TimelineChange[] = [];
-  for (const raw of Array.isArray(body.timeline) ? body.timeline as unknown[] : []) {
+  for (const raw of body.timeline as unknown[]) {
     const change = record(raw);
     const from = references(change?.from, lines);
     const text = episodeText(change?.text);
@@ -268,6 +278,7 @@ export function parseExtractionReply(reply: string, lines: number): { changes: E
     const id = memoryId(change?.id);
     if (change?.do === "rewrite" && from.length > 0 && text !== undefined && id !== undefined) timeline.push({ do: "rewrite", id, text, from });
   }
+  if (timeline.length === 0) throw new ReplyFormatError("The reply writes no timeline line for what it read");
   const changes: ExtractionChange[] = [];
   for (const raw of rawChanges) {
     const change = record(raw);

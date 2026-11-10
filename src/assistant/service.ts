@@ -54,8 +54,8 @@ export class AssistantCore {
   }
 
   private async dispatch(request: AssistantRequest, source: AssistantSource, signal?: AbortSignal): Promise<unknown> {
-    // A Work asking is the assistant herself; a client asking is the owner.
-    const author: AssistantMemoryAuthor = source.workId === undefined ? "owner" : "assistant";
+    // The owner's client says so; anyone else asking is a Work opened as her, whether or not Main knows which.
+    const author: AssistantMemoryAuthor = source.owner === true && source.workId === undefined ? "owner" : "assistant";
     switch (request.op) {
       case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES, maxMemoryChars: MAX_ASSISTANT_MEMORY_CHARS, maxEpisodeChars: MAX_ASSISTANT_EPISODE_CHARS, extraction: this.extraction.status() };
       case "load": return this.preview();
@@ -69,7 +69,7 @@ export class AssistantCore {
       case "memory_list": { const { op: _op, ...list } = request; return this.memories.list(list); }
       case "memory_get": return this.memories.get(request.id);
       case "memory_add": { const { op: _op, ...add } = request; return this.memories.add(add, author); }
-      case "memory_update": { const { op: _op, ...update } = request; return this.memories.update(update, author); }
+      case "memory_update": { const { op: _op, askedAt, ...update } = request; return this.memories.update(update, author, askedAt); }
       case "timeline_list": { const { op: _op, ...list } = request; return this.timeline.list(list); }
       case "timeline_get": return this.timeline.get(request.id);
       case "timeline_update": { const { op: _op, ...update } = request; return this.timeline.update(update, author); }
@@ -92,7 +92,8 @@ export class AssistantCore {
     }
     const remembered = rememberedSection(this.memories.resident());
     if (remembered) parts.push(remembered);
-    const recent = timelineSection(this.timeline.recent(loaded.getTime() - LOADED_TIMELINE_DAYS * 86_400_000, LOADED_TIMELINE_LINES));
+    // One more than is loaded, to say so when the week holds more.
+    const recent = timelineSection(this.timeline.recent(loaded.getTime() - LOADED_TIMELINE_DAYS * 86_400_000, LOADED_TIMELINE_LINES + 1));
     if (recent) parts.push(recent);
     parts.push([
       "## 记忆",
@@ -124,11 +125,14 @@ function rememberedSection(memories: readonly AssistantMemory[]): string | undef
 /** The latest week of her timeline, oldest first, so she knows what they have been up to. */
 function timelineSection(episodes: readonly AssistantEpisode[]): string | undefined {
   if (episodes.length === 0) return undefined;
-  const lines = episodes.map((episode) => `- ${localSpan(new Date(episode.fromAt), new Date(episode.toAt))}：${episode.text}（#${episode.id}）`);
+  // Oldest first: the newest LOADED_TIMELINE_LINES are the last ones.
+  const shown = episodes.slice(-LOADED_TIMELINE_LINES);
+  const lines = shown.map((episode) => `- ${localSpan(new Date(episode.fromAt), new Date(episode.toAt))}：${episode.text}（#${episode.id}）`);
   return [
     "## 最近一周的时间线",
     "",
     "你们这几天在做什么、聊什么，一段一行，是后台按对话写的目录。更早的用 assistant_search 只给时间范围查。括号里是这一行的编号。",
+    ...(shown.length < episodes.length ? [`这一周的行太多，这里只放了最新的 ${shown.length} 行，前几天的同样用 assistant_search 查。`] : []),
     "",
     ...lines,
   ].join("\n");

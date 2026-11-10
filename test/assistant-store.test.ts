@@ -9,7 +9,11 @@ import { promisify } from "node:util";
 
 import { DatabaseSync } from "node:sqlite";
 
+import { AssistantDocuments } from "../src/assistant/documents.js";
+import { AssistantMemories } from "../src/assistant/memories.js";
+import { AssistantCore } from "../src/assistant/service.js";
 import { AssistantStore } from "../src/assistant/store.js";
+import { AssistantTimeline } from "../src/assistant/timeline.js";
 import { parseAssistantSearchResult, type AssistantEntry } from "../src/core/assistant.js";
 
 const entry = (entryId: string, parentId: string | undefined, at: string, kind: AssistantEntry["kind"], text: string, extra: Partial<AssistantEntry> = {}): AssistantEntry =>
@@ -51,6 +55,10 @@ test("the assistant's memory finds Chinese keywords by time, pages back, and rea
   // A batch sent again changes nothing.
   store.record(session, [entry("e", "d", "2026-11-03T09:00:10.000Z", "user", "好，魂系先放放")], "e", {});
   assert.equal(store.search({ query: "先放放", limit: 10 }).hits.length, 1);
+  // A batch without entries only moves the mark: the conversation's last time stays that of its words
+  // (review of 2026-11-10: it became the moment the mark moved).
+  store.record(session, [], "later-entry-not-kept", {});
+  assert.equal(store.search({ query: "先放放", limit: 10 }).hits[0]!.session.lastAt, "2026-11-03T09:00:10.000Z");
 
   const around = store.context({ sessionId: "s1", entryId: "a", before: 3, after: 3 });
   assert.deepEqual(around.entries.map((item) => item.entryId), ["a", "d", "e"]);
@@ -163,4 +171,62 @@ test("a backup taken while her memory is in use holds everything said until then
   copy.close();
   assert.deepEqual(kept, ["u1"]);
   await assert.rejects(promisify(execFile)(process.execPath, [cli, "assistant:backup", backup], { env: environment }), /already exists/u);
+});
+
+// Card #295, review of 2026-11-10 and the owner's call on what forgetting covers: only the words a
+// memory came from were hidden, so her answer repeating them, the request to forget it and Pi's later
+// summary of the conversation were still found. They go with the memory, also when they are recorded
+// afterwards or when the owner asks a second time; what follows a summary and what the owner says
+// elsewhere stay, and restoring the memory brings everything back.
+test("what she forgets takes with it her answers, the request to forget it and the later summary, and restoring it brings them back", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-assistant-forget-"));
+  const store = new AssistantStore(join(root, "memory.sqlite"));
+  context.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  const memories = new AssistantMemories(store.connection);
+  const session = { sessionId: "s", cwd: "/home/owner" };
+  const found = (query: string) => store.search({ query, limit: 20 }).hits.map((hit) => hit.entryId);
+  store.record(session, [
+    entry("u1", undefined, "2026-11-01T10:00:00.000Z", "user", "我对花生过敏。"),
+    entry("a1", "u1", "2026-11-01T10:00:05.000Z", "assistant", "花生过敏，记住了。"),
+    entry("u2", "a1", "2026-11-01T10:01:00.000Z", "user", "晚上吃面吧。"),
+  ], "u2", {});
+  const memory = memories.add({ topic: "owner", text: "主人对花生过敏。", resident: true, sources: [{ sessionId: "s", entryId: "u1" }] }, "owner");
+  // She forgets it when the owner asks, in words Main has not recorded yet.
+  const gone = memories.update({ id: memory.id, revision: memory.revision, state: "forgotten" }, "assistant", { sessionId: "s", entryId: "q1" });
+  // Recorded afterwards: another answer to the forgotten words, Pi's summary of the conversation and
+  // what she did next, the request to forget and her answer to it, and the owner going on.
+  store.record(session, [
+    entry("a2", "u1", "2026-11-01T10:02:00.000Z", "assistant", "花生？那花生酱也别吃了。"),
+    entry("s1", "u2", "2026-11-01T11:00:00.000Z", "summary", "主人说他对花生过敏，晚上想吃面。"),
+    entry("a3", "s1", "2026-11-01T11:00:05.000Z", "assistant", "面馆订好了。"),
+    entry("q1", "a3", "2026-11-01T11:01:00.000Z", "user", "把我花生过敏的事忘掉。"),
+    entry("qa", "q1", "2026-11-01T11:01:05.000Z", "assistant", "好，花生过敏忘掉了。"),
+    entry("u3", "qa", "2026-11-01T11:02:00.000Z", "user", "花生油炒的菜呢？"),
+  ], "u3", {});
+  assert.deepEqual(found("花生"), ["u3"], "Her answers, the request and the summary are not found; what the owner says elsewhere is");
+  assert.deepEqual(found("吃面"), ["u2"], "The exchange that followed is untouched");
+  assert.deepEqual(found("面馆"), ["a3"], "What follows a summary is not hidden for it");
+
+  // Asked a second time to forget what is forgotten already: that request and her answer go too.
+  store.record(session, [entry("q2", "u3", "2026-11-01T11:03:00.000Z", "user", "花生过敏那条，再忘一次。")], "q2", {});
+  assert.deepEqual(found("花生"), ["q2", "u3"]);
+  memories.update({ id: gone.id, revision: gone.revision, state: "forgotten" }, "assistant", { sessionId: "s", entryId: "q2" });
+  store.record(session, [entry("qb", "q2", "2026-11-01T11:03:05.000Z", "assistant", "忘干净了，花生的事不提了。")], "qb", {});
+  assert.deepEqual(found("花生"), ["u3"]);
+
+  memories.update({ id: gone.id, revision: gone.revision, state: "active" }, "owner");
+  assert.deepEqual(found("花生"), ["qb", "q2", "u3", "qa", "q1", "s1", "a2", "a1", "u1"]);
+});
+
+// Review of 2026-11-10: who changed a memory was told by whether the question named a Work, so a Work
+// on another machine that Main could not name changed her memories as the owner, whose changes the
+// background never touches again.
+test("only the owner's own client changes her memories as the owner; a Work Main cannot name is still her", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-assistant-author-"));
+  const store = new AssistantStore(join(root, "memory.sqlite"));
+  context.after(async () => { store.close(); await rm(root, { recursive: true, force: true }); });
+  const core = new AssistantCore(new AssistantDocuments(root), store, {} as never, new AssistantMemories(store.connection), new AssistantTimeline(store.connection), {} as never, root);
+  const hers = await core.answer({ op: "memory_add", topic: "self", text: "她答应下雨天提醒主人带伞。", resident: false }, { machine: "书房的机器" });
+  const his = await core.answer({ op: "memory_add", topic: "owner", text: "主人的猫叫团子。", resident: false }, { owner: true });
+  assert.deepEqual([hers.author, his.author], ["assistant", "owner"]);
 });

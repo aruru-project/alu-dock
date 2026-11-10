@@ -258,8 +258,12 @@ export interface AssistantContextResult { session: AssistantSessionInfo; entries
 
 /** The session an assistant Work records into; the Host adds the Work and machine. */
 export interface AssistantRecordSession { sessionId: string; sessionFile?: string; cwd: string; name?: string }
-/** Added by the Host that relays a Worker's question, never by the Worker. */
-export interface AssistantSource { workId?: string; machine?: string }
+/**
+ * Who asks, as the relaying Host says it, never the Worker. `owner`: the owner's own client asked.
+ * Without it the asker is a Work opened as her, also when Main does not know that Work's ID, so a
+ * question whose source is incomplete never acts with the owner's say.
+ */
+export interface AssistantSource { owner?: true; workId?: string; machine?: string }
 
 /** Keywords, a time range, or both; without keywords every entry in the range is listed. */
 export interface AssistantSearchRequest { query?: string; from?: string; to?: string; cursor?: string; limit: number }
@@ -284,7 +288,11 @@ export type AssistantRequest =
   | ({ op: "memory_list" } & AssistantMemoryListRequest)
   | { op: "memory_get"; id: string }
   | ({ op: "memory_add" } & AssistantMemoryAddRequest)
-  | ({ op: "memory_update" } & AssistantMemoryUpdateRequest)
+  /**
+   * `askedAt`: where in a conversation the owner asked for this change, as her Work says it. When the
+   * change forgets the memory, that exchange is forgotten with it, since it tells the same thing.
+   */
+  | ({ op: "memory_update"; askedAt?: { sessionId: string; entryId: string } } & AssistantMemoryUpdateRequest)
   | ({ op: "timeline_list" } & AssistantTimelineListRequest)
   | { op: "timeline_get"; id: string }
   | ({ op: "timeline_update" } & AssistantTimelineUpdateRequest)
@@ -593,9 +601,16 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
       case "memory_add":
         only(value, ["op", "topic", "text", "resident", "sources"], field);
         return { op: "memory_add", ...parseMemoryAdd(value, field) };
-      case "memory_update":
-        only(value, ["op", "id", "revision", "text", "topic", "resident", "state"], field);
-        return { op: "memory_update", ...parseMemoryUpdate(value, field) };
+      case "memory_update": {
+        only(value, ["op", "id", "revision", "text", "topic", "resident", "state", "askedAt"], field);
+        if (value.askedAt === undefined) return { op: "memory_update", ...parseMemoryUpdate(value, field) };
+        const asked = record(value.askedAt, `${field}.askedAt`);
+        only(asked, ["sessionId", "entryId"], `${field}.askedAt`);
+        return {
+          op: "memory_update", ...parseMemoryUpdate(value, field),
+          askedAt: { sessionId: id(asked.sessionId, `${field}.askedAt.sessionId`), entryId: id(asked.entryId, `${field}.askedAt.entryId`) },
+        };
+      }
       case "timeline_list":
         only(value, ["op", "query", "from", "to", "state", "cursor", "limit"], field);
         return { op: "timeline_list", ...parseTimelineList(value, field) };
@@ -663,6 +678,7 @@ export function parseAssistantSource(input: unknown): AssistantSource {
   const value = input as Record<string, unknown>;
   const fits = (item: unknown, max: number): item is string => typeof item === "string" && item.length > 0 && item.length <= max;
   return {
+    ...(value.owner === true ? { owner: true as const } : {}),
     ...(fits(value.workId, MAX_ASSISTANT_ID_CHARS) ? { workId: value.workId } : {}),
     ...(fits(value.machine, MAX_ASSISTANT_NAME_CHARS) ? { machine: value.machine } : {}),
   };
