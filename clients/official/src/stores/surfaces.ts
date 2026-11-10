@@ -445,9 +445,9 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     // open-watch never moves focus; without this the keyboard stays on the page behind.
     if (handoff) void nextTick(() => { if (machineSettingsOpen.value) focusModalInitial(surfaceElements.get('machine-settings')) })
   }
-  /** Opens the assistant's page, on the section last shown unless one is named. */
-  function openAssistant(section?: AssistantSection) {
-    rememberModalTrigger(); if (section) assistantSection.value = section; assistantOpen.value = true
+  /** Opens the assistant's page on the section last shown. */
+  function openAssistant() {
+    rememberModalTrigger(); assistantOpen.value = true
     appSettingsOpen.value = false; hostSettingsOpen.value = false; directoryOpen.value = false; commandOpen.value = false; app.workDrawerOpen = false
   }
   function openDeliveryTray() { rememberModalTrigger(); app.workDrawerOpen = false; deliveryOpen.value = true }

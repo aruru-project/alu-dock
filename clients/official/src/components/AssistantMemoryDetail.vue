@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { assistantTime, memoryAuthorLabel, memoryChangeLabel, memoryLength, memoryStateLabel, memoryTopics } from '../lib/assistant'
+import { assistantTime, MEMORY_DELETED_EFFECT, memoryAuthorLabel, memoryChangeLabel, memoryLength, memoryResidentLabel, memoryStateLabel, memoryTopics } from '../lib/assistant'
 import type { AssistantMemoryTopic } from '../lib/types'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
 import AssistantConversation from './AssistantConversation.vue'
@@ -16,9 +16,9 @@ const rewriteLength = computed(() => memoryLength(rewrite.value ?? '', memoryLim
 const rewriteSaveable = computed(() => !!rewrite.value?.trim() && rewrite.value.trim() !== shown.value?.text && !rewriteLength.value.over)
 const actionsHint = computed(() => {
   const state = shown.value?.state
-  if (state === 'active') return '作废：这件事已经不成立了，留作记录，她不再用它。删除：她会忘掉这条，不再载入，原话也搜不到；可以在「已删除」里恢复。'
-  if (state === 'retired') return '这条已作废，她不再用它，记录还留着。恢复后她又会用；删除后她会忘掉它，原话也搜不到。'
-  if (state === 'forgotten') return '这条已删除：她不会再载入它，说过它的原话也搜不到，读到那里只显示「主人让我忘掉了」。恢复后都会回来。'
+  if (state === 'active') return `作废：这件事已经不成立了，留作记录，她不再用它。删除：${MEMORY_DELETED_EFFECT}删除后可以在「已删除」里恢复，恢复后都会回来。`
+  if (state === 'retired') return `这条已作废，她不再用它，记录还留着。恢复后她又会用。删除：${MEMORY_DELETED_EFFECT}删除后可以在「已删除」里恢复，恢复后都会回来。`
+  if (state === 'forgotten') return `这条已删除：${MEMORY_DELETED_EFFECT}恢复后都会回来。`
   return ''
 })
 
@@ -77,11 +77,11 @@ function input(event: Event) {
         <div class="memory-field">
           <span class="memory-field-label">什么时候用</span>
           <div class="alu-switch" role="radiogroup" aria-label="什么时候用">
-            <button type="button" role="radio" :class="{ 'is-active': shown.resident }" :aria-checked="shown.resident" :disabled="pending" @click="setResident(true)">每次都带上</button>
-            <button type="button" role="radio" :class="{ 'is-active': !shown.resident }" :aria-checked="!shown.resident" :disabled="pending" @click="setResident(false)">她查的时候才用</button>
+            <button type="button" role="radio" :class="{ 'is-active': shown.resident }" :aria-checked="shown.resident" :disabled="pending" @click="setResident(true)">{{ memoryResidentLabel(true) }}</button>
+            <button type="button" role="radio" :class="{ 'is-active': !shown.resident }" :aria-checked="!shown.resident" :disabled="pending" @click="setResident(false)">{{ memoryResidentLabel(false) }}</button>
           </div>
         </div>
-        <p class="memory-hint">「每次都带上」的会写进每个新开的助手会话；「她查的时候才用」的，她搜记忆时才会找到。在这里选过一次（点现在的选项也算），后台整理就不会再改这一项。已经开着的会话要重新打开才会读到改动。</p>
+        <p class="memory-hint">「{{ memoryResidentLabel(true) }}」的会写进每个新开的助手会话；「{{ memoryResidentLabel(false) }}」的，她搜记忆时才会找到。在这里选过一次（点现在的选项也算），后台整理就不会再改这一项。已经开着的会话要重新打开才会读到改动。</p>
       </template>
 
       <div class="memory-actions">

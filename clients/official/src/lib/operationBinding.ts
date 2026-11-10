@@ -45,24 +45,42 @@ export function replyLost(cause: unknown): boolean {
 }
 
 /**
- * Sends requests so that the same request sent again after its reply was lost names the same
- * operation, and the Host does it at most once. Any answer ends that.
+ * Names the operations asked of one subject (a memory, a timeline line, a setting). The same
+ * request sent again straight after its reply was lost names the same operation, so the Host
+ * does it at most once. Anything else learnt of the subject since ends that: a different
+ * request, or reading the subject after the reply was lost. The Host answers a repeated
+ * operation with its first result without doing it again, so repeating one after the subject
+ * moved on would report a state it is no longer in.
  */
 export function onceAfterLostReply() {
-  const unsettled = new Map<string, string>()
-  return async function once<T>(request: unknown[], send: (operationId: string) => Promise<T>): Promise<T> {
-    const key = JSON.stringify(request)
-    const operationId = unsettled.get(key) ?? crypto.randomUUID()
+  /** The latest request sent about each subject, until it is answered. */
+  const latest = new Map<string, { request: string; operationId: string; replyLost: boolean }>()
+  async function once<T>(subject: unknown[], request: unknown, send: (operationId: string) => Promise<T>): Promise<T> {
+    const key = JSON.stringify(subject)
+    const asked = JSON.stringify(request)
+    const before = latest.get(key)
+    const mine = { request: asked, operationId: before?.replyLost && before.request === asked ? before.operationId : crypto.randomUUID(), replyLost: false }
+    latest.set(key, mine)
     try {
-      const result = await send(operationId)
-      unsettled.delete(key)
+      const result = await send(mine.operationId)
+      if (latest.get(key) === mine) latest.delete(key)
       return result
     } catch (cause) {
-      if (replyLost(cause)) unsettled.set(key, operationId)
-      else unsettled.delete(key)
+      if (replyLost(cause)) mine.replyLost = true
+      else if (latest.get(key) === mine) latest.delete(key)
       throw cause
     }
   }
+  /**
+   * The subject was read. A request whose reply was lost before this is no longer waiting to be
+   * repeated; one still on its way keeps its name, so asking again after losing its reply is
+   * still done once.
+   */
+  function known(subject: unknown[]) {
+    const key = JSON.stringify(subject)
+    if (latest.get(key)?.replyLost) latest.delete(key)
+  }
+  return Object.assign(once, { known })
 }
 
 // Whether these took effect shows in the conversation: a compaction notice, the new

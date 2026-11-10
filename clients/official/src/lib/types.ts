@@ -753,7 +753,7 @@ export interface AssistantExtractionStatus {
   model?: ModelRef
   /** Conversations with something said since they were last read for memories. */
   waitingSessions: number
-  /** Parts of conversations the model could not make sense of; a newly chosen model reads them again. */
+  /** Parts passed over: the model's answer made no sense, or its service kept refusing the part. Another model, or starting over, reads them again. */
   skippedParts?: number
   lastRunAt?: string
   lastError?: string
@@ -794,7 +794,7 @@ export interface AssistantMemoryList { memories: AssistantMemory[]; nextCursor?:
 export interface AssistantMemoryChange { at: string; author: AssistantMemoryAuthor; action: AssistantMemoryAction; text?: string }
 export interface AssistantMemoryDetail { memory: AssistantMemory; history: AssistantMemoryChange[] }
 /** Which memories a list shows, newest first; without `state`, those in use. */
-export interface AssistantMemoryFilter { query?: string; topic?: AssistantMemoryTopic; state?: AssistantMemoryState; resident?: boolean; author?: AssistantMemoryAuthor }
+export interface AssistantMemoryFilter { query?: string; topic?: AssistantMemoryTopic; state?: AssistantMemoryState }
 /** What one change sets; the rest stays as it is. */
 export interface AssistantMemoryEdit { text?: string; topic?: AssistantMemoryTopic; resident?: boolean; state?: AssistantMemoryState }
 /** A timeline line is in use, or forgotten: at the owner's word, or along with a forgotten memory whose words it covers. */

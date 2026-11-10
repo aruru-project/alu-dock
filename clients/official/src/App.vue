@@ -17,6 +17,7 @@ import { useModelListsStore } from './stores/model-lists'
 import { useAppStore } from './stores/app'
 import { useAssistantStore } from './stores/assistant'
 import { useAssistantMemoryStore } from './stores/assistant-memory'
+import { useAssistantSearchStore } from './stores/assistant-search'
 import { useAttachmentsStore } from './stores/attachments'
 import { useControlPanelStore } from './stores/control-panel'
 import { useConversationStore } from './stores/conversation'
@@ -49,6 +50,8 @@ const modelLists = useModelListsStore()
 const assistant = useAssistantStore()
 // Her memories and settings, read when her page shows them; what the owner is typing there lives here.
 const assistantMemory = useAssistantMemoryStore()
+// Searches of her conversations and rewrites of timeline lines being typed.
+const assistantSearch = useAssistantSearchStore()
 // Created with the page so it sees a run from its first event.
 const turnSpeed = useTurnSpeedStore()
 const selected = computed(() => app.selectedWork)
@@ -75,7 +78,7 @@ onMounted(async () => {
 })
 // The page's stores stop their listeners and timers with the page; a later page starts from fresh state.
 onUnmounted(() => {
-  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelLists, assistantMemory, assistant]) {
+  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelLists, assistantSearch, assistantMemory, assistant]) {
     store.$dispose()
     if (pinia) delete pinia.state.value[store.$id]
   }

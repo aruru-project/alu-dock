@@ -17,8 +17,6 @@ const SAFE_ERROR_CODES = new Set([
   'workspace_cache_unavailable', 'workspace_read_cancelled', 'workspace_read_invalid',
   'workspace_large_file_confirmation_required', 'workspace_preview_unsupported',
   'workspace_save_failed',
-  // Main says which memory a merged one lives on in, and what to change there instead.
-  'assistant_memory_merged',
 ])
 
 export interface UserErrorPresentation {
@@ -31,7 +29,8 @@ interface DiagnosticContext {
   request: string
 }
 
-function errorCode(cause: unknown): string {
+/** The Host's or the native side's code for a failure; empty when it carries none. */
+export function errorCode(cause: unknown): string {
   return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
 }
 
@@ -72,7 +71,7 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'assistant_entry_not_found') return '这段对话已经找不到了。请重新搜索。'
     if (code === 'assistant_memory_changed') return '这条记忆刚被改过（可能是她自己或后台整理改的），这次没有改动。请看过现在的内容再改。'
     if (code === 'assistant_memory_not_found') return '没有找到这条记忆。请回到列表刷新后再试。'
-    if (code === 'assistant_episode_changed') return '时间线的这一行刚被改过（可能是她自己或后台改的），这次没有改动。请重新搜索看过现在的内容再改。'
+    if (code === 'assistant_episode_changed') return '时间线的这一行刚被改过（可能是她自己或后台改的），这次没有改动。请看过现在的内容再改。'
     if (code === 'assistant_episode_not_found') return '没有找到时间线的这一行。请重新搜索后再试。'
     if (code === 'host_unreachable') return '无法连接这台 AluDock。请检查电脑状态、网络和保存的地址，然后重试。'
     if ('message' in cause && (!code || SAFE_ERROR_CODES.has(code))) {

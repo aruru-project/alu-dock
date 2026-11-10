@@ -2,7 +2,7 @@ import { reactive } from 'vue'
 import { getAssistantContext } from './bridge'
 import { currentConnectionCall } from './hostResult'
 import type { AssistantEntry, AssistantSessionInfo, ConnectionContext } from './types'
-import { userErrorMessage } from './userError'
+import { errorCode, userErrorMessage } from './userError'
 
 const CONTEXT_SPAN = 6
 const CONTEXT_MORE = 12
@@ -60,8 +60,7 @@ export function useConversationReading(app: { connectionContext: ConnectionConte
       Object.assign(state, { session: result.session, entries: result.entries, hasBefore: result.hasBefore, hasAfter: result.hasAfter })
     } catch (cause) {
       if (current !== epoch) return
-      const notFound = messages.notFound && cause && typeof cause === 'object' && 'code' in cause && cause.code === 'assistant_entry_not_found'
-      state.error = notFound ? messages.notFound! : userErrorMessage(cause, messages.failure)
+      state.error = messages.notFound && errorCode(cause) === 'assistant_entry_not_found' ? messages.notFound : userErrorMessage(cause, messages.failure)
     } finally {
       if (current === epoch) state.loading = false
     }

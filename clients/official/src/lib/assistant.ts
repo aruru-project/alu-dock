@@ -3,6 +3,12 @@ import type {
   AssistantMemoryChange, AssistantMemoryState, AssistantMemoryTopic, AssistantSessionInfo,
 } from './types'
 
+/** The start of a memory or a timeline line, enough to tell which one a notice is about. */
+export function excerpt(text: string): string {
+  const characters = Array.from(text)
+  return characters.length > 16 ? `${characters.slice(0, 16).join('')}…` : text
+}
+
 /** Who said an entry of her conversation, as the page labels it. */
 export function assistantEntryLabel(kind: AssistantEntryKind, toolName?: string): string {
   if (kind === 'user') return '你'
@@ -20,6 +26,11 @@ export function assistantSessionLabel(session: AssistantSessionInfo): string {
   if (session.name?.trim()) return session.name.trim()
   const parts = (session.cwd ?? '').split(/[\\/]/u).filter(Boolean)
   return parts.length ? parts.slice(-2).join('/') : '未命名的对话'
+}
+
+/** Where something was said: the conversation and the machine it ran on. */
+export function assistantPlace(session: AssistantSessionInfo): string {
+  return [assistantSessionLabel(session), session.machine].filter(Boolean).join(' · ')
 }
 
 const timeFormat = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -88,13 +99,24 @@ export function memoryStateLabel(state: AssistantMemoryState): string {
   return state === 'active' ? '在用' : state === 'retired' ? '已作废' : state === 'forgotten' ? '已删除' : '状态未知'
 }
 
+/**
+ * What deleting a memory does, as Main does it: the words it came from go with it, and so do the
+ * timeline lines covering them; the same thing said elsewhere stays.
+ */
+export const MEMORY_DELETED_EFFECT = '她不再载入这条，也搜不到它；说出它的那几句话和她当时紧接着回的话，在搜索和前后文里也读不到，覆盖这些话的时间线行一起收起。别处另外提到同一件事的原话不受影响。'
+
 const WROTE: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里记下', dreaming: '整理时记下', assistant: '她在对话里记下', owner: '你写的' }
 const CHANGED: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里改的', dreaming: '整理时改的', assistant: '她在对话里改的', owner: '你改的' }
+// The background sets a memory aside when a conversation shows it no longer holds, and when the owner starts her memories over.
+const SET_ASIDE: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '后台作废的', dreaming: '整理时作废的', assistant: '她在对话里作废的', owner: '你作废的' }
 
-/** Who made the latest change; a memory nobody changed since it was written says who wrote it. */
-export function memoryAuthorLabel(memory: Pick<AssistantMemory, 'author' | 'revision'>): string {
+/**
+ * Who made the latest change; a memory nobody changed since it was written says who wrote it,
+ * and one set aside says who set it aside.
+ */
+export function memoryAuthorLabel(memory: Pick<AssistantMemory, 'author' | 'revision' | 'state'>): string {
   if (memory.author === 'unrecognized') return ''
-  return (memory.revision <= 1 ? WROTE : CHANGED)[memory.author]
+  return (memory.state === 'retired' ? SET_ASIDE : memory.revision <= 1 ? WROTE : CHANGED)[memory.author]
 }
 
 const ACTOR: Record<Known<AssistantMemoryAuthor>, string> = { extraction: '从对话里', dreaming: '整理时', assistant: '她在对话里', owner: '你' }
@@ -105,6 +127,8 @@ const ACTION: Record<Known<AssistantMemoryAction>, string> = {
 
 /** One line of a memory's history: who did what. */
 export function memoryChangeLabel(change: AssistantMemoryChange): string {
+  // Starting her memories over sets them aside in the background's name, not from any one conversation.
+  if (change.author === 'extraction' && change.action === 'retired') return '后台作废'
   const actor = change.author === 'unrecognized' ? '' : ACTOR[change.author]
   return `${actor}${change.action === 'unrecognized' ? '改动' : ACTION[change.action]}`
 }

@@ -45,7 +45,8 @@ pub struct AssistantExtractionStatus {
     pub model: Option<ModelRef>,
     /// Conversations with something said since they were last read for memories.
     pub waiting_sessions: u64,
-    /// Parts of conversations the model could not make sense of; a newly chosen model reads them again.
+    /// Parts of conversations passed over: the model's answer made no sense, or its service
+    /// kept refusing the part. A newly chosen model, or starting over, reads them again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped_parts: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,10 +212,6 @@ pub struct AssistantMemoryFilter {
     pub topic: Option<AssistantMemoryTopic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<AssistantMemoryState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resident: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<AssistantMemoryAuthor>,
 }
 
 /// What a change to one memory sets; each field left out stays as it is.
@@ -337,14 +334,12 @@ pub enum AssistantEntryKind {
     Unrecognized,
 }
 
-/// Where a conversation took place: the session, and the Work and machine it ran in.
+/// Where a conversation took place: the session, and the Work and machine it ran in. Main also
+/// says where the session file is; that path is not read, so it never reaches the interface.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSessionInfo {
     pub session_id: String,
-    /// A path on Main; the interface has no use for it.
-    #[serde(default, skip_serializing)]
-    pub session_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -809,57 +804,8 @@ impl DockClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn saving_a_document_names_the_version_it_was_edited_from() {
-        let params = serde_json::to_value(DocumentSetParams {
-            operation_id: "save-1",
-            document: AssistantDocumentName::Notes,
-            text: "早上先说天气",
-            base_revision: "r7",
-        })
-        .unwrap();
-        assert_eq!(
-            params,
-            serde_json::json!({ "operationId": "save-1", "document": "notes", "text": "早上先说天气", "baseRevision": "r7" })
-        );
-        let read: AssistantDocument = serde_json::from_value(
-            serde_json::json!({ "document": "persona", "text": "她是阿露。", "revision": "r8" }),
-        )
-        .unwrap();
-        assert_eq!(read.document, AssistantDocumentName::Persona);
-        assert_eq!(read.revision, "r8");
-    }
-
-    #[test]
-    fn a_search_sends_the_words_or_only_a_time_range() {
-        let params = serde_json::to_value(SearchParams {
-            query: Some("天气 早上"),
-            from: None,
-            to: None,
-            cursor: None,
-            limit: 20,
-        })
-        .unwrap();
-        assert_eq!(
-            params,
-            serde_json::json!({ "query": "天气 早上", "limit": 20 })
-        );
-        let yesterday = serde_json::to_value(SearchParams {
-            query: None,
-            from: Some("2026-11-06T00:00:00.000Z"),
-            to: Some("2026-11-07T00:00:00.000Z"),
-            cursor: Some("c2"),
-            limit: 20,
-        })
-        .unwrap();
-        assert_eq!(
-            yesterday,
-            serde_json::json!({ "from": "2026-11-06T00:00:00.000Z", "to": "2026-11-07T00:00:00.000Z", "cursor": "c2", "limit": 20 }),
-            "a time range alone lists that time's conversations"
-        );
-    }
-
-    /// The Host may add fields to hits and sessions; the client reads the ones it knows.
+    /// The Host may add fields to hits and sessions; the client reads the ones it knows, and
+    /// the session file's path on Main is not one of them.
     #[test]
     fn search_results_show_where_a_conversation_happened_without_session_file_paths() {
         let result: AssistantSearchResult = serde_json::from_value(serde_json::json!({

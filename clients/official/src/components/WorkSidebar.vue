@@ -9,6 +9,7 @@ import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
+import { useAssistantSearchStore } from '../stores/assistant-search'
 import { useHostStore } from '../stores/host'
 import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
@@ -23,6 +24,7 @@ const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions
 const { workMachineTag, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant } = workActions
 const assistant = useAssistantStore()
 const assistantMemory = useAssistantMemoryStore()
+const assistantSearch = useAssistantSearchStore()
 const { directoryOpen } = storeToRefs(useSurfacesStore())
 const host = useHostStore()
 const { pairingInProgress } = storeToRefs(host)
@@ -84,7 +86,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     </button>
     <button v-if="app.connectionContext && assistant.available" class="alu-sidebar-settings-entry" aria-label="助手" @click="openAssistant()">
       <span class="alu-sidebar-settings-icon"><Sparkles :size="17" /></span>
-      <span><strong>助手</strong><small>{{ assistant.hasDrafts || assistantMemory.hasDrafts ? '有改动还没有保存' : '人设、记忆和过去的对话' }}</small></span>
+      <span><strong>助手</strong><small>{{ assistant.hasDrafts || assistantMemory.hasDrafts || assistantSearch.hasDrafts ? '有改动还没有保存' : '人设、记忆和过去的对话' }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
     <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings()">

@@ -2,14 +2,14 @@
 import { computed, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { PenLine, RefreshCw } from '@lucide/vue'
-import { assistantTime, memoryAuthorLabel, memoryLength, memoryStateLabel, memoryTopicLabel, memoryTopics } from '../lib/assistant'
+import { assistantTime, memoryAuthorLabel, memoryLength, memoryResidentLabel, memoryStateLabel, memoryTopicLabel, memoryTopics } from '../lib/assistant'
 import { useAssistantMemoryStore, type MemoryView } from '../stores/assistant-memory'
 import AssistantMemoryDetail from './AssistantMemoryDetail.vue'
 
 // Her memories: the newest first, by topic, and those set aside, each opening to its own page.
 const emit = defineEmits<{ settings: [] }>()
 const memory = useAssistantMemoryStore()
-const { list, detail } = memory
+const { list, detail, more } = memory
 const { extraction, draft, memoryLimit } = storeToRefs(memory)
 
 const views: Array<{ id: MemoryView; label: string }> = [
@@ -48,11 +48,7 @@ function input(event: Event) {
 <template>
   <AssistantMemoryDetail v-if="detail.id" />
   <template v-else>
-    <div v-if="extraction?.state === 'off'" class="assistant-note is-warning memory-extraction" role="status">
-      <span>还没选整理记忆的模型，她不会从对话里自动记东西。</span>
-      <button type="button" class="alu-link-button" @click="emit('settings')">去选模型</button>
-    </div>
-    <div v-else-if="extraction?.state === 'failed'" class="assistant-note is-warning memory-extraction" role="status">
+    <div v-if="extraction?.state === 'failed'" class="assistant-note is-warning has-action" role="status">
       <span>上次整理记忆没有成功{{ extraction.retryAt ? `，${assistantTime(extraction.retryAt)} 会自动再试` : '' }}。</span>
       <button type="button" class="alu-link-button" @click="emit('settings')">看看原因</button>
     </div>
@@ -82,8 +78,8 @@ function input(event: Event) {
       <div class="memory-write-field">
         <span>什么时候用</span>
         <div class="alu-switch" role="radiogroup" aria-label="这条什么时候用">
-          <button type="button" role="radio" :class="{ 'is-active': !draft.resident }" :aria-checked="!draft.resident" :disabled="saving" @click="memory.editDraft({ resident: false })">她查的时候才用</button>
-          <button type="button" role="radio" :class="{ 'is-active': draft.resident }" :aria-checked="draft.resident" :disabled="saving" @click="memory.editDraft({ resident: true })">每次都带上</button>
+          <button type="button" role="radio" :class="{ 'is-active': !draft.resident }" :aria-checked="!draft.resident" :disabled="saving" @click="memory.editDraft({ resident: false })">{{ memoryResidentLabel(false) }}</button>
+          <button type="button" role="radio" :class="{ 'is-active': draft.resident }" :aria-checked="draft.resident" :disabled="saving" @click="memory.editDraft({ resident: true })">{{ memoryResidentLabel(true) }}</button>
         </div>
       </div>
       <p v-if="draft.save" class="memory-write-status" :class="{ 'is-error': draft.save.state === 'failed' }" :role="draft.save.state === 'failed' ? 'alert' : 'status'">{{ draft.save.message }}</p>
@@ -105,7 +101,7 @@ function input(event: Event) {
           <span class="memory-row-meta">
             <span v-if="list.view !== 'topics'" class="memory-tag">{{ memoryTopicLabel(item.topic) }}</span>
             <span v-if="item.state !== listState" class="memory-tag" :class="`is-${item.state}`">{{ memoryStateLabel(item.state) }}</span>
-            <span v-if="item.state === 'active' && item.resident" class="memory-tag is-resident">每次都带上</span>
+            <span v-if="item.state === 'active' && item.resident" class="memory-tag is-resident">{{ memoryResidentLabel(true) }}</span>
             <span v-if="memory.hasRewrite(item.id)" class="memory-tag is-draft">改写还没保存</span>
             <span>{{ [memoryAuthorLabel(item), assistantTime(item.updatedAt), `#${item.id}`].filter(Boolean).join(' · ') }}</span>
           </span>
@@ -113,13 +109,12 @@ function input(event: Event) {
       </li>
     </ul>
     <p v-else-if="list.shown && !list.loading && !list.error" class="assistant-empty">{{ emptyText }}</p>
-    <div v-if="list.moreError" class="assistant-error" role="alert"><span>{{ list.moreError }}</span></div>
-    <button v-if="list.nextCursor" type="button" class="assistant-more" :disabled="list.loadingMore" @click="memory.moreMemories()">{{ list.loadingMore ? '正在读取…' : '更多' }}</button>
+    <div v-if="more.error" class="assistant-error" role="alert"><span>{{ more.error }}</span></div>
+    <button v-if="list.nextCursor" type="button" class="assistant-more" :disabled="more.loading || list.loading" @click="memory.moreMemories()">{{ more.loading ? '正在读取…' : '更多' }}</button>
   </template>
 </template>
 
 <style scoped>
-.memory-extraction { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
 .memory-views { display: flex; flex: 0 0 auto; gap: 4px; overflow-x: auto; padding: 3px; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg); scrollbar-width: none; }
 .memory-views::-webkit-scrollbar { display: none; }
 .memory-view { flex: 1 0 auto; min-height: 32px; padding: 0 12px; cursor: pointer; border: 1px solid transparent; border-radius: 7px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); white-space: nowrap; }

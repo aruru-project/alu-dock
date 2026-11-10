@@ -1,0 +1,12 @@
+/* The assistant's page: what its sections and the conversations they read share. */
+.assistant-status { color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
+.assistant-note { margin: 0; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; color: var(--alu-text-dim); font-size: var(--alu-meta-size); line-height: 1.6; }
+.assistant-note.is-warning { border-color: rgb(var(--alu-warning-rgb) / .35); color: var(--alu-warning); }
+/* A note with what to do about it at its end. */
+.assistant-note.has-action { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.assistant-error { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0; padding: 9px 10px; border: 1px solid var(--alu-danger-border); border-radius: 8px; background: var(--alu-danger-bg); color: var(--alu-danger); font-size: var(--alu-meta-size); }
+.assistant-text-block { margin: 0; padding: 12px 14px; overflow: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); color: var(--alu-text); font: 13px/1.75 var(--font-reading); white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-empty { margin: 8px 2px; color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
+.assistant-more { align-self: center; padding: 6px 12px; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-accent); font-size: var(--alu-meta-size); }
+.assistant-more:hover:where(:not(:disabled)) { background: var(--alu-hover); }
+.assistant-more:disabled { cursor: wait; opacity: .6; }

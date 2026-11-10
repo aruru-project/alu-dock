@@ -15,10 +15,12 @@ const saving = computed(() => editor.value.save?.state === 'pending')
 const bytes = computed(() => utf8Bytes(text.value))
 const limit = computed(() => assistant.info?.maxDocumentBytes ?? 0)
 const tooLarge = computed(() => limit.value > 0 && bytes.value > limit.value)
+/** Rounded up, so a few bytes over never reads as nothing over. */
+const overBy = computed(() => (Math.ceil((bytes.value - limit.value) / 102.4) / 10).toFixed(1))
 const status = computed(() => {
   const save = editor.value.save
   if (save && (save.state !== 'saved' || !dirty.value)) return save
-  return dirty.value ? { state: 'draft' as const, message: '有改动还没有保存。离开这一页，草稿也会留着。' } : null
+  return dirty.value ? { state: 'draft' as const, message: '有改动还没有保存。切到别处或关掉这一页，草稿都还在；退出客户端就没有了。' } : null
 })
 
 function input(event: Event) {
@@ -49,15 +51,16 @@ function input(event: Event) {
       spellcheck="false"
       @input="input"
     />
-    <div class="assistant-document-size" :class="{ 'is-over': tooLarge }">
-      {{ kilobytes(bytes) }} KB<template v-if="limit"> / {{ kilobytes(limit) }} KB</template><template v-if="tooLarge">，超过上限，保存不会成功。请删短一些。</template>
-    </div>
+    <p class="alu-counter" :class="{ 'is-over': tooLarge }" :role="tooLarge ? 'alert' : undefined">
+      <template v-if="tooLarge">超出 {{ overBy }} KB：{{ name }}最多 {{ kilobytes(limit) }} KB，请删到 {{ kilobytes(limit) }} KB 以内再保存。</template>
+      <template v-else>{{ kilobytes(bytes) }} KB<template v-if="limit"> / {{ kilobytes(limit) }} KB</template></template>
+    </p>
   </template>
   <footer v-if="editor.base" class="assistant-document-footer">
     <span class="assistant-document-status" :class="{ 'is-error': status?.state === 'failed' || status?.state === 'changed' }" :role="status?.state === 'failed' || status?.state === 'changed' ? 'alert' : 'status'">{{ status?.message }}</span>
     <button v-if="(editor.save?.state === 'changed' || editor.save?.state === 'unknown') && !editor.latest" type="button" class="button secondary" :disabled="editor.loading" @click="assistant.loadDocument(document)">{{ editor.loading ? '正在读取…' : '读取最新内容' }}</button>
     <button type="button" class="button secondary" :disabled="saving || !dirty" @click="assistant.discardDocument(document)">放弃改动</button>
-    <button type="button" class="button primary" :disabled="saving || !dirty || !editor.base || !!editor.latest" @click="assistant.saveDocument(document)">{{ saving ? '正在保存…' : '保存' }}</button>
+    <button type="button" class="button primary" :disabled="saving || !dirty || !editor.base || !!editor.latest || tooLarge" @click="assistant.saveDocument(document)">{{ saving ? '正在保存…' : '保存' }}</button>
   </footer>
 </template>
 
@@ -80,8 +83,6 @@ function input(event: Event) {
   font: 14px/1.75 var(--font-reading);
 }
 .assistant-document-input:focus { outline: none; border-color: var(--alu-border-focus); }
-.assistant-document-size { color: var(--alu-text-faint); font-size: var(--alu-micro-size); text-align: right; }
-.assistant-document-size.is-over { color: var(--alu-danger); }
 .assistant-document-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; padding-top: 4px; }
 .assistant-document-status { flex: 1 1 220px; min-width: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.5; }
 .assistant-document-status.is-error { color: var(--alu-danger); }

@@ -3,10 +3,11 @@
 use std::{env, path::PathBuf};
 
 use aludock_client_core::{
-    AssistantDocumentName, AssistantEntryKind, AssistantEntryRef, AssistantExtractionState,
-    AssistantMemoryAction, AssistantMemoryAuthor, AssistantMemoryEdit, AssistantMemoryFilter,
-    AssistantMemoryState, AssistantMemoryTopic, AssistantTimelineFilter, ClientError,
-    ConnectionRouter, DockClient, IdentityStore, LocalDockEndpoint, MachineKind, ModelRef,
+    AssistantDocumentName, AssistantEntryKind, AssistantEntryRef, AssistantEpisodeEdit,
+    AssistantEpisodeState, AssistantExtractionState, AssistantMemoryAction, AssistantMemoryAuthor,
+    AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryState, AssistantMemoryTopic,
+    AssistantTimelineFilter, ClientError, ConnectionRouter, DockClient, IdentityStore,
+    LocalDockEndpoint, MachineKind, ModelRef,
 };
 
 #[tokio::main]
@@ -22,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "assistant-protocol-gate".into(),
     )?);
 
-    // Her workspace opens new Works as her from the start.
+    // Her workspace opens new Works as her from the start, and this Host takes that choice.
     let info = client.assistant_info().await?;
     let main = client
         .list_machines()
@@ -34,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .system_catalog(&info.workspace_path, Some(&main.host_id), None)
         .await?;
     assert!(workspace.default_assistant);
+    assert!(workspace.assistant_choice);
 
     // The shipped persona, and notes saved against the version they were edited from.
     assert!(
@@ -143,16 +145,107 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A memory is dated by when it was said, not by when it was written.
     assert_eq!(added.said_at, hit.at);
 
-    // Her timeline is written by the model, which this gate has none of: empty, and a line that
-    // does not exist is refused by its own code.
+    // Her timeline: the one line the background wrote of that conversation, from its first entry.
+    let lines_in_use = AssistantTimelineFilter::default();
+    let timeline = client.assistant_timeline(&lines_in_use, None, 20).await?;
+    assert_eq!(timeline.episodes.len(), 1);
+    let line = &timeline.episodes[0];
+    assert_eq!(line.entry_id, "e1");
+    let read = client.assistant_episode(&line.id).await?;
+    assert_eq!(
+        (read.id.as_str(), read.text.as_str(), read.revision),
+        (line.id.as_str(), line.text.as_str(), line.revision)
+    );
+    // The owner rewrites it; a change from the version before is refused.
+    let line_edit = |state| AssistantEpisodeEdit {
+        state: Some(state),
+        ..AssistantEpisodeEdit::default()
+    };
+    let line_rewritten = client
+        .update_assistant_episode(
+            &line.id,
+            line.revision,
+            &AssistantEpisodeEdit {
+                text: Some("下午闲聊，聊到家里的猫。".into()),
+                ..AssistantEpisodeEdit::default()
+            },
+            None,
+        )
+        .await?;
+    assert_eq!(
+        (
+            line_rewritten.text.as_str(),
+            line_rewritten.revision,
+            line_rewritten.author
+        ),
+        (
+            "下午闲聊，聊到家里的猫。",
+            line.revision + 1,
+            AssistantMemoryAuthor::Owner
+        )
+    );
+    match client
+        .update_assistant_episode(
+            &line.id,
+            line.revision,
+            &line_edit(AssistantEpisodeState::Forgotten),
+            None,
+        )
+        .await
+    {
+        Err(ClientError::Host { code, .. }) if code == "assistant_episode_changed" => {}
+        other => {
+            return Err(
+                format!("a line change from an old version was not refused: {other:?}").into(),
+            );
+        }
+    }
+    // Forgotten, it leaves the lines in use and is listed among those forgotten; restored, it is back.
+    let line_forgotten = client
+        .update_assistant_episode(
+            &line.id,
+            line_rewritten.revision,
+            &line_edit(AssistantEpisodeState::Forgotten),
+            None,
+        )
+        .await?;
     assert!(
         client
-            .assistant_timeline(&AssistantTimelineFilter::default(), None, 20)
+            .assistant_timeline(&lines_in_use, None, 20)
             .await?
             .episodes
             .is_empty()
     );
-    match client.assistant_episode("1").await {
+    let lines_forgotten = AssistantTimelineFilter {
+        state: Some(AssistantEpisodeState::Forgotten),
+        ..AssistantTimelineFilter::default()
+    };
+    assert_eq!(
+        client
+            .assistant_timeline(&lines_forgotten, None, 20)
+            .await?
+            .episodes[0]
+            .id,
+        line.id
+    );
+    client
+        .update_assistant_episode(
+            &line.id,
+            line_forgotten.revision,
+            &line_edit(AssistantEpisodeState::Active),
+            None,
+        )
+        .await?;
+    assert_eq!(
+        client
+            .assistant_timeline(&lines_in_use, None, 20)
+            .await?
+            .episodes[0]
+            .id,
+        line.id
+    );
+    // A line that does not exist is refused by its own code.
+    match client.assistant_episode("999").await {
         Err(ClientError::Host { code, .. }) if code == "assistant_episode_not_found" => {}
         other => return Err(format!("expected no timeline line, got {other:?}").into()),
     }
@@ -259,6 +352,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .len(),
         1
     );
+    // The line covering those words was put away with the memory and came back with it, still
+    // as the owner rewrote it.
+    let lines_back = client.assistant_timeline(&lines_in_use, None, 20).await?;
+    assert_eq!(lines_back.episodes.len(), 1);
+    assert_eq!(
+        (
+            lines_back.episodes[0].id.as_str(),
+            lines_back.episodes[0].author
+        ),
+        (line.id.as_str(), AssistantMemoryAuthor::Owner)
+    );
     let detail = client.assistant_memory(&restored.id).await?;
     let history: Vec<_> = detail.history.iter().map(|change| change.action).collect();
     assert_eq!(
@@ -305,7 +409,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .extraction
         .ok_or("no status")?;
     assert_ne!(on.state, AssistantExtractionState::Off);
-    // Starting over keeps what the owner wrote and reads every conversation again with the model.
+    // Starting over keeps what the owner wrote or rewrote and reads every conversation again with
+    // the model.
     let again = client.reorganize_assistant(&model, None).await?;
     assert_eq!(
         (
@@ -330,13 +435,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_none()
     );
     println!(
-        "assistant gate: workspace={} hits={} context={} day={} history={} waiting={}",
+        "assistant gate: workspace={} hits={} context={} day={} history={} waiting={} lines={}",
         info.workspace_path,
         found.hits.len(),
         around.entries.len(),
         day.hits.len(),
         detail.history.len(),
-        off.waiting_sessions
+        off.waiting_sessions,
+        timeline.episodes.len()
     );
     Ok(())
 }

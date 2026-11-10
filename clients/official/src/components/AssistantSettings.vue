@@ -52,7 +52,9 @@ const placeholder = computed(() => settings.loading ? '正在读取…' : '没�
 const refreshing = computed(() => assistant.current?.state === 'loading' || !!assistant.current?.refreshing)
 
 function choose(value: string) {
-  if (value === selected.value) return
+  // The value shown is chosen again only after a save that failed or whose reply was lost: Main
+  // may hold the other choice, and choosing the one shown is how the owner takes it back.
+  if (value === selected.value && settings.save?.state !== 'failed') return
   if (value === NO_MODEL) {
     void memory.chooseModel(null)
     return
@@ -73,8 +75,8 @@ function choose(value: string) {
     <p v-if="models?.state === 'failed'" class="assistant-note">读不到 Main 的模型列表。改过模型或登录后，点右侧的刷新。</p>
     <p v-else-if="models?.state === 'loading' && !modelList.length" class="assistant-status" role="status">正在读取 Main 的模型…</p>
     <div v-if="settings.error" class="assistant-error" role="alert"><span>{{ settings.error }}</span><button type="button" class="button secondary" :disabled="settings.loading" @click="memory.loadSettings()">重试</button></div>
-    <p v-if="settings.save && settings.save.state !== 'pending'" class="assistant-setting-saved" :class="{ 'is-error': settings.save.state === 'failed' }" :role="settings.save.state === 'failed' ? 'alert' : 'status'">{{ settings.save.message }}</p>
-    <p v-else-if="settings.current && !settings.current.extractionModel && !saving" class="assistant-note is-warning" role="status">还没选模型，她不会从对话里自动记东西。选一个模型就会开始。</p>
+    <p v-if="settings.save" class="assistant-setting-saved" :class="{ 'is-error': settings.save.state === 'failed', 'is-pending': saving }" :role="settings.save.state === 'failed' ? 'alert' : 'status'">{{ settings.save.message }}</p>
+    <p v-else-if="settings.current && !settings.current.extractionModel" class="assistant-note is-warning" role="status">还没选模型，她不会从对话里自动记东西。选一个模型就会开始。</p>
     <div v-if="settings.current?.extractionModel || restart.state !== 'idle'" class="assistant-restart">
       <div v-if="restart.state === 'confirming'" class="assistant-restart-confirm" role="alertdialog" aria-labelledby="assistant-restart-what">
         <p id="assistant-restart-what">她会用「{{ chosenLabel }}」把所有对话从头读一遍、重新整理：后台整理出的记忆挪进「已作废」，可以一条条恢复；后台写的时间线清掉。你写过或改过的，和她按你吩咐记下的，都留着。</p>
@@ -101,7 +103,7 @@ function choose(value: string) {
         <div><dt>等着整理</dt><dd>{{ extraction.waitingSessions ? `${extraction.waitingSessions} 段对话有新内容还没整理` : '没有' }}</dd></div>
         <div><dt>上次整理</dt><dd>{{ extraction.lastRunAt ? assistantTime(extraction.lastRunAt) : '还没有整理过' }}</dd></div>
         <div v-if="extraction.retryAt"><dt>下次重试</dt><dd>{{ assistantTime(extraction.retryAt) }}</dd></div>
-        <div v-if="extraction.skippedParts"><dt>没读成</dt><dd>{{ extraction.skippedParts }} 段对话模型没读懂，先跳过了。换一个模型或从头整理时会重新读。</dd></div>
+        <div v-if="extraction.skippedParts"><dt>没读成</dt><dd>{{ extraction.skippedParts }} 段对话先跳过了：模型的回答看不懂，或模型服务一再拒绝这一段。换一个模型或从头整理时会重新读。</dd></div>
       </dl>
       <p v-if="extraction.lastError" class="assistant-note is-warning" role="status">{{ extraction.lastError }}</p>
     </template>
@@ -120,6 +122,7 @@ function choose(value: string) {
 .assistant-setting-refresh:hover:not(:disabled) { background: var(--alu-hover); color: var(--alu-text); }
 .assistant-setting-saved { margin: 0; color: var(--alu-success-text); font-size: var(--alu-meta-size); line-height: 1.6; }
 .assistant-setting-saved.is-error { color: var(--alu-danger); }
+.assistant-setting-saved.is-pending { color: var(--alu-text-muted); }
 .assistant-setting-facts { display: grid; gap: 6px; margin: 0; }
 .assistant-setting-facts div { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 10px; font-size: var(--alu-meta-size); line-height: 1.6; }
 .assistant-setting-facts dt { color: var(--alu-text-muted); }

@@ -1,15 +1,11 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
-import { useConversationReading } from '../lib/assistantReading'
-import {
-  getAssistantDocument, getAssistantInfo, getAssistantPreview, listAssistantTimeline, searchAssistant, setAssistantDocument, updateAssistantEpisode,
-} from '../lib/bridge'
+import { utf8Bytes } from '../lib/assistant'
+import { getAssistantDocument, getAssistantInfo, getAssistantPreview, setAssistantDocument } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
-import { onceAfterLostReply, replyLost } from '../lib/operationBinding'
-import type {
-  AssistantDocument, AssistantDocumentName, AssistantEpisode, AssistantEpisodeEdit, AssistantInfo, AssistantPreview, AssistantSearchHit, ConnectionContext,
-} from '../lib/types'
-import { userErrorMessage } from '../lib/userError'
+import { replyLost } from '../lib/operationBinding'
+import type { AssistantDocument, AssistantDocumentName, AssistantInfo, AssistantPreview, ConnectionContext } from '../lib/types'
+import { errorCode, userErrorMessage } from '../lib/userError'
 import { useAppStore } from './app'
 
 /** One document being edited: the version the editor started from, the user's unsaved text, and its save. */
@@ -35,19 +31,11 @@ interface InfoEntry {
   refreshError?: string
 }
 
-const SEARCH_PAGE = 20
-const TIMELINE_PAGE = 20
-const LOST = '连接中断，没收到结果。请稍后再试。'
-
-function errorCode(cause: unknown) {
-  return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
-}
-
 /**
  * The personal assistant on Main (card #295): whether this connection offers her, her persona
- * and notes being edited, what a new session of hers loads, and searching her conversations.
- * Drafts live here, per connection and document, so closing the page or switching sections
- * keeps them; a save also outlives the page.
+ * and notes being edited, and what a new session of hers loads. Drafts live here, per
+ * connection and document, so closing the page or switching sections keeps them; a save also
+ * outlives the page.
  */
 export const useAssistantStore = defineStore('assistant', () => {
   const app = useAppStore()
@@ -81,7 +69,8 @@ export const useAssistantStore = defineStore('assistant', () => {
       })
     }
   }
-  watch(() => [app.connectionContext?.connectionId, app.connectionContext?.selectionGeneration], () => { void loadInfo() }, { immediate: true })
+  // Two sources, each compared by value: the context is a new object whenever the Host list is read again.
+  watch([() => app.connectionContext?.connectionId, () => app.connectionContext?.selectionGeneration], () => { void loadInfo() }, { immediate: true })
   // Opening the Work list asks again when the last answer was not a clear yes or no.
   watch(() => app.workDrawerOpen, (open) => {
     const state = current.value?.state
@@ -175,6 +164,9 @@ export const useAssistantStore = defineStore('assistant', () => {
     const entry = editorFor(context.connectionId, document)
     if (entry.save?.state === 'pending' || !entry.base || entry.draft === null) return
     const text = entry.draft
+    // Main would refuse it; the editor says how short it must get.
+    const limit = infos.value.get(context.connectionId)?.info?.maxDocumentBytes ?? 0
+    if (limit > 0 && utf8Bytes(text) > limit) return
     const afterLostReply = entry.save?.state === 'unknown'
     entry.save = { state: 'pending', message: '正在保存，关闭这一页不会取消保存。' }
     try {
@@ -216,187 +208,9 @@ export const useAssistantStore = defineStore('assistant', () => {
     }
   }
 
-  // ── Searching her conversations and her timeline ──
-  const search = reactive({
-    query: '', from: '', to: '',
-    /** The search the list shows; reading more continues it, not the fields being edited. */
-    shown: null as null | { connectionId: string; query?: string; from?: string; to?: string },
-    hits: [] as AssistantSearchHit[],
-    nextCursor: undefined as string | undefined,
-    loading: false,
-    loadingMore: false,
-    error: '',
-    moreError: '',
-    /** The timeline lines of the same words and time, newest first, above what was said. */
-    episodes: [] as AssistantEpisode[],
-    episodesCursor: undefined as string | undefined,
-    loadingMoreEpisodes: false,
-    timelineError: '',
-  })
-  let searchEpoch = 0
-
-  /** Local calendar days, from the start of `from` through the end of `to`. */
-  function range(from: string, to: string) {
-    const day = (value: string, next: boolean) => {
-      const [year, month, date] = value.split('-').map(Number)
-      return new Date(year!, month! - 1, date! + (next ? 1 : 0)).toISOString()
-    }
-    return { ...(from ? { from: day(from, false) } : {}), ...(to ? { to: day(to, true) } : {}) }
-  }
-
-  /** Words, a time range, or both; a range alone lists that time's conversations, newest first. */
-  const canSearch = computed(() => !!(search.query.trim() || search.from || search.to))
-  async function runSearch() {
-    const query = search.query.trim() || undefined
-    const context = app.connectionContext
-    if (!canSearch.value || !context) return
-    const epoch = ++searchEpoch
-    const shown = { connectionId: context.connectionId, ...(query ? { query } : {}), ...range(search.from, search.to) }
-    search.loading = true
-    search.error = ''
-    search.moreError = ''
-    closeContext()
-    try {
-      const [page, timeline] = await Promise.all([
-        currentConnectionCall(app, (ctx) => searchAssistant(shown.query, shown, undefined, SEARCH_PAGE, ctx)),
-        currentConnectionCall(app, (ctx) => listAssistantTimeline(timelineFilter(shown), undefined, TIMELINE_PAGE, ctx)).then((list) => ({ list }), (cause: unknown) => ({ cause })),
-      ])
-      if (epoch !== searchEpoch) return
-      search.shown = shown
-      search.hits = page.hits
-      search.nextCursor = page.nextCursor
-      lineEdit.id = ''
-      // The search stands even when the timeline could not be read this time.
-      search.timelineError = 'list' in timeline ? '' : userErrorMessage(timeline.cause, '暂时读不到这段时间的时间线。请稍后重试。')
-      search.episodes = 'list' in timeline ? timeline.list.episodes : []
-      search.episodesCursor = 'list' in timeline ? timeline.list.nextCursor : undefined
-    } catch (cause) {
-      if (epoch === searchEpoch) search.error = userErrorMessage(cause, '这次没有搜成。请稍后重试。')
-    } finally {
-      if (epoch === searchEpoch) search.loading = false
-    }
-  }
-
-  function timelineFilter(shown: NonNullable<typeof search.shown>) {
-    return { ...(shown.query ? { query: shown.query } : {}), ...(shown.from ? { from: shown.from } : {}), ...(shown.to ? { to: shown.to } : {}) }
-  }
-
-  async function timelineMore() {
-    const shown = search.shown
-    const cursor = search.episodesCursor
-    if (!shown || !cursor || search.loadingMoreEpisodes || search.loading || shown.connectionId !== app.activeConnectionId) return
-    const epoch = searchEpoch
-    search.loadingMoreEpisodes = true
-    search.timelineError = ''
-    try {
-      const list = await currentConnectionCall(app, (ctx) => listAssistantTimeline(timelineFilter(shown), cursor, TIMELINE_PAGE, ctx))
-      if (epoch !== searchEpoch) return
-      search.episodes = [...search.episodes, ...list.episodes]
-      search.episodesCursor = list.nextCursor
-    } catch (cause) {
-      if (epoch === searchEpoch) search.timelineError = userErrorMessage(cause, '没有读到更多时间线。请重试。')
-    } finally {
-      if (epoch === searchEpoch) search.loadingMoreEpisodes = false
-    }
-  }
-
-  // ── Changing a timeline line: rewrite, forget, restore ──
-  /** The line being rewritten in place, and the outcome of the last change to any line. */
-  const lineEdit = reactive({
-    id: '',
-    text: '',
-    pending: '' as string,
-    outcome: null as null | { id: string; state: 'done' | 'failed'; message: string },
-  })
-  function startLineEdit(line: AssistantEpisode) {
-    if (lineEdit.pending) return
-    lineEdit.id = line.id
-    lineEdit.text = line.text
-    lineEdit.outcome = null
-  }
-  function cancelLineEdit() {
-    if (!lineEdit.pending) lineEdit.id = ''
-  }
-  function saveLineEdit() {
-    const line = search.episodes.find((item) => item.id === lineEdit.id)
-    const text = lineEdit.text.trim()
-    if (!line || !text || text === line.text) { lineEdit.id = ''; return }
-    return changeLine(line, { text })
-  }
-  const once = onceAfterLostReply()
-  /**
-   * Changes a line from the version shown; one changed meanwhile is refused, and the search read again
-   * shows it. The same change sent again after its reply was lost is made once.
-   */
-  async function changeLine(line: AssistantEpisode, edit: AssistantEpisodeEdit) {
-    const context = app.connectionContext ? { ...app.connectionContext } : null
-    if (!context || lineEdit.pending) return
-    const epoch = searchEpoch
-    lineEdit.pending = line.id
-    lineEdit.outcome = null
-    try {
-      const changed = await once([context.connectionId, 'line', line.id, line.revision, edit],
-        (operationId) => updateAssistantEpisode(line.id, line.revision, edit, operationId, context))
-      if (epoch !== searchEpoch) return
-      search.episodes = search.episodes.map((item) => (item.id === changed.id ? changed : item))
-      if (lineEdit.id === line.id) lineEdit.id = ''
-      lineEdit.outcome = { id: line.id, state: 'done', message: edit.text !== undefined ? '已改写。新开的助手会话按改后的读。' : edit.state === 'forgotten' ? '已忘掉这一行：不再列出、不再载入，它覆盖的原话还在。' : '已恢复这一行。' }
-    } catch (cause) {
-      if (epoch !== searchEpoch) return
-      lineEdit.outcome = { id: line.id, state: 'failed', message: replyLost(cause) ? LOST : userErrorMessage(cause, '没有改成。请稍后重试。') }
-    } finally {
-      if (epoch === searchEpoch) lineEdit.pending = ''
-    }
-  }
-  const forgetLine = (line: AssistantEpisode) => changeLine(line, { state: 'forgotten' })
-  const restoreLine = (line: AssistantEpisode) => changeLine(line, { state: 'active' })
-
-  async function searchMore() {
-    const shown = search.shown
-    const cursor = search.nextCursor
-    if (!shown || !cursor || search.loadingMore || search.loading || shown.connectionId !== app.activeConnectionId) return
-    const epoch = searchEpoch
-    search.loadingMore = true
-    search.moreError = ''
-    try {
-      const page = await currentConnectionCall(app, (ctx) => searchAssistant(shown.query, shown, cursor, SEARCH_PAGE, ctx))
-      if (epoch !== searchEpoch) return
-      search.hits = [...search.hits, ...page.hits]
-      search.nextCursor = page.nextCursor
-    } catch (cause) {
-      if (epoch === searchEpoch) search.moreError = userErrorMessage(cause, '没有读到更多结果。请重试。')
-    } finally {
-      if (epoch === searchEpoch) search.loadingMore = false
-    }
-  }
-
-  // ── One conversation around a hit ──
-  const hitReading = useConversationReading(app, { failure: '暂时读不到这段对话。请重试。' })
-  const reading = hitReading.state
-  const closeContext = hitReading.close
-  const readMore = hitReading.readMore
-  function openContext(hit: AssistantSearchHit) {
-    return hitReading.open({ sessionId: hit.session.sessionId, entryId: hit.entryId, session: hit.session })
-  }
-  /** The words a timeline line sums up, from the first it covers. */
-  function openLine(line: AssistantEpisode) {
-    return hitReading.open({ sessionId: line.session.sessionId, entryId: line.entryId, session: line.session })
-  }
-
-  // A search or open conversation belongs to the connection it was read from.
-  watch(() => app.activeConnectionId, () => {
-    searchEpoch++
-    Object.assign(search, { shown: null, hits: [], nextCursor: undefined, loading: false, loadingMore: false, error: '', moreError: '', episodes: [], episodesCursor: undefined, loadingMoreEpisodes: false, timelineError: '' })
-    Object.assign(lineEdit, { id: '', text: '', pending: '', outcome: null })
-    closeContext()
-  })
-
   return {
     infos, available, info, current, loadInfo,
     editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
-    search, canSearch, runSearch, searchMore, timelineMore, openLine,
-    lineEdit, startLineEdit, cancelLineEdit, saveLineEdit, forgetLine, restoreLine,
-    reading, openContext, readMore, closeContext,
   }
 })

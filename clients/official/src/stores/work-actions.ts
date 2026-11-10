@@ -12,7 +12,7 @@ import type { ConnectionContext, MachineDto, Work } from '../lib/types'
 import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
-import { useSurfacesStore, type AssistantSection, type MachineSettingsSection } from './surfaces'
+import { useSurfacesStore, type MachineSettingsSection } from './surfaces'
 
 /** Work buttons, the Work list and New Work, with their local feedback. Results are claimed by the operations store. */
 export const useWorkActionsStore = defineStore('work-actions', () => {
@@ -402,9 +402,9 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
 
   /** The assistant's page; she lives on Main, so no machine is chosen (card #295). */
-  function openAssistant(section?: AssistantSection) {
+  function openAssistant() {
     if (host.pairingInProgress) return
-    page.openAssistant(section)
+    page.openAssistant()
   }
 
   function acceptCreatedWork(work: Work) {

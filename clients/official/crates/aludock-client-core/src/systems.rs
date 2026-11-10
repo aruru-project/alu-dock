@@ -275,4 +275,73 @@ mod tests {
             "turning the choice off asks nothing of the Host"
         );
     }
+
+    // New Client / older Host: its hello offers no `instance.assistant.v1`. The directory's
+    // systems are listed as before, and the creation page is told not to offer the switch.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_older_host_lists_its_systems_and_takes_no_assistant_choice() {
+        use crate::tls::{read_json_line, write_json_line};
+        use crate::{ConnectionRouter, IdentityStore, LocalDockEndpoint};
+        let directory = std::env::temp_dir().join(format!("sys-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let endpoint = directory.join("dock.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio::io::BufReader::new(socket);
+            let hello: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+            write_json_line(
+                &mut socket,
+                &serde_json::json!({
+                    "kind": "hello_ack", "version": 2, "requestId": hello["requestId"],
+                    "catalogSchemaVersion": 1, "host": {"hostEpoch": "epoch"},
+                    "capabilities": ["core.v2", "system.templates.v1"],
+                    "limits": {"maxLineBytes": 16384}
+                }),
+            )
+            .await
+            .unwrap();
+            let request: Value = read_json_line(&mut socket, 16 * 1024).await.unwrap();
+            assert_eq!(request["type"], "system.catalog");
+            write_json_line(
+                &mut socket,
+                &serde_json::json!({
+                    "kind": "response", "version": 2, "requestId": request["requestId"],
+                    "hostEpoch": "epoch", "ok": true, "result": {
+                        "cwd": "/project", "total": 1, "revision": "r1", "warnings": [],
+                        "candidates": [{
+                            "id": "project", "name": "项目 SYSTEM", "kind": "project-system",
+                            "path": "/project/.pi/SYSTEM.md", "workerConfig": {}
+                        }]
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+            hello["requiredCapabilities"].clone()
+        });
+        let client = DockClient::new(
+            ConnectionRouter::local(
+                &IdentityStore::new(directory.join("identity")),
+                LocalDockEndpoint::configured(endpoint.to_str().unwrap()).unwrap(),
+                "older-host-systems".into(),
+            )
+            .unwrap(),
+        );
+        let page = client.system_catalog("/project", None, None).await;
+        let required = peer.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        let page = page.unwrap();
+        assert_eq!(page.candidates[0].name, "项目 SYSTEM");
+        assert!(!page.assistant_choice);
+        assert!(
+            !required
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|capability| capability == INSTANCE_ASSISTANT_V1),
+            "listing systems does not ask the Host for the assistant choice"
+        );
+    }
 }

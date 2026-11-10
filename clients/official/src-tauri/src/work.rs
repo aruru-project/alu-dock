@@ -762,6 +762,21 @@ pub(crate) async fn assistant_timeline(
         .map_err(CommandError::from)
 }
 
+/// One timeline line as it is now; read after a change to it was refused as out of date.
+#[tauri::command]
+pub(crate) async fn assistant_episode(
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
+    selection_generation: u64,
+    id: String,
+) -> Result<AssistantEpisode, CommandError> {
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
+        .assistant_episode(&id)
+        .await
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub(crate) async fn update_assistant_episode(
     runtime: tauri::State<'_, ConnectionRuntimeState>,

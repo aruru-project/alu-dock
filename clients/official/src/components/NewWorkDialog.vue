@@ -24,6 +24,7 @@ import {
   workspaceChildPath,
 } from '../lib/machines'
 import { modelKey } from '../lib/modelLists'
+import { replyLost } from '../lib/operationBinding'
 import { useSavedSessionPages } from '../lib/savedSessions'
 import type { DirectoryPage } from '../lib/workspaceBrowser'
 import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
@@ -89,9 +90,14 @@ const assistantChoice = ref(false)
 // Starts from the directory's saved choice; fixed once the Work is created.
 const openAsAssistant = ref(false)
 // The directory opens new Works as the assistant unless told otherwise; only then is "off" said.
+// Read with the system list, and kept up with what a save here told the directory to remember.
 const directoryAssistant = ref(false)
 // The model the new Work starts with; null leaves the choice to Pi on that Machine.
 const modelChoice = ref<ModelRef | null>(null)
+// Ticked on the first screen: a directory with a saved default system stops at the system page too,
+// where the system, the assistant switch and what the directory remembers can be changed. Each
+// opening of the dialog starts unticked.
+const chooseFirst = ref(false)
 let systemEpoch = 0
 let inventoryEpoch = 0
 
@@ -262,9 +268,10 @@ async function chooseDirectory(path: string, refresh = false) {
     // Without a saved default the first usable candidate is already selected; confirming is one click.
     systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? candidates.find(candidate => !candidate.warning) ?? null
     // A usable saved default creates at once; the Host applies the directory's saved choices, so none is sent.
+    // Asked to choose first, the page stays with that default selected, and confirming says the choice outright.
     if (!refresh && defaultSelection && !defaultSelection.warning) {
       systemSelection.value = defaultSelection
-      await createAt(path, hostId)
+      if (!chooseFirst.value) await createAt(path, hostId)
     }
   } catch (cause) {
     if (epoch !== systemEpoch) return
@@ -324,8 +331,13 @@ async function confirmSystem() {
       await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, asAssistant))
       if (epoch !== systemEpoch) return
       savedDefaultId.value = selection.id
+      // The directory now remembers what was just saved: if the creation fails and the switch is
+      // turned off, "off" has to be said against it.
+      if (asAssistant !== undefined) directoryAssistant.value = asAssistant
     } catch (cause) {
       if (epoch !== systemEpoch) return
+      // A save whose reply was lost may have gone through: the directory may open as her now.
+      if (asAssistant && replyLost(cause)) directoryAssistant.value = true
       saveFailed.value = true
       setError(cause, '保存此目录的默认 system', 'set_system_default')
       return
@@ -572,6 +584,10 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         <span v-if="modelListState === 'failed'" class="new-work-model-note">读不到这台机器的模型列表，将使用 Pi 默认。改过模型或登录后，点右侧刷新。</span>
       </label>
       <section v-if="view === 'launcher'" class="new-work-launcher">
+        <label class="new-work-choose-first">
+          <input v-model="chooseFirst" type="checkbox" :disabled="actionBusy" />
+          <span><strong>{{ assistant.available ? '创建前先选 system 和身份' : '创建前先选 system' }}</strong><small>不勾时，保存过默认 system 的目录会直接创建。</small></span>
+        </label>
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
           <button v-for="path in recentWorkspaces" :key="path" type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="chooseDirectory(path)">
@@ -720,11 +736,13 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .system-confirm { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; padding: 12px; border-top: 1px solid var(--alu-border); }
 .system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
 .system-confirm input { accent-color: var(--alu-highlight); }
-.new-work-assistant { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 9px; padding: 10px 14px; border-top: 1px solid var(--alu-border); color: var(--alu-text-muted); font-size: var(--alu-ui-size); cursor: pointer; }
-.new-work-assistant input { margin-top: 3px; accent-color: var(--alu-highlight); }
-.new-work-assistant span { display: grid; gap: 2px; }
-.new-work-assistant strong { color: var(--alu-text); font-weight: 600; }
-.new-work-assistant small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); line-height: 1.5; }
+.new-work-assistant, .new-work-choose-first { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 9px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); cursor: pointer; }
+.new-work-assistant { padding: 10px 14px; border-top: 1px solid var(--alu-border); }
+.new-work-choose-first { padding: 2px 4px 8px; }
+.new-work-assistant input, .new-work-choose-first input { margin-top: 3px; accent-color: var(--alu-highlight); }
+.new-work-assistant span, .new-work-choose-first span { display: grid; gap: 2px; }
+.new-work-assistant strong, .new-work-choose-first strong { color: var(--alu-text); font-weight: 600; }
+.new-work-assistant small, .new-work-choose-first small { color: var(--alu-text-muted); font-size: var(--alu-micro-size); line-height: 1.5; }
 .new-work-dialog > .resource-document { flex: 1; min-height: 0; }
 .alu-dialog-error > span { display: block; }
 /* Leaves room under the first-screen selectors for their open menus, which the dialog otherwise clips. */

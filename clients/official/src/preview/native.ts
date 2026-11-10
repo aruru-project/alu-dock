@@ -281,8 +281,12 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'assistant_info': {
       await delay(80)
       const model = preview.assistantSettings.extractionModel
+      // With a model chosen the sample shows all the settings page can say: parts passed over, why
+      // the last try failed and when it is tried again.
       return { workspacePath: preview.assistantWorkspace, maxDocumentBytes: 256 * 1024, maxMemoryChars: 1000, maxEpisodeChars: 300,
-        extraction: { state: model ? 'idle' : 'off', ...(model ? { model } : {}), waitingSessions: 2, lastRunAt: preview.ago(25) } }
+        extraction: model
+          ? { state: 'failed', model, waitingSessions: 2, skippedParts: 3, lastRunAt: preview.ago(25), lastError: '模型服务暂时连不上，稍后会自动再试。', retryAt: preview.ago(-5) }
+          : { state: 'off', waitingSessions: 2, lastRunAt: preview.ago(25) } }
     }
     case 'assistant_memories': {
       await delay(180)
@@ -313,6 +317,12 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
         .sort((left, right) => Date.parse(right.fromAt) - Date.parse(left.fromAt))
       const page = matching.slice(0, Number(args.limit))
       return { episodes: structuredClone(page), ...(matching.length > page.length ? { nextCursor: page.at(-1)!.id } : {}) }
+    }
+    case 'assistant_episode': {
+      await delay(120)
+      const found = preview.assistantTimeline.find((item) => item.id === args.id)
+      if (!found) throw { code: 'assistant_episode_not_found', message: 'No timeline line has this number.' }
+      return structuredClone(found)
     }
     case 'update_assistant_episode': {
       await delay(200)
@@ -361,7 +371,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       await delay(300)
       // What the background made is set aside; what the owner or she wrote stays.
       const made = preview.assistantMemories.filter((item) => item.state === 'active' && (item.author === 'extraction' || item.author === 'dreaming'))
-      for (const item of made) Object.assign(item, { state: 'retired', author: 'owner', revision: item.revision + 1, updatedAt: new Date().toISOString() })
+      for (const item of made) Object.assign(item, { state: 'retired', author: 'extraction', revision: item.revision + 1, updatedAt: new Date().toISOString() })
       const kept = preview.assistantTimeline.filter((item) => item.author !== 'extraction')
       const removedLines = preview.assistantTimeline.length - kept.length
       preview.assistantTimeline.splice(0, preview.assistantTimeline.length, ...kept)

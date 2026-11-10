@@ -704,6 +704,11 @@ export async function listAssistantTimeline(filter: AssistantTimelineFilter, cur
   return native<AssistantTimelineList>('assistant_timeline', { ...context, filter, cursor: cursor ?? null, limit })
 }
 
+/** One line as it is now; read after a change to it was refused as out of date. */
+export async function getAssistantEpisode(id: string, context: ConnectionContext): Promise<AssistantEpisode> {
+  return native<AssistantEpisode>('assistant_episode', { ...context, id })
+}
+
 /** Rewrites a line, forgets it or restores it. The Host refuses with `assistant_episode_changed`, changing nothing, when `revision` is no longer current. */
 export async function updateAssistantEpisode(id: string, revision: number, edit: AssistantEpisodeEdit, operationId: string, context: ConnectionContext): Promise<AssistantEpisode> {
   return native<AssistantEpisode>('update_assistant_episode', { ...context, id, revision, edit, operationId })
