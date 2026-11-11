@@ -736,7 +736,8 @@ export interface SystemCatalogResult {
   /** The connected Host takes the "open as the assistant" choice (its hello, read by the Rust core). */
   assistantChoice: boolean
 }
-export interface SystemDefaultSetResult { selection: SystemCandidate }
+/** `selection` is the system the save remembered; remembering only the assistant has none. */
+export interface SystemDefaultSetResult { selection?: SystemCandidate }
 
 /**
  * The personal assistant kept on Main (card #295). `maxMemoryChars` and `maxEpisodeChars` are how

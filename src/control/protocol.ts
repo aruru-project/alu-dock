@@ -432,7 +432,8 @@ export type ControlRequest =
   | Request<"resource.get", { instanceId: string }>
   | Request<"system.catalog", { cwd: string; hostId?: string; cursor?: SystemCatalogCursor; limit: number }>
   | Request<"system.content", { cwd: string; hostId?: string; id: string; offset?: number; revision?: string }>
-  | Request<"system.default.set", { cwd: string; hostId?: string; id: string; operationId: string; assistant?: boolean }>
+  /** `id` may be left out only to remember opening as the assistant, who takes no system. */
+  | Request<"system.default.set", { cwd: string; hostId?: string; id?: string; operationId: string; assistant?: boolean }>
   | Request<"assistant.info", Record<string, never>>
   | Request<"assistant.preview", Record<string, never>>
   | Request<"assistant.document.get", { document: AssistantDocumentName }>
@@ -893,7 +894,8 @@ export interface SystemCatalogResult {
   /** This directory opens new Works as the assistant unless the creator says otherwise. */
   defaultAssistant?: true;
 }
-export interface SystemDefaultSetResult { selection: SystemCandidate }
+/** `selection` is the system saved by this request; a request that only remembers the assistant has none. */
+export interface SystemDefaultSetResult { selection?: SystemCandidate }
 
 export interface ResourceContentResult { text: string; revision: string; nextOffset?: number }
 export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
@@ -1339,11 +1341,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
         if (limit > MAX_SYSTEM_CATALOG_ITEMS) throw validation("invalid_request", "System page is too large");
         return { ...base, type, params: { ...common, limit, cursor: params.cursor === undefined ? undefined : parseSystemCatalogCursor(params.cursor, "invalid_request") } };
       }
-      const selected = string(params.id, "params.id", 128, "invalid_request");
       if (type === "system.default.set") {
         const assistant = params.assistant === undefined ? undefined : boolean(params.assistant, "params.assistant", "invalid_request");
-        return { ...base, type, params: { ...common, id: selected, operationId: operationId(), ...(assistant === undefined ? {} : { assistant }) } };
+        if (params.id === undefined && assistant !== true) throw validation("invalid_request", "params.id is required unless assistant is true");
+        const id = params.id === undefined ? undefined : string(params.id, "params.id", 128, "invalid_request");
+        return { ...base, type, params: { ...common, ...(id === undefined ? {} : { id }), operationId: operationId(), ...(assistant === undefined ? {} : { assistant }) } };
       }
+      const selected = string(params.id, "params.id", 128, "invalid_request");
       const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
       const revision = optionalString(params.revision, "params.revision", 128, "invalid_request");
       if (offset !== undefined && offset > 0 && revision === undefined) throw validation("invalid_request", "Resource continuation requires revision");
@@ -2630,7 +2634,7 @@ export function parseSystemCatalogResult(input: unknown): SystemCatalogResult {
 }
 export function parseSystemDefaultSetResult(input: unknown): SystemDefaultSetResult {
   const value = object(input, "system default result"); exact(value, ["selection"]);
-  return { selection: parseSystemCandidate(value.selection) };
+  return value.selection === undefined ? {} : { selection: parseSystemCandidate(value.selection) };
 }
 
 export function parseResourceContentResult(input: unknown): ResourceContentResult {

@@ -40,7 +40,7 @@ import {
   type DockAttachmentCallPort,
 } from "./dock-attachments-extension.js";
 import { appendDockAttachmentContext, extractDockAttachmentContext } from "./dock-attachment-context.js";
-import { assistantExtension, type AssistantCallPort } from "./assistant-extension.js";
+import { assistantExtension, assistantSystemPrompt, type AssistantCallPort } from "./assistant-extension.js";
 import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import { hardenWindowsPrivatePath, noFollowFlag } from "../platform/private-state.js";
 
@@ -3626,7 +3626,8 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     ? () => createPiExtensionUiContext(options.extensionUiContextPortFactory!())
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
-  const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
+  // The assistant is the Work's system; a selection saved with an older assistant Work is not read.
+  const systemPromptResolver = options.assistantPort !== undefined ? assistantSystemPrompt : piSystemPromptResolver(options.workerConfig, options.agentDir);
   let childStarting = options.child === true;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));

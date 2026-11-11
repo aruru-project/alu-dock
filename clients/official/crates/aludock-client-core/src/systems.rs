@@ -59,7 +59,9 @@ pub struct SystemCatalogResult {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SystemDefaultSetResult {
-    pub selection: SystemCandidate,
+    /// The system this save remembered; a save that only remembers the assistant has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SystemCandidate>,
 }
 
 #[derive(Serialize)]
@@ -89,7 +91,8 @@ struct ContentParams<'a> {
 #[serde(rename_all = "camelCase")]
 struct DefaultParams<'a> {
     cwd: &'a str,
-    id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     host_id: Option<&'a str>,
     operation_id: &'a str,
@@ -188,10 +191,12 @@ impl DockClient {
 
     /// `Some(true)` also remembers opening new Works here as the assistant and `Some(false)`
     /// forgets it; `None` keeps whatever the directory remembered, as an older client's save does.
+    /// `id` may be `None` only with `Some(true)`: the assistant takes no system, and the directory
+    /// keeps the system it had for Works not opened as her.
     pub async fn set_system_default(
         &self,
         cwd: &str,
-        id: &str,
+        id: Option<&str>,
         host_id: Option<&str>,
         operation_id: Option<&str>,
         assistant: Option<bool>,
@@ -246,7 +251,7 @@ mod tests {
 
         let forget = serde_json::to_value(DefaultParams {
             cwd: "/project",
-            id: "template",
+            id: Some("template"),
             host_id: None,
             operation_id: "save-1",
             assistant: Some(false),
@@ -258,13 +263,28 @@ mod tests {
         );
         let older_save = serde_json::to_value(DefaultParams {
             cwd: "/project",
-            id: "template",
+            id: Some("template"),
             host_id: None,
             operation_id: "save-1",
             assistant: None,
         })
         .unwrap();
         assert!(older_save.get("assistant").is_none());
+        // 2026-11-12: remembering her says no system, and the Host answers with none.
+        let hers = serde_json::to_value(DefaultParams {
+            cwd: "/project",
+            id: None,
+            host_id: None,
+            operation_id: "save-2",
+            assistant: Some(true),
+        })
+        .unwrap();
+        assert_eq!(
+            hers,
+            serde_json::json!({ "cwd": "/project", "operationId": "save-2", "assistant": true })
+        );
+        let answer: SystemDefaultSetResult = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(answer.selection.is_none());
         assert_eq!(
             with_assistant_choice(SYSTEM_TEMPLATES, Some(true)),
             ["core.v2", "system.templates.v1", "instance.assistant.v1"]

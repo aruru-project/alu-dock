@@ -83,7 +83,8 @@ const systemPreview = ref<SystemCandidate | null>(null)
 const systemLoading = ref(false)
 const systemCatalogState = ref<'idle' | 'ready' | 'unsupported' | 'failed'>('idle')
 const saveDefault = ref(false)
-const savedDefaultId = ref('')
+// What a save on this page made the directory remember: `{ id }` a system, `{}` opening as the assistant.
+const savedDefault = ref<{ id?: string } | null>(null)
 const saveFailed = ref(false)
 // The connected Host takes the "open as the assistant" choice (card #295); without it the system page has no switch.
 const assistantChoice = ref(false)
@@ -92,6 +93,8 @@ const openAsAssistant = ref(false)
 // The directory opens new Works as the assistant unless told otherwise; only then is "off" said.
 // Read with the system list, and kept up with what a save here told the directory to remember.
 const directoryAssistant = ref(false)
+// She is the system of a Work opened as her, so no system is chosen or sent then (2026-11-12, card #295).
+const asHer = computed(() => assistantChoice.value && openAsAssistant.value)
 // The model the new Work starts with; null leaves the choice to Pi on that Machine.
 const modelChoice = ref<ModelRef | null>(null)
 // Ticked on the first screen: a directory with a saved default system stops at the system page too,
@@ -145,7 +148,7 @@ const modelOptions = computed(() => [
   })),
 ])
 const modelChoiceValue = computed(() => modelChoice.value ? modelKey(modelChoice.value) : PI_DEFAULT_MODEL)
-const title = computed(() => view.value === 'systems' ? '选择 system' : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
+const title = computed(() => view.value === 'systems' ? (assistantChoice.value ? '选择身份和 system' : '选择 system') : view.value === 'system-content' ? '阅读 system' : view.value === 'browse' ? '选择工作目录' : view.value === 'sessions' ? '恢复保存的 Pi Session' : '新建 Work')
 const body = computed(() => {
   if (view.value === 'systems' || view.value === 'system-content') return systemPath.value
   if (view.value === 'browse') return workspacePath.value
@@ -217,7 +220,7 @@ function resetSystems() {
   systemPreview.value = null
   systemPath.value = ''
   saveDefault.value = false
-  savedDefaultId.value = ''
+  savedDefault.value = null
   saveFailed.value = false
   assistantChoice.value = false
   openAsAssistant.value = false
@@ -228,7 +231,7 @@ async function chooseDirectory(path: string, refresh = false) {
   if (!isTauri || actionBusy.value || !machine.value?.available) return
   const selectedId = refresh ? systemSelection.value?.id : undefined
   const shouldSave = refresh && saveDefault.value
-  const previouslySaved = refresh ? savedDefaultId.value : ''
+  const previouslySaved = refresh ? savedDefault.value : null
   // Reading the list again keeps the user's switch as it is.
   const chosenAssistant = refresh ? openAsAssistant.value : undefined
   resetSystems()
@@ -264,15 +267,16 @@ async function chooseDirectory(path: string, refresh = false) {
     openAsAssistant.value = takesAssistant && (chosenAssistant ?? defaultAssistant)
     systemCandidates.value = candidates
     systemWarnings.value = warnings
-    savedDefaultId.value = defaultSelection?.id === previouslySaved ? previouslySaved : ''
+    // The saved notice stays while the directory still remembers what was saved here.
+    savedDefault.value = previouslySaved && (previouslySaved.id === undefined ? defaultAssistant : defaultSelection?.id === previouslySaved.id) ? previouslySaved : null
     // Without a saved default the first usable candidate is already selected; confirming is one click.
     systemSelection.value = candidates.find(candidate => candidate.id === selectedId) ?? candidates.find(candidate => !candidate.warning) ?? null
-    // A usable saved default creates at once; the Host applies the directory's saved choices, so none is sent.
+    // A usable saved default creates at once, and so does a directory that opens new Works as the
+    // assistant, who needs no system; the Host applies the directory's saved choices, so none is sent.
     // Asked to choose first, the page stays with that default selected, and confirming says the choice outright.
-    if (!refresh && defaultSelection && !defaultSelection.warning) {
-      systemSelection.value = defaultSelection
-      if (!chooseFirst.value) await createAt(path, hostId)
-    }
+    const usableDefault = defaultSelection && !defaultSelection.warning ? defaultSelection : undefined
+    if (!refresh && usableDefault) systemSelection.value = usableDefault
+    if (!refresh && !chooseFirst.value && (usableDefault || (takesAssistant && defaultAssistant))) await createAt(path, hostId)
   } catch (cause) {
     if (epoch !== systemEpoch) return
     const failure = cause as { code?: string; details?: { missing?: unknown } }
@@ -313,14 +317,14 @@ function systemReadFailed(cause: unknown) {
 }
 
 async function confirmSystem() {
-  const selection = systemSelection.value
-  if (!selection || selection.warning || systemLoading.value || actionBusy.value) return
+  const selection = asHer.value ? undefined : systemSelection.value
+  if ((!asHer.value && (!selection || selection.warning)) || systemLoading.value || actionBusy.value) return
   const epoch = systemEpoch
   const path = systemPath.value
   const hostId = machineHostId.value
   // Creating and saving the default say the same, and only when it matters: "on", or "off" against a
   // directory that opens as the assistant. Without the field the Host keeps the directory's choice.
-  const asAssistant = assistantChoice.value && openAsAssistant.value ? true : directoryAssistant.value ? false : undefined
+  const asAssistant = asHer.value ? true : directoryAssistant.value ? false : undefined
   // A fresh confirmation is a fresh save intent; another Client may have changed
   // the default. Trust continuation calls createAt directly and does not save again.
   if (saveDefault.value) {
@@ -328,9 +332,10 @@ async function confirmSystem() {
     clearError()
     saveFailed.value = false
     try {
-      await currentConnectionCall(app, (context) => setSystemDefault(path, selection.id, app.captureHostOperation(context), hostId, asAssistant))
+      // Remembering her saves no system; the directory keeps its system for Works not opened as her.
+      await currentConnectionCall(app, (context) => setSystemDefault(path, selection?.id, app.captureHostOperation(context), hostId, asAssistant))
       if (epoch !== systemEpoch) return
-      savedDefaultId.value = selection.id
+      savedDefault.value = selection ? { id: selection.id } : {}
       // The directory now remembers what was just saved: if the creation fails and the switch is
       // turned off, "off" has to be said against it.
       if (asAssistant !== undefined) directoryAssistant.value = asAssistant
@@ -345,7 +350,7 @@ async function confirmSystem() {
       pending.value = ''
     }
   }
-  if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection.workerConfig, asAssistant)
+  if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection?.workerConfig, asAssistant)
 }
 
 /** Her workspace on Main, through the same steps as choosing that directory. */
@@ -586,7 +591,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
       <section v-if="view === 'launcher'" class="new-work-launcher">
         <label class="new-work-choose-first">
           <input v-model="chooseFirst" type="checkbox" :disabled="actionBusy" />
-          <span><strong>{{ assistant.available ? '创建前先选 system 和身份' : '创建前先选 system' }}</strong><small>不勾时，保存过默认 system 的目录会直接创建。</small></span>
+          <span><strong>{{ assistant.available ? '创建前先选 system 和身份' : '创建前先选 system' }}</strong><small>{{ assistant.available ? '不勾时，保存过默认 system 或记住以助手身份打开的目录会直接创建。' : '不勾时，保存过默认 system 的目录会直接创建。' }}</small></span>
         </label>
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
@@ -637,10 +642,15 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
       <template v-else-if="view === 'systems'">
         <div v-if="systemLoading" class="alu-dialog-loading" role="status"><span class="alu-agent-activity-spinner" />正在读取这个目录的 system…</div>
         <template v-else>
-          <div v-if="systemWarnings.length" class="alu-dialog-error" role="alert"><span v-for="warning in systemWarnings" :key="warning">{{ warning }}</span><span>请修复文件后重新读取，或选择其他可用 system。</span></div>
-          <div v-if="savedDefaultId" class="cmd-palette-footer" role="status">目录默认已保存。{{ error ? '' : '创建 Work 是另一步操作。' }}</div>
+          <label v-if="assistantChoice" class="new-work-assistant">
+            <input v-model="openAsAssistant" type="checkbox" :disabled="actionBusy" />
+            <span><strong>以助手身份打开</strong><small>{{ openAsAssistant ? '她的人设和记忆代替 system，对话会记进她的记忆。' : '这个 Work 和助手的记忆无关。' }}创建后不能更改。</small></span>
+          </label>
+          <div v-if="systemWarnings.length && !asHer" class="alu-dialog-error" role="alert"><span v-for="warning in systemWarnings" :key="warning">{{ warning }}</span><span>请修复文件后重新读取，或选择其他可用 system。</span></div>
+          <div v-if="savedDefault" class="cmd-palette-footer" role="status">目录默认已保存。{{ error ? '' : '创建 Work 是另一步操作。' }}</div>
           <div v-if="saveFailed" class="alu-dialog-error">还没有创建 Work。可以重试保存，或取消勾选只用于这一次。</div>
-          <div class="ui-dialog-options" role="group" aria-label="可用 system">
+          <div v-if="asHer" class="new-work-her-system" role="note">以助手身份打开时不用选 system。Pi 自带的工具说明和这个目录的 AGENTS.md 照常载入。</div>
+          <div v-else class="ui-dialog-options" role="group" aria-label="可用 system">
             <div v-for="candidate in systemCandidates" :key="candidate.id" class="system-option">
               <button type="button" class="ui-dialog-option" :aria-pressed="systemSelection?.id === candidate.id" :disabled="actionBusy || !!candidate.warning" @click="selectSystem(candidate)">
                 <span class="ui-dialog-option-marker">{{ systemSelection?.id === candidate.id ? '✓' : '•' }}</span>
@@ -650,14 +660,10 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
             </div>
             <div v-if="systemCatalogState === 'ready' && !systemCandidates.length" class="ui-dialog-empty">没有可用的 system。请检查这台机器的 SYSTEM 文件或 Dock 模板后重新读取。</div>
           </div>
-          <label v-if="assistantChoice" class="new-work-assistant">
-            <input v-model="openAsAssistant" type="checkbox" :disabled="actionBusy" />
-            <span><strong>以助手身份打开</strong><small>{{ openAsAssistant ? '这个 Work 会载入助手的人设和记忆，对话会记进她的记忆。' : '这个 Work 和助手的记忆无关。' }}创建后不能更改。</small></span>
-          </label>
           <footer class="system-confirm">
             <button type="button" class="ui-dialog-btn" :disabled="actionBusy" @click="chooseDirectory(systemPath, true)">重新读取</button>
             <label><input v-model="saveDefault" type="checkbox" :disabled="actionBusy" />设为此目录默认</label>
-            <button type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || !systemSelection || !!systemSelection.warning" @click="confirmSystem">确认并创建</button>
+            <button type="button" class="ui-dialog-btn session-primary" :disabled="actionBusy || (!asHer && (!systemSelection || !!systemSelection.warning))" @click="confirmSystem">确认并创建</button>
           </footer>
         </template>
       </template>
@@ -737,7 +743,8 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
 .system-confirm label { display: flex; align-items: center; gap: 6px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); }
 .system-confirm input { accent-color: var(--alu-highlight); }
 .new-work-assistant, .new-work-choose-first { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 9px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); cursor: pointer; }
-.new-work-assistant { padding: 10px 14px; border-top: 1px solid var(--alu-border); }
+.new-work-assistant { padding: 10px 14px; border-bottom: 1px solid var(--alu-border); }
+.new-work-her-system { flex: 1 1 auto; padding: 14px; color: var(--alu-text-muted); font-size: var(--alu-ui-size); line-height: 1.6; }
 .new-work-choose-first { padding: 2px 4px 8px; }
 .new-work-assistant input, .new-work-choose-first input { margin-top: 3px; accent-color: var(--alu-highlight); }
 .new-work-assistant span, .new-work-choose-first span { display: grid; gap: 2px; }

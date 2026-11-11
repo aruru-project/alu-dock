@@ -405,7 +405,8 @@ try {
         if (args.assistant != null) remembersAssistant = args.assistant
         // The first save lands, but its reply is lost on the way back.
         if (scenario === 'save-lost-then-off' && calls.filter(call => call.command === command).length === 1) throw { code: 'effect_unknown', outcomeUnknown: true, operationId: 'save-1', message: 'connection closed' }
-        return { selection: args.id === template.id ? template : project }
+        // Remembering her saves no system, and the Host answers with none.
+        return args.id == null ? {} : { selection: args.id === template.id ? template : project }
       }
       if (command === 'create_work') {
         const asAssistant = args.assistant ?? (args.cwd === workspace || remembersAssistant)
@@ -427,13 +428,12 @@ try {
     await settle()
     if (scenario === 'workspace') {
       // Her workspace is on Main; the shortcut takes the same steps as choosing that directory there.
+      // (2026-11-12) It remembers opening as her, who takes no system, so it no longer asks for one.
       await click('选择 Machine'); await click('笔记本 · SubHost')
       await click('助手的工作区')
       const read = calls.find(c => c.command === 'system_catalog')
       assert.deepEqual([read.args.cwd, read.args.targetHostId], [workspace, 'target'], 'the shortcut reads her workspace on Main')
-      assert.equal(toggle().checked, true, 'her workspace remembers opening as the assistant')
-      await click('确认并创建')
-      assert.deepEqual([creates()[0].args.cwd, creates()[0].args.targetHostId, creates()[0].args.assistant], [workspace, 'target', true])
+      assert.deepEqual([creates().length, creates()[0].args.cwd, creates()[0].args.targetHostId, creates()[0].args.assistant, creates()[0].args.workerConfig], [1, workspace, 'target', null, null], 'it creates at once and the Host opens it as her')
       assert.equal(created[0].assistant, true)
       app.unmount(); continue
     }
@@ -448,16 +448,20 @@ try {
       first.checked = true; first.change(); await settle()
       await click('project')
       assert.equal(creates().length, 0, 'nothing is created before the choice is confirmed')
-      assert.equal(button('项目 SYSTEM').props['aria-pressed'], true, 'the system the directory saved is already selected')
       assert.equal(toggle().checked, scenario === 'choose-first-remembered', 'the switch starts from what the directory remembers')
+      // Switched off, the system the directory saved is already selected.
+      if (toggle().checked) await setToggle(false)
+      assert.equal(button('项目 SYSTEM').props['aria-pressed'], true, 'the system the directory saved is already selected')
       if (scenario === 'choose-first') {
+        // (2026-11-12) She takes the place of a system: switched on, the page offers none and sends none.
         await setToggle(true)
+        assert.ok(!button('项目 SYSTEM') && text(container).includes('以助手身份打开时不用选 system'), 'the system list gives way to a note')
         await click('确认并创建')
-        assert.deepEqual([creates()[0].args.assistant, creates()[0].args.workerConfig], [true, project.workerConfig], 'it opens as her, with the selected system said outright')
+        assert.deepEqual([creates()[0].args.assistant, creates()[0].args.workerConfig], [true, null], 'it opens as her, with no system')
         assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0, 'what the directory remembers is left alone')
       } else {
         // The directory remembered her and one system; both are changed and saved.
-        await setToggle(false); await click('选择的模板'); await saveAsDefault()
+        await click('选择的模板'); await saveAsDefault()
         await click('确认并创建')
         const saved = calls.find(c => c.command === 'set_system_default').args
         assert.deepEqual([saved.id, saved.assistant], ['chosen', false], 'the directory now remembers the other system, and no longer her')
@@ -466,22 +470,32 @@ try {
       assert.equal(created.length, 1)
       app.unmount(); continue
     }
+    if (scenario === 'override-off') {
+      // A directory that remembers her creates at once (below); choosing first stops at the page.
+      const first = find(container, item => item.type === 'input' && item.props.type === 'checkbox')
+      first.checked = true; first.change(); await settle()
+    }
     await click('project')
-    if (scenario === 'direct-default') {
+    if (scenario === 'direct-default' || scenario === 'default-on') {
       // Not ticked, a usable saved default creates at once: the Host applies the directory's saved choices.
+      // (2026-11-12) So does a directory that only remembers opening as her: she needs no system.
       assert.equal(creates().length, 1)
-      assert.equal(creates()[0].args.assistant, null, 'nothing is said, so the Host decides from the directory default')
+      assert.deepEqual([creates()[0].args.assistant, creates()[0].args.workerConfig], [null, null], 'nothing is said, so the Host decides from the directory default')
+      assert.equal(created[0].assistant, true)
       app.unmount(); continue
     }
-    assert.equal(toggle().checked, ['default-on', 'override-off'].includes(scenario), 'the switch starts from the directory\'s saved choice')
+    assert.equal(toggle().checked, scenario === 'override-off', 'the switch starts from the directory\'s saved choice')
     assert.ok(text(container).includes('创建后不能更改'))
     if (scenario === 'override-off' || scenario === 'save-on' || scenario === 'plain-off') {
       if (scenario !== 'plain-off') await setToggle(scenario === 'save-on')
       await saveAsDefault()
       await click('确认并创建')
       const said = { 'save-on': true, 'override-off': false, 'plain-off': null }[scenario]
-      assert.equal(calls.find(c => c.command === 'set_system_default').args.assistant, said, 'saving the default says the same as creating')
+      const saved = calls.find(c => c.command === 'set_system_default').args
+      assert.equal(saved.assistant, said, 'saving the default says the same as creating')
       assert.equal(creates()[0].args.assistant, said, scenario === 'plain-off' ? 'off where the directory remembers nothing needs no field' : 'turning the switch off against the directory default is said')
+      // Remembering her saves no system: the Host keeps the directory's system for Works not opened as her.
+      assert.deepEqual([saved.id, creates()[0].args.workerConfig], scenario === 'save-on' ? [null, null] : ['project', project.workerConfig])
       app.unmount(); continue
     }
     if (scenario === 'saved-then-unavailable') {
@@ -509,27 +523,24 @@ try {
       assert.deepEqual([created.length, created[0]?.assistant === true], [1, false], 'the Work is created, and not as her')
       app.unmount(); continue
     }
-    if (['trust', 'unavailable', 'unsupported-target'].includes(scenario)) await setToggle(true)
+    await setToggle(true)
     await click('确认并创建')
     if (scenario === 'trust') {
       await click('仅本次信任')
-      assert.deepEqual(creates().map(c => c.args.assistant), [true, true], 'the trust continuation replays the choice')
+      assert.deepEqual(creates().map(c => [c.args.assistant, c.args.workerConfig]), [[true, null], [true, null]], 'the trust continuation replays the choice, still without a system')
       assert.equal(creates()[1].args.trustChallengeId, 'trust-1')
-    } else if (scenario === 'unavailable' || scenario === 'unsupported-target') {
+    } else {
       assert.equal(created.length, 0)
       assert.ok(text(container).includes(scenario === 'unavailable' ? '助手服务现在没有运行' : '还不能以助手身份打开'), text(container))
       assert.ok(text(container).includes('关掉「以助手身份打开」'), 'the user is told what can still be done')
       await setToggle(false)
       await click('确认并创建')
-      assert.equal(creates()[1].args.assistant, null)
-    } else {
-      assert.equal(creates()[0].args.assistant, true)
-      assert.equal(calls.filter(c => c.command === 'set_system_default').length, 0)
+      assert.deepEqual([creates()[1].args.assistant, creates()[1].args.workerConfig], [null, project.workerConfig], 'switched off, the system list is back with its choice')
     }
     assert.equal(created.length, 1)
     app.unmount()
   }
-  console.log('PASS: open as the assistant: switch starts from the directory default, sent only when it matters, remembered with the default, said as off against a default just saved here when the creation failed or the reply of the save was lost, survives trust, refused by an older machine with a way on; a usable default lets the Host decide unless choosing first is ticked, which stops at the system page to open as her or change what the directory remembers; her workspace shortcut on Main')
+  console.log('PASS: open as the assistant: switch starts from the directory default, takes the place of a system (none listed or sent), sent only when it matters, remembered with the default without a system, said as off against a default just saved here when the creation failed or the reply of the save was lost, survives trust, refused by an older machine with a way on; a usable default or a directory that opens as her lets the Host decide unless choosing first is ticked, which stops at the page to open as her or change what the directory remembers; her workspace on Main opens her at once')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

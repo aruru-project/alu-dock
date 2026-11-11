@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { DockClient } from "../src/control/dock-client.js";
+import { createPiSystemTemplateProvider } from "../src/pi/system-template-provider.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 const settled = (client: DockClient, id: string) => waitFor(async () => (await client.status(id)).execution === "idle", "The Work did not finish its turn");
-const systemPrompt = (body: { messages?: Array<{ role: string; content?: unknown }> }) => JSON.stringify(body.messages?.filter((message) => message.role === "system" || message.role === "developer") ?? []);
+const systemMessages = (body: { messages?: Array<{ role: string; content?: unknown }> }) => body.messages?.filter((message) => message.role === "system" || message.role === "developer") ?? [];
+const systemPrompt = (body: { messages?: Array<{ role: string; content?: unknown }> }) => JSON.stringify(systemMessages(body));
 
 // Card #295: a Work opened as the assistant knows her persona and the owner's notes, its conversation
 // becomes hers and she can find it again; a Work not opened as her neither knows nor records anything.
@@ -17,15 +21,28 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
   const notes = await client.assistantDocument("notes");
   await client.setAssistantDocument("notes", "主人的猫叫团子。", notes.revision);
 
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "assistant-create", trust, undefined, undefined, undefined, true));
+  // The project has its own SYSTEM.md and AGENTS.md.
+  const projectSystem = join(team.cwd, ".pi", "SYSTEM.md");
+  await mkdir(join(team.cwd, ".pi"));
+  await writeFile(projectSystem, "PROJECT SYSTEM TEXT");
+  await writeFile(join(team.cwd, "AGENTS.md"), "PROJECT RULES TEXT");
+  // Like an assistant Work created before 2026-11-12, it also carries that SYSTEM.md as its chosen system.
+  const olderChoice = createPiSystemTemplateProvider(team.agentDir).workerConfig({ kind: "project-system", path: projectSystem });
+  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "assistant-create", trust, undefined, olderChoice, undefined, true));
   assert.equal(alu.assistant, true);
   const plain = await trustOnce((trust) => client.create(team.cwd, "Plain", "plain-create", trust));
   assert.equal(plain.assistant, undefined);
 
   await client.prompt(alu.id, "我家猫叫什么来着？", "auto", "alu-ask");
   const asked = await coordinator.request(0);
-  assert.ok(systemPrompt(asked.body).includes("你是**阿露**"), "The assistant loads the shipped persona");
-  assert.ok(systemPrompt(asked.body).includes("主人的猫叫团子。"), "The assistant loads the owner's notes");
+  // 2026-11-12: she is the Work's system. Her persona opens the prompt in place of Pi's "coding
+  // assistant" line and of any SYSTEM.md; Pi's tool list and the project's AGENTS.md stay.
+  const prompt = systemMessages(asked.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
+  assert.ok(prompt.startsWith("## 身份\n\n你是**阿露**"), `The prompt opens with her persona: ${prompt.slice(0, 200)}`);
+  assert.ok(!prompt.includes("You are an expert coding assistant"), "Pi's coding-assistant line is gone");
+  assert.ok(!prompt.includes("PROJECT SYSTEM TEXT"), "No SYSTEM.md is read for her");
+  assert.ok(prompt.includes("<tools>") && prompt.includes("PROJECT RULES TEXT"), "Pi's tool list and the project's AGENTS.md stay");
+  assert.ok(prompt.includes("主人的猫叫团子。"), "The assistant loads the owner's notes");
   asked.text("团子呀，这都忘了？");
   await settled(client, alu.id);
 
@@ -33,6 +50,7 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
   const plainAsked = await coordinator.request(1);
   // Card #295: a Work not opened as her neither reads nor writes her memory.
   assert.ok(!systemPrompt(plainAsked.body).includes("团子"), "A Work not opened as the assistant knows nothing of her");
+  assert.ok(systemPrompt(plainAsked.body).includes("PROJECT SYSTEM TEXT"), "A Work not opened as her still uses the project's SYSTEM.md");
   plainAsked.text("晴。");
   await settled(client, plain.id);
 

@@ -120,7 +120,7 @@ export default function(pi) {
     assert.ok(resource?.contentRef);
     assert.equal((await client.resourceContent(work.id, resource.contentRef)).text, selectedText);
     const receipt = await client.setSystemDefault(cwd, chosen.id, hostId, "save-choice");
-    assert.equal(receipt.selection.id, chosen.id);
+    assert.equal(receipt.selection?.id, chosen.id);
     assert.deepEqual(JSON.parse(await readFile(saved, "utf8")), { id: chosen.id });
     const withDefault = await client.systemCatalog(cwd, hostId, undefined, 1);
     assert.equal(withDefault.defaultSelection?.id, chosen.id, "saved default is usable even outside this candidate page");

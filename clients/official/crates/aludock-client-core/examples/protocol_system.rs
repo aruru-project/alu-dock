@@ -68,9 +68,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_none()
     );
     let saved = client
-        .set_system_default(cwd, &chosen.id, host_id, Some("system-save-gate"), None)
+        .set_system_default(
+            cwd,
+            Some(&chosen.id),
+            host_id,
+            Some("system-save-gate"),
+            None,
+        )
         .await?;
-    assert_eq!(saved.selection.id, chosen.id);
+    assert_eq!(
+        saved.selection.map(|selection| selection.id),
+        Some(chosen.id.clone())
+    );
     let default = client
         .system_catalog(cwd, host_id, None)
         .await?

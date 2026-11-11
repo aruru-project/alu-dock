@@ -1,4 +1,4 @@
-import type { ExtensionContext, ExtensionFactory, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { getDefaultSystemPromptBody, type ExtensionContext, type ExtensionFactory, type SessionEntry, type SystemPromptSelection } from "@earendil-works/pi-coding-agent";
 
 import {
   ASSISTANT_CONTEXT_DEFAULT_SPAN,
@@ -46,10 +46,11 @@ import { WATCH_NOTICE_TYPE, WORK_MESSAGE_TYPE, WORK_WAKE_TYPE } from "./dock-too
 import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
 /*
- * What makes a Pi Work the personal assistant (card #295). Each session start (new Work, reload,
- * /new, resume, reopen) loads her persona, the owner's notes, the memories loaded every session and
- * how to recall more from Main into a prompt section; the session keeps that copy until it starts
- * again. Her conversation goes to Main entry by entry, and her tools search her memories, her
+ * What makes a Pi Work the personal assistant (card #295). She is the Work's system: each session
+ * start (new Work, reload, /new, resume, reopen) loads her persona, the owner's notes, the memories
+ * loaded every session and how to recall more from Main into the opening of the system prompt, in
+ * place of Pi's "You are an expert coding assistant…"; the session keeps that copy until it starts
+ * again. The rest of Pi's default prompt (tools, rules, docs) and the project's context stay. Her conversation goes to Main entry by entry, and her tools search her memories, her
  * timeline and her conversations, read around a hit, change her memories and timeline, and edit her
  * persona and the owner's notes.
  */
@@ -62,8 +63,6 @@ export interface AssistantCallPort {
 
 const EXTENSION_PATH = "<inline:alu-dock-assistant>";
 const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
-/** The prompt section holding what the session loaded; Pi records it and any later change in the session. */
-const SECTION = "assistant";
 /** A Work that is stopping waits this long at most for its last entries to reach Main. */
 const SHUTDOWN_SYNC_MS = 1_000;
 /** Tool arguments kept of an entry that would not fit one batch otherwise. */
@@ -174,7 +173,7 @@ class SessionLoad {
     return this.pending;
   }
 
-  async section(notify: Notify): Promise<string> {
+  async text(notify: Notify): Promise<string> {
     if (!this.loaded && !this.failure) await this.start();
     if (this.loaded) return this.loaded.text;
     // Try again in the background; this run goes on without her and the owner is told once.
@@ -185,6 +184,14 @@ class SessionLoad {
     }
     return `You are the owner's personal assistant, but your persona and notes could not be loaded from Main just now (${this.failure?.message ?? "unknown reason"}). Say so if it matters, and do not make them up.`;
   }
+}
+
+/**
+ * An assistant Work's system, whatever was chosen or saved for its directory (2026-11-12, card #295):
+ * Pi's default prompt, whose opening the extension below replaces with her. No SYSTEM.md is read.
+ */
+export function assistantSystemPrompt(): SystemPromptSelection {
+  return { kind: "default", body: getDefaultSystemPromptBody() };
 }
 
 export function assistantExtension(port: AssistantCallPort, attachmentContextKey: Uint8Array): ExtensionFactory {
@@ -211,7 +218,10 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.on("before_agent_start", async (event, ctx) => {
       load ??= new SessionLoad(port);
       void recorder?.sync();
-      event.systemPromptOptions.sections[SECTION] = await load.section((message) => ctx.ui.notify(message, "warning"));
+      // She replaces only the opening; Pi records the change in the session like any prompt change.
+      const opening = await load.text((message) => ctx.ui.notify(message, "warning"));
+      const options = event.systemPromptOptions;
+      options.defaultSystemPromptBody = { ...(options.defaultSystemPromptBody ?? getDefaultSystemPromptBody()), intro: opening };
     });
 
     // Her words go to Main once each run settles; a stopped run or a failed send is caught up later.
