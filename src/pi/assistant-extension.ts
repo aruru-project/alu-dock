@@ -1,3 +1,4 @@
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
 import { getDefaultSystemPromptBody, type ExtensionContext, type ExtensionFactory, type SessionEntry, type SystemPromptSelection } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -222,6 +223,32 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
       const opening = await load.text((message) => ctx.ui.notify(message, "warning"));
       const options = event.systemPromptOptions;
       options.defaultSystemPromptBody = { ...(options.defaultSystemPromptBody ?? getDefaultSystemPromptBody()), intro: opening };
+    });
+
+    // A session whose opening changed after it began (one from before 2026-11-12, one resumed into
+    // this Work, or hers again after a reload) keeps its first opening at the head and records the
+    // new one as an update, which models that take system messages mid-conversation get after it:
+    // the old "coding assistant" or SYSTEM.md would still lead. Her requests lead with her current
+    // opening instead, for this request only; the session's records stay as they are. Other prompt
+    // and tool updates stay where they are, so switching tools does not resend the conversation.
+    pi.on("context_with_system", (event) => {
+      const [head, ...rest] = event.messages;
+      if (head?.role !== "system" || !rest.some((message) => message.role === "system" && message.sections?.preamble !== undefined)) return undefined;
+      const current = getCurrentSystemMessage(event.messages)!;
+      const opening = current.sections?.preamble;
+      // A head that does not hold its opening as a section (an older session) is merged whole, as Pi
+      // does for models that take no updates.
+      if (typeof opening !== "string" || head.sections?.preamble === undefined) {
+        return { messages: [current, ...event.messages.filter((message) => message.role !== "system")] };
+      }
+      const messages: typeof event.messages = [{ ...head, sections: { ...head.sections, preamble: opening } }];
+      for (const message of rest) {
+        if (message.role !== "system" || message.sections?.preamble === undefined) { messages.push(message); continue; }
+        const { preamble: _opening, ...sections } = message.sections;
+        // An update that only changed the opening has nothing left to say.
+        if (message.content.length > 0 || Object.keys(sections).length > 0 || message.toolsAdded?.length || message.toolsRemoved?.length) messages.push({ ...message, sections });
+      }
+      return { messages };
     });
 
     // Her words go to Main once each run settles; a stopped run or a failed send is caught up later.

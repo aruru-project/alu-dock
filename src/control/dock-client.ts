@@ -641,7 +641,8 @@ export class DockClient {
 
   systemCatalog(cwd:string,hostId?:string,cursor?:SystemCatalogCursor,limit=MAX_SYSTEM_CATALOG_ITEMS):Promise<SystemCatalogResult>{return this.request("system.catalog",{cwd,hostId,cursor,limit},SYSTEM_TEMPLATES_CAPABILITY,parseSystemCatalogResult);}
   systemContent(cwd:string,id:string,hostId?:string,offset?:number,revision?:string):Promise<ResourceContentResult>{return this.request("system.content",{cwd,id,hostId,offset,revision},SYSTEM_TEMPLATES_CAPABILITY,parseResourceContentResult);}
-  setSystemDefault(cwd:string,id:string,hostId?:string,operationId=this.createRequestId(),assistant?:boolean):Promise<SystemDefaultSetResult>{return this.request("system.default.set",{cwd,id,hostId,operationId,assistant},assistant===true?[SYSTEM_TEMPLATES_CAPABILITY,INSTANCE_ASSISTANT_CAPABILITY]:SYSTEM_TEMPLATES_CAPABILITY,parseSystemDefaultSetResult);}
+  /** `id` may be left out only with `assistant: true`: she takes no system, and the directory keeps its system for other Works. */
+  setSystemDefault(cwd:string,id:string|undefined,hostId?:string,operationId=this.createRequestId(),assistant?:boolean):Promise<SystemDefaultSetResult>{return this.request("system.default.set",{cwd,id,hostId,operationId,assistant},assistant===true?[SYSTEM_TEMPLATES_CAPABILITY,INSTANCE_ASSISTANT_CAPABILITY]:SYSTEM_TEMPLATES_CAPABILITY,parseSystemDefaultSetResult);}
   /** The assistant on Main (card #295): her workspace, what a new session loads, her persona and notes, and her conversations. */
   assistantInfo():Promise<AssistantInfo>{return this.request("assistant.info",{},ASSISTANT_CAPABILITY,parseAssistantInfo);}
   assistantPreview():Promise<AssistantPreview>{return this.request("assistant.preview",{},ASSISTANT_CAPABILITY,parseAssistantPreview);}

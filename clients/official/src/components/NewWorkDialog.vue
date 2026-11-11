@@ -344,7 +344,7 @@ async function confirmSystem() {
       // A save whose reply was lost may have gone through: the directory may open as her now.
       if (asAssistant && replyLost(cause)) directoryAssistant.value = true
       saveFailed.value = true
-      setError(cause, '保存此目录的默认 system', 'set_system_default')
+      setError(cause, '保存此目录的默认选择', 'set_system_default')
       return
     } finally {
       pending.value = ''

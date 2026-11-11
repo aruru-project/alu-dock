@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -17,6 +17,12 @@ const systemPrompt = (body: { messages?: Array<{ role: string; content?: unknown
 test("a Work opened as the assistant loads her persona and notes, and her conversations can be searched later", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-", assistant: true });
   const { coordinator } = team.providers;
+  // Like the Claude models, the model takes system messages mid-conversation: a session keeps its
+  // first prompt at the head and gets later prompt changes as updates after it.
+  const modelsFile = join(team.agentDir, "models.json");
+  const models = JSON.parse(await readFile(modelsFile, "utf8"));
+  for (const model of models.providers.coordinator.models) model.compat = { supportsMidConvoSystemMessages: true };
+  await writeFile(modelsFile, JSON.stringify(models));
   const client = await team.startHost();
   const notes = await client.assistantDocument("notes");
   await client.setAssistantDocument("notes", "主人的猫叫团子。", notes.revision);
@@ -91,5 +97,20 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
   const back = await coordinator.request(5);
   assert.ok(systemPrompt(back.body).includes("狗叫豆包"), "A continued Work loads her again");
   back.text("在。");
+  await settled(client, alu.id);
+
+  // (2026-11-12 review) A session that began with another opening, here the plain Work's with the
+  // project's SYSTEM.md, still opens her requests with her once resumed in her Work.
+  const plainSession = (await client.read(plain.id)).instance.executor.sessionFile;
+  assert.ok(plainSession);
+  await client.stop(plain.id, "plain-stop");
+  await trustOnce((trust) => client.switchSession(alu.id, plainSession, "alu-resume-plain", trust));
+  await client.prompt(alu.id, "接着聊。", "auto", "alu-resumed");
+  const resumed = await coordinator.request(6);
+  const resumedSystem = systemMessages(resumed.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content));
+  assert.ok(resumedSystem[0]?.startsWith("## 身份\n\n你是**阿露**"), `The request opens with her persona: ${resumedSystem[0]?.slice(0, 200)}`);
+  assert.ok(!resumedSystem.some((text) => text.includes("PROJECT SYSTEM TEXT") || text.includes("You are an expert coding assistant")), "The session's earlier opening is not sent");
+  assert.ok(resumedSystem.join("\n").includes("<tools>") && resumedSystem.join("\n").includes("PROJECT RULES TEXT"), "Pi's tool list and the project's AGENTS.md stay");
+  resumed.text("嗯。");
   await settled(client, alu.id);
 });
