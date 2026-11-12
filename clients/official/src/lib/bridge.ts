@@ -648,9 +648,12 @@ export async function systemContent(cwd: string, id: string, context: Connection
   return native<ResourceContentResult>('system_content', { ...context, cwd, id, targetHostId, offset: offset ?? null, revision: revision ?? null })
 }
 
-/** `assistant` also remembers (true) or forgets (false) opening new Works here as the assistant; omitted, the directory keeps its choice. */
-export async function setSystemDefault(cwd: string, id: string, context: HostOperationContext, targetHostId: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
-  return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id, targetHostId, assistant: assistant ?? null })
+/**
+ * `assistant` also remembers (true) or forgets (false) opening new Works here as the assistant; omitted, the directory keeps its choice.
+ * Without `id` (only with `assistant: true`: she takes no system) the directory keeps its system for Works not opened as her.
+ */
+export async function setSystemDefault(cwd: string, id: string | undefined, context: HostOperationContext, targetHostId: string, assistant?: boolean): Promise<SystemDefaultSetResult> {
+  return native<SystemDefaultSetResult>('set_system_default', { ...context, cwd, id: id ?? null, targetHostId, assistant: assistant ?? null })
 }
 
 /** The assistant lives on Main, so the connected Host answers; there is no machine to choose. */

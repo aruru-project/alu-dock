@@ -1,4 +1,5 @@
-import type { ExtensionContext, ExtensionFactory, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
+import { getDefaultSystemPromptBody, type ExtensionContext, type ExtensionFactory, type SessionEntry, type SystemPromptSelection } from "@earendil-works/pi-coding-agent";
 
 import {
   ASSISTANT_CONTEXT_DEFAULT_SPAN,
@@ -46,10 +47,11 @@ import { WATCH_NOTICE_TYPE, WORK_MESSAGE_TYPE, WORK_WAKE_TYPE } from "./dock-too
 import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
 /*
- * What makes a Pi Work the personal assistant (card #295). Each session start (new Work, reload,
- * /new, resume, reopen) loads her persona, the owner's notes, the memories loaded every session and
- * how to recall more from Main into a prompt section; the session keeps that copy until it starts
- * again. Her conversation goes to Main entry by entry, and her tools search her memories, her
+ * What makes a Pi Work the personal assistant (card #295). She is the Work's system: each session
+ * start (new Work, reload, /new, resume, reopen) loads her persona, the owner's notes, the memories
+ * loaded every session and how to recall more from Main into the opening of the system prompt, in
+ * place of Pi's "You are an expert coding assistant…"; the session keeps that copy until it starts
+ * again. The rest of Pi's default prompt (tools, rules, docs) and the project's context stay. Her conversation goes to Main entry by entry, and her tools search her memories, her
  * timeline and her conversations, read around a hit, change her memories and timeline, and edit her
  * persona and the owner's notes.
  */
@@ -62,8 +64,6 @@ export interface AssistantCallPort {
 
 const EXTENSION_PATH = "<inline:alu-dock-assistant>";
 const OWN_TOOLS = new Set<string>(ASSISTANT_TOOL_NAMES);
-/** The prompt section holding what the session loaded; Pi records it and any later change in the session. */
-const SECTION = "assistant";
 /** A Work that is stopping waits this long at most for its last entries to reach Main. */
 const SHUTDOWN_SYNC_MS = 1_000;
 /** Tool arguments kept of an entry that would not fit one batch otherwise. */
@@ -174,7 +174,7 @@ class SessionLoad {
     return this.pending;
   }
 
-  async section(notify: Notify): Promise<string> {
+  async text(notify: Notify): Promise<string> {
     if (!this.loaded && !this.failure) await this.start();
     if (this.loaded) return this.loaded.text;
     // Try again in the background; this run goes on without her and the owner is told once.
@@ -185,6 +185,14 @@ class SessionLoad {
     }
     return `You are the owner's personal assistant, but your persona and notes could not be loaded from Main just now (${this.failure?.message ?? "unknown reason"}). Say so if it matters, and do not make them up.`;
   }
+}
+
+/**
+ * An assistant Work's system, whatever was chosen or saved for its directory (2026-11-12, card #295):
+ * Pi's default prompt, whose opening the extension below replaces with her. No SYSTEM.md is read.
+ */
+export function assistantSystemPrompt(): SystemPromptSelection {
+  return { kind: "default", body: getDefaultSystemPromptBody() };
 }
 
 export function assistantExtension(port: AssistantCallPort, attachmentContextKey: Uint8Array): ExtensionFactory {
@@ -211,7 +219,36 @@ export function assistantExtension(port: AssistantCallPort, attachmentContextKey
     pi.on("before_agent_start", async (event, ctx) => {
       load ??= new SessionLoad(port);
       void recorder?.sync();
-      event.systemPromptOptions.sections[SECTION] = await load.section((message) => ctx.ui.notify(message, "warning"));
+      // She replaces only the opening; Pi records the change in the session like any prompt change.
+      const opening = await load.text((message) => ctx.ui.notify(message, "warning"));
+      const options = event.systemPromptOptions;
+      options.defaultSystemPromptBody = { ...(options.defaultSystemPromptBody ?? getDefaultSystemPromptBody()), intro: opening };
+    });
+
+    // A session whose opening changed after it began (one from before 2026-11-12, one resumed into
+    // this Work, or hers again after a reload) keeps its first opening at the head and records the
+    // new one as an update, which models that take system messages mid-conversation get after it:
+    // the old "coding assistant" or SYSTEM.md would still lead. Her requests lead with her current
+    // opening instead, for this request only; the session's records stay as they are. Other prompt
+    // and tool updates stay where they are, so switching tools does not resend the conversation.
+    pi.on("context_with_system", (event) => {
+      const [head, ...rest] = event.messages;
+      if (head?.role !== "system" || !rest.some((message) => message.role === "system" && message.sections?.preamble !== undefined)) return undefined;
+      const current = getCurrentSystemMessage(event.messages)!;
+      const opening = current.sections?.preamble;
+      // A head that does not hold its opening as a section (an older session) is merged whole, as Pi
+      // does for models that take no updates.
+      if (typeof opening !== "string" || head.sections?.preamble === undefined) {
+        return { messages: [current, ...event.messages.filter((message) => message.role !== "system")] };
+      }
+      const messages: typeof event.messages = [{ ...head, sections: { ...head.sections, preamble: opening } }];
+      for (const message of rest) {
+        if (message.role !== "system" || message.sections?.preamble === undefined) { messages.push(message); continue; }
+        const { preamble: _opening, ...sections } = message.sections;
+        // An update that only changed the opening has nothing left to say.
+        if (message.content.length > 0 || Object.keys(sections).length > 0 || message.toolsAdded?.length || message.toolsRemoved?.length) messages.push({ ...message, sections });
+      }
+      return { messages };
     });
 
     // Her words go to Main once each run settles; a stopped run or a failed send is caught up later.

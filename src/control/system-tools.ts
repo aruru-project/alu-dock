@@ -16,6 +16,8 @@ export async function readDockSystem(port: SystemPort, input: SystemToolRequest,
 /** Both local and Main tools use the canonical catalog/default and create application boundaries. */
 export async function createDockSystem(port: SystemPort, input: DockCreateInput, hostId?: string): Promise<DockToolsResult> {
   if (input.saveDefault && input.systemId === undefined) throw new Error("Saving requires an explicit systemId.");
+  // The assistant is a Work's system: her persona and memory replace its opening (2026-11-12, card #295).
+  if (input.assistant === true && input.systemId !== undefined) throw new Error("A Work opened as the assistant takes no system: her persona and memory replace its opening. Leave out systemId to open her, or leave out assistant to use that system; no Work was created.");
   // The starting model and thinking level ride in the same Worker configuration as the system; the target Host still applies its directory default.
   const starting: JsonObject = {
     ...(input.model === undefined ? {} : { model: { provider: input.model.provider, id: input.model.id } }),
@@ -39,7 +41,7 @@ export async function createDockSystem(port: SystemPort, input: DockCreateInput,
   if (!selection || selection.warning) throw new Error("The selected system is unavailable. Use dock_system to inspect current candidates and choose again; no Work was created.");
   let saved = false;
   if (input.saveDefault) {
-    selection = (await port.setSystemDefault(first.cwd, selection.id, hostId, systemToolOperation(input.operationId, "save"))).selection;
+    selection = (await port.setSystemDefault(first.cwd, selection.id, hostId, systemToolOperation(input.operationId, "save"))).selection ?? selection;
     saved = true;
   }
   try {

@@ -895,7 +895,7 @@ pub(crate) async fn set_system_default(
     expected_host_epoch: String,
     selection_generation: u64,
     cwd: String,
-    id: String,
+    id: Option<String>,
     target_host_id: Option<String>,
     assistant: Option<bool>,
 ) -> Result<SystemDefaultSetResult, CommandError> {
@@ -916,7 +916,7 @@ pub(crate) async fn set_system_default(
             client
                 .set_system_default(
                     &cwd,
-                    &id,
+                    id.as_deref(),
                     target_host_id.as_deref(),
                     Some(&operation_id),
                     assistant,

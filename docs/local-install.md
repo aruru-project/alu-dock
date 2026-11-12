@@ -106,7 +106,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\model-visibility.json
 
 ## 个人助手
 
-Dock 自带一个个人助手，默认是阿露。新建 Work 时选「以助手身份打开」，这个 Work 就载入她的人设和你写给她的设定，对话也记进她的记忆；没选的 Work 和这些无关。这个开关和选 system 在同一页；目录存过默认 system 时会直接创建，想在这种目录里改身份或改目录记住的选择，先在第一屏勾上「创建前先选 system 和身份」。在哪台机器上开都一样，资料只在 Main 上一份：
+Dock 自带一个个人助手，默认是阿露。新建 Work 时选「以助手身份打开」，这个 Work 就载入她的人设和你写给她的设定，对话也记进她的记忆；没选的 Work 和这些无关。这个开关和选 system 在同一页。打开它就不用选 system：她的人设和记忆代替 system 开头那句“你是编码助手”，Pi 自带的工具说明和工作目录的 AGENTS.md 照常载入，项目自己的 `SYSTEM.md` 不用。目录存过默认 system、或记住了以助手身份打开时会直接创建，想在这种目录里改身份或改目录记住的选择，先在第一屏勾上「创建前先选 system 和身份」。在哪台机器上开都一样，资料只在 Main 上一份：
 
 ```text
 Linux:   ~/.local/state/alu-dock/assistant/（managed service 为 STATE_DIRECTORY 下的 assistant/）
@@ -123,7 +123,7 @@ Windows: %LOCALAPPDATA%\Alu Dock\assistant\
 
 通常在官方客户端的「助手」页里看和改，也可以直接编辑两个 Markdown 文件，或者让她自己改。改动对之后新开的助手会话生效；已经开着的会话在 reload、`/new` 或 Work 重新打开时换成最新的。备份用 `aludock assistant:backup 新目录`，在 Main 上运行，Host 不用停：它把人设、手写设定和对话记忆按运行这条命令那一刻的样子复制到新目录，复制期间新说的话留给下一次备份。不要在 Host 运行时直接复制 `memory.sqlite`，最近的对话可能还在旁边的 `-wal` 文件里。恢复时先停 Host，把备份里的三个文件放回 `assistant/` 目录，再启动。
 
-她在 Main 上还有自己的工作区 `~/.aludock/assistant`，不在任何项目里时在这里聊天、干杂活。这个目录新建的 Work 默认以助手身份打开。
+她在 Main 上还有自己的工作区 `~/.aludock/assistant`，不在任何项目里时在这里聊天、干杂活。这个目录新建的 Work 默认以助手身份打开，点了就直接创建，不问 system。
 
 ## Service 命令
 

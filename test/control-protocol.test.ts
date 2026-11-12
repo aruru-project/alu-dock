@@ -25,6 +25,7 @@ import {
   parseMachinesResult,
   parseSettingsResult,
   parseStatusResult,
+  parseSystemDefaultSetResult,
   parseWorkspaceFileReadFrame,
   ProtocolValidationError,
   INSTANCE_READ_CAPABILITY,
@@ -258,6 +259,18 @@ test("published file pages require exact byte continuity and the requested offse
     chunks: [{ blockIndex: 0, type: "tool_result", toolCallId: "call-1", toolName: "show_image", text: "Published display.png for display.", offset: 0, blockComplete: true, isError: false, publishedFile: file }],
   });
   assert.deepEqual(hydrated.chunks[0]?.type === "tool_result" ? hydrated.chunks[0].publishedFile : undefined, file);
+});
+
+// 2026-11-12 (card #295): the creation page remembers opening as the assistant, who takes no system,
+// without naming one; every other save of the directory default still names its system.
+test("saving a directory default as the assistant needs no system, and any other save names one", () => {
+  const base = { kind: "request", version: 2, requestId: "r-save", type: "system.default.set" };
+  assert.deepEqual(parseControlRequest({ ...base, params: { cwd: "/project", operationId: "save-1", assistant: true } }).params,
+    { cwd: "/project", hostId: undefined, operationId: "save-1", assistant: true });
+  for (const params of [{ cwd: "/project", operationId: "save-2" }, { cwd: "/project", operationId: "save-3", assistant: false }]) {
+    assert.throws(() => parseControlRequest({ ...base, params }), (error: unknown) => error instanceof ProtocolValidationError && error.code === "invalid_request");
+  }
+  assert.deepEqual(parseSystemDefaultSetResult({}), {});
 });
 
 test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {
