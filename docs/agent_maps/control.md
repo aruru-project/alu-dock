@@ -308,9 +308,9 @@ Worker 只解析当前登记的资源引用并通过私有 `resolve_file_source`
 - `system.catalog {cwd,hostId?,cursor?,limit?}` → `{cwd,candidates,total,revision,warnings,defaultSelection?,nextCursor?}`。候选按项目 `.pi/SYSTEM.md`、原生 agentDir 的 `SYSTEM.md`、目标 Host Home 下 `.aludock/systems/*.json` 文件名顺序返回。`nextCursor` 必须续读到缺省，不能只展示第一页；有效 `defaultSelection` 独立返回，即使不在当前页也可直接用于创建。
 - 候选的唯一 DTO 是 `protocol.ts` 中的 `SystemCandidate`：`{id,name,kind,path,workerConfig,warning?}`；`kind` 为 `project-system | global-system | dock-template`。`id` 是 cwd-bound opaque identity，不是文件路径。`warning` 表示该候选当前不可使用；可以预览原文并让用户修复或重选。
 - `system.content {cwd,hostId?,id,offset?,revision?}` 只读当前目录候选，不接受任意路径。与 `resource.content` 共用 `readResourceContent` 和唯一的 `ResourceContentResult` parser：`{text,revision,nextOffset?}`，字节续读、UTF-8 和文件变化处理完全一致。
-- `system.default.set {cwd,hostId?,id?,operationId,assistant?}` → `{selection?}`。这是独立的显式保存操作，复用 operation ledger。只写本目录 `.aludock/system-default.json` 的 `{id?,assistant?}`，不继承父目录、不保存正文。普通查询和本次确认都不写这个文件。`assistant: true` 同时记住“以助手身份打开”并要求 `instance.assistant.v1`；`false` 清掉它；省略时保留本目录原来的选择，所以不显示这个开关的入口（Hub、旧客户端、`dock_create` 的 `saveDefault`）保存 system 时不会把它清掉。`id` 只在 `assistant: true` 时可以省略：助手不带 system，只记住“以助手身份打开”，目录原来的 system 留着给不以助手身份打开的 Work 用；这时结果没有 `selection`（见下文[个人助手](#个人助手instanceassistantv1assistantv1)）。
+- `system.default.set {cwd,hostId?,id?,operationId,assistant?}` → `{selection?}` 保留兼容的请求形状；当前 Host 要求提供普通 Work 的 system `id`，拒绝 `assistant: true`。这是独立的显式保存操作，复用 operation ledger，只写本目录 `.aludock/system-default.json` 的 `{id}`，不继承父目录、不保存正文。旧文件中的 `assistant: true` 可以读取，但不再决定创建身份；只有显式保存默认时才从文件中移除。普通查询和创建确认都不写这个文件。常驻助手由 Main 管理，不能存成目录默认（见[个人助手](#个人助手assistantv1)）。
 
-创建默认归实际创建 Worker 的 Host：`DockRegistry.createNew` 在 project trust 完成、cwd 规范化后解析最终 `workerConfig`，覆盖 `instance.create` 和 `instance.ensure` 新建。以助手身份打开的 Work 不应用任何 system（她就是这个 Work 的 system，见下文）；其他 Work 显式 system 选择优先；省略时使用本目录保存的默认；仅在未配置目录默认时使用 Pi 原生行为。其他 `workerConfig` 字段不会关闭 system 默认。已配置但损坏、不可读或目标缺失时返回 `system_default_unavailable`，不静默换正文，新旧客户端一致。最终配置进入既有 creation/catalog 路径；同一创建操作不重选默认，ensure 命中已有 Work、adopt 和 reopen 不重新应用目录默认。
+创建默认归实际创建 Worker 的 Host：`DockRegistry.createNew` 在 project trust 完成、cwd 规范化后解析最终 `workerConfig`，覆盖 `instance.create` 和 `instance.ensure` 新建。普通 Work 显式 system 选择优先；省略时使用本目录保存的默认；仅在未配置目录默认时使用 Pi 原生行为。Main 常驻助手走自己的启动入口，不应用目录的 system 默认。其他 `workerConfig` 字段不会关闭 system 默认。已配置但损坏、不可读或目标缺失时返回 `system_default_unavailable`，不静默换正文，新旧客户端一致。最终配置进入既有 creation/catalog 路径；同一创建操作不重选默认，ensure 命中已有 Work、adopt 和 reopen 不重新应用目录默认。
 
 客户端只在用户明确选择时，将候选 `workerConfig` 原样传给 `instance.create`；使用 Host 默认时省略选择，不把 catalog 的旧快照变成本次 override。显式选择、目标 Host/cwd 在 project trust continuation 中保留。预览、刷新、返回、取消均不创建 Work。坏默认在 catalog 中仍作为 warning 展示，让支持选择的客户端可以明确改选；不代替创建边界的报错。保存默认与 create 有各自的 operation/失败结果，不合并成一次成功提示。
 
@@ -318,7 +318,7 @@ Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一�
 
 `pi-default.json` 由 Dock 维护，始终是当前 Pi 的默认正文：CLI Host 启动时（在任何 Work reopen 之前）和首次 catalog 初始化时，内容与 `getDefaultSystemPromptBody()` 的序列化不同就整份替换，不判断是否由用户修改，也不提示；想保留自己的正文，另存为其他名字的模板。替换只发生在文件仍存在时，被删除的模板不会因此重建。用这份模板的 Work 在下次加载 resource（新建、reopen、reload）时读到新正文。
 
-官方 Client、Hub/direct new 保留选择和阅读界面；有效目录默认可直接进入创建，由 Host 在创建时应用，否则由用户明确选择。目录记住了以助手身份打开（catalog 的 `defaultAssistant`）也算有效默认，即使没有记住 system：她不需要 system。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
+官方 Client、Hub/direct new 保留选择和阅读界面；有效目录默认可直接进入创建，由 Host 在创建时应用，否则由用户明确选择。旧的助手目录标记不再算有效创建默认。官方客户端连接仍提供 `instance.assistant.v1` 的旧 Host 时保留旧选择；连接新 Host 时不显示创建助手入口。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
 
 ## 个人助手（`assistant.v1`）
 

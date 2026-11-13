@@ -25,9 +25,9 @@ Managed Host 启动时：
 2. 加载 durable catalog；
 3. 对上一次 Host 遗留状态做保守恢复；
 4. 进入 ready；
-5. 只有显式 create、continue、adopt 或 reopen 才启动 Worker。
+5. Main 自动确保唯一常驻助手已打开；CLI 对本机可重新打开的普通 Work 做一次恢复尝试，失败保留可见状态，由用户处理。SubHost 不创建助手。之后新开或重新打开普通 Work 沿显式 create、continue、adopt 或 reopen 入口。
 
-Startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 tool effect。
+恢复 Worker 不等于重放任务：startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 tool effect；助手也不会仅因为 Host 重启就自行开始一轮回复。
 
 Durable catalog 在 POSIX 保持既有 owner/mode 与 same-directory fsync/rename 规则。Windows Host 在首次准备 catalog 目录时建立只含当前用户与 SYSTEM 的可继承私有 DACL；启动读取时额外收紧可能来自旧版本的既有 catalog。后续 atomic replacement 从该目录创建同目录临时文件并继承相同 DACL，不在每次 catalog transition 重复启动 `icacls.exe`。
 
