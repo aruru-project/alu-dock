@@ -2,11 +2,13 @@
 import { ref } from 'vue'
 import type { NativeOperation } from '../lib/operationBinding'
 import { userErrorMessage } from '../lib/userError'
+import { useAppStore } from '../stores/app'
 
 const props = defineProps<{
   operations: readonly NativeOperation[]
   acknowledge: (operation: NativeOperation) => Promise<void>
 }>()
+const app = useAppStore()
 const pending = ref(new Set<string>())
 const errors = ref<Record<string, string>>({})
 const labels: Record<string, string> = {
@@ -17,7 +19,13 @@ const labels: Record<string, string> = {
   stop_work: '停止 Work', abort_run: '中止运行', reopen_work: '继续 Work', forget_work: '移除 Work',
   create_work: '新建 Work', adopt_session: '恢复 Work', set_system_default: '保存目录默认',
 }
-function label(operation: NativeOperation) { return labels[operation.kind] ?? '操作' }
+function label(operation: NativeOperation) {
+  if (operation.connectionId === app.activeConnectionId && app.works.some(work => work.id === operation.instanceId && work.assistant)) {
+    if (operation.kind === 'stop_work') return '重启阿露'
+    if (operation.kind === 'reload_session') return '刷新人设和记忆'
+  }
+  return labels[operation.kind] ?? '操作'
+}
 function outcome(operation: NativeOperation) { return operation.state === 'succeeded' ? '已完成' : operation.state === 'unknown' ? '没收到结果' : '没有完成' }
 async function acknowledge(operation: NativeOperation) {
   if (pending.value.has(operation.operationId)) return

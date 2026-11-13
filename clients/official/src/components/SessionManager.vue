@@ -404,7 +404,7 @@ async function reload() {
     const result = await currentSessionCall(scope, () => reloadSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration)
     reloadScope.value = scope
     reloadSummary.value = result
-    status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
+    status.value = props.work.assistant ? '人设和记忆已刷新，对话接着原来的。' : `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
     emit('finished')
   }
   catch (cause) { if (!handOverLostReply(cause, 'reload_session')) mutationFailure(cause, 'sessions') } finally { pending.value = '' }
@@ -522,8 +522,8 @@ function time(value?: string | null) { return treeNodeTime(value) }
     </section>
 
     <section v-else-if="mode === 'reload-session'" class="alu-session-action-state alu-confirm-state">
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : '确认' }}</button></div>
-      <div v-if="reloadSummary" class="reload-summary"><strong>{{ reloadSummary.resourceTotal }} 个资源 · {{ reloadSummary.diagnosticTotal }} 条诊断</strong><span v-for="diagnostic in reloadSummary.diagnostics" :key="diagnostic.message" :data-severity="diagnostic.severity">{{ diagnostic.message }}</span></div>
+      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : work.assistant ? '刷新人设和记忆' : '确认' }}</button></div>
+      <div v-if="reloadSummary" class="reload-summary"><strong v-if="!work.assistant">{{ reloadSummary.resourceTotal }} 个资源 · {{ reloadSummary.diagnosticTotal }} 条诊断</strong><span v-for="diagnostic in reloadSummary.diagnostics" :key="diagnostic.message" :data-severity="diagnostic.severity">{{ diagnostic.message }}</span></div>
     </section>
 
     <section v-else class="alu-tree-select">

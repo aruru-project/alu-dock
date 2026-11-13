@@ -80,7 +80,7 @@ function choose(value: string) {
     <div v-if="settings.current?.extractionModel || restart.state !== 'idle'" class="assistant-restart">
       <div v-if="restart.state === 'confirming'" class="assistant-restart-confirm" role="alertdialog" aria-labelledby="assistant-restart-what">
         <p id="assistant-restart-what">她会用「{{ chosenLabel }}」把所有对话从头读一遍、重新整理：后台整理出的记忆挪进「已作废」，可以一条条恢复；后台写的时间线清掉。你写过或改过的，和她按你吩咐记下的，都留着。</p>
-        <p>对话多的话要读一阵，读完之前新开的会话里记忆不全；用掉的额度大致和当初整理这些对话加起来差不多。</p>
+        <p>对话多的话要读一阵，读完之前她能查到的记忆还不全；用掉的额度大致和当初整理这些对话加起来差不多。</p>
         <div class="assistant-restart-actions">
           <button type="button" class="button primary" @click="memory.startOver()">从头整理</button>
           <button type="button" class="button secondary" @click="memory.cancelRestart()">取消</button>

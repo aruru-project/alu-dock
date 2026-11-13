@@ -3049,6 +3049,87 @@ try {
     console.log('PASS: quick buttons: defaults run local controls; pinned command takes an argument; send keeps draft/attachments; restart keeps buttons; insert fills without sending; overflow runs from palette; order decides the row')
   }
 
+  // #670: the owner chose one permanent assistant: open her existing conversation, keep her
+  // first with her children, and offer restart rather than the Pi-only conversation controls.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear()
+    storage.set('aludock.quickButtons', JSON.stringify([
+      { id: 'resume', name: '恢复', text: '/resume', mode: 'send' },
+      { id: 'fork', name: '自选 Fork', text: '/fork old-entry', mode: 'insert' },
+      { id: 'compact', name: '压缩', text: '/compact', mode: 'send' },
+      { id: 'hello', name: '问候', text: '早上好', mode: 'insert' },
+    ]))
+    const her = { ...otherWork, id: 'resident-assistant', displayName: '阿露', name: '阿露', assistant: true, runtimeGeneration: 1 }
+    const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
+    extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
+    const savedAssistant = assistantNative, savedTools = toolsNative
+    assistantNative = (command, args) => command === 'assistant_preview' ? { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' } : savedAssistant(command, args)
+    toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'builtin' } }], total: 1, truncated: false })
+    const pinia = createPinia(), assistantApp = useAppStore(pinia), assistantView = element('resident-assistant-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(assistantView); await settle()
+    const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(!!target, `button exists: ${label}`)
+      target.props.onClick(); await settle()
+    }
+    const dialog = label => find(assistantView, item => item.props.role === 'dialog' && item.props['aria-label'] === label)
+    const rowNames = () => all(assistantView, item => String(item.props.class).split(' ').includes('alu-instance-name')).map(visibleText)
+    assert.deepEqual(rowNames().slice(0, 4), ['助手阿露', '她的子 Work', 'Work', '普通子 Work'], 'pinning her keeps each parent and its children together')
+    await click(assistantView, '助手')
+    await click(assistantView, '打开阿露的对话')
+    assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'the settings page opens the already listed assistant')
+    const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
+    assert.deepEqual(quickNames(), ['问候'], 'saved Pi-only buttons stay out of her input row')
+    const composer = () => find(assistantView, item => item.type === 'textarea' && item.props.placeholder === '输入消息…')
+    composer().props['onUpdate:modelValue']('/res'); await settle()
+    const suggestions = all(assistantView, item => item.props.role === 'option').map(text).join(' ')
+    assert.equal(suggestions.includes('/resume'), false, 'slash suggestions do not offer a second conversation')
+    composer().props['onUpdate:modelValue']('还没发完的话'); await settle()
+    await click(assistantView, '打开命令中心')
+    const paletteLabels = () => all(dialog('命令中心'), item => String(item.props.class).split(' ').includes('cmd-palette-item-label')).map(text)
+    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '自选 Fork', '压缩']) {
+      assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
+    }
+    await click(dialog('命令中心'), '刷新人设和记忆重新读入人设、手写设定和记忆，对话接着原来的')
+    assert.ok(!!dialog('刷新人设和记忆'), 'Reload stays available with her meaning')
+    await click(dialog('刷新人设和记忆'), '取消')
+    await click(assistantView, '打开命令中心')
+    const toolOption = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('她能用的工具'))
+    assert.ok(!!toolOption); toolOption.props.onClick(); await settle()
+    assert.ok(text(dialog('她能用的工具')).includes('读取文件里的文字和图片。'), 'her actual tools and descriptions are readable')
+    assert.equal(all(dialog('她能用的工具'), item => item.type === 'button').some(item => text(item).includes('读取文件里的文字和图片。')), false, 'her tool list has no unsupported per-tool switch')
+    await click(dialog('她能用的工具'), '关闭')
+    await click(assistantView, '打开命令中心')
+    const restartOption = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('重启阿露'))
+    assert.ok(!!restartOption); restartOption.props.onClick(); await settle()
+    assert.ok(!!dialog('重启阿露？'), 'restart asks for confirmation')
+    let finishRestart
+    stopNative = args => new Promise(resolve => {
+      finishRestart = () => {
+        const stopped = atHost({ ...her, lifecycle: 'stopped', execution: 'unavailable', ownerHostEpoch: undefined })
+        extraListed = [{ ...her, runtimeGeneration: 2 }]
+        resolve({ receipt: { operationId: args.operationId, alreadyStopped: false }, instance: stopped })
+      }
+    })
+    await click(dialog('重启阿露？'), '确认')
+    assert.ok(text(assistantView).includes('正在重启阿露'), 'the restart shows progress while Main is opening her again')
+    finishRestart(); await settle()
+    assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'restart stays on her conversation instead of dropping the Work')
+    assert.equal(assistantApp.selectedWork.lifecycle, 'active', 'the post-stop refresh shows her restarted state')
+    assert.equal(assistantApp.currentDraft, '还没发完的话', 'restart keeps the local draft')
+    assert.equal(text(assistantView).includes('正在重启阿露'), false, 'the progress notice leaves once she is back')
+    assert.deepEqual(rowNames().slice(0, 2), ['助手阿露', 'Work'])
+    assistantApp.selectWork('work'); await settle()
+    assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候'], 'the same device buttons still belong to ordinary Pi Works')
+    await click(assistantView, '打开命令中心')
+    assert.ok(paletteLabels().includes('New Session'), 'ordinary Pi conversation controls stay available')
+    extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools
+    console.log('PASS: permanent assistant: pinned with her children, existing conversation opened from settings, Pi-only controls hidden, real tools read-only, restart keeps her selected and preserves the draft')
+  }
+
   // #665 review: the color theme survives a reload, works without this device's settings,
   // tells a failed save or a failed system-bar match with a retry, and is reachable before pairing.
   {

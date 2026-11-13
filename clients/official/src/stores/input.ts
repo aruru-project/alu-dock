@@ -6,7 +6,7 @@ import { attachmentUploadMatches, attachmentUploadTarget } from '../lib/attachme
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { conversationBoundaryKey } from '../lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from '../lib/commandSuggest'
-import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type LocalControlCommand } from '../lib/localCommands'
+import { controlCommandAvailable, filterLocalControlCommands, localControlCommands, submittedLocalControl, type LocalControlCommand } from '../lib/localCommands'
 import { shellRunQuote } from '../lib/conversation'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import type { EditorCapture, NativeOperation } from '../lib/operationBinding'
@@ -141,7 +141,7 @@ export const useInputStore = defineStore('input', () => {
   const commandSuggestItems = computed<ComposerCommandSuggestion[]>(() => {
     const query = slashQuery.value
     if (query === null) return []
-    const local = filterLocalControlCommands(query).map((command) => ({
+    const local = filterLocalControlCommands(query, selected.value?.assistant).map((command) => ({
       kind: 'local' as const,
       name: command.name,
       description: command.description,
@@ -357,6 +357,10 @@ export const useInputStore = defineStore('input', () => {
   /** `typed` is the editor text that asked for the control, cleared once it runs; a quick button passes null. */
   async function executeLocalControl(command: LocalControlCommand, typed: string | null): Promise<boolean> {
     if (!selected.value || selected.value.lifecycle !== 'active') return false
+    if (!controlCommandAvailable(command.name, selected.value.assistant)) {
+      submissionError.value = '阿露一直用同一段对话，不提供这个 Pi 操作。可以继续和她说话。'
+      return false
+    }
     const clearTyped = () => { if (typed !== null && draft.value === typed) draft.value = '' }
     if (command.section) {
       clearTyped()
@@ -427,12 +431,18 @@ export const useInputStore = defineStore('input', () => {
     focusComposerEnd()
   }
 
+  function quickButtonVisible(button: QuickButton) {
+    const command = button.text.trim().match(/^\/([^\s/]+)(?:\s|$)/)?.[1]
+    return !command || controlCommandAvailable(command, selected.value?.assistant)
+  }
+
   function quickButtonDisabled(button: QuickButton) {
-    if (!selected.value || selected.value.lifecycle !== 'active') return true
+    if (!selected.value || selected.value.lifecycle !== 'active' || !quickButtonVisible(button)) return true
     return button.mode === 'send' && !submittedLocalControl(button.text) && !canSendText.value
   }
 
   async function runQuickButton(button: QuickButton): Promise<boolean> {
+    if (!quickButtonVisible(button)) return false
     if (button.mode === 'insert') {
       insertText(button.text)
       return true
@@ -546,6 +556,6 @@ export const useInputStore = defineStore('input', () => {
     draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, visibleComposerError, canSubmit,
     suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading,
     rememberSelection: composer.remember, trackComposition: composer.composition,
-    submit, submitExpanded, restoreQueue, prefillSlashCommand, applyExtensionEditorText, runQuickButton, quickButtonDisabled, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
+    submit, submitExpanded, restoreQueue, prefillSlashCommand, applyExtensionEditorText, runQuickButton, quickButtonDisabled, quickButtonVisible, appendShellQuote, completeSuggest, handleComposerKeydown, clearQueueImages, listenShortcuts,
   }
 })

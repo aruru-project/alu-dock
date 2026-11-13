@@ -14,7 +14,7 @@ import { currentConnectionCall } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { dockToolsState } from '../lib/dockTools'
-import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
+import { localControlCommands, workControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
 import { formatContextUsage, workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
@@ -56,7 +56,7 @@ function showFailure(cause: unknown) {
   if (panelMounted) app.failureShown(cause)
 }
 const quickButtons = useQuickButtonsStore()
-const { runQuickButton, quickButtonDisabled } = useInputStore()
+const { runQuickButton, quickButtonDisabled, quickButtonVisible } = useInputStore()
 const { openMachineSettings } = useWorkActionsStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
@@ -91,7 +91,7 @@ const localControlIcons = {
 } as const
 /** Managing quick buttons lives only in the palette; it is not a slash command. */
 const manageQuickButtons: LocalControlCommand = { id: 'quick-buttons', name: '', label: '管理快捷按钮', keywords: '快捷按钮 钉住 自定义 quick button pin', description: '新建、修改、排序或删除输入框下方的快捷按钮', section: 'quick-buttons' }
-const staticCommands = [...localControlCommands, manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] }))
+const staticCommands = computed(() => [...workControlCommands(props.work.assistant), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
 
 const commandSearch = ref('')
 const modelSearch = ref('')
@@ -146,7 +146,7 @@ const dockToolsEntries = computed(() => dockToolsOperationId.value
   : [])
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
-const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands, commandSearch.value))
+const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands.value, commandSearch.value))
 const catalogCommands = computed(() => {
   const localNames = new Set(localControlCommands.map((command) => command.name))
   return catalog.commands.filter((item) => !localNames.has(item.name))
@@ -154,7 +154,7 @@ const catalogCommands = computed(() => {
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
 /** Every quick button, including those the row has no room for. */
 const filteredQuickButtons = computed(() => filterCommandPaletteItems(
-  quickButtons.buttons.map((button) => ({ id: button.text, label: button.name, keywords: button.text, description: '', button })),
+  quickButtons.buttons.filter(quickButtonVisible).map((button) => ({ id: button.text, label: button.name, keywords: button.text, description: '', button })),
   commandSearch.value,
 ).map((item) => item.button))
 const commandSelections = computed(() => [
@@ -166,6 +166,11 @@ const staticOffset = computed(() => filteredQuickButtons.value.length)
 const catalogOffset = computed(() => staticOffset.value + filteredStaticCommands.value.length)
 const commandFooter = computed(() => {
   const count = catalogCommands.value.length
+  if (props.work.assistant) {
+    if (catalog.state === 'idle' || catalog.state === 'loading') return '正在读取她的可用命令…'
+    if (catalog.state === 'failed') return '命令暂时没有读到，其他操作仍可使用'
+    return `${count} 个助手命令 · 点击选择 · ↑↓ 移动`
+  }
   if (catalog.state === 'idle' || catalog.state === 'loading') return '正在同步当前 Session 的 Extension、Skill 和 Prompt 命令…'
   if (catalog.state === 'truncated') return `显示 ${count} 个 Pi 命令（目录未完整返回）`
   if (catalog.state === 'failed') return 'Pi 命令目录暂时不可用 · Work 操作仍可使用'
@@ -576,7 +581,7 @@ function isCurrentModel(model: ModelInfo) {
       <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>
-          <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 Work 操作、Extension、Skill 和 Prompt…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
+          <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" :placeholder="work.assistant ? '搜索助手操作和命令…' : '搜索 Work 操作、Extension、Skill 和 Prompt…'" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
           <kbd class="cmd-palette-kbd">ESC</kbd>
           <button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button>
         </div>
@@ -597,7 +602,7 @@ function isCurrentModel(model: ModelInfo) {
             <button v-if="item.name" type="button" class="cmd-palette-pin" :aria-label="`把 /${item.name} 做成快捷按钮`" title="做成快捷按钮" @click="pinCommand(item.name, false)"><Pin :size="13" /></button>
           </div>
           <template v-if="filteredCommands.length">
-            <div class="cmd-palette-group">Pi Commands</div>
+            <div class="cmd-palette-group">{{ work.assistant ? '助手命令' : 'Pi Commands' }}</div>
             <div v-for="(item, index) in filteredCommands" :key="item.referenceId" class="cmd-palette-item-row">
               <button :id="`cmd-opt-${catalogOffset + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === catalogOffset + index }" role="option" :aria-selected="commandSelectedIndex === catalogOffset + index" @mouseenter="commandSelectedIndex = catalogOffset + index" @click="activateCatalogCommand(item)">
                 <span class="cmd-palette-item-icon"><ChevronRight :size="13" /></span>
@@ -685,9 +690,10 @@ function isCurrentModel(model: ModelInfo) {
     <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="!!pending" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
-      <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回，暂时不能切换工具。</div>
-      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="!!pending || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
+      <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="!work.assistant && handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
+      <p v-if="work.assistant" class="alu-project-status-note">下面列出她可用的工具，不能逐个开关。需要写文件或运行命令时，可以请她交给其他 Work。</p>
+      <div v-if="tools?.truncated" class="alu-project-status-note">{{ work.assistant ? '工具列表未完整返回。' : '工具列表未完整返回，暂时不能切换工具。' }}</div>
+      <div class="ui-dialog-options"><component :is="work.assistant ? 'div' : 'button'" v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': !work.assistant && tool.active, 'is-cursor': !work.assistant && optionCursor === index }" :disabled="work.assistant ? undefined : !!pending || !!tools?.truncated" @click="!work.assistant && toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">{{ work.assistant ? '可用' : 'ACTIVE' }}</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></component></div>
     </section>
 
     <ResourceDocument v-else-if="section === 'resources' && selectedResource" :work="work" :resource="selectedResource" @back="closeResource" />
@@ -704,13 +710,13 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="work.lastError" class="alu-project-status-error">{{ work.lastError }}</div>
       </section>
       <section class="alu-project-status-section">
-        <h3>Active Tools <span v-if="tools" class="alu-project-status-count">{{ tools?.tools.filter(item => item.active).length || 0 }}/{{ tools?.total ?? tools?.tools.length ?? 0 }}</span></h3>
+        <h3>{{ work.assistant ? '她能用的工具' : 'Active Tools' }} <span v-if="tools" class="alu-project-status-count">{{ tools?.tools.filter(item => item.active).length || 0 }}/{{ tools?.total ?? tools?.tools.length ?? 0 }}</span></h3>
         <div v-if="loadErrors.tools" class="alu-dialog-error">{{ loadErrors.tools }}<button type="button" @click="loadSection('tools', true)">重试读取工具</button></div>
         <div v-else-if="!tools" class="alu-dialog-loading">正在读取工具…</div>
         <div v-if="tools" class="alu-project-status-chips"><span v-for="tool in tools.tools.filter(item => item.active)" :key="tool.name" class="alu-project-status-chip">{{ tool.name }}</span><span v-if="!tools?.tools.some(item => item.active)" class="alu-project-status-empty">当前没有启用工具</span></div>
         <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回</div>
       </section>
-      <section class="alu-project-status-section">
+      <section v-if="!work.assistant" class="alu-project-status-section">
         <h3>Loaded Resources</h3>
         <div v-if="loadErrors.resources" class="alu-dialog-error">{{ loadErrors.resources }}<button type="button" @click="loadSection('resources', true)">重试读取资源</button></div>
         <div v-else-if="!resources" class="alu-dialog-loading">正在读取资源…</div>

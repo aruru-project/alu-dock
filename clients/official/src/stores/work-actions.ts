@@ -154,18 +154,23 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     const capturedHost = app.connectionContext
     if (!isTauri || !capturedHost || !stopCanStart(work, workMutating.value) || !work) return false
     const feedbackScope = captureFeedback(false)
-    if (!await page.askConfirm('停止当前工作？', stopConfirmationText(work))) return false
+    if (!await page.askConfirm(work.assistant ? '重启阿露？' : '停止当前工作？', stopConfirmationText(work))) return false
     if (!feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || !stopCanStart(selected.value, false)) return false
     pendingWorkActions.value.add(feedbackScope.identity)
-    reportAction(feedbackScope, null)
+    reportAction(work.assistant ? captureFeedback() : feedbackScope, work.assistant ? '正在重启阿露，对话和记忆保留。' : null, 'notice')
     try {
       const result = await stopWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return false
       if (!stoppedResultIsCorrelated(result, work.id)) throw new Error('停止结果和这个 Work 对不上，请看一下它现在的状态。')
-      // The Host has retired this Work and it is no longer followed, so this
-      // answer decides: the Work leaves the list and its page now.
-      app.dropStoppedWork(work.id, capturedHost)
-      void app.refreshWorksQuietly()
+      if (work.assistant) {
+        // Stop retires her old process, not her Work. Main restarts her with the same conversation.
+        observation.acceptWork(result.instance, capturedHost)
+        void observation.refreshCurrent()
+      } else {
+        // A regular Work is retired: it leaves the list and its page now.
+        app.dropStoppedWork(work.id, capturedHost)
+        void app.refreshWorksQuietly()
+      }
       return true
     } catch (cause) {
 
@@ -213,7 +218,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   async function forgetSelectedWork() {
     const work = selected.value
-    if (!isTauri || !work || !['stopped', 'host_lost', 'runtime_error'].includes(work.lifecycle) || workMutating.value) return
+    if (!isTauri || !work || work.assistant || !['stopped', 'host_lost', 'runtime_error'].includes(work.lifecycle) || workMutating.value) return
     const capturedHost = requireConnectionContext(app)
     const feedbackScope = captureFeedback(false)
     if (!await page.askConfirm('从列表移除这条历史记录？')) return
@@ -316,14 +321,15 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   function workGroup(work: Work) {
     // A lifecycle only a newer Host knows is not history: it stays visible, without a 移除 that cannot act (#356).
-    if (work.lifecycle === 'active' || work.lifecycle === 'stopping' || work.lifecycle === 'unrecognized') return 'current'
+    if (work.assistant || work.lifecycle === 'active' || work.lifecycle === 'stopping' || work.lifecycle === 'unrecognized') return 'current'
     if (work.reopenable) return 'continue'
     return 'history'
   }
 
   const groupedWorks = computed(() => {
     const groups: Record<'current' | 'continue' | 'history', Work[]> = { current: [], continue: [], history: [] }
-    for (const parent of app.works.filter(work => !work.parentId)) {
+    const parents = app.works.filter(work => !work.parentId).sort((left, right) => Number(!!right.assistant) - Number(!!left.assistant))
+    for (const parent of parents) {
       const group = groups[workGroup(parent)]
       group.push(parent, ...app.works.filter(work => work.parentId === parent.id))
     }
