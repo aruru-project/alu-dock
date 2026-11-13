@@ -15,6 +15,15 @@ import type { ChildWaitResult } from "./child-messages.js";
  * as user text, so its first line says whose words it is; clients show it as a message from that Work.
  */
 export const WORK_MESSAGE_TYPE = "dock-work-message";
+/** Where a Work shows whether its Dock tools are on; clients read the switch's state under this key. */
+export const DOCK_TOOLS_STATUS_KEY = "Dock tools";
+/** The owner's switch for a Work's Dock tools: `/dock-tools on|off|status`. */
+export const DOCK_TOOLS_COMMAND = "dock-tools";
+export const DOCK_TOOLS_ACTIONS = ["on", "off", "status"] as const;
+export type DockToolsAction = typeof DOCK_TOOLS_ACTIONS[number];
+export function isDockToolsAction(value: string): value is DockToolsAction {
+  return (DOCK_TOOLS_ACTIONS as readonly string[]).includes(value);
+}
 /** Hidden marker that starts a turn for Work messages an idle Work just took; the model never reads it. */
 export const WORK_WAKE_TYPE = "dock-work-wake";
 /** A dock_watch notice in the conversation. */

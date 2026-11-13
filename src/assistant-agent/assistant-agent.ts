@@ -37,6 +37,7 @@ import {
   type ClearedAgentQueue,
   type ThinkingLevel,
 } from "../core/agent-worker.js";
+import type { CommandDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import type { JsonObject } from "../core/json-value.js";
@@ -57,7 +58,7 @@ import { projectPiModelList } from "../pi/pi-model-list.js";
 import { resolvePiStartingModel } from "../pi/pi-starting-model.js";
 import { TransientFileRegistry } from "../pi/transient-file-registry.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
-import { watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
+import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
 import { Handoff, handoffLimits, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
 import { memoryTools } from "./memory-tools.js";
@@ -99,6 +100,7 @@ const REMIND_SCHEMA = {
     action: { type: "string", enum: ["set", "list", "cancel"] },
     at: { type: "string", description: "set: when, as YYYY-MM-DD HH:mm in local time or an ISO time." },
     inMinutes: { type: "integer", minimum: 1, maximum: 525_600, description: "set: minutes from now, instead of at." },
+    inSeconds: { type: "integer", minimum: 1, maximum: 86_400, description: "set: seconds from now, instead of at; added to inMinutes when both are given." },
     text: { type: "string", maxLength: MAX_REMINDER_CHARS, description: "set: what to do or say then, written so it makes sense on its own later." },
     id: { type: "string", description: "cancel: the reminder's id, as in #r1a2b3c4 (without #)." },
   },
@@ -117,6 +119,12 @@ interface QueuedInput {
   message: AgentMessage;
 }
 
+/** `/dock-tools`, alone or with what to do. */
+const DOCK_TOOLS_INPUT = new RegExp(`^\\s*/${DOCK_TOOLS_COMMAND}(?:\\s+(.*))?$`, "su");
+const DOCK_TOOLS_SWITCH: CommandDto = {
+  name: DOCK_TOOLS_COMMAND, source: { kind: "built-in" }, description: "开启、关闭或查看助手的 Dock tools（派 Work、联系别的 Work）",
+  argumentHint: "on|off|status", argumentCompletions: false,
+};
 const NO_OTHER_SESSION = "助手的对话是一条连续的线，不能新建、切换、分叉或回到某一点。想从头开始，就停掉这个 Work，再以助手身份新开一个；她的记忆都还在。要让她载入刚改过的人设和记忆，用 Reload。";
 
 /**
@@ -294,7 +302,7 @@ class AssistantAgent implements WorkerAgent {
       isCompacting: false,
       modelState: this.modelState(),
       metrics: this.metrics(),
-      extensionCommands: [],
+      extensionCommands: [DOCK_TOOLS_COMMAND],
     };
   }
 
@@ -325,7 +333,11 @@ class AssistantAgent implements WorkerAgent {
       case "tool.list": return { tools: [], total: 0, truncated: false };
       case "settings.get": return [];
       case "resource.get": return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
-      case "command.catalog": return { commands: [], total: 0, truncated: false };
+      // The one command she takes: her owner's switch for her Dock tools, as every Work has it.
+      case "command.catalog": {
+        const commands = [DOCK_TOOLS_SWITCH].filter((command) => command.name.startsWith(request.params.prefix ?? ""));
+        return { commands, total: commands.length, truncated: false };
+      }
       case "session.list": return { sessions: [], total: 0, truncated: false };
       case "session.tree": return { nodes: [] };
       // Her conversation is one line: nothing replaces it. The request ends as cancelled, which every
@@ -340,7 +352,7 @@ class AssistantAgent implements WorkerAgent {
       case "session.compaction.prompts": throw this.notHers("助手的对话由她自己整理，没有可以查看的压缩提示。");
       case "bash.run": case "bash.abort": throw this.notHers("助手自己不跑命令。请在别的 Work 里运行。");
       case "tool.set_active": case "settings.update": case "command.content": case "command.complete":
-        throw this.notHers("助手没有可以在这里调整的工具、设置或命令。");
+        throw this.notHers("助手没有可以在这里调整的工具或设置。");
     }
   }
 
@@ -371,6 +383,24 @@ class AssistantAgent implements WorkerAgent {
     return { cancelled: false };
   }
 
+  /** Her owner's switch for her Dock tools. Without them she only talks and remembers. */
+  private async switchDockTools(action: string): Promise<void> {
+    if (!isDockToolsAction(action)) {
+      this.tell("用法：/dock-tools on、/dock-tools off 或 /dock-tools status。", "warning");
+      return;
+    }
+    const enabled = action === "status" ? this.host.dockToolsEnabled() : await this.host.configureDockTools(action === "on");
+    this.showDockTools();
+    this.tell(enabled
+      ? "助手的 Dock tools 开着：她可以派 Work 干活、联系别的 Work。"
+      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work，只能聊天和用记忆。");
+  }
+
+  /** Clients show the switch's state where every Work shows it. */
+  private showDockTools(): void {
+    void this.host.call("ui.setStatus", { key: DOCK_TOOLS_STATUS_KEY, ...(this.host.dockToolsEnabled() ? { text: "on" } : {}) }).catch(() => {});
+  }
+
   /** Says something to the owner outside the conversation, in whichever client is open. */
   private tell(message: string, level: "info" | "warning" = "info"): void {
     void this.host.call("ui.notify", { message, level }).catch(() => {});
@@ -388,6 +418,7 @@ class AssistantAgent implements WorkerAgent {
         const waiting = this.buffered ?? [];
         this.buffered = undefined;
         for (const event of waiting) this.publish(event);
+        this.showDockTools();
         // Reminders that came due while she was not running fire now that the Host listens.
         this.reminders.start();
         return null;
@@ -429,6 +460,12 @@ class AssistantAgent implements WorkerAgent {
     preflight: (result: AgentCommandPreflightResult) => void,
   ): Promise<null> {
     const { operationId, message, images, delivery: requested } = params;
+    const dockTools = DOCK_TOOLS_INPUT.exec(message);
+    if (dockTools) {
+      preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
+      await this.switchDockTools(dockTools[1]?.trim() || "status");
+      return null;
+    }
     if (this.model === undefined) {
       preflight({ success: false });
       throw this.notHers("这个 Work 还没有可用的模型，所以这句话没有发出去。请先在模型列表里选一个，再发一遍。");
@@ -556,9 +593,9 @@ class AssistantAgent implements WorkerAgent {
     return {
       name: "assistant_remind",
       label: "Reminders",
-      description: "Wake yourself later. set: at a time (at) or after some minutes (inMinutes), with a text that says what to do then; when it comes due you get a turn that starts with the reminder, even if nobody is talking to you. list: the reminders still waiting. cancel: drop one. Reminders survive a restart; one that came due while Dock was not running fires as soon as it is back and says how late it is. Use it when your owner asks to be reminded of something, or to look at something again later instead of waiting in this turn.",
+      description: "Wake yourself later. set: at a time (at) or after a while (inMinutes, inSeconds), with a text that says what to do then; when it comes due you get a turn that starts with the reminder, even if nobody is talking to you. list: the reminders still waiting. cancel: drop one. Reminders survive a restart; one that came due while Dock was not running fires as soon as it is back and says how late it is. Use it when your owner asks to be reminded of something, or to look at something again later instead of waiting in this turn.",
       parameters: REMIND_SCHEMA,
-      execute: async (_id: string, params: { action: string; at?: string; inMinutes?: number; text?: string; id?: string }) => {
+      execute: async (_id: string, params: { action: string; at?: string; inMinutes?: number; inSeconds?: number; text?: string; id?: string }) => {
         const line = (reminder: Reminder): string => `#${reminder.id} ${localMinute(new Date(reminder.at))} ${firstLine(reminder.text)}`;
         if (params.action === "set") {
           if (params.text === undefined) throw new Error("set needs text.");
@@ -885,7 +922,7 @@ class AssistantAgent implements WorkerAgent {
     const lost = this.desk.takeLost();
     const text = [
       renderStatus({
-        now: new Date(), wokenBy, works: this.host.dockToolsEnabled() ? await this.desk.list() : [], selfId: this.host.identity.instanceId,
+        now: new Date(), wokenBy, dockTools: this.host.dockToolsEnabled(), works: this.host.dockToolsEnabled() ? await this.desk.list() : [], selfId: this.host.identity.instanceId,
         notes: this.desk.notes, followed: this.desk.following, reminders: this.reminders.list(),
       }),
       ...(lost.length === 0 ? [] : [`这个 Work 重新打开过，下面这些你派出去的子 Work 已经不在了，它们没交的结果不会再来：${lost.map((name) => `「${name}」`).join("、")}。有事叫醒你时再跟主人说，需要的话重新派。`]),

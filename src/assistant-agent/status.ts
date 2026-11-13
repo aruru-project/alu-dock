@@ -19,6 +19,8 @@ export interface StatusInput {
   now: Date;
   /** What started this reply, in a few words. */
   wokenBy: string;
+  /** Her Dock tools are on; off, she cannot hand anything to a Work or see one. */
+  dockTools: boolean;
   /** Every Work she can see, or undefined when the list could not be read. */
   works: readonly ObservedInstanceStatus[] | undefined;
   /** Her own Work, as the list names it. */
@@ -40,7 +42,9 @@ const MAX_LISTED_WORKS = 12;
  */
 export function renderStatus(input: StatusInput): string {
   const lines = [`[现状 · ${localMinute(input.now)} ${WEEKDAYS[input.now.getDay()]}] 这是 Dock 自动附上的，不是主人说的话。`, `叫醒你的：${input.wokenBy}`];
-  if (input.works === undefined) {
+  if (!input.dockTools) {
+    lines.push("你的 Dock tools 现在关着：派不了 Work，也看不到别的 Work。要动手的事先告诉主人，他在输入框发 /dock-tools on 就能打开。");
+  } else if (input.works === undefined) {
     lines.push("现在读不到 Work 列表。");
   } else {
     const mine = input.works.filter((work) => work.id !== input.selfId && (work.parentId === input.selfId || input.followed.has(work.id)));
@@ -49,6 +53,10 @@ export function renderStatus(input: StatusInput): string {
       lines.push("你派出去或在跟着的 Work：");
       for (const work of mine.slice(0, MAX_LISTED_WORKS)) lines.push(`- ${describeWork(work, input.now, input.notes.get(work.id), work.parentId === input.selfId)}`);
       if (mine.length > MAX_LISTED_WORKS) lines.push(`- 还有 ${mine.length - MAX_LISTED_WORKS} 个，用 dock_list 看。`);
+      // Each idle child Work keeps a process and a line here until she stops it.
+      if (mine.some((work) => work.parentId === input.selfId && work.lifecycle === "active" && work.execution === "idle" && input.notes.get(work.id)?.owes !== true)) {
+        lines.push("空闲的子 Work 里，活已经了结、后面用不到的，用 dock_stop 停掉。");
+      }
     }
     if (others.length > 0) lines.push(`${mine.length > 0 ? "另有" : "主人现在有"} ${others.length} 个别的 Work，要看用 dock_list。`);
   }
@@ -64,9 +72,9 @@ function describeWork(work: ObservedInstanceStatus, now: Date, note: WorkNote | 
   const name = `「${firstLine(work.name ?? work.id, 60)}」`;
   const since = elapsed(work.execution === "running" ? work.runStartedAt ?? work.executionChangedAt : work.executionChangedAt, now);
   const state = work.lifecycle !== "active" ? (work.lifecycle === "stopped" ? "已停止" : "已断开，没在运行")
-    : work.execution === "running" ? `在干活，已 ${since}`
-    : work.execution === "failed" ? `出错停下了，${since}前`
-    : `空闲，${since}前停下`;
+    : work.execution === "running" ? `在干活（${since}）`
+    : work.execution === "failed" ? `出错停下了（${since}前）`
+    : `空闲（${since}前停下）`;
   const owes = child && note?.owes ? "；还欠你结果" : "";
   const said = note?.lastSaid ? `；最近说：${note.lastSaid}` : "";
   return `${child ? "子 Work" : "Work"}${name}${state}${owes}${said}`;

@@ -43,6 +43,8 @@ test("a reminder is handed over once when it comes due, and one that came due wh
 test("a reminder's time is read as minutes from now, a local time, or an ISO time", () => {
   const now = Date.parse("2026-11-13T10:00:00.000Z");
   assert.equal(reminderTime({ inMinutes: 90 }, now).toISOString(), "2026-11-13T11:30:00.000Z");
+  // Card #667 real-model run: asked for "20 秒后", with only minutes to give she set 20 minutes.
+  assert.equal(reminderTime({ inSeconds: 20 }, now).toISOString(), "2026-11-13T10:00:20.000Z");
   assert.equal(reminderTime({ at: "2026-11-14T09:00:00.000Z" }, now).toISOString(), "2026-11-14T09:00:00.000Z");
   const local = reminderTime({ at: "2026-11-14 09:05" }, now);
   assert.deepEqual([local.getFullYear(), local.getMonth(), local.getDate(), local.getHours(), local.getMinutes()], [2026, 10, 14, 9, 5]);
@@ -53,6 +55,7 @@ test("her status lists the Works she handed things to and only counts her owner'
   const at = (minutesAgo: number) => new Date(2026, 10, 13, 16, 5 - minutesAgo).toISOString();
   const base = { cwd: "/w", lifecycle: "active" as const, compacting: false, runtimeGeneration: 1 };
   const text = renderStatus({
+    dockTools: true,
     now: new Date(2026, 10, 13, 16, 5),
     wokenBy: "主人的消息",
     selfId: "alu",
@@ -72,9 +75,10 @@ test("her status lists the Works she handed things to and only counts her owner'
     "[现状 · 2026-11-13 16:05 周五] 这是 Dock 自动附上的，不是主人说的话。",
     "叫醒你的：主人的消息",
     "你派出去或在跟着的 Work：",
-    "- 子 Work「修历史刷新」在干活，已 12 分钟；还欠你结果；最近说：先问一下：要不要改测试？",
-    "- 子 Work「整理部署」空闲，3 分钟前停下；最近说：部署说明整理好了。",
-    "- Work「她替主人开的」空闲，1 小时 30 分钟前停下",
+    "- 子 Work「修历史刷新」在干活（12 分钟）；还欠你结果；最近说：先问一下：要不要改测试？",
+    "- 子 Work「整理部署」空闲（3 分钟前停下）；最近说：部署说明整理好了。",
+    "- Work「她替主人开的」空闲（1 小时 30 分钟前停下）",
+    "空闲的子 Work 里，活已经了结、后面用不到的，用 dock_stop 停掉。",
     "另有 1 个别的 Work，要看用 dock_list。",
     "没到点的提醒：",
     "- 2026-11-14 09:00 提醒主人开会（#r9）",

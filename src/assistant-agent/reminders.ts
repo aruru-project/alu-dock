@@ -56,7 +56,7 @@ export class Reminders {
   list(): readonly Reminder[] { return this.items; }
 
   set(at: Date, text: string): Reminder {
-    if (!Number.isFinite(at.getTime())) throw new Error("The reminder's time could not be read. Give it as YYYY-MM-DD HH:mm (local time), an ISO time, or inMinutes.");
+    if (!Number.isFinite(at.getTime())) throw new Error("The reminder's time could not be read. Give it as YYYY-MM-DD HH:mm (local time), an ISO time, or inMinutes / inSeconds.");
     if (at.getTime() <= this.now()) throw new Error("That time has already passed. Give a later time.");
     if (text.trim().length === 0 || text.length > MAX_REMINDER_CHARS) throw new Error(`A reminder needs a text of at most ${MAX_REMINDER_CHARS} characters.`);
     if (this.items.length >= MAX_REMINDERS) throw new Error(`You already have ${MAX_REMINDERS} reminders waiting. Cancel one first.`);
@@ -103,9 +103,9 @@ export class Reminders {
   }
 }
 
-/** Reads the time a reminder is set for: minutes from now, or a local or ISO time. */
-export function reminderTime(input: { at?: string; inMinutes?: number }, now: number): Date {
-  if (typeof input.inMinutes === "number") return new Date(now + input.inMinutes * 60_000);
+/** Reads the time a reminder is set for: a while from now, or a local or ISO time. */
+export function reminderTime(input: { at?: string; inMinutes?: number; inSeconds?: number }, now: number): Date {
+  if (typeof input.inMinutes === "number" || typeof input.inSeconds === "number") return new Date(now + (input.inMinutes ?? 0) * 60_000 + (input.inSeconds ?? 0) * 1_000);
   if (typeof input.at !== "string") return new Date(Number.NaN);
   const local = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/u.exec(input.at.trim());
   if (local) return new Date(Number(local[1]), Number(local[2]) - 1, Number(local[3]), Number(local[4]), Number(local[5]));

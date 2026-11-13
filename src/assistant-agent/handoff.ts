@@ -1,6 +1,8 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { buildSessionProjection, convertToLlm, estimateTokens, serializeConversation, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
+import { DOCK_NOTE_TYPE, STATUS_NOTE_TYPE } from "./status.js";
+
 /** Where a hand-over record takes over from the conversation before it. */
 export interface HandoffRecord {
   summary: string;
@@ -37,10 +39,10 @@ const WRITER = [
 const WHAT_TO_WRITE = [
   "写一份交接记录，用中文，直接写内容，不要开场白。只写下面这些，哪一项没有就不写那一项：",
   "1. 主人交代过、还没办完的事，以及他提的要求和边界，尽量用他的原话。",
-  "2. 她派出去的 Work：叫什么、交给它什么、做到哪了、交回了什么结果。",
+  "2. 她派出去、活还没了结的 Work：叫什么、交给它什么、做到哪了。已经交回结果、她也转告过主人的不写。",
   "3. 她在等的回答（等主人的、等哪个 Work 的），和她答应过还没做的事。",
   "4. 这段对话里刚定下来、后面还会用到的结论。",
-  "已经了结的事、寒暄和闲聊不写。对话里没有的内容不要编。",
+  "已经了结的事、寒暄和闲聊不写。她定的提醒由 Dock 另外保管、每轮都会告诉她，不要写。对话里没有的内容不要编。",
 ].join("\n");
 
 export interface HandoffDeps {
@@ -128,7 +130,9 @@ export class Handoff {
     const prepared = prepareHandoff(this.deps.branch(), this.deps.limits().keepRecentTokens);
     if (prepared === undefined) return undefined;
     const forgottenAtStart = new Set(await this.deps.forgotten() ?? []);
-    const said = serializeConversation(convertToLlm(prepared.handedOver));
+    // Dock's own notes are not the conversation: she gets a fresh status with every reply.
+    const said = serializeConversation(convertToLlm(prepared.handedOver.filter((message) =>
+      message.role !== "custom" || (message.customType !== STATUS_NOTE_TYPE && message.customType !== DOCK_NOTE_TYPE))));
     const prompt = [
       ...(prepared.previousSummary === undefined ? [] : [`<上一份交接记录>\n${prepared.previousSummary}\n</上一份交接记录>`, "上一份记录里还没了结的事要带到新记录里，已经了结的去掉。"]),
       `<对话>\n${said}\n</对话>`,

@@ -11,6 +11,7 @@ import {
 } from "../core/dock-tools.js";
 import { MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE, type ObservationNotification } from "../core/instance-observation.js";
 import {
+  DOCK_TOOLS_ACTIONS, DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction,
   watchNoticeEntry,
   workMessageEntry,
   WORK_WAKE_TYPE,
@@ -26,9 +27,6 @@ export const DOCK_TOOL_NAMES: readonly string[] = TOP_LEVEL_DOCK_TOOLS.map((tool
 /** A child Work reports to its parent and reaches nothing else. */
 export const CHILD_DOCK_TOOL_NAMES = ["dock_send"] as const;
 const DOCK_TOOLS_EXTENSION_PATH = "<inline:alu-dock-tools>";
-const DOCK_TOOLS_STATUS_KEY = "Dock tools";
-const DOCK_TOOLS_ACTIONS = ["on", "off", "status"] as const;
-type DockToolsAction = typeof DOCK_TOOLS_ACTIONS[number];
 const CHILD_SEND_SCHEMA = {
   type: "object",
   properties: {
@@ -375,7 +373,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
 }
 
 function registerDockToolsSwitch(pi: ExtensionAPI, bridge: DockToolsBridge): void {
-  pi.registerCommand("dock-tools", {
+  pi.registerCommand(DOCK_TOOLS_COMMAND, {
     description: "Turn Agent-facing Dock tools on or off, or show their status",
     getArgumentCompletions: (prefix) => DOCK_TOOLS_ACTIONS
       .filter((action) => action.startsWith(prefix))
@@ -455,9 +453,6 @@ function textOf(content: unknown): string {
     ? [(block as { text: string }).text] : []).join("\n").trim();
 }
 
-function isDockToolsAction(value: string): value is DockToolsAction {
-  return (DOCK_TOOLS_ACTIONS as readonly string[]).includes(value);
-}
 
 function findDockToolCollision(pi: ExtensionAPI, bridge: DockToolsBridge): ReturnType<ExtensionAPI["getAllTools"]>[number] | undefined {
   return pi.getAllTools().find((tool) => bridge.toolNames.includes(tool.name)

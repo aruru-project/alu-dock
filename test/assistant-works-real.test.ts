@@ -69,6 +69,30 @@ test("the assistant hands work to a child Work, answers her owner while it works
   await waitFor(async () => !(await client.list()).some((work) => work.id === child.id), "Her child Work outlived her");
 });
 
+// Seen in the official client against a real Host (card #667): her Work showed "Dock Tools OFF"
+// and offered no switch while she was handing work to child Works.
+test("her Dock tools show as on, and her owner can switch them off and on like any Work's", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-switch-", assistant: true });
+  const { coordinator } = team.providers;
+  const client = await team.startHost();
+  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const shown = async () => (await client.status(alu.id)).extensionStatus["Dock tools"];
+  await waitFor(async () => await shown() === "on", "Her Dock tools did not show as on");
+  assert.ok((await client.commands(alu.id)).commands.some((command) => command.name === "dock-tools"), "Clients find her switch where every Work has it");
+
+  await client.prompt(alu.id, "/dock-tools off", "auto", "alu-off");
+  await waitFor(async () => await shown() === undefined, "Her Dock tools still show as on");
+  await client.prompt(alu.id, "帮我跑一下测试。", "auto", "alu-ask");
+  const asked = await coordinator.request(0);
+  assert.ok(!given(asked).includes("/dock-tools off"), "The switch is not something said to her");
+  assert.ok(given(asked).includes("你的 Dock tools 现在关着"), "She is told she cannot hand work to anyone now");
+  asked.text("我的 Dock tools 关着，派不了 Work。");
+  await settled(client, alu.id);
+
+  await client.prompt(alu.id, "/dock-tools on", "auto", "alu-on");
+  await waitFor(async () => await shown() === "on", "Her Dock tools did not come back on");
+});
+
 // Incident this guards against (the Minecraft companion this design follows, on its live server): a
 // long reply ran out of steps after the work was done, and the person who asked never heard back.
 test("a reply of hers that runs out of steps still ends with a word to her owner", { timeout: 90_000 }, async (context) => {
