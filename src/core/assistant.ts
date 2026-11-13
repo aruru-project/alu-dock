@@ -132,7 +132,7 @@ export interface AssistantSettingsEdit {
   handoff?: AssistantHandoffSettings;
 }
 
-/** One factory default, returned by Main and used by the Worker until settings are read. */
+/** One factory default, returned by Main; the Worker never guesses it when settings cannot be read. */
 export const DEFAULT_ASSISTANT_HANDOFF: Readonly<AssistantHandoffSettings> = {
   startTokens: null,
   keepRecentTokens: null,

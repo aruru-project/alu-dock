@@ -80,7 +80,7 @@ function choose(value: string) {
       <label class="assistant-handoff-field">保留最近原话（约 token）
         <input type="number" aria-label="保留最近原话的 token 数" placeholder="自动" :value="handoffValues.keepRecentTokens ?? ''" @input="editTokens('keepRecentTokens', $event)" />
       </label>
-      <p class="assistant-setting-text">留空由助手按当前模型自动计算；原话按整轮保留，实际数量会有差异。更换较小窗口的模型后，保留量较大可能让整理后的对话仍然较长。</p>
+      <p class="assistant-setting-text">留空由助手按当前模型自动计算；原话按整轮保留，实际数量会有差异。手填保留量超过当前整理预算时，运行时采用较小的量，保存值不变；实际采用值和原因显示在下面的状态中。</p>
       <button type="button" class="button secondary assistant-handoff-auto" @click="memory.editHandoff({ startTokens: null, keepRecentTokens: null })">恢复自动值</button>
       <label class="assistant-handoff-field">交接记录提示词
         <textarea aria-label="交接记录提示词" rows="11" :value="handoffValues.prompt" @input="memory.editHandoff({ prompt: ($event.target as HTMLTextAreaElement).value })" />
@@ -97,7 +97,7 @@ function choose(value: string) {
     </div>
     <p v-if="memory.handoffStatus.error" class="assistant-note is-warning" role="status">{{ memory.handoffStatus.error }}</p>
     <p class="assistant-note" role="status">{{ handoffWork?.extensionStatus['滚动整理'] ?? '暂未读到助手的整理状态，可以刷新再看。' }}</p>
-    <p class="assistant-setting-text">这里显示最近读到的助手 Work 状态；打开助手对话时会随它更新，也可点刷新读取最新状态。</p>
+    <p class="assistant-setting-text">这里显示最近读到的助手 Work 状态和实际采用值；打开助手对话时会随它更新，也可点刷新读取最新状态。首次未读到设置时暂不整理，完整对话保留；之后读取失败则沿用上次有效配置，并在状态中说明。</p>
   </section>
 
   <section class="assistant-setting" aria-labelledby="assistant-extraction-model">

@@ -54,15 +54,16 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     ...options.environment,
   });
   const modelService = options.modelService ? new ModelServiceProcess({ agentDir, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
-  const assistantService = options.assistant
+  const createAssistantService = () => options.assistant
     ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
     : undefined;
+  let assistantService: AssistantServiceProcess | undefined;
   const attachmentService = options.attachments
     ? new AttachmentService(new AttachmentStorageState(join(root, "attachment-state"), join(root, "attachments")))
     : undefined;
   const team = {
-    root, cwd, agentDir, providers, workerPids, modelService, assistantService,
+    root, cwd, agentDir, providers, workerPids, modelService,
     registry: undefined as DockRegistry | undefined,
     host: undefined as DockHost | undefined,
     client: undefined as DockClient | undefined,
@@ -71,7 +72,12 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     onCleanup: undefined as (() => void) | undefined,
     async startHost(): Promise<DockClient> {
       await modelService?.start();
+      // A restarted Main gets a new service process, so persistence is read from disk rather than
+      // from the previous Host's service. SupervisedService instances have one explicit lifecycle.
+      await assistantService?.stop();
+      assistantService = createAssistantService();
       await assistantService?.start();
+      const runningAssistant = assistantService;
       const registry = new DockRegistry(async ({ child, assistant, ...input }) => {
         const shared = {
           ...input, agentDir, sessionDir,
@@ -80,8 +86,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
           ...(modelService === undefined ? {} : { modelHostPort: modelService }),
         };
         // As the installed Host does: a Work opened as the assistant runs her own Agent, every other Pi.
-        const instance = assistant && assistantService !== undefined
-          ? await createAssistantInstance({ ...shared, assistantHostPort: { request: (request, source, signal) => assistantService.request(request, { ...source, machine: "Main" }, signal) } })
+        const instance = assistant && runningAssistant !== undefined
+          ? await createAssistantInstance({ ...shared, assistantHostPort: { request: (request, source, signal) => runningAssistant.request(request, { ...source, machine: "Main" }, signal) } })
           : await createPiInstance({ ...shared, ...(child === undefined ? {} : { child }) });
         const hold = child === undefined ? undefined : team.holdNextChild;
         team.holdNextChild = undefined;

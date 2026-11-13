@@ -61,7 +61,7 @@ import { dockAttachmentTools } from "../worker/dock-attachment-tools.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
 import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
-import { Handoff, handoffLimits, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
+import { HANDOFF_STATE_TYPE, HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
 import { memoryTools } from "./memory-tools.js";
 import { AssistantOpening } from "./opening.js";
 import { SessionRecorder, type AssistantCallPort } from "./recorder.js";
@@ -222,7 +222,10 @@ class AssistantAgent implements WorkerAgent {
     this.shown = new RecentConversation(session);
     this.handoff = new Handoff({
       branch: () => this.session.getBranch(),
-      limits: () => handoffLimits(this.model?.contextWindow ?? 0),
+      contextWindow: () => this.model?.contextWindow ?? 0,
+      settings: async () => (await port.call({ op: "settings_get" })).handoff,
+      status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, text }).catch(() => {}); },
+      rememberResult: (text) => this.saveState(HANDOFF_STATE_TYPE, text),
       complete: (system, prompt, maxTokens, signal) => this.complete(system, prompt, maxTokens, signal),
       forgotten: () => this.forgottenEntries(),
       ready: () => { if (this.running === undefined) this.settleSoon(); },
@@ -275,8 +278,8 @@ class AssistantAgent implements WorkerAgent {
       // she wait for it here and go on from it inside the reply.
       prepareRequest: async ({ context }, signal) => {
         const tokens = estimateContextTokens(convertToLlm(context.messages)).tokens;
-        if (tokens < handoffLimits(this.model?.contextWindow ?? 0).mustTokens) this.handoff.consider(tokens);
-        else {
+        this.handoff.consider(tokens);
+        if (this.handoff.mustWait(tokens)) {
           // Stop does not wait for the record: the request that follows ends at once.
           const stopped = new Promise<void>((done) => signal?.addEventListener("abort", () => done(), { once: true }));
           await Promise.race([this.handoff.require(tokens), stopped]);
@@ -440,6 +443,7 @@ class AssistantAgent implements WorkerAgent {
         this.buffered = undefined;
         for (const event of waiting) this.publish(event);
         this.showDockTools();
+        void this.handoff.refresh();
         // Reminders that came due while she was not running fire now that the Host listens.
         this.reminders.start();
         return null;
@@ -688,6 +692,8 @@ class AssistantAgent implements WorkerAgent {
     for (const [type, state] of latest) this.savedState.set(type, JSON.stringify(state));
     this.desk.restore(latest.get(WORKS_STATE_TYPE));
     this.reminders.restore((latest.get(REMINDERS_STATE_TYPE) as { reminders?: unknown } | undefined)?.reminders);
+    const lastCompaction = this.session.getBranch().findLast((entry) => entry.type === "compaction");
+    this.handoff.restore(latest.get(HANDOFF_STATE_TYPE), lastCompaction?.timestamp);
   }
 
   private clearQueue(): ClearedAgentQueue {
@@ -845,6 +851,7 @@ class AssistantAgent implements WorkerAgent {
       return false;
     }
     this.session.appendCompaction(record.summary, record.firstKeptEntryId, record.tokensBefore);
+    this.handoff.applied();
     if (!insideReply) await this.dropForgotten(forgotten);
     this.opening.refresh();
     this.contextReady = false;
@@ -1082,6 +1089,7 @@ class AssistantAgent implements WorkerAgent {
     this.model = model;
     this.thinkingLevel = clampThinkingLevel(model, this.thinkingLevel) as ThinkingLevel;
     this.session.appendModelChange(model.provider, model.id);
+    void this.handoff.refresh();
     return this.modelState();
   }
 

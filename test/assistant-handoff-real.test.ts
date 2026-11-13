@@ -30,8 +30,13 @@ const records = async (client: DockClient, id: string) => (await client.history(
 // Card #667: her conversation never starts over. When it grows long, the older part is written into a
 // hand-over record in the background while she goes on answering (compacting in place made the
 // Minecraft companion this follows deaf for 90 to 194 seconds), and the record takes its place later.
-test("a long conversation is handed over in the background: she answers meanwhile, then goes on from the record with her persona and notes loaded anew", { timeout: 90_000 }, async (context) => {
-  const { client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-assistant-handoff-");
+test("saved hand-over settings guide background writing while she answers, and survive restarting Main", { timeout: 90_000 }, async (context) => {
+  const { team, client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-assistant-handoff-");
+  const handoff = { startTokens: 55_000, keepRecentTokens: 1_200, prompt: "你是小满的交接记录员。用主人选的名字，只交接还没办完的事情，保留原话中的要求。" };
+  assert.ok((await client.assistantSettings()).handoff?.prompt.includes("交接记录"), "Main supplies the editable factory instruction");
+  await client.setAssistantSettings({ handoff });
+  // An existing model-only caller leaves hand-over settings alone.
+  assert.deepEqual((await client.setAssistantSettings({ extractionModel: null })).handoff, handoff);
 
   await client.prompt(alu.id, "周末去爬山，到时候记得提醒我带水壶。", "auto", "alu-plan");
   (await coordinator.request(0)).text("好，记着呢。");
@@ -42,6 +47,11 @@ test("a long conversation is handed over in the background: she answers meanwhil
 
   // The record is being written: the model is asked for it and has not answered.
   const writing = await coordinator.request(2);
+  assert.equal(writing.body.messages?.find((message) => message.role === "system" || message.role === "developer")?.content, handoff.prompt, "The entire saved instruction replaces the factory role and writing rules");
+  await waitFor(async () => {
+    const status = (await client.status(alu.id)).extensionStatus["滚动整理"] ?? "";
+    return status.includes("正在后台整理") && status.includes("55000 token") && status.includes("1200 token");
+  }, "The Work did not show its effective hand-over settings");
   assert.ok(given(writing).includes("交接记录") && given(writing).includes("周末去爬山，到时候记得提醒我带水壶。"), "The older part of the conversation is given to the model to write the record from");
   // She answers her owner meanwhile, from the whole conversation.
   await client.prompt(alu.id, "在吗？", "auto", "alu-there");
@@ -67,6 +77,13 @@ test("a long conversation is handed over in the background: she answers meanwhil
   // Clients still show the conversation from before the record, with the record in it.
   const shown = (await client.history(alu.id)).entries;
   assert.ok(shown.some((entry) => JSON.stringify(entry.content).includes("周末去爬山，到时候记得提醒我带水壶。")), "Clients keep showing what was said before the latest record");
+
+  client.closeActiveConnections();
+  await team.host!.stop();
+  const reopened = await team.startHost();
+  assert.deepEqual((await reopened.assistantSettings()).handoff, handoff, "Main keeps the saved parameters and full instruction after restarting");
+  const resident = await team.assistantWork();
+  await waitFor(async () => (await reopened.status(resident.id)).extensionStatus["滚动整理"]?.includes("上次整理成功") === true, "The reopened Work did not restore its latest hand-over result");
 });
 
 // Card #667: what she is told to forget is no longer in front of her either: not where it was said
