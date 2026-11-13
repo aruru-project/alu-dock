@@ -1,13 +1,9 @@
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 
-import type {
-  AttachmentAccessRequest,
-  AttachmentAccessResult,
-  AttachmentDto,
-} from "../core/instance-attachments.js";
+import type { AttachmentDto } from "../core/instance-attachments.js";
+import { DOCK_ATTACHMENT_RESOLVE_TOOL, type DockAttachmentCallPort } from "./dock-attachment-access.js";
 
 export const DOCK_ATTACHMENT_TOOL_NAMES = ["dock_attachment_list", "dock_attachment_resolve"] as const;
-export const DOCK_ATTACHMENT_RESOLVE_TOOL = "dock_attachment_resolve";
 const EXTENSION_PATH = "<inline:alu-dock-attachments>";
 const TOOL_NAMES = new Set<string>(DOCK_ATTACHMENT_TOOL_NAMES);
 const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
@@ -18,10 +14,6 @@ const RESOLVE_SCHEMA = {
   additionalProperties: false,
 };
 const COPY_GUIDANCE = "Copy the resolved file into the workspace or a temporary directory before modifying or extracting it; preserve the stored original.";
-
-export interface DockAttachmentCallPort {
-  access(request: AttachmentAccessRequest): Promise<AttachmentAccessResult>;
-}
 
 export function dockAttachmentsExtension(port: DockAttachmentCallPort): ExtensionFactory {
   return (pi) => {
@@ -63,11 +55,6 @@ export function dockAttachmentsExtension(port: DockAttachmentCallPort): Extensio
       ctx.ui.notify(`Dock attachment tools are unavailable because ${collision.name} is already registered.`, "error");
     });
   };
-}
-
-export function redactDockAttachmentToolResult(toolName: string | undefined, text: string): string {
-  if (toolName !== DOCK_ATTACHMENT_RESOLVE_TOOL) return text;
-  return "Dock attachment resolved. The Host-local path was disclosed privately to the Agent and is omitted from external conversation projections.";
 }
 
 function renderList(attachments: readonly AttachmentDto[], total: number, truncated: boolean): string {

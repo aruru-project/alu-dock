@@ -5,8 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
-import { PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
-import { ownCanonicalShowImage, PUBLISHED_FILE_DETAIL_KEY, SHOW_IMAGE_EXTENSION_PATH, showImageExtension } from "../src/pi/show-image-extension.js";
+import { PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-conversation.js";
+import { ownCanonicalShowImage, SHOW_IMAGE_EXTENSION_PATH, showImageExtension } from "../src/pi/show-image-extension.js";
+import { PUBLISHED_FILE_DETAIL_KEY } from "../src/pi/show-image-result.js";
 
 test("show_image publishes path-free metadata while the source file remains the only bytes", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-show-image-"));

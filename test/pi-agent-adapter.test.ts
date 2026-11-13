@@ -4,7 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
-import { PUBLISHED_FILE_DETAIL_KEY } from "../src/pi/show-image-extension.js";
+import { PUBLISHED_FILE_DETAIL_KEY } from "../src/pi/show-image-result.js";
 import test from "node:test";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { parseConversationFrame, parseConversationHistoryBody, parseConversationContentBody } from "../src/control/protocol.js";
@@ -12,7 +12,8 @@ import { formatDimensionNote, SessionManager } from "@earendil-works/pi-coding-a
 
 import { InstanceEventJournal } from "../src/core/instance-event-journal.js";
 import { AgentConversationCursorError } from "../src/core/agent-worker.js";
-import { PiAgentAdapter, type PiAgentAdapterOptions, PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
+import { PiAgentAdapter, type PiAgentAdapterOptions } from "../src/pi/pi-agent-adapter.js";
+import { PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-conversation.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
 import type { JsonObject } from "../src/core/json-value.js";
