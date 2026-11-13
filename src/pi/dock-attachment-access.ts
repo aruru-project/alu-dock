@@ -3,8 +3,9 @@
  * resolved attachment in place of its Host-local path.
  */
 import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
+import { DOCK_ATTACHMENT_TOOL_NAMES } from "../worker/dock-attachment-tools.js";
 
-export const DOCK_ATTACHMENT_RESOLVE_TOOL = "dock_attachment_resolve";
+export const DOCK_ATTACHMENT_RESOLVE_TOOL = DOCK_ATTACHMENT_TOOL_NAMES[1];
 
 export interface DockAttachmentCallPort {
   access(request: AttachmentAccessRequest): Promise<AttachmentAccessResult>;

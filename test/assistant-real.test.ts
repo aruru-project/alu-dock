@@ -36,10 +36,8 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
   const prompt = systemMessages(asked.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
   assert.ok(prompt.startsWith("## 身份\n\n你是**阿露**"), `The prompt opens with her persona: ${prompt.slice(0, 200)}`);
   assert.ok(prompt.includes("主人的猫叫团子。"), "The assistant loads the owner's notes");
-  // Card #667: she is not a coding Work. The project's rules belong to the Works that work there, and
-  // she has no file or shell tools of her own.
+  // Card #667: she is not a coding Work. The project's rules belong to the Works that work there.
   assert.ok(!prompt.includes("PROJECT SYSTEM TEXT") && !prompt.includes("PROJECT RULES TEXT") && !prompt.includes("You are an expert coding assistant"), "Nothing of the project or of Pi's coding prompt is loaded for her");
-  assert.deepEqual(asked.toolNames.filter((name) => !name.startsWith("assistant_") && !name.startsWith("dock_")), [], "Her own Agent offers the model her memory and Dock tools, and none for files or the shell");
   assert.ok(asked.toolNames.includes("assistant_search") && asked.toolNames.includes("dock_spawn"));
   asked.text("团子呀，这都忘了？");
   await settled(client, alu.id);

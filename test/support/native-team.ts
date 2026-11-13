@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
+import { AttachmentService } from "../../src/control/attachment-service.js";
+import { AttachmentStorageState } from "../../src/control/attachment-storage-state.js";
 import { ControlClientError, DockClient } from "../../src/control/dock-client.js";
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
@@ -37,6 +39,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   environment?: Record<string, string>;
   /** Run Main's assistant service, so Works can be opened as the assistant (card #295). */
   assistant?: boolean;
+  /** Real attachment storage, isolated under the team's temporary directory. */
+  attachments?: boolean;
   /** Shorter waits for her memory passes. */
   assistantTiming?: Partial<ExtractionTiming>;
 }) {
@@ -53,6 +57,9 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   const assistantService = options.assistant
     ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
+    : undefined;
+  const attachmentService = options.attachments
+    ? new AttachmentService(new AttachmentStorageState(join(root, "attachment-state"), join(root, "attachments")))
     : undefined;
   const team = {
     root, cwd, agentDir, providers, workerPids, modelService, assistantService,
@@ -86,9 +93,10 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
         trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
         assistantAvailable: assistantService !== undefined,
+        ...(attachmentService === undefined ? {} : { attachmentHostPort: attachmentService }),
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }) });
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
       await team.host.start();
       return team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
     },

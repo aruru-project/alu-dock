@@ -17,7 +17,7 @@ import {
   type TextContent,
 } from "@earendil-works/pi-ai";
 import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { convertToLlm, ModelRuntime, SessionManager, SettingsManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, createFindTool, createGrepTool, createLsTool, createReadTool, ModelRuntime, SessionManager, SettingsManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import {
   AgentCompactionKnownFailureError,
@@ -37,10 +37,10 @@ import {
   type ClearedAgentQueue,
   type ThinkingLevel,
 } from "../core/agent-worker.js";
-import type { CommandDto } from "../core/config-projection.js";
+import { compareToolDtos, type CommandDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
-import type { JsonObject } from "../core/json-value.js";
+import { projectJsonObject, type JsonObject } from "../core/json-value.js";
 import { localMinute } from "../core/local-time.js";
 import { mainModelOwner } from "../model-service/owner.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
@@ -57,6 +57,7 @@ import {
 import { projectPiModelList } from "../pi/pi-model-list.js";
 import { resolvePiStartingModel } from "../pi/pi-starting-model.js";
 import { TransientFileRegistry } from "../pi/transient-file-registry.js";
+import { dockAttachmentTools } from "../worker/dock-attachment-tools.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
 import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
@@ -130,7 +131,8 @@ const NO_OTHER_SESSION = "助手的对话是一条连续的线，不能新建、
 /**
  * The personal assistant's own Agent (card #667). She is not a Pi coding Work: she keeps a
  * conversation in Pi's session format and asks the model through Pi's model runtime and loop, but
- * has no project context, extensions, shell or file tools of her own.
+ * loads no project context or extensions. She can read files; changing them and running commands
+ * belong to the Works she hands tasks to.
  */
 export async function createAssistantAgent(init: AssistantWorkerInit, host: WorkerHost): Promise<WorkerAgent> {
   const assistant = host.assistant;
@@ -165,6 +167,7 @@ class AssistantAgent implements WorkerAgent {
   private readonly opening: AssistantOpening;
   private readonly agent: Agent;
   private readonly tools: AgentTool[];
+  private readonly workTools: AgentTool[];
   private model: Model<Api> | undefined;
   private thinkingLevel: ThinkingLevel = "off";
   /** The reply in progress, retries included; undefined while she is idle. */
@@ -234,13 +237,16 @@ class AssistantAgent implements WorkerAgent {
       (reminder, lateMs) => this.reminderDue(reminder, lateMs),
     );
     this.restoreState();
+    this.workTools = this.dockTools();
     this.tools = [
+      createReadTool(cwd), createLsTool(cwd), createFindTool(cwd), createGrepTool(cwd),
+      ...(host.attachments === undefined ? [] : dockAttachmentTools(host.attachments) as AgentTool[]),
       ...memoryTools({
         port, session, recorder: this.recorder, models, attachmentContextKey,
         confirm: async (title, message) => await host.call("ui.confirm", { title, message }, this.agent.signal) === true,
       }),
       this.reminderTool(),
-      ...this.dockTools(),
+      ...this.workTools,
     ];
     this.agent = new Agent({
       initialState: { tools: this.tools },
@@ -329,8 +335,16 @@ class AssistantAgent implements WorkerAgent {
         this.publish({ type: "session_info_changed", ...(name === undefined ? {} : { name }), operationId: request.params.operationId });
         return name;
       }
+      // Tools can be inspected, not individually switched. The Dock switch keeps its own meaning.
+      case "tool.list": {
+        const tools = this.tools.map((tool) => ({
+          name: tool.name, description: tool.description,
+          active: this.host.dockToolsEnabled() || !this.workTools.includes(tool),
+          source: { kind: "built-in" as const }, parameterSchema: projectJsonObject(tool.parameters).value,
+        })).sort(compareToolDtos);
+        return { tools, total: tools.length, truncated: false };
+      }
       // She has none of these: clients open her Work and show them empty.
-      case "tool.list": return { tools: [], total: 0, truncated: false };
       case "settings.get": return [];
       case "resource.get": return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
       // The one command she takes: her owner's switch for her Dock tools, as every Work has it.
@@ -351,8 +365,10 @@ class AssistantAgent implements WorkerAgent {
         throw new AgentCompactionKnownFailureError("nothing_to_compact", "The assistant keeps her own conversation short");
       case "session.compaction.prompts": throw this.notHers("助手的对话由她自己整理，没有可以查看的压缩提示。");
       case "bash.run": case "bash.abort": throw this.notHers("助手自己不跑命令。请在别的 Work 里运行。");
-      case "tool.set_active": case "settings.update": case "command.content": case "command.complete":
-        throw this.notHers("助手没有可以在这里调整的工具或设置。");
+      case "tool.set_active":
+        throw this.notHers("助手的工具可以查看，不能逐个开关。要开关派 Work、联系别的 Work 的能力，请用 /dock-tools on 或 /dock-tools off。");
+      case "settings.update": case "command.content": case "command.complete":
+        throw this.notHers("助手没有可以在这里调整的设置。要刷新人设和记忆，请用 Reload。");
     }
   }
 
@@ -383,7 +399,7 @@ class AssistantAgent implements WorkerAgent {
     return { cancelled: false };
   }
 
-  /** Her owner's switch for her Dock tools. Without them she only talks and remembers. */
+  /** Her owner's switch for collaboration. Reading files and attachments stays available. */
   private async switchDockTools(action: string): Promise<void> {
     if (!isDockToolsAction(action)) {
       this.tell("用法：/dock-tools on、/dock-tools off 或 /dock-tools status。", "warning");
@@ -393,7 +409,7 @@ class AssistantAgent implements WorkerAgent {
     this.showDockTools();
     this.tell(enabled
       ? "助手的 Dock tools 开着：她可以派 Work 干活、联系别的 Work。"
-      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work，只能聊天和用记忆。");
+      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work；仍能聊天、用记忆、读取文件和附件。要恢复派活，用 /dock-tools on。");
   }
 
   /** Clients show the switch's state where every Work shows it. */
