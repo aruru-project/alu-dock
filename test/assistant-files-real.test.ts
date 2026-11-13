@@ -44,7 +44,6 @@ test("the assistant reads and searches files and uploaded text and images hersel
   const textId = textUpload.attachment.fileId, imageId = imageUpload.attachment.fileId;
 
   const catalog = await client.tools(alu.id);
-  assert.equal(catalog.total, 25);
   for (const name of ["read", "ls", "find", "grep", "dock_attachment_list", "dock_attachment_resolve", "assistant_search", "dock_spawn", "dock_deliver_file"]) {
     const tool = catalog.tools.find((item) => item.name === name);
     assert.equal(tool?.active, true, `${name} should be listed as available`);

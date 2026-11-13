@@ -24,7 +24,23 @@
 }
 ```
 
-内置工厂用 `builtin:名称`，由随包 Worker 显式注册，不扫描本机目录。Main 的出厂设置声明启用 `builtin:web`；实际能力以这个版本随包的 factory map 为准，缺少工厂会显示加载失败，绝不会冒充已经启用。没有自动安装、下载或插件市场。
+内置工厂用 `builtin:名称`，由随包 Worker 显式注册，不扫描本机目录。Main 的出厂设置启用 `builtin:web`，联网实现随 Dock 一起安装，不要求用户装过 Pi 或任何 Pi 扩展。没有运行时自动安装、下载或插件市场。
+
+## 随包联网扩展
+
+`builtin:web` 提供 `web_search`、`fetch_content`、`get_search_content`、`source_check`，具体列表遵循本项配置。实现复用固定版本 pi-web-access 的公开独立接口，通过 Pi 的独立 MCP 客户端库调用；它不是 Pi Agent，也不是另一份搜索引擎。
+
+本项 JSON 配置使用 pi-web-access 的 `web-search.json` 格式。例如显式使用自己的 Exa 账户：
+
+```json
+{ "provider": "exa", "exaApiKey": "填写自己的密钥" }
+```
+
+空配置采用联网引擎的默认路由（支持无密钥的 Exa MCP），不保证服务可用性或免费额度；收费与权限以你选择的搜索服务为准。也支持你自己的 SearXNG 地址等配置。已有 Pi 联网配置可以复制到此处，但 Dock 不读取或改写你的 Pi 扩展安装。配置写入本项私人 dataDir 下的 `web-search.json`，不进入模型对话。
+
+配置与启停保存后 Reload 生效。联网引擎作为此扩展拥有的固定本机服务运行，Reload/助手退出时关闭；内存中的搜索结果编号随它退出失效，不能当作永久记忆。尚需的来源和结论应保存在助手对话/记忆中。
+
+独立接口不支持 Pi 专属的 curator、ChatGPT 登录复用、当前 Pi 模型搜索、网页问答模式、视频抽帧等能力；这里不宣称它们已经迁入。需要这些功能时仍可交给普通 Pi Work。公开配置说明见 [pi-web-access](https://www.npmjs.com/package/pi-web-access)。
 
 ## 最小扩展
 
@@ -97,6 +113,6 @@ async execute(params, { signal }) {
 
 加载器不把 `config` 拼进工具说明、系统提示或聊天；内置 `assistant_memory` 的设置操作也只返回它负责的整理记忆模型。扩展作者仍须保证自己的说明、结果、更新和报错不泄露秘密。不要把秘密写进源码示例、工具 schema 或 `details`。已有对话中记录的业务输出不会因禁用扩展被删除。
 
-Reload 会清理旧扩展，再重新执行入口模块，重读 Main 配置。Node 缓存的间接依赖不强制失效；修改依赖代码后可重启助手。没有独立扩展进程、会话钩子、循环接管或后台重启平台。
+Reload 会清理旧扩展，再重新执行入口模块，重读 Main 配置。Node 缓存的间接依赖不强制失效；修改依赖代码后可重启助手。加载器不为每个扩展另起 Work 或通用进程容器，也没有会话钩子、循环接管或后台重启平台。扩展如需自己的辅助进程（随包联网服务就是一例），必须自己负责关闭资源。
 
 随包扩展只在 Worker 装配：`assistant-worker-entry.ts` 把 `builtin-extensions.ts` 的 `builtinAssistantExtensions` 传给 `createAssistantAgent`。向 map 增加 `web: factory` 即对应 `builtin:web`，Host 不导入这些模块。

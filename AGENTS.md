@@ -10,7 +10,7 @@
 
 Alu Dock 是本机单用户的 Agent 运行与控制主体。它提供长期 Host Service、受管工作实例、统一协议，以及官方 Desktop/Android Client、TUI 和自定义 Client 等多个入口，让 Agent 工作可以脱离单个终端持续运行、观察和接管。
 
-当前唯一 Agent 实现是 Pi，也是当前的成熟基底；其他 Agent（如轻量语音）可通过新的 Worker adapter 接入。官方 Desktop/Android Client 属于 Alu Dock 的第一方产品。
+Pi 是成熟的编码 Agent 基底；常驻个人助手使用独立 Worker，并提供自己的轻量工具扩展接口。其他 Agent（如轻量语音）可通过新的 Worker adapter 接入。官方 Desktop/Android Client 属于 Alu Dock 的第一方产品。
 
 ## 架构
 
