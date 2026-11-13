@@ -7,6 +7,7 @@ import { modelKey } from '../lib/modelLists'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
 import AluSelect from './AluSelect.vue'
+import AssistantExtensions from './AssistantExtensions.vue'
 
 // Main owns the saved settings; the assistant Work reports its own rolling hand-over status.
 const assistant = useAssistantStore()
@@ -70,6 +71,7 @@ function choose(value: string) {
 </script>
 
 <template>
+  <AssistantExtensions />
   <section class="assistant-setting" aria-labelledby="assistant-handoff-settings">
     <h4 id="assistant-handoff-settings">滚动整理对话</h4>
     <p class="assistant-setting-text">较早的对话会在后台写成交接记录，最近的原话继续保留。原始对话不会删除。整理沿用当前聊天模型，不影响整理记忆的模型。</p>

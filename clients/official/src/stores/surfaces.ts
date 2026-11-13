@@ -325,7 +325,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
 
   function controlDialogTitle(section: ControlSection) {
     if (app.selectedWork?.assistant) {
-      if (section === 'reload-session') return '刷新人设和记忆'
+      if (section === 'reload-session') return '刷新助手（Reload）'
       if (section === 'tools') return '她能用的工具'
       if (section === 'resources') return '助手状态'
     }

@@ -46,6 +46,10 @@ App / 区域组件 → 按领域划分的 Pinia store → typed bridge
 | 配色：经典、暮色、晨光 | 本机 `localStorage` 的 `aludock.theme`（`lib/theme.ts`），`stores/platform.ts` 持当前选择；Android 原生另存一份（`ClientAppearance.kt`），Windows 另存一份（`appearance.rs` 写在 App 本地数据目录），只给页面加载前的窗口、系统栏和标题栏用，每次页面启动和切换时由页面同步（一次一个请求，期间的选择只发最后一个） | App 设置的「配色」（`AppSettings.vue`，所有平台都有，Windows 另有暂离）；`index.html` 在首次绘制前按存的值设 `data-theme`；颜色在 `styles/tokens.css` 每套一块；Tauri `appearance.rs` 的 `set_native_appearance` → Android `MainActivity.applyAppearance`（状态栏和导航栏图标深浅、窗口底色、Android 13+ 的启动画面），Windows 设窗口标题栏的深浅（WebView2 自带的菜单、提示框随之），启动时在窗口出现前按存的那份设好；Linux 等其他桌面仍跟随系统；原生把失败分两种报回（当前的窗口和系统栏没跟上／只是下次的启动画面没设上），App 设置分别提示，再点一下当前配色重试 | `themes.test.ts`（每套变量齐全、首次绘制读同一个键）；`appInteraction.test.mjs`（App 设置切换立即生效、本机保存、通知原生、两种失败的提示和重试）；Tauri `appearance::tests`（原生状态码对应的结果）；系统栏和启动底色须真机，标题栏须在 Windows 上看 |
 | Windows 托盘/away、Android 后台与文档 URI | `desktop_shell.rs`、`windows_launch.rs`、`android_documents.rs`；Vue `stores/platform.ts`（暂离在 `stores/observation.ts`） | 本地 lifecycle 与原生 pause/rebind；不以后台状态结束 Work 或清文件 | Linux 编译不等于 Windows/Android；按用户授权打 staging 包后进行真机验证 |
 
+### 助手工具扩展设置
+
+`AssistantSettings.vue` 内的 `AssistantExtensions.vue` 用 `stores/assistant-extensions.ts` 保留每个连接的模块、启停和 JSON 配置草稿；仍经 `assistant.settings.get/set`、Rust core `assistant.rs` 和原 bridge 读写 Main，不在客户端安装模块。保存提示助手空闲时 Reload，不热换工具。配置可能含密钥，只出现在本项编辑器里，不送聊天；信任边界和最小示例见 [工具扩展 API](../agent/assistant-tool-extensions.md)。实际工具来自原 `tool.list`，来源显示 `extension / id`，加载状态来自 Work 的 `extensionStatus`。定向证据沿原 `appInteraction.test.mjs` 的设置和工具列表入口。
+
 ## Native 入口与 core 业务接口
 
 `src-tauri/src/lib.rs` 只启动、装配状态和注册原有 IPC。连接选择保留在 `connection_state.rs`，配对和连接任务在 `connection.rs`；它们调用 core 的 registry、pairing 和 router，不实现认证或身份存储。其余入口分别在 `sessions.rs`、`work.rs`、`configuration.rs`、`observation.rs`、`extension.rs`、`attachment_import.rs`、`file_handoff.rs`；`media.rs`、`file_delivery.rs`、`workspace_files.rs` 负责原生文件交付，`away.rs` 负责 Windows 离开提醒。

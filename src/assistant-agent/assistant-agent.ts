@@ -63,6 +63,7 @@ import { DOCK_TOOLS_COMMAND, DOCK_TOOLS_STATUS_KEY, isDockToolsAction, watchNoti
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
 import { HANDOFF_STATE_TYPE, HANDOFF_STATUS_KEY, Handoff, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
 import { memoryTools } from "./memory-tools.js";
+import { AssistantToolExtensions, type AssistantBuiltinExtensions } from "./tool-extensions.js";
 import { AssistantOpening } from "./opening.js";
 import { SessionRecorder, type AssistantCallPort } from "./recorder.js";
 import { MAX_REMINDER_CHARS, Reminders, reminderTime, type Reminder } from "./reminders.js";
@@ -128,10 +129,10 @@ const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开
 /**
  * The personal assistant's own Agent (card #667). She is not a Pi coding Work: she keeps a
  * conversation in Pi's session format and asks the model through Pi's model runtime and loop, but
- * loads no project context or extensions. She can read files; changing them and running commands
+ * loads no project context or Pi extensions. She can read files; changing them and running commands
  * belong to the Works she hands tasks to.
  */
-export async function createAssistantAgent(init: AssistantWorkerInit, host: WorkerHost): Promise<WorkerAgent> {
+export async function createAssistantAgent(init: AssistantWorkerInit, host: WorkerHost, builtins: AssistantBuiltinExtensions = {}): Promise<WorkerAgent> {
   const assistant = host.assistant;
   if (!assistant) throw new Error("This Work was not opened as the assistant");
   const cwd = resolve(init.cwd);
@@ -148,8 +149,9 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
     : SessionManager.open(resolve(init.sessionFile), sessionDir, cwd);
   if (init.initialName !== undefined && session.getSessionName() !== init.initialName) session.appendSessionInfo(init.initialName);
   const attachmentContextKey = await loadAttachmentContextKey(agentDir);
-  const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey);
+  const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins);
   await her.chooseStartingModel(init.workerConfig?.model, init.sessionFile === undefined);
+  await her.loadExtensions();
   return her;
 }
 
@@ -163,7 +165,9 @@ class AssistantAgent implements WorkerAgent {
   private readonly recorder: SessionRecorder;
   private readonly opening: AssistantOpening;
   private readonly agent: Agent;
-  private readonly tools: AgentTool[];
+  private tools: AgentTool[];
+  private readonly builtInTools: AgentTool[];
+  private readonly extensions: AssistantToolExtensions;
   private readonly workTools: AgentTool[];
   private model: Model<Api> | undefined;
   private thinkingLevel: ThinkingLevel = "off";
@@ -217,7 +221,13 @@ class AssistantAgent implements WorkerAgent {
     private readonly settings: SettingsManager,
     private readonly session: SessionManager,
     private readonly attachmentContextKey: Uint8Array,
+    builtins: AssistantBuiltinExtensions,
   ) {
+    this.extensions = new AssistantToolExtensions(cwd, builtins, {
+      notify: (message, level) => this.tell(message, level),
+      confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message }, signal) === true,
+      status: (key, text) => { void host.call("ui.setStatus", { key, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
+    });
     this.conversation = new PiSessionConversation({ attachmentContextKey, publishedFiles: this.publishedFiles });
     this.shown = new RecentConversation(session);
     this.handoff = new Handoff({
@@ -252,6 +262,7 @@ class AssistantAgent implements WorkerAgent {
       this.reminderTool(),
       ...this.workTools,
     ];
+    this.builtInTools = this.tools;
     this.agent = new Agent({
       initialState: { tools: this.tools },
       streamFn: (model, context, options) => models.streamSimple(model, context, options),
@@ -295,6 +306,17 @@ class AssistantAgent implements WorkerAgent {
   }
 
   get persistedName(): string | undefined { return this.session.getSessionName(); }
+
+  async loadExtensions(): Promise<void> {
+    try {
+      const { extensions = [] } = await this.port.call({ op: "settings_get" });
+      this.tools = [...this.builtInTools, ...await this.extensions.load(extensions, this.builtInTools)];
+      this.agent.state.tools = this.tools;
+    } catch {
+      // A settings outage must not take away chat or the tools that already worked.
+      this.tell("暂时读不到助手扩展设置，现有工具没有改变。请稍后 Reload 重试。", "warning");
+    }
+  }
 
   // ---- What the Host asks -------------------------------------------------------------------
 
@@ -348,7 +370,7 @@ class AssistantAgent implements WorkerAgent {
         const tools = this.tools.map((tool) => ({
           name: tool.name, description: tool.description,
           active: this.host.dockToolsEnabled() || !this.workTools.includes(tool),
-          source: { kind: "built-in" as const }, parameterSchema: projectJsonObject(tool.parameters).value,
+          source: this.extensions.sources.get(tool.name) ?? { kind: "built-in" as const }, parameterSchema: projectJsonObject(tool.parameters).value,
         })).sort(compareToolDtos);
         return { tools, total: tools.length, truncated: false };
       }
@@ -395,6 +417,7 @@ class AssistantAgent implements WorkerAgent {
     // A record being written asks the model through the Host; the reloaded conversation writes its own.
     this.handoff.discard();
     this.opening.refresh();
+    await this.loadExtensions();
     await this.dropForgotten().catch(() => {});
     this.contextReady = false;
     const sessionFile = this.session.getSessionFile();
@@ -404,6 +427,7 @@ class AssistantAgent implements WorkerAgent {
       ...(sessionFile === undefined ? {} : { previousSessionFile: sessionFile, sessionFile }),
       ...(name === undefined ? {} : { name }),
     });
+    this.extensions.showStatus();
     return { cancelled: false };
   }
 
@@ -444,6 +468,7 @@ class AssistantAgent implements WorkerAgent {
         for (const event of waiting) this.publish(event);
         this.showDockTools();
         void this.handoff.refresh();
+        this.extensions.showStatus();
         // Reminders that came due while she was not running fire now that the Host listens.
         this.reminders.start();
         return null;
@@ -469,6 +494,7 @@ class AssistantAgent implements WorkerAgent {
       this.reminders.stop();
       this.handoff.stop();
       try { await this.abort(); } catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
+      cleanupErrors.push(...await this.extensions.dispose());
       // Her last words reach Main now when they can; otherwise the next time this conversation opens.
       await Promise.race([this.recorder.sync(), new Promise((done) => setTimeout(done, SHUTDOWN_SYNC_MS).unref())]);
       this.publishedFiles.clear();

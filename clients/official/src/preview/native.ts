@@ -206,7 +206,7 @@ function sampleData() {
     ...(item.revision > 1 ? [{ at: item.updatedAt, author: item.author, action: item.state === 'retired' ? 'merged' as const : item.state === 'forgotten' ? 'forgotten' as const : 'rewritten' as const, ...(item.state === 'active' ? { text: item.text } : {}) }] : []),
     { at: item.createdAt, author: item.revision > 1 && item.author !== 'owner' ? 'extraction' as const : item.author, action: 'added' as const, text: item.text },
   ]]))
-  const assistantSettings: AssistantSettings = { extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' }, handoff: { startTokens: null, keepRecentTokens: null, prompt: '预览示例：为助手写一份交接记录，保留尚未办完的事、主人的要求和待回答的问题。' } }
+  const assistantSettings: AssistantSettings = { extensions: [{ id: 'web', module: 'builtin:web', enabled: true, config: {} }], extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' }, handoff: { startTokens: null, keepRecentTokens: null, prompt: '预览示例：为助手写一份交接记录，保留尚未办完的事、主人的要求和待回答的问题。' } }
   // Her timeline: what the two of them were doing, one line per stretch of a conversation, newest first.
   const line = (id: string, fromMinutes: number, toMinutes: number, text: string, fields: Partial<AssistantEpisode> = {}): AssistantEpisode => ({
     id, session: assistantSession, entryId: 'a1', fromAt: ago(fromMinutes), toAt: ago(toMinutes), text, state: 'active', author: 'extraction', createdAt: ago(toMinutes), updatedAt: ago(toMinutes), revision: 1, ...fields,

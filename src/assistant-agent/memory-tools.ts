@@ -215,7 +215,9 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
             settings = await port.call({ op: "settings_set", extractionModel: chosen });
           } else settings = await port.call({ op: "settings_get" });
           const { extraction } = await port.call({ op: "info" });
-          return { content: [{ type: "text", text: renderSettings(settings, extraction) }], details: { settings, extraction } };
+          // This tool owns only memory extraction. Other settings can contain extension credentials.
+          const memorySettings = settings.extractionModel === undefined ? {} : { extractionModel: settings.extractionModel };
+          return { content: [{ type: "text", text: renderSettings(memorySettings, extraction) }], details: { settings: memorySettings, extraction } };
         }
         if (params.action === "reorganize") {
           const { extractionModel } = await port.call({ op: "settings_get" });

@@ -8,6 +8,9 @@
  * fields they do not know, so a newer Main can add to them.
  */
 
+import { isAbsolute, win32 } from "node:path";
+import { cloneBoundedJsonObject, type JsonObject } from "./json-value.js";
+
 /** The two texts the owner and the assistant edit: who she is, and what the owner told her by hand. */
 export const ASSISTANT_DOCUMENTS = ["persona", "notes"] as const;
 export type AssistantDocumentName = typeof ASSISTANT_DOCUMENTS[number];
@@ -119,18 +122,34 @@ export interface AssistantHandoffSettings {
   /** The entire writing instruction; conversation and previous record are supplied separately. */
   prompt: string;
 }
+/** Explicitly trusted code on Main; config is private and never part of a tool declaration. */
+export interface AssistantExtensionSettings {
+  id: string;
+  module: string;
+  enabled: boolean;
+  config: JsonObject;
+}
 export interface AssistantSettings {
   /** The model that turns her conversations into memories; without it nothing is extracted. */
   extractionModel?: AssistantModelRef;
   /** Absent only on older Hosts that do not offer rolling hand-over settings. */
   handoff?: AssistantHandoffSettings;
+  /** Absent on older Hosts. An empty array loads no extensions. */
+  extensions?: AssistantExtensionSettings[];
 }
 export interface AssistantSettingsEdit {
   /** Omitted leaves it unchanged; null stops making memories. */
   extractionModel?: AssistantModelRef | null;
   /** Omitted leaves the existing hand-over settings unchanged. */
   handoff?: AssistantHandoffSettings;
+  /** Omitted preserves the saved list; supplied replaces it. */
+  extensions?: AssistantExtensionSettings[];
 }
+
+/** New installations offer the bundled web tools; an explicitly saved [] disables all extensions. */
+export const DEFAULT_ASSISTANT_EXTENSIONS: readonly AssistantExtensionSettings[] = [
+  { id: "web", module: "builtin:web", enabled: true, config: {} },
+];
 
 /** One factory default, returned by Main; the Worker never guesses it when settings cannot be read. */
 export const DEFAULT_ASSISTANT_HANDOFF: Readonly<AssistantHandoffSettings> = {
@@ -543,11 +562,30 @@ function parseHandoffSettings(input: unknown, field: string, closed: boolean): A
   return { startTokens, keepRecentTokens, prompt };
 }
 
+function parseExtensions(input: unknown, field: string, closed: boolean): AssistantExtensionSettings[] {
+  if (!Array.isArray(input)) return fail(`${field} must be an array`);
+  const ids = new Set<string>();
+  return input.map((raw, index) => {
+    const itemField = `${field}[${index}]`, value = record(raw, itemField);
+    if (closed) only(value, ["id", "module", "enabled", "config"], itemField);
+    const extensionId = text(value.id, `${itemField}.id`, 64, 1);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u.test(extensionId)) fail("扩展标识请只用字母、数字、下划线和短横线；这次没有保存。");
+    if (ids.has(extensionId)) fail(`扩展标识 ${extensionId} 重复了，请改成不同的标识后保存。`);
+    ids.add(extensionId);
+    const module = text(value.module, `${itemField}.module`, 16_384, 1);
+    if (!/^builtin:[a-zA-Z0-9_-]+$/u.test(module) && !((isAbsolute(module) || win32.isAbsolute(module)) && /\.(mjs|js)$/u.test(module))) {
+      fail("扩展模块请填写 Main 上的绝对 .mjs/.js 文件路径，或 builtin:名称；这次没有保存。");
+    }
+    return { id: extensionId, module, enabled: flag(value.enabled, `${itemField}.enabled`), config: cloneBoundedJsonObject(value.config, `${itemField}.config`) };
+  });
+}
+
 function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantSettingsEdit {
-  if (value.extractionModel === undefined && value.handoff === undefined) fail(`${field} changes nothing`);
+  if (value.extractionModel === undefined && value.handoff === undefined && value.extensions === undefined) fail(`${field} changes nothing`);
   return {
     ...(value.extractionModel === undefined ? {} : { extractionModel: value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true) }),
     ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, true) }),
+    ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, true) }),
   };
 }
 
@@ -690,7 +728,7 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op"], field);
         return { op: "settings_get" };
       case "settings_set":
-        only(value, ["op", "extractionModel", "handoff"], field);
+        only(value, ["op", "extractionModel", "handoff", "extensions"], field);
         return { op: "settings_set", ...parseSettingsSet(value, field) };
       case "reorganize":
         only(value, ["op", "extractionModel"], field);
@@ -880,6 +918,7 @@ export function parseAssistantSettings(input: unknown, field = "assistant settin
     return {
       ...(value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) }),
       ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, false) }),
+      ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, false) }),
     };
   });
 }

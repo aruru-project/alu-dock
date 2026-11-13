@@ -1794,6 +1794,7 @@ try {
     const answered = new Map()
     let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings
     let handoff = { startTokens: null, keepRecentTokens: null, prompt: 'Main 提供的完整交接要求。' }
+    let extensions = [{ id: 'local', module: '/home/owner/tools.mjs', enabled: true, config: {} }]
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
       if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: !model ? { state: 'off', waitingSessions: 1 }
@@ -1829,15 +1830,16 @@ try {
         if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
         return structuredClone(changed)
       }
-      if (command === 'assistant_settings') return { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff) }
+      if (command === 'assistant_settings') return { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
       if (command === 'set_assistant_settings' || command === 'reorganize_assistant') {
         const done = () => {
           if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
           const edit = command === 'reorganize_assistant' ? args : args.settings
           if ('extractionModel' in edit) model = edit.extractionModel ?? undefined
           if (edit.handoff) handoff = structuredClone(edit.handoff)
+          if (edit.extensions) extensions = structuredClone(edit.extensions)
           if (command === 'reorganize_assistant') startedOver++
-          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff) }
+          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
           answered.set(args.operationId, structuredClone(result))
           if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
           return result
@@ -2030,6 +2032,23 @@ try {
     await click(page(), '恢复自动值')
     await click(page(), '保存滚动整理设置')
     assert.deepEqual(sent('set_assistant_settings').settings.handoff, { startTokens: null, keepRecentTokens: null, prompt: '请以小满的口吻交接，只写尚待完成的事。' })
+    // #670: edit only one extension's JSON and switch, through the real settings controls and bridge.
+    assert.equal(labelled('扩展模块 1').props.value, '/home/owner/tools.mjs')
+    await type('扩展 JSON 配置 1', '{"token":"PRIVATE_UI_CONFIG"}')
+    labelled('启用扩展 1').props.onChange({ target: { checked: false } }); await settle()
+    await click(page(), '保存扩展设置')
+    assert.deepEqual(sent('set_assistant_settings').settings, { extensions: [{ id: 'local', module: '/home/owner/tools.mjs', enabled: false, config: { token: 'PRIVATE_UI_CONFIG' } }] })
+    assert.ok(text(page()).includes('Reload'))
+    assert.equal(extensions[0].enabled, false)
+    labelled('启用扩展 1').props.onChange({ target: { checked: true } }); await settle()
+    await click(page(), '保存扩展设置')
+    assert.equal(sent('set_assistant_settings').settings.extensions[0].enabled, true)
+    await click(page(), '添加扩展')
+    await type('扩展标识 2', 'other')
+    await type('扩展模块 2', '/home/owner/other.mjs')
+    await type('扩展 JSON 配置 2', '{}')
+    await click(page(), '保存扩展设置')
+    assert.equal(sent('set_assistant_settings').settings.extensions[1].module, '/home/owner/other.mjs')
     // How making memories goes: the parts it could not read, why the last try failed and when it tries again.
     const extractionSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status')
     troubled = true
@@ -3080,7 +3099,7 @@ try {
     extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
     const savedAssistant = assistantNative, savedTools = toolsNative
     assistantNative = (command, args) => command === 'assistant_preview' ? { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' } : savedAssistant(command, args)
-    toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'builtin' } }], total: 1, truncated: false })
+    toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'built-in' } }, { name: 'local_schedule', description: 'Read a local schedule.', active: true, source: { kind: 'extension', package: 'local' } }], total: 2, truncated: false })
     const pinia = createPinia(), assistantApp = useAppStore(pinia), assistantView = element('resident-assistant-app')
     mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
     mounted.mount(assistantView); await settle()
@@ -3111,13 +3130,14 @@ try {
     assert.ok(paletteLabels().includes('Rename Session'), 'the owner can still rename the assistant')
     // Seen in the real Desktop trial: state and resources had become two identical entries.
     assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
-    await click(dialog('命令中心'), '刷新人设和记忆重新读入人设、手写设定和记忆，对话接着原来的')
-    assert.ok(!!dialog('刷新人设和记忆'), 'Reload stays available with her meaning')
-    await click(dialog('刷新人设和记忆'), '取消')
+    await click(dialog('命令中心'), '刷新助手（Reload）重新读入人设、手写设定、记忆和工具扩展，对话接着原来的')
+    assert.ok(!!dialog('刷新助手（Reload）'), 'Reload stays available with her meaning')
+    await click(dialog('刷新助手（Reload）'), '取消')
     await click(assistantView, '打开命令中心')
     const toolOption = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('她能用的工具'))
     assert.ok(!!toolOption); toolOption.props.onClick(); await settle()
     assert.ok(text(dialog('她能用的工具')).includes('读取文件里的文字和图片。'), 'her actual tools and descriptions are readable')
+    assert.ok(text(dialog('她能用的工具')).includes('extension / local'), 'the actual tool list identifies its extension source')
     assert.equal(all(dialog('她能用的工具'), item => item.type === 'button').some(item => text(item).includes('读取文件里的文字和图片。')), false, 'her tool list has no unsupported per-tool switch')
     await click(dialog('她能用的工具'), '关闭')
     await click(assistantView, '打开命令中心')

@@ -2,9 +2,10 @@ import { cloneWorkerConfig } from "../core/worker-config.js";
 import { runAgentWorker } from "../worker/worker-shell.js";
 import { createAssistantAgent, type AssistantWorkerInit } from "./assistant-agent.js";
 import { ASSISTANT_WORKER_MARKER } from "./assistant-worker-launch.js";
+import { builtinAssistantExtensions } from "./builtin-extensions.js";
 
 if (process.env[ASSISTANT_WORKER_MARKER] === "1" && typeof process.send === "function") {
-  void runAgentWorker({ parseInit, create: createAssistantAgent }).catch((error) => {
+  void runAgentWorker({ parseInit, create: (init, host) => createAssistantAgent(init, host, builtinAssistantExtensions) }).catch((error) => {
     try { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); } catch {}
     process.exit(1);
   });

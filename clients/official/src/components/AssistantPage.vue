@@ -103,7 +103,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <template v-if="section === 'preview'">
         <div class="assistant-intro">
           <h3>她会读到什么</h3>
-          <p>下面是目前保存的人设、手写设定和记忆。到她的对话里点“刷新人设和记忆”，她会重新读入这些内容，对话不会重来。</p>
+          <p>下面是目前保存的人设、手写设定和记忆。到她的对话里点“刷新助手（Reload）”，她会重新读入这些内容，对话不会重来。</p>
         </div>
         <div class="assistant-toolbar">
           <span v-if="preview?.result" class="assistant-meta">生成于 {{ assistantTime(preview.result.loadedAt) }}</span>
@@ -117,8 +117,8 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <template v-else-if="section === 'persona' || section === 'notes'">
         <div class="assistant-intro">
           <h3>{{ section === 'persona' ? '人设' : '手写设定' }}</h3>
-          <p v-if="section === 'persona'">她是谁、怎么说话。保存后，到她的对话里点“刷新人设和记忆”，她就会读到改动。</p>
-          <p v-else>你写给她的设定和要记住的事。保存后，到她的对话里点“刷新人设和记忆”，她就会读到改动。</p>
+          <p v-if="section === 'persona'">她是谁、怎么说话。保存后，到她的对话里点“刷新助手（Reload）”，她就会读到改动。</p>
+          <p v-else>你写给她的设定和要记住的事。保存后，到她的对话里点“刷新助手（Reload）”，她就会读到改动。</p>
         </div>
         <AssistantDocumentEditor :document="section" />
       </template>
