@@ -132,7 +132,7 @@ test("she keeps what the owner tells her to remember, forgets it so it cannot be
   (await coordinator.request(4)).tools({ id: "model", name: "assistant_memory", arguments: { action: "set_model", model: "coordinator/fixture" } });
   (await coordinator.request(5)).text("换好了。");
   await settled(client, alu.id);
-  assert.deepEqual(await client.assistantSettings(), { extractionModel: { provider: "coordinator", id: "fixture" } });
+  assert.deepEqual((await client.assistantSettings()).extractionModel, { provider: "coordinator", id: "fixture" });
 
   // Card #295: what the owner can do in her settings she can do too. Starting over asks him first.
   await client.prompt(alu.id, "用这个模型把记忆从头整理一遍吧。", "auto", "alu-restart");

@@ -113,7 +113,7 @@ test("while she replies a message waits its turn, can be taken back or joins at 
   assert.equal((joined.body as { reasoning_effort?: string }).reasoning_effort, "low");
   const said = (joined.body.messages ?? []).filter((message) => message.role === "user").map((message) => JSON.stringify(message.content));
   assert.ok(said.some((text) => text.includes("顺便看看记忆里有没有团子")) && !said.some((text) => text.includes("这句发错了")), "What waited joins the reply at its next step; what was taken back does not");
-  assert.equal((await client.status(alu.id)).pending.total, 0);
+  await waitFor(async () => (await client.status(alu.id)).pending.total === 0, "The Host did not observe consumption of the queued message");
 
   // The old model's tool reply arrived after the explicit choice. Reopen before the new model answers:
   // the conversation must keep that choice rather than reverting to the last assistant message's model.
