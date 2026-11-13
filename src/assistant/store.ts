@@ -4,6 +4,7 @@ import {
   ASSISTANT_SPOKEN_KINDS,
   ASSISTANT_TOOL_NAMES,
   AssistantError,
+  MAX_ASSISTANT_FORGOTTEN_ENTRIES,
   MAX_ASSISTANT_RESULT_BYTES,
   MAX_ASSISTANT_SNIPPET_CHARS,
   type AssistantContextRequest,
@@ -264,6 +265,15 @@ export class AssistantStore {
   recorded(sessionId: string): { lastEntryId?: string } {
     const row = this.db.prepare("SELECT through_entry_id FROM sessions WHERE session_id = ?").get(sessionId) as { through_entry_id: string | null } | undefined;
     return row?.through_entry_id ? { lastEntryId: row.through_entry_id } : {};
+  }
+
+  /** The entries of a session hidden with a forgotten memory, newest first, from `fromEntryId` on. */
+  forgotten(sessionId: string, fromEntryId?: string): { entryIds: string[] } {
+    const from = fromEntryId === undefined ? undefined
+      : this.db.prepare("SELECT id FROM entries WHERE session_id = ? AND entry_id = ?").get(sessionId, fromEntryId) as { id: number } | undefined;
+    const rows = this.db.prepare("SELECT entry_id FROM entries WHERE session_id = ? AND id >= ? AND forgotten > 0 ORDER BY id DESC LIMIT ?")
+      .all(sessionId, from?.id ?? Number.MIN_SAFE_INTEGER, MAX_ASSISTANT_FORGOTTEN_ENTRIES) as Array<{ entry_id: string }>;
+    return { entryIds: rows.map((row) => row.entry_id) };
   }
 
   /** Keeps a batch; an entry already kept stays as it was, so a batch sent twice changes nothing. */

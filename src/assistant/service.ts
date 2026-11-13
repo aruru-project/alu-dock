@@ -60,6 +60,7 @@ export class AssistantCore {
       case "info": return { workspacePath: this.workspacePath, maxDocumentBytes: MAX_ASSISTANT_DOCUMENT_BYTES, maxMemoryChars: MAX_ASSISTANT_MEMORY_CHARS, maxEpisodeChars: MAX_ASSISTANT_EPISODE_CHARS, extraction: this.extraction.status() };
       case "load": return this.preview();
       case "recorded": return this.store.recorded(request.sessionId);
+      case "forgotten": return this.store.forgotten(request.sessionId, request.fromEntryId);
       case "record": return this.store.record(request.session, request.entries, request.throughEntryId, source);
       case "search": return this.readers.search(request, signal);
       case "context": return this.readers.context(request, signal);

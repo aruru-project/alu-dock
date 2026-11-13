@@ -167,7 +167,7 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
           : undefined;
         if (change === undefined) throw new Error(params.action === "rewrite" ? "rewrite needs text." : `Unknown action ${params.action}.`);
         const episode = await port.call({ op: "timeline_update", id: before.id, revision: before.revision, ...change });
-        return { content: [{ type: "text", text: `Done: ${renderEpisode(episode)}\nSessions that start from now on see it as it is now.` }], details: episode };
+        return { content: [{ type: "text", text: `Done: ${renderEpisode(episode)}\nWhat you start from shows it this way the next time it is loaded; in this conversation you already know.` }], details: episode };
     },
     },
 
@@ -185,7 +185,7 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
     {
       name: "assistant_memory",
       label: "Memories",
-      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true; the background will not record it again from what was said before. forget: forget one when your owner asks; the words it came from, what was said in answer to them and the request to forget it are not found by searches either, the timeline lines covering them are forgotten with it, and the background will not record it again. Other places that happen to mention the same thing stay as they are. restore: bring back a retired or forgotten one, with everything that went with it. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic, state or keywords, newest first. settings: which model keeps your memories in the background and how that is going. set_model: change that model when your owner asks. reorganize: start over with the chosen model when your owner asks: what the background made and nobody touched is set aside (each can be restored), the timeline it wrote is cleared, and every conversation is read again; your owner is asked to confirm first. Use this tool when your owner asks you to remember or forget something, or when something is clearly worth remembering. Changes apply to sessions that start later; this session already knows.",
+      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true; the background will not record it again from what was said before. forget: forget one when your owner asks; the words it came from, what was said in answer to them and the request to forget it are not found by searches either, the timeline lines covering them are forgotten with it, and the background will not record it again. Other places that happen to mention the same thing stay as they are. restore: bring back a retired or forgotten one, with everything that went with it. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic, state or keywords, newest first. settings: which model keeps your memories in the background and how that is going. set_model: change that model when your owner asks. reorganize: start over with the chosen model when your owner asks: what the background made and nobody touched is set aside (each can be restored), the timeline it wrote is cleared, and every conversation is read again; your owner is asked to confirm first. Use this tool when your owner asks you to remember or forget something, or when something is clearly worth remembering. What you start from is loaded anew when this Work is reopened or reloaded and when an older part of this conversation is handed over; until then you know what you changed from this conversation.",
       parameters: MEMORY_SCHEMA,
       execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState; query?: string; cursor?: string; model?: string }) => {
         /** The owner's latest words in this session, once they reached Main: where a memory said here came from, or where he asked for a change. */
@@ -226,7 +226,7 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
           if (!confirmed) return { content: [{ type: "text", text: "Your owner did not confirm. Nothing was changed." }], details: { confirmed: false } };
           const result = await port.call({ op: "reorganize", extractionModel });
           return {
-            content: [{ type: "text", text: `Started over with ${result.extractionModel.provider}/${result.extractionModel.id}: ${result.retiredMemories} memor${result.retiredMemories === 1 ? "y" : "ies"} the background made were set aside among the retired, ${result.removedLines} timeline line(s) it wrote were cleared, and every conversation is being read again. Until that is done, sessions that start load fewer memories.` }],
+            content: [{ type: "text", text: `Started over with ${result.extractionModel.provider}/${result.extractionModel.id}: ${result.retiredMemories} memor${result.retiredMemories === 1 ? "y" : "ies"} the background made were set aside among the retired, ${result.removedLines} timeline line(s) it wrote were cleared, and every conversation is being read again. Until that is done, fewer memories are loaded with what you start from.` }],
             details: { confirmed: true, ...result },
           };
         }
@@ -266,14 +266,14 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
           const askedAt = params.action === "forget" ? await saidHere() : undefined;
           memory = await port.call({ op: "memory_update", id: before.id, revision: before.revision, ...change, ...(askedAt ? { askedAt } : {}) });
         }
-        return { content: [{ type: "text", text: `Done: ${renderMemory(memory)}\nSessions that start from now on load it as it is now.` }], details: memory };
+        return { content: [{ type: "text", text: `Done: ${renderMemory(memory)}\nWhat you start from shows it this way the next time it is loaded; in this conversation you already know.` }], details: memory };
     },
     },
 
     {
       name: "assistant_document",
       label: "Persona and notes",
-      description: "Read or change your persona (who you are) or the notes your owner wrote by hand (facts and rules that win over anything else). write replaces the whole text; edit replaces one exact passage. Changes apply to sessions that start later; this session already knows what you changed.",
+      description: "Read or change your persona (who you are) or the notes your owner wrote by hand (facts and rules that win over anything else). write replaces the whole text; edit replaces one exact passage. What you start from is loaded anew when this Work is reopened or reloaded and when an older part of this conversation is handed over; until then you know what you changed from this conversation.",
       parameters: DOCUMENT_SCHEMA,
       execute: async (_id: string, params: { document: AssistantDocumentName; action: "read" | "write" | "edit"; text?: string; oldText?: string; newText?: string }) => {
         let result: AssistantDocument;
@@ -287,7 +287,7 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
         }
         const text = params.action === "read"
           ? (result.text.length === 0 ? `The ${params.document} document is empty.` : result.text)
-          : `Saved the ${params.document} document. Sessions that start from now on load it.`;
+          : `Saved the ${params.document} document. What you start from carries it the next time it is loaded; in this conversation you already know.`;
         return { content: [{ type: "text", text }], details: { document: result.document, revision: result.revision } };
     },
     },

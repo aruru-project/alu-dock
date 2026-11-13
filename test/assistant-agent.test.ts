@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+
+import { handoffLimits, prepareHandoff } from "../src/assistant-agent/handoff.js";
 import { Reminders, reminderTime, type Reminder } from "../src/assistant-agent/reminders.js";
 import { renderStatus } from "../src/assistant-agent/status.js";
 import { WakeBudget } from "../src/assistant-agent/wake.js";
@@ -76,4 +79,42 @@ test("her status lists the Works she handed things to and only counts her owner'
     "没到点的提醒：",
     "- 2026-11-14 09:00 提醒主人开会（#r9）",
   ].join("\n"));
+});
+
+const USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+const says = (text: string) => ({ role: "assistant" as const, content: [{ type: "text" as const, text }], api: "openai-completions" as const, provider: "p", model: "m", stopReason: "stop" as const, timestamp: 2, usage: USAGE });
+
+test("a hand-over record is written at half the model's window and waited for at one and a half times that", () => {
+  assert.deepEqual(handoffLimits(32_000), { startTokens: 16_000, mustTokens: 24_000, keepRecentTokens: 4_800 });
+  assert.deepEqual(handoffLimits(1_000_000), { startTokens: 100_000, mustTokens: 150_000, keepRecentTokens: 20_000 });
+});
+
+test("a conversation is handed over up to the start of a turn, keeping the latest turns whole and carrying the record before", () => {
+  const session = SessionManager.inMemory("/w");
+  const turn = (question: string, answer: string) => {
+    session.appendCustomMessageEntry("assistant-status", `[现状] ${question}`, false);
+    const asked = session.appendMessage({ role: "user", content: question, timestamp: 1 });
+    session.appendMessage(says(answer));
+    return asked;
+  };
+  turn("第一件事", "好。");
+  assert.equal(prepareHandoff(session.getBranch(), 10), undefined, "A single turn has nothing before it to hand over");
+  turn("第二件事", "x".repeat(4_000));
+  turn("第三件事", "行。");
+
+  // About 1,000 tokens of the latest conversation stay: the third turn alone is too little, so the second stays too.
+  const first = prepareHandoff(session.getBranch(), 1_000)!;
+  assert.deepEqual(first.handedOver.map((message) => message.role), ["custom", "user", "assistant"]);
+  assert.ok(JSON.stringify(first.handedOver).includes("第一件事") && !JSON.stringify(first.handedOver).includes("第二件事"));
+  const kept = session.getBranch().find((entry) => entry.id === first.firstKeptEntryId)!;
+  assert.ok(kept.type === "custom_message" && kept.content === "[现状] 第二件事", "What stays begins with the status note that opened its turn");
+
+  session.appendCompaction("第一份记录", first.firstKeptEntryId, first.tokensBefore);
+  assert.equal(prepareHandoff(session.getBranch(), 1_000), undefined, "Nothing new was said since the record took its place");
+  turn("第四件事", "嗯。");
+  // Next time the record before is carried on, and only what it kept and what was said since is looked at.
+  const second = prepareHandoff(session.getBranch(), 1)!;
+  assert.equal(second.previousSummary, "第一份记录");
+  assert.ok(JSON.stringify(second.handedOver).includes("第二件事") && JSON.stringify(second.handedOver).includes("第三件事") && !JSON.stringify(second.handedOver).includes("第四件事"));
+  assert.ok(!JSON.stringify(second.handedOver).includes("第一件事"), "What the record before replaced is not handed over again");
 });

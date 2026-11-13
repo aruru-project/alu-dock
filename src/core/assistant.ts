@@ -18,6 +18,8 @@ export const MAX_ASSISTANT_QUERY_CHARS = 256;
 export const MAX_ASSISTANT_SEARCH_LIMIT = 50;
 /** Entries read on each side of one conversation entry, and how many when the asker does not say. */
 export const MAX_ASSISTANT_CONTEXT_SPAN = 50;
+/** The most forgotten entries of one session named in one answer; the newest come first. */
+export const MAX_ASSISTANT_FORGOTTEN_ENTRIES = 2_000;
 export const ASSISTANT_CONTEXT_DEFAULT_SPAN = 6;
 /** One recorded entry's text; a longer tool output is cut here and stays whole in the Agent's own session file. */
 export const MAX_ASSISTANT_ENTRY_TEXT_CHARS = 32_000;
@@ -277,6 +279,11 @@ export type AssistantRequest =
   | { op: "load" }
   | { op: "recorded"; sessionId: string }
   /**
+   * Which entries of a session her owner had her forget, from `fromEntryId` on (the whole session
+   * without it): her Worker takes them out of the conversation it still holds (card #667).
+   */
+  | { op: "forgotten"; sessionId: string; fromEntryId?: string }
+  /**
    * `throughEntryId` is the last entry of the Agent's session this batch covers, kept or not. A
    * batch without entries only moves that mark, as when a session opened as the assistant starts
    * from history that was not hers.
@@ -308,6 +315,7 @@ export type AssistantResultFor<R extends AssistantRequest> =
   R extends { op: "info" } ? AssistantInfo
   : R extends { op: "load" } ? AssistantPreview
   : R extends { op: "recorded" } ? { lastEntryId?: string }
+  : R extends { op: "forgotten" } ? { entryIds: string[] }
   : R extends { op: "record" } ? { lastEntryId: string }
   : R extends { op: "search" } ? AssistantSearchResult
   : R extends { op: "context" } ? AssistantContextResult
@@ -558,6 +566,11 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
       case "recorded":
         only(value, ["op", "sessionId"], field);
         return { op: "recorded", sessionId: id(value.sessionId, `${field}.sessionId`) };
+      case "forgotten": {
+        only(value, ["op", "sessionId", "fromEntryId"], field);
+        const fromEntryId = value.fromEntryId === undefined ? undefined : id(value.fromEntryId, `${field}.fromEntryId`);
+        return { op: "forgotten", sessionId: id(value.sessionId, `${field}.sessionId`), ...(fromEntryId === undefined ? {} : { fromEntryId }) };
+      }
       case "record": {
         only(value, ["op", "session", "entries", "throughEntryId"], field);
         const session = record(value.session, `${field}.session`);
@@ -878,6 +891,11 @@ export function parseAssistantResult<R extends AssistantRequest>(request: R, inp
     case "recorded": return answer(() => {
       const value = record(input, "recorded");
       return value.lastEntryId === undefined ? {} : { lastEntryId: id(value.lastEntryId, "recorded.lastEntryId") };
+    }) as AssistantResultFor<R>;
+    case "forgotten": return answer(() => {
+      const entryIds = record(input, "forgotten").entryIds;
+      if (!Array.isArray(entryIds) || entryIds.length > MAX_ASSISTANT_FORGOTTEN_ENTRIES) throw new Error("forgotten.entryIds must be a bounded array");
+      return { entryIds: entryIds.map((entryId, index) => id(entryId, `forgotten.entryIds[${index}]`)) };
     }) as AssistantResultFor<R>;
     case "record": return answer(() => ({ lastEntryId: id(record(input, "record").lastEntryId, "record.lastEntryId") })) as AssistantResultFor<R>;
     case "search": return parseAssistantSearchResult(input) as AssistantResultFor<R>;

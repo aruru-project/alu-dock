@@ -16,6 +16,7 @@ import {
   type Model,
   type TextContent,
 } from "@earendil-works/pi-ai";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { convertToLlm, ModelRuntime, SessionManager, SettingsManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -48,6 +49,7 @@ import {
   loadPiImages,
   PiConversationProjector,
   PiSessionConversation,
+  type PiConversationSource,
   projectAgentSessionEvents,
   resolveAttachmentImages,
 } from "../pi/pi-conversation.js";
@@ -57,6 +59,7 @@ import { TransientFileRegistry } from "../pi/transient-file-registry.js";
 import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
 import { watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
+import { Handoff, handoffLimits, rewriteWithoutPrompt, type HandoffRecord } from "./handoff.js";
 import { memoryTools } from "./memory-tools.js";
 import { AssistantOpening } from "./opening.js";
 import { SessionRecorder, type AssistantCallPort } from "./recorder.js";
@@ -102,6 +105,9 @@ const REMIND_SCHEMA = {
   required: ["action"],
   additionalProperties: false,
 };
+
+/** What an entry her owner had her forget says in her conversation from then on. */
+const FORGOTTEN_NOTE = "（这一条里的事主人让我忘掉了。）";
 
 /** One message the owner (or another Work, through her input) sent while she was replying. */
 interface QueuedInput {
@@ -171,6 +177,15 @@ class AssistantAgent implements WorkerAgent {
   private closing = false;
   /** Whether the model's context was built from the conversation yet; until then the session alone holds it. */
   private contextReady = false;
+  private readonly handoff: Handoff;
+  /** What clients are shown of her conversation: from the hand-over record before the latest one on. */
+  private readonly shown: RecentConversation;
+  /** The entries Main said were forgotten when it was last asked. */
+  private forgottenSeen = new Set<string>();
+  /** She forgot something in the reply in progress. */
+  private forgetting = false;
+  /** What is done to her context between replies; the next reply waits for it. */
+  private settling: Promise<void> = Promise.resolve();
   /** The last entry already counted in `metricsValue`. */
   private countedThrough: string | undefined;
   private metricsValue: AgentSessionMetrics = {
@@ -184,13 +199,22 @@ class AssistantAgent implements WorkerAgent {
   constructor(
     private readonly cwd: string,
     private readonly host: WorkerHost,
-    port: AssistantCallPort,
+    private readonly port: AssistantCallPort,
     private readonly models: ModelRuntime,
     private readonly settings: SettingsManager,
     private readonly session: SessionManager,
     private readonly attachmentContextKey: Uint8Array,
   ) {
     this.conversation = new PiSessionConversation({ attachmentContextKey, publishedFiles: this.publishedFiles });
+    this.shown = new RecentConversation(session);
+    this.handoff = new Handoff({
+      branch: () => this.session.getBranch(),
+      limits: () => handoffLimits(this.model?.contextWindow ?? 0),
+      complete: (system, prompt, maxTokens, signal) => this.complete(system, prompt, maxTokens, signal),
+      forgotten: () => this.forgottenEntries(),
+      ready: () => { if (this.running === undefined) this.settleSoon(); },
+      tell: (message) => this.tell(message, "warning"),
+    });
     this.projector = new PiConversationProjector(attachmentContextKey);
     const notify = (message: string): void => this.tell(message, "warning");
     this.recorder = new SessionRecorder(port, session, attachmentContextKey, undefined, notify);
@@ -230,6 +254,16 @@ class AssistantAgent implements WorkerAgent {
       beforeToolCall: async ({ toolCall }) => this.closing && toolCall.name !== "dock_send"
         ? { block: true, reason: "这一轮已到步数上限，这个调用没有执行。" }
         : undefined,
+      // Before every request: a conversation grown long gets its hand-over record started. The record
+      // takes its place between replies; only past the point where she cannot go on without one does
+      // she wait for it here and go on from it inside the reply.
+      prepareRequest: async ({ context }) => {
+        const tokens = estimateContextTokens(convertToLlm(context.messages)).tokens;
+        if (tokens < handoffLimits(this.model?.contextWindow ?? 0).mustTokens) { this.handoff.consider(tokens); return undefined; }
+        await this.handoff.require(tokens);
+        const record = this.handoff.take();
+        return record !== undefined && await this.takeOver(record, true) ? { context: { ...context, messages: [...this.agent.state.messages] } } : undefined;
+      },
     });
     this.agent.subscribe((event) => this.observe(event));
   }
@@ -271,10 +305,10 @@ class AssistantAgent implements WorkerAgent {
       }
       case "model.set": return this.selectModel(request.params.provider, request.params.modelId);
       case "thinking.set": return this.selectThinkingLevel(request.params.level);
-      case "session.history": return this.conversation.entries(this.session);
-      case "conversation.history": return this.conversation.history(this.session, request.params.cursor, request.params.limit, request.params.view);
-      case "conversation.content": return this.conversation.content(this.session, request.params.contentRef, request.params.cursor, request.params.view);
-      case "conversation.image": return this.conversation.image(this.session, request.params.contentRef);
+      case "session.history": return this.conversation.entries(this.shown);
+      case "conversation.history": return this.conversation.history(this.shown, request.params.cursor, request.params.limit, request.params.view);
+      case "conversation.content": return this.conversation.content(this.shown, request.params.contentRef, request.params.cursor, request.params.view);
+      case "conversation.image": return this.conversation.image(this.shown, request.params.contentRef);
       case "session.name": {
         this.session.appendSessionInfo(request.params.name);
         const name = this.session.getSessionName();
@@ -317,6 +351,8 @@ class AssistantAgent implements WorkerAgent {
     // Nothing of hers is on its way to Main when the Host starts counting from the reloaded conversation.
     await this.recorder.sync();
     this.opening.refresh();
+    await this.dropForgotten();
+    this.contextReady = false;
     const sessionFile = this.session.getSessionFile();
     const name = this.session.getSessionName();
     this.publish({
@@ -367,6 +403,7 @@ class AssistantAgent implements WorkerAgent {
     this.disposed ??= (async () => {
       const cleanupErrors: string[] = [];
       this.reminders.stop();
+      this.handoff.stop();
       try { await this.abort(); } catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
       // Her last words reach Main now when they can; otherwise the next time this conversation opens.
       await Promise.race([this.recorder.sync(), new Promise((done) => setTimeout(done, SHUTDOWN_SYNC_MS).unref())]);
@@ -631,7 +668,10 @@ class AssistantAgent implements WorkerAgent {
     const run = (async () => {
       const model = this.model;
       if (model === undefined) return;
+      await this.settling;
       void this.recorder.sync();
+      // What her owner had her forget anywhere since her last reply leaves what the model is given.
+      await this.dropForgotten();
       await this.leadWithOpening();
       await this.noteStatus(wokenBy);
       this.agent.state.model = model;
@@ -675,17 +715,143 @@ class AssistantAgent implements WorkerAgent {
         this.publish(typeof failure === "string" ? { ...event, stopReason: "error", error: failure } : event);
       }
       this.publish(this.checkpoint());
-      void this.recorder.sync();
+      this.settleSoon();
     });
     this.running = run;
     return run;
   }
 
+  private settleSoon(): void {
+    this.settling = this.settling.then(() => this.settleContext()).catch(() => {});
+  }
+
+  /**
+   * Between replies: her words reach Main, what she just forgot leaves what the model is given, and
+   * a hand-over record that is ready takes its place, or one is started when the conversation is long.
+   */
+  private async settleContext(): Promise<void> {
+    if (this.forgetting) {
+      this.forgetting = false;
+      // Main hides the exchange she was asked in once it has it; then what is hidden leaves her context.
+      await this.recorder.sync();
+      // The record under way may tell what she just forgot: it is written again from what is left.
+      this.handoff.discard();
+      await this.dropForgotten();
+    } else void this.recorder.sync();
+    if (this.running !== undefined) return;
+    const record = this.handoff.take();
+    if (record !== undefined) await this.takeOver(record);
+    else if (this.contextReady) this.handoff.consider(estimateContextTokens(convertToLlm(this.agent.state.messages)).tokens);
+  }
+
+  /**
+   * Puts a finished hand-over record in place of the conversation before it, loads her persona and
+   * memories anew (the model's cached prefix is lost at this point anyway) and rebuilds what the
+   * model is given. False when the record was thrown away instead.
+   */
+  private async takeOver(record: HandoffRecord, insideReply = false): Promise<boolean> {
+    const forgotten = await this.forgottenEntries();
+    const branch = this.session.getBranch();
+    const keptFrom = branch.findIndex((entry) => entry.id === record.firstKeptEntryId);
+    const kept = new Set(branch.slice(Math.max(0, keptFrom)).map((entry) => entry.id));
+    // Something forgotten since writing began lies in what the record tells: it is written again.
+    // What is forgotten leaves her context between replies, never under a reply in progress.
+    if (keptFrom < 0 || forgotten?.some((id) => !record.forgottenAtStart.has(id) && !kept.has(id))) {
+      if (!insideReply) await this.dropForgotten(forgotten);
+      return false;
+    }
+    this.session.appendCompaction(record.summary, record.firstKeptEntryId, record.tokensBefore);
+    if (!insideReply) await this.dropForgotten(forgotten);
+    this.opening.refresh();
+    this.contextReady = false;
+    await this.leadWithOpening();
+    this.publish(this.checkpoint());
+    void this.recorder.sync();
+    return true;
+  }
+
+  /** One request to her model outside the conversation. */
+  private async complete(system: string, prompt: string, maxTokens: number, signal: AbortSignal): Promise<string> {
+    const model = this.model;
+    if (model === undefined) throw new Error("没有可用的模型");
+    const reply = await this.models.completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+      { signal, maxTokens: Math.min(maxTokens, model.maxTokens || maxTokens) });
+    if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? "模型没有回答");
+    if (reply.stopReason === "length") throw new Error("模型的回答被截断了");
+    return reply.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
+  }
+
+  // ---- Forgetting ---------------------------------------------------------------------------------
+
+  /** The entries of this conversation her owner had her forget, or undefined when Main does not answer. */
+  private async forgottenEntries(): Promise<string[] | undefined> {
+    try {
+      return (await this.port.call({ op: "forgotten", sessionId: this.session.getSessionId() })).entryIds;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * What Main hides because her owner had her forget it also leaves what the model is given: each
+   * such entry still in front of her says only that it was forgotten, and a hand-over record written
+   * before the forgetting is rewritten without it. The conversation file keeps what was said.
+   */
+  private async dropForgotten(known?: string[]): Promise<void> {
+    const forgotten = known ?? await this.forgottenEntries();
+    if (forgotten === undefined || forgotten.every((id) => this.forgottenSeen.has(id))) return;
+    const hidden = new Set(forgotten);
+    const branch = this.session.getBranch();
+    const edited = new Set(branch.flatMap((entry) => entry.type === "context_edit" ? [entry.targetId] : []));
+    let changed = false;
+    // Main keeps no results of her own memory tools, yet they repeat what was remembered: the results
+    // of a forgotten message's calls go with it.
+    const forgottenCalls = new Set<string>();
+    for (const entry of this.session.buildContextEntries()) {
+      const message = entry.type === "message" ? entry.message : undefined;
+      const forgottenResult = message?.role === "toolResult" && forgottenCalls.has(message.toolCallId);
+      if (message?.role === "assistant" && hidden.has(entry.id)) for (const block of message.content) if (block.type === "toolCall") forgottenCalls.add(block.id);
+      if ((!hidden.has(entry.id) && !forgottenResult) || edited.has(entry.id)) continue;
+      if (entry.type === "custom_message" || message?.role === "user") this.session.appendContextEdit(entry.id, { content: FORGOTTEN_NOTE });
+      else if (message?.role === "toolResult") this.session.appendContextEdit(entry.id, { content: [{ type: "text", text: FORGOTTEN_NOTE }] });
+      else if (message?.role === "assistant") {
+        // Her calls keep their place, so their results still belong to something; what they carried goes.
+        const calls = message.content.flatMap((block) => block.type === "toolCall" ? [{ ...block, arguments: {} }] : []);
+        this.session.appendContextEdit(entry.id, { content: [{ type: "text", text: FORGOTTEN_NOTE }, ...calls] });
+      } else continue;
+      changed = true;
+    }
+    if (await this.rewriteRecord(hidden)) changed = true;
+    this.forgottenSeen = hidden;
+    if (!changed) return;
+    this.contextReady = false;
+    this.publish(this.checkpoint());
+  }
+
+  /** The hand-over record in use, when it was written before something in this conversation was forgotten, is rewritten without it. */
+  private async rewriteRecord(hidden: ReadonlySet<string>): Promise<boolean> {
+    const record = this.session.buildContextEntries()[0];
+    if (record?.type !== "compaction" || !hidden.has(record.id)) return false;
+    try {
+      const since = Date.parse(record.timestamp);
+      const { memories } = await this.port.call({ op: "memory_list", state: "forgotten", limit: 50 });
+      const texts = memories.filter((memory) => Date.parse(memory.updatedAt) > since).map((memory) => memory.text);
+      if (texts.length === 0) return false;
+      const { system, prompt } = rewriteWithoutPrompt(record.summary, texts);
+      const rewritten = (await this.complete(system, prompt, 4_096, new AbortController().signal)).trim();
+      if (rewritten.length === 0) return false;
+      this.session.appendCompaction(rewritten, record.firstKeptEntryId, record.tokensBefore);
+      return true;
+    } catch {
+      // Tried again the next time something is found forgotten; until then the record stays.
+      return false;
+    }
+  }
+
   /** Her opening leads what the model is given; the conversation follows as the session holds it. */
   private async leadWithOpening(): Promise<void> {
     const { text, changed } = await this.opening.text();
-    const messages = this.agent.state.messages;
-    if (!changed && messages[0]?.role === "system") return;
+    if (!changed && this.contextReady) return;
     const opening = createInitialSystemMessage(text, this.tools.map(toToolDeclaration));
     const conversation = this.session.buildSessionContext().messages.filter((message) => message.role !== "system");
     this.agent.state.messages = opening === undefined ? conversation : [opening, ...conversation];
@@ -738,6 +904,7 @@ class AssistantAgent implements WorkerAgent {
   // ---- What her loop does, as the Host and Main see it -----------------------------------------
 
   private observe(event: LoopEvent): void {
+    if (event.type === "tool_execution_start" && event.toolName === "assistant_memory" && (event.args as { action?: unknown } | undefined)?.action === "forget") this.forgetting = true;
     if (event.type === "message_end") {
       this.keep(event.message);
       // Outside a reply nothing else adds it to what the model is given next.
@@ -775,7 +942,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   private checkpoint(): AgentEvent {
-    return { type: "conversation_checkpoint", history: this.conversation.entries(this.session) };
+    return { type: "conversation_checkpoint", history: this.conversation.entries(this.shown) };
   }
 
   private publish(event: AgentEvent): void {
@@ -831,10 +998,14 @@ class AssistantAgent implements WorkerAgent {
   // ---- Counts -----------------------------------------------------------------------------------
 
   private metrics(): AgentSessionMetrics {
-    const entries = this.session.getBranch();
-    const from = this.countedThrough === undefined ? 0 : entries.findIndex((entry) => entry.id === this.countedThrough) + 1;
-    for (const entry of entries.slice(from)) this.count(entry);
-    this.countedThrough = entries.at(-1)?.id;
+    // Asked for with every event: the conversation is walked only when it has grown.
+    const leaf = this.session.getLeafId() ?? undefined;
+    if (leaf !== this.countedThrough) {
+      const entries = this.session.getBranch();
+      const from = this.countedThrough === undefined ? 0 : entries.findIndex((entry) => entry.id === this.countedThrough) + 1;
+      for (const entry of entries.slice(from)) this.count(entry);
+      this.countedThrough = leaf;
+    }
     const window = this.model?.contextWindow;
     return {
       ...structuredClone(this.metricsValue),
@@ -866,6 +1037,26 @@ class AssistantAgent implements WorkerAgent {
       if (message.stopReason !== "error" && message.stopReason !== "aborted" && usage.totalTokens > 0) this.lastUsageTokens = usage.totalTokens;
     } else return;
     counts.total += 1;
+  }
+}
+
+/**
+ * What clients are shown of her conversation. It never starts over, so the whole of it would grow
+ * without end; clients get it from the hand-over record before the latest one on, and find what
+ * came earlier by searching her conversations. The file keeps everything.
+ */
+class RecentConversation implements PiConversationSource {
+  constructor(private readonly session: SessionManager) {}
+  getSessionId(): string { return this.session.getSessionId(); }
+  getLeafId(): string | null { return this.session.getLeafId(); }
+  getLeafEntry(): SessionEntry | undefined { return this.session.getLeafEntry(); }
+  getBranch(): SessionEntry[] {
+    const branch = this.session.getBranch();
+    let records = 0;
+    for (let index = branch.length - 1; index >= 0; index -= 1) {
+      if (branch[index]!.type === "compaction" && ++records === 2) return branch.slice(index);
+    }
+    return branch;
   }
 }
 
