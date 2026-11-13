@@ -1,6 +1,6 @@
 # 真机与跨机器检查
 
-普通测试碰不到的两类检查：真实供应商，以及两台真正分开的机器。这两类都不在 `npm test` 里，每次运行都要用户授权：会调用真实模型、花额度，Docker 那项还要用户给一个临时 key。第一次用于 card #303（2026-11-05）。
+普通测试碰不到的检查：真实供应商、两台真正分开的机器，以及在这组机器上看助手 Work 和官方 Desktop 客户端。它们都不在 `npm test` 里，每次运行都要用户授权：会调用真实模型、花额度，Docker 那项还要用户给一个临时 key。第一次用于 card #303（2026-11-05）。
 
 开始前先 `npm run build`。要验证 Pi 分叉里还没发布的改动，先装好本地候选包。
 
@@ -61,6 +61,48 @@ rm /tmp/alu-trial-secrets.env
 ```
 
 第 4 步是证据：SubHost 应该只连了 Main 的机器端口（7443）和出口代理；Main 只有 SubHost 连进来的那一条，自己不向外发请求。
+
+## 助手 Work 配真实模型：`assistant-driver.mjs`
+
+在同一组容器的 Main 上，以主人的身份和助手 Work 说话，把她和她派出去的 Work 做了什么打印出来给人读。第一次用于 card #667（2026-11-13）。普通测试里模型的回复是写好的，这里看的是真实模型会不会该派的派、该自己答的自己答、交接记录写得对不对。
+
+```bash
+# 1. 第三个参数给 Main 一份 models.json（只放要用的 provider）。想在短对话里看到交接记录，
+#    再加一个同样地址和 key、但 contextWindow 很小（如 40000）的 provider，脚本里叫 openai-sub-small。
+ssh root@127.0.0.1 "NODE_DIR=$HOME/.nvm/versions/node/v24.22.1 bash $PWD/scripts/trials/cross-machine-docker.sh up /tmp/alu-trial-secrets.env '' /tmp/alu-trial-models.json"
+
+# 2. 一步一步跑，STEPS 按顺序列出要跑的；每一步后面打印她的会话里新增的内容：
+ssh root@127.0.0.1 'docker exec -e STEPS=chat,remember,delegate,question,stop,remind,forget alu-trial-main node /opt/alu/scripts/trials/assistant-driver.mjs'
+#    其余步骤：handoff（换小窗口模型读长文，直到写出交接记录）、leave 和 back（中间在外面重启 Host）、
+#    create（替主人在 Laptop 上开 Work）、memories（十分钟没有新话之后看后台整理出了什么）、
+#    child（CHILD=名字的一部分，看某个子 Work 收到了什么、做了什么）、works、transcript。
+#    MODEL=provider/id 和 THINKING 指定她的模型，默认 openai-sub/gpt-6-luna、low。
+```
+
+容器里没有时区数据，`date` 打印的是 UTC；想让她的现状用本地时间，在起 Host 之前往 `/etc/profile.d/` 写一行 `export TZ=Asia/Shanghai`（Node 自带时区数据）。
+
+## 官方 Desktop 客户端装进容器：`desktop-client-driver.mjs`
+
+浏览器预览里的 native 一侧是样例数据，连不到真实 Host。要看真实客户端对着真实 Host 的样子，把 Linux 版客户端放进 Main 容器，用 WebKitWebDriver 操作它（Linux 上的 Tauri 是 WebKitGTK，没有 CDP）。客户端和 Host 在同一台“机器”上，走本机连接，不用配对。
+
+```bash
+# 1. 本机编译客户端（不打包）：
+(cd clients/official && corepack pnpm tauri build --no-bundle --ci)
+
+# 2. 容器里装运行库、虚拟屏幕和 WebDriver，放进客户端和操作脚本：
+ssh root@127.0.0.1 'docker exec alu-trial-main sh -c "sed -i s#http://archive.ubuntu.com/ubuntu/#http://mirrors.tuna.tsinghua.edu.cn/ubuntu/# /etc/apt/sources.list.d/ubuntu.sources; apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libwebkit2gtk-4.1-0 webkit2gtk-driver xvfb fonts-noto-cjk libayatana-appindicator3-1 librsvg2-2 dbus-x11 ca-certificates xauth"'
+ssh root@127.0.0.1 "docker exec alu-trial-main mkdir -p /opt/client && docker cp $PWD/clients/official/src-tauri/target/release/aludock-client-app alu-trial-main:/opt/client/ && docker cp $PWD/scripts/trials/desktop-client-driver.mjs alu-trial-main:/root/wd.mjs"
+
+# 3. 起虚拟屏幕和 WebDriver。客户端找的是本机默认 socket，试验 Host 的 socket 在别处，所以连一个链接过去：
+ssh root@127.0.0.1 'docker exec -d alu-trial-main sh -c "Xvfb :99 -screen 0 1440x900x24 -nolisten tcp"'
+ssh root@127.0.0.1 'docker exec -d alu-trial-main sh -c "mkdir -p /root/.alu-dock/run && ln -sf /root/dock.sock /root/.alu-dock/run/dock.sock; export DISPLAY=:99 TAURI_WEBVIEW_AUTOMATION=true WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1 LANG=C.UTF-8; exec dbus-run-session -- WebKitWebDriver --port=4444 --host=127.0.0.1"'
+
+# 4. 打开客户端，点「连接」，之后看字、点按钮、打字、截图：
+ssh root@127.0.0.1 'docker exec alu-trial-main sh -c "node /root/wd.mjs start && sleep 5 && node /root/wd.mjs click text=连接 && sleep 4 && node /root/wd.mjs shot connected"'
+ssh root@127.0.0.1 'cat /tmp/alu-trial-shared/connected.png' > /tmp/connected.png
+```
+
+Host 重启后客户端左上角显示「Host」，要点开它按「刷新状态」才会读到新内容，和真机一样。容器没有时区数据，客户端里的时间是 UTC。
 
 ## 踩过的坑
 
