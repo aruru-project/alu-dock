@@ -194,6 +194,7 @@ class AssistantAgent implements WorkerAgent {
     cost: 0,
   };
   private lastUsageTokens: number | undefined;
+  private onDisk = false;
   private disposed: Promise<AgentCleanupResult> | undefined;
 
   constructor(
@@ -228,7 +229,7 @@ class AssistantAgent implements WorkerAgent {
     this.tools = [
       ...memoryTools({
         port, session, recorder: this.recorder, models, attachmentContextKey,
-        confirm: async (title, message) => await host.call("ui.confirm", { title, message }) === true,
+        confirm: async (title, message) => await host.call("ui.confirm", { title, message }, this.agent.signal) === true,
       }),
       this.reminderTool(),
       ...this.dockTools(),
@@ -257,10 +258,13 @@ class AssistantAgent implements WorkerAgent {
       // Before every request: a conversation grown long gets its hand-over record started. The record
       // takes its place between replies; only past the point where she cannot go on without one does
       // she wait for it here and go on from it inside the reply.
-      prepareRequest: async ({ context }) => {
+      prepareRequest: async ({ context }, signal) => {
         const tokens = estimateContextTokens(convertToLlm(context.messages)).tokens;
         if (tokens < handoffLimits(this.model?.contextWindow ?? 0).mustTokens) { this.handoff.consider(tokens); return undefined; }
-        await this.handoff.require(tokens);
+        // Stop does not wait for the record: the request that follows ends at once.
+        const stopped = new Promise<void>((done) => signal?.addEventListener("abort", () => done(), { once: true }));
+        await Promise.race([this.handoff.require(tokens), stopped]);
+        if (signal?.aborted) return undefined;
         const record = this.handoff.take();
         return record !== undefined && await this.takeOver(record, true) ? { context: { ...context, messages: [...this.agent.state.messages] } } : undefined;
       },
@@ -279,7 +283,9 @@ class AssistantAgent implements WorkerAgent {
 
   state(): AgentWorkerState {
     const sessionFile = this.session.getSessionFile();
-    const durable = sessionFile !== undefined && isOwnRegularFile(sessionFile);
+    // Asked for with every event; a conversation once on disk stays there.
+    this.onDisk ||= sessionFile !== undefined && isOwnRegularFile(sessionFile);
+    const durable = this.onDisk;
     return {
       sessionId: this.session.getSessionId(),
       ...(sessionFile === undefined ? {} : { sessionFile }),
@@ -350,8 +356,10 @@ class AssistantAgent implements WorkerAgent {
     }
     // Nothing of hers is on its way to Main when the Host starts counting from the reloaded conversation.
     await this.recorder.sync();
+    // A record being written asks the model through the Host; the reloaded conversation writes its own.
+    this.handoff.discard();
     this.opening.refresh();
-    await this.dropForgotten();
+    await this.dropForgotten().catch(() => {});
     this.contextReady = false;
     const sessionFile = this.session.getSessionFile();
     const name = this.session.getSessionName();
@@ -671,9 +679,19 @@ class AssistantAgent implements WorkerAgent {
       await this.settling;
       void this.recorder.sync();
       // What her owner had her forget anywhere since her last reply leaves what the model is given.
-      await this.dropForgotten();
+      await this.dropForgotten().catch(() => {});
       await this.leadWithOpening();
-      await this.noteStatus(wokenBy);
+      await this.noteStatus(wokenBy).catch(() => {});
+      if (this.stopRequested) {
+        // Stopped before the model was asked: what started the reply stays in the conversation, unanswered.
+        this.publish({ type: "agent_start", ...(operationId === undefined ? {} : { operationId }) });
+        for (const message of messages) {
+          this.observe({ type: "message_start", message });
+          this.observe({ type: "message_end", message });
+        }
+        this.agent.state.messages = [...this.agent.state.messages, ...messages];
+        return;
+      }
       this.agent.state.model = model;
       this.agent.state.thinkingLevel = clampThinkingLevel(model, this.thinkingLevel);
       await this.agent.prompt(messages);
@@ -867,7 +885,7 @@ class AssistantAgent implements WorkerAgent {
     const lost = this.desk.takeLost();
     const text = [
       renderStatus({
-        now: new Date(), wokenBy, works: await this.desk.list(), selfId: this.host.identity.instanceId,
+        now: new Date(), wokenBy, works: this.host.dockToolsEnabled() ? await this.desk.list() : [], selfId: this.host.identity.instanceId,
         notes: this.desk.notes, followed: this.desk.following, reminders: this.reminders.list(),
       }),
       ...(lost.length === 0 ? [] : [`这个 Work 重新打开过，下面这些你派出去的子 Work 已经不在了，它们没交的结果不会再来：${lost.map((name) => `「${name}」`).join("、")}。有事叫醒你时再跟主人说，需要的话重新派。`]),
@@ -889,7 +907,7 @@ class AssistantAgent implements WorkerAgent {
     const messages = this.agent.state.messages;
     if (messages.at(-1) === failed) this.agent.state.messages = messages.slice(0, -1);
     const entry = this.session.getLeafEntry();
-    if (entry?.type === "message" && entry.message === failed) this.session.appendContextEdit(entry.id, null);
+    if (entry?.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "error") this.session.appendContextEdit(entry.id, null);
   }
 
   private waitBeforeRetry(delayMs: number): Promise<boolean> {
