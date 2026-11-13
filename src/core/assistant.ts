@@ -57,6 +57,9 @@ export const MAX_ASSISTANT_REVISION_CHARS = 128;
 const MAX_PATH_CHARS = 16_384;
 const MAX_CURSOR_CHARS = 256;
 
+/** What clients see as the kind of Agent in a Work opened as the personal assistant; it runs her own Agent, not Pi (card #667). */
+export const ASSISTANT_EXECUTOR_KIND = "dock-assistant";
+
 /** The assistant's own tools; their calls and results are kept for context but not searched again. */
 export const ASSISTANT_TOOL_NAMES = ["assistant_search", "assistant_read", "assistant_document", "assistant_memory", "assistant_timeline"] as const;
 

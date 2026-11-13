@@ -36,7 +36,6 @@ import { CHILD_DOCK_TOOL_NAMES, dockToolsExtension, type DockToolsBridge } from 
 import { dockAttachmentsExtension } from "./dock-attachments-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachment-access.js";
 import { appendDockAttachmentContext, extractDockAttachmentContext } from "./dock-attachment-context.js";
-import { assistantExtension, assistantSystemPrompt, type AssistantCallPort } from "./assistant-extension.js";
 
 import {
   MAX_STOP_CLEANUP_ERROR_CHARS,
@@ -230,8 +229,6 @@ export interface CreatePiAgentAdapterOptions {
   sessionManager?: SessionManager;
   dockToolsBridge?: DockToolsBridge;
   dockAttachmentPort?: DockAttachmentCallPort;
-  /** Given only to a Work opened as the personal assistant (card #295). */
-  assistantPort?: AssistantCallPort;
 }
 
 interface BindingToken { active: boolean }
@@ -2101,8 +2098,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     ? () => createPiExtensionUiContext(options.extensionUiContextPortFactory!())
     : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
-  // The assistant is the Work's system; a selection saved with an older assistant Work is not read.
-  const systemPromptResolver = options.assistantPort !== undefined ? assistantSystemPrompt : piSystemPromptResolver(options.workerConfig, options.agentDir);
+  const systemPromptResolver = piSystemPromptResolver(options.workerConfig, options.agentDir);
   let childStarting = options.child === true;
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
@@ -2124,7 +2120,6 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
-          ...(options.assistantPort === undefined ? [] : [{ name: "alu-dock-assistant", factory: assistantExtension(options.assistantPort, attachmentContextKey) }]),
           ...piBuiltinExtensions(() => planGoalPort.isPlanning?.() ?? false),
         ],
         extensionsOverride: ownCanonicalShowImage,

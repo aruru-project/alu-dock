@@ -13,7 +13,7 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { MainMachineState, SubHostMachineState } from "../src/control/machine-state.js";
 import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { MainMachineController, SubHostAssistantPort, SubHostMachineConnection } from "../src/control/machine-transport.js";
-import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { createAssistantInstance } from "../src/assistant-agent/create-assistant-instance.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { PlanGoalProvider, waitFor } from "./support/plan-goal-provider.js";
 
@@ -51,7 +51,7 @@ test("an assistant Work on a SubHost loads her from Main and its conversation re
   const upstream = new SubHostMachineConnection({ state: joined, address: "127.0.0.1", port, hostEpoch: subHostEpoch,
     snapshots: () => subRegistry.list(), acceptProtocolSocket: (socket) => subHost.acceptProtocolSocket(socket) });
   const mainAssistant = new SubHostAssistantPort(upstream);
-  subRegistry = new DockRegistry((input) => createPiInstance({ ...input, agentDir: subAgent, sessionDir: join(root, "sub-sessions"), workerEnvironment: { ...environment, PI_CODING_AGENT_DIR: subAgent }, assistantHostPort: mainAssistant }),
+  subRegistry = new DockRegistry(({ child: _child, assistant: _assistant, ...input }) => createAssistantInstance({ ...input, agentDir: subAgent, sessionDir: join(root, "sub-sessions"), workerEnvironment: { ...environment, PI_CODING_AGENT_DIR: subAgent }, assistantHostPort: mainAssistant }),
     undefined, { hostEpoch: subHostEpoch, assistantAvailable: true });
   subHost = new DockHost({ socketPath: join(root, "sub.sock"), registry: subRegistry, listen: false });
   const client = new DockClient({ socketPath: main.socketPath, timeoutMs: 30_000 });

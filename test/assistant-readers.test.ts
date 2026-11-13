@@ -7,8 +7,7 @@ import test from "node:test";
 import { AssistantReaders } from "../src/assistant/readers.js";
 import { AssistantStore } from "../src/assistant/store.js";
 import { AssistantError, type AssistantRequest } from "../src/core/assistant.js";
-import { assistantExtension } from "../src/pi/assistant-extension.js";
-import { waitFor } from "./support/plan-goal-provider.js";
+import { SessionRecorder } from "../src/assistant-agent/recorder.js";
 
 async function memoryWithManyEntries(context: test.TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "alu-assistant-readers-"));
@@ -55,46 +54,29 @@ test("a memory search the asker gave up on keeps its thread until it ends, and t
   assert.deepEqual(next.hits.map((hit) => hit.entryId), ["e19999"]);
 });
 
-// Data-layer review of 2026-11-07: an assistant session written while Main was away, then left and
-// resumed in the same Work, still has what was said in it recorded once Main is back.
-test("an assistant session written while Main was away keeps its conversation after switching away and back", async () => {
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-  const pi = {
-    on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => { handlers.set(name, handler); },
-    registerTool: () => {}, getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => {},
-  };
+// Data-layer review of 2026-11-07: what was said to her while Main was away is recorded once Main is back.
+test("an assistant conversation held while Main was away is recorded once Main is back", async () => {
   const calls: AssistantRequest[] = [];
   let mainUp = false;
   const port = {
     call: async (request: AssistantRequest) => {
       if (!mainUp) throw new Error("Main is offline");
       calls.push(request);
-      if (request.op === "load") return { text: "persona", loadedAt: new Date().toISOString() } as never;
       return (request.op === "recorded" ? {} : { lastEntryId: (request as { throughEntryId: string }).throughEntryId }) as never;
     },
   };
-  assistantExtension(port, new Uint8Array(32))(pi as never);
-  const sessionA = `away-${Date.now()}`;
-  const entriesA: object[] = [];
-  const contextOf = (sessionId: string, entries: object[]) => ({
-    sessionManager: { getSessionId: () => sessionId, getSessionFile: () => undefined, getSessionName: () => undefined, getCwd: () => "/w", getEntries: () => entries },
-    ui: { notify: () => {} },
-  });
-  const run = async (sessionId: string, entries: object[]) => {
-    await handlers.get("before_agent_start")!({ systemPromptOptions: { sections: {} } }, contextOf(sessionId, entries));
-    await handlers.get("agent_settled")!({}, contextOf(sessionId, entries));
-  };
-  await handlers.get("session_start")!({ reason: "startup" }, contextOf(sessionA, entriesA));
-  entriesA.push(
+  const entries: object[] = [];
+  const session = { getSessionId: () => "away", getSessionFile: () => undefined, getSessionName: () => undefined, getCwd: () => "/w", getEntries: () => entries };
+  const told: string[] = [];
+  const recorder = new SessionRecorder(port, session as never, new Uint8Array(32), undefined, (message) => told.push(message));
+  entries.push(
     { type: "message", id: "u1", parentId: null, timestamp: "2026-11-01T10:00:00.000Z", message: { role: "user", content: "离线时说的话" } },
     { type: "message", id: "a1", parentId: "u1", timestamp: "2026-11-01T10:00:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "离线时的回复" }] } },
   );
-  await run(sessionA, entriesA);
-  await handlers.get("session_start")!({ reason: "new" }, contextOf(`other-${Date.now()}`, []));
-  await handlers.get("session_start")!({ reason: "resume" }, contextOf(sessionA, entriesA));
+  await recorder.sync();
+  assert.equal(told.length, 1, "The owner hears once that her words have not reached her memory yet");
   mainUp = true;
-  await run(sessionA, entriesA);
-  await waitFor(() => calls.some((call) => call.op === "record" && call.entries.length > 0), "The session's conversation was not recorded");
+  await recorder.sync();
   const kept = calls.flatMap((call) => call.op === "record" ? call.entries.map((entry) => entry.text) : []);
   assert.deepEqual(kept, ["离线时说的话", "离线时的回复"]);
 });

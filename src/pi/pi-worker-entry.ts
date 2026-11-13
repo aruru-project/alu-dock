@@ -57,8 +57,6 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     dockToolsBridge,
     ...(host.attachments === undefined ? {} : { dockAttachmentPort: { access: host.attachments } }),
     ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
-    // Only a Work opened as the personal assistant is given her persona, notes and memory.
-    ...(host.assistant === undefined ? {} : { assistantPort: { call: host.assistant } }),
   });
   if (init.initialName !== undefined && (!reopened || init.child)) runtime.currentSession().setSessionName(init.initialName);
   return {

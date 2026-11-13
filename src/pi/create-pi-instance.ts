@@ -14,7 +14,8 @@ import { PI_SDK_VERSION } from "../version.js";
 import { createWorkerInstance, type WorkerInstanceOptions } from "../worker/create-worker-instance.js";
 import { piWorkerLaunch, type PiWorkerInitOptions } from "./pi-worker-launch.js";
 
-export interface CreatePiInstanceOptions extends Omit<WorkerInstanceOptions, "parentId"> {
+/** A Work opened as the personal assistant runs her own Agent (`src/assistant-agent/`), never Pi. */
+export interface CreatePiInstanceOptions extends Omit<WorkerInstanceOptions, "parentId" | "assistant" | "assistantHostPort"> {
   child?: DockChildStart;
   cwd: string;
   agentDir?: string;

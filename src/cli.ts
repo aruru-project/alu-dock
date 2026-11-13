@@ -11,7 +11,7 @@ import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
 import { humanListWidth, renderHumanInstanceList, selectHumanInstanceList } from "./cli-list.js";
 import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
-import { DockRegistry } from "./control/dock-registry.js";
+import { DockRegistry, type InstanceFactory } from "./control/dock-registry.js";
 import { AttachmentService } from "./control/attachment-service.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { ModelVisibilityService, ModelVisibilityStore, modelVisibilityStateRoot } from "./control/model-visibility.js";
@@ -327,13 +327,19 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   }
   // A SubHost's Works ask Main through the machine connection, set up below.
   let subHostModels: SubHostModelPort | undefined;
-  const createManagedPiInstance = (input: Parameters<typeof createPiInstance>[0]) => createPiInstance({
-    ...input,
-    ...(modelService ?? subHostModels ? { modelHostPort: (modelService ?? subHostModels)! } : {}),
-    ...(workerAssistantPort === undefined ? {} : { assistantHostPort: workerAssistantPort }),
-    ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
-    ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
-  });
+  const { createAssistantInstance } = await import("./assistant-agent/create-assistant-instance.js");
+  // A Work opened as the personal assistant runs her own Agent; every other Work runs Pi.
+  const createManagedInstance: InstanceFactory = ({ child, assistant, ...input }) => {
+    const shared = {
+      ...input,
+      ...(modelService ?? subHostModels ? { modelHostPort: (modelService ?? subHostModels)! } : {}),
+      ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
+      ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
+    };
+    return assistant
+      ? createAssistantInstance({ ...shared, ...(workerAssistantPort === undefined ? {} : { assistantHostPort: workerAssistantPort }) })
+      : createPiInstance({ ...shared, ...(child === undefined ? {} : { child }) });
+  };
   if (windowsLifecycle?.stopRequested) return;
 
   if (options.role === "subhost") {
@@ -372,7 +378,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     // The hidden list and the child Work list exist only on Main.
     const mainModelLists = new SubHostModelLists(upstreamConnection);
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
-    registry = new DockRegistry(createManagedPiInstance, undefined, {
+    registry = new DockRegistry(createManagedInstance, undefined, {
       hostEpoch: subHostEpoch,
       trustPreflight,
       systemService,
@@ -402,7 +408,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       authority: () => dockToolsAuthority as MainMachineDockToolsAuthority,
       mainHostId: async () => (await (remoteInstances as MainMachineController).machines()).find((machine) => machine.kind === "main")!.hostId,
     }) : undefined;
-    registry = new DockRegistry(createManagedPiInstance, undefined, {
+    registry = new DockRegistry(createManagedInstance, undefined, {
       trustPreflight,
       systemService,
       ...(durable ? { catalogStore: new FileCatalogStore(catalogPath as string), attachmentHostPort: attachmentService } : {}),

@@ -10,6 +10,7 @@ import { DockRegistry } from "../../src/control/dock-registry.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
 import { ChildModelsStore } from "../../src/control/child-models.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
+import { createAssistantInstance } from "../../src/assistant-agent/create-assistant-instance.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 import { ModelServiceProcess } from "../../src/model-service/service-process.js";
 import { AssistantServiceProcess } from "../../src/assistant/service-process.js";
@@ -64,15 +65,18 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     async startHost(): Promise<DockClient> {
       await modelService?.start();
       await assistantService?.start();
-      const registry = new DockRegistry(async (input) => {
-        const instance = await createPiInstance({
+      const registry = new DockRegistry(async ({ child, assistant, ...input }) => {
+        const shared = {
           ...input, agentDir, sessionDir,
-          onWorkerSpawn: (pid) => workerPids.push(pid),
+          onWorkerSpawn: (pid: number) => workerPids.push(pid),
           workerEnvironment: environment,
           ...(modelService === undefined ? {} : { modelHostPort: modelService }),
-          ...(assistantService === undefined ? {} : { assistantHostPort: { request: (request, source, signal) => assistantService.request(request, { ...source, machine: "Main" }, signal) } }),
-        });
-        const hold = input.child === undefined ? undefined : team.holdNextChild;
+        };
+        // As the installed Host does: a Work opened as the assistant runs her own Agent, every other Pi.
+        const instance = assistant && assistantService !== undefined
+          ? await createAssistantInstance({ ...shared, assistantHostPort: { request: (request, source, signal) => assistantService.request(request, { ...source, machine: "Main" }, signal) } })
+          : await createPiInstance({ ...shared, ...(child === undefined ? {} : { child }) });
+        const hold = child === undefined ? undefined : team.holdNextChild;
         team.holdNextChild = undefined;
         await hold?.();
         return instance;
