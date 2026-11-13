@@ -37,7 +37,7 @@ export function controlSectionAvailable(section: ControlSection, assistant = fal
 
 export function controlCommandAvailable(name: string, assistant = false): boolean {
   if (!assistant) return true
-  if (name === 'fork' || name === 'clone') return false
+  if (name === 'fork' || name === 'clone' || name === 'resources') return false
   const section = localControlCommand(name)?.section
   return !section || controlSectionAvailable(section, assistant)
 }

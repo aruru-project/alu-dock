@@ -36,15 +36,10 @@ export class SessionRecorder {
   private again = false;
   private told = false;
 
-  /**
-   * `startAfter`: when Main has not recorded this session, it starts after this entry instead of from
-   * its first. It is fixed when the session came in, so entries written while Main was away are kept.
-   */
   constructor(
     private readonly port: AssistantCallPort,
     private readonly session: RecordedSession,
     private readonly attachmentContextKey: Uint8Array,
-    private readonly startAfter: string | undefined,
     private readonly notify: Notify,
   ) {}
 
@@ -67,10 +62,6 @@ export class SessionRecorder {
     const entries = this.session.getEntries();
     if (!this.known) {
       this.through = (await this.port.call({ op: "recorded", sessionId })).lastEntryId;
-      if (this.through === undefined && this.startAfter !== undefined) {
-        await this.port.call({ op: "record", session: this.sessionInfo(sessionId), entries: [], throughEntryId: this.startAfter });
-        this.through = this.startAfter;
-      }
       this.known = true;
     }
     const recordedAt = this.through === undefined ? -1 : entries.findIndex((entry) => entry.id === this.through);

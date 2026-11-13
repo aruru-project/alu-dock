@@ -68,7 +68,7 @@ test("an assistant conversation held while Main was away is recorded once Main i
   const entries: object[] = [];
   const session = { getSessionId: () => "away", getSessionFile: () => undefined, getSessionName: () => undefined, getCwd: () => "/w", getEntries: () => entries };
   const told: string[] = [];
-  const recorder = new SessionRecorder(port, session as never, new Uint8Array(32), undefined, (message) => told.push(message));
+  const recorder = new SessionRecorder(port, session as never, new Uint8Array(32), (message) => told.push(message));
   entries.push(
     { type: "message", id: "u1", parentId: null, timestamp: "2026-11-01T10:00:00.000Z", message: { role: "user", content: "离线时说的话" } },
     { type: "message", id: "a1", parentId: "u1", timestamp: "2026-11-01T10:00:05.000Z", message: { role: "assistant", content: [{ type: "text", text: "离线时的回复" }] } },

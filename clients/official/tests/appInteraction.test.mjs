@@ -3094,6 +3094,8 @@ try {
       assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
     }
     assert.ok(paletteLabels().includes('Rename Session'), 'the owner can still rename the assistant')
+    // Seen in the real Desktop trial: state and resources had become two identical entries.
+    assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
     await click(dialog('命令中心'), '刷新人设和记忆重新读入人设、手写设定和记忆，对话接着原来的')
     assert.ok(!!dialog('刷新人设和记忆'), 'Reload stays available with her meaning')
     await click(dialog('刷新人设和记忆'), '取消')

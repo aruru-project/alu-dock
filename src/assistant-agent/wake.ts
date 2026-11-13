@@ -19,7 +19,4 @@ export class WakeBudget {
     this.inARow += 1;
     return true;
   }
-
-  /** True once Works have used every reply they may start. */
-  get spent(): boolean { return this.inARow >= MAX_WORK_WAKES; }
 }

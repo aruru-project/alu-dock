@@ -117,7 +117,6 @@ interface QueuedInput {
   operationId: string;
   delivery: "steer" | "followUp";
   text: string;
-  message: AgentMessage;
 }
 
 /** `/dock-tools`, alone or with what to do. */
@@ -233,7 +232,7 @@ class AssistantAgent implements WorkerAgent {
     });
     this.projector = new PiConversationProjector(attachmentContextKey);
     const notify = (message: string): void => this.tell(message, "warning");
-    this.recorder = new SessionRecorder(port, session, attachmentContextKey, undefined, notify);
+    this.recorder = new SessionRecorder(port, session, attachmentContextKey, notify);
     this.opening = new AssistantOpening(port, notify);
     this.desk = new WorkDesk(host, (state) => this.saveState(WORKS_STATE_TYPE, state));
     this.reminders = new Reminders(
@@ -535,7 +534,7 @@ class AssistantAgent implements WorkerAgent {
     const fromWork = isDockMessageText(message);
     if (actual !== "prompt") {
       if (!fromWork) this.ownerWords.push(message);
-      this.queue.push({ operationId, delivery: actual, text: modelText, message: userMessage });
+      this.queue.push({ operationId, delivery: actual, text: modelText });
       if (actual === "steer") this.agent.steer(userMessage); else this.agent.followUp(userMessage);
       this.publishQueue();
       return null;
