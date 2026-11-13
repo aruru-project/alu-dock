@@ -49,6 +49,13 @@ export class HeldChatRequest {
     })) }, "tool_calls");
   }
 
+  /** The provider answers with an HTTP error instead of a reply. */
+  fail(status: number, message: string): void {
+    assert.equal(this.closed, false, "The native run ended before the test supplied its model reply");
+    this.response.writeHead(status, { "content-type": "application/json" });
+    this.response.end(JSON.stringify({ error: { message, type: "server_error" } }));
+  }
+
   private reply(delta: Record<string, unknown>, finishReason: string): void {
     assert.equal(this.closed, false, "The native run ended before the test supplied its model reply");
     this.response.writeHead(200, { "content-type": "text/event-stream" });

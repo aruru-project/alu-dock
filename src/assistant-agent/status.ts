@@ -2,8 +2,10 @@ import type { ObservedInstanceStatus } from "../core/instance-observation.js";
 import { localMinute } from "../core/local-time.js";
 import type { Reminder } from "./reminders.js";
 
-/** The hidden note that opens each of her replies; clients do not show it and Main does not read it as speech. */
+/** The hidden note that opens each of her replies; clients do not show it and Main does not keep it. */
 export const STATUS_NOTE_TYPE = "assistant-status";
+/** Dock's own notes to her inside a reply, such as the last step's; clients do not show them and Main does not keep them. */
+export const DOCK_NOTE_TYPE = "assistant-dock-note";
 
 /** What she keeps about a Work between replies. */
 export interface WorkNote {

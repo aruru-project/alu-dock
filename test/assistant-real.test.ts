@@ -39,8 +39,8 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
   // Card #667: she is not a coding Work. The project's rules belong to the Works that work there, and
   // she has no file or shell tools of her own.
   assert.ok(!prompt.includes("PROJECT SYSTEM TEXT") && !prompt.includes("PROJECT RULES TEXT") && !prompt.includes("You are an expert coding assistant"), "Nothing of the project or of Pi's coding prompt is loaded for her");
-  assert.deepEqual(asked.toolNames.filter((name) => !name.startsWith("assistant_")), [], "Her own Agent offers the model only her tools");
-  assert.ok(asked.toolNames.includes("assistant_search"));
+  assert.deepEqual(asked.toolNames.filter((name) => !name.startsWith("assistant_") && !name.startsWith("dock_")), [], "Her own Agent offers the model her memory and Dock tools, and none for files or the shell");
+  assert.ok(asked.toolNames.includes("assistant_search") && asked.toolNames.includes("dock_spawn"));
   asked.text("团子呀，这都忘了？");
   await settled(client, alu.id);
   assert.deepEqual((await client.history(alu.id)).entries.filter((entry) => entry.visibility === "conversation").map((entry) => entry.source), ["user", "assistant"]);
@@ -87,4 +87,49 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
   assert.ok(JSON.stringify(dog.body.messages).includes("团子呀，这都忘了？"), "A continued Work has its conversation back");
   dog.text("豆包。");
   await settled(client, alu.id);
+});
+
+// Card #667: what a Pi Work lets its owner do while it replies stays with her own Agent: a message sent
+// meanwhile waits and joins the reply at its next step, can be taken back, and Stop ends the reply.
+test("while she replies a message waits its turn, can be taken back or joins at her next step, and Stop ends the reply", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "second"], { prefix: "alu-assistant-queue-", assistant: true });
+  const { coordinator, second } = team.providers;
+  const client = await team.startHost();
+  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+
+  await client.prompt(alu.id, "第一句", "auto", "alu-first");
+  const first = await coordinator.request(0);
+  const waiting = await client.prompt(alu.id, "这句发错了", "auto", "alu-mistake");
+  assert.deepEqual({ queued: waiting.receipt.queued, delivery: waiting.receipt.delivery }, { queued: true, delivery: "steer" });
+  assert.equal((await client.status(alu.id)).pending.total, 1);
+  const taken = await client.dequeue(alu.id, "alu-take-back");
+  assert.deepEqual(taken.receipt.restored.map((item) => item.text), ["这句发错了"]);
+  assert.equal((await client.status(alu.id)).pending.total, 0);
+
+  await client.prompt(alu.id, "顺便看看记忆里有没有团子", "auto", "alu-join");
+  first.tools({ id: "look", name: "assistant_search", arguments: { query: "团子" } });
+  const joined = await coordinator.request(1);
+  const said = (joined.body.messages ?? []).filter((message) => message.role === "user").map((message) => JSON.stringify(message.content));
+  assert.ok(said.some((text) => text.includes("顺便看看记忆里有没有团子")) && !said.some((text) => text.includes("这句发错了")), "What waited joins the reply at its next step; what was taken back does not");
+  joined.text("没有团子。");
+  await settled(client, alu.id);
+  assert.equal((await client.status(alu.id)).pending.total, 0);
+
+  // Stop ends a reply that waits for the model; she takes the next message.
+  await client.prompt(alu.id, "讲个很长的故事", "auto", "alu-long");
+  await coordinator.request(2);
+  await client.abort(alu.id, "alu-stop");
+  await waitFor(async () => (await client.status(alu.id)).lastRun === "aborted", "Stop did not end her reply");
+
+  // She changes model when asked, keeps the choice when the Work is opened again, and asks a failed request again.
+  await client.setModel(alu.id, "second", "fixture", "alu-model");
+  await client.prompt(alu.id, "换了模型还在吗？", "auto", "alu-after-model");
+  (await second.request(0)).fail(503, "overloaded");
+  (await second.request(1)).text("在。");
+  await settled(client, alu.id);
+  assert.equal((await client.status(alu.id)).lastRun, "succeeded");
+  process.kill(team.workerPids[0]!, "SIGKILL");
+  await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
+  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen", undefined, trust));
+  assert.deepEqual((await client.status(alu.id)).executor.model, { provider: "second", id: "fixture" });
 });

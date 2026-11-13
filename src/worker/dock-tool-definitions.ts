@@ -56,6 +56,11 @@ export interface DockToolOptions {
    * for an Agent whose conversation is never copied to a child Work. Default true.
    */
   conversationCopy?: boolean;
+  /**
+   * false leaves out dock_wait and the sentence of dock_spawn's description about it, for an Agent
+   * whose turns always end while child Works run: their messages wake it. Default true.
+   */
+  waitInTurn?: boolean;
 }
 
 const DOCK_TOOLS_GUIDE_PATH = fileURLToPath(new URL("../../../docs/agent/dock-tools.md", import.meta.url));
@@ -177,10 +182,11 @@ function spawnSchema(conversationCopy: boolean): object {
 /** Every Dock tool of a top-level Work, in registration order. */
 export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefinition[] {
   const conversationCopy = options.conversationCopy ?? true;
-  return [
+  const waitInTurn = options.waitInTurn ?? true;
+  const tools: DockToolDefinition[] = [
     {
       name: "dock_spawn", label: "Start a child Work",
-      description: toolDescription(`Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so.${conversationCopy ? " It starts with only the task unless withContext gives it a copy of your conversation." : ""} It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls.`),
+      description: toolDescription(`Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so.${conversationCopy ? " It starts with only the task unless withContext gives it a copy of your conversation." : " It starts with only the task, so put what it needs to know into the task."} It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them.${waitInTurn ? " If your turn must not end, as during a Dock Goal, use dock_wait." : ""} It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls.`),
       parameters: spawnSchema(conversationCopy),
       execute: async (params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">, runtime) => {
         const thinkingAsked = params.thinkingLevel ?? runtime.thinkingLevel();
@@ -298,6 +304,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
       })),
     },
   ];
+  return waitInTurn ? tools : tools.filter((tool) => tool.name !== "dock_wait");
 }
 
 /** A Host answer as a tool call's outcome; the list of Machines goes to the model as text only. */

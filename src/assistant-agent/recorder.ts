@@ -14,6 +14,7 @@ import {
 import { isDockMessageText } from "../core/dock-tools.js";
 import { extractDockAttachmentContext } from "../pi/dock-attachment-context.js";
 import { WATCH_NOTICE_TYPE, WORK_MESSAGE_TYPE, WORK_WAKE_TYPE } from "../worker/dock-tools-client.js";
+import { DOCK_NOTE_TYPE, STATUS_NOTE_TYPE } from "./status.js";
 
 /** How her Worker asks the assistant service on Main; the Host names the Work that asks. */
 export interface AssistantCallPort {
@@ -136,9 +137,12 @@ type Block = { type: string; text?: string; name?: string; arguments?: unknown; 
 /** Extension messages in which another Work speaks to this one (card #666). */
 const WORK_SPEAKS = new Set<string>([WORK_MESSAGE_TYPE, WATCH_NOTICE_TYPE]);
 
-/** An extension message: another Work's words, or another notice; undefined for the marker that only starts a turn. */
+/** What Dock itself puts into her conversation for the model alone: not part of what was said. */
+const DOCK_ONLY = new Set<string>([WORK_WAKE_TYPE, STATUS_NOTE_TYPE, DOCK_NOTE_TYPE]);
+
+/** A message that is neither the owner's nor hers: another Work's words, or another notice; undefined for Dock's own notes to the model. */
 function extensionEntry(base: { entryId: string; at: string }, customType: unknown, content: string | readonly Block[] | undefined): Omit<AssistantEntry, "parentId"> | undefined {
-  if (customType === WORK_WAKE_TYPE) return undefined;
+  if (typeof customType === "string" && DOCK_ONLY.has(customType)) return undefined;
   return withText({ ...base, kind: typeof customType === "string" && WORK_SPEAKS.has(customType) ? "work" : "notice" }, contentText(content));
 }
 

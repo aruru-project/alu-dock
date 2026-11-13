@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
@@ -35,7 +36,10 @@ import {
   type ClearedAgentQueue,
   type ThinkingLevel,
 } from "../core/agent-worker.js";
+import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
+import type { ObservationNotification } from "../core/instance-observation.js";
 import type { JsonObject } from "../core/json-value.js";
+import { localMinute } from "../core/local-time.js";
 import { mainModelOwner } from "../model-service/owner.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import { appendDockAttachmentContext } from "../pi/dock-attachment-context.js";
@@ -50,10 +54,16 @@ import {
 import { projectPiModelList } from "../pi/pi-model-list.js";
 import { resolvePiStartingModel } from "../pi/pi-starting-model.js";
 import { TransientFileRegistry } from "../pi/transient-file-registry.js";
+import { topLevelDockTools, type DockToolRuntime } from "../worker/dock-tool-definitions.js";
+import { watchNoticeEntry, workMessageEntry, type DescribedModel } from "../worker/dock-tools-client.js";
 import type { WorkerAgent, WorkerHost } from "../worker/worker-shell.js";
 import { memoryTools } from "./memory-tools.js";
 import { AssistantOpening } from "./opening.js";
 import { SessionRecorder, type AssistantCallPort } from "./recorder.js";
+import { MAX_REMINDER_CHARS, Reminders, reminderTime, type Reminder } from "./reminders.js";
+import { DOCK_NOTE_TYPE, firstLine, renderStatus, STATUS_NOTE_TYPE } from "./status.js";
+import { MAX_WORK_WAKES, WakeBudget, type WakeSource } from "./wake.js";
+import { WORKS_STATE_TYPE, WorkDesk } from "./works.js";
 
 /** What the Host gives her Worker to start with. */
 export interface AssistantWorkerInit {
@@ -71,6 +81,27 @@ export interface AssistantWorkerInit {
 const RETRY_DELAYS_MS = [2_000, 6_000, 15_000];
 /** A Work that is stopping waits this long at most for her last words to reach Main. */
 const SHUTDOWN_SYNC_MS = 1_000;
+
+/** Requests to the model one reply may make before it is told to wrap up. */
+export const MAX_REPLY_STEPS = 20;
+/** Kept with her conversation: the reminders still waiting. */
+const REMINDERS_STATE_TYPE = "assistant-reminders";
+/** A reminder that came due, in her conversation. */
+const REMINDER_NOTE_TYPE = "assistant-reminder";
+/** She has no files of her own to hand over, and her turns end while child Works run. */
+const NOT_HER_DOCK_TOOLS = new Set(["dock_deliver_file"]);
+const REMIND_SCHEMA = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["set", "list", "cancel"] },
+    at: { type: "string", description: "set: when, as YYYY-MM-DD HH:mm in local time or an ISO time." },
+    inMinutes: { type: "integer", minimum: 1, maximum: 525_600, description: "set: minutes from now, instead of at." },
+    text: { type: "string", maxLength: MAX_REMINDER_CHARS, description: "set: what to do or say then, written so it makes sense on its own later." },
+    id: { type: "string", description: "cancel: the reminder's id, as in #r1a2b3c4 (without #)." },
+  },
+  required: ["action"],
+  additionalProperties: false,
+};
 
 /** One message the owner (or another Work, through her input) sent while she was replying. */
 interface QueuedInput {
@@ -128,6 +159,18 @@ class AssistantAgent implements WorkerAgent {
   private stopRequested = false;
   private retryWait: AbortController | undefined;
   private readonly queue: QueuedInput[] = [];
+  private readonly wake = new WakeBudget();
+  private toldWakesSpent = false;
+  private readonly desk: WorkDesk;
+  private readonly reminders: Reminders;
+  private readonly savedState = new Map<string, string>();
+  /** What her owner said in the reply in progress, as he said it; handed on with the work she gives out. */
+  private ownerWords: string[] = [];
+  private steps = 0;
+  /** The reply reached its last step: only messages to other Works still go out. */
+  private closing = false;
+  /** Whether the model's context was built from the conversation yet; until then the session alone holds it. */
+  private contextReady = false;
   /** The last entry already counted in `metricsValue`. */
   private countedThrough: string | undefined;
   private metricsValue: AgentSessionMetrics = {
@@ -152,10 +195,20 @@ class AssistantAgent implements WorkerAgent {
     const notify = (message: string): void => this.tell(message, "warning");
     this.recorder = new SessionRecorder(port, session, attachmentContextKey, undefined, notify);
     this.opening = new AssistantOpening(port, notify);
-    this.tools = memoryTools({
-      port, session, recorder: this.recorder, models, attachmentContextKey,
-      confirm: async (title, message) => await host.call("ui.confirm", { title, message }) === true,
-    });
+    this.desk = new WorkDesk(host, (state) => this.saveState(WORKS_STATE_TYPE, state));
+    this.reminders = new Reminders(
+      (reminders) => this.saveState(REMINDERS_STATE_TYPE, { reminders }),
+      (reminder, lateMs) => this.reminderDue(reminder, lateMs),
+    );
+    this.restoreState();
+    this.tools = [
+      ...memoryTools({
+        port, session, recorder: this.recorder, models, attachmentContextKey,
+        confirm: async (title, message) => await host.call("ui.confirm", { title, message }) === true,
+      }),
+      this.reminderTool(),
+      ...this.dockTools(),
+    ];
     this.agent = new Agent({
       initialState: { tools: this.tools },
       streamFn: (model, context, options) => models.streamSimple(model, context, options),
@@ -163,6 +216,20 @@ class AssistantAgent implements WorkerAgent {
       steeringMode: "all",
       followUpMode: "all",
       sessionId: session.getSessionId(),
+      finishTurn: (turn) => {
+        this.steps += 1;
+        if (this.closing) return { action: "end" };
+        // Tool results mean she would ask the model again. At the limit she gets one more request to
+        // say where things stand, so a long reply never ends without a word to her owner.
+        if (turn.toolResults.length > 0 && this.steps >= MAX_REPLY_STEPS) {
+          this.closing = true;
+          this.agent.steer(this.dockNote(`[步数上限] 这一轮已经走了 ${MAX_REPLY_STEPS} 步，这是最后一步。现在用几句话向主人交代做到哪了、还差什么；要通知别的 Work 可以用 dock_send。这一步里其他工具都不会执行。`));
+        }
+        return undefined;
+      },
+      beforeToolCall: async ({ toolCall }) => this.closing && toolCall.name !== "dock_send"
+        ? { block: true, reason: "这一轮已到步数上限，这个调用没有执行。" }
+        : undefined,
     });
     this.agent.subscribe((event) => this.observe(event));
   }
@@ -277,6 +344,8 @@ class AssistantAgent implements WorkerAgent {
         const waiting = this.buffered ?? [];
         this.buffered = undefined;
         for (const event of waiting) this.publish(event);
+        // Reminders that came due while she was not running fire now that the Host listens.
+        this.reminders.start();
         return null;
       }
       case "wait_for_idle": await this.running; return null;
@@ -288,8 +357,8 @@ class AssistantAgent implements WorkerAgent {
       case "resolve_session_target": throw this.notHers(NO_OTHER_SESSION);
       // What she and her owner said stays with her; a Work she hands something to gets it in the task.
       case "branch_for_child": throw new Error("The assistant's conversation is not copied to other Works. Put what the Work needs into its task.");
-      case "observation_delivery": case "work_message":
-        throw new Error("The assistant cannot take messages from other Works yet");
+      case "work_message": this.workSaid(control.message); return null;
+      case "observation_delivery": this.watchFired(control.notification); return null;
       case "dispose": return this.dispose();
     }
   }
@@ -297,6 +366,7 @@ class AssistantAgent implements WorkerAgent {
   dispose(): Promise<AgentCleanupResult> {
     this.disposed ??= (async () => {
       const cleanupErrors: string[] = [];
+      this.reminders.stop();
       try { await this.abort(); } catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
       // Her last words reach Main now when they can; otherwise the next time this conversation opens.
       await Promise.race([this.recorder.sync(), new Promise((done) => setTimeout(done, SHUTDOWN_SYNC_MS).unref())]);
@@ -355,14 +425,167 @@ class AssistantAgent implements WorkerAgent {
       ...(images === undefined ? {} : { images }), ...(attachments === undefined ? {} : { attachments }),
     });
     preflight({ success: true, inputKind: "prompt", delivery: actual, custody: "runtime" });
+    // Another top-level Work speaks to her through her input, with Dock's source line first.
+    const fromWork = isDockMessageText(message);
     if (actual !== "prompt") {
+      if (!fromWork) this.ownerWords.push(message);
       this.queue.push({ operationId, delivery: actual, text: modelText, message: userMessage });
       if (actual === "steer") this.agent.steer(userMessage); else this.agent.followUp(userMessage);
       this.publishQueue();
       return null;
     }
-    await this.reply(operationId, [userMessage]);
+    if (!this.admit(fromWork ? "work" : "owner")) {
+      // It joins the conversation without a reply: the Host shows the message as taken without a run.
+      this.observe({ type: "message_start", message: userMessage });
+      this.observe({ type: "message_end", message: userMessage });
+      this.publish(this.checkpoint());
+      return null;
+    }
+    if (!fromWork) this.ownerWords = [message];
+    await this.reply(operationId, [userMessage], fromWork ? "别的 Work 发来的消息" : "主人的消息");
     return null;
+  }
+
+  // ---- What reaches her from Works and from her own reminders ---------------------------------
+
+  /** A message from a child Work, or Dock's notice that one stopped without its result. */
+  private workSaid(message: WorkMessage): void {
+    this.desk.heard(message);
+    const name = `「${firstLine(message.from.name, 60)}」`;
+    const wokenBy = message.type === "child_stopped" ? `子 Work${name}没交结果就停下了`
+      : message.from.relation === "parent" ? `父 Work${name}的消息`
+        : `子 Work${name}${message.done ? "交来的结果" : "的消息"}`;
+    this.arrive("work", workMessageEntry(message), wokenBy, message.from.relation === "child" ? message.from.id : undefined);
+  }
+
+  private watchFired(notification: ObservationNotification): void {
+    this.desk.watched(notification);
+    this.arrive("work", watchNoticeEntry(notification), `你盯着的 Work「${firstLine(notification.target.name ?? notification.target.id, 60)}」有了动静`);
+  }
+
+  private reminderDue(reminder: Reminder, lateMs: number): void {
+    const late = lateMs >= 60_000 ? `，晚了 ${Math.round(lateMs / 60_000)} 分钟（到点时 Dock 没在运行）` : "";
+    const content = `[提醒 · 你定在 ${localMinute(new Date(reminder.at))}${late}]\n${reminder.text}`;
+    this.arrive("reminder", { customType: REMINDER_NOTE_TYPE, content, display: true, details: { id: reminder.id, at: reminder.at } }, `你定的提醒（#${reminder.id}）`);
+  }
+
+  /**
+   * Something that is not her owner speaking reached her. While she replies it joins the reply at
+   * its next step; while she is idle it starts a reply, unless Works have already started as many
+   * in a row as they may, and then it waits in the conversation for her owner.
+   */
+  private arrive(source: WakeSource, entry: { customType: string; content: string; display: boolean; details?: unknown }, wokenBy: string, childId?: string): void {
+    const message = customMessage(entry.customType, entry.content, entry.display, entry.details);
+    if (this.running !== undefined) { this.agent.steer(message); return; }
+    if (this.model !== undefined && this.admit(source, childId)) { void this.reply(undefined, [message], wokenBy); return; }
+    this.observe({ type: "message_start", message });
+    this.observe({ type: "message_end", message });
+  }
+
+  /** Whether this may start a reply; says so once when Works have used up the replies they may start. */
+  private admit(source: WakeSource, childId?: string): boolean {
+    if (this.wake.admit(source)) {
+      if (source !== "work") this.toldWakesSpent = false;
+      return true;
+    }
+    if (!this.toldWakesSpent) {
+      this.toldWakesSpent = true;
+      this.tell(`助手已经连续 ${MAX_WORK_WAKES} 次被别的 Work 的消息叫醒。之后它们的消息她照样收到，但先不回应，等你跟她说话。`, "warning");
+      // A child Work that waits for her answer is told why none comes.
+      if (childId !== undefined) void this.desk.invoke({
+        type: "send", operationId: randomUUID(), target: childId,
+        message: `[Dock 自动通知] 助手已经连续 ${MAX_WORK_WAKES} 次被 Work 的消息叫醒，现在不再自动回应 Work 的消息，要等主人跟她说话。你的消息已经送到，她之后会看到。`,
+      }).catch(() => {});
+    }
+    return false;
+  }
+
+  /** A note from Dock inside her reply; clients do not show it. */
+  private dockNote(text: string): AgentMessage {
+    return customMessage(DOCK_NOTE_TYPE, text, false);
+  }
+
+  // ---- Her tools beyond memory ------------------------------------------------------------------
+
+  private reminderTool(): AgentTool {
+    return {
+      name: "assistant_remind",
+      label: "Reminders",
+      description: "Wake yourself later. set: at a time (at) or after some minutes (inMinutes), with a text that says what to do then; when it comes due you get a turn that starts with the reminder, even if nobody is talking to you. list: the reminders still waiting. cancel: drop one. Reminders survive a restart; one that came due while Dock was not running fires as soon as it is back and says how late it is. Use it when your owner asks to be reminded of something, or to look at something again later instead of waiting in this turn.",
+      parameters: REMIND_SCHEMA,
+      execute: async (_id: string, params: { action: string; at?: string; inMinutes?: number; text?: string; id?: string }) => {
+        const line = (reminder: Reminder): string => `#${reminder.id} ${localMinute(new Date(reminder.at))} ${firstLine(reminder.text)}`;
+        if (params.action === "set") {
+          if (params.text === undefined) throw new Error("set needs text.");
+          const reminder = this.reminders.set(reminderTime(params, Date.now()), params.text);
+          return { content: [{ type: "text", text: `Set: ${line(reminder)}` }], details: reminder };
+        }
+        if (params.action === "cancel") {
+          if (params.id === undefined) throw new Error("cancel needs the reminder's id.");
+          const removed = this.reminders.cancel(params.id);
+          if (!removed) throw new Error(`No reminder #${params.id.replace(/^#/u, "")} is waiting.`);
+          return { content: [{ type: "text", text: `Cancelled: ${line(removed)}` }], details: removed };
+        }
+        if (params.action !== "list") throw new Error(`Unknown action ${params.action}.`);
+        const waiting = this.reminders.list();
+        return { content: [{ type: "text", text: waiting.length === 0 ? "No reminder is waiting." : ["Waiting reminders (local time):", ...waiting.map((reminder) => `- ${line(reminder)}`)].join("\n") }], details: { reminders: waiting } };
+      },
+    } as unknown as AgentTool;
+  }
+
+  /** The Dock tools of a top-level Work, asked through her desk so her status knows what she handed out. */
+  private dockTools(): AgentTool[] {
+    const describe = (model: Model<Api>): DescribedModel => ({
+      provider: model.provider, id: model.id,
+      thinkingLevels: getSupportedThinkingLevels(model),
+      ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
+      images: model.input.includes("image"),
+    });
+    const runtime: DockToolRuntime = {
+      invoke: (request) => this.desk.invoke(this.withOwnerWords(request)),
+      thinkingLevel: () => this.thinkingLevel,
+      modelFacts: () => ({
+        ...(this.model === undefined ? {} : { current: describe(this.model) }),
+        describe: (ref) => { const model = this.models.getModel(ref.provider, ref.id); return model ? describe(model) : undefined; },
+      }),
+    };
+    return topLevelDockTools({ conversationCopy: false, waitInTurn: false })
+      .filter((tool) => !NOT_HER_DOCK_TOOLS.has(tool.name))
+      .map((tool) => ({
+        name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
+        execute: async (_id: string, params: unknown, signal?: AbortSignal) => {
+          const { text, details } = await tool.execute(params, runtime, signal);
+          return { content: [{ type: "text", text }], details };
+        },
+      })) as unknown as AgentTool[];
+  }
+
+  /**
+   * A child Work sees only its task. What her owner said in this reply goes with it as he said it,
+   * so a retelling that drifted can be checked against his words.
+   */
+  private withOwnerWords(request: DockToolsRequest): DockToolsRequest {
+    if (request.type !== "spawn" || this.ownerWords.length === 0) return request;
+    const quoted = this.ownerWords.flatMap((words) => words.split(/\r?\n/u)).map((line) => `> ${line}`).join("\n");
+    const task = `${request.task}\n\n---\n下面是主人这一轮的原话，由 Dock 原样附上，供你核对上面的任务有没有走样；两者对不上时，先问清楚再做。\n${quoted}`;
+    return task.length > MAX_DOCK_TOOL_MESSAGE_CHARS ? request : { ...request, task };
+  }
+
+  // ---- What is kept with her conversation besides what was said -------------------------------
+
+  private saveState(type: string, state: unknown): void {
+    const serialized = JSON.stringify(state);
+    if (this.savedState.get(type) === serialized) return;
+    this.savedState.set(type, serialized);
+    this.session.appendCustomEntry(type, state);
+  }
+
+  private restoreState(): void {
+    const latest = new Map<string, unknown>();
+    for (const entry of this.session.getBranch()) if (entry.type === "custom") latest.set(entry.customType, entry.data);
+    for (const [type, state] of latest) this.savedState.set(type, JSON.stringify(state));
+    this.desk.restore(latest.get(WORKS_STATE_TYPE));
+    this.reminders.restore((latest.get(REMINDERS_STATE_TYPE) as { reminders?: unknown } | undefined)?.reminders);
   }
 
   private clearQueue(): ClearedAgentQueue {
@@ -399,15 +622,18 @@ class AssistantAgent implements WorkerAgent {
    * passing reason is asked for again, and what was sent while she replied starts the next reply,
    * also after a stop, as in Pi.
    */
-  private reply(operationId: string | undefined, messages: AgentMessage[]): Promise<void> {
+  private reply(operationId: string | undefined, messages: AgentMessage[], wokenBy: string): Promise<void> {
     if (this.running !== undefined) throw new Error("The assistant is already replying");
     this.runOperationId = operationId;
     this.stopRequested = false;
+    this.steps = 0;
+    this.closing = false;
     const run = (async () => {
       const model = this.model;
       if (model === undefined) return;
       void this.recorder.sync();
       await this.leadWithOpening();
+      await this.noteStatus(wokenBy);
       this.agent.state.model = model;
       this.agent.state.thinkingLevel = clampThinkingLevel(model, this.thinkingLevel);
       await this.agent.prompt(messages);
@@ -430,6 +656,8 @@ class AssistantAgent implements WorkerAgent {
         }
         if (!this.agent.hasQueuedMessages()) break;
         this.stopRequested = false;
+        this.steps = 0;
+        this.closing = false;
         await this.agent.continue();
       }
     })().catch((error: unknown) => error instanceof Error ? error.message : String(error)).then((failure) => {
@@ -438,6 +666,7 @@ class AssistantAgent implements WorkerAgent {
       this.running = undefined;
       this.runOperationId = undefined;
       this.stopRequested = false;
+      this.ownerWords = [];
       for (const event of this.projector.project({
         type: "agent_settled",
         ...(settledOperationId === undefined ? {} : { operationId: settledOperationId }),
@@ -460,6 +689,25 @@ class AssistantAgent implements WorkerAgent {
     const opening = createInitialSystemMessage(text, this.tools.map(toToolDeclaration));
     const conversation = this.session.buildSessionContext().messages.filter((message) => message.role !== "system");
     this.agent.state.messages = opening === undefined ? conversation : [opening, ...conversation];
+    this.contextReady = true;
+  }
+
+  /**
+   * What she should know before she answers, without calling a tool: the time, what woke her and
+   * what the Works she handed things to are doing. It is saved with the conversation, hidden from
+   * clients, and stays where it was written so the model's cached prefix does not change.
+   */
+  private async noteStatus(wokenBy: string): Promise<void> {
+    const lost = this.desk.takeLost();
+    const text = [
+      renderStatus({
+        now: new Date(), wokenBy, works: await this.desk.list(), selfId: this.host.identity.instanceId,
+        notes: this.desk.notes, followed: this.desk.following, reminders: this.reminders.list(),
+      }),
+      ...(lost.length === 0 ? [] : [`这个 Work 重新打开过，下面这些你派出去的子 Work 已经不在了，它们没交的结果不会再来：${lost.map((name) => `「${name}」`).join("、")}。有事叫醒你时再跟主人说，需要的话重新派。`]),
+    ].join("\n");
+    this.session.appendCustomMessageEntry(STATUS_NOTE_TYPE, text, false);
+    this.agent.state.messages = [...this.agent.state.messages, customMessage(STATUS_NOTE_TYPE, text, false)];
   }
 
   private lastAssistantMessage(): AssistantMessage | undefined {
@@ -490,7 +738,11 @@ class AssistantAgent implements WorkerAgent {
   // ---- What her loop does, as the Host and Main see it -----------------------------------------
 
   private observe(event: LoopEvent): void {
-    if (event.type === "message_end") this.keep(event.message);
+    if (event.type === "message_end") {
+      this.keep(event.message);
+      // Outside a reply nothing else adds it to what the model is given next.
+      if (this.running === undefined && this.contextReady) this.agent.state.messages = [...this.agent.state.messages, event.message];
+    }
     const projected = projectAgentSessionEvents(event as never, this.publishedFiles).map((item) => {
       if (item.type !== "agent_start") return item;
       // The reply belongs to the message that starts it: the one sent, or the first that waited.
@@ -501,6 +753,8 @@ class AssistantAgent implements WorkerAgent {
       if (item.type === "dock_queue_consumed") this.consumed(item.operationId);
       this.publish(item.type === "conversation_checkpoint" ? this.checkpoint() : item);
     }
+    // A Work's message or a reminder shows in clients as soon as it is in the conversation.
+    if (event.type === "message_end" && event.message.role === "custom") this.publish(this.checkpoint());
   }
 
   /** Every message of the conversation is saved as it completes; prompt and tool changes are not conversation. */
@@ -613,6 +867,11 @@ class AssistantAgent implements WorkerAgent {
     } else return;
     counts.total += 1;
   }
+}
+
+/** A message in the conversation that is neither her owner's nor hers, as Pi's sessions keep them. */
+function customMessage(customType: string, content: string, display: boolean, details?: unknown): AgentMessage {
+  return { role: "custom", customType, content, display, ...(details === undefined ? {} : { details }), timestamp: Date.now() };
 }
 
 /** A file the Host can open this conversation from again: a real file of this user, not a link. */
