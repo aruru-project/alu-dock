@@ -680,6 +680,8 @@ export interface ConversationTurnItem {
   error?: string
   /** A running segment observed without its own `run.started` continues the turn before it. */
   continuation?: boolean
+  /** A wake already in history starts this live reply; it is still a standalone row until a run is observed. */
+  openerId?: string
 }
 
 export type ShellRunStatus = 'running' | 'done' | 'failed' | 'stopped'

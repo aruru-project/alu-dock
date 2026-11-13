@@ -281,7 +281,7 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
 let mounted
 try {
-  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
+  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
   await build({ root, configFile: false, logLevel: 'silent', build: { outDir: directory, emptyOutDir: false, minify: false,
     lib: { entry: join(directory, 'entry.ts'), formats: ['es'], fileName: () => 'app.mjs' }, rolldownOptions: { external: ['vue', 'pinia'] } },
     plugins: [{ name: 'native-boundary', enforce: 'pre', resolveId(id) {
@@ -3149,6 +3149,73 @@ try {
       console.error = loggedError; failPreferences = false; failStorage = false; failNativeAppearance = false
     }
     console.log('PASS: color theme survives a reload, works without device settings, tells a failed save or system-bar match and retries on a second click, opens before pairing')
+  }
+
+  // Card #670: a wake checkpoints its record before the assistant writes her reply.
+  // Use the real content ingress and ConversationView: choices on each live turn must
+  // follow that same reply through this intermediate checkpoint and final history handoff.
+  {
+    mounted.unmount(); await settle()
+    const { ConversationView, useConversationContent } = compiled
+    const content = useConversationContent({ beforeLayoutChange: () => null, afterLayoutChange: async () => {}, isFollowing: () => true, layoutChanged: () => {}, projected: () => {} })
+    content.publish({ ...bootstrap, records: [], activeEvents: [], historyTruncated: false })
+    const view = element('reply-turns')
+    mounted = renderer.createApp({ render: () => h(ConversationView, {
+      items: content.items.value, switching: false, streamingParts: content.streamingPartIds.value,
+      historyLoading: false, historyHydrating: false, historyTruncated: false, historyError: null, awayFromBottom: false,
+      attachmentPreviews: {}, toolOpen: () => false, imageResource: () => ({ state: 'idle' }),
+      holdReadingPosition: change => change(), restoringAnchorId: () => undefined, recordState: () => ({ loading: false }),
+    }) }).use(createPinia())
+    mounted.mount(view)
+    let sequence = 10
+    const at = seconds => new Date(Date.UTC(2026, 10, 13, 0, 0, seconds)).toISOString()
+    const send = (seconds, eventType, data = {}) => content.applyConversationEvent(content.state.value,
+      { runtimeGeneration: 1, sequence: ++sequence, occurredAt: at(seconds), eventType, data }, true)
+    const message = (seconds, messageId, role, value, stopReason = 'stop') => send(seconds, 'message.completed', { messageId, role, content: [{ type: 'text', text: value }], stopReason })
+    const record = (recordId, source, value, seconds, extra = {}) => ({ recordId, entryId: recordId, kind: 'message', source, visibility: 'conversation', timestamp: at(seconds), content: [{ type: 'text', text: value }], ...extra })
+    const records = [
+      record('request', 'user', '派个 Work 数行数', 0),
+      record('planning', 'assistant', '第一轮的过程', 1, { stopReason: 'toolUse' }),
+      record('sent', 'assistant', '我派它去数了', 3, { stopReason: 'stop' }),
+    ]
+    const handoff = async (execution) => {
+      const header = { ...bootstrap, instance: { ...work, execution }, cursor: { ...cursor, sequence }, activeEvents: [], records: [], historyTruncated: false }
+      content.acceptReadCut(sequence, header)
+      content.applyContent({ kind: 'checkpoint_begin', bootstrap: header })
+      for (const record of records) content.applyContent({ kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true })
+      content.applyContent({ kind: 'checkpoint_end' })
+      await settle()
+    }
+    const summaries = () => all(view, item => item.type === 'button' && item.props.class === 'alu-turn-summary-line')
+    const choices = () => summaries().map(item => item.props['aria-expanded'])
+    send(0, 'run.started'); message(0, 'request', 'user', '派个 Work 数行数')
+    message(1, 'planning', 'assistant', '第一轮的过程', 'toolUse'); message(3, 'sent', 'assistant', '我派它去数了'); send(3, 'run.settled', { result: 'succeeded' })
+    await settle()
+    summaries()[0].props.onClick(); await settle()
+    send(20, 'run.started'); message(20, 'child', 'system', '[来自子 Work「数行数」]\n子 Work 数完了')
+    await settle()
+    summaries()[1].props.onClick(); await settle()
+    assert.deepEqual(choices(), [true, false], 'the reader opened the first reply and folded the new one while it was running')
+    records.push(record('status', 'extension', '内部状态', 4, { kind: 'custom_message', customType: 'assistant-status', visibility: 'hidden' }),
+      record('child', 'extension', '[来自子 Work「数行数」]\n子 Work 数完了', 20, { kind: 'custom_message', customType: 'dock-work-message' }))
+    await handoff('running')
+    assert.deepEqual(choices(), [true, false], 'a checkpoint with only the wake message keeps both replies and their separate choices')
+    assert.ok(text(view).includes('第一轮的过程') && text(view).includes('子 Work 数完了'), 'the opened process and the folded next reply’s opener stay visible')
+    message(21, 'checking', 'assistant', '第二轮的过程', 'toolUse'); message(22, 'count', 'assistant', 'README.md 有 4 行'); send(22, 'run.settled', { result: 'succeeded' })
+    records.push(record('checking', 'assistant', '第二轮的过程', 21, { stopReason: 'toolUse' }), record('count', 'assistant', 'README.md 有 4 行', 22, { stopReason: 'stop' }))
+    await handoff('idle')
+    assert.deepEqual(choices(), [true, false], 'settled history keeps the reader’s choices on those same two replies')
+    send(405, 'run.started'); message(405, 'reminder', 'system', '提醒：喝口水'); message(407, 'drink', 'assistant', '主人，喝口水'); send(407, 'run.settled', { result: 'succeeded' })
+    await settle()
+    assert.deepEqual(choices(), [true, false, false])
+    assert.ok(text(view).includes('提醒：喝口水'), 'the live reminder remains at the start of the folded reply')
+    records.push(record('reminder', 'extension', '提醒：喝口水', 405, { kind: 'custom_message', customType: 'assistant-reminder' }), record('drink', 'assistant', '主人，喝口水', 407, { stopReason: 'stop' }))
+    await handoff('idle')
+    assert.deepEqual(choices(), [true, false, false], 'the third reply’s handoff leaves all earlier choices intact')
+    for (const line of ['第一轮的过程', '我派它去数了', '子 Work 数完了', 'README.md 有 4 行', '提醒：喝口水', '主人，喝口水']) assert.ok(text(view).includes(line), line)
+    assert.deepEqual(summaries().map(item => text(item).match(/\d+s/)?.[0]), ['3s', '2s', '2s'], 'each reply measures its own time')
+    content.dispose()
+    console.log('PASS: each awakened reply keeps its opener, final answer and fold choice through live checkpoints and history handoff (#670)')
   }
 
   }
