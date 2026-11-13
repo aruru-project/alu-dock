@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
+import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 
 export interface ResolveManagedPiAgentDirOptions {
   sourceEnvironment?: NodeJS.ProcessEnv;

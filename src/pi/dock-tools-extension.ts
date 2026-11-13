@@ -33,8 +33,8 @@ import {
   type DescribedModel,
   type ModelFacts,
   type RenderContext,
-} from "./dock-tools-client.js";
-import { ChildMessages, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "./child-messages.js";
+} from "../worker/dock-tools-client.js";
+import { ChildMessages, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../worker/child-messages.js";
 
 export const DOCK_TOOL_NAMES = [
   "dock_spawn",

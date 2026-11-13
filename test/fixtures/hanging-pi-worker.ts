@@ -3,7 +3,7 @@ import {
   OrderedWorkerSender,
   WorkerFrameReceiver,
   parseWorkerIdentity,
-} from "../../src/pi/worker-protocol.js";
+} from "../../src/worker/worker-protocol.js";
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
   void run().catch(() => process.exit(1));

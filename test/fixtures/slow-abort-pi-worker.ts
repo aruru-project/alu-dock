@@ -5,7 +5,7 @@ import {
   WorkerFrameReceiver,
   parseWorkerIdentity,
   type WorkerEnvelope,
-} from "../../src/pi/worker-protocol.js";
+} from "../../src/worker/worker-protocol.js";
 
 async function run(): Promise<void> {
   const identity = parseWorkerIdentity(JSON.parse(process.env.ALU_DOCK_WORKER_IDENTITY ?? "null"));

@@ -14,7 +14,7 @@ import {
   validateUiCapabilityResult,
   type WorkerFrame,
   type WorkerIdentity,
-} from "../src/pi/worker-protocol.js";
+} from "../src/worker/worker-protocol.js";
 
 const IDENTITY: WorkerIdentity = {
   hostEpoch: "host-test",
@@ -298,7 +298,7 @@ test("large conversation images cross Worker IPC with canonical method validatio
 });
 
 test("discarded replies still enforce Worker structure, envelope and state boundaries", async () => {
-  const { MAX_WORKER_CHUNK_CHARS } = await import("../src/pi/worker-protocol.js");
+  const { MAX_WORKER_CHUNK_CHARS } = await import("../src/worker/worker-protocol.js");
   const large = "x".repeat(2_000_001);
   const response = { kind: "response", callId: "host-1", ok: true, result: { ignored: large } };
   function receive(value: unknown, cancelled: boolean) {
@@ -327,7 +327,7 @@ test("a cancelled image reply cannot kill the replacement Worker or overwrite it
   const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const { AgentWorkerConnection } = await import("../src/pi/agent-worker-connection.js");
+  const { AgentWorkerConnection } = await import("../src/worker/agent-worker-connection.js");
   const { ExtensionUiBroker } = await import("../src/core/extension-ui-broker.js");
   const root = await mkdtemp(join(tmpdir(), "worker-late-image-"));
   const entry = join(root, "worker.mjs");
@@ -335,7 +335,7 @@ test("a cancelled image reply cannot kill the replacement Worker or overwrite it
   // and next call pass through production AgentWorkerConnection/pending fences.
   await writeFile(entry, `
     import { createHash } from 'node:crypto';
-    import { OrderedWorkerSender, WorkerFrameReceiver } from ${JSON.stringify(new URL("../src/pi/worker-protocol.js", import.meta.url).href)};
+    import { OrderedWorkerSender, WorkerFrameReceiver } from ${JSON.stringify(new URL("../src/worker/worker-protocol.js", import.meta.url).href)};
     const identity = JSON.parse(process.env.ALU_DOCK_WORKER_IDENTITY);
     const sender = new OrderedWorkerSender(identity, (frame, cb) => process.send(frame, cb));
     const receiver = new WorkerFrameReceiver(() => true);
@@ -365,8 +365,8 @@ test("a cancelled image reply cannot kill the replacement Worker or overwrite it
     for (const mode of ["late", "future", "noncanonical", "unknown", "pending-nonimage"]) {
       const { session } = await AgentWorkerConnection.create({
         identity: { hostEpoch: "host-test", instanceId: "instance-test", runtimeGeneration: 1 },
-        init: { cwd: root, agentDir: join(root, "pi"), projectTrusted: false },
-        extensionUiBroker: new ExtensionUiBroker(), workerEntry: entry,
+        cwd: root, launch: (environment) => ({ entry, cwd: root, init: {}, environment }),
+        extensionUiBroker: new ExtensionUiBroker(),
         workerEnvironment: { PATH: process.env.PATH, HOME: root, USERPROFILE: root, PI_OFFLINE: "1",
           XDG_CONFIG_HOME: join(root, "config"), XDG_DATA_HOME: join(root, "data"), XDG_STATE_HOME: join(root, "state"),
           XDG_CACHE_HOME: join(root, "cache"), XDG_RUNTIME_DIR: join(root, "run"),

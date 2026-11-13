@@ -4,7 +4,7 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 import type { AgentWorkerState } from "../src/core/agent-worker.js";
 import { projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
-import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerFrame } from "../src/pi/worker-protocol.js";
+import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerFrame } from "../src/worker/worker-protocol.js";
 
 import { PROVIDER_ERROR_HTML as errorPage } from "./support/provider-error-fixture.js";
 const state: AgentWorkerState = {

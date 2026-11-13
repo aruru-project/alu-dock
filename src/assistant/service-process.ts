@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { ServiceAnswerError, SupervisedService } from "../control/service-supervisor.js";
 import { answerModelQuestion, type ModelHostPort } from "../model-service/service-process.js";
-import { captureWorkspaceShellEnvironment } from "../pi/workspace-shell-environment.js";
+import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import type { ExtractionTiming } from "./extraction.js";
 import {
   AssistantError,

@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { SupervisedService } from "../control/service-supervisor.js";
-import { captureWorkspaceShellEnvironment } from "../pi/workspace-shell-environment.js";
+import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import type { ModelAuthRequest, ModelAuthResult, ModelAuthState, ModelConfiguration, ModelServiceRequest } from "./protocol.js";
 import { MODEL_SERVICE_AGENT_DIR_ENV } from "./service-messages.js";
 

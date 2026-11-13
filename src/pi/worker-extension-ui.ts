@@ -6,7 +6,7 @@ import type {
 } from "../core/extension-ui-broker.js";
 import type { PiExtensionUiLifecyclePort } from "./pi-agent-adapter.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
-import type { UiCapability } from "./worker-protocol.js";
+import type { UiCapability } from "../worker/worker-protocol.js";
 
 export type WorkerUiCall = (capability: UiCapability, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 

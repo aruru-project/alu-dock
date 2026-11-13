@@ -1,26 +1,18 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 
 import { WORKER_INCIDENT_STDERR_MAX_BYTES } from "../core/worker-incident.js";
-import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
 import type { WorkerIdentity } from "./worker-protocol.js";
-import type { JsonObject } from "../core/json-value.js";
 
-export interface PiWorkerInitOptions {
+/** What one kind of Worker supplies to start its process. */
+export interface WorkerLaunch {
+  /** The kind's entry file. */
+  entry: string;
   cwd: string;
-  agentDir: string;
-  sessionDir?: string;
-  tools?: string[];
-  excludeTools?: string[];
-  workerConfig?: JsonObject;
-  /** A child Work reports only to its parent. */
-  child?: true;
-  /** A child's exact tool ceiling, chosen by its parent. */
-  allowedTools?: string[];
-  projectTrusted: boolean;
-  sessionFile?: string;
-  initialName?: string;
+  /** The kind's own startup input; only its entry reads it. */
+  init: object;
+  /** The whole environment of the Worker process, before the two bootstrap variables Dock adds. */
+  environment: NodeJS.ProcessEnv;
 }
 
 export interface WorkerProcessTimeouts {
@@ -43,17 +35,15 @@ export const DEFAULT_WORKER_TIMEOUTS: WorkerProcessTimeouts = {
   termMs: 2_000,
 };
 
-export interface PiWorkerProcessOptions {
+export interface WorkerProcessOptions {
   identity: WorkerIdentity;
-  init: PiWorkerInitOptions;
-  environment: NodeJS.ProcessEnv;
-  entry?: string;
+  launch: WorkerLaunch;
   timeouts?: Partial<WorkerProcessTimeouts>;
   onSpawn?: (pid: number) => void;
 }
 
 /** Owns one Worker process tree and always reaps its direct child. */
-export class PiWorkerProcess {
+export class WorkerProcess {
   readonly child: ChildProcess;
   readonly timeouts: WorkerProcessTimeouts;
   private terminating: Promise<void> | undefined;
@@ -61,11 +51,10 @@ export class PiWorkerProcess {
   private stderrBytesSeen = 0;
   private readonly stderrClosed: Promise<void>;
 
-  constructor(options: PiWorkerProcessOptions) {
+  constructor(options: WorkerProcessOptions) {
     this.timeouts = { ...DEFAULT_WORKER_TIMEOUTS, ...options.timeouts };
-    const entry = options.entry ?? fileURLToPath(new URL("./pi-worker-entry.js", import.meta.url));
-    this.child = spawn(process.execPath, [entry], {
-      cwd: options.init.cwd,
+    this.child = spawn(process.execPath, [options.launch.entry], {
+      cwd: options.launch.cwd,
       detached: true,
       // A detached Windows process otherwise receives its own visible console.
       // Keep the Worker process group while preventing background Work from
@@ -74,20 +63,16 @@ export class PiWorkerProcess {
       // Invoking the entry directly also keeps parent runner/debug flags (for
       // example --test or --input-type) out of the managed runtime process.
       env: {
-        ...definedEnvironment(piWorkerRuntimeEnvironment(options.environment)),
-        ALU_DOCK_PI_WORKER: "1",
-        // Keep Pi's own config/session contract coherent even though the login-shell
-        // capture intentionally drops Host process overrides.
-        PI_CODING_AGENT_DIR: options.init.agentDir,
+        ...definedEnvironment(options.launch.environment),
         ALU_DOCK_WORKER_IDENTITY: JSON.stringify(options.identity),
-        ALU_DOCK_WORKER_INIT: JSON.stringify(options.init),
+        ALU_DOCK_WORKER_INIT: JSON.stringify(options.launch.init),
       },
       stdio: ["ignore", "ignore", "pipe", "ipc"],
       serialization: "json",
     });
-    if (!this.child.pid) throw new Error("Pi worker did not receive a process identity");
+    if (!this.child.pid) throw new Error("Worker did not receive a process identity");
     const stderr = this.child.stderr;
-    if (!stderr) throw new Error("Pi worker did not expose its error output");
+    if (!stderr) throw new Error("Worker did not expose its error output");
     this.stderrClosed = new Promise((resolveClosed) => {
       let closed = false;
       const finish = (): void => { if (!closed) { closed = true; resolveClosed(); } };
@@ -140,12 +125,12 @@ export class PiWorkerProcess {
   }
 
   private async performTerminate(): Promise<void> {
-    if (!this.child.pid) throw new Error("Pi worker process identity is unavailable during termination");
+    if (!this.child.pid) throw new Error("Worker process identity is unavailable during termination");
     await terminateDetachedProcessTree(this.child, this.timeouts.termMs);
   }
 }
 
-/** End a detached Pi process and every extension descendant left in its process group. */
+/** End a detached Worker process and every descendant left in its process group. */
 export async function terminateDetachedProcessTree(child: ChildProcess, termMs: number): Promise<void> {
   const pid = child.pid;
   if (!pid) return;
@@ -184,7 +169,7 @@ async function terminateWindowsProcessTree(pid: number, child: ChildProcess, tim
     killer.once("close", resolve);
   });
   if (exitCode !== 0 && child.exitCode === null && child.signalCode === null) {
-    throw new Error("Windows could not terminate the Pi worker process tree");
+    throw new Error("Windows could not terminate the Worker process tree");
   }
   await waitForExit(child, timeoutMs);
 }
@@ -207,7 +192,7 @@ async function waitForGroupGone(pid: number, timeoutMs: number): Promise<void> {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
     if (!await processGroupExists(pid)) return;
   }
-  throw new Error("Pi worker process group did not exit before the process deadline");
+  throw new Error("Worker process group did not exit before the process deadline");
 }
 
 async function processGroupExists(pid: number): Promise<boolean> {
@@ -273,7 +258,7 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
     const done = (): void => { cleanup(); resolve(); };
     const timer = setTimeout(() => {
       cleanup();
-      reject(new Error("Pi worker did not exit before the process deadline"));
+      reject(new Error("Worker did not exit before the process deadline"));
     }, timeoutMs);
     const cleanup = (): void => {
       clearTimeout(timer);

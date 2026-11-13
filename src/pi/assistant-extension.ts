@@ -43,7 +43,7 @@ import {
 import { isDockMessageText } from "../core/dock-tools.js";
 import { localSpan } from "../core/local-time.js";
 import { extractDockAttachmentContext } from "./dock-attachment-context.js";
-import { WATCH_NOTICE_TYPE, WORK_MESSAGE_TYPE, WORK_WAKE_TYPE } from "./dock-tools-client.js";
+import { WATCH_NOTICE_TYPE, WORK_MESSAGE_TYPE, WORK_WAKE_TYPE } from "../worker/dock-tools-client.js";
 import { WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 
 /*

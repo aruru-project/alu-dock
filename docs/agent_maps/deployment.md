@@ -133,7 +133,7 @@ Windows 系统拒绝启动时应保留可操作的客户端并说明原因，不
 - `src/control/durable-catalog-store.ts`：durable catalog。
 - `src/control/attachment-storage-state.ts`、`attachment-service.ts`：Host-private directory setting 与 permanent attachment store。
 - `src/control/catalog-reconcile.ts`：Host startup recovery。
-- `src/pi/worker-process.ts`：Worker process supervision。
-- `src/pi/pi-worker-entry.ts`：当前 Pi Worker 入口和 Host-loss shutdown。
+- `src/worker/worker-process.ts`：Worker process supervision。
+- `src/worker/worker-shell.ts`：Worker 入口的公共部分和 Host-loss shutdown；`src/pi/pi-worker-entry.ts` 是 Pi 的入口。
 
 部署代码只管理进程、文件和 service，不实现 Agent session 能力。
