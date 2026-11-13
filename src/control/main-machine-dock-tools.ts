@@ -67,7 +67,7 @@ export class MainMachineDockToolsAuthority {
       return { ...result, completion: withReplyShortened(result.completion, SUBHOST_REPLY_CHARS) };
     }
     const send: DockToolsMutationPort["send"] = async (input) => {
-      const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery ?? "followUp", input.operationId);
+      const result = await this.options.localClient.prompt(input.instanceId, input.message, input.delivery, input.operationId);
       return { target: observationStatus(result.instance), receipt: result.receipt };
     };
     if (request.type === "spawn") return spawnDockWorker(source, request, {

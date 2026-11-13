@@ -93,8 +93,6 @@ export const MAX_REPLY_STEPS = 20;
 const REMINDERS_STATE_TYPE = "assistant-reminders";
 /** A reminder that came due, in her conversation. */
 const REMINDER_NOTE_TYPE = "assistant-reminder";
-/** She has no files of her own to hand over, and her turns end while child Works run. */
-const NOT_HER_DOCK_TOOLS = new Set(["dock_deliver_file"]);
 const REMIND_SCHEMA = {
   type: "object",
   properties: {
@@ -655,7 +653,6 @@ class AssistantAgent implements WorkerAgent {
       }),
     };
     return topLevelDockTools({ conversationCopy: false, waitInTurn: false, usageGuide: false })
-      .filter((tool) => !NOT_HER_DOCK_TOOLS.has(tool.name))
       .map((tool) => ({
         name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
         execute: async (_id: string, params: unknown, signal?: AbortSignal) => {

@@ -247,7 +247,7 @@ export class DockHost {
           operationId: input.operationId,
           instanceId: input.instanceId,
           message: input.message,
-          delivery: input.delivery ?? "followUp",
+          delivery: input.delivery,
         });
         return {
           target: this.registry.observationStatus(result.instance.id),

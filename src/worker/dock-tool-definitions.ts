@@ -148,7 +148,7 @@ const SEND_SCHEMA = {
   properties: {
     target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
     message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS },
-    delivery: { type: "string", enum: ["followUp", "steer"], description: "For another top-level Work only: default followUp lets its current turn finish; steer deliberately supplies guidance during the turn. A child Work of yours always gets the message at its next step." },
+    delivery: { type: "string", enum: ["followUp", "steer"], description: "For another top-level Work only. Omit to start it if idle or deliver at its next step if busy. followUp explicitly waits until its current turn finishes; steer explicitly joins a busy turn. A child Work of yours always gets the message at its next step." },
   },
   required: ["target", "message"],
   additionalProperties: false,
@@ -297,7 +297,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_send",
       label: "Send a Dock message",
-      description: describe("Send a message to another Work with your authenticated sender identity. A child Work of yours gets it at its next step as a message from you, and its answers come back the same way. Another top-level Work is started if idle, or gets it after its current turn; use delivery=steer only for deliberate mid-turn guidance. Do not send acknowledgment-only messages: each one wakes the other Work."),
+      description: describe("Send a message to another Work with your authenticated sender identity. A child Work of yours gets it at its next step as a message from you, and its answers come back the same way. Another top-level Work is started if idle, or gets it at its next step if busy. Set delivery=followUp only when the message should wait until its current turn finishes. Do not send acknowledgment-only messages: each one wakes the other Work."),
       parameters: SEND_SCHEMA,
       execute: async (params: { target: string; message: string; delivery?: "followUp" | "steer" }, runtime) => dockToolOutput(await runtime.invoke({
         type: "send",

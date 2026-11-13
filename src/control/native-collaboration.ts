@@ -38,7 +38,8 @@ export async function sendDockMessage(
     operationId: request.operationId,
     instanceId: target.id,
     message: dockMessageText(source.displayName, request.message),
-    delivery: request.delivery ?? "followUp",
+    // The target Worker decides atomically: start now if idle, otherwise join its next step.
+    delivery: request.delivery ?? "auto",
   });
   return { type: "send", target: delivered, receipt: { delivery: receipt.delivery, queued: receipt.queued, acceptedAt: receipt.acceptedAt } };
 }

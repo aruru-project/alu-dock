@@ -154,7 +154,7 @@ export interface DockToolsMutationPort {
   create(input: DockCreateInput): Promise<DockToolsResult>;
   system(input: Extract<DockToolsRequest, { type: "system" }>): Promise<DockToolsResult>;
   /** `auto` joins a busy target's current turn at its next step and starts an idle one. */
-  send(input: { operationId: string; instanceId: string; message: string; delivery?: "followUp" | "steer" | "auto" }): Promise<{
+  send(input: { operationId: string; instanceId: string; message: string; delivery: "followUp" | "steer" | "auto" }): Promise<{
     target: ObservedInstanceStatus;
     receipt: Pick<CommandReceipt, "delivery" | "queued" | "acceptedAt">;
   }>;

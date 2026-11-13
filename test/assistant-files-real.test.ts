@@ -44,8 +44,8 @@ test("the assistant reads and searches files and uploaded text and images hersel
   const textId = textUpload.attachment.fileId, imageId = imageUpload.attachment.fileId;
 
   const catalog = await client.tools(alu.id);
-  assert.equal(catalog.total, 24);
-  for (const name of ["read", "ls", "find", "grep", "dock_attachment_list", "dock_attachment_resolve", "assistant_search", "dock_spawn"]) {
+  assert.equal(catalog.total, 25);
+  for (const name of ["read", "ls", "find", "grep", "dock_attachment_list", "dock_attachment_resolve", "assistant_search", "dock_spawn", "dock_deliver_file"]) {
     const tool = catalog.tools.find((item) => item.name === name);
     assert.equal(tool?.active, true, `${name} should be listed as available`);
     assert.ok(tool?.description && tool.parameterSchema, `${name} should have its description and parameters`);
@@ -115,6 +115,18 @@ test("the assistant reads and searches files and uploaded text and images hersel
   const publicResolve = history.entries.filter((entry) => entry.source === "tool" && entry.toolName === "dock_attachment_resolve");
   assert.equal(publicResolve.length, 2);
   assert.ok(publicResolve.every((entry) => !JSON.stringify(entry).includes(textPath) && !JSON.stringify(entry).includes(imagePath)));
+  // Owner-approved review #670: read-only does not mean the assistant cannot hand over an
+  // existing deliverable. Reuse the same Host publication and download path as ordinary Works.
+  await client.prompt(alu.id, "/dock-tools on", "auto", "alu-tools-on");
+  await client.prompt(alu.id, "我确认这份日程可以交付，请发布 schedule.txt 供我下载。", "auto", "alu-deliver");
+  (await coordinator.request(4)).tools({ id: "deliver", name: "dock_deliver_file", arguments: { path: join(team.cwd, "schedule.txt") } });
+  (await coordinator.request(5)).text("日程可以下载了。");
+  await waitFor(async () => (await client.status(alu.id)).execution === "idle", "The assistant did not finish delivery");
+  const delivery = (await client.listDeliverables(alu.id)).find((item) => item.name === "schedule.txt");
+  assert.ok(delivery);
+  const downloaded: Buffer[] = [];
+  await client.downloadDeliverable(alu.id, delivery.deliveryRef, (chunk) => { downloaded.push(Buffer.from(chunk)); });
+  assert.equal(Buffer.concat(downloaded).toString("utf8"), "first line\nmeeting at 14:30\nlast line\n");
   follower.close();
   await follower.done;
 });

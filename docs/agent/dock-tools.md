@@ -27,7 +27,7 @@ The Work that created you is your parent. You work at the same time, and it sees
 
 ## Messages
 
-Between you and your child Works, `dock_send` carries messages as described above. To another top-level Work, `dock_send({target,message,delivery?})` defaults to `followUp`: an idle Work starts a turn, a busy one receives the message after its current turn. Use `steer` only when the message belongs in the ongoing turn. Dock adds a source header; do not add it yourself:
+Between you and your child Works, `dock_send` carries messages as described above. To another top-level Work, `dock_send({target,message,delivery?})` starts an idle Work immediately or delivers to a busy Work at its next step by default. Only set `delivery: "followUp"` when the message should wait until its current turn finishes; explicit `steer` joins a busy turn. Dock adds a source header; do not add it yourself:
 
 ```text
 [Agent message from "Reviewer"]
