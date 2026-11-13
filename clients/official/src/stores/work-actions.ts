@@ -154,10 +154,10 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     const capturedHost = app.connectionContext
     if (!isTauri || !capturedHost || !stopCanStart(work, workMutating.value) || !work) return false
     const feedbackScope = captureFeedback(false)
-    if (!await page.askConfirm(work.assistant ? '重启阿露？' : '停止当前工作？', stopConfirmationText(work))) return false
+    if (!await page.askConfirm(work.assistant ? `重启${work.displayName || '助手'}？` : '停止当前工作？', stopConfirmationText(work))) return false
     if (!feedbackMatches(feedbackScope) || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || !stopCanStart(selected.value, false)) return false
     pendingWorkActions.value.add(feedbackScope.identity)
-    reportAction(work.assistant ? captureFeedback() : feedbackScope, work.assistant ? '正在重启阿露，对话和记忆保留。' : null, 'notice')
+    reportAction(work.assistant ? captureFeedback() : feedbackScope, work.assistant ? `正在重启${work.displayName || '助手'}，对话和记忆保留。` : null, 'notice')
     try {
       const result = await stopWork(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return false

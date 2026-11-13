@@ -76,7 +76,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <span class="assistant-mark"><Sparkles :size="20" /></span>
       <div>
         <h2 id="assistant-title">助手</h2>
-        <p>阿露一直住在 Main，对话、人设和记忆都留在这里</p>
+        <p>助手一直住在 Main，对话、人设和记忆都留在这里</p>
       </div>
     </div>
     <button class="assistant-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
@@ -92,7 +92,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
 
     <main :key="section" class="assistant-content">
       <div v-if="assistantWork" class="assistant-toolbar">
-        <button type="button" class="button secondary" @click="openConversation">打开阿露的对话</button>
+        <button type="button" class="button secondary" @click="openConversation">打开{{ assistantWork.displayName || '助手' }}的对话</button>
       </div>
       <p v-if="info?.extraction?.state === 'off' && section !== 'settings'" class="assistant-note is-warning has-action" role="status">
         <span>还没选整理记忆的模型，她现在不会从对话里自动记东西。</span>

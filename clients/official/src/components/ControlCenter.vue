@@ -91,7 +91,7 @@ const localControlIcons = {
 } as const
 /** Managing quick buttons lives only in the palette; it is not a slash command. */
 const manageQuickButtons: LocalControlCommand = { id: 'quick-buttons', name: '', label: '管理快捷按钮', keywords: '快捷按钮 钉住 自定义 quick button pin', description: '新建、修改、排序或删除输入框下方的快捷按钮', section: 'quick-buttons' }
-const staticCommands = computed(() => [...workControlCommands(props.work.assistant), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
+const staticCommands = computed(() => [...workControlCommands(props.work.assistant, props.work.displayName), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
 
 const commandSearch = ref('')
 const modelSearch = ref('')

@@ -358,7 +358,7 @@ export const useInputStore = defineStore('input', () => {
   async function executeLocalControl(command: LocalControlCommand, typed: string | null): Promise<boolean> {
     if (!selected.value || selected.value.lifecycle !== 'active') return false
     if (!controlCommandAvailable(command.name, selected.value.assistant)) {
-      submissionError.value = '阿露一直用同一段对话，不提供这个 Pi 操作。可以继续和她说话。'
+      submissionError.value = '助手一直用同一段对话，不提供这个 Pi 操作。可以继续和她说话。'
       return false
     }
     const clearTyped = () => { if (typed !== null && draft.value === typed) draft.value = '' }

@@ -88,7 +88,7 @@ export function workPresence(
 }
 
 export function stopConfirmationText(work: Work): string {
-  if (work.assistant) return '这会打断阿露当前的回复，停止她派出去的所有子 Work，并清空排队消息。Main 会重新启动她，对话和记忆保留，此设备上的草稿也保留。'
+  if (work.assistant) return `这会打断${work.displayName || '助手'}当前的回复，停止她派出去的所有子 Work，并清空排队消息。Main 会重新启动她，对话和记忆保留，此设备上的草稿也保留。`
   return `停止整个 Work“${work.displayName}”？\n\n这会停止共享 Work、当前运行，并清空所有客户端已经获准的 Queue 项目。此设备上的本地草稿会保留。此操作不同于“中止当前回复”。`
 }
 

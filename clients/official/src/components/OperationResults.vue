@@ -20,8 +20,9 @@ const labels: Record<string, string> = {
   create_work: '新建 Work', adopt_session: '恢复 Work', set_system_default: '保存目录默认',
 }
 function label(operation: NativeOperation) {
-  if (operation.connectionId === app.activeConnectionId && app.works.some(work => work.id === operation.instanceId && work.assistant)) {
-    if (operation.kind === 'stop_work') return '重启阿露'
+  const work = operation.connectionId === app.activeConnectionId ? app.works.find(work => work.id === operation.instanceId) : undefined
+  if (work?.assistant) {
+    if (operation.kind === 'stop_work') return `重启${work.displayName || '助手'}`
     if (operation.kind === 'reload_session') return '刷新人设和记忆'
   }
   return labels[operation.kind] ?? '操作'

@@ -42,10 +42,10 @@ export function controlCommandAvailable(name: string, assistant = false): boolea
   return !section || controlSectionAvailable(section, assistant)
 }
 
-export function workControlCommands(assistant = false): readonly LocalControlCommand[] {
+export function workControlCommands(assistant = false, displayName = '助手'): readonly LocalControlCommand[] {
   if (!assistant) return localControlCommands
   return localControlCommands.filter(command => controlCommandAvailable(command.name, true)).map(command => {
-    if (command.name === 'stop') return { ...command, label: '重启阿露', description: '打断当前回复、停止她的子 Work；对话和记忆保留' }
+    if (command.name === 'stop') return { ...command, label: `重启${displayName || '助手'}`, description: '打断当前回复、停止她的子 Work；对话和记忆保留' }
     if (command.name === 'reload') return { ...command, label: '刷新人设和记忆', description: '重新读入人设、手写设定和记忆，对话接着原来的' }
     if (command.name === 'tools') return { ...command, label: '她能用的工具', description: '了解文件阅读、附件、记忆、提醒和 Dock 工具' }
     if (command.section === 'resources') return { ...command, label: '助手状态', description: '查看她的模型、对话用量和工具说明' }
