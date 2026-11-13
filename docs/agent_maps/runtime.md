@@ -286,7 +286,7 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 
 ## 代码范围
 
-- `src/worker/`：各种 Agent 共用的 Worker 两头：私有通信（`worker-protocol.ts`）、进程监管（`worker-process.ts`）、Host 侧连接与创建（`agent-worker-connection.ts`、`create-worker-instance.ts`）、Worker 侧外壳（`worker-shell.ts`），以及把 Dock 工具结果写成给模型看的文字（`dock-tools-client.ts`、`child-messages.ts`）。不依赖 Pi。
+- `src/worker/`：各种 Agent 共用的 Worker 两头：私有通信（`worker-protocol.ts`）、进程监管（`worker-process.ts`）、Host 侧连接与创建（`agent-worker-connection.ts`、`create-worker-instance.ts`）、Worker 侧外壳（`worker-shell.ts`），顶层 Work 给模型的 Dock 工具的名称、说明、参数和每次调用向 Host 问什么（`dock-tool-definitions.ts`，Pi 扩展从这里注册），以及把 Dock 工具结果写成给模型看的文字（`dock-tools-client.ts`、`child-messages.ts`）。不依赖 Pi。
 - `src/pi/`：Pi Worker 的入口、Pi adapter 与 Dock capability extensions。`pi-conversation.ts` 是 Pi 格式会话交给 Host 的对话，不依赖 Pi agent runtime。
 - `skills/dock-attachments/`、`docs/agent/dock-tools.md`：随包发布的附件 Skill 与 Dock tools 使用手册。
 - `src/control/`：Host control、Worker supervision 与 session routing。

@@ -1,156 +1,34 @@
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import type { BoundaryResult, ExtensionAPI, ExtensionContext, ExtensionFactory, ToolExecutionEndEvent } from "@earendil-works/pi-coding-agent";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 
 import {
-  MAX_DOCK_TOOL_CWD_CHARS,
   MAX_DOCK_TOOL_MESSAGE_CHARS,
-  MAX_DOCK_TOOL_NAME_CHARS,
-  MAX_DOCK_TOOL_TARGET_CHARS,
   shortenLastWords,
   type DockToolsRequest,
   type DockToolsResult,
   type WorkMessage,
 } from "../core/dock-tools.js";
-import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
-import { MAX_ALLOWED_TOOLS, MAX_ALLOWED_TOOL_NAME_CHARS } from "../core/worker-tool-policy.js";
-import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef } from "../control/protocol.js";
+import { MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE, type ObservationNotification } from "../core/instance-observation.js";
 import {
-  MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
-  MAX_OBSERVATION_CURSOR_CHARS,
-  MAX_OBSERVATION_MESSAGE_LIMIT,
-  type ObservationMessageType,
-  type ObservationNotification,
-} from "../core/instance-observation.js";
-import { THINKING_LEVELS } from "../core/agent-worker.js";
-import {
-  renderChildWait,
-  renderDockToolsResult,
   watchNoticeEntry,
   workMessageEntry,
   WORK_WAKE_TYPE,
   type DescribedModel,
   type ModelFacts,
-  type RenderContext,
 } from "../worker/dock-tools-client.js";
-import { ChildMessages, DEFAULT_WAIT_SECONDS, MAX_WAIT_SECONDS } from "../worker/child-messages.js";
+import { ChildMessages } from "../worker/child-messages.js";
+import { dockToolOutput, toolDescription, topLevelDockTools, type DockToolOutput } from "../worker/dock-tool-definitions.js";
 
-export const DOCK_TOOL_NAMES = [
-  "dock_spawn",
-  "dock_wait",
-  "dock_models",
-  "dock_interrupt",
-  "dock_stop",
-  "dock_list",
-  "dock_machines",
-  "dock_inspect",
-  "dock_watch",
-  "dock_cancel_watch",
-  "dock_deliver_file",
-  "dock_system",
-  "dock_create",
-  "dock_send",
-] as const;
+const TOP_LEVEL_DOCK_TOOLS = topLevelDockTools();
+/** The Dock tools of a top-level Pi Work, in the order they are registered. */
+export const DOCK_TOOL_NAMES: readonly string[] = TOP_LEVEL_DOCK_TOOLS.map((tool) => tool.name);
 /** A child Work reports to its parent and reaches nothing else. */
 export const CHILD_DOCK_TOOL_NAMES = ["dock_send"] as const;
 const DOCK_TOOLS_EXTENSION_PATH = "<inline:alu-dock-tools>";
 const DOCK_TOOLS_STATUS_KEY = "Dock tools";
-const DOCK_TOOLS_GUIDE_PATH = fileURLToPath(new URL("../../../docs/agent/dock-tools.md", import.meta.url));
-
-function toolDescription(description: string): string {
-  return `${description}\nUsage guide (read when needed): ${DOCK_TOOLS_GUIDE_PATH}`;
-}
 const DOCK_TOOLS_ACTIONS = ["on", "off", "status"] as const;
 type DockToolsAction = typeof DOCK_TOOLS_ACTIONS[number];
-const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
-const LIST_SCHEMA = {
-  type: "object",
-  properties: { scope: { type: "string", enum: ["live", "all"] } },
-  additionalProperties: false,
-};
-const INSPECT_SCHEMA = {
-  type: "object",
-  properties: {
-    target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
-    limit: { type: "integer", minimum: 1, maximum: MAX_OBSERVATION_MESSAGE_LIMIT },
-    types: { type: "array", minItems: 1, maxItems: 3, uniqueItems: true, items: { type: "string", enum: ["user", "assistant", "other"] } },
-    cursor: { type: "string", minLength: 1, maxLength: MAX_OBSERVATION_CURSOR_CHARS },
-  },
-  required: ["target"],
-  additionalProperties: false,
-};
-const REQUIRED_TARGET_SCHEMA = {
-  type: "object",
-  properties: { target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS } },
-  required: ["target"],
-  additionalProperties: false,
-};
-const OPTIONAL_WATCH_SCHEMA = {
-  type: "object",
-  properties: { watchId: { type: "string", minLength: 1, maxLength: 128 } },
-  additionalProperties: false,
-};
-const DELIVER_SCHEMA = {
-  type: "object",
-  properties: { path: { type: "string", minLength: 1, maxLength: MAX_SOURCE_FILE_PATH_CHARS } },
-  required: ["path"],
-  additionalProperties: false,
-};
-const MACHINE_NAME_SCHEMA = { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS, description: "An exact name from dock_machines. Omit for this Work's Machine." };
-const SYSTEM_SCHEMA = {
-  type: "object",
-  properties: {
-    cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
-    machine: MACHINE_NAME_SCHEMA,
-    id: { type: "string", minLength: 1, maxLength: 128, description: "A candidate's id from the list. Reads that candidate instead of listing." },
-    cursor: { type: "object", properties: { revision: { type: "string" }, offset: { type: "integer", minimum: 0 } }, required: ["revision", "offset"], additionalProperties: false, description: "The list's nextCursor, for its next page. Only without id." },
-    offset: { type: "integer", minimum: 0, description: "The candidate's nextOffset, to continue reading it. Only with id." },
-    revision: { type: "string", minLength: 1, maxLength: 128, description: "The revision that came with nextOffset. Only with id." },
-  },
-  required: ["cwd"], additionalProperties: false,
-};
-const CREATE_SCHEMA = {
-  type: "object",
-  properties: {
-    cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
-    systemId: { type: "string", minLength: 1, maxLength: 128, description: "A candidate's id read with dock_system. Omit for the directory default." },
-    saveDefault: { type: "boolean" },
-    assistant: { type: "boolean", description: "Open it as the owner's personal assistant, with her persona and memory in place of a system, so without systemId. Only when the owner asks for that Work to be her." },
-    name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
-    machine: MACHINE_NAME_SCHEMA,
-    model: {
-      type: "object",
-      properties: {
-        provider: { type: "string", minLength: 1, maxLength: MAX_MODEL_PROVIDER_CHARS },
-        id: { type: "string", minLength: 1, maxLength: MAX_MODEL_ID_CHARS },
-      },
-      required: ["provider", "id"],
-      additionalProperties: false,
-    },
-  },
-  required: ["cwd"],
-  additionalProperties: false,
-};
-const SEND_SCHEMA = {
-  type: "object",
-  properties: {
-    target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
-    message: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS },
-    delivery: { type: "string", enum: ["followUp", "steer"], description: "For another top-level Work only: default followUp lets its current turn finish; steer deliberately supplies guidance during the turn. A child Work of yours always gets the message at its next step." },
-  },
-  required: ["target", "message"],
-  additionalProperties: false,
-};
-const WAIT_SCHEMA = {
-  type: "object",
-  properties: {
-    target: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS, description: "One child Work's name or id: wait for its final result. Omit to wait for the first message from any child Work." },
-    all: { type: "boolean", description: "Wait until every child Work you handed work to has sent its final result or stopped." },
-    timeoutSeconds: { type: "integer", minimum: 1, maximum: MAX_WAIT_SECONDS, description: `Default ${DEFAULT_WAIT_SECONDS}.` },
-  },
-  additionalProperties: false,
-};
 const CHILD_SEND_SCHEMA = {
   type: "object",
   properties: {
@@ -159,20 +37,6 @@ const CHILD_SEND_SCHEMA = {
   },
   required: ["message", "done"],
   additionalProperties: false,
-};
-
-const SPAWN_SCHEMA = {
-  type: "object",
-  properties: {
-    name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
-    task: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_MESSAGE_CHARS },
-    cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
-    model: CREATE_SCHEMA.properties.model,
-    thinkingLevel: { type: "string", enum: THINKING_LEVELS },
-    allowedTools: { type: "array", maxItems: MAX_ALLOWED_TOOLS, items: { type: "string", minLength: 1, maxLength: MAX_ALLOWED_TOOL_NAME_CHARS }, uniqueItems: true, description: "Exact Pi tool names such as read, grep, find, ls, edit, write, bash. Omit for normal full tool access; [] grants none. The child can always message you; it never gets other Dock tools. This limits tools, not what a granted shell can do." },
-    withContext: { type: "boolean", description: "true starts the child Work from a copy of your conversation so far, so it already knows what you and the user settled; the task then only needs what is new. Omit it for a fresh start, as for an independent reviewer. A copied conversation makes each of the child Work's model requests larger." },
-  },
-  required: ["name", "task"], additionalProperties: false,
 };
 
 export interface DockToolsCallPort {
@@ -498,123 +362,14 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
       registerChildTools(pi, bridge);
       return;
     }
-    pi.registerTool({
-      name: "dock_spawn", label: "Start a child Work",
-      description: toolDescription("Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so. It starts with only the task unless withContext gives it a copy of your conversation. It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them. If your turn must not end, as during a Dock Goal, use dock_wait. It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls."),
-      parameters: SPAWN_SCHEMA,
-      execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">) => {
-        const thinkingAsked = params.thinkingLevel ?? pi.getThinkingLevel();
-        return toolResult(await bridge.invoke({ ...params, type: "spawn", operationId: randomUUID() }), { thinkingAsked });
-      },
-    } as never);
-    pi.registerTool({
-      name: "dock_wait", label: "Wait for child Works",
-      description: toolDescription("Wait in this turn for your child Works: until the first message from any of them, until target sends its final result, or with all=true until every child Work you handed work to has sent its final result or stopped. Messages from child Works that arrive meanwhile come back here instead of separately; one that is not a final result, such as a question or a finding, ends the wait at once so you can answer it. Returns early when the user's message reaches you or the user cancels. Use it only when your turn must not end, such as during a Dock Goal, whose next round would start as soon as your turn ends; otherwise end your turn and the messages wake you."),
-      parameters: WAIT_SCHEMA,
-      execute: async (_toolCallId: string, params: { target?: string; all?: boolean; timeoutSeconds?: number }, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: { hasPendingMessages(): boolean }) => {
-        const result = await bridge.children.wait(params, signal, () => ctx.hasPendingMessages(), bridge.takeArrivedChildMessages());
-        return { content: [{ type: "text", text: renderChildWait(result) }], details: result };
-      },
-    } as never);
-    pi.registerTool({
-      name: "dock_models", label: "Models for child Works",
-      description: toolDescription("Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
-      parameters: EMPTY_SCHEMA,
-      execute: async (_toolCallId: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: PiModelContext) => toolResult(await bridge.invoke({ type: "models" }), { facts: modelFacts(ctx) }),
-    } as never);
-    for (const action of ["interrupt", "stop"] as const) pi.registerTool({
-      name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a Work" : "Stop a Work",
-      description: toolDescription(action === "interrupt" ? "Interrupt another Work's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Work. Its child Works also stop and exit and leave the work list; their conversation files remain on disk. Check dock_list first."),
-      parameters: REQUIRED_TARGET_SCHEMA,
-      execute: async (_toolCallId: string, params: { target: string }) => toolResult(await bridge.invoke({ type: action, operationId: randomUUID(), target: params.target })),
-    } as never);
-    pi.registerTool({
-      name: "dock_list",
-      label: "List Dock Works",
-      description: toolDescription("List the Works you can see, without reading their conversations. Use scope='all' only when stopped or unavailable history is relevant."),
-      parameters: LIST_SCHEMA,
-      execute: async (_toolCallId: string, params: { scope?: "live" | "all" }) => toolResult(await bridge.invoke({
-        type: "list",
-        ...(params.scope === "all" ? { includeHistory: true } : {}),
-      })),
-    } as never);
-    pi.registerTool({
-      name: "dock_machines",
-      label: "List Dock Machines",
-      description: toolDescription("List current Machines with their names, availability, platform, Home, and workspace roots. The Machine this Work runs on is marked."),
-      parameters: EMPTY_SCHEMA,
-      execute: async () => toolResult(await bridge.invoke({ type: "machines" })),
-    } as never);
-    pi.registerTool({
-      name: "dock_inspect",
-      label: "Inspect a Work",
-      description: toolDescription("Read a page of another Work’s conversation. Selected messages come whole; one too long for a page says so and continues on the next page. Source roles identify who said each message."),
-      parameters: INSPECT_SCHEMA,
-      execute: async (_toolCallId: string, params: { target: string; limit?: number; types?: ObservationMessageType[]; cursor?: string }) => toolResult(await bridge.invoke({
-        type: "inspect",
-        target: params.target,
-        ...(params.limit === undefined ? {} : { limit: params.limit }),
-        ...(params.types === undefined ? {} : { types: params.types }),
-        ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
-      })),
-    } as never);
-    pi.registerTool({
-      name: "dock_watch",
-      label: "Watch a Work",
-      description: toolDescription("Get a notification when another Work becomes idle, stops or fails. Returns immediately; continue other work while waiting. The notification reaches you at your next step if you are still working. Your own child Works need no watch: they send you their results."),
-      parameters: REQUIRED_TARGET_SCHEMA,
-      execute: async (_toolCallId: string, params: { target: string }) => toolResult(await bridge.invoke({ type: "watch", target: params.target })),
-    } as never);
-    pi.registerTool({
-      name: "dock_cancel_watch",
-      label: "Cancel Dock watches",
-      description: toolDescription("Cancel one source-owned watch, or all watches when watchId is omitted."),
-      parameters: OPTIONAL_WATCH_SCHEMA,
-      execute: async (_toolCallId: string, params: { watchId?: string }) => toolResult(await bridge.invoke({ type: "cancel", ...(params.watchId === undefined ? {} : { watchId: params.watchId }) })),
-    } as never);
-    pi.registerTool({
-      name: "dock_deliver_file",
-      label: "Deliver a temporary file",
-      description: toolDescription("Register an absolute local file path for temporary download by the user. The file must remain unchanged and available."),
-      parameters: DELIVER_SCHEMA,
-      execute: async (_toolCallId: string, params: { path: string }) => toolResult(await bridge.invoke({ type: "deliver", path: params.path })),
-    } as never);
-    pi.registerTool({
-      name: "dock_system",
-      label: "Read Dock systems",
-      description: toolDescription("Find the systems a new Work in an absolute cwd can start from, or read one. Without id it lists candidates; pass the list's nextCursor as cursor for the next page. With id it reads that candidate; pass its nextOffset as offset, with the revision that came with it, to continue. cursor goes only without id, offset and revision only with id."),
-      parameters: SYSTEM_SCHEMA,
-      execute: async (_toolCallId: string, params: Omit<Extract<DockToolsRequest, { type: "system" }>, "type">) => toolResult(await bridge.invoke({ type: "system", ...params })),
-    } as never);
-    pi.registerTool({
-      name: "dock_create",
-      label: "Create Dock work",
-      description: toolDescription("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. assistant=true opens it as the owner's personal assistant, whose persona and memory take the place of a system, so leave out systemId; without it the new Work is not her, whatever the directory's default. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
-      parameters: CREATE_SCHEMA,
-      execute: async (_toolCallId: string, params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: boolean }) => toolResult(await bridge.invoke({
-        type: "create",
-        operationId: randomUUID(),
-        cwd: params.cwd,
-        ...(params.assistant === true ? { assistant: true as const } : {}),
-        ...(params.systemId === undefined ? {} : { systemId: params.systemId }),
-        ...(params.saveDefault === undefined ? {} : { saveDefault: params.saveDefault }),
-        ...(params.model === undefined ? {} : { model: { provider: params.model.provider, id: params.model.id } }),
-        ...(params.name === undefined ? {} : { name: params.name }),
-        ...(params.machine === undefined ? {} : { machine: params.machine }),
-      })),
-    } as never);
-    pi.registerTool({
-      name: "dock_send",
-      label: "Send a Dock message",
-      description: toolDescription("Send a message to another Work with your authenticated sender identity. A child Work of yours gets it at its next step as a message from you, and its answers come back the same way. Another top-level Work is started if idle, or gets it after its current turn; use delivery=steer only for deliberate mid-turn guidance. Do not send acknowledgment-only messages: each one wakes the other Work."),
-      parameters: SEND_SCHEMA,
-      execute: async (_toolCallId: string, params: { target: string; message: string; delivery?: "followUp" | "steer" }) => toolResult(await bridge.invoke({
-        type: "send",
-        operationId: randomUUID(),
-        target: params.target,
-        message: params.message,
-        ...(params.delivery === undefined ? {} : { delivery: params.delivery }),
-      })),
+    for (const tool of TOP_LEVEL_DOCK_TOOLS) pi.registerTool({
+      name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
+      execute: async (_toolCallId: string, params: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: PiModelContext & { hasPendingMessages(): boolean }) => piToolResult(await tool.execute(params, {
+        invoke: (request) => bridge.invoke(request),
+        thinkingLevel: () => pi.getThinkingLevel(),
+        modelFacts: () => modelFacts(ctx),
+        wait: (request, waitSignal) => bridge.children.wait(request, waitSignal, () => ctx.hasPendingMessages(), bridge.takeArrivedChildMessages()),
+      }, signal)),
     } as never);
   };
 }
@@ -686,7 +441,7 @@ function registerChildTools(pi: ExtensionAPI, bridge: DockToolsBridge): void {
     description: toolDescription("Send a message to the Work that created you; it reaches your parent at its next step, even while it is working. You and your parent work at the same time. With done: false, tell it what it should know or answer now, such as a finding that affects its work, a question or a point to agree on, and keep working. With done: true, send your final result for the work it handed you; your turn ends. Your parent sees only what you send this way. Never send acknowledgments or empty progress such as that you are still working."),
     parameters: CHILD_SEND_SCHEMA,
     execute: async (_toolCallId: string, params: { message: string; done: boolean }) => {
-      const result = toolResult(await bridge.invoke({ type: "send", operationId: randomUUID(), message: params.message, done: params.done }));
+      const result = piToolResult(dockToolOutput(await bridge.invoke({ type: "send", operationId: randomUUID(), message: params.message, done: params.done })));
       // A final result ends the turn: nothing the model would write after it reaches the parent.
       return params.done ? { ...result, terminate: true } : result;
     },
@@ -731,9 +486,10 @@ function modelFacts(ctx: PiModelContext): ModelFacts {
   };
 }
 
-function toolResult(value: DockToolsResult, context?: RenderContext): { content: Array<{ type: "text"; text: string }>; details?: DockToolsResult } {
+/** A Dock tool call's outcome in the shape Pi's tools return. */
+function piToolResult(output: DockToolOutput): { content: Array<{ type: "text"; text: string }>; details?: unknown } {
   return {
-    content: [{ type: "text", text: renderDockToolsResult(value, context) }],
-    ...(value.type === "machines" ? {} : { details: value }),
+    content: [{ type: "text", text: output.text }],
+    ...(output.details === undefined ? {} : { details: output.details }),
   };
 }
