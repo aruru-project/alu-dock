@@ -176,6 +176,8 @@ class AssistantAgent implements WorkerAgent {
   private stopRequested = false;
   private retryWait: AbortController | undefined;
   private readonly queue: QueuedInput[] = [];
+  /** Work messages and reminders waiting for the loop, never drafts the owner can take back. */
+  private readonly arrivals = new Set<AgentMessage>();
   private readonly wake = new WakeBudget();
   private toldWakesSpent = false;
   private readonly desk: WorkDesk;
@@ -276,13 +278,17 @@ class AssistantAgent implements WorkerAgent {
       // she wait for it here and go on from it inside the reply.
       prepareRequest: async ({ context }, signal) => {
         const tokens = estimateContextTokens(convertToLlm(context.messages)).tokens;
-        if (tokens < handoffLimits(this.model?.contextWindow ?? 0).mustTokens) { this.handoff.consider(tokens); return undefined; }
-        // Stop does not wait for the record: the request that follows ends at once.
-        const stopped = new Promise<void>((done) => signal?.addEventListener("abort", () => done(), { once: true }));
-        await Promise.race([this.handoff.require(tokens), stopped]);
-        if (signal?.aborted) return undefined;
-        const record = this.handoff.take();
-        return record !== undefined && await this.takeOver(record, true) ? { context: { ...context, messages: [...this.agent.state.messages] } } : undefined;
+        if (tokens < handoffLimits(this.model?.contextWindow ?? 0).mustTokens) this.handoff.consider(tokens);
+        else {
+          // Stop does not wait for the record: the request that follows ends at once.
+          const stopped = new Promise<void>((done) => signal?.addEventListener("abort", () => done(), { once: true }));
+          await Promise.race([this.handoff.require(tokens), stopped]);
+          if (signal?.aborted) return undefined;
+          const record = this.handoff.take();
+          if (record !== undefined && await this.takeOver(record, true)) context = { ...context, messages: [...this.agent.state.messages] };
+        }
+        // Each request (including retries) takes the latest choice; one already in flight is left alone.
+        return { ...(this.model === undefined ? {} : { model: this.model }), thinkingLevel: this.thinkingLevel, context };
       },
     });
     this.agent.subscribe((event) => this.observe(event));
@@ -576,7 +582,7 @@ class AssistantAgent implements WorkerAgent {
    */
   private arrive(source: WakeSource, entry: { customType: string; content: string; display: boolean; details?: unknown }, wokenBy: string, childId?: string): void {
     const message = customMessage(entry.customType, entry.content, entry.display, entry.details);
-    if (this.running !== undefined) { this.agent.steer(message); return; }
+    if (this.running !== undefined) { this.arrivals.add(message); this.agent.steer(message); return; }
     if (this.model !== undefined && this.admit(source, childId)) { void this.reply(undefined, [message], wokenBy); return; }
     this.observe({ type: "message_start", message });
     this.observe({ type: "message_end", message });
@@ -695,6 +701,15 @@ class AssistantAgent implements WorkerAgent {
     };
     this.queue.length = 0;
     this.agent.clearAllQueues();
+    // Taking back drafts must not discard Work results or due reminders. Keep them in the session,
+    // not in a new steering queue: abort_restore_queue must leave her stopped, not wake her again.
+    if (this.arrivals.size > 0) {
+      this.contextReady = false;
+      for (const message of this.arrivals) {
+        this.observe({ type: "message_start", message });
+        this.observe({ type: "message_end", message });
+      }
+    }
     this.projector.clearQueuedInputs(cleared);
     this.publishQueue();
     return cleared;
@@ -753,7 +768,7 @@ class AssistantAgent implements WorkerAgent {
       let attempt = 0;
       for (;;) {
         const last = this.lastAssistantMessage();
-        if (last !== undefined && !this.stopRequested && attempt < RETRY_DELAYS_MS.length && this.passingFailure(last, model)) {
+        if (last !== undefined && !this.stopRequested && attempt < RETRY_DELAYS_MS.length && this.passingFailure(last, this.models.getModel(last.provider, last.model) ?? model)) {
           const delayMs = RETRY_DELAYS_MS[attempt]!;
           attempt += 1;
           this.publish({ type: "auto_retry_start", attempt, maxAttempts: RETRY_DELAYS_MS.length, delayMs, errorMessage: last.errorMessage ?? "Unknown error" });
@@ -988,6 +1003,7 @@ class AssistantAgent implements WorkerAgent {
   private observe(event: LoopEvent): void {
     if (event.type === "tool_execution_start" && event.toolName === "assistant_memory" && (event.args as { action?: unknown } | undefined)?.action === "forget") this.forgetting = true;
     if (event.type === "message_end") {
+      this.arrivals.delete(event.message);
       this.keep(event.message);
       // Outside a reply nothing else adds it to what the model is given next.
       if (this.running === undefined && this.contextReady) this.agent.state.messages = [...this.agent.state.messages, event.message];
@@ -1038,7 +1054,9 @@ class AssistantAgent implements WorkerAgent {
   async chooseStartingModel(chosen: unknown, fresh: boolean): Promise<void> {
     const recorded = this.session.buildSessionContext();
     const starting = await resolvePiStartingModel(chosen, this.models, this.session);
-    const fromSession = recorded.model === null ? undefined : this.models.getModel(recorded.model.provider, recorded.model.modelId);
+    // An old request can finish after model.set. Its provider is history, not a newer choice.
+    const selected = this.session.getBranch().findLast((entry) => entry.type === "model_change") ?? recorded.model;
+    const fromSession = selected === null ? undefined : this.models.getModel(selected.provider, selected.modelId);
     const provider = this.settings.getDefaultProvider(), modelId = this.settings.getDefaultModel();
     const fromSettings = provider === undefined || modelId === undefined ? undefined : this.models.getModel(provider, modelId);
     this.model = starting ?? fromSession ?? fromSettings ?? (await this.models.getAvailable())[0];

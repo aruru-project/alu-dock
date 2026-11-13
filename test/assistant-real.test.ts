@@ -105,29 +105,42 @@ test("while she replies a message waits its turn, can be taken back or joins at 
   assert.equal((await client.status(alu.id)).pending.total, 0);
 
   await client.prompt(alu.id, "顺便看看记忆里有没有团子", "auto", "alu-join");
+  // Review regression: changing model while its old request is held must affect the next tool step.
+  await client.setModel(alu.id, "second", "fixture", "alu-model");
+  await client.setThinking(alu.id, "low", "alu-thinking");
   first.tools({ id: "look", name: "assistant_search", arguments: { query: "团子" } });
-  const joined = await coordinator.request(1);
+  const joined = await second.request(0);
+  assert.equal((joined.body as { reasoning_effort?: string }).reasoning_effort, "low");
   const said = (joined.body.messages ?? []).filter((message) => message.role === "user").map((message) => JSON.stringify(message.content));
   assert.ok(said.some((text) => text.includes("顺便看看记忆里有没有团子")) && !said.some((text) => text.includes("这句发错了")), "What waited joins the reply at its next step; what was taken back does not");
-  joined.text("没有团子。");
-  await settled(client, alu.id);
   assert.equal((await client.status(alu.id)).pending.total, 0);
 
-  // Stop ends a reply that waits for the model; she takes the next message.
-  await client.prompt(alu.id, "讲个很长的故事", "auto", "alu-long");
-  await coordinator.request(2);
-  await client.abort(alu.id, "alu-stop");
-  await waitFor(async () => (await client.status(alu.id)).lastRun === "aborted", "Stop did not end her reply");
-
-  // She changes model when asked, keeps the choice when the Work is opened again, and asks a failed request again.
-  await client.setModel(alu.id, "second", "fixture", "alu-model");
-  await client.prompt(alu.id, "换了模型还在吗？", "auto", "alu-after-model");
-  (await second.request(0)).fail(503, "overloaded");
-  (await second.request(1)).text("在。");
-  await settled(client, alu.id);
-  assert.equal((await client.status(alu.id)).lastRun, "succeeded");
+  // The old model's tool reply arrived after the explicit choice. Reopen before the new model answers:
+  // the conversation must keep that choice rather than reverting to the last assistant message's model.
   process.kill(team.workerPids[0]!, "SIGKILL");
   await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
   await team.assistantWork();
-  assert.deepEqual((await client.status(alu.id)).executor.model, { provider: "second", id: "fixture" });
+  const reopened = await client.status(alu.id);
+  assert.deepEqual(reopened.executor.model, { provider: "second", id: "fixture" });
+  assert.equal(reopened.executor.thinkingLevel, "low");
+  await client.prompt(alu.id, "接着说。", "auto", "alu-after-reopen");
+  (await second.request(1)).text("没有团子。");
+  await settled(client, alu.id);
+
+  // Stop ends a reply that waits for the model; she takes the next message.
+  await client.prompt(alu.id, "讲个很长的故事", "auto", "alu-long");
+  await second.request(2);
+  await client.abort(alu.id, "alu-stop");
+  await waitFor(async () => (await client.status(alu.id)).lastRun === "aborted", "Stop did not end her reply");
+
+  // A retry also uses the model and thinking selected since the failed request began.
+  await client.prompt(alu.id, "换了模型还在吗？", "auto", "alu-after-model");
+  (await second.request(3)).fail(503, "overloaded");
+  await client.setModel(alu.id, "coordinator", "fixture", "alu-retry-model");
+  await client.setThinking(alu.id, "medium", "alu-retry-thinking");
+  const retried = await coordinator.request(1);
+  assert.equal((retried.body as { reasoning_effort?: string }).reasoning_effort, "medium");
+  retried.text("在。");
+  await settled(client, alu.id);
+  assert.equal((await client.status(alu.id)).lastRun, "succeeded");
 });

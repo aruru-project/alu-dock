@@ -40,12 +40,34 @@ test("the assistant hands work to a child Work, answers her owner while it works
   await client.prompt(alu.id, "在干嘛呢？", "auto", "alu-status");
   const status = await coordinator.request(2);
   assert.ok(given(status).includes("子 Work「读 README」在干活"), `Her status says what the child Work is doing: ${given(status).slice(-600)}`);
-  status.text("那个 Work 还在读 README。");
+  // Review regression: taking back the owner's input must not throw away child messages received
+  // while the model is held. Stop keeps them too, but does not start another reply on their account.
+  childStarted.tools({ id: "progress", name: "dock_send", arguments: { message: "README 已经找到。", done: false } });
+  const reading = await implementer.request(1);
+  await client.prompt(alu.id, "这句先取回", "auto", "alu-take-input");
+  const taken = await client.dequeue(alu.id, "alu-take");
+  assert.deepEqual(taken.receipt.restored.map((item) => item.text), ["这句先取回"]);
+  reading.tools({ id: "more-progress", name: "dock_send", arguments: { message: "README 正在核对。", done: false } });
+  const reporting = await implementer.request(2);
+  await client.prompt(alu.id, "这句也先取回", "auto", "alu-stop-input");
+  const stopped = await client.abortRestoreQueue(alu.id, "alu-stop-reply");
+  assert.deepEqual(stopped.receipt.restored.map((item) => item.text), ["这句也先取回"]);
+  await waitFor(async () => (await client.status(alu.id)).lastRun === "aborted", "Stop did not end her reply");
+
+  await client.prompt(alu.id, "子 Work 刚才说了什么？", "auto", "alu-after-stop");
+  const afterStop = await coordinator.request(3);
+  assert.ok(given(afterStop).includes("子 Work 刚才说了什么？"), "Only the owner's next message starts another reply");
+  for (const text of ["README 已经找到。", "README 正在核对。"]) {
+    assert.ok(given(afterStop).includes(text), "The next reply still sees what the child Work sent");
+    const messages = (await client.history(alu.id)).entries.filter((entry) => entry.customType === "dock-work-message" && JSON.stringify(entry.content).includes(text));
+    assert.equal(messages.length, 1, "Each child message is kept once, outside the owner's drafts");
+  }
+  afterStop.text("那个 Work 找到了 README，还在核对。");
   await settled(client, alu.id);
 
   // The child Work's result wakes her, marked as that Work's words.
-  childStarted.tools({ id: "report", name: "dock_send", arguments: { message: "README 说这是一个测试目录。", done: true } });
-  const woken = await coordinator.request(3);
+  reporting.tools({ id: "report", name: "dock_send", arguments: { message: "README 说这是一个测试目录。", done: true } });
+  const woken = await coordinator.request(4);
   assert.ok(given(woken).includes("[来自子 Work「读 README」· 已完成]\\nREADME 说这是一个测试目录。"), "The result reaches her as the child Work's message");
   assert.ok(given(woken).includes("叫醒你的：子 Work「读 README」交来的结果"));
   woken.text("README 说这是一个测试目录。");
@@ -56,10 +78,10 @@ test("the assistant hands work to a child Work, answers her owner while it works
 
   // A reminder she sets wakes her when it comes due, with nobody talking to her.
   await client.prompt(alu.id, "两秒后提醒我喝水。", "auto", "alu-remind");
-  (await coordinator.request(4)).tools({ id: "remind", name: "assistant_remind", arguments: { action: "set", at: new Date(Date.now() + 2_000).toISOString(), text: "提醒主人喝水" } });
-  (await coordinator.request(5)).text("两秒后叫你。");
+  (await coordinator.request(5)).tools({ id: "remind", name: "assistant_remind", arguments: { action: "set", at: new Date(Date.now() + 2_000).toISOString(), text: "提醒主人喝水" } });
+  (await coordinator.request(6)).text("两秒后叫你。");
   await settled(client, alu.id);
-  const due = await coordinator.request(6);
+  const due = await coordinator.request(7);
   assert.ok(given(due).includes("提醒主人喝水") && given(due).includes("叫醒你的：你定的提醒"), "The reminder starts a reply of hers");
   due.text("喝水啦。");
   await settled(client, alu.id);
