@@ -284,7 +284,7 @@ Pi 现有机制已覆盖 Dock 自带扩展的需要；没有任何一个真实�
 
 ### 已知边界
 
-别的 Work 用 `dock_send` 发给助手 Work 的消息，在 Pi 会话里是一条普通的用户消息，只在正文开头带着 Dock 加的来源行 `[Agent message from "…"]`。助手记对话时靠这一行把它记成那个 Work 说的（`src/core/dock-tools.ts` 的 `isDockMessageText`，和生成这一行的 `dockMessageText` 写在一起；使用处在 `src/pi/assistant-extension.ts` 的 `assistantEntryOf`）。会话记录里没有别的标记能区分它和主人自己打的字。
+别的顶层 Work 用 `dock_send` 发给助手 Work 的消息，在她的会话里是一条普通的用户消息，只在正文开头带着 Dock 加的来源行 `[Agent message from "…"]`。助手记对话时靠这一行把它记成那个 Work 说的（`src/core/dock-tools.ts` 的 `isDockMessageText`，和生成这一行的 `dockMessageText` 写在一起；使用处在 `src/assistant-agent/recorder.ts` 的 `assistantEntryOf`，以及 `assistant-agent.ts` 里判断这条消息算不算别的 Work 叫醒她）。会话记录里没有别的标记能区分它和主人自己打的字。
 
 认错只有一个方向：主人自己打的一句话恰好以这一行开头，会被记成别的 Work 说的，不会被当成主人的情况记进记忆，她让记住或忘掉时也不会拿它当“主人刚说的那句”。别的 Work 的话不会因此被当成主人的话，因为来源行由 Dock 加在最前面，发消息的 Work 去不掉。
 

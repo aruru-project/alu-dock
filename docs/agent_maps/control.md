@@ -322,7 +322,7 @@ Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一�
 
 ## 个人助手（`instance.assistant.v1`、`assistant.v1`）
 
-Dock 自带一个个人助手（card #295），默认是阿露。她的人设、主人的手写设定、她经历过的对话和从中整理出的记忆由 Main 上的助手服务保管（见 [runtime](runtime.md#个人助手)）。新建 Work 时可以选择以助手身份打开：这样的 Work 载入人设和记忆，对话记进她的记忆；没选的 Work 与记忆无关。她就是这样的 Work 的 system：她的内容代替系统提示开头的身份说明，不再另选 system（2026-11-12 主人定）。
+Dock 自带一个个人助手（card #295），默认是阿露。她的人设、主人的手写设定、她经历过的对话和从中整理出的记忆由 Main 上的助手服务保管（见 [runtime](runtime.md#个人助手)）。新建 Work 时可以选择以助手身份打开：这样的 Work 载入人设和记忆，对话记进她的记忆；没选的 Work 与记忆无关。这样的 Work 运行她自己的 Agent 而不是 Pi（card #667，见 [runtime](runtime.md#个人助手)），所以不选 system，snapshot 的 `executor.kind` 是 `dock-assistant`。
 
 **以助手身份打开（`instance.assistant.v1`，每台 Host 都提供）**
 
@@ -341,7 +341,7 @@ Dock 自带一个个人助手（card #295），默认是阿露。她的人设、
 请求都不带 `hostId`，由所连的 Main 回答。DTO 与 parser 定义在 `src/core/assistant.ts`，`protocol.ts` 复用。
 
 - `assistant.info {}` → `{workspacePath,maxDocumentBytes,maxMemoryChars,maxEpisodeChars,extraction?}`：她在 Main 上的工作区，一份文档的字节上限，一条记忆和时间线一行的长度上限（UTF-16 单位，现在是 1,000 和 300），以及后台整理记忆的现状 `extraction {state,model?,waitingSessions,skippedParts?,lastRunAt?,lastError?,retryAt?}`。`state` 为 `off`（没选模型，不整理）、`idle`、`working` 或 `failed`（`lastError` 是给主人看的原因，`retryAt` 自动再试）；`waitingSessions` 是还有新说的话没读的对话数；`skippedParts` 是这个模型读不成、先跳过的对话段数（回答看不懂，或对这一段的调用反复失败而模型本身答得出话），换了模型会重读；`lastError` 在 `idle` 时也可能有，说明上次有一段被跳过。
-- `assistant.preview {}` → `{text,loadedAt}`：现在新开一个助手会话会载入的全文，以及这份内容生成的时间。
+- `assistant.preview {}` → `{text,loadedAt}`：助手 Work 现在取开头会载入的全文，以及这份内容生成的时间。
 - `assistant.document.get {document}` → `{document,text,revision}`；`document` 为 `persona`（人设）或 `notes`（手写设定）。
 - `assistant.document.set {operationId,document,text,baseRevision}` → `{document,text,revision}`：整份替换，沿用 operation ledger。`baseRevision` 不是当前版本时返回 `assistant_document_changed`，内容不变；超过 `MAX_ASSISTANT_DOCUMENT_BYTES`（256 KiB）返回 `assistant_document_too_large`。她用工具按原文替换一段时，找不到原文为 `assistant_edit_not_found`，原文出现不止一次为 `assistant_edit_ambiguous`。
 - `assistant.search {query?,from?,to?,cursor?,limit}` → `{hits,nextCursor?}`：按关键词、时间或两者一起搜她经历过的对话。`query` 按空白分成几个词，全部出现才算命中；三个字及以上的词不分大小写，一两个字的词只有英文字母不分大小写；`from`/`to` 是时间范围，只写日期时按 Main 的本地日，`to` 含当天；没有 `query` 时必须给时间范围，列出这段时间里的全部条目。结果从新到旧，`limit` 最多 50，`nextCursor` 续读下一页。每条命中是 `{session,entryId,at,kind,snippet}`，`snippet` 是命中处前后最多 400 个 UTF-16 单位的原文（含省略号）。

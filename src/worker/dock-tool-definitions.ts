@@ -61,6 +61,11 @@ export interface DockToolOptions {
    * whose turns always end while child Works run: their messages wake it. Default true.
    */
   waitInTurn?: boolean;
+  /**
+   * false leaves the line naming the usage guide's file out of every description, for an Agent that
+   * cannot read files and is told the rules another way. Default true.
+   */
+  usageGuide?: boolean;
 }
 
 const DOCK_TOOLS_GUIDE_PATH = fileURLToPath(new URL("../../../docs/agent/dock-tools.md", import.meta.url));
@@ -183,10 +188,11 @@ function spawnSchema(conversationCopy: boolean): object {
 export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefinition[] {
   const conversationCopy = options.conversationCopy ?? true;
   const waitInTurn = options.waitInTurn ?? true;
+  const describe = options.usageGuide === false ? (description: string): string => description : toolDescription;
   const tools: DockToolDefinition[] = [
     {
       name: "dock_spawn", label: "Start a child Work",
-      description: toolDescription(`Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so.${conversationCopy ? " It starts with only the task unless withContext gives it a copy of your conversation." : " It starts with only the task, so put what it needs to know into the task."} It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them.${waitInTurn ? " If your turn must not end, as during a Dock Goal, use dock_wait." : ""} It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls.`),
+      description: describe(`Create a child Work for a task of yours and start it. It works in your workspace with your model and thinking level. Set model or thinkingLevel only when the user or the project's instructions ask for one, never because a task looks easy or hard; dock_models gives the exact name of a model the user picked. A model without that thinking level runs at the nearest one it has, and the result says so.${conversationCopy ? " It starts with only the task unless withContext gives it a copy of your conversation." : " It starts with only the task, so put what it needs to know into the task."} It appears under you in Dock, talks only to you and cannot reach other Works. It works at the same time as you: while it works it sends you what you should know or answer now, such as findings that affect your work, questions or points to agree on, and when it finishes, its final result. These messages reach you at your next step if you are still working; if it stops without its result, Dock tells you. Send it more with dock_send and stop it with dock_stop when you no longer need it. Child Works that edit and build at the same time need separate directories: give each its own git worktree as cwd and merge their work yourself. After starting child Works, end your turn unless you have work of your own; do not poll them.${waitInTurn ? " If your turn must not end, as during a Dock Goal, use dock_wait." : ""} It also stops when you stop. If creation succeeded but the task was not confirmed, inspect it before sending the task again. For an independent review grant only read, grep, find and ls.`),
       parameters: spawnSchema(conversationCopy),
       execute: async (params: Omit<Extract<DockToolsRequest, { type: "spawn" }>, "type" | "operationId">, runtime) => {
         const thinkingAsked = params.thinkingLevel ?? runtime.thinkingLevel();
@@ -195,7 +201,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     },
     {
       name: "dock_wait", label: "Wait for child Works",
-      description: toolDescription("Wait in this turn for your child Works: until the first message from any of them, until target sends its final result, or with all=true until every child Work you handed work to has sent its final result or stopped. Messages from child Works that arrive meanwhile come back here instead of separately; one that is not a final result, such as a question or a finding, ends the wait at once so you can answer it. Returns early when the user's message reaches you or the user cancels. Use it only when your turn must not end, such as during a Dock Goal, whose next round would start as soon as your turn ends; otherwise end your turn and the messages wake you."),
+      description: describe("Wait in this turn for your child Works: until the first message from any of them, until target sends its final result, or with all=true until every child Work you handed work to has sent its final result or stopped. Messages from child Works that arrive meanwhile come back here instead of separately; one that is not a final result, such as a question or a finding, ends the wait at once so you can answer it. Returns early when the user's message reaches you or the user cancels. Use it only when your turn must not end, such as during a Dock Goal, whose next round would start as soon as your turn ends; otherwise end your turn and the messages wake you."),
       parameters: WAIT_SCHEMA,
       execute: async (params: { target?: string; all?: boolean; timeoutSeconds?: number }, runtime, signal) => {
         if (!runtime.wait) throw new Error("dock_wait is not available in this Work.");
@@ -205,20 +211,20 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     },
     {
       name: "dock_models", label: "Models for child Works",
-      description: toolDescription("Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
+      description: describe("Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
       parameters: EMPTY_SCHEMA,
       execute: async (_params, runtime) => dockToolOutput(await runtime.invoke({ type: "models" }), { facts: runtime.modelFacts() }),
     },
     ...(["interrupt", "stop"] as const).map((action): DockToolDefinition => ({
       name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a Work" : "Stop a Work",
-      description: toolDescription(action === "interrupt" ? "Interrupt another Work's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Work. Its child Works also stop and exit and leave the work list; their conversation files remain on disk. Check dock_list first."),
+      description: describe(action === "interrupt" ? "Interrupt another Work's current turn. Its work stays available for follow-up. Ordinary messages should use dock_send instead." : "Permanently stop another Work. Its child Works also stop and exit and leave the work list; their conversation files remain on disk. Check dock_list first."),
       parameters: REQUIRED_TARGET_SCHEMA,
       execute: async (params: { target: string }, runtime) => dockToolOutput(await runtime.invoke({ type: action, operationId: randomUUID(), target: params.target })),
     })),
     {
       name: "dock_list",
       label: "List Dock Works",
-      description: toolDescription("List the Works you can see, without reading their conversations. Use scope='all' only when stopped or unavailable history is relevant."),
+      description: describe("List the Works you can see, without reading their conversations. Use scope='all' only when stopped or unavailable history is relevant."),
       parameters: LIST_SCHEMA,
       execute: async (params: { scope?: "live" | "all" }, runtime) => dockToolOutput(await runtime.invoke({
         type: "list",
@@ -228,14 +234,14 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_machines",
       label: "List Dock Machines",
-      description: toolDescription("List current Machines with their names, availability, platform, Home, and workspace roots. The Machine this Work runs on is marked."),
+      description: describe("List current Machines with their names, availability, platform, Home, and workspace roots. The Machine this Work runs on is marked."),
       parameters: EMPTY_SCHEMA,
       execute: async (_params, runtime) => dockToolOutput(await runtime.invoke({ type: "machines" })),
     },
     {
       name: "dock_inspect",
       label: "Inspect a Work",
-      description: toolDescription("Read a page of another Work’s conversation. Selected messages come whole; one too long for a page says so and continues on the next page. Source roles identify who said each message."),
+      description: describe("Read a page of another Work’s conversation. Selected messages come whole; one too long for a page says so and continues on the next page. Source roles identify who said each message."),
       parameters: INSPECT_SCHEMA,
       execute: async (params: { target: string; limit?: number; types?: ObservationMessageType[]; cursor?: string }, runtime) => dockToolOutput(await runtime.invoke({
         type: "inspect",
@@ -248,35 +254,35 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_watch",
       label: "Watch a Work",
-      description: toolDescription("Get a notification when another Work becomes idle, stops or fails. Returns immediately; continue other work while waiting. The notification reaches you at your next step if you are still working. Your own child Works need no watch: they send you their results."),
+      description: describe("Get a notification when another Work becomes idle, stops or fails. Returns immediately; continue other work while waiting. The notification reaches you at your next step if you are still working. Your own child Works need no watch: they send you their results."),
       parameters: REQUIRED_TARGET_SCHEMA,
       execute: async (params: { target: string }, runtime) => dockToolOutput(await runtime.invoke({ type: "watch", target: params.target })),
     },
     {
       name: "dock_cancel_watch",
       label: "Cancel Dock watches",
-      description: toolDescription("Cancel one source-owned watch, or all watches when watchId is omitted."),
+      description: describe("Cancel one source-owned watch, or all watches when watchId is omitted."),
       parameters: OPTIONAL_WATCH_SCHEMA,
       execute: async (params: { watchId?: string }, runtime) => dockToolOutput(await runtime.invoke({ type: "cancel", ...(params.watchId === undefined ? {} : { watchId: params.watchId }) })),
     },
     {
       name: "dock_deliver_file",
       label: "Deliver a temporary file",
-      description: toolDescription("Register an absolute local file path for temporary download by the user. The file must remain unchanged and available."),
+      description: describe("Register an absolute local file path for temporary download by the user. The file must remain unchanged and available."),
       parameters: DELIVER_SCHEMA,
       execute: async (params: { path: string }, runtime) => dockToolOutput(await runtime.invoke({ type: "deliver", path: params.path })),
     },
     {
       name: "dock_system",
       label: "Read Dock systems",
-      description: toolDescription("Find the systems a new Work in an absolute cwd can start from, or read one. Without id it lists candidates; pass the list's nextCursor as cursor for the next page. With id it reads that candidate; pass its nextOffset as offset, with the revision that came with it, to continue. cursor goes only without id, offset and revision only with id."),
+      description: describe("Find the systems a new Work in an absolute cwd can start from, or read one. Without id it lists candidates; pass the list's nextCursor as cursor for the next page. With id it reads that candidate; pass its nextOffset as offset, with the revision that came with it, to continue. cursor goes only without id, offset and revision only with id."),
       parameters: SYSTEM_SCHEMA,
       execute: async (params: Omit<Extract<DockToolsRequest, { type: "system" }>, "type">, runtime) => dockToolOutput(await runtime.invoke({ type: "system", ...params })),
     },
     {
       name: "dock_create",
       label: "Create Dock work",
-      description: toolDescription("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. assistant=true opens it as the owner's personal assistant, whose persona and memory take the place of a system, so leave out systemId; without it the new Work is not her, whatever the directory's default. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
+      description: describe("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. assistant=true opens it as the owner's personal assistant, whose persona and memory take the place of a system, so leave out systemId; without it the new Work is not her, whatever the directory's default. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
       parameters: CREATE_SCHEMA,
       execute: async (params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: boolean }, runtime) => dockToolOutput(await runtime.invoke({
         type: "create",
@@ -293,7 +299,7 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_send",
       label: "Send a Dock message",
-      description: toolDescription("Send a message to another Work with your authenticated sender identity. A child Work of yours gets it at its next step as a message from you, and its answers come back the same way. Another top-level Work is started if idle, or gets it after its current turn; use delivery=steer only for deliberate mid-turn guidance. Do not send acknowledgment-only messages: each one wakes the other Work."),
+      description: describe("Send a message to another Work with your authenticated sender identity. A child Work of yours gets it at its next step as a message from you, and its answers come back the same way. Another top-level Work is started if idle, or gets it after its current turn; use delivery=steer only for deliberate mid-turn guidance. Do not send acknowledgment-only messages: each one wakes the other Work."),
       parameters: SEND_SCHEMA,
       execute: async (params: { target: string; message: string; delivery?: "followUp" | "steer" }, runtime) => dockToolOutput(await runtime.invoke({
         type: "send",
