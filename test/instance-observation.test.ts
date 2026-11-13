@@ -8,7 +8,7 @@ import { DockRegistry, type InstanceFactoryInput } from "../src/control/dock-reg
 import { AgentUnavailableBeforeEffectError } from "../src/core/agent-worker.js";
 import { CROSS_INSTANCE_TRUST, type ObservationNotification } from "../src/core/instance-observation.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
-import { renderDockToolsResult } from "../src/pi/dock-tools-client.js";
+import { renderDockToolsResult } from "../src/worker/dock-tools-client.js";
 import { parseDockToolsResult } from "../src/core/dock-tools-codec.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 

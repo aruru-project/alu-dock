@@ -323,7 +323,16 @@ export function createLiveConversationProjector(
   // A replay whose first run boundary is a settle also started inside that run,
   // even when the Work has since gone idle.
   const firstRunBoundary = (bootstrap.activeEvents ?? []).find((event) => event.eventType === 'run.started' || event.eventType === 'run.settled')
-  if (bootstrap.instance.execution === 'running' || firstRunBoundary?.eventType === 'run.settled') openTurn(CONTINUATION_TURN_ID, undefined, true)
+  function openContinuation(allowOpener = true) {
+    const groups = groupRecords(bootstrap.records ?? [])
+    const pending = historyTurnOpeners(groups).pending
+    // A checkpoint can already contain the wake message, but not its reply. The
+    // running facts/replay confirm a run; the message alone never creates one.
+    const opener = allowOpener && pending !== undefined ? groups[pending] : undefined
+    openTurn(CONTINUATION_TURN_ID, opener?.records[0]?.timestamp, !opener)
+    if (opener) turn!.openerId = opener.key
+  }
+  if (bootstrap.instance.execution === 'running' || firstRunBoundary?.eventType === 'run.settled') openContinuation(firstRunBoundary?.eventType !== 'run.started')
 
   /** `replay` marks events restored from a read rather than followed live. */
   function apply(event: ProjectedEvent, replay = false) {
@@ -343,7 +352,7 @@ export function createLiveConversationProjector(
     const time = () => formattedTime ??= shortTime(event.occurredAt)
     switch (event.eventType) {
       case 'run.started':
-        if (turn?.continuation && !turnHasItems) adoptTurn(event.sequence, event.occurredAt)
+        if ((turn?.continuation || turn?.openerId) && !turnHasItems) adoptTurn(event.sequence, event.occurredAt)
         else {
           settleTurn('completed')
           openTurn(liveTurnId(event.sequence), event.occurredAt, false)
@@ -615,7 +624,7 @@ export function createLiveConversationProjector(
   /** A recovery read can confirm completion without replaying run.settled, or
    * find a run in progress whose events were never delivered here. */
   function reconcileRun(instance: ConversationBootstrap['instance']) {
-    if (instance.execution === 'running') { if (!turn) openTurn(CONTINUATION_TURN_ID, undefined, true) }
+    if (instance.execution === 'running') { if (!turn) openContinuation() }
     // A state only a newer Host knows neither confirms completion nor a run in progress (#356).
     else if (instance.execution !== 'unrecognized') settleTurn(turnStatusFromRunResult(instance.lastRun), undefined, instance.lastError)
   }
@@ -655,7 +664,7 @@ export function projectRecordGroups(records: ConversationRecord[]): Conversation
     for (let index = start; index < output.length; index++) {
       const item = output[index]!
       item.sourceEntryIds = entryIds
-      if (turn) item.turnId = turn.item.turnId
+      if (turn && item.kind !== 'shell') item.turnId = turn.item.turnId
       if (item.kind === 'record') for (const part of item.parts) part.sourceEntryIds = entryIds
     }
   })
@@ -664,33 +673,34 @@ export function projectRecordGroups(records: ConversationRecord[]): Conversation
 
 interface HistoryTurn { opener: number; item: ConversationTurnItem; errorRecordId?: string }
 
-/** History has no run boundaries. A user message opens a turn that runs to the last
- * message record before the next user message; later summaries or shell records
- * between two turns stand on their own. Duration is the span of record timestamps,
- * which Pi writes at message end, so both ends sit close to the real run. */
+/** History has no run boundaries. User prompts and visible wake messages after a
+ * completed reply open turns; a wake must have an Agent reply before the next
+ * opener. Steers during tool use stay inside the run. Trailing display-only
+ * records stand alone, and timestamps measure each reply rather than the wait. */
 function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
   const turns = new Map<number, HistoryTurn>()
-  const openers = groups.flatMap((group, index) => isUserMessageGroup(group) ? [index] : [])
+  const { openers } = historyTurnOpeners(groups)
   openers.forEach((opener, position) => {
     const next = openers[position + 1] ?? groups.length
     let end = opener
     // A system prompt record before the next prompt is a message too, but it does not belong to this run.
-    for (let index = opener + 1; index < next; index++) if (groups[index]!.records[0]!.kind === 'message' && groups[index]!.records[0]!.visibility === 'conversation') end = index
+    for (let index = opener + 1; index < next; index++) {
+      const first = groups[index]!.records[0]!
+      if (first.kind === 'message' && first.visibility === 'conversation' && ['user', 'assistant', 'tool'].includes(first.source)) end = index
+    }
     const records = groups.slice(opener, end + 1).flatMap((group) => group.records)
-    const user = groups[opener]!.records[0]!
+    const start = groups[opener]!.records[0]!
     const lastAssistant = lastWhere(records, (record) => record.kind === 'message' && record.source === 'assistant')
-    const endedAt = lastWhere(records, (record) => record !== user && Boolean(record.timestamp))?.timestamp
+    const endedAt = lastWhere(records, (record) => record !== start && Boolean(record.timestamp))?.timestamp
     const status: ConversationTurnStatus = lastAssistant?.error || lastAssistant?.stopReason === 'error' ? 'failed'
       : lastAssistant?.stopReason === 'aborted' ? 'aborted'
-      // Only the last turn can still be unfinished; an earlier one that ends in a
-      // tool call was continued by the next user message (a steer). A child Work's
-      // turn ends right after it sends its parent the final result (card #666).
+      // A child Work's turn ends right after it sends its parent the final result (card #666).
       : position === openers.length - 1 && (!lastAssistant || lastAssistant.stopReason === 'toolUse') && !endsWithFinalResult(records) ? 'interrupted'
       : 'completed'
-    const turnId = `turn:${user.recordId}`
+    const turnId = `turn:${start.recordId}`
     const item: ConversationTurnItem = {
       id: turnId, kind: 'turn', turnId, status,
-      ...(user.timestamp ? { startedAt: user.timestamp } : {}),
+      ...(start.timestamp ? { startedAt: start.timestamp } : {}),
       ...(endedAt ? { endedAt } : {}),
       ...(status === 'failed' ? { error: lastAssistant?.error || '运行失败。' } : {}),
     }
@@ -698,6 +708,44 @@ function historyTurns(groups: RecordGroup[]): Map<number, HistoryTurn> {
     for (let index = opener; index <= end; index++) turns.set(index, turn)
   })
   return turns
+}
+
+/** Candidate wake messages have the same rule regardless of extension/customType.
+ * Keep an unanswered tail candidate separate so a live continuation can adopt it. */
+function historyTurnOpeners(groups: RecordGroup[]): { openers: number[]; pending?: number } {
+  const candidates: number[] = []
+  let lastMessage: ConversationRecord | undefined
+  let lastAssistant: ConversationRecord | undefined
+  let finalResult = false
+  groups.forEach((group, index) => {
+    const first = group.records[0]!
+    if (isUserMessageGroup(group)) {
+      if (!candidates.length || lastAssistant?.stopReason !== 'toolUse' || finalResult) {
+        candidates.push(index)
+        lastAssistant = undefined
+        finalResult = false
+      }
+    } else if (first.visibility === 'conversation' && (first.kind === 'message' || first.kind === 'custom_message')
+      && first.source !== 'assistant' && first.source !== 'tool'
+      && lastMessage?.source === 'assistant' && lastMessage.stopReason !== 'toolUse') {
+      candidates.push(index)
+    }
+    for (const record of group.records) {
+      if (record.visibility !== 'conversation' || (record.kind !== 'message' && record.kind !== 'custom_message')) continue
+      lastMessage = record
+      if (record.kind === 'message' && record.source === 'assistant') { lastAssistant = record; finalResult = false }
+    }
+    if (endsWithFinalResult(group.records)) finalResult = true
+  })
+  const openers: number[] = []
+  let pending: number | undefined
+  candidates.forEach((opener, position) => {
+    const next = candidates[position + 1] ?? groups.length
+    const answered = groups.slice(opener + 1, next).some(group => group.records.some(record => record.kind === 'message' && record.source === 'assistant' && record.visibility === 'conversation'))
+    if (isUserMessageGroup(groups[opener]!) || answered) openers.push(opener)
+    else if (position === candidates.length - 1) pending = opener
+  })
+  return { openers, pending }
 }
 
 /** The turn's last record is a child Work's final result reaching its parent, which ends the turn by design. */

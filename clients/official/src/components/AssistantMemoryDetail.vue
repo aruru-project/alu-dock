@@ -81,7 +81,7 @@ function input(event: Event) {
             <button type="button" role="radio" :class="{ 'is-active': !shown.resident }" :aria-checked="!shown.resident" :disabled="pending" @click="setResident(false)">{{ memoryResidentLabel(false) }}</button>
           </div>
         </div>
-        <p class="memory-hint">「{{ memoryResidentLabel(true) }}」的会写进每个新开的助手会话；「{{ memoryResidentLabel(false) }}」的，她搜记忆时才会找到。在这里选过一次（点现在的选项也算），后台整理就不会再改这一项。已经开着的会话要重新打开才会读到改动。</p>
+        <p class="memory-hint">「{{ memoryResidentLabel(true) }}」的会随人设一起读入；「{{ memoryResidentLabel(false) }}」的，她搜记忆时才会找到。在这里选过一次（点现在的选项也算），后台整理就不会再改这一项。到她的对话里点“刷新助手（Reload）”，就能让她重新读入改动。</p>
       </template>
 
       <div class="memory-actions">

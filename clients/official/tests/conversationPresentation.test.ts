@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { test } from 'node:test'
 import { projectRecordGroups, createLiveConversationProjector, shellRunQuote, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
-import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnDurationMs, turnHidingAnchor, turnToolCallsLabel } from '../src/lib/conversationPresentation.ts'
+import { assistantMarkdownSource, conversationRows, conversationSections, formatTurnDuration, partVisibleWhenCollapsed, reconcileTurnOverrides, rowVisibleWhenCollapsed, turnDurationMs, turnHidingAnchor, turnToolCallsLabel, type ConversationRow, type ConversationSection } from '../src/lib/conversationPresentation.ts'
 import type { HistoryRecord, ConversationBootstrap, ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
 const parts: ConversationProcessItem[] = [
@@ -79,10 +80,96 @@ assert.equal(afterImage.imageKey, beforeImage.imageKey)
 assert.equal(afterImage.id, beforeImage.id)
 assert.equal(afterImage.source?.type, 'native', 'resource source can improve without retiring the displayed image')
 
-// History has no run boundaries: a user message opens a turn that ends at the last
-// message record before the next user message.
+// An ordinary Pi exchange still shows one turn per question and final answer.
 const record = (recordId: string, source: string, content: HistoryRecord['content'], extra: Partial<HistoryRecord> = {}): HistoryRecord =>
   ({ recordId, entryId: recordId, kind: 'message', source, visibility: 'conversation', content, ...extra }) as HistoryRecord
+const rowText = (row: ConversationRow, finalRowId?: string, collapsed = false): string => {
+  if (row.kind === 'user' || row.kind === 'notice') return row.text
+  if (row.kind === 'shell') return row.command
+  if (row.kind === 'record' || row.kind === 'assistant-group') return row.parts
+    .filter(part => !collapsed || (row.kind === 'record' && row.keep) || partVisibleWhenCollapsed(part, row.id === finalRowId))
+    .flatMap(part => 'text' in part ? [part.text] : []).join('\n')
+  return ''
+}
+const collapsedText = (section: ConversationSection): string[] => section.kind === 'row' ? [rowText(section.row)] : [
+  ...section.openers.map(row => rowText(row)),
+  ...section.body.filter(row => rowVisibleWhenCollapsed(row, section.finalRowId)).map(row => rowText(row, section.finalRowId, true)),
+]
+const historySectionsOf = (records: HistoryRecord[]) => conversationSections(conversationRows(projectRecordGroups(records)))
+const timed = (second: number) => new Date(Date.UTC(2026, 10, 13, 0, 0, second)).toISOString()
+const said = (id: string, source: string, text: string, second: number, extra: Partial<HistoryRecord> = {}) =>
+  record(id, source, [{ type: 'text', text }], { timestamp: timed(second), ...extra })
+const wake = (id: string, text: string, second: number, customType = 'dock-work-message') =>
+  said(id, 'extension', text, second, { kind: 'custom_message', customType })
+
+// Card #670: in the real Desktop client, the assistant's README result vanished under the
+// drink-water reply seven minutes later. Hidden status notes sit between those separate replies.
+const assistantReplies = [
+  said('owner', 'user', '派个 Work 数一下 README.md 有几行', 0),
+  record('spawn', 'assistant', [{ type: 'tool_call', toolCallId: 'spawn', toolName: 'dock_spawn', args: {} }], { timestamp: timed(1), stopReason: 'toolUse' }),
+  record('spawned', 'tool', [{ type: 'tool_result', toolCallId: 'spawn', toolName: 'dock_spawn', text: '派出去了', isError: false }], { timestamp: timed(2), toolCallId: 'spawn' }),
+  said('sent', 'assistant', '我派它去数了', 3, { stopReason: 'stop' }),
+  { ...wake('hidden-1', '内部状态', 4, 'assistant-status'), visibility: 'hidden' },
+  wake('child', '[来自子 Work「数行数」]\nREADME.md 有 4 行', 20),
+  said('count', 'assistant', 'README.md 有 4 行', 22, { stopReason: 'stop' }),
+  { ...wake('hidden-2', '内部状态', 23, 'assistant-status'), visibility: 'hidden' },
+  wake('reminder', '提醒：喝口水', 405, 'assistant-reminder'),
+  said('drink', 'assistant', '主人，喝口水', 407, { stopReason: 'stop' }),
+]
+
+test('card #670：每次回复各自留着最后一句，叫醒它的子 Work 消息、提醒和 watch 通知留在下一轮开头', () => {
+  const sections = historySectionsOf([
+    ...assistantReplies,
+    wake('watch', '盯着的 Work 完成了', 500, 'dock-watch-notification'),
+    said('watched', 'assistant', '它完成了，我来验收', 502, { stopReason: 'stop' }),
+  ])
+  assert.deepEqual(sections.map(collapsedText), [
+    ['派个 Work 数一下 README.md 有几行', '我派它去数了'],
+    ['README.md 有 4 行', 'README.md 有 4 行'],
+    ['提醒：喝口水', '主人，喝口水'],
+    ['盯着的 Work 完成了', '它完成了，我来验收'],
+  ])
+})
+
+test('card #670：每轮单独显示用时和工具次数，等待子 Work 或提醒的时间留在轮外', () => {
+  assert.deepEqual(historySectionsOf(assistantReplies).map(section => section.kind === 'turn'
+    ? [section.status, turnDurationMs(section, 0), turnToolCallsLabel(section)] : '独立记录'), [
+    ['completed', 3000, '1 次工具调用'], ['completed', 2000, '没有工具调用'], ['completed', 2000, '没有工具调用'],
+  ])
+})
+
+test('card #670：回复中的 steer、子 Work 消息和出错后的自动重试都留在正在进行的同一轮', () => {
+  const sections = historySectionsOf([
+    said('question', 'user', '检查一下', 0),
+    record('checking', 'assistant', [{ type: 'tool_call', toolCallId: 'read', toolName: 'read', args: {} }], { timestamp: timed(1), stopReason: 'toolUse' }),
+    wake('progress', '[来自子 Work「复审」]\n还在检查', 2),
+    said('steer', 'user', '也看看测试', 3),
+    record('checked', 'tool', [{ type: 'tool_result', toolCallId: 'read', toolName: 'read', text: '已读取', isError: false }], { timestamp: timed(4), toolCallId: 'read' }),
+    said('retry', 'assistant', '', 5, { stopReason: 'error', error: 'overloaded' }),
+    said('answer', 'assistant', '检查好了', 8, { stopReason: 'stop' }),
+  ])
+  assert.deepEqual(sections.map(section => [collapsedText(section), section.kind === 'turn' && section.status, section.kind === 'turn' && turnDurationMs(section, 0)]), [
+    [['检查一下', '还在检查', '也看看测试', 'overloaded', '检查好了'], 'completed', 8000],
+  ])
+})
+
+test('card #670：两轮之间的摘要、shell 和仅展示的扩展消息各自显示', () => {
+  const sections = historySectionsOf([
+    ...assistantReplies.slice(0, 4),
+    said('summary', 'runtime', '之前的摘要', 10, { kind: 'compaction_summary' }),
+    said('shell', 'runtime', '! pwd\n/work', 11, { kind: 'bash_execution', command: 'pwd' }),
+    wake('display', '只给你看看', 12, 'extension-note'),
+    said('next-user', 'user', '谢谢', 30),
+    said('next-answer', 'assistant', '不客气', 31, { stopReason: 'stop' }),
+    wake('tail', '下一条仅展示的通知', 32, 'extension-note'),
+  ])
+  assert.deepEqual(sections.map(section => [section.kind, collapsedText(section)]), [
+    ['turn', ['派个 Work 数一下 README.md 有几行', '我派它去数了']],
+    ['row', ['之前的摘要']], ['row', ['pwd']], ['row', ['只给你看看']],
+    ['turn', ['谢谢', '不客气']], ['row', ['下一条仅展示的通知']],
+  ])
+})
+
 const historyItems = projectRecordGroups([
   record('u1', 'user', [{ type: 'text', text: '查一下' }], { timestamp: '2026-01-01T00:00:00Z' }),
   record('a1', 'assistant', [{ type: 'text', text: '好' }, { type: 'tool_call', toolCallId: 'c1', toolName: 'read', args: { path: 'a' } }], { timestamp: '2026-01-01T00:00:05Z', stopReason: 'toolUse' }),

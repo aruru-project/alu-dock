@@ -5,7 +5,8 @@ import {
 } from "../core/catalog.js";
 import { projectInstanceDisplayName } from "../core/instance-display-name.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
-import { PI_SDK_VERSION } from "../version.js";
+import { ASSISTANT_EXECUTOR_KIND } from "../core/assistant.js";
+import { DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
 
 export interface CatalogReconcileResult {
   projection: CatalogProjection;
@@ -118,8 +119,8 @@ export function catalogSnapshotFromRecord(
     ...(record.interruption === undefined ? {} : { interruption: structuredClone(record.interruption) }),
     pending: { steering: 0, followUp: 0, total: record.pendingCount },
     executor: {
-      kind: "pi-sdk",
-      version: PI_SDK_VERSION,
+      // The catalog does not record which Agent ran a Work: one opened as the assistant ran hers, every other Pi.
+      ...(record.assistant ? { kind: ASSISTANT_EXECUTOR_KIND, version: DOCK_VERSION } : { kind: "pi-sdk", version: PI_SDK_VERSION }),
       piSessionId: record.piSessionId,
       ...(record.sessionFile === undefined ? {} : { sessionFile: record.sessionFile }),
       ...(record.model === undefined ? {} : { model: { ...record.model } }),

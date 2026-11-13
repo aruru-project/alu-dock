@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { FolderOpen, RefreshCw, RotateCcw, Sparkles } from '@lucide/vue'
+import { FolderOpen, RefreshCw, RotateCcw } from '@lucide/vue'
 import {
   adoptSession,
   createWork,
@@ -30,7 +30,6 @@ import type { DirectoryPage } from '../lib/workspaceBrowser'
 import type { MachineDto, ModelRef, SystemCandidate, SystemCatalogCursor, Work, WorkspaceCursor } from '../lib/types'
 import { userErrorPresentation, type UserErrorPresentation } from '../lib/userError'
 import { useAppStore } from '../stores/app'
-import { useAssistantStore } from '../stores/assistant'
 import { useModelCatalogStore } from '../stores/model-catalog'
 import AluSelect from './AluSelect.vue'
 import DirectoryBrowser from './DirectoryBrowser.vue'
@@ -64,7 +63,6 @@ const emit = defineEmits<{
 }>()
 const app = useAppStore()
 const catalog = useModelCatalogStore()
-const assistant = useAssistantStore()
 
 const view = ref<View>('launcher')
 const machineHostId = ref('')
@@ -124,9 +122,6 @@ const workspaceRootOptions = computed(() => {
   ]
 })
 const recentWorkspaces = computed(() => machineHostId.value ? app.recentWorkspaces(machineHostId.value) : [])
-// Her workspace is on Main; the shortcut opens it there whichever machine is selected.
-const mainMachine = computed(() => props.machines.find((candidate) => candidate.kind === 'main' && candidate.available))
-const assistantWorkspace = computed(() => assistant.available && mainMachine.value ? assistant.info?.workspacePath ?? '' : '')
 const PI_DEFAULT_MODEL = ''
 // The Machine's model list is cached for the app's lifetime; the refresh button asks the Machine again.
 const modelCatalog = computed(() => machine.value?.available
@@ -351,15 +346,6 @@ async function confirmSystem() {
     }
   }
   if (epoch === systemEpoch) await createAt(path, hostId, undefined, selection?.workerConfig, asAssistant)
-}
-
-/** Her workspace on Main, through the same steps as choosing that directory. */
-async function openAssistantWorkspace() {
-  const main = mainMachine.value
-  const path = assistantWorkspace.value
-  if (!main || !path || actionBusy.value) return
-  machineHostId.value = main.hostId
-  await chooseDirectory(path)
 }
 
 function clearError() {
@@ -591,7 +577,7 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
       <section v-if="view === 'launcher'" class="new-work-launcher">
         <label class="new-work-choose-first">
           <input v-model="chooseFirst" type="checkbox" :disabled="actionBusy" />
-          <span><strong>{{ assistant.available ? '创建前先选 system 和身份' : '创建前先选 system' }}</strong><small>{{ assistant.available ? '不勾时，保存过默认 system 或记住以助手身份打开的目录会直接创建。' : '不勾时，保存过默认 system 的目录会直接创建。' }}</small></span>
+          <span><strong>创建前先选 system</strong><small>不勾时，有可用默认设置的目录会直接创建。</small></span>
         </label>
         <div v-if="recentWorkspaces.length" class="new-work-section-label">最近创建</div>
         <div v-if="recentWorkspaces.length" class="ui-dialog-options new-work-recent-options">
@@ -602,10 +588,6 @@ function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecisio
         </div>
         <div class="new-work-section-label">开始</div>
         <div class="ui-dialog-options new-work-action-options">
-          <button v-if="assistantWorkspace" type="button" class="ui-dialog-option" :disabled="actionBusy" @click="openAssistantWorkspace">
-            <span class="ui-dialog-option-marker"><Sparkles :size="16" /></span>
-            <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">助手的工作区…</span><span class="ui-dialog-option-detail"><span>在 Main 上打开 {{ assistantWorkspace }}</span></span></span>
-          </button>
           <button type="button" class="ui-dialog-option" :disabled="actionBusy || !machine.available" @click="startBrowsing()">
             <span class="ui-dialog-option-marker"><FolderOpen :size="16" /></span>
             <span class="ui-dialog-option-content"><span class="ui-dialog-option-label">选择其他目录…</span><span class="ui-dialog-option-detail"><span>浏览这台机器上的目录</span></span></span>

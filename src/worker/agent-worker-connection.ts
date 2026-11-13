@@ -9,8 +9,8 @@ import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { parseAssistantRequest, type AssistantHostPort } from "../core/assistant.js";
 import { answerModelQuestion, type ModelHostPort } from "../model-service/service-process.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
-import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
-import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
+import { WorkerProcess, type WorkerLaunch, type WorkerProcessTimeouts } from "./worker-process.js";
+import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import {
   ORDINARY_REVERSE_WORKER_CAPABILITIES, OrderedWorkerSender, WorkerFrameReceiver, decodeWorkerError, encodeWorkerError, validateAgentWorkerResult,
   type DockCapability, type ReverseWorkerCapability, type UiCapability, type WorkerEnvelope, type WorkerIdentity,
@@ -28,9 +28,10 @@ interface PendingCall {
 
 export interface CreateAgentWorkerConnectionOptions {
   identity: Omit<WorkerIdentity, "workerIncarnation">;
-  init: PiWorkerInitOptions;
+  cwd: string;
+  /** The Worker kind's process, started in the workspace's environment. */
+  launch: (workspaceEnvironment: NodeJS.ProcessEnv) => WorkerLaunch;
   extensionUiBroker: ExtensionUiBroker;
-  workerEntry?: string;
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
   /** Test-only deterministic environment seam; production captures the workspace login shell. */
   workerEnvironment?: NodeJS.ProcessEnv;
@@ -50,13 +51,13 @@ export class AgentWorkerUnavailableError extends AgentUnavailableBeforeEffectErr
   constructor(message: string) { super(message); this.name = "AgentWorkerUnavailableError"; }
 }
 
-/** Host-side AgentWorkerConnection proxy; no Pi SDK object crosses this boundary. */
+/** Host-side AgentWorkerConnection proxy; no Agent runtime object crosses this boundary. */
 export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   private readonly listeners = new Set<(event: AgentEvent) => void>();
   private readonly pending = new Map<string, PendingCall>();
   private readonly uiAbort = new Map<string, AbortController>();
   private readonly modelCalls = new Map<string, AbortController>();
-  private readonly process: PiWorkerProcess;
+  private readonly process: WorkerProcess;
   private readonly sender: OrderedWorkerSender;
   private readonly receiver: WorkerFrameReceiver;
   private readonly identity: WorkerIdentity;
@@ -81,11 +82,9 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     if (!options.initialDockToolsEnabled) this.reverseCapabilities.delete("dock.tools");
     if (options.modelHostPort) this.reverseCapabilities.add("dock.models");
     if (options.assistantHostPort) this.reverseCapabilities.add("dock.assistant");
-    this.process = new PiWorkerProcess({
+    this.process = new WorkerProcess({
       identity,
-      init: options.init,
-      environment: workerEnvironment,
-      entry: options.workerEntry,
+      launch: options.launch(workerEnvironment),
       timeouts: options.workerTimeouts,
       onSpawn: options.onWorkerSpawn,
     });
@@ -104,7 +103,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     this.process.child.on("error", (error) => this.failTransport(error));
     this.process.child.on("disconnect", () => {
       if (this.expectedExit || this.unavailable) return;
-      const watchdog = setTimeout(() => this.failTransport(new AgentWorkerUnavailableError("Pi worker IPC disconnected")), this.process.timeouts.disconnectMs);
+      const watchdog = setTimeout(() => this.failTransport(new AgentWorkerUnavailableError("Worker IPC disconnected")), this.process.timeouts.disconnectMs);
       this.process.child.once("exit", () => clearTimeout(watchdog));
     });
     this.process.child.on("exit", (code, signal) => this.handleExit(code, signal));
@@ -118,7 +117,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   static async create(options: CreateAgentWorkerConnectionOptions): Promise<{ session: AgentWorkerConnection; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }> {
     const identity = { ...options.identity, workerIncarnation: randomUUID() };
     const workerEnvironment = options.workerEnvironment === undefined
-      ? await captureWorkspaceShellEnvironment(options.init.cwd)
+      ? await captureWorkspaceShellEnvironment(options.cwd)
       : { ...options.workerEnvironment };
     const session = new AgentWorkerConnection(options, identity, workerEnvironment);
     const startup = session.process.timeouts.startupMs;
@@ -126,7 +125,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     try {
       const ready = await Promise.race([
         session.readyPromise,
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Pi worker startup deadline exceeded")), startup); }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Worker startup deadline exceeded")), startup); }),
       ]);
       return { session, ...ready };
     } catch (error) {
@@ -167,7 +166,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     this.abortModelCalls();
     this.sender.close();
     try { await this.process.terminate(); }
-    finally { this.rejectPending(new AgentWorkerUnavailableError("Pi worker was disposed")); }
+    finally { this.rejectPending(new AgentWorkerUnavailableError("Worker was disposed")); }
     return cleanup;
   }
 
@@ -181,12 +180,12 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     deadline: "request" | "mutation" | "control" | "shutdown" | "none",
     preflight?: (result: AgentCommandPreflightResult) => void,
   ): Promise<unknown> {
-    if (this.unavailable) return Promise.reject(new AgentWorkerUnavailableError("Pi worker is unavailable"));
+    if (this.unavailable) return Promise.reject(new AgentWorkerUnavailableError("Worker is unavailable"));
     const callId = `host-${++this.nextCall}`;
     const timeoutMs = deadline === "none" ? undefined : deadline === "request" ? this.process.timeouts.requestMs
       : deadline === "mutation" ? this.process.timeouts.mutationMs : deadline === "control" ? this.process.timeouts.controlMs : this.process.timeouts.gracefulShutdownMs;
     return new Promise<unknown>((resolve, reject) => {
-      const timer = timeoutMs === undefined ? undefined : setTimeout(() => this.failTransport(new AgentWorkerUnavailableError(`Pi worker ${label} deadline exceeded`)), timeoutMs);
+      const timer = timeoutMs === undefined ? undefined : setTimeout(() => this.failTransport(new AgentWorkerUnavailableError(`Worker ${label} deadline exceeded`)), timeoutMs);
       this.pending.set(callId, { label, resolve, reject, timer, preflight, accepted: false, generation: this.expectedGeneration });
       void this.sender.sendEnvelope({ ...envelope, callId } as WorkerEnvelope).catch((error) => {
         if (this.pending.has(callId)) this.failTransport(error);
@@ -355,7 +354,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     void this.finishTransportLoss(error);
   }
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
-    const error = new AgentWorkerUnavailableError(`Pi worker exited (${signal ?? code ?? "unknown"})`);
+    const error = new AgentWorkerUnavailableError(`Worker exited (${signal ?? code ?? "unknown"})`);
     this.failTransport(error);
   }
   private async finishTransportLoss(error: unknown): Promise<void> {
@@ -374,7 +373,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       if (!this.expectedExit) await this.recordIncident(new AggregateError([error, terminationError], "Worker ownership could not be released"));
       // Keep the instance non-reopenable when reaping could not be proven.
       this.rejectPending(new AgentWorkerUnavailableError(
-        `Pi worker termination could not be confirmed: ${terminationError instanceof Error ? terminationError.message : String(terminationError)}`,
+        `Worker termination could not be confirmed: ${terminationError instanceof Error ? terminationError.message : String(terminationError)}`,
       ));
     }
   }
@@ -408,8 +407,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     for (const pending of this.pending.values()) {
       if (pending.timer) clearTimeout(pending.timer);
       pending.reject(pending.accepted
-        ? new AgentMutationEffectUnknownError(`Pi worker lost after accepting ${pending.label}`, error)
-        : new AgentUnavailableBeforeEffectError(`Pi worker lost before accepting ${pending.label}`));
+        ? new AgentMutationEffectUnknownError(`Worker lost after accepting ${pending.label}`, error)
+        : new AgentUnavailableBeforeEffectError(`Worker lost before accepting ${pending.label}`));
     }
     this.pending.clear(); for (const controller of this.uiAbort.values()) controller.abort(); this.uiAbort.clear();
   }
@@ -430,7 +429,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
 function isReplacementRequest(label: string): boolean { return label === "session.new" || label === "session.switch" || label === "session.fork" || label === "session.clone" || label === "session.reload"; }
 function deadlineForRequest(type: AgentRequest["type"]): "request" | "mutation" | "control" | "none" {
   if (type === "queue.dequeue") return "control";
-  // Pi abort waits for the Agent to become idle. Queued input may legally start
+  // Abort waits for the Agent to become idle. Queued input may legally start
   // another turn first, so abort completion is not a Worker liveness signal.
   if (["command.submit", "command.abort", "command.abort_restore_queue", "session.navigate", "session.compact"].includes(type)) return "none";
   if (controlRequestDescriptor(type).effect === "query") return "request";

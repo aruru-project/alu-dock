@@ -55,8 +55,8 @@ import type { SettingKey } from "../core/config-projection.js";
 import { parseDockToolsRequest, parseDockToolsResult, parseObservationNotification, parseWorkMessage } from "../core/dock-tools-codec.js";
 import { MAX_DOCK_TRANSFER_BYTES } from "../core/transport-bounds.js";
 
-export const PI_WORKER_PROTOCOL = "alu-dock-pi-worker";
-export const PI_WORKER_PROTOCOL_VERSION = 1;
+export const WORKER_PROTOCOL = "alu-dock-pi-worker";
+export const WORKER_PROTOCOL_VERSION = 1;
 export const MAX_WORKER_CHUNK_CHARS = 96_000;
 export const MAX_WORKER_TRANSFER_BYTES = MAX_DOCK_TRANSFER_BYTES;
 export const MAX_WORKER_TRANSFER_CHUNKS = 4_096;
@@ -88,8 +88,8 @@ export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapabil
 export type WorkerCapability = UiCapability | DockCapability;
 
 export interface WorkerFrame {
-  protocol: typeof PI_WORKER_PROTOCOL;
-  version: typeof PI_WORKER_PROTOCOL_VERSION;
+  protocol: typeof WORKER_PROTOCOL;
+  version: typeof WORKER_PROTOCOL_VERSION;
   identity: WorkerIdentity;
   sequence: number;
   transferId: string;
@@ -157,8 +157,8 @@ export class OrderedWorkerSender {
       if (this.closed) throw new Error("Worker IPC sender is closed");
       for (let index = 0; index < chunks.length; index += 1) {
         const frame: WorkerFrame = {
-          protocol: PI_WORKER_PROTOCOL,
-          version: PI_WORKER_PROTOCOL_VERSION,
+          protocol: WORKER_PROTOCOL,
+          version: WORKER_PROTOCOL_VERSION,
           identity,
           sequence: ++this.sequence,
           transferId,
@@ -227,7 +227,7 @@ export class WorkerFrameReceiver {
 export function parseWorkerFrame(raw: unknown): WorkerFrame {
   const value = record(raw, "Worker IPC frame");
   exactKeys(value, ["protocol", "version", "identity", "sequence", "transferId", "index", "count", "payload"], "Worker IPC frame");
-  if (value.protocol !== PI_WORKER_PROTOCOL || value.version !== PI_WORKER_PROTOCOL_VERSION) throw new Error("Worker IPC protocol version mismatch");
+  if (value.protocol !== WORKER_PROTOCOL || value.version !== WORKER_PROTOCOL_VERSION) throw new Error("Worker IPC protocol version mismatch");
   const identity = parseWorkerIdentity(value.identity);
   const sequence = positiveInteger(value.sequence, "Worker frame sequence");
   const transferId = boundedString(value.transferId, 128, "Worker transfer ID");
@@ -235,7 +235,7 @@ export function parseWorkerFrame(raw: unknown): WorkerFrame {
   const count = positiveInteger(value.count, "Worker chunk count");
   if (count > MAX_WORKER_TRANSFER_CHUNKS || index >= count) throw new Error("Worker chunk index/count is outside bounds");
   const payload = typeof value.payload === "string" && value.payload.length <= MAX_WORKER_CHUNK_CHARS ? value.payload : fail("Worker chunk payload is invalid");
-  return { protocol: PI_WORKER_PROTOCOL, version: PI_WORKER_PROTOCOL_VERSION, identity, sequence, transferId, index, count, payload };
+  return { protocol: WORKER_PROTOCOL, version: WORKER_PROTOCOL_VERSION, identity, sequence, transferId, index, count, payload };
 }
 
 export function parseWorkerIdentity(raw: unknown): WorkerIdentity {

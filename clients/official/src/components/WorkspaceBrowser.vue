@@ -416,7 +416,7 @@ onBeforeUnmount(() => {
             <p>{{ work?.displayName }} · 根目录 <code>.</code></p>
           </div>
           <div class="workspace-header-actions">
-            <button v-if="isMobile" type="button" class="workspace-toggle workspace-command-toggle" :aria-pressed="mobileCommand" aria-label="命令" @click="mobileCommand = !mobileCommand">
+            <button v-if="isMobile && !work?.assistant" type="button" class="workspace-toggle workspace-command-toggle" :aria-pressed="mobileCommand" aria-label="命令" @click="mobileCommand = !mobileCommand">
               <Terminal :size="16" />
             </button>
             <button type="button" class="workspace-toggle" :aria-pressed="showHidden" @click="showHidden = !showHidden">
@@ -490,7 +490,7 @@ onBeforeUnmount(() => {
             <div v-if="saveStatus" class="workspace-save-status" role="status">{{ saveStatus }}</div>
           </main>
 
-          <WorkspaceCommandArea v-if="!isMobile || mobileCommand" :work="work" :ready="!!currentContext()" :mobile="isMobile" @close="$emit('close')" />
+          <WorkspaceCommandArea v-if="!work?.assistant && (!isMobile || mobileCommand)" :work="work" :ready="!!currentContext()" :mobile="isMobile" @close="$emit('close')" />
         </div>
       </section>
     </div>

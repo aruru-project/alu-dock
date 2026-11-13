@@ -1,283 +1,84 @@
-import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { controlRequestDescriptor } from "../control/protocol.js";
 
 import { createPiAgentAdapter, type PiAgentAdapter } from "./pi-agent-adapter.js";
 import { openValidatedPiSession } from "./pi-session-target.js";
 import { WorkerExtensionUiEndpoint, WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
-import {
-  ORDINARY_REVERSE_WORKER_CAPABILITIES,
-  OrderedWorkerSender,
-  forwardWorkerEvent,
-  WorkerFrameReceiver,
-  decodeWorkerError,
-  encodeWorkerError,
-  parseWorkerIdentity,
-  validateDockCapabilityResult,
-  validateUiCapabilityResult,
-  type DockCapability,
-  type ReverseWorkerCapability,
-  type UiCapability,
-  type WorkerEnvelope,
-  type WorkerIdentity,
-} from "./worker-protocol.js";
-import type { PiWorkerInitOptions } from "./worker-process.js";
-import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
+import type { UiCapability } from "../worker/worker-protocol.js";
+import { runAgentWorker, type WorkerAgent, type WorkerHost } from "../worker/worker-shell.js";
+import type { PiWorkerInitOptions } from "./pi-worker-launch.js";
+import type { AgentWorkerState } from "../core/agent-worker.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
 import { parseAllowedTools } from "../core/worker-tool-policy.js";
-import type { DockToolsResult } from "../core/dock-tools.js";
-import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
 import { DockToolsBridge } from "./dock-tools-extension.js";
-import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { mainModelOwner } from "../model-service/owner.js";
-import { parseAssistantResult } from "../core/assistant.js";
-import type { AssistantCallPort } from "./assistant-extension.js";
-
-interface PendingHostCall {
-  capability: UiCapability | DockCapability;
-  resolve(value: unknown): void;
-  reject(error: unknown): void;
-  abort?: () => void;
-}
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
   enterPiWorkerRuntime();
-  void runWorker().catch((error) => {
+  void runAgentWorker({ parseInit, create: createPiWorkerAgent, replacedCallError: () => new WorkerUiLifecycleCancelledError() }).catch((error) => {
     try { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); } catch {}
     process.exit(1);
   });
 }
 
-async function runWorker(): Promise<void> {
-  const identity = parseWorkerIdentity(parseEnvJson("ALU_DOCK_WORKER_IDENTITY"));
-  const init = parseInit(parseEnvJson("ALU_DOCK_WORKER_INIT"));
-  let generation = identity.runtimeGeneration;
-  let hostGenerationSeen = generation;
-  const sender = new OrderedWorkerSender(identity, (message, callback) => process.send!(message, undefined, undefined, callback));
-  const receiver = new WorkerFrameReceiver((received) => sameWorker(received, identity)
-    && (received.runtimeGeneration === generation
-      || (received.runtimeGeneration === generation - 1 && hostGenerationSeen < generation)));
-  const hostCalls = new Map<string, PendingHostCall>();
-  let nextHostCall = 0;
-  let runtime: PiAgentAdapter | undefined;
-  let shutdownPromise: Promise<void> | undefined;
-  let hostCapabilities = new Set<ReverseWorkerCapability>(["dock.identity"]);
-  let dockToolsBridge: DockToolsBridge | undefined;
-  let attachmentPort: DockAttachmentCallPort | undefined;
-
-  const callHost = (capability: UiCapability | DockCapability, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
-    const callId = `child-${++nextHostCall}`;
-    if (!hostCapabilities.has(capability as ReverseWorkerCapability)) {
-      return Promise.reject(new Error(`Host capability is not authorized for this Worker: ${capability}`));
-    }
-    if (signal?.aborted) return Promise.resolve(undefined);
-    return new Promise<unknown>((resolveCall, rejectCall) => {
-      const abort = !signal ? undefined
-        : capability.startsWith("ui.") ? (): void => { void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "ui.cancel", args: { callId } }); }
-        // A cancelled question to Main releases its caller at once; the Host cancels it there.
-        : capability === "dock.models" ? (): void => {
-          hostCalls.delete(callId);
-          rejectCall(new Error("Model request cancelled"));
-          void sender.sendEnvelope({ kind: "call", callId: `cancel-${callId}`, capability: "dock.models", args: { op: "cancel", callId } }).catch(() => {});
-        }
-        : undefined;
-      if (signal && abort) signal.addEventListener("abort", abort, { once: true });
-      hostCalls.set(callId, {
-        capability,
-        resolve: (value) => { if (signal && abort) signal.removeEventListener("abort", abort); resolveCall(value); },
-        reject: (error) => { if (signal && abort) signal.removeEventListener("abort", abort); rejectCall(error); },
-      });
-      void sender.sendEnvelope({ kind: "call", callId, capability, args }).catch((error) => {
-        hostCalls.delete(callId);
-        rejectCall(error);
-      });
-    });
-  };
-
-  const ui = new WorkerExtensionUiEndpoint(callHost);
-  process.on("message", (raw) => {
-    try {
-      const envelope = receiver.accept(raw);
-      if (envelope) {
-        const frameGeneration = receiver.lastIdentity?.runtimeGeneration ?? generation;
-        if (frameGeneration < generation) {
-          if (envelope.kind === "call") void sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: false, error: encodeWorkerError(new Error("Stale worker generation call")) });
-          return;
-        }
-        hostGenerationSeen = generation;
-        void handleHostEnvelope(envelope).catch(() => shutdown(1));
-      }
-    } catch {
-      void shutdown(1);
-    }
-  });
-  process.on("disconnect", () => { void shutdown(0); });
-
-  // Prove Host authorization and the generation-bound reverse capability
-  // channel before constructing Pi resources or loading extensions.
-  const dockContext = await callHost("dock.identity", {});
-  hostCapabilities = verifyDockContext(dockContext, identity, generation);
-  attachmentPort = hostCapabilities.has("dock.attachments") ? {
-    access: async (request: AttachmentAccessRequest) => {
-      const capability: DockCapability = "dock.attachments";
-      const result = await callHost(capability, { request });
-      validateDockCapabilityResult(capability, result);
-      return result as AttachmentAccessResult;
-    },
-  } : undefined;
+/** Pi inside the Worker shell: its adapter, the extension UI endpoint and the Dock tools bridge. */
+async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost): Promise<WorkerAgent> {
+  const ui = new WorkerExtensionUiEndpoint(host.call);
   // With Main's model service the Work takes its model configuration and credentials from Main and
   // reads none of this machine's; it still sends and handles its own requests. There is no local fallback.
   // Each session gets its own runtime, so providers one session's extensions registered do not outlive it.
-  const modelOwner = hostCapabilities.has("dock.models") ? mainModelOwner((args, signal) => callHost("dock.models", args, signal)) : undefined;
+  const modelOwner = host.models ? mainModelOwner(host.models) : undefined;
   const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
-  // Only a Work opened as the personal assistant is given her persona, notes and memory.
-  const assistantPort: AssistantCallPort | undefined = hostCapabilities.has("dock.assistant") ? {
-    call: async (request) => parseAssistantResult(request, await callHost("dock.assistant", { request })),
-  } : undefined;
-  dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
-    configure: async (action) => {
-      if (action === "status") return { enabled: dockToolsBridge!.enabled };
-      const capability: DockCapability = "dock.tools.configure";
-      const result = await callHost(capability, { enabled: action === "on", operationId: randomUUID() });
-      validateDockCapabilityResult(capability, result);
-      const enabled = (result as { enabled: boolean }).enabled;
-      if (enabled) hostCapabilities.add("dock.tools"); else hostCapabilities.delete("dock.tools");
-      return { enabled };
-    },
-    invoke: async (request) => {
-      const capability: DockCapability = "dock.tools";
-      const result = await callHost(capability, { request });
-      validateDockCapabilityResult(capability, result);
-      return result as DockToolsResult;
-    },
+  const dockToolsBridge: DockToolsBridge = new DockToolsBridge(host.dockToolsEnabled(), {
+    configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),
+    invoke: host.invokeDockTool,
   }, init.child === true);
 
   const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
-  let reopened: Awaited<ReturnType<typeof openValidatedPiSession>> | undefined;
-  try {
-    reopened = sessionPath
-      ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
-      : undefined;
-    if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
-    runtime = await createPiAgentAdapter({
-      cwd: init.cwd,
-      agentDir: init.agentDir,
-      ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
-      ...(init.tools === undefined ? {} : { tools: init.tools }),
-      ...(init.excludeTools === undefined ? {} : { excludeTools: init.excludeTools }),
-      ...(init.workerConfig === undefined ? {} : { workerConfig: init.workerConfig }),
-      ...(init.child === undefined ? {} : { child: init.child }),
-      ...(init.allowedTools === undefined ? {} : { allowedTools: init.allowedTools }),
-      projectTrusted: init.projectTrusted,
-      extensionUiBroker: ui,
-      extensionUiContextPortFactory: () => ui.createGenerationPort(),
-      setProcessCwd: (cwd) => process.chdir(cwd),
-      ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
-      dockToolsBridge,
-      ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
-      ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
-      ...(assistantPort === undefined ? {} : { assistantPort }),
-    });
-  } catch (error) {
-    // The Host learns why this Work could not start (an unavailable chosen model, an
-    // unreadable selected system) instead of only seeing the exit code.
-    await sender.sendEnvelope({ kind: "fatal", error: encodeWorkerError(error) }).catch(() => {});
-    throw error;
-  }
-  if (init.initialName !== undefined && (!reopened || init.child)) runtime!.currentSession().setSessionName(init.initialName);
-  runtime.subscribe((event) => {
-    const envelope: WorkerEnvelope = { kind: "event", event, state: captureState(runtime!) };
-    forwardWorkerEvent(sender, envelope, () => process.exit(1));
-    if (event.type === "dock_session_replaced") {
-      generation += 1;
-      sender.updateRuntimeGeneration(generation);
-      for (const pending of hostCalls.values()) pending.reject(new WorkerUiLifecycleCancelledError());
-      hostCalls.clear();
-    }
+  const reopened = sessionPath
+    ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
+    : undefined;
+  if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
+  const runtime = await createPiAgentAdapter({
+    cwd: init.cwd,
+    agentDir: init.agentDir,
+    ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
+    ...(init.tools === undefined ? {} : { tools: init.tools }),
+    ...(init.excludeTools === undefined ? {} : { excludeTools: init.excludeTools }),
+    ...(init.workerConfig === undefined ? {} : { workerConfig: init.workerConfig }),
+    ...(init.child === undefined ? {} : { child: init.child }),
+    ...(init.allowedTools === undefined ? {} : { allowedTools: init.allowedTools }),
+    projectTrusted: init.projectTrusted,
+    extensionUiBroker: ui,
+    extensionUiContextPortFactory: () => ui.createGenerationPort(),
+    setProcessCwd: (cwd) => process.chdir(cwd),
+    ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
+    dockToolsBridge,
+    ...(host.attachments === undefined ? {} : { dockAttachmentPort: { access: host.attachments } }),
+    ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
   });
-
-  const diagnostics = runtime.diagnostics.map((item) => boundedError(item));
-  await sender.sendEnvelope({
-    kind: "ready",
-    state: captureState(runtime),
-    diagnostics,
+  if (init.initialName !== undefined && (!reopened || init.child)) runtime.currentSession().setSessionName(init.initialName);
+  return {
+    dispatch: (request, context, preflight) => {
+      const dispatch = (): Promise<unknown> => runtime.dispatch(request, context, preflight);
+      return request.type === "command.submit" && runtime.classifyInput(request.params.message) === "extension_command"
+        ? ui.withCommandNotificationOrigin(request.params.operationId, dispatch)
+        : dispatch();
+    },
+    control: async (control) => {
+      if (control.type === "observation_delivery") { dockToolsBridge.deliver(control.notification); return null; }
+      if (control.type === "work_message") { dockToolsBridge.receive(control.message); return null; }
+      return runtime.control(control);
+    },
+    hostCall: (capability, args) => dispatchHostUi(ui, capability, args),
+    subscribe: (listener) => runtime.subscribe(listener),
+    state: () => captureState(runtime),
+    dispose: () => runtime.dispose(),
+    diagnostics: runtime.diagnostics,
     ...(runtime.modelFallbackMessage === undefined ? {} : { modelFallbackMessage: runtime.modelFallbackMessage }),
-    ...(runtime.currentSession().sessionManager.getSessionName() === undefined ? {} : { persistedName: runtime.currentSession().sessionManager.getSessionName() }),
-    pid: process.pid,
-  });
-
-  async function handleHostEnvelope(envelope: WorkerEnvelope): Promise<void> {
-    if (envelope.kind === "response") {
-      const pending = hostCalls.get(envelope.callId);
-      if (!pending) return;
-      hostCalls.delete(envelope.callId);
-      if (envelope.ok) {
-        if (pending.capability.startsWith("ui.")) validateUiCapabilityResult(pending.capability as UiCapability, envelope.result);
-        else validateDockCapabilityResult(pending.capability as DockCapability, envelope.result);
-        pending.resolve(envelope.result);
-      } else pending.reject(decodeWorkerError(envelope.error));
-      return;
-    }
-    if (envelope.kind !== "agent_request" && envelope.kind !== "agent_control" && envelope.kind !== "call") return;
-    try {
-      if (envelope.kind === "agent_request" && envelope.request.params.instanceId !== identity.instanceId) {
-        throw new Error("Worker Agent request instance identity mismatch");
-      }
-      const accepted = envelope.kind === "agent_request" ? isAcceptedRequest(envelope.request.type)
-        : envelope.kind === "agent_control"
-          && (envelope.control.type === "dispose" || envelope.control.type === "observation_delivery" || envelope.control.type === "work_message");
-      if (accepted) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
-      let result: unknown;
-      if (envelope.kind === "agent_request") {
-        const dispatchAgentRequest = (): Promise<unknown> => runtime!.dispatch(
-          envelope.request,
-          envelope.context,
-          (preflight) => { void sender.sendEnvelope({ kind: "preflight", callId: envelope.callId, ...preflight }); },
-        );
-        result = envelope.request.type === "command.submit"
-          && runtime!.classifyInput(envelope.request.params.message) === "extension_command"
-          ? await ui.withCommandNotificationOrigin(envelope.request.params.operationId, dispatchAgentRequest)
-          : await dispatchAgentRequest();
-      } else if (envelope.kind === "agent_control") {
-        if (envelope.control.type === "observation_delivery") {
-          dockToolsBridge!.deliver(envelope.control.notification);
-          result = null;
-        } else if (envelope.control.type === "work_message") {
-          dockToolsBridge!.receive(envelope.control.message);
-          result = null;
-        } else result = await runtime!.control(envelope.control);
-      } else {
-        result = dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
-      }
-      const disposed = envelope.kind === "agent_control" && envelope.control.type === "dispose";
-      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed ? {} : { state: captureState(runtime!) }) }, envelope.kind === "agent_request" && envelope.request.type === "conversation.image" ? "conversation.image" : undefined);
-      if (disposed) setTimeout(() => process.exit(0), 0);
-    } catch (error) {
-      const state = tryCaptureState(runtime!);
-      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: false, error: encodeWorkerError(error), ...(state === undefined ? {} : { state }) }).catch(() => {});
-    }
-  }
-
-  function shutdown(code: number): Promise<void> {
-    if (shutdownPromise) return shutdownPromise;
-    shutdownPromise = (async () => {
-      sender.close();
-      for (const pending of hostCalls.values()) pending.reject(new Error("Host IPC disconnected"));
-      hostCalls.clear();
-      // A Host crash must not leave this detached Worker or extension-owned
-      // descendants alive behind an unresolved dispose Promise.
-      const watchdog = setTimeout(hardKillOwnProcessGroup, 3_000);
-      try { await runtime?.dispose().catch(() => {}); }
-      finally {
-        clearTimeout(watchdog);
-        process.exit(code);
-      }
-    })();
-    return shutdownPromise;
-  }
+    get persistedName() { return runtime.currentSession().sessionManager.getSessionName(); },
+  };
 }
 
 function dispatchHostUi(ui: WorkerExtensionUiEndpoint, capability: UiCapability, args: Record<string, unknown>): unknown {
@@ -304,11 +105,6 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
   };
 }
 
-function tryCaptureState(runtime: PiAgentAdapter): AgentWorkerState | undefined { try { return captureState(runtime); } catch { return undefined; } }
-function isAcceptedRequest(type: AgentRequest["type"]): boolean {
-  return controlRequestDescriptor(type).effect === "command";
-}
-function parseEnvJson(name: string): unknown { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return JSON.parse(value); }
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
@@ -340,43 +136,3 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(text(value.initialName, 256, "Worker initial name", true) === undefined ? {} : { initialName: value.initialName as string }),
   };
 }
-function sameWorker(received: WorkerIdentity, initial: WorkerIdentity): boolean { return received.hostEpoch === initial.hostEpoch && received.instanceId === initial.instanceId && received.workerIncarnation === initial.workerIncarnation; }
-function verifyDockContext(raw: unknown, expected: WorkerIdentity, runtimeGeneration: number): Set<ReverseWorkerCapability> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Dock Worker identity capability returned an invalid result");
-  const value = raw as { identity?: Partial<WorkerIdentity>; capabilities?: unknown };
-  if (Object.keys(value).some((key) => key !== "identity" && key !== "capabilities")) throw new Error("Dock Worker identity result contains unknown fields");
-  const identity = value.identity;
-  if (!identity || typeof identity !== "object" || Array.isArray(identity)
-    || Object.keys(identity).some((key) => !["hostEpoch", "instanceId", "runtimeGeneration", "workerIncarnation"].includes(key))) {
-    throw new Error("Dock Worker identity result is not closed");
-  }
-  if (identity.hostEpoch !== expected.hostEpoch || identity.instanceId !== expected.instanceId
-    || identity.workerIncarnation !== expected.workerIncarnation || identity.runtimeGeneration !== runtimeGeneration) {
-    throw new Error("Dock Worker identity capability did not match bootstrap identity");
-  }
-  if (!Array.isArray(value.capabilities) || !value.capabilities.includes("dock.identity")) {
-    throw new Error("Dock Worker identity capability was not authorized by Host");
-  }
-  // dock.models and dock.assistant are not ordinary: only a Host that offers model access grants the
-  // first, and only to an assistant Work the second.
-  const known = new Set<string>([...ORDINARY_REVERSE_WORKER_CAPABILITIES, "dock.models", "dock.assistant"]);
-  const capabilities = new Set<ReverseWorkerCapability>();
-  for (const capability of value.capabilities) {
-    if (typeof capability !== "string" || !known.has(capability)) throw new Error("Host advertised an unknown Worker capability");
-    if (capabilities.has(capability as ReverseWorkerCapability)) throw new Error("Host advertised a duplicate Worker capability");
-    capabilities.add(capability as ReverseWorkerCapability);
-  }
-  return capabilities;
-}
-function hardKillOwnProcessGroup(): void {
-  if (process.platform === "win32") {
-    try {
-      const killer = spawn("taskkill.exe", ["/PID", String(process.pid), "/T", "/F"], { detached: true, stdio: "ignore", windowsHide: true });
-      killer.unref();
-      return;
-    } catch { process.exit(1); }
-  }
-  try { process.kill(-process.pid, "SIGKILL"); }
-  catch { process.exit(1); }
-}
-function boundedError(error: unknown): string { const text = error instanceof Error ? error.message : String(error); return text.length <= 2_048 ? text : text.slice(0, 2_048); }

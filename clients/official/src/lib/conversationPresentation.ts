@@ -37,7 +37,7 @@ function isGroupedProcessItem(item: ConversationItem): item is GroupedProcessIte
   return item.kind !== 'user' && item.kind !== 'turn' && item.kind !== 'record' && item.kind !== 'shell' && Boolean(item.groupId)
 }
 
-/** One turn as the view lays it out: the user message(s) that opened it, its
+/** One turn as the view lays it out: the user or wake message that opened it, its
  * summary line, and the body the summary line expands. Grouping is a pure
  * function of the flat rows; it owns no state. */
 export interface ConversationTurnSection {
@@ -66,19 +66,20 @@ export function conversationSections(rows: readonly ConversationRow[]): Conversa
       if (previous) {
         // The live segment continues the history turn: the run is still this
         // one, so anything projected between them is part of its process.
-        const trailing: ConversationRow[] = []
-        while (sections[sections.length - 1] !== previous) {
-          const section = sections.pop()!
-          if (section.kind === 'row') trailing.unshift(section.row)
-        }
-        previous.body.push(...trailing)
+        carryTrailingRows(sections, previous, sections.indexOf(previous) + 1)
         applyTurnFacts(previous, row)
         owners.set(row.turnId, previous)
         continue
       }
       const section: ConversationTurnSection = { kind: 'turn', id: row.turnId, status: row.status, openers: [], body: [], toolCalls: 0, failedToolCalls: 0 }
       applyTurnFacts(section, row)
-      sections.push(section)
+      const openerIndex = row.openerId ? sections.findIndex(candidate => candidate.kind === 'row' && candidate.id === row.openerId) : -1
+      const opener = sections[openerIndex]
+      if (opener?.kind === 'row') {
+        section.openers.push(opener.row)
+        sections.splice(openerIndex, 1, section)
+        carryTrailingRows(sections, section, openerIndex + 1)
+      } else sections.push(section)
       owners.set(row.turnId, section)
       continue
     }
@@ -87,7 +88,7 @@ export function conversationSections(rows: readonly ConversationRow[]): Conversa
       sections.push({ kind: 'row', id: row.id, row })
       continue
     }
-    if (row.kind === 'user' && section.body.length === 0) section.openers.push(row)
+    if (section.body.length === 0 && (row.kind === 'user' || (section.openers.length === 0 && (row.kind === 'record' || row.kind === 'notice')))) section.openers.push(row)
     else section.body.push(row)
   }
   for (const section of sections) {
@@ -104,6 +105,14 @@ export function conversationSections(rows: readonly ConversationRow[]): Conversa
     }
   }
   return sections
+}
+
+/** An observed continuation owns the intervening process, but shell commands run beside it. */
+function carryTrailingRows(sections: ConversationSection[], turn: ConversationTurnSection, after: number) {
+  for (const section of sections.splice(after)) {
+    if (section.kind === 'row' && section.row.kind !== 'shell') turn.body.push(section.row)
+    else sections.push(section)
+  }
 }
 
 function lastTurnSection(sections: ConversationSection[]): ConversationTurnSection | undefined {

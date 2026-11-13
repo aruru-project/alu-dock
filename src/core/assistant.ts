@@ -8,6 +8,9 @@
  * fields they do not know, so a newer Main can add to them.
  */
 
+import { isAbsolute, win32 } from "node:path";
+import { cloneBoundedJsonObject, type JsonObject } from "./json-value.js";
+
 /** The two texts the owner and the assistant edit: who she is, and what the owner told her by hand. */
 export const ASSISTANT_DOCUMENTS = ["persona", "notes"] as const;
 export type AssistantDocumentName = typeof ASSISTANT_DOCUMENTS[number];
@@ -18,6 +21,8 @@ export const MAX_ASSISTANT_QUERY_CHARS = 256;
 export const MAX_ASSISTANT_SEARCH_LIMIT = 50;
 /** Entries read on each side of one conversation entry, and how many when the asker does not say. */
 export const MAX_ASSISTANT_CONTEXT_SPAN = 50;
+/** The most forgotten entries of one session named in one answer; the newest come first. */
+export const MAX_ASSISTANT_FORGOTTEN_ENTRIES = 2_000;
 export const ASSISTANT_CONTEXT_DEFAULT_SPAN = 6;
 /** One recorded entry's text; a longer tool output is cut here and stays whole in the Agent's own session file. */
 export const MAX_ASSISTANT_ENTRY_TEXT_CHARS = 32_000;
@@ -56,6 +61,9 @@ export const MAX_ASSISTANT_NAME_CHARS = 1_024;
 export const MAX_ASSISTANT_REVISION_CHARS = 128;
 const MAX_PATH_CHARS = 16_384;
 const MAX_CURSOR_CHARS = 256;
+
+/** What clients see as the kind of Agent in a Work opened as the personal assistant; it runs her own Agent, not Pi (card #667). */
+export const ASSISTANT_EXECUTOR_KIND = "dock-assistant";
 
 /** The assistant's own tools; their calls and results are kept for context but not searched again. */
 export const ASSISTANT_TOOL_NAMES = ["assistant_search", "assistant_read", "assistant_document", "assistant_memory", "assistant_timeline"] as const;
@@ -107,10 +115,58 @@ export interface AssistantDocument { document: AssistantDocumentName; text: stri
 export interface AssistantPreview { text: string; loadedAt: string }
 /** A model of Main's model service. */
 export interface AssistantModelRef { provider: string; id: string }
+export interface AssistantHandoffSettings {
+  /** Null follows the model's window; explicit values are token counts. */
+  startTokens: number | null;
+  keepRecentTokens: number | null;
+  /** The entire writing instruction; conversation and previous record are supplied separately. */
+  prompt: string;
+}
+/** Explicitly trusted code on Main; config is private and never part of a tool declaration. */
+export interface AssistantExtensionSettings {
+  id: string;
+  module: string;
+  enabled: boolean;
+  config: JsonObject;
+}
 export interface AssistantSettings {
   /** The model that turns her conversations into memories; without it nothing is extracted. */
   extractionModel?: AssistantModelRef;
+  /** Absent only on older Hosts that do not offer rolling hand-over settings. */
+  handoff?: AssistantHandoffSettings;
+  /** Absent on older Hosts. An empty array loads no extensions. */
+  extensions?: AssistantExtensionSettings[];
 }
+export interface AssistantSettingsEdit {
+  /** Omitted leaves it unchanged; null stops making memories. */
+  extractionModel?: AssistantModelRef | null;
+  /** Omitted leaves the existing hand-over settings unchanged. */
+  handoff?: AssistantHandoffSettings;
+  /** Omitted preserves the saved list; supplied replaces it. */
+  extensions?: AssistantExtensionSettings[];
+}
+
+/** New installations offer the bundled web tools; an explicitly saved [] disables all extensions. */
+export const DEFAULT_ASSISTANT_EXTENSIONS: readonly AssistantExtensionSettings[] = [
+  { id: "web", module: "builtin:web", enabled: true, config: {} },
+];
+
+/** One factory default, returned by Main; the Worker never guesses it when settings cannot be read. */
+export const DEFAULT_ASSISTANT_HANDOFF: Readonly<AssistantHandoffSettings> = {
+  startTokens: null,
+  keepRecentTokens: null,
+  prompt: [
+    "你在替一位个人助手写交接记录。她和主人的对话太长了：下面这段较早的对话会从她眼前拿掉，只留下你写的这份记录，她靠它接着往下做事。",
+    "原话都另外存着，她以后搜得到，所以不要复述经过。主人是什么样的人、有什么喜好，由她的记忆保管；每天做了什么，由她的时间线保管。这两样都不要写进来。",
+    "上一份记录里还没了结的事要带到新记录里，已经了结的去掉。",
+    "写一份交接记录，用中文，直接写内容，不要开场白。只写下面这些，哪一项没有就不写那一项：",
+    "1. 主人交代过、还没办完的事，以及他提的要求和边界，尽量用他的原话。",
+    "2. 她派出去、活还没了结的 Work：叫什么、交给它什么、做到哪了。已经交回结果、她也转告过主人的不写。",
+    "3. 她在等的回答（等主人的、等哪个 Work 的），和她答应过还没做的事。",
+    "4. 这段对话里刚定下来、后面还会用到的结论。",
+    "已经了结的事、寒暄和闲聊不写。她定的提醒由 Dock 另外保管、每轮都会告诉她，不要写。对话里没有的内容不要编。",
+  ].join("\n"),
+};
 /**
  * Starting over with `extractionModel`: what the background made is set aside, its memories among the
  * retired (where each can be restored) and its timeline lines removed, and every conversation is read
@@ -274,6 +330,11 @@ export type AssistantRequest =
   | { op: "load" }
   | { op: "recorded"; sessionId: string }
   /**
+   * Which entries of a session her owner had her forget, from `fromEntryId` on (the whole session
+   * without it): her Worker takes them out of the conversation it still holds (card #667).
+   */
+  | { op: "forgotten"; sessionId: string; fromEntryId?: string }
+  /**
    * `throughEntryId` is the last entry of the Agent's session this batch covers, kept or not. A
    * batch without entries only moves that mark, as when a session opened as the assistant starts
    * from history that was not hers.
@@ -298,13 +359,14 @@ export type AssistantRequest =
   | ({ op: "timeline_update" } & AssistantTimelineUpdateRequest)
   | { op: "settings_get" }
   /** `null` stops extraction. */
-  | { op: "settings_set"; extractionModel: AssistantModelRef | null }
+  | ({ op: "settings_set" } & AssistantSettingsEdit)
   | { op: "reorganize"; extractionModel: AssistantModelRef };
 
 export type AssistantResultFor<R extends AssistantRequest> =
   R extends { op: "info" } ? AssistantInfo
   : R extends { op: "load" } ? AssistantPreview
   : R extends { op: "recorded" } ? { lastEntryId?: string }
+  : R extends { op: "forgotten" } ? { entryIds: string[]; revision: number }
   : R extends { op: "record" } ? { lastEntryId: string }
   : R extends { op: "search" } ? AssistantSearchResult
   : R extends { op: "context" } ? AssistantContextResult
@@ -485,9 +547,46 @@ function parseReorganizeModel(value: Record<string, unknown>, field: string): As
   return modelRef(value.extractionModel, `${field}.extractionModel`, true);
 }
 
-function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantModelRef | null {
-  if (!("extractionModel" in value)) fail(`${field}.extractionModel is required`);
-  return value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true);
+function parseHandoffSettings(input: unknown, field: string, closed: boolean): AssistantHandoffSettings {
+  const value = record(input, field);
+  if (closed) only(value, ["startTokens", "keepRecentTokens", "prompt"], field);
+  const tokens = (input: unknown): number | null => {
+    if (input === null) return null;
+    if (!Number.isSafeInteger(input) || (input as number) <= 0) fail("整理的 token 数请填正整数，或留空使用自动值；这次没有保存。");
+    return input as number;
+  };
+  const startTokens = tokens(value.startTokens), keepRecentTokens = tokens(value.keepRecentTokens);
+  if (startTokens !== null && keepRecentTokens !== null && keepRecentTokens >= startTokens) fail("保留的最近原话必须少于开始整理的 token 数；这次没有保存。");
+  const prompt = documentText(value.prompt, `${field}.prompt`);
+  if (!prompt.trim()) fail("请写下交接记录的提示词；这次没有保存。");
+  return { startTokens, keepRecentTokens, prompt };
+}
+
+function parseExtensions(input: unknown, field: string, closed: boolean): AssistantExtensionSettings[] {
+  if (!Array.isArray(input)) return fail(`${field} must be an array`);
+  const ids = new Set<string>();
+  return input.map((raw, index) => {
+    const itemField = `${field}[${index}]`, value = record(raw, itemField);
+    if (closed) only(value, ["id", "module", "enabled", "config"], itemField);
+    const extensionId = text(value.id, `${itemField}.id`, 64, 1);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u.test(extensionId)) fail("扩展标识请只用字母、数字、下划线和短横线；这次没有保存。");
+    if (ids.has(extensionId)) fail(`扩展标识 ${extensionId} 重复了，请改成不同的标识后保存。`);
+    ids.add(extensionId);
+    const module = text(value.module, `${itemField}.module`, 16_384, 1);
+    if (!/^builtin:[a-zA-Z0-9_-]+$/u.test(module) && !((isAbsolute(module) || win32.isAbsolute(module)) && /\.(mjs|js)$/u.test(module))) {
+      fail("扩展模块请填写 Main 上的绝对 .mjs/.js 文件路径，或 builtin:名称；这次没有保存。");
+    }
+    return { id: extensionId, module, enabled: flag(value.enabled, `${itemField}.enabled`), config: cloneBoundedJsonObject(value.config, `${itemField}.config`) };
+  });
+}
+
+function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantSettingsEdit {
+  if (value.extractionModel === undefined && value.handoff === undefined && value.extensions === undefined) fail(`${field} changes nothing`);
+  return {
+    ...(value.extractionModel === undefined ? {} : { extractionModel: value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true) }),
+    ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, true) }),
+    ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, true) }),
+  };
 }
 
 /** `closed` refuses unknown fields, as in a question; an answer ignores them. */
@@ -555,6 +654,11 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
       case "recorded":
         only(value, ["op", "sessionId"], field);
         return { op: "recorded", sessionId: id(value.sessionId, `${field}.sessionId`) };
+      case "forgotten": {
+        only(value, ["op", "sessionId", "fromEntryId"], field);
+        const fromEntryId = value.fromEntryId === undefined ? undefined : id(value.fromEntryId, `${field}.fromEntryId`);
+        return { op: "forgotten", sessionId: id(value.sessionId, `${field}.sessionId`), ...(fromEntryId === undefined ? {} : { fromEntryId }) };
+      }
       case "record": {
         only(value, ["op", "session", "entries", "throughEntryId"], field);
         const session = record(value.session, `${field}.session`);
@@ -624,8 +728,8 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op"], field);
         return { op: "settings_get" };
       case "settings_set":
-        only(value, ["op", "extractionModel"], field);
-        return { op: "settings_set", extractionModel: parseSettingsSet(value, field) };
+        only(value, ["op", "extractionModel", "handoff", "extensions"], field);
+        return { op: "settings_set", ...parseSettingsSet(value, field) };
       case "reorganize":
         only(value, ["op", "extractionModel"], field);
         return { op: "reorganize", extractionModel: parseReorganizeModel(value, field) };
@@ -660,7 +764,7 @@ export function parseAssistantTimelineListParams(input: Record<string, unknown>,
 export function parseAssistantTimelineUpdateParams(input: Record<string, unknown>, field: string): AssistantTimelineUpdateRequest {
   return question(() => parseTimelineUpdate(input, field));
 }
-export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantModelRef | null {
+export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantSettingsEdit {
   return question(() => parseSettingsSet(input, field));
 }
 export function parseAssistantReorganizeParams(input: Record<string, unknown>, field: string): AssistantModelRef {
@@ -811,7 +915,11 @@ export function parseAssistantTimelineList(input: unknown, field = "assistant ti
 export function parseAssistantSettings(input: unknown, field = "assistant settings"): AssistantSettings {
   return answer(() => {
     const value = record(input, field);
-    return value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) };
+    return {
+      ...(value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) }),
+      ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, false) }),
+      ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, false) }),
+    };
   });
 }
 export function parseAssistantReorganizeResult(input: unknown, field = "assistant reorganize"): AssistantReorganizeResult {
@@ -875,6 +983,12 @@ export function parseAssistantResult<R extends AssistantRequest>(request: R, inp
     case "recorded": return answer(() => {
       const value = record(input, "recorded");
       return value.lastEntryId === undefined ? {} : { lastEntryId: id(value.lastEntryId, "recorded.lastEntryId") };
+    }) as AssistantResultFor<R>;
+    case "forgotten": return answer(() => {
+      const value = record(input, "forgotten");
+      const entryIds = value.entryIds;
+      if (!Array.isArray(entryIds) || entryIds.length > MAX_ASSISTANT_FORGOTTEN_ENTRIES) throw new Error("forgotten.entryIds must be a bounded array");
+      return { entryIds: entryIds.map((entryId, index) => id(entryId, `forgotten.entryIds[${index}]`)), revision: count(value.revision, "forgotten.revision", Number.MAX_SAFE_INTEGER) };
     }) as AssistantResultFor<R>;
     case "record": return answer(() => ({ lastEntryId: id(record(input, "record").lastEntryId, "record.lastEntryId") })) as AssistantResultFor<R>;
     case "search": return parseAssistantSearchResult(input) as AssistantResultFor<R>;

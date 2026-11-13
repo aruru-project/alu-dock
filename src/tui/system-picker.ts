@@ -33,8 +33,7 @@ export class SystemPicker implements Component, Focusable {
       const selectedId = this.catalog?.candidates[this.selected]?.id ?? this.options.selectedId;
       const first = await this.client.systemCatalog(this.cwd);
       if (!this.active) return;
-      // A directory that opens new Works as the assistant needs no system either: she is the system.
-      if (useDefault && !this.options.forceSelection && (first.defaultSelection || first.defaultAssistant)) { this.finish({ cwd: first.cwd, defaultSaved: false }); return; }
+      if (useDefault && !this.options.forceSelection && first.defaultSelection) { this.finish({ cwd: first.cwd, defaultSaved: false }); return; }
       const candidates = [...first.candidates];
       let page = first;
       while (page.nextCursor) {

@@ -30,10 +30,34 @@ export const localControlCommands: readonly LocalControlCommand[] = [
   { id: 'resources', name: 'resources', label: 'Loaded Resources', keywords: '资源 diagnostics skill context', description: '打开 Project Status 的资源与诊断', section: 'resources' },
 ]
 
-export function filterLocalControlCommands(query: string): LocalControlCommand[] {
+/** Her conversation stays one continuous conversation; these Pi-only panels do not apply. */
+export function controlSectionAvailable(section: ControlSection, assistant = false): boolean {
+  return !assistant || !['sessions', 'tree', 'new-session', 'compact-session', 'settings'].includes(section)
+}
+
+export function controlCommandAvailable(name: string, assistant = false): boolean {
+  if (!assistant) return true
+  if (name === 'fork' || name === 'clone' || name === 'resources') return false
+  const section = localControlCommand(name)?.section
+  return !section || controlSectionAvailable(section, assistant)
+}
+
+export function workControlCommands(assistant = false, displayName = '助手'): readonly LocalControlCommand[] {
+  if (!assistant) return localControlCommands
+  return localControlCommands.filter(command => controlCommandAvailable(command.name, true)).map(command => {
+    if (command.name === 'stop') return { ...command, label: `重启${displayName || '助手'}`, description: '打断当前回复、停止她的子 Work；对话和记忆保留' }
+    if (command.name === 'reload') return { ...command, label: '刷新助手（Reload）', description: '重新读入人设、手写设定、记忆和工具扩展，对话接着原来的' }
+    if (command.name === 'tools') return { ...command, label: '她能用的工具', description: '查看实际注册的工具、扩展来源和可用状态' }
+    if (command.section === 'resources') return { ...command, label: '助手状态', description: '查看她的模型、对话用量和工具说明' }
+    return command
+  })
+}
+
+export function filterLocalControlCommands(query: string, assistant = false): LocalControlCommand[] {
   const normalized = query.toLowerCase()
-  if (!normalized) return [...localControlCommands]
-  return localControlCommands
+  const commands = workControlCommands(assistant)
+  if (!normalized) return [...commands]
+  return commands
     .flatMap((command, index) => {
       const name = command.name.toLowerCase()
       if (name.startsWith(normalized)) return [{ command, index, rank: 0 }]

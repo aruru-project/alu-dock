@@ -83,7 +83,8 @@ const { appendShellQuote } = useInputStore()
 
     <div v-else class="alu-welcome">
       <img :src="dockIconUrl" alt="Alu Dock" />
-      <div class="alu-welcome-text">「{{ selected.name || 'New session' }}」准备好了。</div>
+      <div v-if="selected.assistant" class="alu-welcome-text">{{ selected.displayName || '助手' }}在这里，想说什么都可以。也可以把文件或图片发给她。</div>
+      <div v-else class="alu-welcome-text">「{{ selected.name || 'New session' }}」准备好了。</div>
     </div>
   </main>
 

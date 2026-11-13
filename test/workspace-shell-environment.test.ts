@@ -6,12 +6,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { resolveManagedPiAgentDir } from "../src/pi/pi-agent-directory.js";
-import { PiWorkerProcess } from "../src/pi/worker-process.js";
+import { piWorkerLaunch } from "../src/pi/pi-worker-launch.js";
+import { WorkerProcess } from "../src/worker/worker-process.js";
 import {
   captureWorkspaceShellEnvironment,
   workspaceShellBootstrapEnvironment,
   type WorkspaceShellAccount,
-} from "../src/pi/workspace-shell-environment.js";
+} from "../src/platform/workspace-shell-environment.js";
 
 test("workspace shell bootstrap admits user session defaults but excludes Host and install-time development state", () => {
   const account: WorkspaceShellAccount = {
@@ -135,20 +136,22 @@ test("Pi Worker receives only its captured environment plus explicit Dock bootst
   const previousHostOnly = process.env.ALU_DOCK_HOST_ONLY;
   process.env.NODE_ENV = "production";
   process.env.ALU_DOCK_HOST_ONLY = "must-not-leak";
-  const worker = new PiWorkerProcess({
+  const worker = new WorkerProcess({
     identity: {
       hostEpoch: "environment-host",
       instanceId: "environment-instance",
       runtimeGeneration: 1,
       workerIncarnation: "environment-incarnation",
     },
-    init: { cwd, agentDir, projectTrusted: true, tools: [] },
-    environment: {
-      HOME: root,
-      PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-      WORKSPACE_VALUE: "captured",
-    },
-    entry: fileURLToPath(new URL("./fixtures/worker-environment-probe.js", import.meta.url)),
+    launch: piWorkerLaunch(
+      { cwd, agentDir, projectTrusted: true, tools: [] },
+      {
+        HOME: root,
+        PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        WORKSPACE_VALUE: "captured",
+      },
+      fileURLToPath(new URL("./fixtures/worker-environment-probe.js", import.meta.url)),
+    ),
   });
   try {
     await new Promise<void>((resolveExit, rejectExit) => {

@@ -2,7 +2,7 @@
 
 ## 这部分负责什么
 
-Agent Worker 负责运行真正的 Agent。当前实现是 Pi，未来可以增加其他 Agent adapter。
+Agent Worker 负责运行真正的 Agent。当前有两种：Pi（除助手以外的每个 Work），和个人助手自己的 Agent（Main 自动打开的唯一常驻助手，见[个人助手](#个人助手)）。还可以增加其他 Agent adapter。
 
 Agent runtime 在 Worker 中运行。客户端通过 Protocol V2 与 Dock 通话，Host 完成控制判断后把 Agent 会话流量路由给对应 Worker。
 
@@ -69,7 +69,7 @@ Work 的 `model.list` 与 Host 设置页使用的机器级可选模型列表共�
 
 Pi provider 生成 `workerConfig.systemSelection`：原生 `project-system`/`global-system` 保留 custom 文本语义；`dock-template` 是 fork SDK 的 `DefaultSystemPromptBody` 五字段 JSON（`intro/toolNotes/guidelines/documentationHeading/documentationInstructions`），不是最终组装 prompt，也没有占位符语言。项目来源同时保存原始 cwd，Dock 模板保存发现时的原始 Home（限定其 `.aludock/systems/*.json`），避免 session replacement 或 Worker 登录 shell 改变 HOME 后重新发现或拒绝原来源。模板选择必须携带来源 Home；没有 systemSelection 的旧 Work 继续使用原生行为。
 
-Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加载读取固定选中文件并同时返回 custom/default 内容及实际 `source.path`；显式选择覆盖项目 SYSTEM，但 APPEND、context、skills、动态 tool prompt 继续由 Pi 原生组装。读取或校验失败明确失败，不把路径当正文、不回退。Host 不解释这个 workerConfig。配置随 durable catalog/reopen 原样保留，工具重建不查询目录默认；没有配置的旧 Work 保持原生行为。助手 Work 例外：resolver 固定返回 Pi 默认正文、没有来源文件，不读 `systemSelection`（早于 2026-11-12 创建的助手 Work 可能带着），也不发现项目或全局 `SYSTEM.md`，开头由助手扩展替换（见下文[个人助手](#个人助手)）。
+Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加载读取固定选中文件并同时返回 custom/default 内容及实际 `source.path`；显式选择覆盖项目 SYSTEM，但 APPEND、context、skills、动态 tool prompt 继续由 Pi 原生组装。读取或校验失败明确失败，不把路径当正文、不回退。Host 不解释这个 workerConfig。配置随 durable catalog/reopen 原样保留，工具重建不查询目录默认；没有配置的旧 Work 保持原生行为。
 
 既有 `resource.get`/`resource.content` 自动使用 loader 的实际 source，所以 Work 读到的是选中的 JSON 或原生 SYSTEM 文件，而不是被覆盖的项目 SYSTEM，也不是最终组装快照。
 
@@ -85,15 +85,26 @@ Adapter 在创建 resource loader 时注入 `systemPromptResolver`，每次加�
 
 ## 个人助手
 
-Dock 自带的个人助手（card #295，默认是阿露）由 Main 保管；新建 Work 时选了“以助手身份打开”的 Work 才和她有关。协议与目录默认见 [control](control.md#个人助手instanceassistantv1assistantv1)。
+阿露是 Main 自动打开的唯一常驻助手（#295、#667、#670），运行方式与记忆均不属于 Pi 编码 agent。生命周期和旧会话迁移见 [control](control.md#个人助手assistantv1)。
 
 - **助手服务**（`src/assistant/`）：Main 上 Host 监管的独立进程，和模型服务共用 `src/control/service-supervisor.ts` 的启动、重启与问答。它持有 Host 私有状态目录下 `assistant/` 里的人设 `persona.md`、主人的手写设定 `notes.md` 和 Node 自带 SQLite 的 `memory.sqlite`。人设文件不存在时用 Dock 自带的阿露人设新建，已经存在就不再覆盖，升级也不动。对话原文每条记着 Agent 的 session ID 和 entry ID、分支上的前一条、时间、所在 Work（Main ID）和机器；条目的行号按时间排（毫秒时间 × 1024 加序号），全文索引（SQLite FTS5 trigram）共用这个行号，时间范围就是行号范围；同一毫秒超过 1024 条时多出的用下一个空着的毫秒的行号，库里记着最多顺延过几毫秒，时间范围的上端按它放宽，再按每条自己的时间过滤；搜索沿行号往下走时，读到的条目要等走过它自己的那一毫秒才交出，所以时间范围和从新到旧的顺序都按实际说话的时间算（同一毫秒内按行号），续读位置是“时间 + 行号”。一次搜索或读前后文在同一个读事务里完成，看到的是同一份已提交的数据。条目时间只收 1970 年前后约 ±253 年（`ASSISTANT_TIME_RANGE_MS`），超出的在入口拒绝。三字及以上的词走索引，一两个字的词用 SQLite `LIKE` 比对（只有英文字母不分大小写）。搜索都从最新的往回走、凑够就停：只有索引词时只走索引；有一两个字的词或只按时间时，每次读 5000 行再检查截止时间。写入只在服务主线程用一个连接，一次一批（整批 JSON 不超过 `MAX_ASSISTANT_RECORD_BATCH_BYTES`，入口也检查），失败时保留原始错误；条目的 `parentId` 不是这个会话已经存下的条目时不存。搜索和读前后文在固定两个读线程上，各用自己的只读连接（WAL 允许边写边读）。Node 的同步 SQLite 不能从外面打断，结束线程也要等查询跑完（Node 24.22 实测），所以时限这样实现：提问方从提问起（含排队）15 秒收到 `assistant_query_timeout`；线程在下一步自己按同一截止时间停下，答复之前一直算忙、不接新活，迟到的结果丢弃，线程数不会变多；排队最多 32 个，再多直接回答“正在处理很多查询”。线程出错退出时 1 秒后补一个。数据库带结构版本号，打开时先看版本再建表：空文件才初始化，读到不认识的版本（或有表却没有版本号）就拒绝启动、原样保留。提问方等到截止时间、排队时到期、线程答复时已过期，都按超时答复；线程开始任何查询前也先看截止时间。服务收到 SIGTERM 时关闭数据库再退出。她自己的记忆工具只记下做了什么（工具名和 `action`/`document`），参数和结果不记：那些内容本来就在她的记忆和对话里，忘掉时才能一起忘掉；也就不会被旧搜索结果反复命中。Pi 的会话文件不改。人设和手写设定经服务保存时不会互相覆盖，替换前再核对一次版本，换完同步目录（Windows 不能同步目录）；但在编辑器里保存的同一瞬间服务也在替换时，编辑器的那次仍可能被覆盖，文件没有原子的“核对并替换”。
 - **记忆**（`memories.ts`）：和对话放在同一个库里。每条一件事，带分类、是否每次载入（常驻）、状态、最近一次改动的来源、版本号、出处（指向对话条目）和说起的时间（出处里最早一句的时间，随着出处增加往前挪；没有出处的才是写下的时间，列表可按它筛日期）；每次改动留一行记录。什么都不真删：作废是 `retired`，忘掉是 `forgotten`，都能恢复。一条记忆被忘掉时，它出处的那些条目也搜不到，读前后文只显示“这一条主人让我忘掉了”（条目上记着有几条被忘掉的记忆藏着它，归零就回来）。按对话里的位置说着同一件事的条目跟着一起藏（`memory_hides`）：对出处的回答（同一轮里她接着说的话、工具结果和提示，各个分支都算，到主人、别的 Work 再开口或主人自己跑命令为止）、主人让她忘掉的那一轮（她的工具报上位置；那一轮还没记到 Main 时先记下位置，到了再藏；已经忘掉的记忆再被要求忘一次，新的那一轮同样藏起）、以及之后 Pi 给这段对话写的摘要；忘掉之后才记下的回答和摘要同样藏起。摘要到此为止：摘要后面的话不因为摘要被藏而跟着藏。覆盖这些话的时间线行也一起忘掉（见下；摘要不带走时间线行）。别处另外提到同一件事的原话不动，这一点界面和她的工具说明都写明；被忘掉的记忆留在库里，后台查得到，不会再记一遍（见后台整理）。恢复时这些全部回来。新会话载入人设、手写设定、全部常驻记忆（按分类列，带编号）和最近一周的时间线（见下，最多最新 40 行，从早到晚，放不下时写明）；常驻记忆不设单独的总长度上限，整份载入内容只受一条记录能带的大小（`MAX_ASSISTANT_PREVIEW_BYTES`）限制，超出时截断并说明。她在对话里用 `assistant_memory` 记下的一条，默认出处是主人在这个会话里最近的一句话（先把对话送到 Main 再记；别的 Work 发来的话不算主人的话）。
 - **时间线**（`timeline.ts`）：记忆之外的第二层，回答“那天我们在干嘛”。一行是一个会话里的一段，写那段时间他们在做什么、聊什么，工程上的事照实写（在哪个项目做什么、卡在哪、做完没有），不挑重要不重要；起止时间是它覆盖的第一句和最后一句说出的时间，不经模型判断；第一句的位置随行一起给出，她和客户端从那里读原话。提炼读一段对话时顺手写：把这个会话最新的几行给模型看，同一天同一件事就改写那行（时间范围只往外扩，不丢原来说的），换了一天或换了话题才加行。读过的每一段都要落在某一行上：模型要改写的行不能改时（主人改过的、没给它看过的），那一行保持原样，这次读到的另起一行；模型的回答一行都没写时按“看不懂”处理（重试，三次后跳过并记下）。它要改写的行在它读的期间被改过时，它是照着旧样子写的，这次回答整个不采纳，这一段按现在的时间线重读。状态只有在用和忘掉，忘掉只是不再列出、不再载入，覆盖的原话不动，能恢复；主人改过的行后台不再改；不留改动历史，改坏了主人重写，原话都在。做梦不碰时间线。一条记忆被忘掉时，覆盖它出处的行也跟着忘掉：行里可能说着同一件事，后台又不能不经模型改写它，所以整行收起，宁可多忘一行，也不让忘掉的事留在开会话就载入的时间线里；`episodes_forgotten_with` 记着是哪条记忆带走的，记忆恢复时，没有别的被忘掉的记忆还压着的行一起回来；期间主人或她手动恢复、忘掉过的行，按那次的决定。
-- **后台整理**（`extraction.ts`、`extraction-prompt.ts`、`model-access.ts`）：用助手设置里选的模型，在 Main 的助手服务里做，一次只做一件事，没选模型就不做。只读说过的话：主人的、她的、别的 Work 发给她的（`SPOKEN`），每句整句读，不读工具输出、她调了哪些工具、压缩摘要和插件提示（主人 2026-11-10 定：摘要只是把前面的原话换个时间再说一遍）；这些原文照样存着、能搜。等着读的字数也只算这三种。两步：一段对话 10 分钟没有新话（或者攒了很多）后，“提炼”按顺序一段段读它（一段最多约 24,000 字，再长的一句单独成一段；带前面最多 3,000 字做上文，太长时留结尾），新增、改写或作废记忆，每条注明出自哪几条，同一次回答里顺手写时间线（见上）；别的 Work 对她说的话标成“Work 消息”给模型读，可以写进时间线，但不当成主人的话或主人的情况记进记忆；会话上记着读到哪一行。几个对话都等着时，未读的话最早的那个先读，所以记忆按说话的先后形成。模型只拿到常驻记忆（和她开会话时一样），别的记忆让它用 `search_memories` 自己查（按字面匹配，一次几组词，最多 3 轮），查到的和列出的才能改写或作废；不再把一大批记忆塞给它（主人 2026-11-10 定）。查的时候也看得到主人让她忘掉的、以及主人或她作废的记忆，标明“别再记”、不能改：否则重读旧对话（比如从头整理）会把主人不要的事再记一遍。模型仍然新加、改写或合并出一字不差的同样文字时不采纳。后台自己作废的（合并掉的、从头整理收起的）不在其中。人设和手写设定整份给。模型的回答看不懂时同一段最多试三次，然后跳过、记进 `skipped_parts` 并在状态里说明，换一个模型时用新模型重读这些段（重读时看到的时间线是那段时间的，不是之后的）。一段的调用失败后，立刻问模型一句几个字的话（只在调用失败后才问）：它答得出，说明现在连得通；同一段连续三次都这样，并且这期间模型读成过别的段，才认定问题在这一段（比如内容被服务商拦下、超出上下文），跳过并记下。它答不出就是模型服务本身不通；一段都读不成则是每次整理都带着的东西出了问题（模型、它的设置、人设的长度）。这两种都不算在哪一段头上，不跳过任何一段，只是越等越久地重试。一段调用失败后先读别的对话，轮到它再试，所以一段读不成不会让后面的对话排不上；几段都失败过时，等得最久的先重试，轮流来。所有地方 30 分钟没有新对话、且有 20 条以上记忆被提炼或她改过（或者距上次已过 12 小时）时，“做梦”把这些记忆连同全部出处原话（整句，一次最多约 40,000 字，放不下的下次再看）和常驻记忆再看一遍，别的记忆同样自己查：记错的改正，重复的合并（合并后的那条带上所有出处，旧的作废并指向它），把只是细节的从常驻里拿掉。提示词讲清记忆是为了什么、让模型自己判断什么值得记，只把不能越过的线写成规矩（不记密钥，不记要她忘掉的，手写设定优先，标明出处）；工程细节不进记忆，但主人这阵子在做什么项目算他生活的一部分，照常判断值不值得记，做了什么本身写在时间线里；这借鉴了 Anthropic《Components of agent memory》：给强模型定死“记什么”反而记得更差，每次载入的部分越精简越会被照做，事后对照原始对话能改正记错的。两步都不动主人最后改过的记忆，主人定过是否常驻的也不改这个设置；应用前核对每条记忆还是不是模型看到的那个版本，期间有人改过就跳过这一条（同一次回答里先后改同一条不算冲突）；等回答期间有东西被忘掉（一条记忆，或时间线的一行）时，模型看到的原话、时间线或记忆里可能正好有这件事，它写出的任何一行、任何一条都可能带着它：这次回答整个不采纳，按忘掉之后剩下的重做一遍（做梦同样）；这次调用失败或回答看不懂时，也不算在这一段头上。连续失败时下一次尝试按 1、5、15、30、60 分钟退避，状态和原因在 `assistant.info` 里；有一次成功就从头算。主人可以“从头整理”（`reorganize`）：后台整理出、没人碰过的记忆作废（记成后台作废的，重读时可以重新形成；主人自己作废或让她忘掉的不会被重读带回来），后台写的时间线行删掉，跳过的段清掉，所有对话从头按说话先后重读；正在进行的那次提炼或做梦结果作废，不会接着写；时间线行带“手动改过”标记（主人或她改过一次就一直算），从头整理只删没标记的，行号不复用。已开着的会话不受影响，下次 reload、`/new` 或重新打开时载入最新的。模型调用和 Work 一样：助手服务通过 Host 向模型服务要模型设置和凭据（`service-supervisor.ts` 的 `askHost`），请求自己发出，用 Main 上 Pi 的代理设置。调提示词时用 `scripts/assistant-memory-cases.ts` 里编造的对话跑 `npm run eval:assistant-memory -- --model PROVIDER/MODEL`：它用本机的 Pi 登录真调模型、要花钱，只在主人同意后运行。
-- **路径**：只有助手 Work 的 Worker 被授予 `dock.assistant`。Worker 只问自己的 Host；Main 的 Host 转给助手服务并标上这个 Work 和 Main 的机器名，SubHost 的 Host 经机器连接转给 Main（与模型问题同一种 `machine_model_*` 记录，`op: "assistant"`），Main 把 SubHost 的 Work 换成 Main ID 并标上机器名。Worker 不能自报来源。客户端的 `assistant.*` 请求在 Main 上变成同一组问题，只有这条入口标明是主人问的（`owner`），改动才算主人的；其余一律算她的，包括 Main 一时对不上号的 SubHost Work，所以来源不全的问题不会带着主人的权限。
-- **Pi adapter**（`src/pi/assistant-extension.ts`）：每次 session start（新建、reload、`/new`、resume、fork、Host 重启后 reopen）之后的第一轮开始前，向 Main 取一份“她会读到什么”（带载入时间），放在系统提示的开头，代替 Pi 默认正文的 `intro`（“You are an expert coding assistant…”）：她就是这个 Work 的 system，Pi 的工具列表、规则、文档位置、APPEND、项目 context 和 skills 照常组装（2026-11-12 主人定；之前放在末尾的 section 里，开头仍是“编码助手”，两个身份冲突）。开头在会话开始后变过的会话（改动前的旧助手会话、resume 进来的普通会话、reload 后换了载入时间），Pi 只在后面追加更新，接受对话中途系统消息的模型（如 Claude）会先读到旧开头；助手 Work 的请求因此在 `context_with_system` 里把系统消息合并成一条当前提示放在最前（与 Pi 给不接受中途系统消息的模型的做法相同），只影响这次请求，会话记录不改。代价是这样的会话里系统提示每变一次（reload、工具增减），提示缓存都从头算；开头没变过的会话照 Pi 原样发送；这个会话一直用这份，后台不推送修改。不在 session start 当时取，是因为会话替换会取消 Worker 还没答完的问题。取不到时这一轮照常开始，提示开头如实说明，用户收到一条通知；之后在后台再取，不让后面的回合等。每轮开始和结束（`agent_settled`）、压缩后和会话结束时，按 Pi 会话的条目顺序把 Main 还没记下的部分分批送去；从 Main 记录的最后一条接着送，重复送达不重复保存；送不到时通知一次，下一轮或下次打开这个会话再补。resume 或 fork 进来的会话，Main 没记过的话从进来时已有的最后一条之后开始记：之前那段不是她的经历，或者已经记在原来的会话下。每个会话的起点在 Worker 第一次见到它时定下：这个 Worker 自己开的会话（新建、`/new`、重新打开）从第一条算，resume 或 fork 进来的从当时最后一条之后算；之后 reload、切走再切回都沿用第一次的答案，所以 Main 一时连不上也不会把之后说的话当成旧历史跳过。Host 重启后 Worker 换了进程就不再记得，Main 一直没记过的会话那时会从头记，包括原本排除的旧历史。每条记录带说这句话时的 Work 和机器。保存用户、助手的文字和工具调用、工具结果、`!` 命令、压缩与分支摘要、扩展消息（主人、她和别的 Work 说的话每条最多存 `MAX_ASSISTANT_SPOKEN_TEXT_CHARS` 即 10 万字，工具输出等最多 3.2 万字，一批放不下时才截短）；别的 Work 对她说的话（父子之间的 `dock-work-message`、`dock-tools-watch` 通知、开头是 Dock 来源行 `[Agent message from "…"]` 的输入）记成 `work`，不算主人的话，只用来开始一轮的 `dock-work-wake` 标记不记；不保存 thinking、系统提示和模型切换等记录。用户消息里 Dock 的附件元数据块去掉只留文件名。工具 `assistant_search`、`assistant_read`、`assistant_memory`、`assistant_timeline`、`assistant_document` 分别搜记忆、时间线和对话（第一页先列同样条件下的记忆——文字含所有词、在给的时间里说起——再列时间线，最后是原话；时间线的每行也带它第一句的位置，能接着读原话；只给时间范围就是“那天在干嘛”的查法）、读前后文、记下和改动记忆（按分类、状态或词列出并翻页；忘掉时带上主人提出的那一轮；也能看整理的现状和没读成的段数、换整理记忆用的模型——先核对这个 Work 的模型列表里有它——以及在主人确认后从头整理）、改写、忘掉或恢复时间线的一行、读改人设和手写设定；记忆的改动当场告诉这个会话，其他已开着的会话不推送。
-- **子 Work 与协作成员**：`dock_spawn` 的子 Work 一律不是助手；`dock_create` 只在显式 `assistant: true` 时是，不套用目录默认。
+- **后台整理**（`extraction.ts`、`extraction-prompt.ts`、`model-access.ts`）：用助手设置里选的模型，在 Main 的助手服务里做，一次只做一件事，没选模型就不做。只读说过的话：主人的、她的、别的 Work 发给她的（`SPOKEN`），每句整句读，不读工具输出、她调了哪些工具、压缩摘要和插件提示（主人 2026-11-10 定：摘要只是把前面的原话换个时间再说一遍）；这些原文照样存着、能搜。等着读的字数也只算这三种。两步：一段对话 10 分钟没有新话（或者攒了很多）后，“提炼”按顺序一段段读它（一段最多约 24,000 字，再长的一句单独成一段；带前面最多 3,000 字做上文，太长时留结尾），新增、改写或作废记忆，每条注明出自哪几条，同一次回答里顺手写时间线（见上）；别的 Work 对她说的话标成“Work 消息”给模型读，可以写进时间线，但不当成主人的话或主人的情况记进记忆；会话上记着读到哪一行。几个对话都等着时，未读的话最早的那个先读，所以记忆按说话的先后形成。模型只拿到常驻记忆（和她开会话时一样），别的记忆让它用 `search_memories` 自己查（按字面匹配，一次几组词，最多 3 轮），查到的和列出的才能改写或作废；不再把一大批记忆塞给它（主人 2026-11-10 定）。查的时候也看得到主人让她忘掉的、以及主人或她作废的记忆，标明“别再记”、不能改：否则重读旧对话（比如从头整理）会把主人不要的事再记一遍。模型仍然新加、改写或合并出一字不差的同样文字时不采纳。后台自己作废的（合并掉的、从头整理收起的）不在其中。人设和手写设定整份给。模型的回答看不懂时同一段最多试三次，然后跳过、记进 `skipped_parts` 并在状态里说明，换一个模型时用新模型重读这些段（重读时看到的时间线是那段时间的，不是之后的）。一段的调用失败后，立刻问模型一句几个字的话（只在调用失败后才问）：它答得出，说明现在连得通；同一段连续三次都这样，并且这期间模型读成过别的段，才认定问题在这一段（比如内容被服务商拦下、超出上下文），跳过并记下。它答不出就是模型服务本身不通；一段都读不成则是每次整理都带着的东西出了问题（模型、它的设置、人设的长度）。这两种都不算在哪一段头上，不跳过任何一段，只是越等越久地重试。一段调用失败后先读别的对话，轮到它再试，所以一段读不成不会让后面的对话排不上；几段都失败过时，等得最久的先重试，轮流来。所有地方 30 分钟没有新对话、且有 20 条以上记忆被提炼或她改过（或者距上次已过 12 小时）时，“做梦”把这些记忆连同全部出处原话（整句，一次最多约 40,000 字，放不下的下次再看）和常驻记忆再看一遍，别的记忆同样自己查：记错的改正，重复的合并（合并后的那条带上所有出处，旧的作废并指向它），把只是细节的从常驻里拿掉。提示词讲清记忆是为了什么、让模型自己判断什么值得记，只把不能越过的线写成规矩（不记密钥，不记要她忘掉的，手写设定优先，标明出处）；工程细节不进记忆，但主人这阵子在做什么项目算他生活的一部分，照常判断值不值得记，做了什么本身写在时间线里；这借鉴了 Anthropic《Components of agent memory》：给强模型定死“记什么”反而记得更差，每次载入的部分越精简越会被照做，事后对照原始对话能改正记错的。两步都不动主人最后改过的记忆，主人定过是否常驻的也不改这个设置；应用前核对每条记忆还是不是模型看到的那个版本，期间有人改过就跳过这一条（同一次回答里先后改同一条不算冲突）；等回答期间有东西被忘掉（一条记忆，或时间线的一行）时，模型看到的原话、时间线或记忆里可能正好有这件事，它写出的任何一行、任何一条都可能带着它：这次回答整个不采纳，按忘掉之后剩下的重做一遍（做梦同样）；这次调用失败或回答看不懂时，也不算在这一段头上。连续失败时下一次尝试按 1、5、15、30、60 分钟退避，状态和原因在 `assistant.info` 里；有一次成功就从头算。主人可以“从头整理”（`reorganize`）：后台整理出、没人碰过的记忆作废（记成后台作废的，重读时可以重新形成；主人自己作废或让她忘掉的不会被重读带回来），后台写的时间线行删掉，跳过的段清掉，所有对话从头按说话先后重读；正在进行的那次提炼或做梦结果作废，不会接着写；时间线行带“手动改过”标记（主人或她改过一次就一直算），从头整理只删没标记的，行号不复用。已开着的助手 Work 不受影响，下次 Reload、重新打开或交接记录换进去时载入最新的。模型调用和 Work 一样：助手服务通过 Host 向模型服务要模型设置和凭据（`service-supervisor.ts` 的 `askHost`），请求自己发出，用 Main 上 Pi 的代理设置。调提示词时用 `scripts/assistant-memory-cases.ts` 里编造的对话跑 `npm run eval:assistant-memory -- --model PROVIDER/MODEL`：它用本机的 Pi 登录真调模型、要花钱，只在主人同意后运行。
+- **路径**：只有助手 Work 的 Worker 被授予 `dock.assistant`。她只住在 Main，Worker 问 Main Host，由 Host 转给助手服务并标上 Work 和机器名。机器连接仍识别旧版本的助手问答，但新 SubHost 不创建助手 Worker。Worker 不能自报来源。客户端的 `assistant.*` 请求在 Main 上变成同一组问题，只有这条入口标明是主人问的（`owner`），改动才算主人的；其余一律算她的，包括 Main 一时对不上号的 SubHost Work，所以来源不全的问题不会带着主人的权限。
+- **她的 Agent**（`src/assistant-agent/`，card #667）：Main 的常驻助手不运行 Pi 的编码 agent。它的 Worker 用 Pi 的三样底层东西：`SessionManager` 保存对话（Pi 的会话文件格式，所以早先由 Pi 运行的助手会话照样能打开），`ModelRuntime` 取模型配置和凭据（与 Pi Work 相同，见上文），pi-agent-core 的 `Agent` 跑“问模型、执行工具、再问”的循环。不自动加载项目的 AGENTS.md、SYSTEM、Pi 扩展及其 MCP/skills 配置，也不带 shell 工具；文件只读工具用 Pi public factories（read/ls/find/grep），不带写入或执行工具。对话交给 Host 用的是 Pi Work 的同一份投影（`src/pi/pi-conversation.ts`），送到 Main 用 `recorder.ts`（原来 Pi 扩展里的那一份）。
+  - **开头**（`opening.ts`）：第一次回复前向 Main 取“她会读到什么”，原样作为这次请求的 leading system message；不再追加写死的角色或工作约定，这些仅作为可编辑 persona.md 的出厂内容，已有文件不覆盖；会话文件里不保存 system message，每次构建上下文都用当时的开头。取不到时这一轮照常回复，开头如实说明，主人收到一条通知，之后每轮再取。Reload、Work 重新打开和交接记录换进去时重新取；别的时候沿用，所以提示缓存不变。
+  - **谁叫醒她**（`wake.ts`、`reminders.ts`）：主人的消息走 `command.submit`；子 Work 的消息（`work_message`）、`dock_watch` 通知（`observation_delivery`）和她自己定的提醒到点，都写成对话里的一条消息（前两种与 Pi Work 同一种 `dock-work-message` / `dock-tools-watch` 记录，提醒是 `assistant-reminder`）。她空闲时它开始一轮回复，正在回复时在下一步加入这一轮。别的 Work 连续开始 12 轮回复后（主人说话或提醒到点重新计数），再来的 Work 消息只写进对话、不开始回复，主人收到一条通知，发消息的子 Work 也被告知。别的顶层 Work 用 `dock_send` 发来的消息仍是带来源行的用户消息，同样计数；超过时 Host 把这次提交记为“已处理、没有运行”。
+  - **每轮的现状**（`status.ts`、`works.ts`）：每轮回复开头写入一条隐藏消息 `assistant-status`：时间、是什么叫醒了她、她派出去的子 Work 和她盯着或替主人开的 Work 各自的状态（来自 `dock_list` 的短状态，加上它们最近一次发来的话的第一行）、没到点的提醒；主人其余的 Work 只给个数。有空闲、不欠结果的子 Work 时加一句“活了结了就用 `dock_stop` 停掉”（每个子 Work 占一个进程，她又不会重开对话）。它留在对话里不再改动，客户端不显示，也不送到 Main，写交接记录时不给模型读。
+  - **工具**：四个只读文件工具、与 Pi 共用定义的 `dock_attachment_list/resolve`（`src/worker/dock-attachment-tools.ts`）、五个记忆工具（`memory-tools.ts`）、`assistant_remind`，以及顶层 Work 的 Dock 工具（定义与 Pi 共用 `src/worker/dock-tool-definitions.ts`），不含 `dock_wait` 和 `dock_spawn` 的 `withContext`：她的回合总是结束后等消息叫醒，她和主人的对话也不抄给子 Work。保留 `dock_deliver_file`，让她验看并发布已有成果文件，不因此增加写文件或执行命令的权限。`dock_spawn` 的任务后面由程序附上主人这一轮的原话。Dock tools 的开关和 Pi Work 是同一个：她的 Worker 用同一个状态键（`DOCK_TOOLS_STATUS_KEY`）报告开关状态，命令列表里只有 `/dock-tools on|off|status` 这一条，按命令处理、不进对话；关着时工具仍在声明里（提示缓存不变），调用由 Host 拒绝，现状里写明她现在派不了活。`tool.list` 如实列出已注册工具及说明、参数和可用状态，不提供逐个开关；关闭 Dock tools 不影响文件与附件只读能力。发来的图片继续直接转视觉输入，文本附件可 resolve 后 read，PDF/ZIP 仍派子 Work 提取。
+  - **工具扩展**（`tool-extensions.ts`）：Main 的助手设置显式列出 `{id,module,enabled,config}`，Worker 在启动和空闲 Reload 时加载本机 ESM 工厂。扩展只拿到 cwd、自己的 dataDir/config、通知和沿 Host 的确认入口，返回工具及可选 dispose；不暴露改写会话或接管循环的钩子。工具转换成现有 AgentTool，图片、更新、错误与取消仍走原投影。工具名冲突不覆盖，单项失败只显示在已有 `extensionStatus`；`tool.list.source` 用 `kind: extension`、`package: id` 标来源。配置不进模型和会话，`assistant_memory` 设置操作只返回整理记忆模型。代码是用户信任的本机代码，不是沙箱。`builtin-extensions.ts` 是 Worker 内工厂装配点；默认注册随包的 `webExtension`，它通过独立 MCP 客户端调用固定 pi-web-access 的公开 bin，配置和数据只用本项 dataDir，不要求用户的 Pi 扩展安装。无扫描、下载或 Pi 扩展兼容层。启动和 Reload 共用状态重发，避免会话替换后误报 Dock tools 关闭。使用和最小示例见 [助手工具扩展](../agent/assistant-tool-extensions.md)，实际验证与边界见 [验收记录](../assistant-acceptance.md)。
+  - **一轮的边界**：一轮最多向模型请求 20 次；到了上限再给一次请求让她向主人交代，这一次里只有 `dock_send` 会执行。上游一时失败（pi-ai 的 `isRetryableAssistantError`）按 2、6、15 秒重试三次，失败的那次留在会话里、用 context edit 从上下文拿掉。回复期间到达的主人消息进她自己的队列（`queue_update` / `dock_queue_consumed`），在下一步加入；Stop 之后队列里的消息照 Pi 的做法开始下一轮，「取回 Queue」把它们拿回去。
+  - **交接记录**（`handoff.ts`）：她的对话不重开。助手设置可改启动阈值、保留最近原话的量和完整写作提示词，Main 保存并返回唯一默认正文；Worker 不在后面追加不可编辑的写作规则，只另附原对话和旧记录。自动值仍是模型窗口的一半（最多 10 万 token）启动、保留启动值的 30%（最多 2 万 token）；等待阈值仍是启动值的 1.5 倍。实际保留预算取当前模型的自动启动值和所选启动值中较小的一个，留出较早内容（减 1）；手填保留量超过它时只收敛运行时目标，保存值不改，状态明确写出实际采用量与原因。切点仍按完整轮次，实际留下的原话可能更多。所有计算只在 Worker。每次整理检查异步读取 Main 的设置，聊天和切模型不等读取；首次没成功读到不整理、保留完整对话，已有有效配置后读取失败则沿用它并提示，下次检查重读。写交接记录时沿用当前聊天模型，开始后固定这一次的参数与提示词，修改用于之后开始的整理。后台写时她照常回复；写好后在两轮回复之间换进去，写成 Pi 会话的 compaction 记录，所以上下文和记录的投影都沿用 Pi 的。超过等待阈值才在下一次请求前等它（没有在写就当场写）。写失败不丢任何东西，按 5、15、30、60 分钟再试，主人收到一次通知。换进去的同时重新取开头。正在写、最近成功或失败、配置读取情况和实际参数通过已有 `ui.setStatus` 的「滚动整理」交给 Work，最近结果记在她自己的 session 中；官方设置页读助手 Work 的这份状态，可刷新，不另建状态接口。她不发 `compaction_*` 信号，主人的消息不会因此被 Host 暂存。
+  - **客户端看到的对话**：从倒数第二份交接记录开始往后（没有或只有一份时是全部）。更早的内容留在会话文件里，用助手页的搜索找。原因是 Host 在每个存档点都拿整段对话，而她的对话不会重开。
+  - **忘掉**：Main 因为“忘掉”而藏起的条目（助手服务的内部问法 `forgotten`，只在 Host 和 Worker 之间用），她的 Worker 在每轮回复开始前、Reload 时和交接记录换进去时查一次：还在她上下文里的，用 context edit 换成“这一条里的事主人让我忘掉了”（她的工具调用保留位置、去掉参数，这些调用的结果一并换掉）；正在用的交接记录如果写在这次忘掉之前，让模型把这件事从记录里删掉后重写一份。她在这一轮里自己执行了忘掉，这一轮结束后才处理，不改动进行中的回合。会话文件里的原话不动；恢复一条记忆不会把上下文里已经换掉的话换回来。
+  - **不支持的请求**：新建、切换、fork、clone、树上跳转以“已取消”结束并通知主人原因；手动压缩报“不需要压缩”；`bash.run` 等报错并通知。Reload 保留对话，让她重新取开头并处理忘掉的事（Host 照常进入下一个 runtime generation）。
+  - **状态**：提醒、她派出去和跟着的 Work 记在会话的 custom 记录里（`assistant-reminders`、`assistant-works`），Work 重新打开后还在；子 Work 活不过她的 Worker，重新打开后第一条现状会列出哪些已经不在了。
+- **子 Work 与协作成员**：`dock_spawn` 和 `dock_create` 都只开普通 Pi Work，不带阿露的私人记忆。她只有一个，由 Main 创建。
 
 ## Worker 事故记录
 
@@ -115,6 +126,51 @@ Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `
 - 生命周期 Dock event 包含 Host 管理的 operation 归属、合并队列计数和 catalog 提交顺序，因此由 Host 生成；Worker 提供 agent_start、queue_update、compaction 等生命周期信号。每个信号在 ManagedInstance 中使用唯一转换表，durable 与非 durable 路径共用。
 
 客户端不直接连接 Worker。这样 Worker replacement、旧 generation 隔离、controller 与 reconnect 仍由 Host 统一处理。
+
+## 一个 Worker 要回答什么
+
+Host 不认识 Pi，只认下面这套约定。任何一种 Agent 的 Worker 照此回答，就是一个完整的 Work；`test/fixtures/plain-worker.ts` 是最小的例子（复述收到的话、把对话存成一个文件，Pi 特有的东西全部为空）。
+
+**进程两头的公共部分**在 `src/worker/`，各种 Agent 共用，不在其中写 Agent 自己的规则：
+
+- Host 侧 `createWorkerInstance`：一种 Agent 只交出两样东西，客户端看到的 `executor.kind/version`，以及怎样启动它的进程（入口文件、cwd、它自己的启动输入、要加进 workspace 环境的变量）。连接、身份核对、超时、事故记录、`ManagedInstance` 的组装都相同。Pi 的那一份是 `src/pi/create-pi-instance.ts` 和 `pi-worker-launch.ts`。
+- Worker 侧 `runAgentWorker`（`worker-shell.ts`）：读 `ALU_DOCK_WORKER_IDENTITY` 和 `ALU_DOCK_WORKER_INIT`，先用 `dock.identity` 向 Host 核对身份并取得“这个 Worker 可以向 Host 要什么”，再让这种 Agent 构建自己（`create(init, host)`）。构建失败发 `fatal`，成功发 `ready`；之后把 Host 的请求交给 Agent、把 Agent 的信号和答复带上当前状态发回 Host；Host 断开或发来 `dispose` 时收尾退出。Agent 实现 `WorkerAgent`：`dispatch`、`control`、`subscribe`、`state`、`dispose`。
+
+**状态**（`AgentWorkerState`，随 `ready`、每个信号和每个答复带回）：会话 ID、会话文件、是否正在回复（`isStreaming`）、是否正在压缩、当前模型和 thinking、token 与费用统计。`durableSessionFile` 是这个 Work 之后能凭它重新打开的文件：Host 把它记进 catalog，Host 重启或 Worker 崩溃后用它再启动一个 Worker（启动输入里带着这个文件）。没有它的 Work 不能恢复。
+
+**提交消息**（`command.submit`）是唯一有先后约定的请求。Agent 必须在答复之前，通过 `preflight` 回调恰好报告一次这条消息实际怎样被收下：
+
+- `delivery: "prompt"`、`custody: "runtime"`：现在就开始一轮。
+- `delivery: "steer" | "followUp"`、`custody: "runtime"`：Agent 正在回复，消息进了 Agent 自己的队列。之后用 `queue_update`（两个队列现在各有哪些文字）和 `dock_queue_consumed`（哪个 `operationId` 被取走）让 Host 的 Queue 跟上。
+- `custody: "host"`：Agent 现在不收（比如正在压缩或收尾），Host 把它留在自己的 Queue 里，等 `agent_settled` 或压缩结束后再交一次（那一次的 context 是 `host_queue`；Host 要求直接排进 Agent 队列时是 `force_queue`）。
+- `success: false` 并抛错：拒绝，消息没有被收下。
+
+答复可以等到这一轮结束才返回。一轮没有开始就答复、状态里也不在回复的，Host 记为“已处理、没有运行”。
+
+**信号**（`subscribe` 发出的事件）：
+
+| 信号 | 含义 |
+|---|---|
+| `agent_start {operationId?}` | 一轮开始；带上引起它的那次提交的 `operationId` |
+| `agent_settled {stopReason?, error?, operationId?}` | 一轮结束。`stopReason` 为 `aborted` 记为中止，`error` 记为失败，其余成功 |
+| `dock_conversation_frame {frame}` | 一帧对话，已经是 Protocol V2 的形状（`message.submitted/delta/completed`、`tool.*`、`bash.*`），Host 原样转发 |
+| `conversation_checkpoint {history}` | 到这里为止的对话都已保存；带上当前完整的记录列表，Host 用它替换手里的实时帧 |
+| `queue_update {steering, followUp}`、`dock_queue_consumed {operationId}` | Agent 自己队列的变化 |
+| `session_info_changed {name}` | 会话改了名 |
+| `compaction_start/end`、`auto_retry_start/end` | Agent 自己在压缩或重试，Host 据此显示状态、暂存输入 |
+| `dock_session_replaced {...}` | 换了一个会话（新建、切换、fork、reload）；Host 进入下一个 runtime generation |
+
+一帧对话里的文字有长度上限（`MAX_TEXT_CHARS`）。更长的正文只放预览，客户端经 `conversation.history` 取得 `contentRef`，再用 `conversation.content` 分块读全文。
+
+**其余请求**（`AGENT_REQUEST_TYPES`，结果体用 `protocol.ts` 里同一个 parser 校验）分三种回答法：
+
+- 读对话：`session.history`（当前全部记录，Host 在启动、改名和换会话后读）、`conversation.history`、`conversation.content`、`conversation.image`。
+- 列表：`model.list`、`tool.list`、`settings.get`、`resource.get`、`command.catalog`、`session.list`、`session.tree`。没有这类东西的 Agent 回答空列表，客户端照常打开。
+- 改动：`command.abort`、`queue.dequeue`、`command.abort_restore_queue`、`model.set`、`thinking.set`、`session.name`（要同时发 `session_info_changed`），以及换会话的 `session.new/switch/fork/clone/reload/navigate/compact`。不支持的直接抛错；换会话的请求在抛错前不能已经动过会话。
+
+**Host 的私有控制**（`control`）：`activate`（Host 已开始听，启动期间攒下的信号现在发出）、`wait_for_idle`（等当前这一轮结束）、`work_message`（父 Work 或子 Work 发来的消息，或 Dock 关于子 Work 停下的通知）、`observation_delivery`（`dock_watch` 的通知）、`resolve_file_source`、`resolve_session_target`、`branch_for_child`（把当前对话抄一份给子 Work）、`dispose`。收下 `work_message` 和 `observation_delivery` 即答复，什么时候写进对话、要不要开始一轮由 Agent 决定。
+
+**向 Host 要东西**（`WorkerHost`）：Dock 工具（`invokeDockTool`、开关）、附件、Main 的模型配置与凭据（`models`）、助手服务（`assistant`，只有助手 Work 有）。Host 没给的那一项不存在，Agent 不能自己绕过去。
 
 ## Pi adapter
 
@@ -138,6 +194,8 @@ console.log(JSON.stringify(getCompactionPromptTemplates(), null, 2));
 ```
 
 消息提交的 input kind、实际 delivery 和 custody owner 都由 adapter 确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；普通 prompt 由 Pi input hook 再次检查运行状态后报告实际采用的 `prompt / steer / followUp`，registered extension command 则在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前报告。Compaction 期间不能交给 Pi 的普通 input 明确报告 Host custody。这个私有 preflight 是 Worker→Host 的事实通知，不增加逐条批准往返；Host 按 adapter 报告的实际 delivery 提交 receipt 和 Queue 状态；较早的 `isStreaming` 或 extension command 文本不作为 delivery 判断依据。Pi 0.99 会推迟在 extension 仍处理 `agent_settled` 时到达的 input，且不报告 delivery。adapter 在读完附件和图片、即将交给 Pi 的同一时刻判断：此时 Pi 正在收尾，普通 input 报告 Host custody，由 Host 像 compaction 期间一样保管，Pi 发布 `agent_settled` 后再交出；registered extension command 先报告 delivery，再等这个边界后启动；Host Queue 交接同样交还 Host 保管，不在 Worker 里等，否则 Esc 也要跟着等。Pi 0.99 也会让 input hook 接管排队的 input；被接管（handled）的 input 在任何交付路径都报告为 handled，不成为 Pi message 或 Queue item，也不占用下一次 run 的 `operationId`。Pi 0.99 的自动压缩发生在 run 内，abort 用 Pi 自己的 abort 同时结束压缩和这一轮，不只取消压缩。Pi 1.2 起一轮回复从准备阶段（extension 的 `before_agent_start`）就算忙：Pi 报告 `started` 时 `isStreaming` 已为 true，所以 adapter 按 Pi 报告的结果而不是 `isStreaming` 记为直接开始；扩展发起的回复还在准备时到达的普通消息报告为排队，进入这一轮。准备中的 extension 无法被打断，Pi 的 abort 要等它们返回；Pi 自己的 Esc 只记下停止、不等。Dock 照此处理：准备期间的停止记下后立即完成（Worker 状态 `isPreparing` 让 Host 不等这一轮结束），Pi 在这一轮第一次请求模型前截住它；它截住时仍把开始的消息记进会话。停止后、extension 返回前到达的消息若交给 Pi 会并进被停的这一轮而得不到回答，所以 adapter 像 `agent_settled` 收尾时一样报告 Host custody，Pi 发布 `agent_settled` 后再交出。Pi 截住这种回复时最后一条回复是 error（“This operation was aborted”），adapter 以 `agent_settled.aborted` 为准报告为中止。用户自己的消息还在准备时，Host 仍要等它的 delivery 确定，期间到达的下一条消息和停止照旧得到 `admission_pending`。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
+
+对话的实时帧、持久 record、分页历史、长正文和图片读取都在 `src/pi/pi-conversation.ts`（`projectAgentSessionEvents`、`PiConversationProjector`、`PiSessionConversation`）。它只把 Pi 的 session entry 和事件当类型用，不加载 Pi agent runtime；`PiAgentAdapter` 和其他把对话存成 Pi 格式会话的 Worker 共用这一份。
 
 Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。已经被 Worker 接受的用户消息始终发布为 canonical conversation frame；Host 的辅助 Queue identity 关联异常时，消息仍须先出现在 conversation。
 
@@ -197,7 +255,7 @@ Pi Worker 内建 `/dock-tools on|off|status`。开关按来源 instance 持久�
 
 `dock_deliver_file` 只接受 absolute path。Host 从 authenticated Worker connection 取得 source instance，把 readable regular source 的 path 与 identity metadata 暂存在当前 `ManagedInstance`；它不在 registration 时读全文、hash、复制或持久化。最多 100 MiB（含边界），跨 Pi session replacement 保留，stop/Host restart 后消失；已有登记不因 `/dock-tools off` 删除。公开 list/download 只含 path-free `DeliverableDto`，bytes 由 Host 专用 stream 直接送给客户端并用 terminal SHA-256 核对，始终不经过 Worker。`show_image` 继续使用独立的 Worker session-scoped inline image 语义。
 
-`dock_machines` 沿 Main 的同一 Machine authority 返回名称、availability、platform、Home 与 workspace roots，Agent-facing 文本省略内部 `hostId`。`dock_create` 接受 absolute cwd、可选名称和可选的精确 Machine display name；省略 Machine 时创建在来源 work 所属 Machine，提供时由 Main 将唯一名称解析为 `hostId`，再沿 Host 的 canonical `instance.create(hostId)` application service 创建。找不到、重名或离线都明确失败，不让 Agent 输入或看到 Machine UUID；新 instance 默认开启 Dock tools。顶层 Work 之间的 `dock_send` 在正文前加一行 `[Agent message from "名称"]` 来源标题，再沿同一个 `command.submit` application service 默认使用 `delivery: followUp`；因此目标的运行中/空闲判定、Queue、receipt、持久 conversation 与普通 user message 完全一致。`dock_spawn` 交出的第一份任务也这样提交（子 Work 的会话还没开始）。父子 Work 之间的消息不走这条路，见下文「父子 Work 之间的消息」。正文逐字保留，来源使用人类名称并省略 UUID。Dock tools 提供显式 interrupt/stop，但不代答 interaction 或提供任意 Agent 私有控制。
+`dock_machines` 沿 Main 的同一 Machine authority 返回名称、availability、platform、Home 与 workspace roots，Agent-facing 文本省略内部 `hostId`。`dock_create` 接受 absolute cwd、可选名称和可选的精确 Machine display name；省略 Machine 时创建在来源 work 所属 Machine，提供时由 Main 将唯一名称解析为 `hostId`，再沿 Host 的 canonical `instance.create(hostId)` application service 创建。找不到、重名或离线都明确失败，不让 Agent 输入或看到 Machine UUID；新 instance 默认开启 Dock tools。顶层 Work 之间的 `dock_send` 在正文前加一行 `[Agent message from "名称"]` 来源标题，再沿同一个 `command.submit` application service 默认使用 `delivery: auto`（主人 2026-11-13 指出真实消息迟到后改定）：空闲立即开始、忙时下一步接入；只有显式 `followUp` 才等当前轮结束。因此目标的运行中/空闲判定、Queue、receipt、持久 conversation 与普通 user message 完全一致。`dock_spawn` 交出的第一份任务仍显式用 `followUp` 提交（子 Work 的会话还没开始，直接开始一轮）。父子 Work 之间的消息不走这条路，见下文「父子 Work 之间的消息」。正文逐字保留，来源使用人类名称并省略 UUID。Dock tools 提供显式 interrupt/stop，但不代答 interaction 或提供任意 Agent 私有控制。
 
 watch tool 只登记 Host subscription 并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 含 target/reason/time，目标正常结束一轮时还带它最后一条回复，不携带其余 conversation。adapter 把它做成可见的 `dock-tools-watch` custom message，放进与父子 Work 消息同一个收件箱（见下文「父子 Work 之间的消息」的送达时机）：Agent 正在工作时在它的下一步写入，空闲时写入并开始一轮，主人 Stop 后不自己开始，「取回 Queue」和 reload 都不丢；不再用 Pi 的 steer 队列。排到整轮之后会让通知在 Agent 早已另作处理后才到；回复过长或需要更多上下文时 Agent 再 inspect。watch completion 不走用户消息的 `command.submit`。cancel/off 等 Host 确认期间收件箱暂不写入会话，确认后把被取消 watch 还没写入的通知从收件箱拿掉、之后到的也丢弃，失败则照常写入；同一 watch ID 至多写入一次。Dock tools 手册说明按需读取、等待、创建和消息来源边界，入口随启用的工具描述提供。
 
@@ -209,7 +267,7 @@ watch tool 只登记 Host subscription 并立即返回。Host completion 通过�
 - **欠结果**：只记在 Host 的 `WorkMessages` 里，只用来判断 Host 自己看到的停止和崩溃要不要告诉父 Work。子 Work 创建起欠父 Work 结果；父 Work 每发一条消息、子 Work 每次没汇报就停下都又欠；子 Work 的 `done: true` 消息送达后不欠；父 Work 自己 interrupt 或 stop 它时也不欠。
 - **送达时机**（`DockToolsBridge`）：Worker 收到的消息（以及 `dock_watch` 的通知）先放进 bridge 的 inbox，它跨 reload 存活。不用 Pi 的 steering/followUp 队列，因为「取回 Queue」调用的 `clearQueue()` 会把排着的扩展消息一起清掉。Agent 空闲时，用 `sendMessage(..., { triggerTurn: false })` 立即把全部消息写进会话，再用隐藏的 `dock-work-wake` 标记开始一轮（`context` hook 把它从模型上下文去掉），写入先于开始，开始失败也不丢；忙时在下一个 `turn_end` 或 `agent_before_settle` 边界把它们交给 Pi（同样 `triggerTurn: false`，Pi 在这一步结束后写入），并要求再发一次请求，所以 Agent 在停下前答复它们。「写进了、还没答复」在交给 Pi 的那一刻记下，到下一条回复开始为止：Pi 只把它运行中的消息告诉扩展，它替扩展写入的消息不发扩展事件。`agent_settled`、压缩结束和重新 attach 后再投递剩下的。主人中止的一轮（`agent_settled` 的 `aborted`）之后不自己再跑，和主人的插话一致（adapter 的 abort 保证中止后没有自动续跑）：已经写进会话没答复的、当时还在 inbox 里的消息都不开始新的一轮，inbox 里的照样写进会话；之后新到的消息、或别的原因开始的一轮结束这种状态。写入的是 customType `dock-work-message` 的扩展消息，首行是来源行（`[来自子 Work「X」]`、`[来自子 Work「X」· 已完成]`、`[来自父 Work「Y」]`、`[子 Work「X」异常停止]`），details 是 `{from, done?, stopped?}`；模型把扩展消息当用户位置的内容读，靠首行区分来源。
 - **异常停止**：子 Work 的 Worker 在一轮结束（`agent_settled`）时检查：这一轮带着父 Work 的工作（第一份任务，或期间写入的父 Work 消息），而最后一次顶层工具调用不是成功的 `dock_send`（同一步里已经成功发出 `done: true` 的，和它一起结束的其他调用不算：Pi 只有整批调用都要求结束才结束这一轮），就发私有 `unreported_stop`（原因、最后的话）。Host 收到就告诉仍在运行的父 Work，并重新记成欠结果，不再以 Host 的欠结果为准：父 Work 的新消息和子 Work 对旧活的 `done: true` 可能在同一步交错，只有 Worker 知道这一轮还欠什么。唯一例外是父 Work 自己 interrupt 了这个子 Work：它之后发来的「被中断」报告不转告，直到父 Work 再发消息给它。主人自己开始、期间没有父 Work 消息的一轮不算；子 Work 的第一份任务之后，交给它的 prompt 都是主人的。子 Work 被停止或崩溃由 Host 在它的生命周期变化时判断，最后的话取 Host 自己保存的会话副本；父 Work 自己停下时不通知。不提醒子 Work 补汇报，Host 重启后也不补通知（子 Work 不恢复）。
-- **dock_wait**：只在 Worker 内等待，不经过 Host。`src/pi/child-messages.ts` 记下本 Work 交过工作、还欠结果的子 Work；等待期间到达的子 Work 消息（包括这一步里已到、还没写入的）作为工具结果返回，不再另外写入。不是最终结果的消息可能是问题，立即结束等待；`all` 等每个子 Work 都给出结果或停下，`target` 等它的结果。有用户消息排队、用户取消或超时即返回，所以等待不会把用户挡在外面。结果比派活结果先到的子 Work 不记入。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等子 Work 会白白耗掉轮数。`dock_cancel_watch` 和关闭 Dock tools 都不影响父子消息。
+- **dock_wait**：只在 Worker 内等待，不经过 Host。`src/worker/child-messages.ts` 记下本 Work 交过工作、还欠结果的子 Work；等待期间到达的子 Work 消息（包括这一步里已到、还没写入的）作为工具结果返回，不再另外写入。不是最终结果的消息可能是问题，立即结束等待；`all` 等每个子 Work 都给出结果或停下，`target` 等它的结果。有用户消息排队、用户取消或超时即返回，所以等待不会把用户挡在外面。结果比派活结果先到的子 Work 不记入。它用于本轮不能结束的场合：Dock Goal 在一轮结束时立即开始下一轮，靠结束本轮来等子 Work 会白白耗掉轮数。`dock_cancel_watch` 和关闭 Dock tools 都不影响父子消息。
 
 `dock_models` 的事实由 Worker 读：Host 只返回 Main 的 `child-models.json` 里用户列出的模型（只有 `provider`/`id`，不带用途说明；SubHost 上的 Work 由本机 Host 回答，名单向 Main 取），Worker 用当前 Pi 的模型和可用模型补上 thinking level（pi-ai `getSupportedThinkingLevels`）、上下文长度和是否能看图，父 Work 自己的模型总排第一。名单只影响 Agent 看到什么，`dock_spawn` 仍接受任何可用模型。
 
@@ -229,7 +287,7 @@ Extension command 仍通过完整 Agent input 语义执行，不另建第二条�
 
 ## 新增 Agent 或能力
 
-新增使用现有 Dock 能力的 Agent时，只增加 Worker adapter 和 runtime kind 注册，不修改 Pi adapter和不相关客户端。
+新增使用现有 Dock 能力的 Agent时，只增加 Worker adapter 和 runtime kind 注册，不修改 Pi adapter和不相关客户端：照[一个 Worker 要回答什么](#一个-worker-要回答什么)实现 `WorkerAgent`，用 `runAgentWorker` 做入口、`createWorkerInstance` 做 Host 侧创建。
 
 Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该能力的 Worker adapter 产生，再由需要它的客户端实现。Host 只有在这项能力确实增加新的控制或生命周期规则时才需要变化。
 
@@ -239,7 +297,9 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 
 ## 代码范围
 
-- `src/pi/`：当前 Pi Worker、Pi adapter、Dock capability extensions 与 Worker 进程实现。
+- `src/worker/`：各种 Agent 共用的 Worker 两头：私有通信（`worker-protocol.ts`）、进程监管（`worker-process.ts`）、Host 侧连接与创建（`agent-worker-connection.ts`、`create-worker-instance.ts`）、Worker 侧外壳（`worker-shell.ts`），顶层 Work 给模型的 Dock 工具的名称、说明、参数和每次调用向 Host 问什么（`dock-tool-definitions.ts`，Pi 扩展从这里注册），以及把 Dock 工具结果写成给模型看的文字（`dock-tools-client.ts`、`child-messages.ts`）。不依赖 Pi。
+- `src/pi/`：Pi Worker 的入口、Pi adapter 与 Dock capability extensions。`pi-conversation.ts` 是 Pi 格式会话交给 Host 的对话，不依赖 Pi agent runtime。
+- `src/assistant-agent/`：个人助手自己的 Agent 和它的 Worker 入口；`src/assistant/` 是 Main 上保管她的人设和记忆的服务。
 - `skills/dock-attachments/`、`docs/agent/dock-tools.md`：随包发布的附件 Skill 与 Dock tools 使用手册。
 - `src/control/`：Host control、Worker supervision 与 session routing。
 - `src/core/`：Dock 自己的协议数据与跨实现概念，不依赖 Pi runtime。

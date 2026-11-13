@@ -104,11 +104,11 @@ test("Dock tools create peers with collaboration and send visibly attributed mes
     type: "send",
     operationId: "tool-send-running",
     target: target.id,
-    message: "A queued follow-up.",
+    message: "A finding for the next step.",
   });
   assert.equal(whileRunning.type, "send");
   if (whileRunning.type !== "send") assert.fail("expected send result");
-  assert.equal(whileRunning.receipt.delivery, "followUp");
+  assert.equal(whileRunning.receipt.delivery, "steer");
   assert.equal(whileRunning.receipt.queued, true, "dock_send must retain ordinary command.submit Queue semantics");
 
   runtimes[1]!.settle("done");

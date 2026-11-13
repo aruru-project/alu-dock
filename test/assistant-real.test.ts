@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { createPiSystemTemplateProvider } from "../src/pi/system-template-provider.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
@@ -12,45 +11,37 @@ const settled = (client: DockClient, id: string) => waitFor(async () => (await c
 const systemMessages = (body: { messages?: Array<{ role: string; content?: unknown }> }) => body.messages?.filter((message) => message.role === "system" || message.role === "developer") ?? [];
 const systemPrompt = (body: { messages?: Array<{ role: string; content?: unknown }> }) => JSON.stringify(systemMessages(body));
 
-// Card #295: a Work opened as the assistant knows her persona and the owner's notes, its conversation
-// becomes hers and she can find it again; a Work not opened as her neither knows nor records anything.
-test("a Work opened as the assistant loads her persona and notes, and her conversations can be searched later", { timeout: 60_000 }, async (context) => {
+// Cards #295 and #667: a Work opened as the assistant runs her own Agent. It knows her persona and the
+// owner's notes, its conversation becomes hers and she can find it again; a Work not opened as her
+// neither knows nor records anything.
+test("a Work opened as the assistant is her: it loads her persona and notes, answers with her own tools only, and her conversations can be searched later", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-", assistant: true });
   const { coordinator } = team.providers;
-  // Like the Claude models, the model takes system messages mid-conversation: a session keeps its
-  // first prompt at the head and gets later prompt changes as updates after it.
-  const modelsFile = join(team.agentDir, "models.json");
-  const models = JSON.parse(await readFile(modelsFile, "utf8"));
-  for (const model of models.providers.coordinator.models) model.compat = { supportsMidConvoSystemMessages: true };
-  await writeFile(modelsFile, JSON.stringify(models));
   const client = await team.startHost();
   const notes = await client.assistantDocument("notes");
   await client.setAssistantDocument("notes", "主人的猫叫团子。", notes.revision);
 
   // The project has its own SYSTEM.md and AGENTS.md.
-  const projectSystem = join(team.cwd, ".pi", "SYSTEM.md");
   await mkdir(join(team.cwd, ".pi"));
-  await writeFile(projectSystem, "PROJECT SYSTEM TEXT");
+  await writeFile(join(team.cwd, ".pi", "SYSTEM.md"), "PROJECT SYSTEM TEXT");
   await writeFile(join(team.cwd, "AGENTS.md"), "PROJECT RULES TEXT");
-  // Like an assistant Work created before 2026-11-12, it also carries that SYSTEM.md as its chosen system.
-  const olderChoice = createPiSystemTemplateProvider(team.agentDir).workerConfig({ kind: "project-system", path: projectSystem });
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "assistant-create", trust, undefined, olderChoice, undefined, true));
+  const alu = await team.assistantWork();
   assert.equal(alu.assistant, true);
+  assert.equal(alu.executor.kind, "dock-assistant");
   const plain = await trustOnce((trust) => client.create(team.cwd, "Plain", "plain-create", trust));
   assert.equal(plain.assistant, undefined);
 
   await client.prompt(alu.id, "我家猫叫什么来着？", "auto", "alu-ask");
   const asked = await coordinator.request(0);
-  // 2026-11-12: she is the Work's system. Her persona opens the prompt in place of Pi's "coding
-  // assistant" line and of any SYSTEM.md; Pi's tool list and the project's AGENTS.md stay.
   const prompt = systemMessages(asked.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content)).join("\n");
   assert.ok(prompt.startsWith("## 身份\n\n你是**阿露**"), `The prompt opens with her persona: ${prompt.slice(0, 200)}`);
-  assert.ok(!prompt.includes("You are an expert coding assistant"), "Pi's coding-assistant line is gone");
-  assert.ok(!prompt.includes("PROJECT SYSTEM TEXT"), "No SYSTEM.md is read for her");
-  assert.ok(prompt.includes("<tools>") && prompt.includes("PROJECT RULES TEXT"), "Pi's tool list and the project's AGENTS.md stay");
   assert.ok(prompt.includes("主人的猫叫团子。"), "The assistant loads the owner's notes");
+  // Card #667: she is not a coding Work. The project's rules belong to the Works that work there.
+  assert.ok(!prompt.includes("PROJECT SYSTEM TEXT") && !prompt.includes("PROJECT RULES TEXT") && !prompt.includes("You are an expert coding assistant"), "Nothing of the project or of Pi's coding prompt is loaded for her");
+  assert.ok(asked.toolNames.includes("assistant_search") && asked.toolNames.includes("dock_spawn"));
   asked.text("团子呀，这都忘了？");
   await settled(client, alu.id);
+  assert.deepEqual((await client.history(alu.id)).entries.filter((entry) => entry.visibility === "conversation").map((entry) => entry.source), ["user", "assistant"]);
 
   await client.prompt(plain.id, "随便聊聊天气（不该记住）", "auto", "plain-ask");
   const plainAsked = await coordinator.request(1);
@@ -77,40 +68,79 @@ test("a Work opened as the assistant loads her persona and notes, and her conver
   recalled.text("团子。");
   await settled(client, alu.id);
 
-  // Notes changed later reach her session when it reloads; what she loads is what the client sees.
+  // Card #667: her conversation is one line. Asking for a new session changes nothing, and she goes on.
+  assert.equal((await client.newSession(alu.id, undefined, "alu-new")).cancelled, true);
+  assert.equal((await client.status(alu.id)).runtimeGeneration, alu.runtimeGeneration);
+
+  // Continued after a crash, the Work is still her, with her conversation and the notes as they are now.
   const current = await client.assistantDocument("notes");
   await client.setAssistantDocument("notes", "主人的猫叫团子，狗叫豆包。", current.revision);
-  assert.ok((await client.assistantPreview()).text.includes("狗叫豆包"));
-  await client.reloadSession(alu.id, "alu-reload");
-  await client.prompt(alu.id, "狗呢？", "auto", "alu-dog");
-  const dog = await coordinator.request(4);
-  assert.ok(systemPrompt(dog.body).includes("狗叫豆包"), "A reloaded session loads the latest notes");
-  dog.text("豆包。");
-  await settled(client, alu.id);
-
-  // Continued after a crash, the Work is still her.
   process.kill(team.workerPids[0]!, "SIGKILL");
   await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
-  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen", undefined, trust));
+  await team.assistantWork();
   assert.equal((await client.status(alu.id)).assistant, true);
-  await client.prompt(alu.id, "还在吗？", "auto", "alu-back");
-  const back = await coordinator.request(5);
-  assert.ok(systemPrompt(back.body).includes("狗叫豆包"), "A continued Work loads her again");
-  back.text("在。");
+  await client.prompt(alu.id, "狗呢？", "auto", "alu-dog");
+  const dog = await coordinator.request(4);
+  assert.ok(systemPrompt(dog.body).includes("狗叫豆包"), "A continued Work loads her again, as she is now");
+  assert.ok(JSON.stringify(dog.body.messages).includes("团子呀，这都忘了？"), "A continued Work has its conversation back");
+  dog.text("豆包。");
+  await settled(client, alu.id);
+});
+
+// Card #667: what a Pi Work lets its owner do while it replies stays with her own Agent: a message sent
+// meanwhile waits and joins the reply at its next step, can be taken back, and Stop ends the reply.
+test("while she replies a message waits its turn, can be taken back or joins at her next step, and Stop ends the reply", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "second"], { prefix: "alu-assistant-queue-", assistant: true });
+  const { coordinator, second } = team.providers;
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+
+  await client.prompt(alu.id, "第一句", "auto", "alu-first");
+  const first = await coordinator.request(0);
+  const waiting = await client.prompt(alu.id, "这句发错了", "auto", "alu-mistake");
+  assert.deepEqual({ queued: waiting.receipt.queued, delivery: waiting.receipt.delivery }, { queued: true, delivery: "steer" });
+  assert.equal((await client.status(alu.id)).pending.total, 1);
+  const taken = await client.dequeue(alu.id, "alu-take-back");
+  assert.deepEqual(taken.receipt.restored.map((item) => item.text), ["这句发错了"]);
+  assert.equal((await client.status(alu.id)).pending.total, 0);
+
+  await client.prompt(alu.id, "顺便看看记忆里有没有团子", "auto", "alu-join");
+  // Review regression: changing model while its old request is held must affect the next tool step.
+  await client.setModel(alu.id, "second", "fixture", "alu-model");
+  await client.setThinking(alu.id, "low", "alu-thinking");
+  first.tools({ id: "look", name: "assistant_search", arguments: { query: "团子" } });
+  const joined = await second.request(0);
+  assert.equal((joined.body as { reasoning_effort?: string }).reasoning_effort, "low");
+  const said = (joined.body.messages ?? []).filter((message) => message.role === "user").map((message) => JSON.stringify(message.content));
+  assert.ok(said.some((text) => text.includes("顺便看看记忆里有没有团子")) && !said.some((text) => text.includes("这句发错了")), "What waited joins the reply at its next step; what was taken back does not");
+  await waitFor(async () => (await client.status(alu.id)).pending.total === 0, "The Host did not observe consumption of the queued message");
+
+  // The old model's tool reply arrived after the explicit choice. Reopen before the new model answers:
+  // the conversation must keep that choice rather than reverting to the last assistant message's model.
+  process.kill(team.workerPids[0]!, "SIGKILL");
+  await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
+  await team.assistantWork();
+  const reopened = await client.status(alu.id);
+  assert.deepEqual(reopened.executor.model, { provider: "second", id: "fixture" });
+  assert.equal(reopened.executor.thinkingLevel, "low");
+  await client.prompt(alu.id, "接着说。", "auto", "alu-after-reopen");
+  (await second.request(1)).text("没有团子。");
   await settled(client, alu.id);
 
-  // (2026-11-12 review) A session that began with another opening, here the plain Work's with the
-  // project's SYSTEM.md, still opens her requests with her once resumed in her Work.
-  const plainSession = (await client.read(plain.id)).instance.executor.sessionFile;
-  assert.ok(plainSession);
-  await client.stop(plain.id, "plain-stop");
-  await trustOnce((trust) => client.switchSession(alu.id, plainSession, "alu-resume-plain", trust));
-  await client.prompt(alu.id, "接着聊。", "auto", "alu-resumed");
-  const resumed = await coordinator.request(6);
-  const resumedSystem = systemMessages(resumed.body).map((message) => typeof message.content === "string" ? message.content : JSON.stringify(message.content));
-  assert.ok(resumedSystem[0]?.startsWith("## 身份\n\n你是**阿露**"), `The request opens with her persona: ${resumedSystem[0]?.slice(0, 200)}`);
-  assert.ok(!resumedSystem.some((text) => text.includes("PROJECT SYSTEM TEXT") || text.includes("You are an expert coding assistant")), "The session's earlier opening is not sent");
-  assert.ok(resumedSystem.join("\n").includes("<tools>") && resumedSystem.join("\n").includes("PROJECT RULES TEXT"), "Pi's tool list and the project's AGENTS.md stay");
-  resumed.text("嗯。");
+  // Stop ends a reply that waits for the model; she takes the next message.
+  await client.prompt(alu.id, "讲个很长的故事", "auto", "alu-long");
+  await second.request(2);
+  await client.abort(alu.id, "alu-stop");
+  await waitFor(async () => (await client.status(alu.id)).lastRun === "aborted", "Stop did not end her reply");
+
+  // A retry also uses the model and thinking selected since the failed request began.
+  await client.prompt(alu.id, "换了模型还在吗？", "auto", "alu-after-model");
+  (await second.request(3)).fail(503, "overloaded");
+  await client.setModel(alu.id, "coordinator", "fixture", "alu-retry-model");
+  await client.setThinking(alu.id, "medium", "alu-retry-thinking");
+  const retried = await coordinator.request(1);
+  assert.equal((retried.body as { reasoning_effort?: string }).reasoning_effort, "medium");
+  retried.text("在。");
   await settled(client, alu.id);
+  assert.equal((await client.status(alu.id)).lastRun, "succeeded");
 });

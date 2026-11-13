@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 const settled = (client: DockClient, id: string) => waitFor(async () => (await client.status(id)).execution === "idle", "The Work did not finish its turn");
@@ -22,9 +22,9 @@ test("what she hears becomes a memory and a timeline line her next session start
   const client = await team.startHost();
   // Card #295: without a chosen model nothing is extracted, and the owner is told so.
   assert.equal((await client.assistantInfo()).extraction?.state, "off");
-  await client.setAssistantSettings({ provider: "memory", id: "fixture" });
+  await client.setAssistantSettings({ extractionModel: { provider: "memory", id: "fixture" } });
 
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   await client.prompt(alu.id, "我不吃香菜，以后点外卖记得避开。", "auto", "alu-coriander");
   (await coordinator.request(0)).text("记住啦，香菜退散～");
   await settled(client, alu.id);
@@ -95,7 +95,7 @@ test("she keeps what the owner tells her to remember, forgets it so it cannot be
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-remember-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
 
   await client.prompt(alu.id, "记住：我下周三要去体检。", "auto", "alu-remember");
   (await coordinator.request(0)).tools({ id: "remember", name: "assistant_memory", arguments: { action: "add", topic: "events", text: "主人下周三要去体检。" } });
@@ -132,7 +132,7 @@ test("she keeps what the owner tells her to remember, forgets it so it cannot be
   (await coordinator.request(4)).tools({ id: "model", name: "assistant_memory", arguments: { action: "set_model", model: "coordinator/fixture" } });
   (await coordinator.request(5)).text("换好了。");
   await settled(client, alu.id);
-  assert.deepEqual(await client.assistantSettings(), { extractionModel: { provider: "coordinator", id: "fixture" } });
+  assert.deepEqual((await client.assistantSettings()).extractionModel, { provider: "coordinator", id: "fixture" });
 
   // Card #295: what the owner can do in her settings she can do too. Starting over asks him first.
   await client.prompt(alu.id, "用这个模型把记忆从头整理一遍吧。", "auto", "alu-restart");

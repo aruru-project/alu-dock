@@ -3,23 +3,22 @@ import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { PiWorkerProcess } from "../src/pi/worker-process.js";
+import { WorkerProcess } from "../src/worker/worker-process.js";
 
 test("Worker error output remains available after its process exits", async () => {
-  const worker = new PiWorkerProcess({
+  const worker = new WorkerProcess({
     identity: {
       hostEpoch: "incident-host",
       instanceId: "incident-work",
       runtimeGeneration: 1,
       workerIncarnation: "incident-worker",
     },
-    init: {
+    launch: {
+      entry: fileURLToPath(new URL("./support/stderr-crash-worker.js", import.meta.url)),
       cwd: process.cwd(),
-      agentDir: process.cwd(),
-      projectTrusted: false,
+      init: {},
+      environment: process.env,
     },
-    environment: process.env,
-    entry: fileURLToPath(new URL("./support/stderr-crash-worker.js", import.meta.url)),
   });
   await once(worker.child, "exit");
   const diagnostic = await worker.incidentStderr(1_000);

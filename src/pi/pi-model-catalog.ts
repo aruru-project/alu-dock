@@ -8,8 +8,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ModelCatalogReader } from "../control/model-visibility.js";
 import { parseModelCatalogBody } from "../control/protocol.js";
 import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
-import { definedEnvironment, terminateDetachedProcessTree } from "./worker-process.js";
-import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
+import { definedEnvironment, terminateDetachedProcessTree } from "../worker/worker-process.js";
+import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 
 // The whole answer (login shell plus Pi start) stays well inside a client's 30 s
 // request limit, including a hop from Main to a SubHost, so a slow machine gets

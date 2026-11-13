@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, shallowReactive, watch } from 'vue'
-import type { ControlSection } from '../lib/localCommands'
+import { controlSectionAvailable, type ControlSection } from '../lib/localCommands'
 import { useAppStore } from './app'
 import { useExtensionUiStore } from './extension-ui'
 export type ImagePreview =
@@ -324,6 +324,11 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function controlDialogTitle(section: ControlSection) {
+    if (app.selectedWork?.assistant) {
+      if (section === 'reload-session') return '刷新助手（Reload）'
+      if (section === 'tools') return '她能用的工具'
+      if (section === 'resources') return '助手状态'
+    }
     return ({
       commands: '命令中心', 'dock-tools': 'Dock Tools', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
       'rename-session': '会话名称', 'compact-session': '压缩上下文', 'reload-session': 'Reload Session',
@@ -336,6 +341,11 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     if (section === 'models') {
       const model = app.selectedWork?.executor.model
       return `当前：${model ? `${model.provider}/${model.id}` : '—'}`
+    }
+    if (app.selectedWork?.assistant) {
+      if (section === 'reload-session') return '重新读入人设、手写设定和记忆，对话接着原来的。'
+      if (section === 'tools') return '她可以读文件和附件、管理记忆和提醒；Dock 工具由顶栏的总开关控制。'
+      if (section === 'resources') return '她的模型、对话用量和已提供的工具'
     }
     if (section === 'dock-tools') return '当前 Work 可以交给 Agent 使用的 Dock 能力'
     if (section === 'resources') return '当前 Work、Session、Git 与已加载能力'
@@ -358,7 +368,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function openControlCenter(section: ControlSection) {
-    if (!app.selectedWork) return
+    if (!app.selectedWork || !controlSectionAvailable(section, app.selectedWork.assistant)) return
     rememberModalTrigger()
     controlTitleOverride.value = ''
     controlBodyOverride.value = ''

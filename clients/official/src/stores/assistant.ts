@@ -175,7 +175,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       entry.base = saved
       entry.latest = null
       if (entry.draft === text || entry.draft === saved.text) entry.draft = null
-      entry.save = { state: 'saved', message: '已保存。新开的助手会话会读到它。' }
+      entry.save = { state: 'saved', message: '已保存。到助手的对话里点“刷新助手（Reload）”，她就会读到改动。' }
     } catch (cause) {
       const code = errorCode(cause)
       if (code === 'assistant_document_changed') {

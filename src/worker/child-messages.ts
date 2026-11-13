@@ -30,6 +30,9 @@ export class ChildMessages {
   private count = 0;
   private waiter: { take(message: WorkMessage): void } | undefined;
 
+  /** The child Works that still owe this Work a result. */
+  get waiting(): OwedChild[] { return [...this.owed.values()]; }
+
   /** Read before a Dock call, so a finish that arrives before the call returns is not awaited again. */
   get position(): number { return this.count; }
 

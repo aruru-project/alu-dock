@@ -14,7 +14,7 @@ import { AssistantCore } from "../src/assistant/service.js";
 import { AssistantStore } from "../src/assistant/store.js";
 import { AssistantTimeline } from "../src/assistant/timeline.js";
 import { writeTransaction } from "../src/assistant/transaction.js";
-import { assistantEntryOf } from "../src/pi/assistant-extension.js";
+import { assistantEntryOf } from "../src/assistant-agent/recorder.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 // Card #295: beside her memories, Dock keeps a timeline of what the two of them were doing, one line

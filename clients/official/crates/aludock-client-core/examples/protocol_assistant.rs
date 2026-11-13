@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "assistant-protocol-gate".into(),
     )?);
 
-    // Her workspace opens new Works as her from the start, and this Host takes that choice.
+    // #670: Main keeps one resident assistant; no directory or creation page can open another.
     let info = client.assistant_info().await?;
     let main = client
         .list_machines()
@@ -34,8 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace = client
         .system_catalog(&info.workspace_path, Some(&main.host_id), None)
         .await?;
-    assert!(workspace.default_assistant);
-    assert!(workspace.assistant_choice);
+    assert!(!workspace.default_assistant);
+    assert!(!workspace.assistant_choice);
 
     // The shipped persona, and notes saved against the version they were edited from.
     assert!(
@@ -397,7 +397,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider: "gate-provider".into(),
         id: "gate-model".into(),
     };
-    let chosen = client.set_assistant_settings(Some(&model), None).await?;
+    let chosen = client
+        .set_assistant_settings(
+            &aludock_client_core::AssistantSettingsEdit {
+                extraction_model: Some(Some(model.clone())),
+                ..Default::default()
+            },
+            None,
+        )
+        .await?;
     assert_eq!(chosen.extraction_model.as_ref(), Some(&model));
     assert_eq!(
         client.assistant_settings().await?.extraction_model.as_ref(),
@@ -422,7 +430,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(
         client
-            .set_assistant_settings(None, None)
+            .set_assistant_settings(
+                &aludock_client_core::AssistantSettingsEdit {
+                    extraction_model: Some(None),
+                    ..Default::default()
+                },
+                None
+            )
             .await?
             .extraction_model
             .is_none()

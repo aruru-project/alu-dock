@@ -4,18 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 
+import { AttachmentService } from "../../src/control/attachment-service.js";
+import { AttachmentStorageState } from "../../src/control/attachment-storage-state.js";
 import { ControlClientError, DockClient } from "../../src/control/dock-client.js";
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
 import { ChildModelsStore } from "../../src/control/child-models.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
+import { createAssistantInstance } from "../../src/assistant-agent/create-assistant-instance.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
 import { ModelServiceProcess } from "../../src/model-service/service-process.js";
 import { AssistantServiceProcess } from "../../src/assistant/service-process.js";
 import type { ExtractionTiming } from "../../src/assistant/extraction.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
-import { PlanGoalProvider } from "./plan-goal-provider.js";
+import { PlanGoalProvider, waitFor } from "./plan-goal-provider.js";
 
 /**
  * A real Host, real Pi Workers and one scripted model provider per name. The first name is
@@ -36,6 +39,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   environment?: Record<string, string>;
   /** Run Main's assistant service, so Works can be opened as the assistant (card #295). */
   assistant?: boolean;
+  /** Real attachment storage, isolated under the team's temporary directory. */
+  attachments?: boolean;
   /** Shorter waits for her memory passes. */
   assistantTiming?: Partial<ExtractionTiming>;
 }) {
@@ -49,12 +54,16 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     ...options.environment,
   });
   const modelService = options.modelService ? new ModelServiceProcess({ agentDir, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
-  const assistantService = options.assistant
+  const createAssistantService = () => options.assistant
     ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
     : undefined;
+  let assistantService: AssistantServiceProcess | undefined;
+  const attachmentService = options.attachments
+    ? new AttachmentService(new AttachmentStorageState(join(root, "attachment-state"), join(root, "attachments")))
+    : undefined;
   const team = {
-    root, cwd, agentDir, providers, workerPids, modelService, assistantService,
+    root, cwd, agentDir, providers, workerPids, modelService,
     registry: undefined as DockRegistry | undefined,
     host: undefined as DockHost | undefined,
     client: undefined as DockClient | undefined,
@@ -63,16 +72,24 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     onCleanup: undefined as (() => void) | undefined,
     async startHost(): Promise<DockClient> {
       await modelService?.start();
+      // A restarted Main gets a new service process, so persistence is read from disk rather than
+      // from the previous Host's service. SupervisedService instances have one explicit lifecycle.
+      await assistantService?.stop();
+      assistantService = createAssistantService();
       await assistantService?.start();
-      const registry = new DockRegistry(async (input) => {
-        const instance = await createPiInstance({
+      const runningAssistant = assistantService;
+      const registry = new DockRegistry(async ({ child, assistant, ...input }) => {
+        const shared = {
           ...input, agentDir, sessionDir,
-          onWorkerSpawn: (pid) => workerPids.push(pid),
+          onWorkerSpawn: (pid: number) => workerPids.push(pid),
           workerEnvironment: environment,
           ...(modelService === undefined ? {} : { modelHostPort: modelService }),
-          ...(assistantService === undefined ? {} : { assistantHostPort: { request: (request, source, signal) => assistantService.request(request, { ...source, machine: "Main" }, signal) } }),
-        });
-        const hold = input.child === undefined ? undefined : team.holdNextChild;
+        };
+        // As the installed Host does: a Work opened as the assistant runs her own Agent, every other Pi.
+        const instance = assistant && runningAssistant !== undefined
+          ? await createAssistantInstance({ ...shared, assistantHostPort: { request: (request, source, signal) => runningAssistant.request(request, { ...source, machine: "Main" }, signal) } })
+          : await createPiInstance({ ...shared, ...(child === undefined ? {} : { child }) });
+        const hold = child === undefined ? undefined : team.holdNextChild;
         team.holdNextChild = undefined;
         await hold?.();
         return instance;
@@ -81,12 +98,19 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
         reopenTargetResolver: { resolve: resolvePiReopenTarget },
         trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
-        assistantAvailable: assistantService !== undefined,
+        ...(attachmentService === undefined ? {} : { attachmentHostPort: attachmentService }),
+        ...(assistantService === undefined ? {} : { assistantWorkspace: cwd }),
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }) });
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
       await team.host.start();
-      return team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
+      team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
+      if (assistantService !== undefined) await team.assistantWork();
+      return team.client;
+    },
+    async assistantWork() {
+      await waitFor(async () => (await team.client!.list()).some((work) => work.assistant && work.lifecycle === "active"), "Main did not open its resident assistant");
+      return (await team.client!.list()).find((work) => work.assistant && work.lifecycle === "active")!;
     },
   };
   context.after(async () => {

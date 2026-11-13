@@ -16,8 +16,9 @@ import { createIsolatedPiInstance as createPiInstance } from "./fixtures/isolate
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { RuntimeEffectUnknownError, type InstanceSnapshot } from "../src/core/managed-instance.js";
-import { PiWorkerProcess } from "../src/pi/worker-process.js";
-import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerIdentity } from "../src/pi/worker-protocol.js";
+import { piWorkerLaunch } from "../src/pi/pi-worker-launch.js";
+import { WorkerProcess } from "../src/worker/worker-process.js";
+import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerIdentity } from "../src/worker/worker-protocol.js";
 
 const ZERO_USAGE = {
   input: 0,
@@ -425,7 +426,7 @@ test("one crashed Worker leaves a saved diagnostic while other work continues", 
     assert.equal(incidents[0]?.instanceId, "worker-first");
     assert.equal(incidents[0]?.workName, "Windows migration");
     assert.equal(incidents[0]?.machineName, "Windows worker");
-    assert.match(incidents[0]?.cause ?? "", /Pi worker exited/u);
+    assert.match(incidents[0]?.cause ?? "", /Worker exited/u);
     assert.equal(second.snapshot().lifecycle, "active");
     assert.equal(second.snapshot().execution, "idle");
     await second.disposeUnpublished();
@@ -623,10 +624,12 @@ export default function (pi) {
 
   await rm(descendantFile, { force: true });
   const orphanIdentity: WorkerIdentity = { hostEpoch: "orphan-host", instanceId: "orphan-instance", runtimeGeneration: 1, workerIncarnation: "orphan-incarnation" };
-  const orphan = new PiWorkerProcess({
+  const orphan = new WorkerProcess({
     identity: orphanIdentity,
-    init: { cwd: process.cwd(), agentDir, sessionDir: join(root, "orphan-sessions"), projectTrusted: true, tools: [] },
-    environment: isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir }),
+    launch: piWorkerLaunch(
+      { cwd: process.cwd(), agentDir, sessionDir: join(root, "orphan-sessions"), projectTrusted: true, tools: [] },
+      isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir }),
+    ),
   });
   const orphanReceiver = new WorkerFrameReceiver(() => true);
   const orphanSender = new OrderedWorkerSender(orphanIdentity, (message, callback) => orphan.child.send(message, callback));

@@ -43,6 +43,7 @@ import {
   type AssistantMemoryListRequest,
   type AssistantMemoryUpdateRequest,
   type AssistantModelRef,
+  type AssistantSettingsEdit,
   type AssistantSearchRequest,
   type AssistantTimelineListRequest,
   type AssistantTimelineUpdateRequest,
@@ -448,7 +449,7 @@ export type ControlRequest =
   | Request<"assistant.timeline.get", { id: string }>
   | Request<"assistant.timeline.update", { operationId: string } & AssistantTimelineUpdateRequest>
   | Request<"assistant.settings.get", Record<string, never>>
-  | Request<"assistant.settings.set", { operationId: string; extractionModel: AssistantModelRef | null }>
+  | Request<"assistant.settings.set", { operationId: string } & AssistantSettingsEdit>
   | Request<"assistant.reorganize", { operationId: string; extractionModel: AssistantModelRef }>
   | Request<"resource.content", { instanceId: string; contentRef: string; offset?: number; revision?: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
@@ -1386,8 +1387,8 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryUpdateParams(rest, "params")) } };
     }
     case "assistant.settings.set":
-      exact(params, ["operationId", "extractionModel"], "invalid_request");
-      return { ...base, type, params: { operationId: operationId(), extractionModel: assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
+      exact(params, ["operationId", "extractionModel", "handoff", "extensions"], "invalid_request");
+      return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
     case "assistant.reorganize":
       exact(params, ["operationId", "extractionModel"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), extractionModel: assistantParams(() => parseAssistantReorganizeParams(params, "params")) } };

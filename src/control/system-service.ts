@@ -122,10 +122,8 @@ export class SystemService {
     const { candidates, warnings } = await this.sources(cwd);
     if (initializationWarning) warnings.unshift(initializationWarning);
     let defaultSelection: SystemCandidate | undefined;
-    let defaultAssistant = false;
     try {
       const saved = await this.savedDefault(cwd);
-      defaultAssistant = saved?.assistant === true;
       const id = saved?.id;
       if (id !== undefined) {
         defaultSelection = candidates.find((item) => item.id === id && !item.warning);
@@ -134,25 +132,16 @@ export class SystemService {
     } catch {
       warnings.push("本目录保存的 system 无法使用。请重新选择；需要时再明确保存目录默认。");
     }
-    return this.page(cwd, candidates, warnings, cursor, limit, defaultSelection, defaultAssistant);
+    return this.page(cwd, candidates, warnings, cursor, limit, defaultSelection);
   }
 
-  /**
-   * Creation defaults belong to the owning Host, regardless of the requesting Client. The assistant is
-   * a Work's system (2026-11-12, card #295): a Work opened as her takes none, and a Work given a system
-   * is not her. Otherwise the directory decides: opening as her unless the creator said no, then the
-   * saved system.
-   */
+  /** New Works use the directory's saved system. Alu is opened only by Main, not by a directory default. */
   async resolveCreation(cwd: string, provided?: JsonObject, assistant?: boolean): Promise<{ workerConfig?: JsonObject; assistant: boolean }> {
     const given = provided === undefined ? {} : { workerConfig: provided };
-    if (this.provider.hasExplicitSelection(provided)) {
-      if (assistant === true) throw new ProtocolValidationError("invalid_request", "以助手身份打开的 Work 不选 system：她的人设和记忆代替 system 的开头。请去掉 system 选择，或关掉「以助手身份打开」后重试。");
-      return { ...given, assistant: false };
-    }
-    if (assistant === true) return { ...given, assistant: true };
+    if (assistant === true) throw new ProtocolValidationError("invalid_request", "常驻助手由 Main 自动打开，不再随工作目录创建。请从工作列表打开助手，或去掉助手选择。");
+    if (this.provider.hasExplicitSelection(provided)) return { ...given, assistant: false };
     cwd = await this.directory(cwd);
     const saved = await this.savedDefault(cwd);
-    if (assistant === undefined && saved?.assistant === true) return { ...given, assistant: true };
     if (saved?.id === undefined) return { ...given, assistant: false };
     try {
       const selection = await this.selected(cwd, saved.id);
@@ -160,29 +149,12 @@ export class SystemService {
     } catch { throw this.defaultUnavailable(); }
   }
 
-  /**
-   * The assistant's own working directory opens new Works as her unless its saved default says
-   * otherwise. A default already there is left as it is.
-   */
-  async prepareAssistantWorkspace(path: string): Promise<void> {
-    const file = join(path, ".aludock", "system-default.json");
-    await mkdir(dirname(file), { recursive: true });
-    const temporary = `${file}.${randomUUID()}.tmp`;
-    try {
-      const handle = await open(temporary, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify({ assistant: true }) + "\n"); await handle.sync(); }
-      finally { await handle.close(); }
-      try { await link(temporary, file); }
-      catch (error) { if (errorCode(error) !== "EEXIST") throw error; }
-    } finally { await rm(temporary, { force: true }); }
-  }
-
   private defaultUnavailable(): ProtocolValidationError {
     return new ProtocolValidationError("system_default_unavailable", "无法使用本目录保存的 system 默认。请检查 .aludock/system-default.json 及其所选文件，或明确选择其他 system 后重试。");
   }
 
-  /** `{id?, assistant?}`: the system chosen for this directory and whether new Works open as the assistant. */
-  private async savedDefault(cwd: string): Promise<{ id?: string; assistant?: true } | undefined> {
+  /** Old assistant defaults are accepted on disk but no longer make a new Work into Alu. */
+  private async savedDefault(cwd: string): Promise<{ id?: string } | undefined> {
     const path = join(cwd, ".aludock", "system-default.json");
     try { await lstat(path); }
     catch (error) {
@@ -197,11 +169,11 @@ export class SystemService {
       if (keys.length === 0 || keys.some((key) => key !== "id" && key !== "assistant")) throw new Error();
       if (value.id !== undefined && typeof value.id !== "string") throw new Error();
       if (value.assistant !== undefined && value.assistant !== true) throw new Error();
-      return { ...(value.id === undefined ? {} : { id: value.id }), ...(value.assistant === true ? { assistant: true as const } : {}) };
+      return { ...(value.id === undefined ? {} : { id: value.id }) };
     } catch { throw this.defaultUnavailable(); }
   }
 
-  private page(cwd: string, candidates: SystemCandidate[], warnings: string[], cursor: SystemCatalogCursor | undefined, limit: number, defaultSelection?: SystemCandidate, defaultAssistant = false): SystemCatalogResult {
+  private page(cwd: string, candidates: SystemCandidate[], warnings: string[], cursor: SystemCatalogCursor | undefined, limit: number, defaultSelection?: SystemCandidate): SystemCatalogResult {
     const revision = createHash("sha256").update(JSON.stringify(candidates)).digest("hex");
     const offset = cursor?.offset ?? 0;
     if (cursor && (cursor.revision !== revision || offset >= candidates.length)) throw new ProtocolValidationError("resource_unavailable", "system 列表已变化。请重新打开选择列表。");
@@ -216,7 +188,7 @@ export class SystemService {
     return { cwd, candidates: page, total: candidates.length, revision, warnings,
       ...(defaultSelection ? { defaultSelection } : {}),
       ...(next < candidates.length ? { nextCursor: { revision, offset: next } } : {}),
-      ...(defaultAssistant ? { defaultAssistant: true as const } : {}),
+
     };
   }
 
@@ -239,30 +211,23 @@ export class SystemService {
     return readResourceContent(await this.contentPath(cwd, id), offset, revision);
   }
 
-  /**
-   * Saves what the directory remembers: the system for Works not opened as the assistant, and whether
-   * new Works open as her. Each one left out keeps what the directory had, so a client without the
-   * switch cannot clear it, and remembering her (which takes no system) keeps the saved system for
-   * Works opened otherwise, such as those the assistant creates.
-   */
+  /** Save the selected system. A previous assistant default is removed only by this explicit save. */
   async setDefault(cwd: string, id: string | undefined, assistant?: boolean): Promise<SystemDefaultSetResult> {
-    if (id === undefined && assistant !== true) throw new ProtocolValidationError("invalid_request", "保存目录默认时需要选一份 system，或者以助手身份打开。");
+    if (assistant === true) throw new ProtocolValidationError("invalid_request", "常驻助手只有一个，不能保存成目录默认。请选一份普通 Work 使用的 system。");
+    if (id === undefined) throw new ProtocolValidationError("invalid_request", "保存目录默认时需要选一份 system。请先选择再保存。");
     cwd = await this.directory(cwd);
-    const selection = id === undefined ? undefined : await this.selected(cwd, id);
-    const saved = await this.savedDefault(cwd).catch(() => undefined);
-    const keptId = id ?? saved?.id;
-    const keepsAssistant = assistant ?? saved?.assistant === true;
+    const selection = await this.selected(cwd, id);
     const path = join(cwd, ".aludock", "system-default.json");
     const temporary = `${path}.${randomUUID()}.tmp`;
     try {
       await mkdir(dirname(path), { recursive: true });
       const handle = await open(temporary, "wx", 0o600);
-      try { await handle.writeFile(JSON.stringify({ ...(keptId === undefined ? {} : { id: keptId }), ...(keepsAssistant ? { assistant: true } : {}) }) + "\n"); await handle.sync(); }
+      try { await handle.writeFile(JSON.stringify({ id }) + "\n"); await handle.sync(); }
       finally { await handle.close(); }
       await rename(temporary, path);
     } catch { throw new ProtocolValidationError("system_default_unavailable", "无法保存本目录的默认选择。请检查 .aludock 的写入权限后重试；本次仍可单独选择。"); }
     finally { await rm(temporary, { force: true }).catch(() => {}); }
-    return selection === undefined ? {} : { selection };
+    return { selection };
   }
 }
 

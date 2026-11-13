@@ -11,7 +11,7 @@ import { useNextPage } from '../lib/nextPage'
 import { onceAfterLostReply } from '../lib/operationBinding'
 import type {
   AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemorySource,
-  AssistantMemoryTopic, AssistantSettings, ModelRef,
+  AssistantMemoryTopic, AssistantSettings, AssistantHandoffSettings, ModelRef,
 } from '../lib/types'
 import { errorCode, userErrorMessage } from '../lib/userError'
 import { useAppStore } from './app'
@@ -332,6 +332,56 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     error: '',
     save: null as null | { state: 'pending' | 'saved' | 'failed'; model: ModelRef | null; message: string },
   })
+  // The hand-over editor keeps its draft across section changes and closing the page.
+  const handoffs = reactive(new Map<string, {
+    current: AssistantHandoffSettings | null
+    draft: AssistantHandoffSettings | null
+    save: { state: 'pending' | 'saved' | 'failed'; message: string } | null
+  }>())
+  function handoffFor(connectionId: string) {
+    if (!handoffs.has(connectionId)) handoffs.set(connectionId, { current: null, draft: null, save: null })
+    return handoffs.get(connectionId)!
+  }
+  const handoff = computed(() => handoffFor(app.activeConnectionId ?? ''))
+  const handoffValues = computed(() => handoff.value.draft ?? handoff.value.current)
+  function editHandoff(edit: Partial<AssistantHandoffSettings>) {
+    if (handoffValues.value) handoff.value.draft = { ...handoffValues.value, ...edit }
+  }
+  async function saveHandoff() {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    const values = handoffValues.value
+    if (!context || !values || handoff.value.save?.state === 'pending') return
+    const entry = handoffFor(context.connectionId)
+    const submitted = { ...values }
+    entry.save = { state: 'pending', message: '正在保存…' }
+    try {
+      const saved = await once([context.connectionId, 'handoff settings'], submitted, operationId => setAssistantSettings({ handoff: submitted }, operationId, context))
+      if (!saved.handoff) {
+        entry.save = { state: 'failed', message: '这台 Dock 尚不支持滚动整理设置，未确认保存成功。请更新 Main 后重试。' }
+        return
+      }
+      entry.current = saved.handoff
+      if (JSON.stringify(entry.draft) === JSON.stringify(submitted)) entry.draft = null
+      entry.save = { state: 'saved', message: '已保存。下一次整理用新设置，已经开始的那次照原设置完成。' }
+    } catch (cause) {
+      entry.save = { state: 'failed', message: userErrorMessage(cause, '没有保存成功，草稿还在。请稍后重试。') }
+    }
+  }
+
+  const handoffWork = computed(() => app.works.find(work => work.assistant))
+  const handoffStatus = reactive({ loading: false, error: '' })
+  async function refreshHandoffStatus() {
+    if (handoffStatus.loading) return
+    handoffStatus.loading = true
+    handoffStatus.error = ''
+    const context = app.connectionContext
+    const refreshed = await app.refreshWorksQuietly()
+    if (context && app.contextMatches(context)) {
+      if (!refreshed) handoffStatus.error = '暂时读不到最新整理状态，下面保留上次读到的内容。请稍后刷新。'
+      handoffStatus.loading = false
+    }
+  }
+
   /**
    * Every request about the settings — a read, a choice, a start-over — takes the next number.
    * What an answer says the settings are is taken only from the latest request sent: an earlier
@@ -387,6 +437,11 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       // A choice or a start-over whose reply was lost is no longer waiting to be asked again.
       once.known(makingMemories(connectionId))
       settings.current = read
+      const editor = handoffFor(connectionId)
+      if (editor.save?.state !== 'pending') {
+        editor.current = read.handoff ?? null
+        once.known([connectionId, 'handoff settings'])
+      }
       // What Main has now replaces the outcome of an earlier save.
       if (!check) settings.save = null
       else if (settings.save?.state === 'saved' && !sameModel(settings.save.model, read.extractionModel)) {
@@ -410,7 +465,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     if (restart.state !== 'pending') Object.assign(restart, { state: 'idle', message: '' })
     settingBegins(context.connectionId)
     try {
-      const saved = await once(makingMemories(context.connectionId), ['model', model], (operationId) => setAssistantSettings(model, operationId, context))
+      const saved = await once(makingMemories(context.connectionId), ['model', model], (operationId) => setAssistantSettings({ extractionModel: model }, operationId, context))
       // The settings shown went with the connection they were read from.
       if (context.connectionId !== app.activeConnectionId) return
       if (asked === settingsAsked) settings.current = saved
@@ -453,7 +508,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       const result = await once(makingMemories(context.connectionId), ['start over', model], (operationId) => reorganizeAssistant(model, operationId, context))
       if (context.connectionId !== app.activeConnectionId) return
       // Starting over sets the model too; answered after a later choice, it is told but does not put its model back.
-      if (asked === settingsAsked) settings.current = { extractionModel: result.extractionModel }
+      if (asked === settingsAsked) settings.current = { ...settings.current, extractionModel: result.extractionModel }
       if (asked === startOverShown) Object.assign(restart, {
         state: 'done',
         message: `已开始从头整理：后台整理出的 ${result.retiredMemories} 条记忆挪进了「已作废」，它写的 ${result.removedLines} 行时间线清掉了。她正在把所有对话从头读一遍，读完之前，新开的会话里记忆不全。`,
@@ -487,6 +542,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     Object.assign(list, { shown: null, memories: [], nextCursor: undefined, loading: false, error: '', notice: '', failure: '' })
     closeMemory()
     Object.assign(settings, { current: null, loading: false, error: '', save: null })
+    Object.assign(handoffStatus, { loading: false, error: '' })
     Object.assign(restart, { state: 'idle', message: '' })
   })
 
@@ -497,6 +553,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     source: sourceReading.state, openSource, readSourceMore: sourceReading.readMore, closeSource: sourceReading.close,
     draft, hasDrafts, startWriting, editDraft, dropDraft, writeMemory,
     settings, loadSettings, chooseModel, models, loadModels,
+    handoff, handoffValues, editHandoff, saveHandoff, handoffWork, handoffStatus, refreshHandoffStatus,
     restart, askRestart, cancelRestart, startOver,
   }
 })

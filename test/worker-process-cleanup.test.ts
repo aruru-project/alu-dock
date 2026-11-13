@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { terminateDetachedProcessTree } from "../src/pi/worker-process.js";
+import { terminateDetachedProcessTree } from "../src/worker/worker-process.js";
 import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 test("Worker cleanup terminates a descendant forked during the Linux process scan", async (context) => {

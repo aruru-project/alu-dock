@@ -374,11 +374,12 @@ try {
   }
   console.log('PASS: directory/recent → first candidate preselected → raw whole-file preview/copy → retained choice → once/save/failures/trust; model choice rides with the system; stale discovery fenced; actual TS IPC payloads')
 
-  // Card #295: a new Work can open as the assistant. The choice sits on the system page, starts from the
+  // Older Hosts keep #295's creation choice. A permanent-assistant Host (#670) no longer offers it.
+  // On older Hosts the choice sits on the system page, starts from the
   // directory's saved choice, can be remembered with the default, and is fixed when the Work is created.
   // Creating and saving the default send the choice only when it matters ("on", or "off" against a
   // directory that opens as her); without the field the Host keeps the directory's choice.
-  for (const scenario of ['default-on', 'override-off', 'plain-off', 'save-on', 'direct-default', 'choose-first', 'choose-first-remembered', 'workspace', 'trust', 'unavailable', 'saved-then-unavailable', 'save-lost-then-off', 'unsupported-target']) {
+  for (const scenario of ['default-on', 'override-off', 'plain-off', 'save-on', 'direct-default', 'choose-first', 'choose-first-remembered', 'resident', 'trust', 'unavailable', 'saved-then-unavailable', 'save-lost-then-off', 'unsupported-target']) {
     const store = await createStore()
     const calls = [], created = []
     const workspace = '/home/alu/.aludock/assistant'
@@ -398,7 +399,7 @@ try {
         const remembered = args.cwd === workspace || remembersAssistant
         // The directory saved a default system in the last three: choosing it would create at once.
         const savedSystem = ['direct-default', 'choose-first', 'choose-first-remembered'].includes(scenario)
-        return { cwd: args.cwd, candidates: [project, template], total: 2, revision: 'r', warnings: [], assistantChoice: true,
+        return { cwd: args.cwd, candidates: [project, template], total: 2, revision: 'r', warnings: [], assistantChoice: scenario !== 'resident',
           ...(remembered ? { defaultAssistant: true } : {}), ...(savedSystem ? { defaultSelection: project } : {}) }
       }
       if (command === 'set_system_default') {
@@ -426,15 +427,12 @@ try {
     const toggle = () => find(find(container, hasClass('new-work-assistant')) ?? node('none'), item => item.type === 'input')
     const creates = () => calls.filter(c => c.command === 'create_work')
     await settle()
-    if (scenario === 'workspace') {
-      // Her workspace is on Main; the shortcut takes the same steps as choosing that directory there.
-      // (2026-11-12) It remembers opening as her, who takes no system, so it no longer asks for one.
-      await click('选择 Machine'); await click('笔记本 · SubHost')
-      await click('助手的工作区')
-      const read = calls.find(c => c.command === 'system_catalog')
-      assert.deepEqual([read.args.cwd, read.args.targetHostId], [workspace, 'target'], 'the shortcut reads her workspace on Main')
-      assert.deepEqual([creates().length, creates()[0].args.cwd, creates()[0].args.targetHostId, creates()[0].args.assistant, creates()[0].args.workerConfig], [1, workspace, 'target', null, null], 'it creates at once and the Host opens it as her')
-      assert.equal(created[0].assistant, true)
+    if (scenario === 'resident') {
+      assert.equal(!!button('助手的工作区'), false, 'new Work does not offer to create another assistant in her directory')
+      await click('project')
+      assert.equal(!!toggle(), false, 'a permanent-assistant Host offers no assistant creation choice')
+      await click('确认并创建')
+      assert.deepEqual([creates()[0].args.assistant, creates()[0].args.workerConfig], [null, project.workerConfig], 'ordinary Work creation still uses the selected system')
       app.unmount(); continue
     }
     const setToggle = async on => { const input = toggle(); input.checked = on; input.change(); await settle() }
@@ -444,7 +442,7 @@ try {
       // that holds the switch: it could never open as her, nor change what the directory remembers.
       // Ticked on the first screen, every way of choosing a directory stops at that page first.
       const first = find(container, item => item.type === 'input' && item.props.type === 'checkbox')
-      assert.ok(first && text(container).includes('创建前先选 system 和身份'), 'the first screen offers choosing before creating')
+      assert.ok(first && text(container).includes('创建前先选 system'), 'the first screen offers choosing before creating')
       first.checked = true; first.change(); await settle()
       await click('project')
       assert.equal(creates().length, 0, 'nothing is created before the choice is confirmed')
@@ -540,7 +538,7 @@ try {
     assert.equal(created.length, 1)
     app.unmount()
   }
-  console.log('PASS: open as the assistant: switch starts from the directory default, takes the place of a system (none listed or sent), sent only when it matters, remembered with the default without a system, said as off against a default just saved here when the creation failed or the reply of the save was lost, survives trust, refused by an older machine with a way on; a usable default or a directory that opens as her lets the Host decide unless choosing first is ticked, which stops at the page to open as her or change what the directory remembers; her workspace on Main opens her at once')
+  console.log('PASS: open as the assistant: switch starts from the directory default, takes the place of a system (none listed or sent), sent only when it matters, remembered with the default without a system, said as off against a default just saved here when the creation failed or the reply of the save was lost, survives trust, refused by an older machine with a way on; a usable default or a directory that opens as her lets the Host decide unless choosing first is ticked, which stops at the page to open as her or change what the directory remembers; a permanent-assistant Host offers ordinary Work creation only')
 
   // A closed browser shares the real Work prop with the shell. Content-only
   // snapshots must not enqueue native file cleanup on that hidden surface.

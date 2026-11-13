@@ -22,7 +22,7 @@ const app = useAppStore()
 const selected = computed(() => app.selectedWork)
 const input = useInputStore()
 const { draft, composerTextarea, expandedTextarea, composerTall, queueRestoring, queueNotice, queueItems, submitting, visibleComposerError, canSubmit, suggestIndex, slashQuery, suggestItems, suggestOpen, composerArgumentLoading } = storeToRefs(input)
-const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, runQuickButton, quickButtonDisabled } = input
+const { rememberSelection, trackComposition, submit, submitExpanded, restoreQueue, applyExtensionEditorText, completeSuggest, handleComposerKeydown, clearQueueImages, runQuickButton, quickButtonDisabled, quickButtonVisible } = input
 const attachments = useAttachmentsStore()
 const { draftAttachments, attachmentPreviews, uploadDrafts, attachmentPicking, clearingRestoredImages, restoredImageCount, maxMessageAttachments, fileDragOver } = storeToRefs(attachments)
 const { handleComposerPaste, launchAttachmentUpload, cancelUpload, removeUpload, removeUploaded, openAttachmentPreview, chooseAttachments } = attachments
@@ -31,7 +31,7 @@ const { modalOpen, composerExpanded, workspaceBrowserOpen } = storeToRefs(surfac
 const { rememberModalTrigger, handleModalKeydown, handleModalWheel, bindSurface, openControlCenter, openWorkspaceBrowser } = surfaces
 // The middle of the button row: the user's quick buttons in their order. Phones show the first three (CSS).
 const quickButtons = useQuickButtonsStore()
-const rowQuickButtons = computed(() => quickButtons.buttons.slice(0, QUICK_BUTTONS_IN_ROW))
+const rowQuickButtons = computed(() => quickButtons.buttons.filter(quickButtonVisible).slice(0, QUICK_BUTTONS_IN_ROW))
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '\u2318K' : 'Ctrl+K'
 const workActions = useWorkActionsStore()
 const { actionNotice } = storeToRefs(workActions)
@@ -85,7 +85,7 @@ const applyExtensionTitle = (title: string) => { document.title = title }
           <button v-if="composerTall" type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" @click="rememberModalTrigger(); composerExpanded = true"><Maximize2 :size="14" /></button>
         </div>
         <div class="alu-composer-actions">
-          <button type="button" class="alu-bar-btn" title="添加附件" aria-label="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= maxMessageAttachments" @click="chooseAttachments"><Paperclip :size="15" /><span>附件</span></button>
+          <button type="button" class="alu-bar-btn" :title="selected?.assistant ? '添加附件：图片直接看，其他文件交给她读取和解析' : '添加附件'" aria-label="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= maxMessageAttachments" @click="chooseAttachments"><Paperclip :size="15" /><span>附件</span></button>
           <button type="button" class="alu-bar-btn" title="浏览当前 Work 的工作区" aria-label="打开工作区" :aria-expanded="workspaceBrowserOpen" :disabled="!isTauri" @click="openWorkspaceBrowser"><FolderTree :size="15" /><span>工作区</span></button>
           <template v-if="rowQuickButtons.length">
             <div class="alu-composer-actions-sep" aria-hidden="true" />

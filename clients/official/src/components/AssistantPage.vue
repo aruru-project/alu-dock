@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { BookUser, Brain, Eye, NotebookPen, RefreshCw, Search, Settings2, Sparkles, X } from '@lucide/vue'
 import { assistantTime, memoryResidentLabel } from '../lib/assistant'
@@ -13,7 +13,7 @@ import AssistantMemories from './AssistantMemories.vue'
 import AssistantSearch from './AssistantSearch.vue'
 import AssistantSettings from './AssistantSettings.vue'
 
-// The assistant kept on Main (card #295). Her persona can be the user's own assistant, so the page says 「助手」, never a name.
+// Her settings and memories stay on Main; the conversation entry opens the listed Work, never a new one.
 const emit = defineEmits<{ close: [] }>()
 const app = useAppStore()
 const assistant = useAssistantStore()
@@ -22,6 +22,12 @@ const search = useAssistantSearchStore()
 const { preview, info } = storeToRefs(assistant)
 const surfaces = useSurfacesStore()
 const { assistantSection: section } = storeToRefs(surfaces)
+const assistantWork = computed(() => app.works.find(work => work.assistant))
+function openConversation() {
+  if (!assistantWork.value) return
+  app.selectWork(assistantWork.value.id)
+  emit('close')
+}
 
 const sections: Array<{ id: AssistantSection; label: string; icon: typeof Eye }> = [
   { id: 'preview', label: '她会读到什么', icon: Eye },
@@ -50,6 +56,7 @@ watch([section, () => app.connectionContext?.connectionId, () => app.connectionC
   } else if (current === 'settings') {
     void memory.loadSettings()
     void memory.loadModels()
+    void memory.refreshHandoffStatus()
   }
 }, { immediate: true })
 
@@ -70,7 +77,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <span class="assistant-mark"><Sparkles :size="20" /></span>
       <div>
         <h2 id="assistant-title">助手</h2>
-        <p>她的人设、你写的设定、她记住的事和经历过的对话，都保存在 Main 上</p>
+        <p>助手一直住在 Main，对话、人设和记忆都留在这里</p>
       </div>
     </div>
     <button class="assistant-close" data-modal-initial aria-label="关闭" @click="emit('close')"><X :size="18" /></button>
@@ -85,6 +92,9 @@ onUnmounted(surfaces.onAssistantBack(() => {
     </nav>
 
     <main :key="section" class="assistant-content">
+      <div v-if="assistantWork" class="assistant-toolbar">
+        <button type="button" class="button secondary" @click="openConversation">打开{{ assistantWork.displayName || '助手' }}的对话</button>
+      </div>
       <p v-if="info?.extraction?.state === 'off' && section !== 'settings'" class="assistant-note is-warning has-action" role="status">
         <span>还没选整理记忆的模型，她现在不会从对话里自动记东西。</span>
         <button type="button" class="alu-link-button" @click="section = 'settings'">去选模型</button>
@@ -93,7 +103,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <template v-if="section === 'preview'">
         <div class="assistant-intro">
           <h3>她会读到什么</h3>
-          <p>现在新开一个助手会话，她会先读到下面的全文。</p>
+          <p>下面是目前保存的人设、手写设定和记忆。到她的对话里点“刷新助手（Reload）”，她会重新读入这些内容，对话不会重来。</p>
         </div>
         <div class="assistant-toolbar">
           <span v-if="preview?.result" class="assistant-meta">生成于 {{ assistantTime(preview.result.loadedAt) }}</span>
@@ -107,8 +117,8 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <template v-else-if="section === 'persona' || section === 'notes'">
         <div class="assistant-intro">
           <h3>{{ section === 'persona' ? '人设' : '手写设定' }}</h3>
-          <p v-if="section === 'persona'">她是谁、怎么说话。保存后，新开的助手会话会读到。</p>
-          <p v-else>你写给她的设定和要记住的事。保存后，新开的助手会话会读到。</p>
+          <p v-if="section === 'persona'">她是谁、怎么说话。保存后，到她的对话里点“刷新助手（Reload）”，她就会读到改动。</p>
+          <p v-else>你写给她的设定和要记住的事。保存后，到她的对话里点“刷新助手（Reload）”，她就会读到改动。</p>
         </div>
         <AssistantDocumentEditor :document="section" />
       </template>
@@ -116,7 +126,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
       <template v-else-if="section === 'memories'">
         <div v-if="!memory.detail.id" class="assistant-intro">
           <h3>记忆</h3>
-          <p>她从对话里记住的事。「{{ memoryResidentLabel(true) }}」的会写进每个新开的助手会话，其余的她查的时候才用。你在这里改过的，后台整理不会再动。</p>
+          <p>她从对话里记住的事。「{{ memoryResidentLabel(true) }}」的会随人设一起读入，其余的她查的时候才用。你在这里改过的，后台整理不会再动。</p>
         </div>
         <AssistantMemories @settings="section = 'settings'" />
       </template>

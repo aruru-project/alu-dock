@@ -281,7 +281,7 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
 let mounted
 try {
-  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
+  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
   await build({ root, configFile: false, logLevel: 'silent', build: { outDir: directory, emptyOutDir: false, minify: false,
     lib: { entry: join(directory, 'entry.ts'), formats: ['es'], fileName: () => 'app.mjs' }, rolldownOptions: { external: ['vue', 'pinia'] } },
     plugins: [{ name: 'native-boundary', enforce: 'pre', resolveId(id) {
@@ -1793,6 +1793,8 @@ try {
     // Main does a change once per operation; the same operation sent again gets its answer again.
     const answered = new Map()
     let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings
+    let handoff = { startTokens: null, keepRecentTokens: null, prompt: 'Main 提供的完整交接要求。' }
+    let extensions = [{ id: 'local', module: '/home/owner/tools.mjs', enabled: true, config: {} }]
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
       if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: !model ? { state: 'off', waitingSessions: 1 }
@@ -1828,13 +1830,16 @@ try {
         if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
         return structuredClone(changed)
       }
-      if (command === 'assistant_settings') return model ? { extractionModel: model } : {}
+      if (command === 'assistant_settings') return { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
       if (command === 'set_assistant_settings' || command === 'reorganize_assistant') {
         const done = () => {
           if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
-          model = args.extractionModel ?? undefined
+          const edit = command === 'reorganize_assistant' ? args : args.settings
+          if ('extractionModel' in edit) model = edit.extractionModel ?? undefined
+          if (edit.handoff) handoff = structuredClone(edit.handoff)
+          if (edit.extensions) extensions = structuredClone(edit.extensions)
           if (command === 'reorganize_assistant') startedOver++
-          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : model ? { extractionModel: model } : {}
+          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
           answered.set(args.operationId, structuredClone(result))
           if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
           return result
@@ -2014,15 +2019,44 @@ try {
       holdSettings = undefined; finishSave(); await settle()
     }
     await choose('GPT mini')
-    assert.deepEqual(sent('set_assistant_settings').extractionModel, { provider: 'openai', id: 'gpt-mini' })
+    assert.deepEqual(sent('set_assistant_settings').settings.extractionModel, { provider: 'openai', id: 'gpt-mini' })
     assert.ok(text(page()).includes('已保存') && text(page()).includes('1 段对话'), text(page()))
+    // #670: the complete instruction comes from Main, and manual values or automatic values save through the same settings entry.
+    assert.equal(labelled('交接记录提示词').props.value, 'Main 提供的完整交接要求。')
+    await type('开始整理的 token 数', '55000')
+    await type('保留最近原话的 token 数', '12000')
+    await type('交接记录提示词', '请以小满的口吻交接，只写尚待完成的事。')
+    await click(page(), '保存滚动整理设置')
+    assert.deepEqual(sent('set_assistant_settings').settings, { handoff: { startTokens: 55000, keepRecentTokens: 12000, prompt: '请以小满的口吻交接，只写尚待完成的事。' } })
+    assert.deepEqual(model, { provider: 'openai', id: 'gpt-mini' }, 'editing the hand-over does not change the memory model')
+    await click(page(), '恢复自动值')
+    await click(page(), '保存滚动整理设置')
+    assert.deepEqual(sent('set_assistant_settings').settings.handoff, { startTokens: null, keepRecentTokens: null, prompt: '请以小满的口吻交接，只写尚待完成的事。' })
+    // #670: edit only one extension's JSON and switch, through the real settings controls and bridge.
+    assert.equal(labelled('扩展模块 1').props.value, '/home/owner/tools.mjs')
+    await type('扩展 JSON 配置 1', '{"token":"PRIVATE_UI_CONFIG"}')
+    labelled('启用扩展 1').props.onChange({ target: { checked: false } }); await settle()
+    await click(page(), '保存扩展设置')
+    assert.deepEqual(sent('set_assistant_settings').settings, { extensions: [{ id: 'local', module: '/home/owner/tools.mjs', enabled: false, config: { token: 'PRIVATE_UI_CONFIG' } }] })
+    assert.ok(text(page()).includes('Reload'))
+    assert.equal(extensions[0].enabled, false)
+    labelled('启用扩展 1').props.onChange({ target: { checked: true } }); await settle()
+    await click(page(), '保存扩展设置')
+    assert.equal(sent('set_assistant_settings').settings.extensions[0].enabled, true)
+    await click(page(), '添加扩展')
+    await type('扩展标识 2', 'other')
+    await type('扩展模块 2', '/home/owner/other.mjs')
+    await type('扩展 JSON 配置 2', '{}')
+    await click(page(), '保存扩展设置')
+    assert.equal(sent('set_assistant_settings').settings.extensions[1].module, '/home/owner/other.mjs')
     // How making memories goes: the parts it could not read, why the last try failed and when it tries again.
+    const extractionSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status')
     troubled = true
-    await click(page(), '刷新')
-    const status = () => text(find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status'))
+    await click(extractionSection(), '刷新')
+    const status = () => text(extractionSection())
     assert.ok(status().includes('没读成') && status().includes('3 段') && status().includes('等着自动再试') && status().includes('下次重试') && status().includes('模型服务暂时连不上'), status())
     troubled = false
-    await click(page(), '刷新')
+    await click(extractionSection(), '刷新')
     // Starting over with it says first what it sets aside and what stays, then reads everything again.
     await click(page(), '用这个模型从头整理')
     assert.ok(text(page()).includes('「GPT mini」') && text(page()).includes('挪进「已作废」') && text(page()).includes('都留着'), text(page()))
@@ -2108,7 +2142,7 @@ try {
     }
     await click(page(), '整理记忆的模型')
     await click(find(page(), item => item.props.role === 'listbox'), '不整理')
-    assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
+    assert.equal(sent('set_assistant_settings').settings.extractionModel, null, 'choosing none stops making memories')
     // At the top of a section, Back closes her page.
     systemBack(); await settle()
     assertSameReference(page(), undefined, 'Back at the top closes her page')
@@ -3049,6 +3083,92 @@ try {
     console.log('PASS: quick buttons: defaults run local controls; pinned command takes an argument; send keeps draft/attachments; restart keeps buttons; insert fills without sending; overflow runs from palette; order decides the row')
   }
 
+  // #670: the owner chose one permanent assistant: open her existing conversation, keep her
+  // first with her children, and offer restart rather than the Pi-only conversation controls.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear()
+    storage.set('aludock.quickButtons', JSON.stringify([
+      { id: 'resume', name: '恢复', text: '/resume', mode: 'send' },
+      { id: 'fork', name: '自选 Fork', text: '/fork old-entry', mode: 'insert' },
+      { id: 'compact', name: '压缩', text: '/compact', mode: 'send' },
+      { id: 'hello', name: '问候', text: '早上好', mode: 'insert' },
+    ]))
+    const her = { ...otherWork, id: 'resident-assistant', displayName: '小满', name: '小满', assistant: true, runtimeGeneration: 1 }
+    const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
+    extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
+    const savedAssistant = assistantNative, savedTools = toolsNative
+    assistantNative = (command, args) => command === 'assistant_preview' ? { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' } : savedAssistant(command, args)
+    toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'built-in' } }, { name: 'local_schedule', description: 'Read a local schedule.', active: true, source: { kind: 'extension', package: 'local' } }], total: 2, truncated: false })
+    const pinia = createPinia(), assistantApp = useAppStore(pinia), assistantView = element('resident-assistant-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(assistantView); await settle()
+    const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
+    const click = async (root, label) => {
+      const target = button(root, label); assert.ok(!!target, `button exists: ${label}`)
+      target.props.onClick(); await settle()
+    }
+    const dialog = label => find(assistantView, item => item.props.role === 'dialog' && item.props['aria-label'] === label)
+    const rowNames = () => all(assistantView, item => String(item.props.class).split(' ').includes('alu-instance-name')).map(visibleText)
+    assert.deepEqual(rowNames().slice(0, 4), ['助手小满', '她的子 Work', 'Work', '普通子 Work'], 'pinning her keeps each parent and its children together')
+    await click(assistantView, '助手')
+    await click(assistantView, '打开小满的对话')
+    assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'the settings page opens the already listed assistant')
+    const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
+    assert.deepEqual(quickNames(), ['问候'], 'saved Pi-only buttons stay out of her input row')
+    const composer = () => find(assistantView, item => item.type === 'textarea' && item.props.placeholder === '输入消息…')
+    composer().props['onUpdate:modelValue']('/res'); await settle()
+    const suggestions = all(assistantView, item => item.props.role === 'option').map(text).join(' ')
+    assert.equal(suggestions.includes('/resume'), false, 'slash suggestions do not offer a second conversation')
+    composer().props['onUpdate:modelValue']('还没发完的话'); await settle()
+    await click(assistantView, '打开命令中心')
+    const paletteLabels = () => all(dialog('命令中心'), item => String(item.props.class).split(' ').includes('cmd-palette-item-label')).map(text)
+    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '自选 Fork', '压缩']) {
+      assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
+    }
+    assert.ok(paletteLabels().includes('Rename Session'), 'the owner can still rename the assistant')
+    // Seen in the real Desktop trial: state and resources had become two identical entries.
+    assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
+    await click(dialog('命令中心'), '刷新助手（Reload）重新读入人设、手写设定、记忆和工具扩展，对话接着原来的')
+    assert.ok(!!dialog('刷新助手（Reload）'), 'Reload stays available with her meaning')
+    await click(dialog('刷新助手（Reload）'), '取消')
+    await click(assistantView, '打开命令中心')
+    const toolOption = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('她能用的工具'))
+    assert.ok(!!toolOption); toolOption.props.onClick(); await settle()
+    assert.ok(text(dialog('她能用的工具')).includes('读取文件里的文字和图片。'), 'her actual tools and descriptions are readable')
+    assert.ok(text(dialog('她能用的工具')).includes('extension / local'), 'the actual tool list identifies its extension source')
+    assert.equal(all(dialog('她能用的工具'), item => item.type === 'button').some(item => text(item).includes('读取文件里的文字和图片。')), false, 'her tool list has no unsupported per-tool switch')
+    await click(dialog('她能用的工具'), '关闭')
+    await click(assistantView, '打开命令中心')
+    const restartOption = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('重启小满'))
+    assert.ok(!!restartOption); restartOption.props.onClick(); await settle()
+    assert.ok(!!dialog('重启小满？'), 'restart uses the assistant name from the Work list')
+    let finishRestart
+    stopNative = args => new Promise(resolve => {
+      finishRestart = () => {
+        const stopped = atHost({ ...her, lifecycle: 'stopped', execution: 'unavailable', ownerHostEpoch: undefined })
+        extraListed = [{ ...her, runtimeGeneration: 2 }]
+        resolve({ receipt: { operationId: args.operationId, alreadyStopped: false }, instance: stopped })
+      }
+    })
+    await click(dialog('重启小满？'), '确认')
+    assert.ok(text(assistantView).includes('正在重启小满'), 'the restart shows progress while Main is opening her again')
+    finishRestart(); await settle()
+    assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'restart stays on her conversation instead of dropping the Work')
+    assert.equal(assistantApp.selectedWork.lifecycle, 'active', 'the post-stop refresh shows her restarted state')
+    assert.equal(assistantApp.currentDraft, '还没发完的话', 'restart keeps the local draft')
+    assert.equal(text(assistantView).includes('正在重启小满'), false, 'the progress notice leaves once she is back')
+    assert.equal(assistantApp.selectedWork.displayName, '小满', 'restart preserves the chosen name')
+    assert.deepEqual(rowNames().slice(0, 2), ['助手小满', 'Work'])
+    assistantApp.selectWork('work'); await settle()
+    assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候'], 'the same device buttons still belong to ordinary Pi Works')
+    await click(assistantView, '打开命令中心')
+    assert.ok(paletteLabels().includes('New Session'), 'ordinary Pi conversation controls stay available')
+    extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools
+    console.log('PASS: permanent assistant: pinned with her children, existing conversation opened from settings, Pi-only controls hidden, real tools read-only, restart keeps her selected and preserves the draft')
+  }
+
   // #665 review: the color theme survives a reload, works without this device's settings,
   // tells a failed save or a failed system-bar match with a retry, and is reachable before pairing.
   {
@@ -3149,6 +3269,73 @@ try {
       console.error = loggedError; failPreferences = false; failStorage = false; failNativeAppearance = false
     }
     console.log('PASS: color theme survives a reload, works without device settings, tells a failed save or system-bar match and retries on a second click, opens before pairing')
+  }
+
+  // Card #670: a wake checkpoints its record before the assistant writes her reply.
+  // Use the real content ingress and ConversationView: choices on each live turn must
+  // follow that same reply through this intermediate checkpoint and final history handoff.
+  {
+    mounted.unmount(); await settle()
+    const { ConversationView, useConversationContent } = compiled
+    const content = useConversationContent({ beforeLayoutChange: () => null, afterLayoutChange: async () => {}, isFollowing: () => true, layoutChanged: () => {}, projected: () => {} })
+    content.publish({ ...bootstrap, records: [], activeEvents: [], historyTruncated: false })
+    const view = element('reply-turns')
+    mounted = renderer.createApp({ render: () => h(ConversationView, {
+      items: content.items.value, switching: false, streamingParts: content.streamingPartIds.value,
+      historyLoading: false, historyHydrating: false, historyTruncated: false, historyError: null, awayFromBottom: false,
+      attachmentPreviews: {}, toolOpen: () => false, imageResource: () => ({ state: 'idle' }),
+      holdReadingPosition: change => change(), restoringAnchorId: () => undefined, recordState: () => ({ loading: false }),
+    }) }).use(createPinia())
+    mounted.mount(view)
+    let sequence = 10
+    const at = seconds => new Date(Date.UTC(2026, 10, 13, 0, 0, seconds)).toISOString()
+    const send = (seconds, eventType, data = {}) => content.applyConversationEvent(content.state.value,
+      { runtimeGeneration: 1, sequence: ++sequence, occurredAt: at(seconds), eventType, data }, true)
+    const message = (seconds, messageId, role, value, stopReason = 'stop') => send(seconds, 'message.completed', { messageId, role, content: [{ type: 'text', text: value }], stopReason })
+    const record = (recordId, source, value, seconds, extra = {}) => ({ recordId, entryId: recordId, kind: 'message', source, visibility: 'conversation', timestamp: at(seconds), content: [{ type: 'text', text: value }], ...extra })
+    const records = [
+      record('request', 'user', '派个 Work 数行数', 0),
+      record('planning', 'assistant', '第一轮的过程', 1, { stopReason: 'toolUse' }),
+      record('sent', 'assistant', '我派它去数了', 3, { stopReason: 'stop' }),
+    ]
+    const handoff = async (execution) => {
+      const header = { ...bootstrap, instance: { ...work, execution }, cursor: { ...cursor, sequence }, activeEvents: [], records: [], historyTruncated: false }
+      content.acceptReadCut(sequence, header)
+      content.applyContent({ kind: 'checkpoint_begin', bootstrap: header })
+      for (const record of records) content.applyContent({ kind: 'record_chunk', entryId: record.entryId, text: JSON.stringify(record), first: true, complete: true })
+      content.applyContent({ kind: 'checkpoint_end' })
+      await settle()
+    }
+    const summaries = () => all(view, item => item.type === 'button' && item.props.class === 'alu-turn-summary-line')
+    const choices = () => summaries().map(item => item.props['aria-expanded'])
+    send(0, 'run.started'); message(0, 'request', 'user', '派个 Work 数行数')
+    message(1, 'planning', 'assistant', '第一轮的过程', 'toolUse'); message(3, 'sent', 'assistant', '我派它去数了'); send(3, 'run.settled', { result: 'succeeded' })
+    await settle()
+    summaries()[0].props.onClick(); await settle()
+    send(20, 'run.started'); message(20, 'child', 'system', '[来自子 Work「数行数」]\n子 Work 数完了')
+    await settle()
+    summaries()[1].props.onClick(); await settle()
+    assert.deepEqual(choices(), [true, false], 'the reader opened the first reply and folded the new one while it was running')
+    records.push(record('status', 'extension', '内部状态', 4, { kind: 'custom_message', customType: 'assistant-status', visibility: 'hidden' }),
+      record('child', 'extension', '[来自子 Work「数行数」]\n子 Work 数完了', 20, { kind: 'custom_message', customType: 'dock-work-message' }))
+    await handoff('running')
+    assert.deepEqual(choices(), [true, false], 'a checkpoint with only the wake message keeps both replies and their separate choices')
+    assert.ok(text(view).includes('第一轮的过程') && text(view).includes('子 Work 数完了'), 'the opened process and the folded next reply’s opener stay visible')
+    message(21, 'checking', 'assistant', '第二轮的过程', 'toolUse'); message(22, 'count', 'assistant', 'README.md 有 4 行'); send(22, 'run.settled', { result: 'succeeded' })
+    records.push(record('checking', 'assistant', '第二轮的过程', 21, { stopReason: 'toolUse' }), record('count', 'assistant', 'README.md 有 4 行', 22, { stopReason: 'stop' }))
+    await handoff('idle')
+    assert.deepEqual(choices(), [true, false], 'settled history keeps the reader’s choices on those same two replies')
+    send(405, 'run.started'); message(405, 'reminder', 'system', '提醒：喝口水'); message(407, 'drink', 'assistant', '主人，喝口水'); send(407, 'run.settled', { result: 'succeeded' })
+    await settle()
+    assert.deepEqual(choices(), [true, false, false])
+    assert.ok(text(view).includes('提醒：喝口水'), 'the live reminder remains at the start of the folded reply')
+    records.push(record('reminder', 'extension', '提醒：喝口水', 405, { kind: 'custom_message', customType: 'assistant-reminder' }), record('drink', 'assistant', '主人，喝口水', 407, { stopReason: 'stop' }))
+    await handoff('idle')
+    assert.deepEqual(choices(), [true, false, false], 'the third reply’s handoff leaves all earlier choices intact')
+    for (const line of ['第一轮的过程', '我派它去数了', '子 Work 数完了', 'README.md 有 4 行', '提醒：喝口水', '主人，喝口水']) assert.ok(text(view).includes(line), line)
+    assert.deepEqual(summaries().map(item => text(item).match(/\d+s/)?.[0]), ['3s', '2s', '2s'], 'each reply measures its own time')
+    content.dispose()
+    console.log('PASS: each awakened reply keeps its opener, final answer and fold choice through live checkpoints and history handoff (#670)')
   }
 
   }

@@ -82,7 +82,7 @@ export type DockToolsRequest =
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
   | { type: "system"; cwd: string; machine?: string; id?: string; cursor?: SystemCatalogCursor; offset?: number; revision?: string }
-  /** `assistant` opens it as the personal assistant; without it the Work is not, whatever its directory's default says. */
+  /** `assistant` is only accepted from older callers so they receive a clear refusal: Main already keeps one assistant. */
   | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: true }
   /** A child Work omits target: it can only message its parent, and `done` says whether this is its final result. */
   | { type: "send"; operationId: string; target?: string; message: string; delivery?: "followUp" | "steer"; done?: boolean }
@@ -154,7 +154,7 @@ export interface DockToolsMutationPort {
   create(input: DockCreateInput): Promise<DockToolsResult>;
   system(input: Extract<DockToolsRequest, { type: "system" }>): Promise<DockToolsResult>;
   /** `auto` joins a busy target's current turn at its next step and starts an idle one. */
-  send(input: { operationId: string; instanceId: string; message: string; delivery?: "followUp" | "steer" | "auto" }): Promise<{
+  send(input: { operationId: string; instanceId: string; message: string; delivery: "followUp" | "steer" | "auto" }): Promise<{
     target: ObservedInstanceStatus;
     receipt: Pick<CommandReceipt, "delivery" | "queued" | "acceptedAt">;
   }>;
