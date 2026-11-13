@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { startNativeTeam } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 const settled = (client: DockClient, id: string) => waitFor(async () => (await client.status(id)).execution === "idle", "The Work did not finish its turn");
@@ -21,7 +21,7 @@ async function assistantWithSmallWindow(context: test.TestContext, prefix: strin
   for (const model of models.providers.coordinator.models) model.contextWindow = 100_000;
   await writeFile(modelsFile, JSON.stringify(models));
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   return { team, client, alu, coordinator: team.providers.coordinator };
 }
 

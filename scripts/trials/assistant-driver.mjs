@@ -1,33 +1,26 @@
 // Runs in the Main container (see scripts/trials/README.md): her owner talks to the personal
 // assistant with a real model, and what she and the Works she hands things to did is printed for a
 // person to read. STEPS picks what to run, in order; MODEL=provider/id and THINKING pick her model.
-const { DockClient, ControlClientError } = await import("/opt/alu/dist/src/control/dock-client.js");
+const { DockClient } = await import("/opt/alu/dist/src/control/dock-client.js");
 const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
 
 const client = new DockClient({ socketPath: "/root/dock.sock", timeoutMs: 60_000, longMutationTimeoutMs: 180_000 });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const [provider, ...modelId] = (process.env.MODEL ?? "openai-sub/gpt-6-luna").split("/");
-const HOME = "/root/.aludock/assistant", PROJECT = "/root/project", PRINTED = "/root/trial-printed";
+const PROJECT = "/root/project", PRINTED = "/root/trial-printed";
 const clip = (text, max = 700) => text.length <= max ? text : `${text.slice(0, max)}…（共 ${text.length} 字）`;
 const seconds = (since) => `${((Date.now() - since) / 1000).toFixed(1)}s`;
 
-async function create(cwd, name) {
-  const operationId = `trial-${Date.now()}`;
-  try { return await client.create(cwd, name, operationId, undefined, undefined, undefined, undefined, true); }
-  catch (error) {
-    if (!(error instanceof ControlClientError) || error.code !== "project_trust_required") throw error;
-    return client.create(cwd, name, operationId, { challengeId: error.details.challengeId, decision: "trust_once" }, undefined, undefined, undefined, true);
-  }
-}
-
-/** Her Work: the one already open, else a new one with the model this run names. */
+/** Main opens the resident assistant itself; this driver never creates a second one. */
 async function alu() {
-  const open = (await client.list()).find((work) => work.assistant === true && work.lifecycle === "active");
-  if (open) return open;
-  const work = await create(HOME, "阿露");
+  let work;
+  await waitFor("Main 自动打开助手", async () => {
+    work = (await client.list()).find((item) => item.assistant === true && item.lifecycle === "active");
+    return work !== undefined;
+  }, 60_000);
   await client.setModel(work.id, provider, modelId.join("/"));
   await client.setThinking(work.id, process.env.THINKING ?? "low");
-  console.log(`# 新开了她的 Work ${work.id}，模型 ${provider}/${modelId.join("/")}`);
+  console.log(`# 常驻助手 ${work.displayName}，模型 ${provider}/${modelId.join("/")}`);
   return work;
 }
 

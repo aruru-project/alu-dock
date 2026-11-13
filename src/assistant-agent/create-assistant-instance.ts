@@ -28,8 +28,8 @@ export async function createAssistantInstance(options: CreateAssistantInstanceOp
     agentDir: resolve(agentDir ?? getAgentDir()),
     ...(sessionDir === undefined ? {} : { sessionDir: resolve(sessionDir) }),
     ...(sessionFile === undefined ? {} : { sessionFile: resolve(sessionFile) }),
-    // A conversation opened again keeps its own name.
-    ...(options.name === undefined || sessionFile !== undefined ? {} : { initialName: options.name }),
+    // Main names its one resident assistant, including a migrated older conversation.
+    ...(options.name === undefined ? {} : { initialName: options.name }),
     ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
   };
   return createWorkerInstance({

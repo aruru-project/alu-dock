@@ -276,8 +276,8 @@ export class DockHost {
     if (!this.modelVisibility) capabilities.delete(MODEL_VISIBILITY_CAPABILITY);
     if (!this.childModelsEditor) capabilities.delete(CHILD_MODELS_CAPABILITY);
     if (!this.assistant) capabilities.delete(ASSISTANT_CAPABILITY);
-    // A Main that routes to SubHosts lets them answer for themselves.
-    if (!this.registry.assistantAvailable && !this.instanceManager.hasRemoteDirectory()) capabilities.delete(INSTANCE_ASSISTANT_CAPABILITY);
+    // She is resident on Main; creating another assistant is no longer a client capability.
+    capabilities.delete(INSTANCE_ASSISTANT_CAPABILITY);
     if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
@@ -321,7 +321,7 @@ export class DockHost {
   recoverInstancesOnce(): Promise<void> {
     if (this.startupRecovery) return this.startupRecovery;
     if (this.state !== "running") return Promise.resolve();
-    const candidates = this.registry.list().filter((instance) => instance.reopenable);
+    const candidates = this.registry.list().filter((instance) => instance.reopenable && !instance.assistant);
     this.startupRecovery = Promise.all(candidates.map((instance) => {
       let task!: Promise<void>;
       task = this.reopenInstance({ instanceId: instance.id, operationId: randomUUID() })
@@ -380,6 +380,7 @@ export class DockHost {
         for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId, true);
       });
       this.state = "running";
+      this.registry.startAssistant();
     } catch (error) {
       await this.instanceManager.stop().catch(() => {});
       await this.remoteAccess?.stop().catch(() => {});
@@ -405,6 +406,7 @@ export class DockHost {
   private async performStop(): Promise<void> {
     try {
       if (this.startPromise) await this.startPromise.catch(() => {});
+      await this.registry.stopAssistantRecovery();
 
       const server = this.server;
       this.server = undefined;
@@ -453,6 +455,7 @@ export class DockHost {
     if ((this.state !== "running" && this.state !== "mutation_faulted" && this.state !== "stopping") || this.faultDrainPromise) return;
     if (this.state === "running") this.state = "mutation_faulted";
     this.registry.beginMutationDrain();
+    void this.registry.stopAssistantRecovery();
     void this.registry.cancelInteractionsForHostDrain();
     this.resolveFaultStarted();
     const admitted = [...this.inFlightDispatches];
@@ -617,7 +620,9 @@ export class DockHost {
         const missing = hello.requiredCapabilities.filter((capability) => !this.capabilities.has(capability));
         if (missing.length > 0) {
           terminal = true;
-          this.sendHelloError(socket, hello.requestId, "capability_missing", "Required capabilities are unavailable", { missing: [...missing].sort() });
+          this.sendHelloError(socket, hello.requestId, "capability_missing", missing.includes(INSTANCE_ASSISTANT_CAPABILITY)
+            ? "常驻助手只有一个，由 Main 自动打开。请从工作列表打开助手；新建普通 Work 时请去掉助手选择。"
+            : "Required capabilities are unavailable", { missing: [...missing].sort() });
           return;
         }
         if (hello.requiredCapabilities.includes(MULTIPLEX_CAPABILITY) && socket instanceof VirtualProtocolSocket) {

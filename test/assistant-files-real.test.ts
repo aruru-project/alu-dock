@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { DockEvent } from "../src/core/managed-instance.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { startNativeTeam } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -38,7 +38,7 @@ test("the assistant reads and searches files and uploaded text and images hersel
   await writeFile(textFile, "The uploaded note says: bring a blue umbrella.");
   await writeFile(imageFile, PNG);
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   const textUpload = await client.uploadFile(textFile, "text/plain", "upload-text", alu.id);
   const imageUpload = await client.uploadFile(imageFile, "image/png", "upload-image", alu.id);
   const textId = textUpload.attachment.fileId, imageId = imageUpload.attachment.fileId;

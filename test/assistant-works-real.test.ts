@@ -6,7 +6,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import type { DockClient } from "../src/control/dock-client.js";
 import { MAX_REPLY_STEPS } from "../src/assistant-agent/assistant-agent.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { startNativeTeam } from "./support/native-team.js";
 import { waitFor, type HeldChatRequest } from "./support/plan-goal-provider.js";
 
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -21,7 +21,7 @@ test("the assistant hands work to a child Work, answers her owner while it works
   const team = await startNativeTeam(context, ["coordinator", "implementer"], { prefix: "alu-assistant-works-", assistant: true });
   const { coordinator, implementer } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
 
   // Her owner asks for something that needs hands; she hands it to a child Work.
   await client.prompt(alu.id, "帮我看看这个目录的 README 写了什么。", "auto", "alu-readme");
@@ -75,7 +75,7 @@ test("her Dock tools show as on, and her owner can switch them off and on like a
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-switch-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   const shown = async () => (await client.status(alu.id)).extensionStatus["Dock tools"];
   await waitFor(async () => await shown() === "on", "Her Dock tools did not show as on");
   assert.ok((await client.commands(alu.id)).commands.some((command) => command.name === "dock-tools"), "Clients find her switch where every Work has it");
@@ -99,7 +99,7 @@ test("a reply of hers that runs out of steps still ends with a word to her owner
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-steps-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   await client.prompt(alu.id, "把所有 Work 挨个看一遍。", "auto", "alu-busy");
   for (let step = 0; step < MAX_REPLY_STEPS; step += 1) {
     (await coordinator.request(step)).tools({ id: `list-${step}`, name: "dock_list", arguments: {} });
@@ -120,7 +120,7 @@ test("after her Work is opened again she knows which child Works are gone", { ti
   const team = await startNativeTeam(context, ["coordinator", "implementer"], { prefix: "alu-assistant-lost-", assistant: true });
   const { coordinator, implementer } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   await client.prompt(alu.id, "跑一下测试。", "auto", "alu-tests");
   (await coordinator.request(0)).tools({ id: "spawn", name: "dock_spawn", arguments: { name: "跑测试", task: "运行测试并报告结果。", model: { provider: "implementer", id: "fixture" } } });
   await implementer.request(0);
@@ -129,7 +129,7 @@ test("after her Work is opened again she knows which child Works are gone", { ti
 
   process.kill(team.workerPids[0]!, "SIGKILL");
   await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
-  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen", undefined, trust));
+  await team.assistantWork();
   await client.prompt(alu.id, "测试跑完了吗？", "auto", "alu-back");
   const back = await coordinator.request(2);
   assert.ok(given(back).includes("已经不在了") && given(back).includes("「跑测试」"), `She is told the child Work is gone: ${given(back).slice(-500)}`);
@@ -143,7 +143,7 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-assistant-old-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   await client.prompt(alu.id, "你好", "auto", "alu-hello");
   (await coordinator.request(0)).text("你好呀。");
   await settled(client, alu.id);
@@ -156,9 +156,11 @@ test("a conversation from when the assistant was a Pi Work opens as hers and goe
   old.appendMessage({ role: "toolResult", toolCallId: "ls-1", toolName: "bash", content: [{ type: "text", text: "README.md" }], isError: false, timestamp: 4 });
   old.appendMessage({ role: "assistant", content: [{ type: "text", text: "只有一个 README.md。" }], api: "openai-completions", provider: "coordinator", model: "fixture", stopReason: "stop", timestamp: 5, usage: ZERO_USAGE });
 
+  // This fixture supplies the older Pi conversation, rather than waiting for automatic recovery.
+  await team.registry!.stopAssistantRecovery();
   process.kill(team.workerPids[0]!, "SIGKILL");
   await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
-  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen-old", old.getSessionFile(), trust));
+  await client.reopen(alu.id, "alu-reopen-old", old.getSessionFile());
   assert.ok((await client.history(alu.id)).entries.some((entry) => JSON.stringify(entry.content).includes("只有一个 README.md。")), "The old conversation is shown");
   await client.prompt(alu.id, "刚才看到了什么文件？", "auto", "alu-old");
   const asked = await coordinator.request(1);

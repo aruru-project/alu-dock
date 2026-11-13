@@ -18,7 +18,7 @@ import { ModelServiceProcess } from "../../src/model-service/service-process.js"
 import { AssistantServiceProcess } from "../../src/assistant/service-process.js";
 import type { ExtractionTiming } from "../../src/assistant/extraction.js";
 import { isolatedProcessEnvironment } from "./isolated-process-environment.js";
-import { PlanGoalProvider } from "./plan-goal-provider.js";
+import { PlanGoalProvider, waitFor } from "./plan-goal-provider.js";
 
 /**
  * A real Host, real Pi Workers and one scripted model provider per name. The first name is
@@ -92,13 +92,19 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
         reopenTargetResolver: { resolve: resolvePiReopenTarget },
         trustPreflight: new ProjectTrustCoordinator({ requiresTrust: () => true, savedDecision: () => null,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
-        assistantAvailable: assistantService !== undefined,
         ...(attachmentService === undefined ? {} : { attachmentHostPort: attachmentService }),
+        ...(assistantService === undefined ? {} : { assistantWorkspace: cwd }),
       });
       team.registry = registry;
       team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
       await team.host.start();
-      return team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
+      team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
+      if (assistantService !== undefined) await team.assistantWork();
+      return team.client;
+    },
+    async assistantWork() {
+      await waitFor(async () => (await team.client!.list()).some((work) => work.assistant && work.lifecycle === "active"), "Main did not open its resident assistant");
+      return (await team.client!.list()).find((work) => work.assistant && work.lifecycle === "active")!;
     },
   };
   context.after(async () => {

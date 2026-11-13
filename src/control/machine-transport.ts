@@ -30,7 +30,7 @@ import { MAX_MODEL_ANSWER_BYTES, parseModelServiceRequest, type ModelAuthRequest
 import { ModelServiceUnavailableError, type ModelHostPort } from "../model-service/service-process.js";
 import { ModelVisibilityError, filterWithHiddenModels, type HiddenModelsFile, type ModelList, type ModelVisibilityPort, type ModelVisibilityService } from "./model-visibility.js";
 import type { ChildModelsSource } from "./child-models.js";
-import { AssistantError, MAX_ASSISTANT_ID_CHARS, parseAssistantRequest, parseAssistantResult, type AssistantHostPort, type AssistantRequest, type AssistantResultFor, type AssistantSource } from "../core/assistant.js";
+import { MAX_ASSISTANT_ID_CHARS, parseAssistantRequest, type AssistantHostPort, type AssistantSource } from "../core/assistant.js";
 import { INSTANCE_ASSISTANT_CAPABILITY } from "./protocol.js";
 import { parseChildModelEntries, withCurrentMachine, type ChildModelList } from "../core/dock-tools.js";
 import { parseModelRefs, parseModelVisibilityResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
@@ -1820,26 +1820,6 @@ export class SubHostModelPort implements ModelHostPort {
   configuration(signal: AbortSignal): Promise<ModelConfiguration> { return this.upstream.askModels({ op: "configuration" }, signal) as Promise<ModelConfiguration>; }
   authState(signal: AbortSignal): Promise<ModelAuthState> { return this.upstream.askModels({ op: "auth_state" }, signal) as Promise<ModelAuthState>; }
   auth(request: ModelAuthRequest, signal: AbortSignal): Promise<ModelAuthResult> { return this.upstream.askModels({ op: "auth", ...request }, signal) as Promise<ModelAuthResult>; }
-}
-
-/**
- * A SubHost's assistant Works reach the assistant service on Main over the machine connection. The
- * SubHost names the asking Work by its own ID; Main replaces it with the Main ID and the machine name.
- */
-export class SubHostAssistantPort implements AssistantHostPort {
-  constructor(private readonly upstream: SubHostMachineConnection) {}
-
-  async request<R extends AssistantRequest>(request: R, source: AssistantSource, signal?: AbortSignal): Promise<AssistantResultFor<R>> {
-    if (source.workId === undefined) throw new Error("An assistant question from a SubHost names the asking Work");
-    let answer: unknown;
-    try {
-      answer = await this.upstream.askModels({ op: "assistant", sourceNativeId: source.workId, request }, signal ?? AbortSignal.timeout(MODEL_LIST_WAIT_MS));
-    } catch (error) {
-      if (error instanceof ModelServiceUnavailableError) throw new AssistantError("assistant_unavailable", error.message);
-      throw error;
-    }
-    return parseAssistantResult(request, answer);
-  }
 }
 
 /** How long a SubHost waits for Main's model lists; a Work's model questions carry their own cancel. */

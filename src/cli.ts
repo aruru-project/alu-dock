@@ -27,7 +27,7 @@ import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-acces
 import { WorkerIncidentStore, workerIncidentStoreRoot } from "./control/worker-incident-store.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
 import { MachineSettingsState, SubHostStatusReporter, machineSettingsStateRoot, machineStatePersistenceDiagnostic } from "./control/machine-settings-state.js";
-import { MainMachineController, SubHostAssistantPort, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "./control/machine-transport.js";
+import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, SubHostModelLists, SubHostModelPort } from "./control/machine-transport.js";
 import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./control/main-machine-dock-tools.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
 import { humanControlErrorText } from "./human-control-error.js";
@@ -307,9 +307,11 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   // Main keeps the personal assistant: her persona, the owner's notes and her memory (card #295).
   // Like the model service, one that cannot start leaves the Host running; assistant Works then say why.
   let workerAssistantPort: AssistantHostPort | undefined;
+  let assistantWorkspace: string | undefined;
   if (options.role !== "subhost" && catalogPath) {
     const { AssistantServiceProcess } = await import("./assistant/service-process.js");
     const workspacePath = join(homedir(), ".aludock", "assistant");
+    assistantWorkspace = workspacePath;
     const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
     const service = new AssistantServiceProcess({
       directory: join(dirname(catalogPath), "assistant"), workspacePath, agentDir: managedPiAgentDir ?? getAgentDir(),
@@ -318,9 +320,6 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     assistantService = service;
     service.start().catch((error: unknown) => {
       process.stderr.write(`Alu Dock: the assistant service could not start; assistant Works cannot load her persona or memory until it does. ${error instanceof Error ? error.message : String(error)}\n`);
-    });
-    await systemService.prepareAssistantWorkspace(workspacePath).catch((error: unknown) => {
-      process.stderr.write(`Alu Dock: the assistant's workspace ${workspacePath} could not be prepared. ${error instanceof Error ? error.message : String(error)}\n`);
     });
     const machine = options.machineName ?? "Main";
     workerAssistantPort = { request: (request, source, signal) => service.request(request, { ...source, machine }, signal) };
@@ -374,7 +373,6 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     });
     upstream = upstreamConnection;
     subHostModels = new SubHostModelPort(upstreamConnection);
-    workerAssistantPort = new SubHostAssistantPort(upstreamConnection);
     // The hidden list and the child Work list exist only on Main.
     const mainModelLists = new SubHostModelLists(upstreamConnection);
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
@@ -386,7 +384,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
       attachmentHostPort: attachmentService,
       dockToolsHostPort: dockToolsPort,
-      assistantAvailable: true,
+
     });
     host = new DockHost({
       socketPath: join(dirname(catalogPath as string), "subhost-private.sock"),
@@ -414,7 +412,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ...(durable ? { catalogStore: new FileCatalogStore(catalogPath as string), attachmentHostPort: attachmentService } : {}),
       ...(mainDockToolsPort ? { dockToolsHostPort: mainDockToolsPort } : {}),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
-      assistantAvailable: assistantService !== undefined,
+      ...(assistantWorkspace === undefined ? {} : { assistantWorkspace }),
     });
     if (options.role === "main" && durable) {
       remoteInstances = new MainMachineController({

@@ -126,7 +126,7 @@ const DOCK_TOOLS_SWITCH: CommandDto = {
   name: DOCK_TOOLS_COMMAND, source: { kind: "built-in" }, description: "开启、关闭或查看助手的 Dock tools（派 Work、联系别的 Work）",
   argumentHint: "on|off|status", argumentCompletions: false,
 };
-const NO_OTHER_SESSION = "助手的对话是一条连续的线，不能新建、切换、分叉或回到某一点。想从头开始，就停掉这个 Work，再以助手身份新开一个；她的记忆都还在。要让她载入刚改过的人设和记忆，用 Reload。";
+const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开会话、不切换或分叉。你可以直接继续说；要载入刚改过的人设和记忆，请用 Reload，重启也会保留这段对话。";
 
 /**
  * The personal assistant's own Agent (card #667). She is not a Pi coding Work: she keeps a
@@ -149,7 +149,7 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
   const session = init.sessionFile === undefined
     ? SessionManager.create(cwd, sessionDir)
     : SessionManager.open(resolve(init.sessionFile), sessionDir, cwd);
-  if (init.initialName !== undefined && init.sessionFile === undefined) session.appendSessionInfo(init.initialName);
+  if (init.initialName !== undefined && session.getSessionName() !== init.initialName) session.appendSessionInfo(init.initialName);
   const attachmentContextKey = await loadAttachmentContextKey(agentDir);
   const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey);
   await her.chooseStartingModel(init.workerConfig?.model, init.sessionFile === undefined);

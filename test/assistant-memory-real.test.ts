@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { DockClient } from "../src/control/dock-client.js";
-import { startNativeTeam, trustOnce } from "./support/native-team.js";
+import { startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 const settled = (client: DockClient, id: string) => waitFor(async () => (await client.status(id)).execution === "idle", "The Work did not finish its turn");
@@ -24,7 +24,7 @@ test("what she hears becomes a memory and a timeline line her next session start
   assert.equal((await client.assistantInfo()).extraction?.state, "off");
   await client.setAssistantSettings({ provider: "memory", id: "fixture" });
 
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   await client.prompt(alu.id, "我不吃香菜，以后点外卖记得避开。", "auto", "alu-coriander");
   (await coordinator.request(0)).text("记住啦，香菜退散～");
   await settled(client, alu.id);
@@ -95,7 +95,7 @@ test("she keeps what the owner tells her to remember, forgets it so it cannot be
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-remember-", assistant: true });
   const { coordinator } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
 
   await client.prompt(alu.id, "记住：我下周三要去体检。", "auto", "alu-remember");
   (await coordinator.request(0)).tools({ id: "remember", name: "assistant_memory", arguments: { action: "add", topic: "events", text: "主人下周三要去体检。" } });

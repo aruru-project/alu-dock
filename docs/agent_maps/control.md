@@ -320,21 +320,19 @@ Host 的 `SystemService` 由 Registry 持有，Host 的 system API 复用同一�
 
 官方 Client、Hub/direct new 保留选择和阅读界面；有效目录默认可直接进入创建，由 Host 在创建时应用，否则由用户明确选择。目录记住了以助手身份打开（catalog 的 `defaultAssistant`）也算有效默认，即使没有记住 system：她不需要 system。owner-enabled `dock_system` 使用同一发现/阅读请求；`dock_create` 有 `systemId` 时显式覆盖，无 ID 时直接走普通创建，不先查 catalog 或要求默认必须存在。`saveDefault: true` 必须同时提供显式 ID。Main/local 工具复用 OperationLedger 保存调用意图及独立保存/创建结果，不另写默认规则或机器代理。
 
-## 个人助手（`instance.assistant.v1`、`assistant.v1`）
+## 个人助手（`assistant.v1`）
 
-Dock 自带一个个人助手（card #295），默认是阿露。她的人设、主人的手写设定、她经历过的对话和从中整理出的记忆由 Main 上的助手服务保管（见 [runtime](runtime.md#个人助手)）。新建 Work 时可以选择以助手身份打开：这样的 Work 载入人设和记忆，对话记进她的记忆；没选的 Work 与记忆无关。这样的 Work 运行她自己的 Agent 而不是 Pi（card #667，见 [runtime](runtime.md#个人助手)），所以不选 system，snapshot 的 `executor.kind` 是 `dock-assistant`。
+个人助手在 Main 上唯一常驻（#667、#670），出厂人设是阿露，名字和提示词都可编辑。人设、手写设定、对话与记忆由 Main 的助手服务保管，Worker 运行独立助手 Agent，snapshot 保留 `assistant: true` 和 `executor.kind: dock-assistant`。普通 Work 不带她的私人记忆。
 
-**以助手身份打开（`instance.assistant.v1`，每台 Host 都提供）**
-
-- `instance.create` 可带 `assistant: boolean`。`true` 以助手身份打开，要求这项能力；`false` 明确不以助手身份打开，不要求能力，Main 转给不认识它的 SubHost 时去掉（那样的 Host 本来就不会以助手身份打开）；省略时用本目录 `.aludock/system-default.json` 记住的选择，没有记住就是不以助手身份打开。`child` 与 `assistant: true` 不能同时出现：子 Work 不带记忆。
-- 助手不带 system。以助手身份打开时（显式或按目录默认），Host 不套用目录保存的 system；`workerConfig` 里同时有显式 system 选择和 `assistant: true` 时返回 `invalid_request`，什么都不创建。显式选了 system 而省略 `assistant` 时是那份 system 的 Work，不套用目录的助手默认（没有开关的入口如 Hub 在助手默认的目录里手选 system 时就是这样）。
-- 这个选择创建时定下，写进 catalog，reopen 沿用，之后不能切换。Snapshot 对这样的 Work 带 `assistant: true`，其他 Work 不带这个字段。
-- `system.catalog` 结果在本目录记住了以助手身份打开时带 `defaultAssistant: true`，即使没有记住 system（只有 `{"assistant":true}`）。客户端把它作为创建页上开关的初值；目录记住了可用的 system 或以助手身份打开而直接创建时，客户端省略 `assistant` 和 system，由 Host 按目录默认决定。
-- 开关为开时创建页不列 system，也不发 system 选择；这时保存目录默认发不带 `id` 的 `system.default.set`。
-- 客户端只在需要时带这个字段：开关为开时带 `assistant: true`；开关为关时，只有 catalog 给了 `defaultAssistant: true`（用户要推翻目录默认）才带 `assistant: false`。创建和保存目录默认用同一条规则。是否显示开关看 Main hello 的 `instance.assistant.v1`（所有机器一起升级）；目标 SubHost 不支持而用户要开时，Main 按常规返回 `capability_missing`。
-- Agent 的 `dock_create` 可带 `assistant`；不带等于 `false`，不套用目录默认，免得她派的协作成员带上记忆。`assistant: true` 与 `systemId` 同时给时在查 system 之前就报错，不创建 Work。`dock_spawn` 的子 Work 一律不是助手。
-- Main 启动时确保助手在 Main 上的工作区 `~/.aludock/assistant` 存在，并在没有目录默认时写入 `{"assistant":true}`。
-- Host 用不了助手时（没有持久状态目录的开发 Host）不广告这项能力；以助手身份创建（包括目录默认为助手）返回 `assistant_unavailable`。
+- Main 启动后由 Registry 自动确保她在 `~/.aludock/assistant`，初始显示名为“助手”，可按普通 Work 改名；启动、重启和迁移都保留用户取的名字，不从人设正文猜名字。常驻本身不调用模型；仅消息、提醒等实际事件叫醒她。
+- 升级时 Main 选择本机 catalog 中最近使用的助手对话，其余旧助手改为普通 Pi Work；SubHost 的旧助手全部改为普通 Pi Work。原会话文件与 Main 记忆库不删除。
+- 不再广告创建助手的 `instance.assistant.v1`。旧请求带 `assistant: true` 会被明确拒绝；新 `dock_create` 不再提供该参数。官方新建页继续按已有能力信息判断，因此连旧 Host 的原有选择仍可用，连新 Host 不出现选择。
+- 旧 `.aludock/system-default.json` 的助手标记只在读盘时兼容，不再生效；保存的普通 system 继续生效，下一次明确保存默认时去掉旧标记。
+- 她停止后保留 catalog 记录与同一个 Work ID，Host 打开新的 Worker 接续对话。`instance.stop` 仍返回旧 Worker 的 stopped 回执，正常重开在答复前完成；客户端保留选中的她，操作后刷新一次以绑定新 Worker。重开失败会说明原因、保留记录并重试，不把普通 Work 一起卡住。
+- Worker 出错后 Host 同样自动恢复，重试从 1 秒退避到最多 30 秒；旧进程是否已退出不确定时不能开第二个。Host 退出先取消恢复，再停止 Worker。她不能被 forget/prune 删除；她的子 Work 随她的旧 Worker 停止，不随她恢复。
+- 普通创建仍按目录 system 和项目信任规则；她不加载项目资源，自动打开她不代表给项目授信。
+- 人设、称呼、语言风格和工作约定均来自可编辑的 persona.md / notes.md。出厂示例只在 persona.md 不存在时写一次；Worker 不再在已编辑的人设后追加一段固定工作提示词。工具声明、记忆和每轮现状仍由实际能力和状态生成。
+- 官方客户端将她置顶，工具可查看但不能逐个开关，Dock tools 总开关保留；她没有的 Pi 操作不展示。每次被叫醒后的回复各成一轮，不让后来的提醒折掉前一次答复。
 
 **助手资料（`assistant.v1`，只有 Main 提供）**
 

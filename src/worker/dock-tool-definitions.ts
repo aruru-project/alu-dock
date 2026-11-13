@@ -128,7 +128,6 @@ const CREATE_SCHEMA = {
     cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
     systemId: { type: "string", minLength: 1, maxLength: 128, description: "A candidate's id read with dock_system. Omit for the directory default." },
     saveDefault: { type: "boolean" },
-    assistant: { type: "boolean", description: "Open it as the owner's personal assistant, with her persona and memory in place of a system, so without systemId. Only when the owner asks for that Work to be her." },
     name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
     machine: MACHINE_NAME_SCHEMA,
     model: {
@@ -282,13 +281,12 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
     {
       name: "dock_create",
       label: "Create Dock work",
-      description: describe("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. assistant=true opens it as the owner's personal assistant, whose persona and memory take the place of a system, so leave out systemId; without it the new Work is not her, whatever the directory's default. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
+      description: describe("Create a new top-level Work in an absolute working directory. Omit machine to create it on this Work's Machine; name another Machine exactly as dock_machines lists it. Set systemId only to an id read with dock_system. Without systemId, the creating Host applies its directory default, or Pi native behavior when none is configured; a broken configured default fails creation. saveDefault=true explicitly saves the selected system before creating. Saving and creating are separate outcomes. model is the exact {provider,id} the new Work starts with, as the owner names it; omit it for the target Machine's Pi default. An unavailable model fails creation. Main already keeps one resident assistant; this only creates ordinary Works, not another assistant. The new Work can collaborate immediately. For a task of your own use dock_spawn."),
       parameters: CREATE_SCHEMA,
-      execute: async (params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef; assistant?: boolean }, runtime) => dockToolOutput(await runtime.invoke({
+      execute: async (params: { cwd: string; name?: string; machine?: string; systemId?: string; saveDefault?: boolean; model?: ModelRef }, runtime) => dockToolOutput(await runtime.invoke({
         type: "create",
         operationId: randomUUID(),
         cwd: params.cwd,
-        ...(params.assistant === true ? { assistant: true as const } : {}),
         ...(params.systemId === undefined ? {} : { systemId: params.systemId }),
         ...(params.saveDefault === undefined ? {} : { saveDefault: params.saveDefault }),
         ...(params.model === undefined ? {} : { model: { provider: params.model.provider, id: params.model.id } }),

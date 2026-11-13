@@ -25,7 +25,7 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
   await mkdir(join(team.cwd, ".pi"));
   await writeFile(join(team.cwd, ".pi", "SYSTEM.md"), "PROJECT SYSTEM TEXT");
   await writeFile(join(team.cwd, "AGENTS.md"), "PROJECT RULES TEXT");
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "assistant-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
   assert.equal(alu.assistant, true);
   assert.equal(alu.executor.kind, "dock-assistant");
   const plain = await trustOnce((trust) => client.create(team.cwd, "Plain", "plain-create", trust));
@@ -77,7 +77,7 @@ test("a Work opened as the assistant is her: it loads her persona and notes, ans
   await client.setAssistantDocument("notes", "主人的猫叫团子，狗叫豆包。", current.revision);
   process.kill(team.workerPids[0]!, "SIGKILL");
   await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
-  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen", undefined, trust));
+  await team.assistantWork();
   assert.equal((await client.status(alu.id)).assistant, true);
   await client.prompt(alu.id, "狗呢？", "auto", "alu-dog");
   const dog = await coordinator.request(4);
@@ -93,7 +93,7 @@ test("while she replies a message waits its turn, can be taken back or joins at 
   const team = await startNativeTeam(context, ["coordinator", "second"], { prefix: "alu-assistant-queue-", assistant: true });
   const { coordinator, second } = team.providers;
   const client = await team.startHost();
-  const alu = await trustOnce((trust) => client.create(team.cwd, "Alu", "alu-create", trust, undefined, undefined, undefined, true));
+  const alu = await team.assistantWork();
 
   await client.prompt(alu.id, "第一句", "auto", "alu-first");
   const first = await coordinator.request(0);
@@ -128,6 +128,6 @@ test("while she replies a message waits its turn, can be taken back or joins at 
   assert.equal((await client.status(alu.id)).lastRun, "succeeded");
   process.kill(team.workerPids[0]!, "SIGKILL");
   await waitFor(async () => (await client.status(alu.id)).lifecycle === "runtime_error", "The crash was not observed");
-  await trustOnce((trust) => client.reopen(alu.id, "alu-reopen", undefined, trust));
+  await team.assistantWork();
   assert.deepEqual((await client.status(alu.id)).executor.model, { provider: "second", id: "fixture" });
 });
