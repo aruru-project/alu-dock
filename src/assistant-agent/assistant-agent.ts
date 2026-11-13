@@ -193,6 +193,8 @@ class AssistantAgent implements WorkerAgent {
   private readonly shown: RecentConversation;
   /** The entries Main said were forgotten when it was last asked. */
   private forgottenSeen = new Set<string>();
+  /** Main's existing global forgetting counter, including memories without a source in this session. */
+  private forgettingRevision: number | undefined;
   /** She forgot something in the reply in progress. */
   private forgetting = false;
   /** What is done to her context between replies; the next reply waits for it. */
@@ -857,7 +859,16 @@ class AssistantAgent implements WorkerAgent {
   /** The entries of this conversation her owner had her forget, or undefined when Main does not answer. */
   private async forgottenEntries(): Promise<string[] | undefined> {
     try {
-      return (await this.port.call({ op: "forgotten", sessionId: this.session.getSessionId() })).entryIds;
+      const result = await this.port.call({ op: "forgotten", sessionId: this.session.getSessionId() });
+      if (this.forgettingRevision !== undefined && result.revision !== this.forgettingRevision) {
+        // The opening can contain a resident memory or timeline line from another conversation.
+        // Forgetting in the UI and forgetting through a tool must both evict that cached text.
+        this.opening.refresh();
+        this.contextReady = false;
+        this.handoff.discard();
+      }
+      this.forgettingRevision = result.revision;
+      return result.entryIds;
     } catch {
       return undefined;
     }

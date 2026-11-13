@@ -268,12 +268,12 @@ export class AssistantStore {
   }
 
   /** The entries of a session hidden with a forgotten memory, newest first, from `fromEntryId` on. */
-  forgotten(sessionId: string, fromEntryId?: string): { entryIds: string[] } {
+  forgotten(sessionId: string, fromEntryId?: string): { entryIds: string[]; revision: number } {
     const from = fromEntryId === undefined ? undefined
       : this.db.prepare("SELECT id FROM entries WHERE session_id = ? AND entry_id = ?").get(sessionId, fromEntryId) as { id: number } | undefined;
     const rows = this.db.prepare("SELECT entry_id FROM entries WHERE session_id = ? AND id >= ? AND forgotten > 0 ORDER BY id DESC LIMIT ?")
       .all(sessionId, from?.id ?? Number.MIN_SAFE_INTEGER, MAX_ASSISTANT_FORGOTTEN_ENTRIES) as Array<{ entry_id: string }>;
-    return { entryIds: rows.map((row) => row.entry_id) };
+    return { entryIds: rows.map((row) => row.entry_id), revision: forgettings(this.db) };
   }
 
   /** Keeps a batch; an entry already kept stays as it was, so a batch sent twice changes nothing. */

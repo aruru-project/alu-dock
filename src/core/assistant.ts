@@ -315,7 +315,7 @@ export type AssistantResultFor<R extends AssistantRequest> =
   R extends { op: "info" } ? AssistantInfo
   : R extends { op: "load" } ? AssistantPreview
   : R extends { op: "recorded" } ? { lastEntryId?: string }
-  : R extends { op: "forgotten" } ? { entryIds: string[] }
+  : R extends { op: "forgotten" } ? { entryIds: string[]; revision: number }
   : R extends { op: "record" } ? { lastEntryId: string }
   : R extends { op: "search" } ? AssistantSearchResult
   : R extends { op: "context" } ? AssistantContextResult
@@ -893,9 +893,10 @@ export function parseAssistantResult<R extends AssistantRequest>(request: R, inp
       return value.lastEntryId === undefined ? {} : { lastEntryId: id(value.lastEntryId, "recorded.lastEntryId") };
     }) as AssistantResultFor<R>;
     case "forgotten": return answer(() => {
-      const entryIds = record(input, "forgotten").entryIds;
+      const value = record(input, "forgotten");
+      const entryIds = value.entryIds;
       if (!Array.isArray(entryIds) || entryIds.length > MAX_ASSISTANT_FORGOTTEN_ENTRIES) throw new Error("forgotten.entryIds must be a bounded array");
-      return { entryIds: entryIds.map((entryId, index) => id(entryId, `forgotten.entryIds[${index}]`)) };
+      return { entryIds: entryIds.map((entryId, index) => id(entryId, `forgotten.entryIds[${index}]`)), revision: count(value.revision, "forgotten.revision", Number.MAX_SAFE_INTEGER) };
     }) as AssistantResultFor<R>;
     case "record": return answer(() => ({ lastEntryId: id(record(input, "record").lastEntryId, "record.lastEntryId") })) as AssistantResultFor<R>;
     case "search": return parseAssistantSearchResult(input) as AssistantResultFor<R>;

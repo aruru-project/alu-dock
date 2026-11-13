@@ -73,6 +73,9 @@ test("a long conversation is handed over in the background: she answers meanwhil
 // or answered, not the request to forget it, and not a hand-over record written before.
 test("what she is told to forget leaves what the model is given, also a hand-over record written before", { timeout: 90_000 }, async (context) => {
   const { client, alu, coordinator } = await assistantWithSmallWindow(context, "alu-assistant-forget-");
+  // Review #670 found the cached opening still repeated forgotten resident memories, even ones
+  // written in the UI with no source entry in this conversation.
+  const resident = await client.addAssistantMemory({ topic: "owner", text: "主人家的门铃暗号是青栀。", resident: true });
   // Records are written and rewritten in the background at their own time; the model answers those
   // requests here whenever they come, and the test takes only the requests of her replies.
   const hers: HeldChatRequest[] = [];
@@ -93,17 +96,19 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   };
 
   await client.prompt(alu.id, "记住：周末爬山我要带水壶。", "auto", "alu-remember");
-  (await reply(0)).tools({ id: "remember", name: "assistant_memory", arguments: { action: "add", topic: "events", text: "主人周末爬山要带水壶。" } });
+  (await reply(0)).tools({ id: "remember", name: "assistant_memory", arguments: { action: "add", topic: "events", text: "主人周末爬山要带水壶。", resident: true } });
   (await reply(1)).text("记下了。");
   await settled(client, alu.id);
-  const [memory] = (await client.assistantMemories()).memories;
+  const memory = (await client.assistantMemories()).memories.find((item) => item.text.includes("水壶"));
   await client.prompt(alu.id, `这是我贴的资料：${LONG_PASTE}`, "auto", "alu-paste");
   (await reply(2)).text("收到。");
   await settled(client, alu.id);
   await waitFor(async () => (await records(client, alu.id)).some((record) => JSON.stringify(record.content).includes("她要提醒他带水壶")), "The hand-over record did not take its place");
 
   await client.prompt(alu.id, "把爬山带水壶那件事忘掉吧。", "auto", "alu-forget");
-  (await reply(3)).tools({ id: "forget", name: "assistant_memory", arguments: { action: "forget", id: memory!.id } });
+  const beforeForget = await reply(3);
+  assert.ok(system(beforeForget).includes("青栀") && system(beforeForget).includes("水壶"), "Both resident facts have entered the cached opening");
+  beforeForget.tools({ id: "forget", name: "assistant_memory", arguments: { action: "forget", id: memory!.id } });
   (await reply(4)).text("好，忘了。");
   await settled(client, alu.id);
   // The record written before tells it: the model is asked to take it out.
@@ -111,9 +116,10 @@ test("what she is told to forget leaves what the model is given, also a hand-ove
   assert.ok(rewrites[0]!.includes("主人周末爬山要带水壶。") && rewrites[0]!.includes("她要提醒他带水壶"));
   await waitFor(async () => (await records(client, alu.id)).some((record) => JSON.stringify(record.content).includes("没有还没了结的事。")), "The rewritten record did not take its place");
 
+  await client.updateAssistantMemory({ id: resident.id, revision: resident.revision, state: "forgotten" });
   await client.prompt(alu.id, "周末我要带什么来着？", "auto", "alu-ask");
   const asked = await reply(5);
-  assert.ok(!given(asked).includes("水壶"), `Nothing she is given still tells it: ${given(asked).replace(/lorem ipsum dolor sit amet /gu, "").slice(-1_500)}`);
+  assert.ok(!given(asked).includes("水壶") && !given(asked).includes("青栀"), `Nothing she is given still tells it: ${given(asked).replace(/lorem ipsum dolor sit amet /gu, "").slice(-1_500)}`);
   asked.text("不记得了。");
   await settled(client, alu.id);
 });
