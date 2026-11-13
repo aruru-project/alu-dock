@@ -427,7 +427,7 @@ class AssistantAgent implements WorkerAgent {
       ...(sessionFile === undefined ? {} : { previousSessionFile: sessionFile, sessionFile }),
       ...(name === undefined ? {} : { name }),
     });
-    this.extensions.showStatus();
+    this.showStatus();
     return { cancelled: false };
   }
 
@@ -442,6 +442,13 @@ class AssistantAgent implements WorkerAgent {
     this.tell(enabled
       ? "助手的 Dock tools 开着：她可以派 Work 干活、联系别的 Work。"
       : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work；仍能聊天、用记忆、读取文件和附件。要恢复派活，用 /dock-tools on。");
+  }
+
+  /** Session replacement clears client status; restore all of her current facts together. */
+  private showStatus(): void {
+    this.showDockTools();
+    void this.handoff.refresh();
+    this.extensions.showStatus();
   }
 
   /** Clients show the switch's state where every Work shows it. */
@@ -466,9 +473,7 @@ class AssistantAgent implements WorkerAgent {
         const waiting = this.buffered ?? [];
         this.buffered = undefined;
         for (const event of waiting) this.publish(event);
-        this.showDockTools();
-        void this.handoff.refresh();
-        this.extensions.showStatus();
+        this.showStatus();
         // Reminders that came due while she was not running fire now that the Host listens.
         this.reminders.start();
         return null;

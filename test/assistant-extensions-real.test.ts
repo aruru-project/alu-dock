@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DOCK_TOOLS_STATUS_KEY } from "../src/worker/dock-tools-client.js";
 import { startNativeTeam } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
@@ -32,6 +33,7 @@ test("Main saves a local assistant extension, Reload makes its tool available di
   assert.equal(catalog.tools.find(tool => tool.name === "local_schedule")?.source?.package, "private-schedule");
   assert.ok(!JSON.stringify(catalog).includes(marker), "Tool declarations never contain private configuration");
   await waitFor(async () => (await client.status(assistant.id)).extensionStatus["扩展/private-schedule"]?.includes("已加载") === true, "The assistant did not report its loaded extension");
+  assert.equal((await client.status(assistant.id)).extensionStatus[DOCK_TOOLS_STATUS_KEY], "on", "Reload must keep the collaboration switch visible, not falsely show OFF");
 
   await client.prompt(assistant.id, "读一下本机日程，再看记忆整理设置。", "auto", "local-extension");
   const first = await team.providers.coordinator.request(0);

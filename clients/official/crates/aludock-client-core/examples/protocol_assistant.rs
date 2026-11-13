@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "assistant-protocol-gate".into(),
     )?);
 
-    // Her workspace opens new Works as her from the start, and this Host takes that choice.
+    // #670: Main keeps one resident assistant; no directory or creation page can open another.
     let info = client.assistant_info().await?;
     let main = client
         .list_machines()
@@ -34,8 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace = client
         .system_catalog(&info.workspace_path, Some(&main.host_id), None)
         .await?;
-    assert!(workspace.default_assistant);
-    assert!(workspace.assistant_choice);
+    assert!(!workspace.default_assistant);
+    assert!(!workspace.assistant_choice);
 
     // The shipped persona, and notes saved against the version they were edited from.
     assert!(

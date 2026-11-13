@@ -139,7 +139,7 @@ export function renderDockToolsResult(result: DockToolsResult, context: RenderCo
     return lines.join("\n");
   }
   if (result.type === "deliver") {
-    return `Made ${inline(result.deliverable.name)} available for temporary download (${result.deliverable.sizeBytes} bytes). The source file must remain unchanged and available.`;
+    return `Made ${inline(result.deliverable.name)} available for temporary download (${result.deliverable.sizeBytes} bytes). A client supporting Dock downloads lists it under this Work's files. This does not create a URL: tell the user the filename, do not invent sandbox: or file: download links. The source file must remain unchanged and available.`;
   }
   if (result.type === "create") {
     return `${result.defaultSaved ? "Directory default saved. " : ""}Created ${identity(result.instance)} in ${inline(result.instance.cwd, 180)}. Collaboration tools are available in the new work.`;
