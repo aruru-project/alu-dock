@@ -1366,8 +1366,8 @@ export class DockHost {
       }
       case "assistant.settings.get": return ask({ op: "settings_get" });
       case "assistant.settings.set": {
-        const { operationId, extractionModel } = request.params;
-        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", extractionModel }));
+        const { operationId, ...settings } = request.params;
+        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", ...settings }));
       }
       case "assistant.reorganize": {
         const { operationId, extractionModel } = request.params;

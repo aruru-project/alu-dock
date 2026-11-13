@@ -1793,6 +1793,7 @@ try {
     // Main does a change once per operation; the same operation sent again gets its answer again.
     const answered = new Map()
     let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings
+    let handoff = { startTokens: null, keepRecentTokens: null, prompt: 'Main 提供的完整交接要求。' }
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
       if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: !model ? { state: 'off', waitingSessions: 1 }
@@ -1828,13 +1829,15 @@ try {
         if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
         return structuredClone(changed)
       }
-      if (command === 'assistant_settings') return model ? { extractionModel: model } : {}
+      if (command === 'assistant_settings') return { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff) }
       if (command === 'set_assistant_settings' || command === 'reorganize_assistant') {
         const done = () => {
           if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
-          model = args.extractionModel ?? undefined
+          const edit = command === 'reorganize_assistant' ? args : args.settings
+          if ('extractionModel' in edit) model = edit.extractionModel ?? undefined
+          if (edit.handoff) handoff = structuredClone(edit.handoff)
           if (command === 'reorganize_assistant') startedOver++
-          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : model ? { extractionModel: model } : {}
+          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff) }
           answered.set(args.operationId, structuredClone(result))
           if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
           return result
@@ -2014,15 +2017,27 @@ try {
       holdSettings = undefined; finishSave(); await settle()
     }
     await choose('GPT mini')
-    assert.deepEqual(sent('set_assistant_settings').extractionModel, { provider: 'openai', id: 'gpt-mini' })
+    assert.deepEqual(sent('set_assistant_settings').settings.extractionModel, { provider: 'openai', id: 'gpt-mini' })
     assert.ok(text(page()).includes('已保存') && text(page()).includes('1 段对话'), text(page()))
+    // #670: the complete instruction comes from Main, and manual values or automatic values save through the same settings entry.
+    assert.equal(labelled('交接记录提示词').props.value, 'Main 提供的完整交接要求。')
+    await type('开始整理的 token 数', '55000')
+    await type('保留最近原话的 token 数', '12000')
+    await type('交接记录提示词', '请以小满的口吻交接，只写尚待完成的事。')
+    await click(page(), '保存滚动整理设置')
+    assert.deepEqual(sent('set_assistant_settings').settings, { handoff: { startTokens: 55000, keepRecentTokens: 12000, prompt: '请以小满的口吻交接，只写尚待完成的事。' } })
+    assert.deepEqual(model, { provider: 'openai', id: 'gpt-mini' }, 'editing the hand-over does not change the memory model')
+    await click(page(), '恢复自动值')
+    await click(page(), '保存滚动整理设置')
+    assert.deepEqual(sent('set_assistant_settings').settings.handoff, { startTokens: null, keepRecentTokens: null, prompt: '请以小满的口吻交接，只写尚待完成的事。' })
     // How making memories goes: the parts it could not read, why the last try failed and when it tries again.
+    const extractionSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status')
     troubled = true
-    await click(page(), '刷新')
-    const status = () => text(find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status'))
+    await click(extractionSection(), '刷新')
+    const status = () => text(extractionSection())
     assert.ok(status().includes('没读成') && status().includes('3 段') && status().includes('等着自动再试') && status().includes('下次重试') && status().includes('模型服务暂时连不上'), status())
     troubled = false
-    await click(page(), '刷新')
+    await click(extractionSection(), '刷新')
     // Starting over with it says first what it sets aside and what stays, then reads everything again.
     await click(page(), '用这个模型从头整理')
     assert.ok(text(page()).includes('「GPT mini」') && text(page()).includes('挪进「已作废」') && text(page()).includes('都留着'), text(page()))
@@ -2108,7 +2123,7 @@ try {
     }
     await click(page(), '整理记忆的模型')
     await click(find(page(), item => item.props.role === 'listbox'), '不整理')
-    assert.equal(sent('set_assistant_settings').extractionModel, null, 'choosing none stops making memories')
+    assert.equal(sent('set_assistant_settings').settings.extractionModel, null, 'choosing none stops making memories')
     // At the top of a section, Back closes her page.
     systemBack(); await settle()
     assertSameReference(page(), undefined, 'Back at the top closes her page')

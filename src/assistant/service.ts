@@ -1,5 +1,9 @@
 import {
   ASSISTANT_MEMORY_TOPICS,
+  DEFAULT_ASSISTANT_HANDOFF,
+  parseAssistantSettings,
+  type AssistantSettings,
+  type AssistantSettingsEdit,
   MAX_ASSISTANT_DOCUMENT_BYTES,
   MAX_ASSISTANT_EPISODE_CHARS,
   MAX_ASSISTANT_MEMORY_CHARS,
@@ -74,10 +78,22 @@ export class AssistantCore {
       case "timeline_list": { const { op: _op, ...list } = request; return this.timeline.list(list); }
       case "timeline_get": return this.timeline.get(request.id);
       case "timeline_update": { const { op: _op, ...update } = request; return this.timeline.update(update, author); }
-      case "settings_get": return this.extraction.settings();
-      case "settings_set": return this.extraction.setModel(request.extractionModel);
+      case "settings_get": return this.settings();
+      case "settings_set": return this.setSettings(request);
       case "reorganize": return this.extraction.reorganize(request.extractionModel);
     }
+  }
+
+  private settings(): AssistantSettings {
+    const row = this.store.connection.prepare("SELECT value FROM meta WHERE key = 'handoff_settings'").get() as { value: string } | undefined;
+    return { ...this.extraction.settings(), ...parseAssistantSettings({ handoff: row === undefined ? DEFAULT_ASSISTANT_HANDOFF : JSON.parse(row.value) }) };
+  }
+
+  private setSettings(edit: AssistantSettingsEdit): AssistantSettings {
+    // The shared request parser validates the entire edit before either setting changes.
+    if (edit.handoff !== undefined) this.store.connection.prepare("INSERT INTO meta(key, value) VALUES ('handoff_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(edit.handoff));
+    if (edit.extractionModel !== undefined) this.extraction.setModel(edit.extractionModel);
+    return this.settings();
   }
 
   /**

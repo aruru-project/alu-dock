@@ -206,7 +206,7 @@ const steps = {
 
 try {
   const work = await alu();
-  if ((await client.assistantSettings()).extractionModel == null) await client.setAssistantSettings({ provider, id: modelId.join("/") });
+  if ((await client.assistantSettings()).extractionModel == null) await client.setAssistantSettings({ extractionModel: { provider, id: modelId.join("/") } });
   for (const name of (process.env.STEPS ?? "chat,remember,delegate,question,stop,remind,forget").split(",")) {
     console.log(`\n===== ${name} =====`);
     try { await steps[name](work.id); }

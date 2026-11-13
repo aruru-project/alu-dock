@@ -206,7 +206,7 @@ function sampleData() {
     ...(item.revision > 1 ? [{ at: item.updatedAt, author: item.author, action: item.state === 'retired' ? 'merged' as const : item.state === 'forgotten' ? 'forgotten' as const : 'rewritten' as const, ...(item.state === 'active' ? { text: item.text } : {}) }] : []),
     { at: item.createdAt, author: item.revision > 1 && item.author !== 'owner' ? 'extraction' as const : item.author, action: 'added' as const, text: item.text },
   ]]))
-  const assistantSettings: AssistantSettings = { extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' } }
+  const assistantSettings: AssistantSettings = { extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' }, handoff: { startTokens: null, keepRecentTokens: null, prompt: '预览示例：为助手写一份交接记录，保留尚未办完的事、主人的要求和待回答的问题。' } }
   // Her timeline: what the two of them were doing, one line per stretch of a conversation, newest first.
   const line = (id: string, fromMinutes: number, toMinutes: number, text: string, fields: Partial<AssistantEpisode> = {}): AssistantEpisode => ({
     id, session: assistantSession, entryId: 'a1', fromAt: ago(fromMinutes), toAt: ago(toMinutes), text, state: 'active', author: 'extraction', createdAt: ago(toMinutes), updatedAt: ago(toMinutes), revision: 1, ...fields,
@@ -364,7 +364,8 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'assistant_settings': await delay(120); return structuredClone(preview.assistantSettings)
     case 'set_assistant_settings': {
       await delay(200)
-      preview.assistantSettings = args.extractionModel ? { extractionModel: args.extractionModel as AssistantSettings['extractionModel'] } : {}
+      Object.assign(preview.assistantSettings, args.settings)
+      if (preview.assistantSettings.extractionModel === null) delete preview.assistantSettings.extractionModel
       return structuredClone(preview.assistantSettings)
     }
     case 'reorganize_assistant': {
@@ -375,7 +376,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
       const kept = preview.assistantTimeline.filter((item) => item.author !== 'extraction')
       const removedLines = preview.assistantTimeline.length - kept.length
       preview.assistantTimeline.splice(0, preview.assistantTimeline.length, ...kept)
-      preview.assistantSettings = { extractionModel: args.extractionModel as NonNullable<AssistantSettings['extractionModel']> }
+      preview.assistantSettings.extractionModel = args.extractionModel as NonNullable<AssistantSettings['extractionModel']>
       return { extractionModel: structuredClone(preview.assistantSettings.extractionModel), retiredMemories: made.length, removedLines }
     }
     case 'assistant_preview': {

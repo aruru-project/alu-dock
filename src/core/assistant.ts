@@ -112,10 +112,42 @@ export interface AssistantDocument { document: AssistantDocumentName; text: stri
 export interface AssistantPreview { text: string; loadedAt: string }
 /** A model of Main's model service. */
 export interface AssistantModelRef { provider: string; id: string }
+export interface AssistantHandoffSettings {
+  /** Null follows the model's window; explicit values are token counts. */
+  startTokens: number | null;
+  keepRecentTokens: number | null;
+  /** The entire writing instruction; conversation and previous record are supplied separately. */
+  prompt: string;
+}
 export interface AssistantSettings {
   /** The model that turns her conversations into memories; without it nothing is extracted. */
   extractionModel?: AssistantModelRef;
+  /** Absent only on older Hosts that do not offer rolling hand-over settings. */
+  handoff?: AssistantHandoffSettings;
 }
+export interface AssistantSettingsEdit {
+  /** Omitted leaves it unchanged; null stops making memories. */
+  extractionModel?: AssistantModelRef | null;
+  /** Omitted leaves the existing hand-over settings unchanged. */
+  handoff?: AssistantHandoffSettings;
+}
+
+/** One factory default, returned by Main and used by the Worker until settings are read. */
+export const DEFAULT_ASSISTANT_HANDOFF: Readonly<AssistantHandoffSettings> = {
+  startTokens: null,
+  keepRecentTokens: null,
+  prompt: [
+    "你在替一位个人助手写交接记录。她和主人的对话太长了：下面这段较早的对话会从她眼前拿掉，只留下你写的这份记录，她靠它接着往下做事。",
+    "原话都另外存着，她以后搜得到，所以不要复述经过。主人是什么样的人、有什么喜好，由她的记忆保管；每天做了什么，由她的时间线保管。这两样都不要写进来。",
+    "上一份记录里还没了结的事要带到新记录里，已经了结的去掉。",
+    "写一份交接记录，用中文，直接写内容，不要开场白。只写下面这些，哪一项没有就不写那一项：",
+    "1. 主人交代过、还没办完的事，以及他提的要求和边界，尽量用他的原话。",
+    "2. 她派出去、活还没了结的 Work：叫什么、交给它什么、做到哪了。已经交回结果、她也转告过主人的不写。",
+    "3. 她在等的回答（等主人的、等哪个 Work 的），和她答应过还没做的事。",
+    "4. 这段对话里刚定下来、后面还会用到的结论。",
+    "已经了结的事、寒暄和闲聊不写。她定的提醒由 Dock 另外保管、每轮都会告诉她，不要写。对话里没有的内容不要编。",
+  ].join("\n"),
+};
 /**
  * Starting over with `extractionModel`: what the background made is set aside, its memories among the
  * retired (where each can be restored) and its timeline lines removed, and every conversation is read
@@ -308,7 +340,7 @@ export type AssistantRequest =
   | ({ op: "timeline_update" } & AssistantTimelineUpdateRequest)
   | { op: "settings_get" }
   /** `null` stops extraction. */
-  | { op: "settings_set"; extractionModel: AssistantModelRef | null }
+  | ({ op: "settings_set" } & AssistantSettingsEdit)
   | { op: "reorganize"; extractionModel: AssistantModelRef };
 
 export type AssistantResultFor<R extends AssistantRequest> =
@@ -496,9 +528,27 @@ function parseReorganizeModel(value: Record<string, unknown>, field: string): As
   return modelRef(value.extractionModel, `${field}.extractionModel`, true);
 }
 
-function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantModelRef | null {
-  if (!("extractionModel" in value)) fail(`${field}.extractionModel is required`);
-  return value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true);
+function parseHandoffSettings(input: unknown, field: string, closed: boolean): AssistantHandoffSettings {
+  const value = record(input, field);
+  if (closed) only(value, ["startTokens", "keepRecentTokens", "prompt"], field);
+  const tokens = (input: unknown): number | null => {
+    if (input === null) return null;
+    if (!Number.isSafeInteger(input) || (input as number) <= 0) fail("整理的 token 数请填正整数，或留空使用自动值；这次没有保存。");
+    return input as number;
+  };
+  const startTokens = tokens(value.startTokens), keepRecentTokens = tokens(value.keepRecentTokens);
+  if (startTokens !== null && keepRecentTokens !== null && keepRecentTokens >= startTokens) fail("保留的最近原话必须少于开始整理的 token 数；这次没有保存。");
+  const prompt = documentText(value.prompt, `${field}.prompt`);
+  if (!prompt.trim()) fail("请写下交接记录的提示词；这次没有保存。");
+  return { startTokens, keepRecentTokens, prompt };
+}
+
+function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantSettingsEdit {
+  if (value.extractionModel === undefined && value.handoff === undefined) fail(`${field} changes nothing`);
+  return {
+    ...(value.extractionModel === undefined ? {} : { extractionModel: value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true) }),
+    ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, true) }),
+  };
 }
 
 /** `closed` refuses unknown fields, as in a question; an answer ignores them. */
@@ -640,8 +690,8 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op"], field);
         return { op: "settings_get" };
       case "settings_set":
-        only(value, ["op", "extractionModel"], field);
-        return { op: "settings_set", extractionModel: parseSettingsSet(value, field) };
+        only(value, ["op", "extractionModel", "handoff"], field);
+        return { op: "settings_set", ...parseSettingsSet(value, field) };
       case "reorganize":
         only(value, ["op", "extractionModel"], field);
         return { op: "reorganize", extractionModel: parseReorganizeModel(value, field) };
@@ -676,7 +726,7 @@ export function parseAssistantTimelineListParams(input: Record<string, unknown>,
 export function parseAssistantTimelineUpdateParams(input: Record<string, unknown>, field: string): AssistantTimelineUpdateRequest {
   return question(() => parseTimelineUpdate(input, field));
 }
-export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantModelRef | null {
+export function parseAssistantSettingsSetParams(input: Record<string, unknown>, field: string): AssistantSettingsEdit {
   return question(() => parseSettingsSet(input, field));
 }
 export function parseAssistantReorganizeParams(input: Record<string, unknown>, field: string): AssistantModelRef {
@@ -827,7 +877,10 @@ export function parseAssistantTimelineList(input: unknown, field = "assistant ti
 export function parseAssistantSettings(input: unknown, field = "assistant settings"): AssistantSettings {
   return answer(() => {
     const value = record(input, field);
-    return value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) };
+    return {
+      ...(value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) }),
+      ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, false) }),
+    };
   });
 }
 export function parseAssistantReorganizeResult(input: unknown, field = "assistant reorganize"): AssistantReorganizeResult {

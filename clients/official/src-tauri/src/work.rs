@@ -10,13 +10,13 @@ use aludock_client_core::{
     AssistantEpisodeEdit, AssistantInfo, AssistantMemory, AssistantMemoryDetail,
     AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList, AssistantMemoryTopic,
     AssistantPreview, AssistantReorganizeResult, AssistantSearchResult, AssistantSettings,
-    AssistantTimelineFilter, AssistantTimelineList, AttachmentState, BashRunResult,
-    ChildModelsResult, ChildModelsSetResult, DeliveryMode, ExtensionControlState, InstanceSnapshot,
-    Machine, ModelRef, ModelVisibilityResult, ModelVisibilitySetResult, ResourceContentResult,
-    RestoredImageState, SafeQueueDequeueResult, SessionTokenState, StopResult, SubmitResult,
-    SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult, WorkspaceCursor,
-    WorkspacePage, operation_association, project_queue_dequeue, resolve_machine_session_token,
-    restored_image_scope,
+    AssistantSettingsEdit, AssistantTimelineFilter, AssistantTimelineList, AttachmentState,
+    BashRunResult, ChildModelsResult, ChildModelsSetResult, DeliveryMode, ExtensionControlState,
+    InstanceSnapshot, Machine, ModelRef, ModelVisibilityResult, ModelVisibilitySetResult,
+    ResourceContentResult, RestoredImageState, SafeQueueDequeueResult, SessionTokenState,
+    StopResult, SubmitResult, SystemCatalogCursor, SystemCatalogResult, SystemDefaultSetResult,
+    WorkspaceCursor, WorkspacePage, operation_association, project_queue_dequeue,
+    resolve_machine_session_token, restored_image_scope,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -807,18 +807,18 @@ pub(crate) async fn assistant_settings(
         .map_err(CommandError::from)
 }
 
-/// `None` stops making memories. The operation is named by the page, as for memory changes.
+/// The page names the operation and changes only the supplied settings.
 #[tauri::command]
 pub(crate) async fn set_assistant_settings(
     runtime: tauri::State<'_, ConnectionRuntimeState>,
     connection_id: String,
     selection_generation: u64,
-    extraction_model: Option<ModelRef>,
+    settings: AssistantSettingsEdit,
     operation_id: String,
 ) -> Result<AssistantSettings, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     dock_client(&runtime, &connection_id, selection_generation, &store)?
-        .set_assistant_settings(extraction_model.as_ref(), Some(&operation_id))
+        .set_assistant_settings(&settings, Some(&operation_id))
         .await
         .map_err(CommandError::from)
 }

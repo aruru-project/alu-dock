@@ -22,7 +22,7 @@ test("what she hears becomes a memory and a timeline line her next session start
   const client = await team.startHost();
   // Card #295: without a chosen model nothing is extracted, and the owner is told so.
   assert.equal((await client.assistantInfo()).extraction?.state, "off");
-  await client.setAssistantSettings({ provider: "memory", id: "fixture" });
+  await client.setAssistantSettings({ extractionModel: { provider: "memory", id: "fixture" } });
 
   const alu = await team.assistantWork();
   await client.prompt(alu.id, "我不吃香菜，以后点外卖记得避开。", "auto", "alu-coriander");

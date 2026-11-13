@@ -12,7 +12,7 @@ import { FILE_TRANSFER_CAPABILITY, parseFileTransferFrame, parseFileDownloadResu
 import { SYSTEM_TEMPLATES_CAPABILITY, parseSystemCatalogResult, parseSystemDefaultSetResult, type SystemCatalogCursor, type SystemCatalogResult, type SystemDefaultSetResult } from "./protocol.js";
 import { ASSISTANT_CONTEXT_DEFAULT_SPAN } from "../core/assistant.js";
 import { ASSISTANT_CAPABILITY, INSTANCE_ASSISTANT_CAPABILITY, parseAssistantContextResult, parseAssistantDocument, parseAssistantEpisode, parseAssistantInfo, parseAssistantMemory, parseAssistantMemoryDetail, parseAssistantMemoryList, parseAssistantPreview, parseAssistantSearchResult, parseAssistantReorganizeResult, parseAssistantSettings, parseAssistantTimelineList, type AssistantContextResult, type AssistantDocument, type AssistantDocumentName, type AssistantEpisode, type AssistantInfo, type AssistantMemory, type AssistantMemoryDetail, type AssistantMemoryList, type AssistantPreview, type AssistantReorganizeResult, type AssistantSearchResult, type AssistantSettings, type AssistantTimelineList } from "./protocol.js";
-import type { AssistantMemoryAddRequest, AssistantMemoryListRequest, AssistantMemoryUpdateRequest, AssistantModelRef, AssistantTimelineListRequest, AssistantTimelineUpdateRequest } from "../core/assistant.js";
+import type { AssistantMemoryAddRequest, AssistantMemoryListRequest, AssistantMemoryUpdateRequest, AssistantModelRef, AssistantSettingsEdit, AssistantTimelineListRequest, AssistantTimelineUpdateRequest } from "../core/assistant.js";
 import { CHILD_MODELS_CAPABILITY, parseChildModelsResult, parseChildModelsSetResult, type ChildModelsResult, type ChildModelsSetResult, MODEL_VISIBILITY_CAPABILITY, parseModelVisibilityResult, parseModelVisibilitySetResult, type ModelRef, type ModelVisibilityResult, type ModelVisibilitySetResult } from "./protocol.js";
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -660,7 +660,7 @@ export class DockClient {
   assistantEpisode(id:string):Promise<AssistantEpisode>{return this.request("assistant.timeline.get",{id},ASSISTANT_CAPABILITY,parseAssistantEpisode);}
   updateAssistantEpisode(update:AssistantTimelineUpdateRequest,operationId=this.createRequestId()):Promise<AssistantEpisode>{return this.request("assistant.timeline.update",{operationId,...update},ASSISTANT_CAPABILITY,parseAssistantEpisode);}
   assistantSettings():Promise<AssistantSettings>{return this.request("assistant.settings.get",{},ASSISTANT_CAPABILITY,parseAssistantSettings);}
-  setAssistantSettings(extractionModel:AssistantModelRef|null,operationId=this.createRequestId()):Promise<AssistantSettings>{return this.request("assistant.settings.set",{operationId,extractionModel},ASSISTANT_CAPABILITY,parseAssistantSettings);}
+  setAssistantSettings(settings:AssistantSettingsEdit,operationId=this.createRequestId()):Promise<AssistantSettings>{return this.request("assistant.settings.set",{operationId,...settings},ASSISTANT_CAPABILITY,parseAssistantSettings);}
   reorganizeAssistant(extractionModel:AssistantModelRef,operationId=this.createRequestId()):Promise<AssistantReorganizeResult>{return this.request("assistant.reorganize",{operationId,extractionModel},ASSISTANT_CAPABILITY,parseAssistantReorganizeResult);}
   /** One machine's selectable models and hidden list; omit hostId for this Host. */
   modelVisibility(hostId?:string):Promise<ModelVisibilityResult>{return this.request("model.visibility.get",{hostId},MODEL_VISIBILITY_CAPABILITY,parseModelVisibilityResult);}

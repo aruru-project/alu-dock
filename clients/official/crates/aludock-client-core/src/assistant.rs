@@ -64,6 +64,37 @@ pub struct AssistantExtractionStatus {
 pub struct AssistantSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_model: Option<ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<AssistantHandoffSettings>,
+}
+
+/// Token counts use null for automatic values. Main validates user-entered numbers.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantHandoffSettings {
+    pub start_tokens: Option<f64>,
+    pub keep_recent_tokens: Option<f64>,
+    pub prompt: String,
+}
+
+/// Omitted fields keep their setting; an explicit null model stops making memories.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantSettingsEdit {
+    #[serde(
+        default,
+        deserialize_with = "present_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub extraction_model: Option<Option<ModelRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<AssistantHandoffSettings>,
+}
+
+fn present_model<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<ModelRef>>, D::Error> {
+    Option::<ModelRef>::deserialize(deserializer).map(Some)
 }
 
 /// Starting over with a model: how many memories the background made were set aside among the
@@ -506,8 +537,8 @@ struct EpisodeUpdateParams<'a> {
 #[serde(rename_all = "camelCase")]
 struct SettingsSetParams<'a> {
     operation_id: &'a str,
-    /// Sent as `null` to stop making memories.
-    extraction_model: Option<&'a ModelRef>,
+    #[serde(flatten)]
+    settings: &'a AssistantSettingsEdit,
 }
 
 #[derive(Serialize)]
@@ -758,10 +789,10 @@ impl DockClient {
             .await
     }
 
-    /// `None` stops making memories; those already made stay.
+    /// Only supplied fields change; previously saved settings stay otherwise.
     pub async fn set_assistant_settings(
         &self,
-        extraction_model: Option<&ModelRef>,
+        settings: &AssistantSettingsEdit,
         operation_id: Option<&str>,
     ) -> Result<AssistantSettings> {
         let generated = Uuid::new_v4().to_string();
@@ -770,7 +801,7 @@ impl DockClient {
             "assistant.settings.set",
             &SettingsSetParams {
                 operation_id,
-                extraction_model,
+                settings,
             },
             ASSISTANT,
             Some(operation_id),

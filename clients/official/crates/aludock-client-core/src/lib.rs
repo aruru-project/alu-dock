@@ -149,12 +149,13 @@ pub use systems::{
 pub use assistant::{
     AssistantContextResult, AssistantDocument, AssistantDocumentName, AssistantEntry,
     AssistantEntryKind, AssistantEntryRef, AssistantEpisode, AssistantEpisodeEdit,
-    AssistantEpisodeState, AssistantExtractionState, AssistantExtractionStatus, AssistantInfo,
-    AssistantMemory, AssistantMemoryAction, AssistantMemoryAuthor, AssistantMemoryChange,
-    AssistantMemoryDetail, AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemoryList,
-    AssistantMemorySource, AssistantMemoryState, AssistantMemoryTopic, AssistantPreview,
-    AssistantReorganizeResult, AssistantSearchHit, AssistantSearchResult, AssistantSessionInfo,
-    AssistantSettings, AssistantTimelineFilter, AssistantTimelineList, AssistantToolCall,
+    AssistantEpisodeState, AssistantExtractionState, AssistantExtractionStatus,
+    AssistantHandoffSettings, AssistantInfo, AssistantMemory, AssistantMemoryAction,
+    AssistantMemoryAuthor, AssistantMemoryChange, AssistantMemoryDetail, AssistantMemoryEdit,
+    AssistantMemoryFilter, AssistantMemoryList, AssistantMemorySource, AssistantMemoryState,
+    AssistantMemoryTopic, AssistantPreview, AssistantReorganizeResult, AssistantSearchHit,
+    AssistantSearchResult, AssistantSessionInfo, AssistantSettings, AssistantSettingsEdit,
+    AssistantTimelineFilter, AssistantTimelineList, AssistantToolCall,
 };
 pub use child_models::{ChildModelsResult, ChildModelsSetResult};
 pub use model_visibility::{ModelRef, ModelVisibilityResult, ModelVisibilitySetResult};

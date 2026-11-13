@@ -56,6 +56,7 @@ watch([section, () => app.connectionContext?.connectionId, () => app.connectionC
   } else if (current === 'settings') {
     void memory.loadSettings()
     void memory.loadModels()
+    void memory.refreshHandoffStatus()
   }
 }, { immediate: true })
 

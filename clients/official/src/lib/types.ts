@@ -763,7 +763,9 @@ export interface AssistantExtractionStatus {
   retryAt?: string
 }
 /** The model that makes her memories; without one nothing is made. */
-export interface AssistantSettings { extractionModel?: ModelRef }
+export interface AssistantHandoffSettings { startTokens: number | null; keepRecentTokens: number | null; prompt: string }
+export interface AssistantSettings { extractionModel?: ModelRef; handoff?: AssistantHandoffSettings }
+export interface AssistantSettingsEdit { extractionModel?: ModelRef | null; handoff?: AssistantHandoffSettings }
 /** Starting over: how many memories the background made went among the retired, and how many of its timeline lines were removed. */
 export interface AssistantReorganizeResult { extractionModel: ModelRef; retiredMemories: number; removedLines: number }
 export type AssistantMemoryTopic = 'owner' | 'preferences' | 'relationship' | 'events' | 'self' | Unrecognized
