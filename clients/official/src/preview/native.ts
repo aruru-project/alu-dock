@@ -24,8 +24,8 @@ function sampleData() {
   }
   const previewModels: Omit<ModelsResult, 'instance'> = {
     models: [
-      { provider: 'anthropic', id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', reasoning: true, contextWindow: 200000 },
-      { provider: 'openai-codex', id: 'gpt-5.6', name: 'GPT-5.6', reasoning: true, contextWindow: 200000 },
+      { provider: 'anthropic', id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', reasoning: true, contextWindow: 200000, speedTiers: ['standard'] },
+      { provider: 'openai-codex', id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', reasoning: true, contextWindow: 1050000, speedTiers: ['standard', 'fast', 'ultrafast'] },
     ],
     availableThinkingLevels: ['off', 'low', 'medium', 'high', 'xhigh'],
     total: 2,
@@ -42,6 +42,7 @@ function sampleData() {
   }
   const previewSettings: SettingsResult = {
     settings: [
+      { key: 'modelSpeed', value: { tier: 'ultrafast', scope: 'all' }, source: 'effective', writable: true, valueType: 'object', allowedValues: ['standard', 'fast', 'ultrafast'], reloadRequired: false, hostRestartRequired: false },
       { key: 'autoCompaction', value: true, source: 'global', writable: true, valueType: 'boolean', reloadRequired: false, hostRestartRequired: false },
       { key: 'enableSkillCommands', value: true, source: 'project', writable: true, valueType: 'boolean', reloadRequired: true, hostRestartRequired: false },
       { key: 'transport', value: 'auto', source: 'global', writable: true, valueType: 'enum', allowedValues: ['auto', 'sse', 'websocket', 'websocket-cached'], reloadRequired: false, hostRestartRequired: false },
@@ -129,7 +130,7 @@ function sampleData() {
     lifecycle: Work['lifecycle'],
     gitBranch?: string,
     // null: the Work has not chosen a model yet.
-    model: Work['executor']['model'] | null = { provider: 'openai-codex', id: 'gpt-5.6', name: 'GPT-5.6' },
+    model: Work['executor']['model'] | null = { provider: 'openai-codex', id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol' },
   ): Work {
     return {
       id: `preview-${displayName}`,
@@ -254,7 +255,19 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'command_catalog': await delay(100); return preview.previewCommands
     case 'list_models': await delay(100); return { ...preview.previewModels, instance: workFor(args.instanceId) }
     case 'list_tools': await delay(100); return { ...preview.previewTools, instance: workFor(args.instanceId) }
-    case 'get_settings': await delay(100); return preview.previewSettings
+    case 'get_settings': {
+      await delay(100)
+      const model = workFor(args.instanceId).executor.model
+      const tiers = preview.previewModels.models.find(item => item.provider === model?.provider && item.id === model?.id)?.speedTiers ?? ['standard']
+      return { settings: preview.previewSettings.settings.map(item => item.key === 'modelSpeed' ? { ...item, allowedValues: tiers } : item) }
+    }
+    case 'update_setting': {
+      await delay(100)
+      const update = args.update as { key: string; value: unknown }
+      const setting = preview.previewSettings.settings.find(item => item.key === update.key)!
+      Object.assign(setting, { value: update.value })
+      return { setting: structuredClone(setting), instance: workFor(args.instanceId), reloadRequired: false, hostRestartRequired: false }
+    }
     case 'get_resources': await delay(100); return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
     case 'list_sessions': await delay(100); return preview.previewSessions(args as unknown as SessionContext)
     case 'session_tree': await delay(100); return preview.previewTree

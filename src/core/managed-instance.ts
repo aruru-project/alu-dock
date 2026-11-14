@@ -1123,7 +1123,10 @@ export class ManagedInstance {
   }
 
   async updateSetting(update: SettingUpdate, operationId = this.createCommandId(), inheritedSpeed: ModelSpeedTier = "standard"): Promise<SettingDto> {
-    const configuration = await this.beginConfiguration(`changing ${update.key}`, { admission: update.key === "modelSpeed" ? "live" : settingAdmission(update.key) });
+    // Work speed only changes the next request's parameter, independently of session operations.
+    const configuration = update.key === "modelSpeed" ? undefined
+      : await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
+    if (update.key === "modelSpeed") { this.catalogPort?.assertWritable(); this.assertActive(); }
     try {
       const runtimeUpdate: SettingUpdate = update.key === "modelSpeed"
         ? { key: "modelSpeed", value: { tier: update.value?.tier ?? inheritedSpeed, scope: "work" } } : update;
@@ -1155,7 +1158,7 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration(configuration);
+      if (configuration) this.endConfiguration(configuration);
     }
   }
 

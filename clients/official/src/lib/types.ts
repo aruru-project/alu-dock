@@ -516,6 +516,7 @@ export interface SessionForkResult { cancelled: boolean; selectedText?: string; 
 export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface ModelInfo {
+  speedTiers?: ModelSpeedTier[]
   provider: string
   id: string
   name: string

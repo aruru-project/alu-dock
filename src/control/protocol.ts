@@ -2091,7 +2091,12 @@ export function parsePruneResult(input: unknown): PruneResult {
   } };
 }
 function modelInfoList(value: Record<string, unknown>): Pick<ModelsResult, "models" | "total" | "truncated"> {
-  const models = array(value.models, "models", MAX_MODEL_LIST_ITEMS).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", MAX_MODEL_NAME_CHARS), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
+  const models = array(value.models, "models", MAX_MODEL_LIST_ITEMS).map((item, index) => {
+    const model = object(item, `models[${index}]`);
+    exact(model, ["provider", "id", "name", "reasoning", "contextWindow", "speedTiers"]);
+    return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", MAX_MODEL_NAME_CHARS), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow"),
+      ...(model.speedTiers === undefined ? {} : { speedTiers: array(model.speedTiers, "model speed tiers", MODEL_SPEED_TIERS.length).map(tier => enumeration(tier, "model speed tier", MODEL_SPEED_TIERS)) }) };
+  });
   return { models, ...parseCollectionCompleteness(value, models.length) };
 }
 function modelListFields(value: Record<string, unknown>): Omit<ModelsResult, "instance"> {

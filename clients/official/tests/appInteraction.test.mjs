@@ -3099,7 +3099,8 @@ try {
     const her = { ...otherWork, id: 'resident-assistant', displayName: '小满', name: '小满', assistant: true, runtimeGeneration: 1 }
     const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
     extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
-    const savedAssistant = assistantNative, savedTools = toolsNative
+    const savedAssistant = assistantNative, savedTools = toolsNative, savedModelVisibility = modelVisibilityNative
+    modelVisibilityNative = () => ({ models: [{ provider: 'openai', id: 'gpt-mini', name: 'Memory model', reasoning: true, speedTiers: ['standard', 'fast'] }], total: 1, truncated: false, hidden: [] })
     assistantNative = (command, args) => {
       if (command === 'assistant_preview') return { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' }
       if (command === 'assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'standard' }
@@ -3126,13 +3127,13 @@ try {
     assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { extractionSpeed: 'fast' }, 'memory speed changes independently, leaving its model and chat speed alone')
     await click(assistantView, '打开小满的对话')
     assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'the settings page opens the already listed assistant')
-    // The new setting is optional on older Hosts; opening it does not replace the conversation.
-    await click(assistantView, '设置模型速度')
-    assert.ok(text(dialog('模型速度')).includes('尚未提供'), 'an older Host still opens the speed entry and explains what is available')
-    await click(dialog('模型速度'), '关闭')
+    // The control is absent until the Host reports an acceleration tier for this model.
+    assert.equal(!!button(assistantView, '设置模型速度'), false, 'older Hosts do not advertise a speed control')
     const speedSetting = { key: 'modelSpeed', value: null, source: 'effective', writable: true, valueType: 'object', allowedValues: ['standard', 'fast', 'ultrafast'], reloadRequired: false, hostRestartRequired: false }
     settingsNative = () => ({ settings: [structuredClone(speedSetting)] })
     updateSettingNative = args => ({ setting: { ...speedSetting, value: args.update.value }, instance: atHost(her), reloadRequired: false, hostRestartRequired: false })
+    assistantApp.selectWork(child.id); await settle()
+    assistantApp.selectWork(her.id); await settle()
     await click(assistantView, '设置模型速度')
     await click(dialog('模型速度'), '模型速度档位')
     await click(dialog('模型速度'), 'Ultrafast')
@@ -3150,6 +3151,20 @@ try {
     assert.equal(inherit.instanceId, child.id)
     assert.equal(inherit.update.value, null, 'a child removes its override through the same settings bridge')
     assistantApp.selectWork(her.id); await settle()
+    const oldSpeedSettings = { settings: [structuredClone(speedSetting)] }
+    let finishOldSettings
+    settingsNative = () => new Promise(resolve => { finishOldSettings = () => resolve(oldSpeedSettings) })
+    await click(assistantView, '设置模型速度')
+    assert.equal(typeof finishOldSettings, 'function')
+    speedSetting.allowedValues = ['standard']
+    settingsNative = () => ({ settings: [structuredClone(speedSetting)] })
+    const oldModelWork = assistantApp.selectedWork
+    assistantApp.applyWorkSnapshot({ ...oldModelWork, executor: { ...oldModelWork.executor, model: { provider: 'other', id: 'no-acceleration' } } }); await settle()
+    finishOldSettings(); await settle()
+    assert.equal(!!button(assistantView, '设置模型速度'), false, 'a settings reply from the previous model cannot restore the hidden speed entry')
+    await click(dialog('模型速度'), '关闭')
+    assistantApp.applyWorkSnapshot(oldModelWork); await settle()
+    assert.equal(!!button(assistantView, '设置模型速度'), false, 'a model without acceleration tiers does not show the speed entry')
     settingsNative = undefined; updateSettingNative = undefined
     const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
     assert.deepEqual(quickNames(), ['问候'], 'saved Pi-only buttons stay out of her input row')
@@ -3201,7 +3216,7 @@ try {
     assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候'], 'the same device buttons still belong to ordinary Pi Works')
     await click(assistantView, '打开命令中心')
     assert.ok(paletteLabels().includes('New Session'), 'ordinary Pi conversation controls stay available')
-    extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools
+    extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
     console.log('PASS: permanent assistant: pinned with her children, existing conversation opened from settings, Pi-only controls hidden, real tools read-only, restart keeps her selected and preserves the draft')
   }
 

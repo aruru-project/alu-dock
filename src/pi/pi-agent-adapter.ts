@@ -646,7 +646,7 @@ export class PiAgentAdapter {
   async listModels(): Promise<AgentModelListBody> {
     const binding = this.requireActive();
     return {
-      ...projectPiModelList(await binding.services.modelRuntime.getAvailable()),
+      ...projectPiModelList(await binding.services.modelRuntime.getAvailable(), model => this.modelSpeed.supported(model)),
       availableThinkingLevels: [...binding.session.getAvailableThinkingLevels()],
     };
   }
@@ -685,7 +685,7 @@ export class PiAgentAdapter {
   async updateSetting(update: SettingUpdate): Promise<SettingDto> {
     if (update.key === "modelSpeed") {
       this.modelSpeed.update(update.value);
-      return this.modelSpeed.setting(this.requireActive().session.model);
+      return this.modelSpeed.setting(this.active?.session.model);
     }
     assertPiSettingUpdate(update);
     const binding = this.requireActive();
@@ -2159,7 +2159,10 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       // Preserve existing plugin preferences; wire JSON cannot disable this contract.
       extensionModelMutationPolicy: "legacy-defaults",
     });
-    result.session.agent.onPayload = modelSpeed.wrap(result.session.agent.onPayload);
+    const stream = result.session.agent.streamFunction;
+    result.session.agent.streamFunction = (model, context, options) => stream(model, context, {
+      ...options, onPayload: modelSpeed.wrap(options?.onPayload),
+    });
     if (inheritedConversation) {
       // Pi records these only for new sessions; without them a reload would restore the parent's.
       if (result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);

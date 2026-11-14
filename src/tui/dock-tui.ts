@@ -60,6 +60,7 @@ import {
   settingChoiceValue,
   settingCompletions,
   settingName,
+  settingVisible,
   settingValueChoices,
   SPEED_USAGE,
 } from "./settings-controls.js";
@@ -128,6 +129,7 @@ export async function runDockTui(
   let draftAttachmentIds: string[] = [];
   let editor!: Editor;
   let settings: SettingDto[] = [];
+  let speedRead = 0;
   let commands: CommandDto[] = [];
   let terminalProgressEnabled = false;
   let replacementHistoryGeneration: number | undefined;
@@ -275,6 +277,18 @@ export async function runDockTui(
       activeExtensionDialog.closeFromHost();
     }
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
+    if (event.type === "model.changed") {
+      const read = ++speedRead;
+      const generation = instance.runtimeGeneration;
+      settings = settings.filter(setting => setting.key !== "modelSpeed");
+      rebuildAutocomplete();
+      void client.settings(instance.id).then(result => {
+        if (read === speedRead && instance.runtimeGeneration === generation) {
+          settings = result.settings;
+          rebuildAutocomplete();
+        }
+      }).catch(() => {});
+    }
     if (event.type === "extension.tools_expanded_changed") conversation.setToolsExpanded(event.data.expanded);
     applyControllerDirective(event, catchUp);
     if (event.type === "session.info_changed") {
@@ -1110,7 +1124,7 @@ export async function runDockTui(
       settings = (await client.settings(instance.id)).settings;
       const key = requestedKey ?? await showChoicePicker(
         "Work settings",
-        settings.map((setting) => ({
+        settings.filter(settingVisible).map((setting) => ({
           value: setting.key,
           label: settingName(setting),
           description: `${formatSettingValue(setting.value)} · ${setting.source}${setting.writable ? "" : " · read-only"}${setting.reloadRequired ? " · reload" : ""}${setting.hostRestartRequired ? " · restart Alu Dock" : ""}`,
@@ -1118,8 +1132,8 @@ export async function runDockTui(
       );
       if (!key) { showStatus("settings unchanged"); return; }
       const setting = settings.find((candidate) => candidate.key === key);
-      if (!setting) {
-        conversation.addNotice("This Dock does not offer model speed settings.", true);
+      if (!setting || !settingVisible(setting)) {
+        conversation.addNotice("No acceleration tier is listed for this model.", true);
         return;
       }
       if (!setting.writable) {
@@ -1996,7 +2010,7 @@ export async function runDockTui(
 
   function rebuildAutocomplete(): void {
     if (!editor) return;
-    const autocompleteCommands = commandCatalog(commands).map((command) => {
+    const autocompleteCommands = commandCatalog(commands).filter(command => command.name !== "speed" || settings.some(setting => setting.key === "modelSpeed" && settingVisible(setting))).map((command) => {
       if (command.name === "thinking") {
         return {
           ...command,

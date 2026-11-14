@@ -15,6 +15,7 @@ import type { CommandArgumentCompletion, CommandInfo, ShellRunItem } from '../li
 import { useAppStore } from './app'
 import { useAttachmentsStore } from './attachments'
 import { useCommandCatalogStore } from './command-catalog'
+import { useControlPanelStore } from './control-panel'
 import { useConversationStore } from './conversation'
 import { useExtensionUiStore } from './extension-ui'
 import { useHostStore } from './host'
@@ -28,6 +29,7 @@ export const useInputStore = defineStore('input', () => {
   const selected = computed(() => app.selectedWork)
   const extensionUi = useExtensionUiStore()
   const commandCatalogStore = useCommandCatalogStore()
+  const controlPanel = useControlPanelStore()
   const surfaces = useSurfacesStore()
   const observation = useObservationStore()
   const host = useHostStore()
@@ -141,7 +143,7 @@ export const useInputStore = defineStore('input', () => {
   const commandSuggestItems = computed<ComposerCommandSuggestion[]>(() => {
     const query = slashQuery.value
     if (query === null) return []
-    const local = filterLocalControlCommands(query, selected.value?.assistant).map((command) => ({
+    const local = filterLocalControlCommands(query, selected.value?.assistant).filter(command => command.id !== 'speed' || controlPanel.speedAvailable).map((command) => ({
       kind: 'local' as const,
       name: command.name,
       description: command.description,

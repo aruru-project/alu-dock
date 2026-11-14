@@ -12,6 +12,8 @@ import {
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 
 import { configurePiNetwork } from "./configure-pi-network.js";
+import { readModelSpeedSupport } from "../model-service/speed-support.js";
+import { supportedModelSpeeds } from "../core/model-speed.js";
 import { projectPiModelList, type PiModelListBody } from "./pi-model-list.js";
 
 export type PiLoginInteraction = Parameters<ModelRuntime["login"]>[2];
@@ -137,7 +139,8 @@ export async function listAvailablePiModels(options: PiEnvironmentOptions = {}):
   const environment = await openPiEnvironment(options);
   try {
     configurePiNetwork(environment.settings);
-    return projectPiModelList(await environment.runtime.getAvailable());
+    const support = await readModelSpeedSupport(join(environment.agentDir, "models.json"));
+    return projectPiModelList(await environment.runtime.getAvailable(), model => supportedModelSpeeds(support, model));
   } finally {
     environment.close();
   }

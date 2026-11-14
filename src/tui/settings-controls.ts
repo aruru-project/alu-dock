@@ -5,6 +5,10 @@ import { MODEL_SPEED_TIERS, parseModelSpeedSelection } from "../core/model-speed
 
 export const SPEED_USAGE = "Use /speed standard|fast|ultrafast [all], or /speed inherit to follow the parent (standard without a shared choice).";
 
+export function settingVisible(setting: SettingDto): boolean {
+  return setting.key !== "modelSpeed" || setting.allowedValues?.some(tier => tier !== "standard") === true;
+}
+
 export function settingName(setting: SettingDto): string {
   return setting.key === "modelSpeed" ? "Model speed" : setting.key;
 }
@@ -28,8 +32,8 @@ export function settingChoiceValue(setting: SettingDto): string | undefined {
 
 export function settingValueChoices(setting: SettingDto, child = false): Array<{ value: string; label: string; description?: string }> {
   if (setting.key === "modelSpeed") return [
-    ...MODEL_SPEED_TIERS.filter(tier => setting.allowedValues?.includes(tier)).flatMap(tier => [
-      { value: tier, label: `${tier === "standard" ? "Standard" : tier === "fast" ? "Fast" : "Ultrafast"} · current Work only` },
+    ...MODEL_SPEED_TIERS.flatMap(tier => [
+      { value: tier, label: `${tier === "standard" ? "Standard" : tier === "fast" ? "Fast" : "Ultrafast"} · current Work only`, description: setting.allowedValues?.includes(tier) ? "Listed for this model" : "Not applied by this model; choice is kept" },
       { value: `${tier} all`, label: `${tier === "standard" ? "Standard" : tier === "fast" ? "Fast" : "Ultrafast"} · current and child Works`, description: "Includes running and future children without their own choice" },
     ]),
     { value: "inherit", label: child ? "Follow parent again" : "Default (standard)", description: child ? "Use the parent's shared choice, otherwise standard" : "Clear this Work's own choice" },
@@ -58,7 +62,6 @@ export function parseSettingCommandValue(setting: SettingDto, rawValue: string):
           ? { tier: tier === "off" ? "standard" : tier, scope: scope ?? "work" }
           : JSON.parse(rawValue) as unknown;
       const parsed = parseModelSpeedSelection(selection);
-      if (parsed && !setting.allowedValues?.includes(parsed.tier)) return undefined;
       return { key: "modelSpeed", value: parsed };
     } catch { return undefined; }
   }
@@ -94,13 +97,13 @@ export function settingCompletions(settings: SettingDto[], prefix: string, child
   const separator = prefix.indexOf(" ");
   if (separator < 0) {
     return settings
-      .filter((setting) => setting.key.startsWith(prefix))
+      .filter((setting) => settingVisible(setting) && setting.key.startsWith(prefix))
       .map((setting) => ({ value: setting.key, label: settingName(setting), description: `${formatSettingValue(setting.value)}${setting.writable ? "" : " · read-only"}` }));
   }
   const key = prefix.slice(0, separator);
   const valuePrefix = prefix.slice(separator + 1);
   const setting = settings.find((candidate) => candidate.key === key);
-  if (!setting?.writable) return [];
+  if (!setting?.writable || !settingVisible(setting)) return [];
   return settingValueChoices(setting, child)
     .filter((choice) => choice.value.startsWith(valuePrefix))
     .map((choice) => ({ value: `${key} ${choice.value}`, label: choice.label, description: choice.description }));

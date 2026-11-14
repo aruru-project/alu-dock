@@ -38,6 +38,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 
 export interface AgentModelInfo {
+  speedTiers?: import("./model-speed.js").ModelSpeedTier[];
   provider: string;
   id: string;
   name: string;
@@ -281,6 +282,11 @@ export type AgentRequestType = typeof AGENT_REQUEST_TYPES[number];
 
 /** The business request is the canonical Protocol V2 request, not a Worker RPC mirror. */
 export type AgentRequest = Extract<ControlRequest, { type: AgentRequestType }>;
+
+/** This Work-owned parameter survives replacing the session inside its Worker. */
+export function survivesSessionReplacement(request: AgentRequest): boolean {
+  return request.type === "settings.update" && request.params.update.key === "modelSpeed";
+}
 
 /** Private source facts; file bytes are read by the owning Host, never by the Worker. */
 export type AgentFileSource =

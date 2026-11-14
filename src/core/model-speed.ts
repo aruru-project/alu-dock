@@ -12,8 +12,8 @@ export interface ModelSpeedSupport {
 /** Initial support data, overridable in Main's model-speed-support.json without updating Dock. */
 export const DEFAULT_MODEL_SPEED_SUPPORT: ModelSpeedSupport = {
   providers: {
-    "openai-codex": { fast: ["gpt-*"], ultrafast: ["gpt-6-astra", "gpt-6.1-sol"] },
-    openai: { fast: ["gpt-*"], ultrafast: ["gpt-6-astra", "gpt-6.1-sol"] },
+    "openai-codex": { fast: ["gpt-6-astra", "gpt-6.1-sol"], ultrafast: ["gpt-6-astra", "gpt-6.1-sol"] },
+    openai: { fast: ["gpt-6-astra", "gpt-6.1-sol"], ultrafast: ["gpt-6-astra", "gpt-6.1-sol"] },
   },
 };
 

@@ -103,8 +103,8 @@ export interface RenderContext {
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult, context: RenderContext = {}): string {
   if (result.type === "models") return renderChildModels(result, context.facts ?? { describe: () => undefined });
-  if (result.type === "speed" && result.setting.key === "modelSpeed") {
-    const value = result.setting.value;
+  if (result.type === "speed") {
+    const value = result.setting.value as import("../core/model-speed.js").ModelSpeedSelection | null;
     return `Selected speed: ${value === null ? "follow parent (standard for an independent Work)" : `${value.tier}; scope: ${value.scope}`}. Supported by the current model's configured list: ${(result.setting.allowedValues ?? []).join(", ")}. Changes apply to subsequent requests, not requests already sent.`;
   }
   if (result.type === "spawn") {

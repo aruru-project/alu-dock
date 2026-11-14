@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { controlRequestDescriptor } from "../control/protocol.js";
+import { survivesSessionReplacement } from "../core/agent-worker.js";
 import type {
   AgentCommandPreflightResult, AgentEvent, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState,
 } from "../core/agent-worker.js";
@@ -128,11 +129,11 @@ export async function runAgentWorker<Init>(options: AgentWorkerOptions<Init>): P
       const envelope = receiver.accept(raw);
       if (envelope) {
         const frameGeneration = receiver.lastIdentity?.runtimeGeneration ?? generation;
-        if (frameGeneration < generation) {
+        if (frameGeneration < generation && !(envelope.kind === "agent_request" && survivesSessionReplacement(envelope.request))) {
           if (envelope.kind === "call") void sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: false, error: encodeWorkerError(new Error("Stale worker generation call")) });
           return;
         }
-        hostGenerationSeen = generation;
+        if (frameGeneration === generation) hostGenerationSeen = generation;
         void handleHostEnvelope(envelope).catch(() => shutdown(1));
       }
     } catch {
@@ -245,7 +246,8 @@ export async function runAgentWorker<Init>(options: AgentWorkerOptions<Init>): P
         result = hostCall.call(agent, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
       }
       const disposed = envelope.kind === "agent_control" && envelope.control.type === "dispose";
-      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed ? {} : { state: agent!.state() }) }, envelope.kind === "agent_request" && envelope.request.type === "conversation.image" ? "conversation.image" : undefined);
+      const workParameter = envelope.kind === "agent_request" && survivesSessionReplacement(envelope.request);
+      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed || workParameter ? {} : { state: agent!.state() }) }, envelope.kind === "agent_request" && envelope.request.type === "conversation.image" ? "conversation.image" : undefined);
       if (disposed) setTimeout(() => process.exit(0), 0);
     } catch (error) {
       const state = tryState(agent!);

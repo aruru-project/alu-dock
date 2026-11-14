@@ -22,11 +22,13 @@ export class ModelSpeedRuntime {
     this.tier = selection.tier;
   }
 
+  supported(model: SpeedModel | undefined): ModelSpeedTier[] { return supportedModelSpeeds(this.support, model); }
+
   setting(model: SpeedModel | undefined): SettingDto {
     const { sourcePath: _sourcePath, ...definition } = SETTING_DEFINITIONS.modelSpeed;
     return {
       ...definition, key: "modelSpeed", value: { tier: this.tier, scope: "work" }, source: "effective",
-      allowedValues: supportedModelSpeeds(this.support, model),
+      allowedValues: this.supported(model),
     };
   }
 
@@ -34,7 +36,7 @@ export class ModelSpeedRuntime {
   wrap(onPayload?: PayloadHook, speed?: ModelSpeedTier): PayloadHook {
     return async (payload, model) => {
       const tier = speed ?? this.tier;
-      const supported = supportedModelSpeeds(this.support, model);
+      const supported = this.supported(model);
       const result = await onPayload?.(payload, model);
       const body = result === undefined ? payload : result;
       if (supported.length === 1 || !supported.includes(tier) || !body || typeof body !== "object" || Array.isArray(body)) return result;

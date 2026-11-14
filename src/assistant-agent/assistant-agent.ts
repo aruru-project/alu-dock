@@ -354,7 +354,7 @@ class AssistantAgent implements WorkerAgent {
       case "model.list": {
         // Models and sign-ins changed on Main since the last look count from this one.
         await this.models.refresh({ allowNetwork: false }).catch(() => {});
-        return { ...projectPiModelList(await this.models.getAvailable()), availableThinkingLevels: this.modelState().availableThinkingLevels };
+        return { ...projectPiModelList(await this.models.getAvailable(), model => this.modelSpeed.supported(model)), availableThinkingLevels: this.modelState().availableThinkingLevels };
       }
       case "model.set": return this.selectModel(request.params.provider, request.params.modelId);
       case "thinking.set": return this.selectThinkingLevel(request.params.level);
@@ -424,6 +424,7 @@ class AssistantAgent implements WorkerAgent {
     // A record being written asks the model through the Host; the reloaded conversation writes its own.
     this.handoff.discard();
     this.opening.refresh();
+    await this.models.refresh({ allowNetwork: false });
     await this.loadExtensions();
     await this.dropForgotten().catch(() => {});
     this.contextReady = false;

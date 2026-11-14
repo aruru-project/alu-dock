@@ -93,7 +93,7 @@ const localControlIcons = {
 } as const
 /** Managing quick buttons lives only in the palette; it is not a slash command. */
 const manageQuickButtons: LocalControlCommand = { id: 'quick-buttons', name: '', label: '管理快捷按钮', keywords: '快捷按钮 钉住 自定义 quick button pin', description: '新建、修改、排序或删除输入框下方的快捷按钮', section: 'quick-buttons' }
-const staticCommands = computed(() => [...workControlCommands(props.work.assistant, props.work.displayName), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
+const staticCommands = computed(() => [...workControlCommands(props.work.assistant, props.work.displayName).filter(command => command.id !== 'speed' || panel.speedAvailable), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
 
 const commandSearch = ref('')
 const modelSearch = ref('')
@@ -203,7 +203,7 @@ const filteredDiagnostics = computed(() => {
 })
 const filteredSettings = computed(() => {
   const query = settingsSearch.value.trim().toLowerCase()
-  return (settings.value?.settings ?? []).filter((setting) => !query || `${settingLabel(setting.key)} ${settingDescription(setting.key)} ${settingValueLabel(setting.key, setting.value)} ${setting.key}`.toLowerCase().includes(query))
+  return (settings.value?.settings ?? []).filter(setting => setting.key !== 'modelSpeed' || panel.speedAvailable).filter((setting) => !query || `${settingLabel(setting.key)} ${settingDescription(setting.key)} ${settingValueLabel(setting.key, setting.value)} ${setting.key}`.toLowerCase().includes(query))
 })
 
 watch(commandSearch, () => { commandSelectedIndex.value = 0 })
@@ -553,8 +553,9 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
   error.value = ''
   try {
     const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, app.captureOperationTarget(context, props.work.id)))
-    const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
-    if (index >= 0) settings.value.settings[index] = result.setting
+    const current = settings.value
+    const index = current?.settings.findIndex((item) => item.key === result.setting.key) ?? -1
+    if (current && index >= 0) current.settings[index] = result.setting
     emit('close')
   } catch (cause) {
     showFailure(cause)

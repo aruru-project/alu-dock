@@ -52,6 +52,8 @@ pub struct ModelInfo {
     pub name: String,
     pub reasoning: bool,
     pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_tiers: Option<Vec<ModelSpeedTier>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

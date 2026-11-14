@@ -172,6 +172,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly reopenInFlight = new Map<string, string>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private readonly keyEnsureTails = new Map<string, Promise<void>>();
+  private readonly speedChangeTails = new Map<string, Promise<void>>();
   private catalogMaintenancePending = false;
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
@@ -384,9 +385,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
       throw new Error("The parent Work stopped before its child could start.");
     }
     // Creation may have taken time; use the parent's current choice before the first task is sent.
-    if (parent && instance.modelSpeed === undefined && inheritedModelSpeed(parent.modelSpeed) !== "standard") {
-      await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), inheritedModelSpeed(parent.modelSpeed));
-    }
+    if (parent) await this.changeModelSpeed(parent.id, async () => {
+      if (instance.modelSpeed === undefined && inheritedModelSpeed(parent.modelSpeed) !== "standard") {
+        await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), inheritedModelSpeed(parent.modelSpeed));
+      }
+    });
     return instance;
   }
 
@@ -394,15 +397,29 @@ export class DockRegistry implements LocalDockToolsHostPort {
   async updateSetting(instanceId: string, update: SettingUpdate, operationId: string): Promise<SettingDto> {
     const instance = this.get(instanceId);
     if (update.key !== "modelSpeed") return instance.updateSetting(update, operationId);
-    const parent = instance.parentId === undefined ? undefined : this.instances.get(instance.parentId);
-    const setting = await instance.updateSetting(update, operationId, inheritedModelSpeed(parent?.modelSpeed));
-    const tier = inheritedModelSpeed(instance.modelSpeed);
-    for (const child of this.instances.values()) {
-      if (child.parentId === instance.id && child.modelSpeed === undefined && child.lifecycle === "active") {
-        await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier);
+    return this.changeModelSpeed(instance.parentId ?? instance.id, async () => {
+      const current = this.get(instanceId);
+      const parent = current.parentId === undefined ? undefined : this.instances.get(current.parentId);
+      const setting = await current.updateSetting(update, operationId, inheritedModelSpeed(parent?.modelSpeed));
+      const tier = inheritedModelSpeed(current.modelSpeed);
+      let failure: unknown;
+      for (const child of this.instances.values()) {
+        if (child.parentId !== current.id || child.modelSpeed !== undefined || child.lifecycle !== "active") continue;
+        try { await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier); }
+        catch (error) { if (child.lifecycle === "active") failure ??= error; }
       }
-    }
-    return setting;
+      if (failure) throw failure;
+      return setting;
+    });
+  }
+
+  /** Keep parent/child choices ordered, without locking sessions or unrelated Work trees. */
+  private changeModelSpeed<T>(rootId: string, change: () => Promise<T>): Promise<T> {
+    const result = (this.speedChangeTails.get(rootId) ?? Promise.resolve()).then(change);
+    const tail = result.then(() => {}, () => {});
+    this.speedChangeTails.set(rootId, tail);
+    void tail.then(() => { if (this.speedChangeTails.get(rootId) === tail) this.speedChangeTails.delete(rootId); });
+    return result;
   }
 
   /** A child in its parent's directory runs under the parent's current decision, including trust_once, without asking again. */

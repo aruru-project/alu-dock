@@ -25,6 +25,9 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   const tools = ref<ToolsResult | null>(null)
   const resources = ref<ResourcesResult | null>(null)
   const settings = ref<SettingsResult | null>(null)
+  const speedAvailable = ref(false)
+  let speedRead = 0
+  const supportsSpeed = (result: SettingsResult) => result.settings.some(item => item.key === 'modelSpeed' && item.allowedValues?.some(tier => tier !== 'standard'))
   const loading = ref(new Set<ControlSection>())
   const loadErrors = ref<Partial<Record<ControlSection, string>>>({})
   const writeFailed = createSignal<[message: string]>()
@@ -36,11 +39,29 @@ export const useControlPanelStore = defineStore('control-panel', () => {
     () => selected.value?.id,
     () => selected.value?.ownerHostEpoch,
     () => selected.value?.runtimeGeneration,
+    () => selected.value?.executor.model?.provider,
+    () => selected.value?.executor.model?.id,
+    () => selected.value?.lifecycle,
   ], () => {
     const context = app.connectionContext
     const work = selected.value
     if (context && work) commandConsole.bindContext(context.connectionId, context.selectionGeneration, work)
+    reset()
+    void refreshSpeedAvailability()
+    if (surfaces.commandOpen) void loadSection(surfaces.controlSection, true)
   }, { immediate: true })
+
+  // Visibility only: this read never gates chatting, changing models or any Host operation.
+  async function refreshSpeedAvailability() {
+    const read = ++speedRead
+    speedAvailable.value = false
+    const work = selected.value
+    if (!app.connectionContext || work?.lifecycle !== 'active') return
+    try {
+      const result = await currentConnectionCall(app, context => getSettings(work.id, context))
+      if (read === speedRead) speedAvailable.value = supportsSpeed(result)
+    } catch { /* An old/unavailable Host does not advertise the optional control. */ }
+  }
 
   /** Drops earlier results; the open panel reads again. */
   function reset() {
@@ -98,6 +119,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
         const result = await currentConnectionCall(app, (context) => getSettings(workId, context))
         if (!current()) return false
         settings.value = result
+        speedAvailable.value = supportsSpeed(result)
       }
       return true
     } catch (cause) {
@@ -130,5 +152,5 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   }
   onScopeDispose(observation.onConfigChanged(applyConfigEvent))
 
-  return { models, tools, resources, settings, loading, loadErrors, reset, loadSection, onWriteFailed: writeFailed.on }
+  return { models, tools, resources, settings, speedAvailable, loading, loadErrors, reset, loadSection, onWriteFailed: writeFailed.on }
 })

@@ -39,6 +39,9 @@ const modelList = computed(() => {
   const hidden = new Set(result.hidden.map(modelKey))
   return result.models.filter((model) => !hidden.has(modelKey(model)))
 })
+const memorySpeedTiers = computed(() => modelList.value.find(model => chosen.value && modelKey(model) === modelKey(chosen.value))?.speedTiers ?? [])
+const memorySpeedAvailable = computed(() => memorySpeedTiers.value.some(tier => tier !== 'standard'))
+const memorySpeedOptions = computed(() => modelSpeedOptions.filter(option => memorySpeedTiers.value.includes(option.value as ModelSpeedTier)))
 const options = computed(() => {
   const current = chosen.value
   const named = (model: { provider: string; id: string; name: string }) => model.name && model.name !== model.id ? model.name : ''
@@ -116,9 +119,9 @@ function choose(value: string) {
       <AluSelect :value="selected" :options="options" label="整理记忆的模型" :placeholder="placeholder" :disabled="saving || !settings.current" @select="choose" />
       <button type="button" class="assistant-setting-refresh" aria-label="刷新模型列表" title="刷新模型列表" :disabled="models?.state === 'loading'" @click="memory.loadModels(true)"><RefreshCw :size="15" :class="{ spinning: models?.state === 'loading' }" /></button>
     </div>
-    <template v-if="settings.current?.extractionSpeed !== undefined">
+    <template v-if="settings.current?.extractionSpeed !== undefined && memorySpeedAvailable">
       <label class="assistant-handoff-field">整理记忆的速度
-        <AluSelect :value="chosenSpeed ?? 'standard'" :options="modelSpeedOptions" label="整理记忆的速度" :disabled="saving" @select="chooseSpeed" />
+        <AluSelect :value="chosenSpeed ?? 'standard'" :options="memorySpeedOptions" label="整理记忆的速度" :disabled="saving" @select="chooseSpeed" />
       </label>
       <p class="assistant-setting-text">只用于后台记忆整理，不随聊天速度自动提高档位。标准不请求加速；Fast / Ultrafast 可能增加费用，实际支持与速度由所选模型服务决定。从下一次整理请求生效。</p>
     </template>
