@@ -9,12 +9,14 @@ export type ModelServiceCall = (args: Record<string, unknown>, signal?: AbortSig
  * Main as the owner of a Work's model configuration and credentials (card #303). The Work's Pi
  * composes, sends and handles its requests itself; it asks Main only what it may use and with what.
  */
-export function mainModelOwner(call: ModelServiceCall): ModelRuntimeOwner {
+export function mainModelOwner(call: ModelServiceCall, onConfiguration?: (configuration: ModelConfiguration) => void): ModelRuntimeOwner {
   return {
     name: "Main",
     async readConfiguration(options) {
       options?.signal?.throwIfAborted();
-      return await call({ op: "configuration" }, options?.signal) as ModelConfiguration;
+      const configuration = await call({ op: "configuration" }, options?.signal) as ModelConfiguration;
+      onConfiguration?.(configuration);
+      return configuration;
     },
     async readAuthState(options) {
       options?.signal?.throwIfAborted();

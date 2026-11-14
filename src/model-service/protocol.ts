@@ -1,5 +1,6 @@
 import type { AnyModel, AuthResult } from "@earendil-works/pi-ai";
 import type { ModelRuntimeOwnerAuthState, ModelRuntimeOwnerConfiguration } from "@earendil-works/pi-coding-agent";
+import type { ModelSpeedSupport } from "../core/model-speed.js";
 
 /*
  * What a Work asks Main's model service (card #303). Main keeps the model configuration and the
@@ -24,7 +25,9 @@ export interface ModelAuthRequest {
   overrides?: ModelAuthOverrides;
 }
 
-export type ModelConfiguration = ModelRuntimeOwnerConfiguration;
+export interface ModelConfiguration extends ModelRuntimeOwnerConfiguration {
+  speedSupport?: ModelSpeedSupport;
+}
 export type ModelAuthState = ModelRuntimeOwnerAuthState;
 export type ModelAuthResult = AuthResult | null;
 

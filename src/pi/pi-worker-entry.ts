@@ -13,6 +13,7 @@ import { DockToolsBridge } from "./dock-tools-extension.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { mainModelOwner } from "../model-service/owner.js";
+import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
   enterPiWorkerRuntime();
@@ -28,7 +29,8 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
   // With Main's model service the Work takes its model configuration and credentials from Main and
   // reads none of this machine's; it still sends and handles its own requests. There is no local fallback.
   // Each session gets its own runtime, so providers one session's extensions registered do not outlive it.
-  const modelOwner = host.models ? mainModelOwner(host.models) : undefined;
+  const modelSpeed = new ModelSpeedRuntime();
+  const modelOwner = host.models ? mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) : undefined;
   const createModelRuntime = modelOwner ? () => ModelRuntime.create({ owner: modelOwner }) : undefined;
   const dockToolsBridge: DockToolsBridge = new DockToolsBridge(host.dockToolsEnabled(), {
     configure: async (action) => ({ enabled: action === "status" ? dockToolsBridge.enabled : await host.configureDockTools(action === "on") }),
@@ -55,6 +57,7 @@ async function createPiWorkerAgent(init: PiWorkerInitOptions, host: WorkerHost):
     setProcessCwd: (cwd) => process.chdir(cwd),
     ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
     dockToolsBridge,
+    modelSpeed,
     ...(host.attachments === undefined ? {} : { dockAttachmentPort: { access: host.attachments } }),
     ...(createModelRuntime === undefined ? {} : { createModelRuntime }),
   });

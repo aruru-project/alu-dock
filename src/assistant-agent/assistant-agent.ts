@@ -43,6 +43,7 @@ import type { ObservationNotification } from "../core/instance-observation.js";
 import { projectJsonObject, type JsonObject } from "../core/json-value.js";
 import { localMinute } from "../core/local-time.js";
 import { mainModelOwner } from "../model-service/owner.js";
+import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import { appendDockAttachmentContext } from "../pi/dock-attachment-context.js";
 import {
@@ -140,8 +141,9 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
   const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
   // Her model calls use Pi's proxy and network settings, as every Work's do.
   configurePiNetwork(settings);
+  const modelSpeed = new ModelSpeedRuntime();
   const models = host.models
-    ? await ModelRuntime.create({ owner: mainModelOwner(host.models) })
+    ? await ModelRuntime.create({ owner: mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) })
     : await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
   const sessionDir = init.sessionDir === undefined ? undefined : resolve(init.sessionDir);
   const session = init.sessionFile === undefined
@@ -149,7 +151,7 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
     : SessionManager.open(resolve(init.sessionFile), sessionDir, cwd);
   if (init.initialName !== undefined && session.getSessionName() !== init.initialName) session.appendSessionInfo(init.initialName);
   const attachmentContextKey = await loadAttachmentContextKey(agentDir);
-  const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins);
+  const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins, modelSpeed);
   await her.chooseStartingModel(init.workerConfig?.model, init.sessionFile === undefined);
   await her.loadExtensions();
   return her;
@@ -222,6 +224,7 @@ class AssistantAgent implements WorkerAgent {
     private readonly session: SessionManager,
     private readonly attachmentContextKey: Uint8Array,
     builtins: AssistantBuiltinExtensions,
+    private readonly modelSpeed: ModelSpeedRuntime,
   ) {
     this.extensions = new AssistantToolExtensions(cwd, builtins, {
       notify: (message, level) => this.tell(message, level),
@@ -265,7 +268,7 @@ class AssistantAgent implements WorkerAgent {
     this.builtInTools = this.tools;
     this.agent = new Agent({
       initialState: { tools: this.tools },
-      streamFn: (model, context, options) => models.streamSimple(model, context, options),
+      streamFn: (model, context, options) => models.streamSimple(model, context, { ...options, onPayload: modelSpeed.wrap(options?.onPayload) }),
       convertToLlm,
       steeringMode: "all",
       followUpMode: "all",
@@ -374,8 +377,12 @@ class AssistantAgent implements WorkerAgent {
         })).sort(compareToolDtos);
         return { tools, total: tools.length, truncated: false };
       }
+      case "settings.get": return [this.modelSpeed.setting(this.model)];
+      case "settings.update":
+        if (request.params.update.key !== "modelSpeed") throw this.notHers("助手在这里可以调整模型速度；其他设置请到助手设置中修改。");
+        this.modelSpeed.update(request.params.update.value);
+        return this.modelSpeed.setting(this.model);
       // She has none of these: clients open her Work and show them empty.
-      case "settings.get": return [];
       case "resource.get": return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
       // The one command she takes: her owner's switch for her Dock tools, as every Work has it.
       case "command.catalog": {
@@ -397,7 +404,7 @@ class AssistantAgent implements WorkerAgent {
       case "bash.run": case "bash.abort": throw this.notHers("助手自己不跑命令。请在别的 Work 里运行。");
       case "tool.set_active":
         throw this.notHers("助手的工具可以查看，不能逐个开关。要开关派 Work、联系别的 Work 的能力，请用 /dock-tools on 或 /dock-tools off。");
-      case "settings.update": case "command.content": case "command.complete":
+      case "command.content": case "command.complete":
         throw this.notHers("助手没有可以在这里调整的设置。要刷新人设和记忆，请用 Reload。");
     }
   }
@@ -897,7 +904,7 @@ class AssistantAgent implements WorkerAgent {
     const model = this.model;
     if (model === undefined) throw new Error("没有可用的模型");
     const reply = await this.models.completeSimple(model, { systemPrompt: system, messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-      { signal, maxTokens: Math.min(maxTokens, model.maxTokens || maxTokens) });
+      { signal, maxTokens: Math.min(maxTokens, model.maxTokens || maxTokens), onPayload: this.modelSpeed.wrap() });
     if (reply.stopReason === "error" || reply.stopReason === "aborted") throw new Error(reply.errorMessage ?? "模型没有回答");
     if (reply.stopReason === "length") throw new Error("模型的回答被截断了");
     return reply.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("");

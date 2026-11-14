@@ -2,6 +2,8 @@ import type { Message, Tool, ToolCall } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { AssistantModelRef } from "../core/assistant.js";
+import type { ModelSpeedTier } from "../core/model-speed.js";
+import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
 import { ExtractionModelError, type ExtractionModel, type ModelTool } from "./extraction.js";
 import type { ModelPrompt } from "./extraction-prompt.js";
 
@@ -15,14 +17,14 @@ const REPLY_TOKENS = 16_000;
 export class MainModelAccess implements ExtractionModel {
   private runtime: Promise<ModelRuntime> | undefined;
 
-  constructor(private readonly create: () => Promise<ModelRuntime>) {}
+  constructor(private readonly create: () => Promise<ModelRuntime>, private readonly modelSpeed = new ModelSpeedRuntime()) {}
 
   /**
    * The model's answer to `prompt`. With `tools` it may call them first: each round of calls is
    * answered and the model asked again; once `rounds` rounds were answered, further calls are told to
    * answer now, and a model that still calls gets its text taken as the answer.
    */
-  async complete(ref: AssistantModelRef, prompt: ModelPrompt, signal: AbortSignal, tools?: { list: readonly ModelTool[]; rounds: number }): Promise<string> {
+  async complete(ref: AssistantModelRef, prompt: ModelPrompt, signal: AbortSignal, tools?: { list: readonly ModelTool[]; rounds: number }, speed: ModelSpeedTier = "standard"): Promise<string> {
     const name = `${ref.provider}/${ref.id}`;
     let runtime: ModelRuntime;
     try {
@@ -40,7 +42,7 @@ export class MainModelAccess implements ExtractionModel {
       let reply: Awaited<ReturnType<ModelRuntime["completeSimple"]>>;
       try {
         reply = await runtime.completeSimple(model, { systemPrompt: prompt.system, messages, ...(declared ? { tools: declared } : {}) },
-          { signal, maxTokens: Math.min(REPLY_TOKENS, model.maxTokens || REPLY_TOKENS) });
+          { signal, maxTokens: Math.min(REPLY_TOKENS, model.maxTokens || REPLY_TOKENS), onPayload: this.modelSpeed.wrap(undefined, speed) });
       } catch (error) {
         throw failed(name, error instanceof Error ? error.message : String(error));
       }

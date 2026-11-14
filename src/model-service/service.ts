@@ -4,6 +4,7 @@ import type { AnyModel, AuthCheck, ModelsStoreEntry } from "@earendil-works/pi-a
 import type { FileModelsStore, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 import type { ModelAuthRequest, ModelAuthResult, ModelAuthState, ModelConfiguration } from "./protocol.js";
+import { readModelSpeedSupport } from "./speed-support.js";
 
 /**
  * Main's model configuration and credentials, kept by Pi's own ModelRuntime over Main's files. It
@@ -28,6 +29,7 @@ export class ModelServiceCore {
     const stored = await Promise.all(this.runtime.getProviders().map(async (provider) => [provider.id, await this.files.store.read(provider.id)] as const));
     return {
       ...(modelsJson === undefined ? {} : { modelsJson }),
+      speedSupport: await readModelSpeedSupport(this.files.modelsPath),
       modelsStore: Object.fromEntries(stored.filter((entry): entry is readonly [string, ModelsStoreEntry] => entry[1] !== undefined)),
     };
   }

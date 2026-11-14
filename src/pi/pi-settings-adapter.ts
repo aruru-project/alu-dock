@@ -11,7 +11,7 @@ import {
 import { AgentInvalidSettingValueError } from "../core/agent-worker.js";
 
 export function projectPiSettings(manager: SettingsManager): SettingDto[] {
-  return SETTING_KEYS.map((key) => projectPiSetting(manager, key));
+  return SETTING_KEYS.filter((key) => key !== "modelSpeed").map((key) => projectPiSetting(manager, key));
 }
 
 export function projectPiSetting(manager: SettingsManager, key: SettingKey): SettingDto {
@@ -82,6 +82,7 @@ export function projectSettingsErrors(errors: Array<{ scope: "global" | "project
 
 function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMap[SettingKey] {
   switch (key) {
+    case "modelSpeed": throw new Error("Work model speed belongs to the Worker, not Pi settings");
     case "autoCompaction": return manager.getCompactionEnabled();
     case "compactionReserveTokens": return manager.getCompactionReserveTokens();
     case "compactionKeepRecentTokens": return manager.getCompactionKeepRecentTokens();

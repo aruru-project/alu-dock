@@ -32,6 +32,7 @@ import {
   type AssistantTimelineList,
 } from "../core/assistant.js";
 import { localSpan } from "../core/local-time.js";
+import { MODEL_SPEED_TIERS, type ModelSpeedTier } from "../core/model-speed.js";
 import { ownerSpoke, type AssistantCallPort, type SessionRecorder } from "./recorder.js";
 
 /*
@@ -81,8 +82,8 @@ const READ_SCHEMA = {
 const MEMORY_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["add", "rewrite", "retire", "forget", "restore", "resident", "get", "list", "settings", "set_model", "reorganize"] },
-    id: { type: "string", description: "The memory's number, as in #12 (without #); for add, list, settings, set_model and reorganize it is not used." },
+    action: { type: "string", enum: ["add", "rewrite", "retire", "forget", "restore", "resident", "get", "list", "settings", "set_model", "set_speed", "reorganize"] },
+    id: { type: "string", description: "The memory's number, as in #12 (without #); for add, list, settings, set_model, set_speed and reorganize it is not used." },
     topic: { type: "string", enum: [...ASSISTANT_MEMORY_TOPICS], description: "owner: who your owner is. preferences: what they like and how they want things. relationship: how the two of you get on. events: things you went through, with the day. self: what you decided about yourself. For add; rewrite may move a memory; list may filter by it." },
     text: { type: "string", maxLength: MAX_ASSISTANT_MEMORY_CHARS, description: "add and rewrite: one thing, as a sentence that makes sense on its own." },
     resident: { type: "boolean", description: "add and resident: true to have it loaded at the start of every session; keep that for what matters in every conversation." },
@@ -95,6 +96,7 @@ const MEMORY_SCHEMA = {
     query: { type: "string", maxLength: MAX_ASSISTANT_QUERY_CHARS, description: "list: keywords separated by spaces; every one must occur in the memory." },
     cursor: { type: "string", description: "list: the cursor an earlier list returned, to read older memories." },
     model: { type: "string", description: "set_model: the model that keeps your memories, as provider/model-id from Main's model list, or none to stop." },
+    speed: { type: "string", enum: [...MODEL_SPEED_TIERS], description: "set_speed: background memory request speed, independent of chat. Change only when your owner asks; never raise it on your own." },
   },
   required: ["action"],
   additionalProperties: false,
@@ -185,9 +187,9 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
     {
       name: "assistant_memory",
       label: "Memories",
-      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true; the background will not record it again from what was said before. forget: forget one when your owner asks; the words it came from, what was said in answer to them and the request to forget it are not found by searches either, the timeline lines covering them are forgotten with it, and the background will not record it again. Other places that happen to mention the same thing stay as they are. restore: bring back a retired or forgotten one, with everything that went with it. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic, state or keywords, newest first. settings: which model keeps your memories in the background and how that is going. set_model: change that model when your owner asks. reorganize: start over with the chosen model when your owner asks: what the background made and nobody touched is set aside (each can be restored), the timeline it wrote is cleared, and every conversation is read again; your owner is asked to confirm first. Use this tool when your owner asks you to remember or forget something, or when something is clearly worth remembering. What you start from is loaded anew when this Work is reopened or reloaded and when an older part of this conversation is handed over; until then you know what you changed from this conversation.",
+      description: "Your memories of your owner and the two of you. add: remember something new. rewrite: correct what a memory says. retire: set aside one that is no longer true; the background will not record it again from what was said before. forget: forget one when your owner asks; the words it came from, what was said in answer to them and the request to forget it are not found by searches either, the timeline lines covering them are forgotten with it, and the background will not record it again. Other places that happen to mention the same thing stay as they are. restore: bring back a retired or forgotten one, with everything that went with it. resident: whether it is loaded at the start of every session. get: one memory with where it came from and how it changed. list: memories by topic, state or keywords, newest first. settings: which model and speed keep your memories in the background and how that is going. set_model: change that model when your owner asks. set_speed: change the background speed only when your owner asks; never raise it on your own. It does not change chat speed. reorganize: start over with the chosen model when your owner asks: what the background made and nobody touched is set aside (each can be restored), the timeline it wrote is cleared, and every conversation is read again; your owner is asked to confirm first. Use this tool when your owner asks you to remember or forget something, or when something is clearly worth remembering. What you start from is loaded anew when this Work is reopened or reloaded and when an older part of this conversation is handed over; until then you know what you changed from this conversation.",
       parameters: MEMORY_SCHEMA,
-      execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState; query?: string; cursor?: string; model?: string }) => {
+      execute: async (_id: string, params: { action: string; id?: string; topic?: AssistantMemoryTopic; text?: string; resident?: boolean; sources?: Array<{ sessionId: string; entryId: string }>; state?: AssistantMemoryState; query?: string; cursor?: string; model?: string; speed?: ModelSpeedTier }) => {
         /** The owner's latest words in this session, once they reached Main: where a memory said here came from, or where he asked for a change. */
         const saidHere = async (): Promise<{ sessionId: string; entryId: string } | undefined> => {
           await recorder.sync();
@@ -203,9 +205,12 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
         const known = (model: { provider: string; id: string }): void => {
           if (!models.getModel(model.provider, model.id)) throw new Error(`${model.provider}/${model.id} is not a model Main can use now. Give the exact provider/model-id of one in this Work's model list.`);
         };
-        if (params.action === "settings" || params.action === "set_model") {
+        if (params.action === "settings" || params.action === "set_model" || params.action === "set_speed") {
           let settings: AssistantSettings;
-          if (params.action === "set_model") {
+          if (params.action === "set_speed") {
+            if (params.speed === undefined) throw new Error("set_speed needs speed: standard, fast, or ultrafast.");
+            settings = await port.call({ op: "settings_set", extractionSpeed: params.speed });
+          } else if (params.action === "set_model") {
             const named = params.model?.trim();
             if (!named) throw new Error("set_model needs model: provider/model-id, or none.");
             const slash = named.indexOf("/");
@@ -216,7 +221,10 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
           } else settings = await port.call({ op: "settings_get" });
           const { extraction } = await port.call({ op: "info" });
           // This tool owns only memory extraction. Other settings can contain extension credentials.
-          const memorySettings = settings.extractionModel === undefined ? {} : { extractionModel: settings.extractionModel };
+          const memorySettings = {
+            ...(settings.extractionModel === undefined ? {} : { extractionModel: settings.extractionModel }),
+            extractionSpeed: settings.extractionSpeed ?? "standard",
+          };
           return { content: [{ type: "text", text: renderSettings(memorySettings, extraction) }], details: { settings: memorySettings, extraction } };
         }
         if (params.action === "reorganize") {
@@ -345,6 +353,7 @@ function renderSettings(settings: AssistantSettings, extraction: AssistantExtrac
   const model = settings.extractionModel;
   return [
     model === undefined ? "No model keeps your memories in the background: nothing is extracted from your conversations until your owner chooses one." : `Your memories are kept with ${model.provider}/${model.id}.`,
+    `Background speed: ${settings.extractionSpeed ?? "standard"}; independent of chat speed.`,
     ...(extraction === undefined ? [] : [
       `Now: ${extraction.state}; ${extraction.waitingSessions} conversation(s) have something new not read yet.`,
       ...(extraction.skippedParts ? [`${extraction.skippedParts} part(s) of conversations could not be read with this model and were passed over; another model, or starting over, reads them again.`] : []),

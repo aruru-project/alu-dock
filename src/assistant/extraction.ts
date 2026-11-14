@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import type { AssistantExtractionStatus, AssistantMemoryTopic, AssistantModelRef, AssistantReorganizeResult, AssistantSettings } from "../core/assistant.js";
+import type { ModelSpeedTier } from "../core/model-speed.js";
 import type { AssistantDocuments } from "./documents.js";
 import {
   ReplyFormatError,
@@ -62,7 +63,7 @@ export interface ModelTool { name: string; description: string; parameters: obje
 /** Sends one prompt to the chosen model and returns the text of its reply. */
 export interface ExtractionModel {
   /** `tools`: what the model may call first, in at most `rounds` rounds of calls before it answers. */
-  complete(model: AssistantModelRef, prompt: ModelPrompt, signal: AbortSignal, tools?: { list: readonly ModelTool[]; rounds: number }): Promise<string>;
+  complete(model: AssistantModelRef, prompt: ModelPrompt, signal: AbortSignal, tools?: { list: readonly ModelTool[]; rounds: number }, speed?: ModelSpeedTier): Promise<string>;
 }
 
 /** A failure whose message the owner sees as it is. */
@@ -188,7 +189,10 @@ export class AssistantExtraction {
 
   settings(): AssistantSettings {
     const value = this.meta("extraction_model");
-    return value === undefined ? {} : { extractionModel: JSON.parse(value) as AssistantModelRef };
+    return {
+      ...(value === undefined ? {} : { extractionModel: JSON.parse(value) as AssistantModelRef }),
+      extractionSpeed: (this.meta("extraction_speed") ?? "standard") as ModelSpeedTier,
+    };
   }
 
   /**
@@ -385,7 +389,7 @@ export class AssistantExtraction {
     let reply: string;
     try {
       reply = await this.model.complete(model, extractionPrompt({ persona: persona.text, notes: notes.text, resident, episodes: shownEpisodes, leadIn, lines }), this.cancel.signal,
-        { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+        { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS }, this.settings().extractionSpeed);
     } catch (error) {
       // Everything is being read again from the start, or the service is stopping: not this part's
       // failure, neither before nor after asking whether the model answers at all. Nor is it when
@@ -502,7 +506,7 @@ export class AssistantExtraction {
     let reply: string;
     try {
       reply = await this.model.complete(model, dreamPrompt({ persona: persona.text, notes: notes.text, focus, resident, residentTotal }), this.cancel.signal,
-        { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS });
+        { list: [this.searchTool(found)], rounds: SEARCH_ROUNDS }, this.settings().extractionSpeed);
     } catch (error) {
       if (generation !== this.generation || this.outdated(forgetting, job.key)) return;
       if (this.stopped) throw error;
@@ -720,7 +724,7 @@ export class AssistantExtraction {
 
   /** Whether the model answers at all right now. */
   private async answers(model: AssistantModelRef): Promise<boolean> {
-    try { await this.model.complete(model, PROBE, this.cancel.signal); return true; }
+    try { await this.model.complete(model, PROBE, this.cancel.signal, undefined, this.settings().extractionSpeed); return true; }
     catch { return false; }
   }
 
