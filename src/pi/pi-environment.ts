@@ -153,6 +153,7 @@ export async function loginPiProvider(
   const environment = await openPiEnvironment(options);
   const { runtime } = environment;
   try {
+    configurePiNetwork(environment.settings);
     const provider = runtime.getProvider(providerId);
     if (!provider) throw new Error("That Pi provider is no longer available");
     if (type === "api_key" && provider.auth.apiKey?.login === undefined) throw new Error("That Pi provider does not offer API-key setup");
