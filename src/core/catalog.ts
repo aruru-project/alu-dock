@@ -3,6 +3,7 @@ import type { ThinkingLevel } from "./agent-worker.js";
 import { isNativeAbsoluteLocalPath } from "./local-path.js";
 import type { JsonObject } from "./json-value.js";
 import { cloneWorkerConfig } from "./worker-config.js";
+import { parseModelSpeedSelection, type ModelSpeedSelection } from "./model-speed.js";
 
 export type CatalogMutationEffect = "pre_effect" | "post_effect" | "rollback_contained";
 
@@ -55,6 +56,8 @@ export interface CatalogInstanceRecord {
   dockToolsEnabled?: boolean;
   /** Opaque, adapter-owned Worker creation input. */
   workerConfig?: JsonObject;
+  /** Explicit Work choice; absent children follow their parent. */
+  modelSpeed?: ModelSpeedSelection;
   executionChangedAt?: string;
   runStartedAt?: string;
   runtimeGeneration: number;
@@ -189,6 +192,7 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.assistant !== undefined && record.assistant !== true) throw new Error("Catalog assistant mark must be true when present");
   if (record.assistant === true && record.parentId !== undefined) throw new Error("A child Work cannot be the assistant");
   if (record.workerConfig !== undefined) cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration");
+  if (record.modelSpeed !== undefined) parseModelSpeedSelection(record.modelSpeed);
   timestamp(record.createdAt, "Catalog createdAt");
   timestamp(record.updatedAt, "Catalog updatedAt");
   if (record.executionChangedAt !== undefined) timestamp(record.executionChangedAt, "Catalog executionChangedAt");

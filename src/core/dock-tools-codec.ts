@@ -1,4 +1,5 @@
-import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult } from "../control/protocol.js";
+import { MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, parseControlRequest, parseModelRef, parseResourceContentResult, parseSystemCatalogResult, parseSettingDto } from "../control/protocol.js";
+import { parseModelSpeedSelection } from "./model-speed.js";
 import {
   MAX_CHILD_LAST_WORDS_CHARS,
   MAX_DOCK_TOOL_CWD_CHARS,
@@ -34,6 +35,12 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   const value = record(raw, "Dock tools request");
   if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) return parseObservationRequest(value);
   if (value.type === "models") { exactKeys(value, ["type"], "Model catalog request"); return { type: "models" }; }
+  if (value.type === "speed") {
+    exactKeys(value, ["type", "operationId", "target", "selection"], "Model speed request");
+    return { type: "speed", operationId: boundedString(value.operationId, 128, "Operation ID"),
+      ...(value.target === undefined ? {} : { target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Target") }),
+      ...(value.selection === undefined ? {} : { selection: parseModelSpeedSelection(value.selection) }) };
+  }
   if (value.type === "interrupt" || value.type === "stop") {
     exactKeys(value, ["type", "operationId", "target"], "Worker control request");
     return { type: value.type, operationId: boundedString(value.operationId, 128, "Operation ID"), target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Target") };
@@ -186,6 +193,7 @@ export function parseDockToolsResult(raw: unknown): void {
     parseObservationResult(value);
     return;
   }
+  if (value.type === "speed") { exactKeys(value, ["type", "setting"], "Model speed result"); parseSettingDto(value.setting, "Model speed setting"); return; }
   if (value.type === "models") {
     exactKeys(value, ["type", "models", "problem"], "Model list for child Works");
     parseChildModelEntries(value.models);

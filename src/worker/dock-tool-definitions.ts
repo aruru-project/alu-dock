@@ -4,6 +4,7 @@
  * its own tool API; nothing in this file knows which kind of Agent that is.
  */
 import { randomUUID } from "node:crypto";
+import { MODEL_SPEED_TIERS, type ModelSpeedTier } from "../core/model-speed.js";
 import { fileURLToPath } from "node:url";
 
 import { THINKING_LEVELS, type ThinkingLevel } from "../core/agent-worker.js";
@@ -213,6 +214,19 @@ export function topLevelDockTools(options: DockToolOptions = {}): DockToolDefini
       description: describe("Show your own model, which child Works use unless the user or the project's instructions ask for another, and the few models the user picked for child Works, with what each supports. Use it to find the exact name of a model you were asked to use; it is not a recommendation."),
       parameters: EMPTY_SCHEMA,
       execute: async (_params, runtime) => dockToolOutput(await runtime.invoke({ type: "models" }), { facts: runtime.modelFacts() }),
+    },
+    {
+      name: "dock_speed", label: "Work model speed",
+      description: describe("Read or set a Work's model request speed. Omit target for yourself; omit speed to read. Change speed only when the user explicitly asks, never to optimize a task on your own. scope=all applies to this Work and children still following it, including future children; a child's own choice wins. speed=inherit restores following its parent (standard for an independent Work). Does not change model or thinking. Only models in Main's editable support list receive the speed parameter; the upstream service decides what it accepts."),
+      parameters: { type: "object", properties: {
+        target: { type: "string", description: "Work name or ID; omit for yourself.", maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
+        speed: { type: "string", enum: [...MODEL_SPEED_TIERS, "inherit"] },
+        scope: { type: "string", enum: ["work", "all"], description: "Default work: only this Work. all also changes children that have not made their own choice." },
+      } },
+      execute: async (params: { target?: string; speed?: ModelSpeedTier | "inherit"; scope?: "work" | "all" }, runtime) => dockToolOutput(await runtime.invoke({
+        type: "speed", operationId: randomUUID(), ...(params.target === undefined ? {} : { target: params.target }),
+        ...(params.speed === undefined ? {} : { selection: params.speed === "inherit" ? null : { tier: params.speed, scope: params.scope ?? "work" } }),
+      })),
     },
     ...(["interrupt", "stop"] as const).map((action): DockToolDefinition => ({
       name: `dock_${action}`, label: action === "interrupt" ? "Interrupt a Work" : "Stop a Work",

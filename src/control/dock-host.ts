@@ -238,6 +238,12 @@ export class DockHost {
     };
     this.registry.bindDockToolsMutationPort({
       childModels: async () => this.childModels ? await this.childModels.read() : { models: [] },
+      speed: async (instanceId, operationId, selection) => {
+        if (selection !== undefined) return this.operationLedger.run(operationId, "settings.update", { instanceId, update: { key: "modelSpeed", value: selection } }, () => this.registry.updateSetting(instanceId, { key: "modelSpeed", value: selection }, operationId));
+        const setting = (await this.registry.get(instanceId).getSettings()).find(item => item.key === "modelSpeed");
+        if (!setting) throw new Error("这个 Work 尚不支持模型速度设置，请更新后重新打开。");
+        return setting;
+      },
       interrupt: async (instanceId, operationId) => { await this.registry.get(instanceId).abort(operationId); return this.registry.observationStatus(instanceId); },
       stop: async (instanceId, operationId) => { const result = await this.registry.stop(instanceId, operationId); return observationStatus(result.instance); },
       create: (input) => this.operationLedger.run(systemToolOperation(input.operationId, "intent"), "dock.create", input, () => createDockSystem(systemPort, input)),
@@ -1040,7 +1046,7 @@ export class DockHost {
       }
       case "settings.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{settings:await instance.getSettings()}); return; }
       case "settings.update": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await this.registry.updateSetting(instance.id,request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "session.compaction.prompts": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.readAgent(request)); return; }
