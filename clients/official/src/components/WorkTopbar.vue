@@ -68,6 +68,10 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
           <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
+        <button class="alu-nav-selector alu-nav-selector-speed" aria-label="设置模型速度" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('speed')">
+          <span class="alu-nav-selector-value">速度</span>
+          <span class="alu-nav-selector-arrow">▾</span>
+        </button>
       </div>
       <button ref="dockToolsTrigger" class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on', unavailable: selectedDockTools === 'unavailable', open: dockToolsOpen }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : selectedDockTools === 'unavailable' ? '当前不可用' : '已关闭'}`" aria-haspopup="dialog" :aria-expanded="dockToolsOpen" @click="openDockTools">
         <Wrench :size="13" />
@@ -462,7 +466,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   .alu-nav-model-controls .alu-nav-selector-value { max-width: none; font-size: var(--alu-ui-size); text-align: left; }
   .alu-nav-selector-model { flex: 1 1 0; min-width: 0; }
   .alu-nav-model-provider { color: var(--alu-text-dim); font-weight: 500; }
-  .alu-nav-selector-thinking { flex: 0 0 auto; border-left: 1px solid var(--alu-border-light); }
+  .alu-nav-selector-thinking, .alu-nav-selector-speed { flex: 0 0 auto; border-left: 1px solid var(--alu-border-light); }
   .alu-nav-stats {
     grid-area: stats;
     z-index: 1;

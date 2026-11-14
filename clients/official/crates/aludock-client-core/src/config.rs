@@ -36,6 +36,14 @@ pub enum ThinkingLevel {
     Unrecognized(String),
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelSpeedTier {
+    Standard,
+    Fast,
+    Ultrafast,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
@@ -177,6 +185,7 @@ pub struct ToolsResult {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum SettingKey {
+    ModelSpeed,
     AutoCompaction,
     CompactionReserveTokens,
     CompactionKeepRecentTokens,
@@ -210,6 +219,7 @@ pub enum SettingKey {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum SettingValue {
+    Null(()),
     Boolean(bool),
     Integer(u64),
     Enum(String),

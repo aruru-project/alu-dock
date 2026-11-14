@@ -7,11 +7,12 @@ import {
 } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
 import { modelKey } from '../lib/modelLists'
+import { modelSpeedOptions } from '../lib/settingLabels'
 import { useNextPage } from '../lib/nextPage'
 import { onceAfterLostReply } from '../lib/operationBinding'
 import type {
   AssistantMemory, AssistantMemoryChange, AssistantMemoryEdit, AssistantMemoryFilter, AssistantMemorySource,
-  AssistantMemoryTopic, AssistantSettings, AssistantHandoffSettings, ModelRef,
+  AssistantMemoryTopic, AssistantSettings, AssistantSettingsEdit, AssistantHandoffSettings, ModelRef, ModelSpeedTier,
 } from '../lib/types'
 import { errorCode, userErrorMessage } from '../lib/userError'
 import { useAppStore } from './app'
@@ -324,13 +325,13 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     }
   }
 
-  // ── The model that makes her memories ──
+  // ── The model and speed used to make her memories ──
   const settings = reactive({
     /** What Main has chosen, as last read or saved here. */
     current: null as AssistantSettings | null,
     loading: false,
     error: '',
-    save: null as null | { state: 'pending' | 'saved' | 'failed'; model: ModelRef | null; message: string },
+    save: null as null | { state: 'pending' | 'saved' | 'failed'; model: ModelRef | null; speed?: ModelSpeedTier; message: string },
   })
   // The hand-over editor keeps its draft across section changes and closing the page.
   const handoffs = reactive(new Map<string, {
@@ -396,9 +397,9 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
   let choiceShown = 0
   let startOverShown = 0
   /**
-   * Choices and start-overs on their way, per connection. Both set the model: two at once leave
-   * it unknown which Main did last, whatever order their answers come in. So does an answer
-   * that came after something later was asked. Once all are answered, the settings are read again.
+   * Choices and start-overs on their way, per connection. Their settings replies may cross;
+   * an earlier reply can describe settings from before another request was applied.
+   * Once all are answered, crossed requests read the settings again.
    */
   const settingModel = new Map<string, { onTheirWay: number; unsure: boolean }>()
   function settingBegins(connectionId: string) {
@@ -444,8 +445,8 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
       }
       // What Main has now replaces the outcome of an earlier save.
       if (!check) settings.save = null
-      else if (settings.save?.state === 'saved' && !sameModel(settings.save.model, read.extractionModel)) {
-        settings.save = { state: 'failed', model: read.extractionModel ?? null, message: 'Main 上现在的模型和刚才保存的不一样（同时还有别的改动，比如从头整理）。现在显示的是 Main 上的设置，要换可以再选一次。' }
+      else if (settings.save?.state === 'saved' && (!sameModel(settings.save.model, read.extractionModel) || (settings.save.speed !== undefined && settings.save.speed !== read.extractionSpeed))) {
+        settings.save = { state: 'failed', model: read.extractionModel ?? null, message: 'Main 上现在的整理设置和刚才保存的不一样（同时还有别的改动，比如从头整理）。现在显示的是 Main 上的设置，要换可以再选一次。' }
       }
     } catch (cause) {
       if (asked === settingsAsked) settings.error = userErrorMessage(cause, '暂时读不到助手设置。请稍后重试。')
@@ -454,27 +455,37 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     }
   }
 
-  /** Saves the choice at once; `null` stops making memories. How it then stands is read again. */
-  async function chooseModel(model: ModelRef | null) {
+  /** Model and speed use the same settings request; omitted fields stay as Main has them. */
+  function chooseModel(model: ModelRef | null) {
+    return saveExtraction({ extractionModel: model })
+  }
+  function chooseSpeed(speed: ModelSpeedTier) {
+    return saveExtraction({ extractionSpeed: speed })
+  }
+  async function saveExtraction(edit: Pick<AssistantSettingsEdit, 'extractionModel' | 'extractionSpeed'>) {
     const context = app.connectionContext ? { ...app.connectionContext } : null
     if (!context || settings.save?.state === 'pending') return
+    const model = edit.extractionModel !== undefined ? edit.extractionModel : settings.current?.extractionModel ?? null
+    const speed = edit.extractionSpeed
     // A read still on its way is older than this choice.
     const asked = choiceShown = ++settingsAsked
     settings.loading = false
-    settings.save = { state: 'pending', model, message: '正在保存…' }
+    settings.save = { state: 'pending', model, speed, message: '正在保存…' }
     if (restart.state !== 'pending') Object.assign(restart, { state: 'idle', message: '' })
     settingBegins(context.connectionId)
     try {
-      const saved = await once(makingMemories(context.connectionId), ['model', model], (operationId) => setAssistantSettings({ extractionModel: model }, operationId, context))
+      const saved = await once(makingMemories(context.connectionId), ['settings', edit], (operationId) => setAssistantSettings(edit, operationId, context))
       // The settings shown went with the connection they were read from.
       if (context.connectionId !== app.activeConnectionId) return
       if (asked === settingsAsked) settings.current = saved
-      if (asked === choiceShown) settings.save = { state: 'saved', model, message: saved.extractionModel
-        ? '已保存。她会用这个模型从对话里记下值得记住的事。'
-        : '已停止整理。她不会再从对话里自动记东西，已经记下的都还在。' }
+      if (asked === choiceShown) settings.save = { state: 'saved', model: saved.extractionModel ?? null, speed, message: speed
+        ? `已保存。后续记忆整理请求选择 ${modelSpeedOptions.find(option => option.value === speed)?.label ?? speed}，不随聊天速度变化。`
+        : saved.extractionModel
+          ? '已保存。她会用这个模型从对话里记下值得记住的事。'
+          : '已停止整理。她不会再从对话里自动记东西，已经记下的都还在。' }
     } catch (cause) {
       if (context.connectionId !== app.activeConnectionId) return
-      if (asked === choiceShown) settings.save = { state: 'failed', model, message: userErrorMessage(cause, '没有保存成功，设置没有变。请稍后重试。') }
+      if (asked === choiceShown) settings.save = { state: 'failed', model, speed, message: userErrorMessage(cause, '没有保存成功，设置没有变。请稍后重试。') }
     } finally {
       settingEnds(context.connectionId, asked !== settingsAsked)
     }
@@ -552,7 +563,7 @@ export const useAssistantMemoryStore = defineStore('assistant-memory', () => {
     detail, rewrite, hasRewrite, openMemory, closeMemory, readMemory, startRewrite, editRewrite, cancelRewrite, changeMemory,
     source: sourceReading.state, openSource, readSourceMore: sourceReading.readMore, closeSource: sourceReading.close,
     draft, hasDrafts, startWriting, editDraft, dropDraft, writeMemory,
-    settings, loadSettings, chooseModel, models, loadModels,
+    settings, loadSettings, chooseModel, chooseSpeed, models, loadModels,
     handoff, handoffValues, editHandoff, saveHandoff, handoffWork, handoffStatus, refreshHandoffStatus,
     restart, askRestart, cancelRestart, startOver,
   }

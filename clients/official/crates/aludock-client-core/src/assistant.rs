@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{DockClient, ModelRef, Result, capabilities::ASSISTANT};
+use crate::{DockClient, ModelRef, ModelSpeedTier, Result, capabilities::ASSISTANT};
 
 /// Her workspace on Main, the most one document and one memory may hold, and how her memories
 /// are being made.
@@ -65,6 +65,8 @@ pub struct AssistantSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_model: Option<ModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_speed: Option<ModelSpeedTier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<AssistantHandoffSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extensions: Option<Vec<AssistantExtensionSettings>>,
@@ -109,6 +111,8 @@ pub struct AssistantSettingsEdit {
         skip_serializing_if = "Option::is_none"
     )]
     pub extraction_model: Option<Option<ModelRef>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_speed: Option<ModelSpeedTier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<AssistantHandoffSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

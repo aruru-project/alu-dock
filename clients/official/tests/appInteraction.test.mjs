@@ -45,6 +45,7 @@ let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
 let machinesFixture = [], modelVisibilityNative, saveModelVisibilityNative, childModelsNative, saveChildModelsNative
+let settingsNative, updateSettingNative
 // Card #295: Main keeps the assistant; the spare Host is an older Main without her.
 let assistantNative = (command, args) => {
   if (args.connectionId === 'spare') throw { code: 'capability_missing', details: { missing: ['assistant.v1'] } }
@@ -108,7 +109,8 @@ const invoke = async (command, args = {}) => {
     throw { code: 'connection_failed', message: '工具暂时没有读到，请重试。' }
   }
   if (command === 'get_resources') return { resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
-  if (command === 'get_settings') return { settings: [] }
+  if (command === 'get_settings') return settingsNative ? settingsNative(args) : { settings: [] }
+  if (command === 'update_setting') return updateSettingNative(args)
   if (command === 'respond_extension_interaction') return respondNative(args)
   if (command === 'abort_run') return abortNative(args)
   if (command === 'compact_session') return compactNative(args)
@@ -3098,7 +3100,12 @@ try {
     const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
     extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
     const savedAssistant = assistantNative, savedTools = toolsNative
-    assistantNative = (command, args) => command === 'assistant_preview' ? { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' } : savedAssistant(command, args)
+    assistantNative = (command, args) => {
+      if (command === 'assistant_preview') return { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' }
+      if (command === 'assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'standard' }
+      if (command === 'set_assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'fast' }
+      return savedAssistant(command, args)
+    }
     toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'built-in' } }, { name: 'local_schedule', description: 'Read a local schedule.', active: true, source: { kind: 'extension', package: 'local' } }], total: 2, truncated: false })
     const pinia = createPinia(), assistantApp = useAppStore(pinia), assistantView = element('resident-assistant-app')
     mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
@@ -3113,8 +3120,37 @@ try {
     const rowNames = () => all(assistantView, item => String(item.props.class).split(' ').includes('alu-instance-name')).map(visibleText)
     assert.deepEqual(rowNames().slice(0, 4), ['助手小满', '她的子 Work', 'Work', '普通子 Work'], 'pinning her keeps each parent and its children together')
     await click(assistantView, '助手')
+    await click(assistantView, '设置')
+    await click(assistantView, '整理记忆的速度')
+    await click(assistantView, 'Fast')
+    assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { extractionSpeed: 'fast' }, 'memory speed changes independently, leaving its model and chat speed alone')
     await click(assistantView, '打开小满的对话')
     assert.equal(assistantApp.selectedWorkId, 'resident-assistant', 'the settings page opens the already listed assistant')
+    // The new setting is optional on older Hosts; opening it does not replace the conversation.
+    await click(assistantView, '设置模型速度')
+    assert.ok(text(dialog('模型速度')).includes('尚未提供'), 'an older Host still opens the speed entry and explains what is available')
+    await click(dialog('模型速度'), '关闭')
+    const speedSetting = { key: 'modelSpeed', value: null, source: 'effective', writable: true, valueType: 'object', allowedValues: ['standard', 'fast', 'ultrafast'], reloadRequired: false, hostRestartRequired: false }
+    settingsNative = () => ({ settings: [structuredClone(speedSetting)] })
+    updateSettingNative = args => ({ setting: { ...speedSetting, value: args.update.value }, instance: atHost(her), reloadRequired: false, hostRestartRequired: false })
+    await click(assistantView, '设置模型速度')
+    await click(dialog('模型速度'), '模型速度档位')
+    await click(dialog('模型速度'), 'Ultrafast')
+    await click(dialog('模型速度'), '速度作用范围')
+    await click(dialog('模型速度'), '当前及子 Work')
+    await click(dialog('模型速度'), '保存速度设置')
+    const speedUpdate = calls.findLast(call => call.command === 'update_setting').args
+    assert.equal(speedUpdate.instanceId, her.id)
+    assert.equal(speedUpdate.update.key, 'modelSpeed')
+    assert.deepEqual(speedUpdate.update.value, { tier: 'ultrafast', scope: 'all' }, 'the assistant uses the same Work setting as Pi')
+    assistantApp.selectWork(child.id); await settle()
+    await click(assistantView, '设置模型速度')
+    await click(dialog('模型速度'), '恢复跟随父 Work')
+    const inherit = calls.findLast(call => call.command === 'update_setting').args
+    assert.equal(inherit.instanceId, child.id)
+    assert.equal(inherit.update.value, null, 'a child removes its override through the same settings bridge')
+    assistantApp.selectWork(her.id); await settle()
+    settingsNative = undefined; updateSettingNative = undefined
     const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
     assert.deepEqual(quickNames(), ['问候'], 'saved Pi-only buttons stay out of her input row')
     const composer = () => find(assistantView, item => item.type === 'textarea' && item.props.placeholder === '输入消息…')

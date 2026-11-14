@@ -65,9 +65,10 @@ pub use config::{
     CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
     CommandContentResult, CommandInfo, CommandReference, CommandReferenceScope,
     CommandReferenceState, CommandsResult, DiagnosticInfo, DiagnosticSeverity, ModelInfo,
-    ModelsResult, ResourceContentResult, ResourceInfo, ResourceKind, ResourcesResult, SettingInfo,
-    SettingKey, SettingSource, SettingUpdate, SettingUpdateResult, SettingValue, SettingValueType,
-    SettingsResult, SourceInfo, SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
+    ModelSpeedTier, ModelsResult, ResourceContentResult, ResourceInfo, ResourceKind,
+    ResourcesResult, SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult,
+    SettingValue, SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel,
+    ToolInfo, ToolsResult,
 };
 pub use connection_router::{ConnectionRouter, RouteSnapshot};
 pub use connections::{

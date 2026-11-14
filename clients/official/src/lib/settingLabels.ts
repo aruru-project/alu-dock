@@ -1,4 +1,10 @@
-import type { SettingKey, SettingValue } from './types'
+import type { ModelSpeedTier, SettingKey, SettingValue } from './types'
+
+export const modelSpeedOptions: { value: ModelSpeedTier; label: string }[] = [
+  { value: 'standard', label: '标准' },
+  { value: 'fast', label: 'Fast' },
+  { value: 'ultrafast', label: 'Ultrafast' },
+]
 
 interface SettingPresentation {
   label: string
@@ -6,6 +12,7 @@ interface SettingPresentation {
 }
 
 const SETTING_PRESENTATIONS = {
+  modelSpeed: { label: '模型速度', description: '选择后续请求的速度档位和作用范围，快速档位可能增加费用' },
   autoCompaction: { label: 'Auto-compact', description: 'Context 过大时自动整理，腾出继续对话的空间' },
   compactionReserveTokens: { label: 'Compaction 预留 Token', description: 'Compaction 时为下一次 Model 回复预留的 Token 数' },
   compactionKeepRecentTokens: { label: 'Compaction 保留的近期 Token', description: 'Compaction 时保留的近期对话 Token 数' },
@@ -56,6 +63,10 @@ export function settingOptionLabel(key: SettingKey, value: string | number | boo
 }
 
 export function settingValueLabel(key: SettingKey, value: SettingValue): string {
+  if (key === 'modelSpeed') {
+    if (value === null) return '跟随父 Work；无共享设置时用标准'
+    if (typeof value === 'object' && 'tier' in value) return `${modelSpeedOptions.find(option => option.value === value.tier)?.label ?? value.tier} · ${value.scope === 'all' ? '当前及子 Work' : '只当前 Work'}`
+  }
   if (typeof value === 'boolean') return value ? '开启' : '关闭'
   if (typeof value === 'string') return settingOptionLabel(key, value)
   if (typeof value === 'number') {
@@ -63,5 +74,5 @@ export function settingValueLabel(key: SettingKey, value: SettingValue): string 
     if (key === 'compactionReserveTokens' || key === 'compactionKeepRecentTokens') return `${value} Token`
     return String(value)
   }
-  return `Anthropic 额外用量提醒：${value.anthropicExtraUsage === false ? '关闭' : '开启'}`
+  return `Anthropic 额外用量提醒：${value && 'anthropicExtraUsage' in value && value.anthropicExtraUsage === false ? '关闭' : '开启'}`
 }
