@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer, type ServerResponse } from "node:http";
+import { connect } from "node:net";
+import type { Duplex } from "node:stream";
 import { isAbsolute, join, relative, sep } from "node:path";
 import test from "node:test";
 
@@ -66,6 +69,87 @@ test("Pi-native access uses auth.json while identity guidance leaves existing Se
   } finally {
     await adapter.control({ type: "dispose" });
   }
+});
+
+// Owner report, 2026-11-14: Hub sign-in ignored the proxy that already worked for Pi sessions.
+// Only the OAuth endpoint and proxy are fixtures; the Hub login entry, provider loading and storage are real.
+test("Hub Pi sign-in uses the configured proxy and saves the returned OAuth credential", { timeout: 20_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-hub-login-proxy-"));
+  const agentDir = join(root, "agent");
+  await mkdir(agentDir);
+  const credentials = { access: "fixture-proxy-access", refresh: "fixture-refresh", expires: Date.now() + 3_600_000 };
+  const respond = (response: ServerResponse): void => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(credentials));
+  };
+  const origin = createServer((_request, response) => respond(response));
+  const proxyTargets: string[] = [];
+  const proxy = createServer((request, response) => {
+    proxyTargets.push(new URL(request.url!).host);
+    respond(response);
+  });
+  const sockets = new Set<Duplex>();
+  context.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    origin.closeAllConnections();
+    proxy.closeAllConnections();
+    await Promise.all([origin, proxy].map((server) => new Promise<void>((done) => server.close(() => done()))));
+    await rm(root, { recursive: true, force: true });
+  });
+  await new Promise<void>((done) => origin.listen(0, "127.0.0.1", done));
+  const originPort = (origin.address() as { port: number }).port;
+  const authority = `127.0.0.1:${originPort}`;
+  // Accept CONNECT too: Pi's network bootstrap supports HTTP clients that tunnel HTTP origins.
+  proxy.on("connect", (request, socket, head) => {
+    proxyTargets.push(request.url!);
+    sockets.add(socket);
+    const upstream = connect(originPort, "127.0.0.1", () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length) upstream.write(head);
+      socket.pipe(upstream);
+      upstream.pipe(socket);
+    });
+    sockets.add(upstream);
+    socket.on("error", () => upstream.destroy());
+    upstream.on("error", () => socket.destroy());
+  });
+  await new Promise<void>((done) => proxy.listen(0, "127.0.0.1", done));
+  const extension = join(agentDir, "oauth-fixture.mjs");
+  await writeFile(extension, `export default function (pi) {
+    pi.registerProvider("proxy-fixture", {
+      api: "openai-completions", baseUrl: "http://${authority}", models: [],
+      oauth: {
+        name: "Proxy fixture",
+        async login(callbacks) {
+          const code = await callbacks.onPrompt({ message: "Authorization code" });
+          const response = await fetch("http://${authority}/token", {
+            method: "POST", body: code, signal: AbortSignal.timeout(5000)
+          });
+          if (!response.ok) throw new Error("Fixture login failed");
+          return await response.json();
+        },
+        async refreshToken(credentials) { return credentials; },
+        getApiKey(credentials) { return credentials.access; }
+      }
+    });
+  }`);
+  await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+    httpProxy: `http://127.0.0.1:${(proxy.address() as { port: number }).port}`,
+    extensions: [extension],
+  }));
+  // Network setup changes process globals, so neither this test nor another login can prime the child.
+  await exec("--input-type=module", ["--eval", `
+    import { loginPiProvider } from ${JSON.stringify(new URL("../src/pi/pi-environment.js", import.meta.url).href)};
+    import { getGlobalDispatcher } from "undici";
+    await loginPiProvider("proxy-fixture", "oauth", {
+      prompt: async () => "fixture-authorization-code", notify: () => {}
+    }, { agentDir: ${JSON.stringify(agentDir)} });
+    await getGlobalDispatcher().close();
+  `], isolatedProcessEnvironment(root, { PI_CODING_AGENT_DIR: agentDir }), process.cwd());
+  assert.ok(proxyTargets.includes(authority), "Hub login bypassed Pi's configured proxy");
+  const saved = JSON.parse(await readFile(join(agentDir, "auth.json"), "utf8"));
+  assert.equal(saved["proxy-fixture"].type, "oauth");
+  assert.equal(saved["proxy-fixture"].access, credentials.access);
 });
 
 test("bundled CLI install and Protocol Worker configuration work without invoking a system Pi", { timeout: 40_000 }, async (context) => {
