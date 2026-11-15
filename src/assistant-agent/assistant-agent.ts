@@ -5,6 +5,7 @@ import { join, relative, resolve } from "node:path";
 import { Agent, type AgentEvent as LoopEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
 import {
   clampThinkingLevel,
+  cleanupSessionResources,
   createInitialSystemMessage,
   getSupportedThinkingLevels,
   isContextOverflow,
@@ -890,6 +891,7 @@ class AssistantAgent implements WorkerAgent {
       return false;
     }
     this.session.appendCompaction(record.summary, record.firstKeptEntryId, record.tokensBefore);
+    cleanupSessionResources(this.session.getSessionId());
     this.handoff.applied();
     if (!insideReply) await this.dropForgotten(forgotten);
     this.opening.refresh();
@@ -980,6 +982,7 @@ class AssistantAgent implements WorkerAgent {
       const rewritten = (await this.complete(system, prompt, 4_096, new AbortController().signal)).trim();
       if (rewritten.length === 0) return false;
       this.session.appendCompaction(rewritten, record.firstKeptEntryId, record.tokensBefore);
+      cleanupSessionResources(this.session.getSessionId());
       return true;
     } catch {
       // Tried again the next time something is found forgotten; until then the record stays.
