@@ -117,6 +117,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   } | undefined;
   private activeTools = new Set(["read"]);
   private readonly settingValues: SettingValueMap = {
+    modelSpeed: null,
     autoCompaction: true, compactionReserveTokens: 165_536, compactionKeepRecentTokens: 20_000,
     autoRetry: true, enableSkillCommands: true, hideThinking: false,
     showCacheMissNotices: false, showHardwareCursor: false, clearOnShrink: true, showTerminalProgress: true,

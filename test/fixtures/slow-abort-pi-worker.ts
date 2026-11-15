@@ -96,7 +96,7 @@ if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function"
 function canonicalSettings(): unknown[] {
   return SETTING_KEYS.map((key) => {
     const definition = SETTING_DEFINITIONS[key];
-    const value = definition.valueType === "boolean" ? false
+    const value = key === "modelSpeed" ? null : definition.valueType === "boolean" ? false
       : definition.valueType === "integer" ? (definition.min ?? 0)
         : definition.valueType === "enum" ? definition.allowedValues?.[0]
           : {};

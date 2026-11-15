@@ -29,6 +29,8 @@ import { InstanceObservationService, observationStatus } from "./instance-observ
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { ProtocolValidationError } from "./protocol.js";
 import { assertChildMayRequest, childCreationOperation, sendDockMessage, spawnDockWorker } from "./native-collaboration.js";
+import { inheritedModelSpeed, type ModelSpeedSelection } from "../core/model-speed.js";
+import type { SettingDto, SettingUpdate } from "../core/config-projection.js";
 import { WorkMessages } from "./work-messages.js";
 import {
   catalogReopenSessionFile,
@@ -44,6 +46,7 @@ import type {
 export interface InstanceFactoryInput {
   /** Not persisted: a child Work is never reopened. */
   child?: DockChildStart;
+  modelSpeed?: ModelSpeedSelection;
   id: string;
   creationOperationId: string;
   hostEpoch: string;
@@ -68,6 +71,7 @@ export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedIn
 
 export interface CreateRegistryInstanceInput {
   child?: DockChildSelection;
+  modelSpeed?: ModelSpeedSelection;
   operationId: string;
   cwd: string;
   name?: string;
@@ -168,6 +172,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly reopenInFlight = new Map<string, string>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private readonly keyEnsureTails = new Map<string, Promise<void>>();
+  private readonly speedChangeTails = new Map<string, Promise<void>>();
   private catalogMaintenancePending = false;
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
@@ -348,7 +353,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.child === undefined ? {} : { child: { parentId: input.child.parentId, ...(input.child.allowedTools === undefined ? {} : { allowedTools: input.child.allowedTools }) } }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}) });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: true, ...(input.child === undefined ? {} : { child: { parentId: input.child.parentId, ...(input.child.allowedTools === undefined ? {} : { allowedTools: input.child.allowedTools }) } }), ...(sessionFile === undefined ? {} : { sessionFile }), ...(workerConfig === undefined ? {} : { workerConfig }), ...(assistant ? { assistant: true as const } : {}), ...(input.modelSpeed === undefined ? {} : { modelSpeed: input.modelSpeed }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -379,7 +384,42 @@ export class DockRegistry implements LocalDockToolsHostPort {
       await this.stop(id, randomUUID()).catch(() => {});
       throw new Error("The parent Work stopped before its child could start.");
     }
+    // Creation may have taken time; use the parent's current choice before the first task is sent.
+    if (parent) await this.changeModelSpeed(parent.id, async () => {
+      if (instance.modelSpeed === undefined && inheritedModelSpeed(parent.modelSpeed) !== "standard") {
+        await instance.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), inheritedModelSpeed(parent.modelSpeed));
+      }
+    });
     return instance;
+  }
+
+  /** Change one Work's setting; only children still following it take a group speed change. */
+  async updateSetting(instanceId: string, update: SettingUpdate, operationId: string): Promise<SettingDto> {
+    const instance = this.get(instanceId);
+    if (update.key !== "modelSpeed") return instance.updateSetting(update, operationId);
+    return this.changeModelSpeed(instance.parentId ?? instance.id, async () => {
+      const current = this.get(instanceId);
+      const parent = current.parentId === undefined ? undefined : this.instances.get(current.parentId);
+      const setting = await current.updateSetting(update, operationId, inheritedModelSpeed(parent?.modelSpeed));
+      const tier = inheritedModelSpeed(current.modelSpeed);
+      let failure: unknown;
+      for (const child of this.instances.values()) {
+        if (child.parentId !== current.id || child.modelSpeed !== undefined || child.lifecycle !== "active") continue;
+        try { await child.updateSetting({ key: "modelSpeed", value: null }, randomUUID(), tier); }
+        catch (error) { if (child.lifecycle === "active") failure ??= error; }
+      }
+      if (failure) throw failure;
+      return setting;
+    });
+  }
+
+  /** Keep parent/child choices ordered, without locking sessions or unrelated Work trees. */
+  private changeModelSpeed<T>(rootId: string, change: () => Promise<T>): Promise<T> {
+    const result = (this.speedChangeTails.get(rootId) ?? Promise.resolve()).then(change);
+    const tail = result.then(() => {}, () => {});
+    this.speedChangeTails.set(rootId, tail);
+    void tail.then(() => { if (this.speedChangeTails.get(rootId) === tail) this.speedChangeTails.delete(rootId); });
+    return result;
   }
 
   /** A child in its parent's directory runs under the parent's current decision, including trust_once, without asking again. */
@@ -552,6 +592,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
       attachmentHostPort: this.attachmentHostPort,
       dockToolsEnabled: record.dockToolsEnabled ?? true,
       ...(record.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration") }),
+      ...(record.modelSpeed === undefined ? {} : { modelSpeed: record.modelSpeed }),
       ...(record.assistant ? { assistant: true as const } : {}),
     });
     if (
@@ -702,7 +743,8 @@ export class DockRegistry implements LocalDockToolsHostPort {
     let source: InstanceSnapshot;
     try { source = this.getSnapshot(sourceInstanceId); } catch { return false; }
     if (source.parentId !== undefined) return this.instances.has(sourceInstanceId);
-    if (request.type !== "send" && request.type !== "interrupt" && request.type !== "stop") return false;
+    if (request.type === "speed" && request.target === undefined) return true;
+    if (request.type !== "send" && request.type !== "interrupt" && request.type !== "stop" && request.type !== "speed") return false;
     return request.target !== undefined && this.workMessages.ownChild(source, request.target) !== undefined;
   }
 
@@ -729,6 +771,11 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     const mutations = this.dockToolsMutationPort;
     if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
+    if (request.type === "speed") {
+      const target = request.target === undefined ? source : this.ownChild(source, request.target)?.snapshot() ?? this.observationService.resolveTarget(sourceInstanceId, request.target);
+      if (!mutations.speed) throw new Error("这个 Host 尚不支持模型速度设置，请更新 Host。");
+      return { type: "speed", setting: await mutations.speed(target.id, request.operationId, request.selection) };
+    }
     if (request.type === "create" || request.type === "system") {
       if (request.machine !== undefined) throw new Error("Machine selection requires a connection to Main. No local fallback was used.");
       return request.type === "create" ? mutations.create(request) : mutations.system(request);

@@ -516,6 +516,7 @@ export interface SessionForkResult { cancelled: boolean; selectedText?: string; 
 export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface ModelInfo {
+  speedTiers?: ModelSpeedTier[]
   provider: string
   id: string
   name: string
@@ -582,14 +583,16 @@ export interface CommandCompletionsResult {
 export interface ToolInfo { name: string; description: string; active: boolean; source?: SafeSource }
 export interface ToolsResult { tools: ToolInfo[]; instance: Work; total: number; truncated: boolean }
 
+export type ModelSpeedTier = 'standard' | 'fast' | 'ultrafast'
+export interface ModelSpeedSelection { tier: ModelSpeedTier; scope: 'work' | 'all' }
 export type SettingKey =
-  | 'autoCompaction' | 'compactionReserveTokens' | 'compactionKeepRecentTokens' | 'autoRetry'
+  | 'modelSpeed' | 'autoCompaction' | 'compactionReserveTokens' | 'compactionKeepRecentTokens' | 'autoRetry'
   | 'enableSkillCommands' | 'hideThinking' | 'showCacheMissNotices' | 'showHardwareCursor'
   | 'clearOnShrink' | 'showTerminalProgress' | 'quietStartup' | 'collapseChangelog'
   | 'enableInstallTelemetry' | 'steeringMode' | 'followUpMode' | 'transport'
   | 'doubleEscapeAction' | 'treeFilterMode' | 'defaultProjectTrust' | 'cacheWarming' | 'httpIdleTimeoutMs'
   | 'editorPaddingX' | 'outputPad' | 'autocompleteMaxVisible' | 'warnings'
-export type SettingValue = boolean | number | string | { anthropicExtraUsage?: boolean }
+export type SettingValue = boolean | number | string | { anthropicExtraUsage?: boolean } | ModelSpeedSelection | null
 export interface SettingInfo {
   key: SettingKey
   value: SettingValue
@@ -765,8 +768,8 @@ export interface AssistantExtractionStatus {
 /** The model that makes her memories; without one nothing is made. */
 export interface AssistantHandoffSettings { startTokens: number | null; keepRecentTokens: number | null; prompt: string }
 export interface AssistantExtensionSettings { id: string; module: string; enabled: boolean; config: Record<string, unknown> }
-export interface AssistantSettings { extractionModel?: ModelRef; handoff?: AssistantHandoffSettings; extensions?: AssistantExtensionSettings[] }
-export interface AssistantSettingsEdit { extractionModel?: ModelRef | null; handoff?: AssistantHandoffSettings; extensions?: AssistantExtensionSettings[] }
+export interface AssistantSettings { extractionModel?: ModelRef; extractionSpeed?: ModelSpeedTier; handoff?: AssistantHandoffSettings; extensions?: AssistantExtensionSettings[] }
+export interface AssistantSettingsEdit { extractionModel?: ModelRef | null; extractionSpeed?: ModelSpeedTier; handoff?: AssistantHandoffSettings; extensions?: AssistantExtensionSettings[] }
 /** Starting over: how many memories the background made went among the retired, and how many of its timeline lines were removed. */
 export interface AssistantReorganizeResult { extractionModel: ModelRef; retiredMemories: number; removedLines: number }
 export type AssistantMemoryTopic = 'owner' | 'preferences' | 'relationship' | 'events' | 'self' | Unrecognized

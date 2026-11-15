@@ -1,4 +1,5 @@
 import type { AgentModelInfo } from "../core/agent-worker.js";
+import type { ModelSpeedTier } from "../core/model-speed.js";
 import {
   MAX_MODEL_ID_CHARS,
   MAX_MODEL_LIST_BYTES,
@@ -18,10 +19,11 @@ interface PiModelLike {
   id: string;
   name: string;
   reasoning: boolean;
+  api?: string;
 }
 
 /** Pi's selectable models in picker order (provider, then display name), within the protocol's model-list bounds. */
-export function projectPiModelList(available: readonly PiModelLike[]): PiModelListBody {
+export function projectPiModelList(available: readonly PiModelLike[], speeds?: (model: PiModelLike) => ModelSpeedTier[]): PiModelListBody {
   const models = available
     .filter((model) => validReference(model.provider, MAX_MODEL_PROVIDER_CHARS) && validReference(model.id, MAX_MODEL_ID_CHARS))
     .map((model) => ({
@@ -29,6 +31,7 @@ export function projectPiModelList(available: readonly PiModelLike[]): PiModelLi
       id: model.id,
       name: displayName(model.name, model.id),
       reasoning: model.reasoning === true,
+      ...(speeds === undefined ? {} : { speedTiers: speeds(model) }),
     }))
     .sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   const projected: AgentModelInfo[] = [];

@@ -8,7 +8,7 @@ import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, Agent
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { parseAssistantRequest, type AssistantHostPort } from "../core/assistant.js";
 import { answerModelQuestion, type ModelHostPort } from "../model-service/service-process.js";
-import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
+import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError, survivesSessionReplacement } from "../core/agent-worker.js";
 import { WorkerProcess, type WorkerLaunch, type WorkerProcessTimeouts } from "./worker-process.js";
 import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import {
@@ -24,6 +24,7 @@ interface PendingCall {
   preflight?: (result: AgentCommandPreflightResult) => void;
   accepted: boolean;
   generation: number;
+  survivesSessionReplacement: boolean;
 }
 
 export interface CreateAgentWorkerConnectionOptions {
@@ -186,7 +187,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       : deadline === "mutation" ? this.process.timeouts.mutationMs : deadline === "control" ? this.process.timeouts.controlMs : this.process.timeouts.gracefulShutdownMs;
     return new Promise<unknown>((resolve, reject) => {
       const timer = timeoutMs === undefined ? undefined : setTimeout(() => this.failTransport(new AgentWorkerUnavailableError(`Worker ${label} deadline exceeded`)), timeoutMs);
-      this.pending.set(callId, { label, resolve, reject, timer, preflight, accepted: false, generation: this.expectedGeneration });
+      this.pending.set(callId, { label, resolve, reject, timer, preflight, accepted: false, generation: this.expectedGeneration,
+        survivesSessionReplacement: envelope.kind === "agent_request" && survivesSessionReplacement(envelope.request) });
       void this.sender.sendEnvelope({ ...envelope, callId } as WorkerEnvelope).catch((error) => {
         if (this.pending.has(callId)) this.failTransport(error);
       });
@@ -414,7 +416,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   }
   private cancelGenerationCalls(generation: number): void {
     for (const [callId, pending] of this.pending) {
-      if (pending.generation !== generation || isReplacementRequest(pending.label)) continue;
+      if (pending.generation !== generation || pending.survivesSessionReplacement || isReplacementRequest(pending.label)) continue;
       this.pending.delete(callId); if (pending.timer) clearTimeout(pending.timer);
       pending.reject(pending.accepted
         ? new AgentMutationEffectUnknownError(`Runtime generation changed after accepting ${pending.label}`)

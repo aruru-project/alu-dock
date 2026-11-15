@@ -5,6 +5,7 @@ import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { askHost, serveRequests } from "../control/service-supervisor.js";
 import { parseAssistantRequest, parseAssistantSource, type AssistantSource } from "../core/assistant.js";
 import { mainModelOwner } from "../model-service/owner.js";
+import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import { ASSISTANT_DATABASE_FILE } from "./backup.js";
 import { AssistantDocuments } from "./documents.js";
@@ -38,8 +39,9 @@ async function main(): Promise<void> {
   const memories = new AssistantMemories(store.connection);
   const timeline = new AssistantTimeline(store.connection);
   // Main's model service answers for credentials through the Host, as it does for Works.
-  const owner = mainModelOwner((args, signal) => askHost({ model: args }, signal));
-  const models = new MainModelAccess(() => ModelRuntime.create({ owner }));
+  const modelSpeed = new ModelSpeedRuntime();
+  const owner = mainModelOwner((args, signal) => askHost({ model: args }, signal), ({ speedSupport }) => modelSpeed.configure(speedSupport));
+  const models = new MainModelAccess(() => ModelRuntime.create({ owner }), modelSpeed);
   const extraction = new AssistantExtraction(store.connection, memories, timeline, documents, models, timing(),
     (message) => process.stderr.write(`Alu Dock: ${message}\n`));
   // The Host stops the service with SIGTERM: close the database rather than leave it to recovery.

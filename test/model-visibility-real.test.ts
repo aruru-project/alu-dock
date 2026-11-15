@@ -39,7 +39,7 @@ export default function() { appendFileSync(${JSON.stringify(launches)}, process.
     APPDATA: join(home, "appdata"), LOCALAPPDATA: join(home, "localappdata"), TMPDIR: root, TEMP: root, TMP: root, PI_OFFLINE: "1" };
   for (const key of ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"]) if (process.env[key]) env[key] = process.env[key];
 
-  const service = new ModelServiceProcess({ agentDir: mainAgent, environment: { ...env, PI_CODING_AGENT_DIR: mainAgent } });
+  const service = new ModelServiceProcess({ agentDir: mainAgent, stateDirectory: mainStateRoot, environment: { ...env, PI_CODING_AGENT_DIR: mainAgent } });
   context.after(() => service.stop());
   await service.start();
   const catalog = createPiModelCatalogReader({ agentDir: mainAgent, homeDir: home, environment: async () => ({ ...env, PI_CODING_AGENT_DIR: mainAgent }) });

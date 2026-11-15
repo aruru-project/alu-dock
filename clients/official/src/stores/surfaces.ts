@@ -332,7 +332,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     return ({
       commands: '命令中心', 'dock-tools': 'Dock Tools', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
       'rename-session': '会话名称', 'compact-session': '压缩上下文', 'reload-session': 'Reload Session',
-      models: '选择 Model', thinking: 'Thinking Level', tools: 'Active Tools', resources: '项目状态', settings: '设置',
+      models: '选择 Model', thinking: 'Thinking Level', speed: '模型速度', tools: 'Active Tools', resources: '项目状态', settings: '设置',
       'quick-buttons': '快捷按钮',
     } as Record<ControlSection, string>)[section]
   }

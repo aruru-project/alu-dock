@@ -9,6 +9,7 @@ import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js
 import type { JsonObject } from "../core/json-value.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import type { ModelHostPort } from "../model-service/service-process.js";
+import type { ModelSpeedSelection } from "../core/model-speed.js";
 import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerLaunch, WorkerProcessTimeouts } from "./worker-process.js";
 
@@ -16,6 +17,7 @@ import type { WorkerLaunch, WorkerProcessTimeouts } from "./worker-process.js";
 export interface WorkerInstanceOptions {
   /** A child Work's parent. */
   parentId?: string;
+  modelSpeed?: ModelSpeedSelection;
   id?: string;
   creationOperationId?: string;
   hostEpoch?: string;
@@ -84,6 +86,10 @@ export async function createWorkerInstance(options: CreateWorkerInstanceOptions)
   });
   const runtime = created.session;
   try {
+    if (options.modelSpeed !== undefined) {
+      await runtime.invoke({ kind: "request", version: 2, requestId: randomUUID(), type: "settings.update",
+        params: { instanceId, operationId: randomUUID(), update: { key: "modelSpeed", value: { tier: options.modelSpeed.tier, scope: "work" } } } });
+    }
     const modelState = runtime.state().modelState;
     const historyRequest = {
       kind: "request", version: 2, requestId: randomUUID(), type: "session.history",
@@ -95,6 +101,7 @@ export async function createWorkerInstance(options: CreateWorkerInstanceOptions)
       id: instanceId,
       creationOperationId: options.creationOperationId,
       parentId: options.parentId,
+      modelSpeed: options.modelSpeed,
       projectTrusted: options.projectTrusted,
       hostEpoch,
       key: options.key,

@@ -10,6 +10,7 @@
 
 import { isAbsolute, win32 } from "node:path";
 import { cloneBoundedJsonObject, type JsonObject } from "./json-value.js";
+import { MODEL_SPEED_TIERS, type ModelSpeedTier } from "./model-speed.js";
 
 /** The two texts the owner and the assistant edit: who she is, and what the owner told her by hand. */
 export const ASSISTANT_DOCUMENTS = ["persona", "notes"] as const;
@@ -132,6 +133,8 @@ export interface AssistantExtensionSettings {
 export interface AssistantSettings {
   /** The model that turns her conversations into memories; without it nothing is extracted. */
   extractionModel?: AssistantModelRef;
+  /** Background memory requests use their own speed; Main returns standard when not configured. */
+  extractionSpeed?: ModelSpeedTier;
   /** Absent only on older Hosts that do not offer rolling hand-over settings. */
   handoff?: AssistantHandoffSettings;
   /** Absent on older Hosts. An empty array loads no extensions. */
@@ -140,6 +143,8 @@ export interface AssistantSettings {
 export interface AssistantSettingsEdit {
   /** Omitted leaves it unchanged; null stops making memories. */
   extractionModel?: AssistantModelRef | null;
+  /** Omitted preserves the background speed, independently of her chat Work. */
+  extractionSpeed?: ModelSpeedTier;
   /** Omitted leaves the existing hand-over settings unchanged. */
   handoff?: AssistantHandoffSettings;
   /** Omitted preserves the saved list; supplied replaces it. */
@@ -581,9 +586,10 @@ function parseExtensions(input: unknown, field: string, closed: boolean): Assist
 }
 
 function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantSettingsEdit {
-  if (value.extractionModel === undefined && value.handoff === undefined && value.extensions === undefined) fail(`${field} changes nothing`);
+  if (value.extractionModel === undefined && value.extractionSpeed === undefined && value.handoff === undefined && value.extensions === undefined) fail(`${field} changes nothing`);
   return {
     ...(value.extractionModel === undefined ? {} : { extractionModel: value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true) }),
+    ...(value.extractionSpeed === undefined ? {} : { extractionSpeed: oneOf(value.extractionSpeed, MODEL_SPEED_TIERS, `${field}.extractionSpeed`) }),
     ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, true) }),
     ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, true) }),
   };
@@ -728,7 +734,7 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op"], field);
         return { op: "settings_get" };
       case "settings_set":
-        only(value, ["op", "extractionModel", "handoff", "extensions"], field);
+        only(value, ["op", "extractionModel", "extractionSpeed", "handoff", "extensions"], field);
         return { op: "settings_set", ...parseSettingsSet(value, field) };
       case "reorganize":
         only(value, ["op", "extractionModel"], field);
@@ -917,6 +923,7 @@ export function parseAssistantSettings(input: unknown, field = "assistant settin
     const value = record(input, field);
     return {
       ...(value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) }),
+      extractionSpeed: value.extractionSpeed === undefined ? "standard" : oneOf(value.extractionSpeed, MODEL_SPEED_TIERS, `${field}.extractionSpeed`),
       ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, false) }),
       ...(value.extensions === undefined ? {} : { extensions: parseExtensions(value.extensions, `${field}.extensions`, false) }),
     };

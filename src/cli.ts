@@ -283,7 +283,12 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     ? new AttachmentService(new AttachmentStorageState(attachmentStorageStateRoot(catalogPath)))
     : undefined;
   const { createPiModelCatalogReader } = await import("./pi/pi-model-catalog.js");
-  const modelCatalog = createPiModelCatalogReader(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir });
+  const dockStateDirectory = dirname(catalogPath ?? defaultCatalogPath());
+  const { readModelSpeedSupport } = await import("./model-service/speed-support.js");
+  const modelCatalog = createPiModelCatalogReader({
+    ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
+    speedSupport: () => readModelSpeedSupport(dockStateDirectory),
+  });
   const modelVisibility = catalogPath
     ? new ModelVisibilityService(new ModelVisibilityStore(modelVisibilityStateRoot(catalogPath)), modelCatalog)
     : undefined;
@@ -299,7 +304,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   if (options.role !== "subhost") {
     const { ModelServiceProcess } = await import("./model-service/service-process.js");
     const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
-    modelService = new ModelServiceProcess({ agentDir: managedPiAgentDir ?? getAgentDir() });
+    modelService = new ModelServiceProcess({ agentDir: managedPiAgentDir ?? getAgentDir(), stateDirectory: dockStateDirectory });
     modelService.start().catch((error: unknown) => {
       process.stderr.write(`Alu Dock: the model service could not start; Works on this machine cannot call models until it does. ${error instanceof Error ? error.message : String(error)}\n`);
     });

@@ -1,4 +1,5 @@
 import { MAX_CONTROL_BASE64_CHUNK_BYTES } from "../core/transport-bounds.js";
+import { MODEL_SPEED_TIERS, parseModelSpeedSelection } from "../core/model-speed.js";
 import { MAX_SYSTEM_CATALOG_ITEMS } from "./system-service.js";
 import { createHash } from "node:crypto";
 import { MAX_RESOURCE_CONTENT_PAGE_BYTES, MAX_RESOURCE_CONTENT_REF_CHARS } from "../core/resource-content.js";
@@ -1387,7 +1388,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryUpdateParams(rest, "params")) } };
     }
     case "assistant.settings.set":
-      exact(params, ["operationId", "extractionModel", "handoff", "extensions"], "invalid_request");
+      exact(params, ["operationId", "extractionModel", "extractionSpeed", "handoff", "extensions"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
     case "assistant.reorganize":
       exact(params, ["operationId", "extractionModel"], "invalid_request");
@@ -2090,7 +2091,12 @@ export function parsePruneResult(input: unknown): PruneResult {
   } };
 }
 function modelInfoList(value: Record<string, unknown>): Pick<ModelsResult, "models" | "total" | "truncated"> {
-  const models = array(value.models, "models", MAX_MODEL_LIST_ITEMS).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", MAX_MODEL_NAME_CHARS), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
+  const models = array(value.models, "models", MAX_MODEL_LIST_ITEMS).map((item, index) => {
+    const model = object(item, `models[${index}]`);
+    exact(model, ["provider", "id", "name", "reasoning", "contextWindow", "speedTiers"]);
+    return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", MAX_MODEL_NAME_CHARS), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow"),
+      ...(model.speedTiers === undefined ? {} : { speedTiers: array(model.speedTiers, "model speed tiers", MODEL_SPEED_TIERS.length).map(tier => enumeration(tier, "model speed tier", MODEL_SPEED_TIERS)) }) };
+  });
   return { models, ...parseCollectionCompleteness(value, models.length) };
 }
 function modelListFields(value: Record<string, unknown>): Omit<ModelsResult, "instance"> {
@@ -3241,6 +3247,10 @@ function settingsWriteKey(input: unknown): string {
   return key === "model" || key === "thinking" ? key : settingKey(key);
 }
 function parseSettingValue(key: SettingKey, input: unknown, code = "invalid_response"): JsonValue {
+  if (key === "modelSpeed") {
+    try { const selection = parseModelSpeedSelection(input); return selection === null ? null : { ...selection }; }
+    catch (error) { throw validation(code, error instanceof Error ? error.message : String(error)); }
+  }
   const definition = SETTING_DEFINITIONS[key];
   if (definition.valueType === "boolean") return boolean(input, `settings.${key}`, code);
   if (definition.valueType === "enum") return enumeration(input, `settings.${key}`, definition.allowedValues as readonly string[], code);
@@ -3270,7 +3280,10 @@ export function parseSettingDto(input: unknown, field: string): SettingDto {
   if (value.writable !== definition.writable) throw validation("invalid_response", `${field}.writable does not match the frozen setting table`);
   if (value.valueType !== definition.valueType || value.reloadRequired !== definition.reloadRequired || value.hostRestartRequired !== definition.hostRestartRequired) throw validation("invalid_response", `${field} metadata does not match the frozen setting table`);
   const allowedValues = value.allowedValues === undefined ? undefined : array(value.allowedValues, `${field}.allowedValues`, 20).map((item, index) => { if (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") throw validation("invalid_response", `${field}.allowedValues[${index}] is invalid`); return item; });
-  if (JSON.stringify(allowedValues) !== JSON.stringify(definition.allowedValues) || value.min !== definition.min || value.max !== definition.max) throw validation("invalid_response", `${field} bounds or allowed values do not match the frozen setting table`);
+  const validChoices = key === "modelSpeed"
+    ? allowedValues?.every(tier => MODEL_SPEED_TIERS.includes(tier as typeof MODEL_SPEED_TIERS[number])) === true
+    : JSON.stringify(allowedValues) === JSON.stringify(definition.allowedValues);
+  if (!validChoices || value.min !== definition.min || value.max !== definition.max) throw validation("invalid_response", `${field} bounds or allowed values do not match the setting definition`);
   return { key, value: parseSettingValue(key, value.value) as never, source, writable: definition.writable, valueType: definition.valueType, ...(allowedValues ? { allowedValues } : {}), ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }), reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired } as SettingDto;
 }
 function assertSorted<T>(values: T[], field: string, compare: (left: T, right: T) => number): void {

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { SupervisedService } from "../control/service-supervisor.js";
 import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import type { ModelAuthRequest, ModelAuthResult, ModelAuthState, ModelConfiguration, ModelServiceRequest } from "./protocol.js";
-import { MODEL_SERVICE_AGENT_DIR_ENV } from "./service-messages.js";
+import { MODEL_SERVICE_AGENT_DIR_ENV, MODEL_SERVICE_STATE_DIR_ENV } from "./service-messages.js";
 
 /** What a Host offers its Workers for model access: Main's configuration and credentials. */
 export interface ModelHostPort {
@@ -30,6 +30,8 @@ export class ModelServiceUnavailableError extends Error {
 
 export interface ModelServiceProcessOptions {
   agentDir: string;
+  /** Main's Dock data directory, also used for its catalog and model-list preferences. */
+  stateDirectory: string;
   /** Test seam; production captures the owner's login shell like Workers do, so key variables match. */
   environment?: NodeJS.ProcessEnv;
   entry?: string;
@@ -56,6 +58,7 @@ export class ModelServiceProcess implements ModelHostPort {
       environment: async () => ({
         ...(options.environment ?? await captureWorkspaceShellEnvironment(homedir())),
         [MODEL_SERVICE_AGENT_DIR_ENV]: options.agentDir,
+        [MODEL_SERVICE_STATE_DIR_ENV]: options.stateDirectory,
       }),
       unavailable: (message) => new ModelServiceUnavailableError(message),
       // Main may still finish a login refresh a cancelled question started, so a rotated token is kept.

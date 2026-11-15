@@ -5,6 +5,7 @@ import { InstanceEventJournal } from "./instance-event-journal.js";
 import { InstanceCommandScheduler, type InstanceCommandDecision, type InstanceCommandLease, type InstanceProjectionReadReservation } from "./instance-command-scheduler.js";
 import { cloneJson, type JsonObject } from "./json-value.js";
 import { cloneWorkerConfig } from "./worker-config.js";
+import type { ModelSpeedSelection, ModelSpeedTier } from "./model-speed.js";
 import { isPortableAbsoluteLocalPath } from "./local-path.js";
 import {
   CatalogEffectUnknownError,
@@ -225,6 +226,7 @@ export interface ManagedInstanceOptions {
   dockToolsEnabled?: boolean;
   /** Adapter-owned creation input; Dock persists it without interpreting fields. */
   workerConfig?: JsonObject;
+  modelSpeed?: ModelSpeedSelection;
   /** Opened as the personal assistant (card #295); fixed at creation. */
   assistant?: true;
 }
@@ -389,6 +391,8 @@ export class ManagedInstance {
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
   private readonly workerConfigValue: JsonObject | undefined;
+  private modelSpeedValue: ModelSpeedSelection | undefined;
+  get modelSpeed(): ModelSpeedSelection | undefined { return this.modelSpeedValue && { ...this.modelSpeedValue }; }
   readonly parentId: string | undefined;
   readonly assistant: boolean;
   // Runtime-only: trust_once must never become a persisted permission grant.
@@ -462,6 +466,7 @@ export class ManagedInstance {
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
     this.dockToolsEnabledValue = options.dockToolsEnabled ?? true;
     this.parentId = options.parentId;
+    this.modelSpeedValue = options.modelSpeed && { ...options.modelSpeed };
     this.assistant = options.assistant === true;
     this.projectTrustedValue = options.projectTrusted;
     this.workerConfigValue = options.workerConfig === undefined
@@ -590,6 +595,7 @@ export class ManagedInstance {
       collaborationVersion: 1,
       dockToolsEnabled: this.dockToolsEnabledValue,
       ...(this.workerConfigValue === undefined ? {} : { workerConfig: cloneJson(this.workerConfigValue) }),
+      ...(this.modelSpeedValue === undefined ? {} : { modelSpeed: { ...this.modelSpeedValue } }),
       executionChangedAt: snapshot.executionChangedAt,
       ...(snapshot.runStartedAt === undefined ? {} : { runStartedAt: snapshot.runStartedAt }),
       runtimeGeneration: snapshot.runtimeGeneration,
@@ -1112,16 +1118,23 @@ export class ManagedInstance {
   }
 
   async getSettings(): Promise<SettingDto[]> {
-    return this.withProjectionRead(async () => cloneJson(await this.invokeAgent<SettingDto[]>("settings.get", {})));
+    return this.withProjectionRead(async () => cloneJson(await this.invokeAgent<SettingDto[]>("settings.get", {})).map(setting =>
+      setting.key === "modelSpeed" ? { ...setting, value: this.modelSpeedValue ?? null } : setting));
   }
 
-  async updateSetting(update: SettingUpdate, operationId = this.createCommandId()): Promise<SettingDto> {
-    const configuration = await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
+  async updateSetting(update: SettingUpdate, operationId = this.createCommandId(), inheritedSpeed: ModelSpeedTier = "standard"): Promise<SettingDto> {
+    // Work speed only changes the next request's parameter, independently of session operations.
+    const configuration = update.key === "modelSpeed" ? undefined
+      : await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
+    if (update.key === "modelSpeed") { this.catalogPort?.assertWritable(); this.assertActive(); }
     try {
-      const setting = cloneJson(await this.invokeAgent<SettingDto>("settings.update", { operationId, update: cloneJson(update) }));
+      const runtimeUpdate: SettingUpdate = update.key === "modelSpeed"
+        ? { key: "modelSpeed", value: { tier: update.value?.tier ?? inheritedSpeed, scope: "work" } } : update;
+      const response = cloneJson(await this.invokeAgent<SettingDto>("settings.update", { operationId, update: cloneJson(runtimeUpdate) }));
+      const setting: SettingDto = update.key === "modelSpeed" && response.key === "modelSpeed" ? { ...response, value: update.value } : response;
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "settings.update", effect: "post_effect", operationId, instanceId: this.id },
-        () => this.touch(),
+        () => { if (update.key === "modelSpeed") this.modelSpeedValue = update.value ?? undefined; this.touch(); },
         () => this.appendSettingChanged(setting, false),
       ));
       return setting;
@@ -1145,7 +1158,7 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration(configuration);
+      if (configuration) this.endConfiguration(configuration);
     }
   }
 

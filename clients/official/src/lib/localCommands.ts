@@ -1,4 +1,4 @@
-export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'tools' | 'resources' | 'settings' | 'quick-buttons'
+export type ControlSection = 'commands' | 'dock-tools' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'speed' | 'tools' | 'resources' | 'settings' | 'quick-buttons'
 export type LocalControlAction = 'stop' | 'restoreQueue' | 'refresh'
 
 export interface LocalControlCommand {
@@ -20,6 +20,7 @@ export const localControlCommands: readonly LocalControlCommand[] = [
   { id: 'tree', name: 'tree', label: 'Session Tree', keywords: '会话树 navigate fork clone', description: '浏览、切换或分叉当前会话树', section: 'tree' },
   { id: 'model', name: 'model', label: 'Set Model', keywords: '切换模型', description: '切换当前模型', section: 'models' },
   { id: 'thinking', name: 'thinking', label: 'Set Thinking', keywords: '思考等级', description: '调整思考等级', section: 'thinking' },
+  { id: 'speed', name: 'speed', label: '模型速度', keywords: '速度 fast ultrafast 标准', description: '设置当前 Work 或包含子 Work 的速度档位', section: 'speed' },
   { id: 'name', name: 'name', label: 'Rename Session', keywords: '重命名会话', description: '修改当前 Session 名称', section: 'rename-session' },
   { id: 'compact', name: 'compact', label: 'Compact Context', keywords: '压缩上下文', description: '手动压缩当前上下文', section: 'compact-session' },
   { id: 'dequeue', name: 'dequeue', label: 'Restore Queue', keywords: '取回排队消息', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },

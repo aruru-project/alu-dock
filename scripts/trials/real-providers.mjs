@@ -55,7 +55,7 @@ const workspace = (name, settings) => {
 
 // Every question the Works ask Main, with what kind of answer came back; never a credential value.
 const questions = [];
-const service = new ModelServiceProcess({ agentDir });
+const service = new ModelServiceProcess({ agentDir, stateDirectory: root });
 const port = {
   async configuration(signal) { const r = await service.configuration(signal); questions.push("configuration"); return r; },
   async authState(signal) { const r = await service.authState(signal); questions.push("auth_state"); return r; },

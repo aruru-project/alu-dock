@@ -148,7 +148,7 @@ test("starting over sets aside what the background made, keeps what the owner an
   assert.deepEqual(memories.list({ limit: 10, state: "retired" }).memories.map((memory) => memory.id), [hangzhou!.id], "What the background made can be found among the retired");
   assert.deepEqual(timeline.list({ limit: 10 }).episodes.map((line) => line.id), [corrected.id], "A line she corrected stays though reading extended it since");
   assert.throws(() => timeline.get(shanghaiLine!.id));
-  assert.deepEqual(extraction.settings(), { extractionModel: { provider: "memory", id: "second" } });
+  assert.deepEqual(extraction.settings(), { extractionModel: { provider: "memory", id: "second" }, extractionSpeed: "standard" });
   await waitFor(() => reads.length === 2 && extraction.status().waitingSessions === 0, "The conversations were not read again");
   assert.ok(reads[0]!.includes("上海") && reads[1]!.includes("杭州"), "Read again in the order it was said");
   // Review of 2026-11-10: a client or a session still naming the removed line must not reach the new one.

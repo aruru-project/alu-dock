@@ -1,5 +1,7 @@
 import { MAX_CHILD_MODELS, MAX_MODEL_ID_CHARS, MAX_MODEL_PROVIDER_CHARS, type ModelRef, type SystemCatalogResult, type SystemCatalogCursor, type ResourceContentResult } from "../control/protocol.js";
 import type { ThinkingLevel } from "./agent-worker.js";
+import type { ModelSpeedSelection } from "./model-speed.js";
+import type { SettingDto } from "./config-projection.js";
 import type { CommandReceipt } from "./instance-dto.js";
 import type { DeliverableDto } from "./instance-deliverables.js";
 import type { MachineDto } from "./machine-dto.js";
@@ -78,6 +80,7 @@ export type DockToolsRequest =
   | ObservationRequest
   | { type: "machines" }
   | { type: "models" }
+  | { type: "speed"; operationId: string; target?: string; selection?: ModelSpeedSelection | null }
   | { type: "spawn"; operationId: string; task: string; name: string; cwd?: string; model?: ModelRef; thinkingLevel?: ThinkingLevel; allowedTools?: string[]; withContext?: boolean }
   | { type: "interrupt" | "stop"; operationId: string; target: string }
   | { type: "deliver"; path: string }
@@ -109,6 +112,7 @@ export type DockChildStart = Omit<DockChildSelection, "withParentContext">;
 export type DockToolsResult =
   | ObservationResult
   | ({ type: "models" } & ChildModelList)
+  | { type: "speed"; setting: SettingDto }
   | { type: "spawn"; instance: ObservedInstanceStatus; taskStatus: "accepted" | "failed"; error?: string }
   | { type: "interrupt"; instance: ObservedInstanceStatus }
   | { type: "stop"; instance: ObservedInstanceStatus }
@@ -149,6 +153,7 @@ export interface LocalDockToolsHostPort extends DockToolsHostPort {
 export interface DockToolsMutationPort {
   /** This machine's list of models for child Works. */
   childModels(): Promise<ChildModelList>;
+  speed?(instanceId: string, operationId: string, selection?: ModelSpeedSelection | null): Promise<SettingDto>;
   interrupt(instanceId: string, operationId: string): Promise<ObservedInstanceStatus>;
   stop(instanceId: string, operationId: string): Promise<ObservedInstanceStatus>;
   create(input: DockCreateInput): Promise<DockToolsResult>;

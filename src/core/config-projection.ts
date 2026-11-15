@@ -1,4 +1,5 @@
 import type { JsonObject, JsonValue } from "./json-value.js";
+import { MODEL_SPEED_TIERS, type ModelSpeedSelection } from "./model-speed.js";
 
 export interface SourceDto {
   kind: "built-in" | "extension" | "skill" | "prompt";
@@ -64,6 +65,8 @@ export function compareDiagnosticDtos(left: DiagnosticDto, right: DiagnosticDto)
 }
 
 export interface SettingValueMap {
+  /** null follows the parent (or standard for an independent Work); stored per Work, not in Pi globals. */
+  modelSpeed: ModelSpeedSelection | null;
   autoCompaction: boolean;
   compactionReserveTokens: number;
   compactionKeepRecentTokens: number;
@@ -135,6 +138,7 @@ const integerDefinition = (sourcePath: readonly string[], min: number, max: numb
 
 /** Exhaustive frozen metadata for the Stage 3 general-settings projection. */
 export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinition } = Object.freeze({
+  modelSpeed: Object.freeze({ valueType: "object", allowedValues: MODEL_SPEED_TIERS, reloadRequired: false, hostRestartRequired: false, writable: true, sourcePath: Object.freeze(["modelSpeed"]) }),
   autoCompaction: booleanDefinition(["compaction", "enabled"]),
   compactionReserveTokens: Object.freeze({ valueType: "integer", min: 0, max: 2_147_483_647, reloadRequired: false, hostRestartRequired: false, writable: false, sourcePath: Object.freeze(["compaction", "reserveTokens"]) }),
   compactionKeepRecentTokens: Object.freeze({ valueType: "integer", min: 0, max: 2_147_483_647, reloadRequired: false, hostRestartRequired: false, writable: false, sourcePath: Object.freeze(["compaction", "keepRecentTokens"]) }),

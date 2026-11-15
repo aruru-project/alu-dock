@@ -11,7 +11,7 @@ const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catc
 // Cloud review of e7c5da2: a service whose start hung kept every waiting question, and its cancel,
 // waiting. Review of 6799d48: a new Work's start must learn why before its own deadline.
 test("a model service whose start hangs is restarted, and questions waiting for it end on cancel or in time", { timeout: 20_000 }, async (context) => {
-  const service = new ModelServiceProcess({ agentDir: "/nonexistent", environment: { PATH: process.env.PATH }, entry: stalled, readyWaitMs: 1_000, startTimeoutMs: 2_000 });
+  const service = new ModelServiceProcess({ agentDir: "/nonexistent", stateDirectory: "/nonexistent", environment: { PATH: process.env.PATH }, entry: stalled, readyWaitMs: 1_000, startTimeoutMs: 2_000 });
   context.after(() => service.stop());
   void service.start().catch(() => {});
   await waitFor(() => service.pid !== undefined, "The service did not start");

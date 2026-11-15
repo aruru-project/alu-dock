@@ -59,7 +59,10 @@ import {
   parseSettingCommandValue,
   settingChoiceValue,
   settingCompletions,
+  settingName,
+  settingVisible,
   settingValueChoices,
+  SPEED_USAGE,
 } from "./settings-controls.js";
 import { editorTheme, paint } from "./theme.js";
 import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
@@ -126,6 +129,7 @@ export async function runDockTui(
   let draftAttachmentIds: string[] = [];
   let editor!: Editor;
   let settings: SettingDto[] = [];
+  let speedRead = 0;
   let commands: CommandDto[] = [];
   let terminalProgressEnabled = false;
   let replacementHistoryGeneration: number | undefined;
@@ -273,6 +277,18 @@ export async function runDockTui(
       activeExtensionDialog.closeFromHost();
     }
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
+    if (event.type === "model.changed") {
+      const read = ++speedRead;
+      const generation = instance.runtimeGeneration;
+      settings = settings.filter(setting => setting.key !== "modelSpeed");
+      rebuildAutocomplete();
+      void client.settings(instance.id).then(result => {
+        if (read === speedRead && instance.runtimeGeneration === generation) {
+          settings = result.settings;
+          rebuildAutocomplete();
+        }
+      }).catch(() => {});
+    }
     if (event.type === "extension.tools_expanded_changed") conversation.setToolsExpanded(event.data.expanded);
     applyControllerDirective(event, catchUp);
     if (event.type === "session.info_changed") {
@@ -553,6 +569,15 @@ export async function runDockTui(
         return;
       }
       await switchModel(parsed.provider, parsed.id);
+      return;
+    }
+    if (text === "/speed") {
+      await chooseSetting("modelSpeed");
+      return;
+    }
+    const speedTarget = commandMessage(text, "/speed");
+    if (speedTarget !== undefined) {
+      await updateSettingFromCommand(`modelSpeed ${speedTarget}`);
       return;
     }
     if (text === "/thinking") {
@@ -1091,24 +1116,28 @@ export async function runDockTui(
     }
   }
 
-  async function chooseSetting(): Promise<void> {
+  async function chooseSetting(requestedKey?: SettingDto["key"]): Promise<void> {
     blockEditorSubmit();
     showStatus("loading settings");
     tui.requestRender();
     try {
       settings = (await client.settings(instance.id)).settings;
-      const key = await showChoicePicker(
-        "Pi settings",
-        settings.map((setting) => ({
+      const key = requestedKey ?? await showChoicePicker(
+        "Work settings",
+        settings.filter(settingVisible).map((setting) => ({
           value: setting.key,
-          label: setting.key,
+          label: settingName(setting),
           description: `${formatSettingValue(setting.value)} · ${setting.source}${setting.writable ? "" : " · read-only"}${setting.reloadRequired ? " · reload" : ""}${setting.hostRestartRequired ? " · restart Alu Dock" : ""}`,
         })),
       );
       if (!key) { showStatus("settings unchanged"); return; }
       const setting = settings.find((candidate) => candidate.key === key);
-      if (!setting || !setting.writable) {
-        conversation.addNotice(`${key} is read-only.`, true);
+      if (!setting || !settingVisible(setting)) {
+        conversation.addNotice("No acceleration tier is listed for this model.", true);
+        return;
+      }
+      if (!setting.writable) {
+        conversation.addNotice(`${settingName(setting)} is read-only.`, true);
         return;
       }
       if (setting.valueType === "integer") {
@@ -1117,17 +1146,20 @@ export async function runDockTui(
         showStatus("setting ready to edit");
         return;
       }
-      const choices = settingValueChoices(setting);
+      const choices = settingValueChoices(setting, !!instance.parentId);
       const selected = await showFixedActions(
-        `Set ${setting.key}`,
-        [`Current: ${formatSettingValue(setting.value)} · ${setting.source}`],
+        `Set ${settingName(setting)}`,
+        [
+          `Current choice: ${formatSettingValue(setting.value)}`,
+          ...(setting.key === "modelSpeed" ? ["Next request only; running requests continue.", "Fast / Ultrafast may cost more; actual speed depends on the model service."] : []),
+        ],
         choices,
         settingChoiceValue(setting),
       );
       if (selected === undefined) { showStatus("setting unchanged"); return; }
       const update = parseSettingCommandValue(setting, selected);
       if (!update) {
-        conversation.addNotice(`Invalid value for ${setting.key}.`, true);
+        conversation.addNotice(`Invalid value for ${settingName(setting)}.`, true);
         return;
       }
       await applySettingUpdate(update);
@@ -1149,13 +1181,14 @@ export async function runDockTui(
     }
     const key = target.slice(0, separator);
     const rawValue = target.slice(separator + 1).trim();
+    showStatus("loading settings");
     try {
       settings = (await client.settings(instance.id)).settings;
       const setting = settings.find((candidate) => candidate.key === key);
       const update = setting && setting.writable ? parseSettingCommandValue(setting, rawValue) : undefined;
-      if (!setting) conversation.addNotice(`Unknown setting: ${key}`, true);
-      else if (!setting.writable) conversation.addNotice(`${key} is read-only.`, true);
-      else if (!update) conversation.addNotice(`Invalid value for ${key}.`, true);
+      if (!setting) conversation.addNotice(key === "modelSpeed" ? "This Dock does not offer model speed settings." : `Unknown setting: ${key}`, true);
+      else if (!setting.writable) conversation.addNotice(`${settingName(setting)} is read-only.`, true);
+      else if (!update) conversation.addNotice(key === "modelSpeed" ? `${SPEED_USAGE} Supported here: ${setting.allowedValues?.join(", ") ?? "standard"}.` : `Invalid value for ${key}.`, true);
       else await applySettingUpdate(update);
     } catch (error) {
       showError(error);
@@ -1165,7 +1198,7 @@ export async function runDockTui(
 
   async function applySettingUpdate(update: SettingUpdate): Promise<void> {
     blockEditorSubmit();
-    showStatus(`setting ${update.key}`);
+    showStatus(update.key === "modelSpeed" ? "saving model speed" : `setting ${update.key}`);
     tui.requestRender();
     try {
       if (!requireCoherentControl()) return;
@@ -1173,8 +1206,8 @@ export async function runDockTui(
       settings = settings.map((setting) => setting.key === result.setting.key ? result.setting : setting);
       applyLiveSetting(result.setting.key, result.setting.value);
       const boundary = result.hostRestartRequired ? " · restart Alu Dock from another shell" : result.reloadRequired ? " · run /reload" : "";
-      conversation.addNotice(`${result.setting.key} = ${formatSettingValue(result.setting.value)}${boundary}`);
-      showStatus(`setting ${result.setting.key} saved`);
+      conversation.addNotice(`${settingName(result.setting)} = ${formatSettingValue(result.setting.value)}${result.setting.key === "modelSpeed" ? " · applies to the next request" : boundary}`);
+      showStatus(`${settingName(result.setting)} saved`);
       rebuildAutocomplete();
     } finally {
       restoreEditorSubmit();
@@ -1977,7 +2010,7 @@ export async function runDockTui(
 
   function rebuildAutocomplete(): void {
     if (!editor) return;
-    const autocompleteCommands = commandCatalog(commands).map((command) => {
+    const autocompleteCommands = commandCatalog(commands).filter(command => command.name !== "speed" || settings.some(setting => setting.key === "modelSpeed" && settingVisible(setting))).map((command) => {
       if (command.name === "thinking") {
         return {
           ...command,
@@ -2005,10 +2038,12 @@ export async function runDockTui(
           },
         };
       }
-      if (command.name === "settings") {
+      if (command.name === "settings" || command.name === "speed") {
         return {
           ...command,
-          getArgumentCompletions: (prefix: string) => settingCompletions(settings, prefix),
+          getArgumentCompletions: (prefix: string) => command.name === "speed"
+            ? settingCompletions(settings, `modelSpeed ${prefix}`, !!instance.parentId).map(item => ({ ...item, value: item.value.slice("modelSpeed ".length) }))
+            : settingCompletions(settings, prefix, !!instance.parentId),
         };
       }
       if (command.name === "tools") {
@@ -2532,6 +2567,8 @@ export function workHelpText(): string {
     "  /resources                inspect loaded Pi files and warnings",
     "  /context-changes          read system prompt and model context changes",
     "WORK",
+    "  /speed [TIER [all]]       standard / fast / ultrafast; all: children",
+    "  /speed inherit           follow parent, otherwise standard",
     "  /steer MESSAGE            redirect the current response",
     "  /follow MESSAGE           send after the current response",
     "  /abort                    stop the current response",
@@ -2587,11 +2624,12 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     { name: "reload", description: "reload Pi files and commands" },
     { name: "resources", description: "inspect loaded Pi files and warnings" },
     { name: "resume", description: "search for and choose a saved Pi session" },
-    { name: "settings", description: "inspect or update Pi settings", argumentHint: "KEY VALUE" },
+    { name: "settings", description: "inspect or update Work settings", argumentHint: "KEY VALUE" },
     { name: "status", description: "refresh work status" },
     { name: "steer", description: "redirect the current response", argumentHint: "MESSAGE" },
     { name: "stop", description: "end this work and remove it from Dock" },
     { name: "thinking", description: "choose or set thinking level", argumentHint: "LEVEL" },
+    { name: "speed", description: "choose request speed and scope; inherit follows the parent", argumentHint: "standard|fast|ultrafast [all] | inherit" },
     { name: "tools", description: "choose active tools", argumentHint: "NAME…" },
     { name: "tree", description: "browse and choose a point in the current Pi session tree" },
   ];

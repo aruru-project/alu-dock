@@ -1,6 +1,7 @@
 import { piSystemPromptResolver } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
 import { workerToolSelection } from "./worker-tool-policy.js";
+import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -184,6 +185,7 @@ export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
 }
 
 export interface PiAgentAdapterOptions {
+  modelSpeed?: ModelSpeedRuntime;
   planGoalPort?: PlanGoalPort;
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
@@ -209,6 +211,7 @@ export interface PiAgentAdapterOptions {
 }
 
 export interface CreatePiAgentAdapterOptions {
+  modelSpeed?: ModelSpeedRuntime;
   /** Creates each session's models when another process owns their configuration and credentials; by default Pi reads this machine's. */
   createModelRuntime?: () => Promise<ModelRuntime>;
   cwd: string;
@@ -288,9 +291,11 @@ export class PiAgentAdapter {
   private manualCompactionOperationId: string | undefined;
   private extensionCommandOperationId: string | undefined;
   private readonly conversationReader: PiSessionConversation;
+  private readonly modelSpeed: ModelSpeedRuntime;
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
+    this.modelSpeed = options.modelSpeed ?? new ModelSpeedRuntime();
     this.conversationReader = new PiSessionConversation({ attachmentContextKey: options.attachmentContextKey, publishedFiles: options.publishedFiles });
     if (options.planGoalPort) options.planGoalPort.prompt = async (text, mayStart, stopped) => {
       let started = false;
@@ -641,7 +646,7 @@ export class PiAgentAdapter {
   async listModels(): Promise<AgentModelListBody> {
     const binding = this.requireActive();
     return {
-      ...projectPiModelList(await binding.services.modelRuntime.getAvailable()),
+      ...projectPiModelList(await binding.services.modelRuntime.getAvailable(), model => this.modelSpeed.supported(model)),
       availableThinkingLevels: [...binding.session.getAvailableThinkingLevels()],
     };
   }
@@ -673,11 +678,15 @@ export class PiAgentAdapter {
   }
 
   async getSettings(): Promise<SettingDto[]> {
-    const settings = this.requireActive().services.settingsManager;
-    return projectPiSettings(settings);
+    const { session, services } = this.requireActive();
+    return [...projectPiSettings(services.settingsManager), this.modelSpeed.setting(session.model)];
   }
 
   async updateSetting(update: SettingUpdate): Promise<SettingDto> {
+    if (update.key === "modelSpeed") {
+      this.modelSpeed.update(update.value);
+      return this.modelSpeed.setting(this.active?.session.model);
+    }
     assertPiSettingUpdate(update);
     const binding = this.requireActive();
     const key = update.key;
@@ -2089,6 +2098,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
   const allowedTools = options.allowedTools === undefined ? undefined
     : options.child ? [...new Set([...options.allowedTools, ...CHILD_DOCK_TOOL_NAMES])] : options.allowedTools;
   const planGoalPort: PlanGoalPort = {};
+  const modelSpeed = options.modelSpeed ?? new ModelSpeedRuntime();
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const publishedFiles = new TransientFileRegistry();
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
@@ -2149,6 +2159,10 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       // Preserve existing plugin preferences; wire JSON cannot disable this contract.
       extensionModelMutationPolicy: "legacy-defaults",
     });
+    const stream = result.session.agent.streamFunction;
+    result.session.agent.streamFunction = (model, context, options) => stream(model, context, {
+      ...options, onPayload: modelSpeed.wrap(options?.onPayload),
+    });
     if (inheritedConversation) {
       // Pi records these only for new sessions; without them a reload would restore the parent's.
       if (result.session.model) sessionManager.appendModelChange(result.session.model.provider, result.session.model.id);
@@ -2165,6 +2179,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     cwd: options.cwd, agentDir: options.agentDir, sessionManager,
   });
   return PiAgentAdapter.create({
+    modelSpeed,
     planGoalPort,
     runtime,
     extensionUiBroker: options.extensionUiBroker,

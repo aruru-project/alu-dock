@@ -19,6 +19,7 @@ import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel
 import { formatContextUsage, workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import QuickButtonsEditor from './QuickButtonsEditor.vue'
+import ModelSpeedSetting from './ModelSpeedSetting.vue'
 import ResourceDocument from './ResourceDocument.vue'
 import { storeToRefs } from 'pinia'
 import { useAppStore } from '../stores/app'
@@ -78,6 +79,7 @@ const localControlIcons = {
   tree: GitFork,
   model: Cpu,
   thinking: Brain,
+  speed: Zap,
   name: Pencil,
   compact: Zap,
   reload: RotateCw,
@@ -91,7 +93,7 @@ const localControlIcons = {
 } as const
 /** Managing quick buttons lives only in the palette; it is not a slash command. */
 const manageQuickButtons: LocalControlCommand = { id: 'quick-buttons', name: '', label: '管理快捷按钮', keywords: '快捷按钮 钉住 自定义 quick button pin', description: '新建、修改、排序或删除输入框下方的快捷按钮', section: 'quick-buttons' }
-const staticCommands = computed(() => [...workControlCommands(props.work.assistant, props.work.displayName), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
+const staticCommands = computed(() => [...workControlCommands(props.work.assistant, props.work.displayName).filter(command => command.id !== 'speed' || panel.speedAvailable), manageQuickButtons].map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] })))
 
 const commandSearch = ref('')
 const modelSearch = ref('')
@@ -145,6 +147,7 @@ const dockToolsEntries = computed(() => dockToolsOperationId.value
   ? commandConsole.entries.filter((entry) => entry.operationId === dockToolsOperationId.value)
   : [])
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
+const speedSetting = computed(() => settings.value?.settings.find((item) => item.key === 'modelSpeed'))
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands.value, commandSearch.value))
 const catalogCommands = computed(() => {
@@ -200,7 +203,7 @@ const filteredDiagnostics = computed(() => {
 })
 const filteredSettings = computed(() => {
   const query = settingsSearch.value.trim().toLowerCase()
-  return (settings.value?.settings ?? []).filter((setting) => !query || `${settingLabel(setting.key)} ${settingDescription(setting.key)} ${settingValueLabel(setting.key, setting.value)} ${setting.key}`.toLowerCase().includes(query))
+  return (settings.value?.settings ?? []).filter(setting => setting.key !== 'modelSpeed' || panel.speedAvailable).filter((setting) => !query || `${settingLabel(setting.key)} ${settingDescription(setting.key)} ${settingValueLabel(setting.key, setting.value)} ${setting.key}`.toLowerCase().includes(query))
 })
 
 watch(commandSearch, () => { commandSelectedIndex.value = 0 })
@@ -509,7 +512,8 @@ function settingValueDescription(setting: SettingInfo) {
 }
 
 function anthropicExtraUsageWarning(setting: SettingInfo) {
-  return typeof setting.value === 'object' && setting.value.anthropicExtraUsage !== false
+  const value = setting.value
+  return value !== null && typeof value === 'object' && (!('anthropicExtraUsage' in value) || value.anthropicExtraUsage !== false)
 }
 
 function openSetting(setting: SettingInfo) {
@@ -549,8 +553,9 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
   error.value = ''
   try {
     const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, app.captureOperationTarget(context, props.work.id)))
-    const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
-    if (index >= 0) settings.value.settings[index] = result.setting
+    const current = settings.value
+    const index = current?.settings.findIndex((item) => item.key === result.setting.key) ?? -1
+    if (current && index >= 0) current.settings[index] = result.setting
     emit('close')
   } catch (cause) {
     showFailure(cause)
@@ -677,6 +682,11 @@ function isCurrentModel(model: ModelInfo) {
       @close="$emit('close')"
     />
 
+    <template v-else-if="section === 'speed'">
+      <ModelSpeedSetting v-if="speedSetting" :setting="speedSetting" :child="!!work.parentId" :pending="!!pending" @save="saveSetting(speedSetting!, $event)" />
+      <p v-else-if="settings" class="alu-project-status-note">这台 Dock 尚未提供模型速度设置。聊天和模型选择照常可用。</p>
+    </template>
+
     <section v-else-if="section === 'models'" class="alu-select-panel">
       <p v-if="work.compacting" class="alu-dialog-status">上下文正在压缩。更改 Model 或 Thinking 仅用于后续调用，不会取消或重跑本次压缩。</p>
       <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredModels, chooseModel)" /></div>
@@ -738,6 +748,8 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="settings && !filteredSettings.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
     </section>
+
+    <ModelSpeedSetting v-else-if="selectedSetting.key === 'modelSpeed'" :setting="selectedSetting" :child="!!work.parentId" :pending="!!pending" @save="saveSetting(selectedSetting!, $event)" />
 
     <section v-else class="alu-session-form alu-setting-editor">
       <div v-if="selectedSetting.key === 'warnings'" class="ui-dialog-options">

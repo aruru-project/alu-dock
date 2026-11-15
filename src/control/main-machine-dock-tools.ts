@@ -74,6 +74,14 @@ export class MainMachineDockToolsAuthority {
       create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
       send,
     });
+    if (request.type === "speed") {
+      const target = request.target === undefined ? source : requireHumanTarget(snapshots.filter(item => dockTargetVisible(source, item)), request.target);
+      const setting = request.selection === undefined
+        ? (await this.options.localClient.settings(target.id)).settings.find(item => item.key === "modelSpeed")
+        : (await this.options.localClient.updateSetting(target.id, { key: "modelSpeed", value: request.selection }, request.operationId)).setting;
+      if (!setting) throw new Error("这个 Work 尚不支持模型速度设置，请更新后重新打开。");
+      return { type: "speed", setting };
+    }
     if (request.type === "interrupt" || request.type === "stop") {
       const target = requireHumanTarget(snapshots.filter(target => dockTargetVisible(source, target)), request.target);
       const result = request.type === "interrupt" ? await this.options.localClient.abort(target.id, request.operationId) : await this.options.localClient.stop(target.id, request.operationId);

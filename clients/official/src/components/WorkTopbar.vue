@@ -8,6 +8,7 @@ import dockIconUrl from '../../../../assets/icon.svg'
 import ConnectionStatus from './ConnectionStatus.vue'
 import { useAppStore } from '../stores/app'
 import { useDeliveriesStore } from '../stores/deliveries'
+import { useControlPanelStore } from '../stores/control-panel'
 import { useHostStore } from '../stores/host'
 import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
@@ -15,6 +16,7 @@ import { usePlatformStore } from '../stores/platform'
 import { useSurfacesStore } from '../stores/surfaces'
 
 const app = useAppStore()
+const panel = useControlPanelStore()
 const selected = computed(() => app.selectedWork)
 const observation = useObservationStore()
 const { status: observationStatus, label: connectionLabel, refreshing } = storeToRefs(observation)
@@ -66,6 +68,10 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
           <span class="alu-nav-selector-icon">⌁</span>
           <span class="alu-nav-selector-label">thinking:</span>
           <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
+          <span class="alu-nav-selector-arrow">▾</span>
+        </button>
+        <button v-if="panel.speedAvailable" class="alu-nav-selector alu-nav-selector-speed" aria-label="设置模型速度" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('speed')">
+          <span class="alu-nav-selector-value">速度</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
       </div>
@@ -462,7 +468,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   .alu-nav-model-controls .alu-nav-selector-value { max-width: none; font-size: var(--alu-ui-size); text-align: left; }
   .alu-nav-selector-model { flex: 1 1 0; min-width: 0; }
   .alu-nav-model-provider { color: var(--alu-text-dim); font-weight: 500; }
-  .alu-nav-selector-thinking { flex: 0 0 auto; border-left: 1px solid var(--alu-border-light); }
+  .alu-nav-selector-thinking, .alu-nav-selector-speed { flex: 0 0 auto; border-left: 1px solid var(--alu-border-light); }
   .alu-nav-stats {
     grid-area: stats;
     z-index: 1;

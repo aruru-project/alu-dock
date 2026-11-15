@@ -22,6 +22,7 @@ import {
   validateCatalogProjection,
 } from "../core/catalog.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "../core/agent-worker.js";
+import { parseModelSpeedSelection } from "../core/model-speed.js";
 import { cloneWorkerConfig } from "../core/worker-config.js";
 import { hardenWindowsPrivatePath, noFollowFlag, syncPrivateDirectory } from "../platform/private-state.js";
 
@@ -168,7 +169,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const value = object(input, field);
   exact(value, [
     "id", "creationOperationId", "parentId", "assistant", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
-    "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
+    "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "modelSpeed", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
     "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
@@ -202,6 +203,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     ...(value.parentId === undefined ? {} : { parentId: text(value.parentId, `${field}.parentId`, 128) }),
     ...(value.assistant === undefined ? {} : { assistant: literalTrue(value.assistant, `${field}.assistant`) }),
     ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, `${field}.workerConfig`) }),
+    ...(value.modelSpeed === undefined ? {} : { modelSpeed: parseModelSpeedSelection(value.modelSpeed) ?? undefined }),
     executionChangedAt: value.executionChangedAt === undefined
       ? timestamp(value.createdAt, `${field}.createdAt`)
       : timestamp(value.executionChangedAt, `${field}.executionChangedAt`),
