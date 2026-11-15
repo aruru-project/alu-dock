@@ -12,8 +12,7 @@ import {
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 
 import { configurePiNetwork } from "./configure-pi-network.js";
-import { readModelSpeedSupport } from "../model-service/speed-support.js";
-import { supportedModelSpeeds } from "../core/model-speed.js";
+import { DEFAULT_MODEL_SPEED_SUPPORT, supportedModelSpeeds, type ModelSpeedSupport } from "../core/model-speed.js";
 import { projectPiModelList, type PiModelListBody } from "./pi-model-list.js";
 
 export type PiLoginInteraction = Parameters<ModelRuntime["login"]>[2];
@@ -135,12 +134,11 @@ export async function inspectPiEnvironment(options: PiEnvironmentOptions = {}): 
  * The models a new Work on this computer can select, in the same list shape a Work reports.
  * It applies Pi's process-wide network setup like a Worker, so call it only from its own process.
  */
-export async function listAvailablePiModels(options: PiEnvironmentOptions = {}): Promise<PiModelListBody> {
+export async function listAvailablePiModels(options: PiEnvironmentOptions = {}, speedSupport: ModelSpeedSupport = DEFAULT_MODEL_SPEED_SUPPORT): Promise<PiModelListBody> {
   const environment = await openPiEnvironment(options);
   try {
     configurePiNetwork(environment.settings);
-    const support = await readModelSpeedSupport(join(environment.agentDir, "models.json"));
-    return projectPiModelList(await environment.runtime.getAvailable(), model => supportedModelSpeeds(support, model));
+    return projectPiModelList(await environment.runtime.getAvailable(), model => supportedModelSpeeds(speedSupport, model));
   } finally {
     environment.close();
   }

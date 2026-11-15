@@ -6,17 +6,18 @@ import { serveRequests } from "../control/service-supervisor.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import type { ModelServiceRequest } from "./protocol.js";
 import { ModelServiceCore } from "./service.js";
-import { MODEL_SERVICE_AGENT_DIR_ENV } from "./service-messages.js";
+import { MODEL_SERVICE_AGENT_DIR_ENV, MODEL_SERVICE_STATE_DIR_ENV } from "./service-messages.js";
 
 /** The model service process. It holds Main's model configuration and credentials and nothing else: no Work, tools or sessions. */
 async function main(): Promise<void> {
   const agentDir = process.env[MODEL_SERVICE_AGENT_DIR_ENV];
-  if (!agentDir || !process.send) throw new Error("The model service must be started by the Dock Host");
+  const stateDirectory = process.env[MODEL_SERVICE_STATE_DIR_ENV];
+  if (!agentDir || !stateDirectory || !process.send) throw new Error("The model service must be started by the Dock Host");
   const settings = SettingsManager.create(agentDir, agentDir, { projectTrusted: false });
   configurePiNetwork(settings);
   const modelsPath = join(agentDir, "models.json");
   const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath, allowModelNetwork: false });
-  const core = new ModelServiceCore(runtime, { modelsPath, store: new FileModelsStore(join(agentDir, "models-store.json")) }, async () => {
+  const core = new ModelServiceCore(runtime, { modelsPath, store: new FileModelsStore(join(agentDir, "models-store.json")), stateDirectory }, async () => {
     await settings.reload();
     configurePiNetwork(settings);
   });

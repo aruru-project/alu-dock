@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+import type { ModelSpeedSupport } from "../core/model-speed.js";
 import type { ModelCatalogReader } from "../control/model-visibility.js";
 import { parseModelCatalogBody } from "../control/protocol.js";
 import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
@@ -21,6 +22,8 @@ const TERMINATE_MS = 2_000;
 export interface PiModelCatalogOptions {
   /** The Pi configuration directory Workers on this Host use; defaults to Pi's own. */
   agentDir?: string;
+  /** Dock supplies its support data; the Pi listing process never reads Dock configuration files. */
+  speedSupport?: () => Promise<ModelSpeedSupport>;
   homeDir?: string;
   /** Deterministic process-boundary tests supply the environment a Worker would receive. */
   environment?: () => Promise<NodeJS.ProcessEnv>;
@@ -45,6 +48,7 @@ export function createPiModelCatalogReader(options: PiModelCatalogOptions): Mode
     const deadline = Date.now() + budgetMs;
     const environment = await (options.environment
       ?? (() => captureWorkspaceShellEnvironment(homeDir, { timeoutMs: Math.min(SHELL_CAPTURE_LIMIT_MS, budgetMs) })))();
+    const speedSupport = await options.speedSupport?.();
     const child = spawn(process.execPath, [entry], {
       cwd: homeDir,
       detached: true,
@@ -65,6 +69,7 @@ export function createPiModelCatalogReader(options: PiModelCatalogOptions): Mode
         child.once("error", (error) => { clearTimeout(timer); rejectMessage(error); });
         // "close" follows the IPC channel, so an answer sent before exit has already arrived.
         child.once("close", (code, signal) => { clearTimeout(timer); rejectMessage(new Error(`Pi model listing ended without an answer (${signal ?? `exit ${code ?? "unknown"}`})`)); });
+        child.send({ speedSupport }, error => { if (error) { clearTimeout(timer); rejectMessage(error); } });
       });
       const record = message !== null && typeof message === "object" ? message as { ok?: unknown; body?: unknown; message?: unknown } : {};
       if (record.ok === true) return parseModelCatalogBody(record.body);

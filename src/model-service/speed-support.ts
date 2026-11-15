@@ -1,12 +1,12 @@
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { DEFAULT_MODEL_SPEED_SUPPORT, type ModelSpeedSupport } from "../core/model-speed.js";
 
-/** Main's editable support data travels with model configuration, never through another lookup. */
-export async function readModelSpeedSupport(modelsPath: string): Promise<ModelSpeedSupport> {
+/** Main's Dock-owned support data; Pi and other Agents receive it, never choose its storage location. */
+export async function readModelSpeedSupport(stateDirectory: string): Promise<ModelSpeedSupport> {
   try {
-    const value: unknown = JSON.parse(await readFile(join(dirname(modelsPath), "model-speed-support.json"), "utf8"));
+    const value: unknown = JSON.parse(await readFile(join(stateDirectory, "model-speed-support.json"), "utf8"));
     if (!isRecord(value) || (value.providers !== undefined && !isRecord(value.providers))) return DEFAULT_MODEL_SPEED_SUPPORT;
     const providers = { ...DEFAULT_MODEL_SPEED_SUPPORT.providers };
     for (const [provider, rules] of Object.entries(value.providers ?? {})) {

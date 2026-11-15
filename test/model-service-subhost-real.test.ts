@@ -41,7 +41,7 @@ test("a SubHost's Work sends its own requests with Main's models and credentials
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "coordinator", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false }, retry: { enabled: false } }));
   }
   const environment = isolatedProcessEnvironment(home, { XDG_RUNTIME_DIR: join(home, "run"), TMPDIR: root, TEMP: root, TMP: root, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost" });
-  const service = new ModelServiceProcess({ agentDir: mainAgent, environment: { ...environment, MAIN_ONLY_KEY: "key-from-main" } });
+  const service = new ModelServiceProcess({ agentDir: mainAgent, stateDirectory: root, environment: { ...environment, MAIN_ONLY_KEY: "key-from-main" } });
   context.after(() => service.stop());
   await service.start();
 

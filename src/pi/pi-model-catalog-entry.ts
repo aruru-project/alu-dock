@@ -1,16 +1,17 @@
 // One-shot process started by the Host to list the models a new Work on this
 // computer could select. It loads Pi like a Worker does (login-shell
 // environment, global extensions) so extension code never runs inside the Host.
+import type { ModelSpeedSupport } from "../core/model-speed.js";
 import { listAvailablePiModels } from "./pi-environment.js";
 import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 
 type CatalogMessage = { ok: true; body: unknown } | { ok: false; message: string };
 
-async function main(): Promise<void> {
+async function main(speedSupport: ModelSpeedSupport | undefined): Promise<void> {
   const agentDir = process.env.PI_CODING_AGENT_DIR;
   let message: CatalogMessage;
   try {
-    message = { ok: true, body: await listAvailablePiModels(agentDir ? { agentDir } : {}) };
+    message = { ok: true, body: await listAvailablePiModels(agentDir ? { agentDir } : {}, speedSupport) };
   } catch (error) {
     message = { ok: false, message: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) };
   }
@@ -24,5 +25,5 @@ if (typeof process.send === "function") {
   enterPiWorkerRuntime();
   // The Host stopped waiting (it stopped or gave up); there is no one left to answer.
   process.on("disconnect", () => process.exit(0));
-  void main();
+  process.once("message", (input: { speedSupport?: ModelSpeedSupport }) => { void main(input.speedSupport); });
 }

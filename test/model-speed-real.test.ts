@@ -3,6 +3,9 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { readModelSpeedSupport } from "../src/model-service/speed-support.js";
+import { createPiModelCatalogReader } from "../src/pi/pi-model-catalog.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
@@ -10,12 +13,23 @@ import { waitFor } from "./support/plan-goal-provider.js";
 // Only model HTTP replies are fake. No subscription, credentials or external service is used.
 test("Work speed can be shared with children, overridden individually and extended through Main's support data", { timeout: 60_000 }, async context => {
   const team = await startNativeTeam(context, ["coordinator", "worker"], { prefix: "alu-model-speed-", modelService: true, assistant: true, settings: { compaction: { enabled: false, keepRecentTokens: 32, reserveTokens: 100 } } });
-  const supportFile = join(team.agentDir, "model-speed-support.json");
+  const supportFile = join(team.root, "model-speed-support.json");
   const support = { providers: { upstream: { fast: ["fixture"], ultrafast: [] as string[] } }, aliases: { coordinator: "upstream", worker: "upstream" } };
   await writeFile(supportFile, JSON.stringify(support));
+  // This is Dock configuration: a conflicting file in Pi's directory must not own either Agent's speed.
+  await writeFile(join(team.agentDir, "model-speed-support.json"), JSON.stringify({
+    providers: { upstream: { fast: [], ultrafast: [] } }, aliases: support.aliases,
+  }));
   const memo = join(team.cwd, "memo.txt");
   await writeFile(memo, "A local tool step.\n");
   const client = await team.startHost();
+  const catalogReader = createPiModelCatalogReader({
+    agentDir: team.agentDir, homeDir: team.cwd,
+    environment: async () => isolatedProcessEnvironment(join(team.root, "catalog-home"), { PI_CODING_AGENT_DIR: team.agentDir }),
+    speedSupport: () => readModelSpeedSupport(team.root),
+  });
+  assert.deepEqual((await catalogReader.read()).models.find(model => model.provider === "worker" && model.id === "fixture")?.speedTiers,
+    ["standard", "fast"], "The background-model picker receives the same Dock-owned support data");
   const assistant = await team.assistantWork();
   const parent = await trustOnce(trust => client.create(team.cwd, "parent", "speed-parent", trust));
   const other = await trustOnce(trust => client.create(team.cwd, "independent", "speed-independent", trust));
