@@ -3673,6 +3673,36 @@ try {
     snapshot(failedEvents); await settle()
     assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'a refreshed read keeps command-owned failures out of chat')
 
+    // P3 retirement review: Main's offline SubHost snapshot drops ownerHostEpoch,
+    // but preserves this Work/runtime and the Main-mapped eventCursor domain.
+    const remote = { ...work, id: 'remote-command', hostId: 'subhost', displayName: '远端命令工作' }
+    extraListed = [her, remote]
+    await commandApp.refreshWorksQuietly(); commandApp.selectWork(remote.id); await settle(); snapshot([], remote); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    let remoteFailure
+    runCatalogNative = args => {
+      remoteFailure = event('instance.error', { operationId: args.operationId, source: 'command_background', error: '远端命令没有完成，请重试。' }, remote)
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(remote) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.ok(text(dialog()).includes('远端命令没有完成'))
+    await click('关闭')
+    extraListed = [her, { ...remote, lifecycle: 'host_lost', execution: 'unavailable', ownerHostEpoch: undefined }]
+    await commandApp.refreshWorksQuietly(); await settle()
+    assert.equal(commandApp.selectedWork.lifecycle, 'host_lost')
+    assert.equal(commandApp.selectedWork.ownerHostEpoch, undefined)
+    extraListed = [her, remote]
+    await commandApp.refreshWorksQuietly(); await settle(); snapshot([], remote); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.ok(text(dialog()).includes('远端命令没有完成'), 'a temporary SubHost outage keeps the original command output after recovery')
+    await click('关闭')
+    snapshot([remoteFailure], remote); await settle()
+    assert.equal(text(view).includes('远端命令没有完成'), false, 'the old failure replay stays out of chat after the same runtime reconnects')
+    extraListed = [her]
+    await commandApp.refreshWorksQuietly(); commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+
     // Closing the panel, or visiting another Work, does not transfer the original command's output.
     await click('打开命令中心')
     find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
@@ -3830,7 +3860,7 @@ try {
     assert.ok(text(view).includes('本机命令失败，请重试。'), 'a page without the command center owner still shows the cached error')
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
     console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
-    console.log('PASS: command failures stay with their command center across close, Work switch, late reply and replay; unclaimed and Host errors remain visible')
+    console.log('PASS: command failures stay with their command center across close, Work switch, temporary SubHost outage, late reply and replay; unclaimed and Host errors remain visible')
     console.log('PASS: failed Queue handoff remains visible after its receipt and replay; cross-Host success stays successful and keeps later parameters; a retired command leaves its late failure in Work results')
   }
 

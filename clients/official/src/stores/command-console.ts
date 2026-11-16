@@ -1,6 +1,6 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
-import type { ConversationBootstrap, ProjectedEvent } from '../lib/types'
+import type { ConversationBootstrap, ProjectedEvent, Work } from '../lib/types'
 import { useAppStore } from './app'
 
 export interface CommandConsoleEntry {
@@ -31,8 +31,7 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   const app = useAppStore()
   // Results belong to the Work/runtime that started them, not the open panel or
   // current visit. Switching away and back must not send their replay into chat.
-  const contextKey = computed(() => scopeKey(app.activeConnectionId ?? '', app.selectedWork?.id ?? '',
-    app.selectedWork?.ownerHostEpoch ?? '', app.selectedWork?.runtimeGeneration ?? 0))
+  const contextKey = computed(() => app.selectedWork ? workScopeKey(app.activeConnectionId ?? '', app.selectedWork) : '')
   const output = ref<CommandConsoleEntry[]>([])
   const operations = ref<Record<string, CommandOperation>>({})
   const entries = computed(() => output.value.filter(entry => operations.value[entry.operationId]?.contextKey === contextKey.value))
@@ -44,11 +43,11 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   watch(() => {
     const payload = app.payload
     return payload ? JSON.stringify([payload.connectionId, payload.host.hostEpoch,
-      payload.works.map(work => scopeKey(payload.connectionId, work.id, work.ownerHostEpoch ?? '', work.runtimeGeneration))]) : ''
+      payload.works.map(work => workScopeKey(payload.connectionId, work))]) : ''
   }, () => {
     const payload = app.payload
     if (!payload) return
-    const current = new Set(payload.works.map(work => scopeKey(payload.connectionId, work.id, work.ownerHostEpoch ?? '', work.runtimeGeneration)))
+    const current = new Set(payload.works.map(work => workScopeKey(payload.connectionId, work)))
     retire(operation => operation.connectionId === payload.connectionId
       && (operation.connectionHostEpoch !== payload.host.hostEpoch || !current.has(operation.contextKey)))
   }, { flush: 'sync' })
@@ -162,6 +161,12 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
 
   return { entries, hasActiveOperation, isActive, beginOperation, receiveReceipt, failOperation, operationSucceeded, handleDockEvent }
 })
+
+function workScopeKey(connectionId: string, work: Work) {
+  // An offline SubHost omits live ownership, but keeps the same Main-mapped
+  // cursor domain used by conversation read/follow. That is not a new runtime.
+  return scopeKey(connectionId, work.id, work.ownerHostEpoch ?? work.eventCursor.hostEpoch, work.runtimeGeneration)
+}
 
 function scopeKey(connectionId: string, workId: string, hostEpoch: string, runtimeGeneration: number) {
   return JSON.stringify([connectionId, workId, hostEpoch, runtimeGeneration])
