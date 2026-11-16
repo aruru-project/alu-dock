@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DEFAULT_ASSISTANT_DISPLAY_NAME } from "../core/assistant.js";
 import type { SystemService } from "./system-service.js";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -189,6 +190,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
   /** Only Main supplies her workspace. Clients cannot create another assistant. */
   private readonly assistantWorkspace: string | undefined;
   private assistantRecoveryEnabled = false;
+  private assistantDisplayName = DEFAULT_ASSISTANT_DISPLAY_NAME;
+  private assistantNameRevision = 0;
+  private readAssistantName: (() => Promise<string | undefined>) | undefined;
   private assistantRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private assistantRecovery: Promise<void> | undefined;
   private assistantRecoveryDelay = 1_000;
@@ -641,6 +645,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
 
   /** Stop retires ordinary Works; her stopped record remains, so reopening keeps her identity. */
   private bindInstanceCatalog(instance: ManagedInstance): void {
+    if (this.assistantWorkspace !== undefined) instance.setAssistantDisplayName(this.assistantDisplayName);
     const port = this.catalog.forInstance(instance.id);
     instance.bindCatalogPort(instance.snapshot().assistant && this.assistantWorkspace !== undefined
       ? { ...port, retire: (context) => port.commit(instance.catalogRecord(), context) }
@@ -648,10 +653,18 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   /** Called by a running Host, not by a client or an Agent. No model is called just to keep her open. */
-  startAssistant(): void {
+  startAssistant(readName?: () => Promise<string | undefined>): void {
     if (this.assistantWorkspace === undefined) return;
+    this.readAssistantName = readName;
     this.assistantRecoveryEnabled = true;
     this.scheduleAssistantRecovery(0);
+  }
+
+  /** Publish Main's saved identity without changing the Work, session title, or conversation. */
+  setAssistantDisplayName(name: string): void {
+    this.assistantDisplayName = name;
+    this.assistantNameRevision++;
+    for (const instance of this.instances.values()) instance.setAssistantDisplayName(name);
   }
 
   /** Shutdown cancels her restart timer before waiting for admitted operations and stopping Workers. */
@@ -691,11 +704,14 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.assertCatalogReady();
     this.catalog.assertWritable();
     const workspace = this.assistantWorkspace!;
+    const revision = this.assistantNameRevision;
+    const name = await this.readAssistantName?.();
+    if (name !== undefined && revision === this.assistantNameRevision) this.setAssistantDisplayName(name);
     await mkdir(workspace, { recursive: true });
     if (!this.assistantRecoveryEnabled) return;
     const record = this.catalog.current().instances.find((work) => work.assistant);
     if (!record) {
-      await this.startNew({ operationId: randomUUID(), cwd: workspace, name: "助手" }, undefined, undefined, () => true, true);
+      await this.startNew({ operationId: randomUUID(), cwd: workspace }, undefined, undefined, () => true, true);
       return;
     }
     if (record.lifecycle === "active") return;
@@ -953,7 +969,9 @@ export class DockRegistry implements LocalDockToolsHostPort {
       try { return live.snapshot(); }
       catch { /* bounded catalog fallback below */ }
     }
-    return catalogSnapshotFromRecord(record, this.hostEpoch);
+    const snapshot = catalogSnapshotFromRecord(record, this.hostEpoch);
+    if (this.assistantWorkspace !== undefined && record.assistant) snapshot.displayName = this.assistantDisplayName;
+    return snapshot;
   }
 
   listPage(input: {

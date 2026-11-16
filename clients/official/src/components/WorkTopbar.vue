@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
-import { FileDown, Settings, Wrench } from '@lucide/vue'
+import { FileDown, Settings, Sparkles, Wrench } from '@lucide/vue'
 import { dockToolsState } from '../lib/dockTools'
-import { formatCacheHitRate, formatContextUsage, formatTokenCount } from '../lib/uiBoundaries'
+import { formatCacheHitRate, formatContextUsage, formatTokenCount, isResidentAssistant } from '../lib/uiBoundaries'
 import dockIconUrl from '../../../../assets/icon.svg'
 import ConnectionStatus from './ConnectionStatus.vue'
 import { useAppStore } from '../stores/app'
@@ -18,6 +18,7 @@ import { useSurfacesStore } from '../stores/surfaces'
 const app = useAppStore()
 const panel = useControlPanelStore()
 const selected = computed(() => app.selectedWork)
+const resident = computed(() => isResidentAssistant(selected.value))
 const observation = useObservationStore()
 const { status: observationStatus, label: connectionLabel, refreshing } = storeToRefs(observation)
 const { refreshCurrent } = observation
@@ -25,7 +26,7 @@ const { openHostSettings } = useHostStore()
 const { openAppSettings } = usePlatformStore()
 const surfaces = useSurfacesStore()
 const { deliveryOpen, dockToolsTrigger, dockToolsOpen } = storeToRefs(surfaces)
-const { openControlCenter, openDockTools } = surfaces
+const { openControlCenter, openDockTools, openAssistant } = surfaces
 const deliveries = useDeliveriesStore()
 const { pendingDeliverableCount } = storeToRefs(deliveries)
 const { openDeliveryTray } = deliveries
@@ -46,12 +47,12 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
     <div class="alu-navbar-left">
       <img :src="dockIconUrl" class="alu-navbar-avatar session-dot" alt="Alu Dock" />
       <ConnectionStatus v-if="selected && selected.lifecycle === 'active'" :state="observationStatus" :label="connectionLabel" :busy="refreshing" @reconnect="refreshCurrent" @settings="openHostSettings" @works="app.workDrawerOpen = true" />
-      <button type="button" class="alu-navbar-breadcrumb" title="查看项目状态" aria-label="查看项目状态" :disabled="!selected" @click="openControlCenter('resources')">
-        <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
-        <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>
-        <span v-if="!app.needsPairing && selected?.assistant" class="alu-nav-assistant-tag" title="助手">助手</span>
-        <span class="alu-nav-session">{{ app.needsPairing ? 'AluDock' : selected?.name || selected?.displayName || '选择 Work' }}</span>
-        <span v-if="selected?.gitBranch" class="alu-nav-git-branch"> {{ selected.gitBranch }}</span>
+      <button type="button" class="alu-navbar-breadcrumb" :title="resident ? '人设、记忆和设置' : '查看项目状态'" :aria-label="resident ? '助手设置' : '查看项目状态'" :disabled="!selected" @click="resident ? openAssistant() : openControlCenter('resources')">
+        <span v-if="!app.needsPairing && !resident" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
+        <span v-if="!app.needsPairing && !resident" class="alu-nav-sep">/</span>
+        <Sparkles v-if="!app.needsPairing && resident" :size="16" class="alu-nav-assistant-mark" aria-hidden="true" />
+        <span class="alu-nav-session">{{ app.needsPairing ? 'AluDock' : resident ? selected?.displayName : selected?.name || selected?.displayName || '选择 Work' }}</span>
+        <span v-if="selected?.gitBranch && !resident" class="alu-nav-git-branch"> {{ selected.gitBranch }}</span>
         <span class="alu-navbar-breadcrumb-arrow" aria-hidden="true">▾</span>
       </button>
     </div>
@@ -195,16 +196,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
   white-space: nowrap;
 }
 .alu-nav-git-branch[hidden] { display: none; }
-.alu-nav-assistant-tag {
-  flex: 0 0 auto;
-  padding: 3px 7px;
-  border: 1px solid var(--alu-accent-border);
-  border-radius: 6px;
-  color: var(--alu-accent);
-  font-size: var(--alu-meta-size);
-  font-weight: 600;
-  line-height: 1;
-}
+.alu-nav-assistant-mark { flex: none; color: var(--alu-accent); }
 .alu-navbar-breadcrumb-arrow { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .alu-navbar-right {
   display: flex;

@@ -362,6 +362,8 @@ export class ManagedInstance {
   private readonly extensionUi: ExtensionUiBroker;
   private keyValue: string | undefined;
   private nameValue: string | undefined;
+  /** Main owns this label in assistant settings, not in the session or catalog. */
+  private assistantDisplayName: string | undefined;
   private cwdValue: string;
   private gitBranchValue: string | undefined;
   private readonly executorIdentity: ExecutorIdentity;
@@ -815,7 +817,15 @@ export class ManagedInstance {
     await this.disposeRuntimeOnce();
   }
 
+  setAssistantDisplayName(name: string): void {
+    if (!this.assistant || this.executorIdentity.kind !== "dock-assistant" || this.assistantDisplayName === name) return;
+    this.assistantDisplayName = name;
+    if (this.committedSnapshotValue) this.committedSnapshotValue = { ...this.committedSnapshotValue, displayName: name };
+    this.appendEvent("session.info_changed", { name: this.name, displayName: name });
+  }
+
   private projectedDisplayName(): string {
+    if (this.assistantDisplayName !== undefined) return this.assistantDisplayName;
     return projectInstanceDisplayName({
       name: this.name,
       key: this.key,

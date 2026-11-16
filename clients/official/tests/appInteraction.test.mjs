@@ -1429,16 +1429,16 @@ try {
         : { session, entries: [entryAt('e1', 'assistant', '早上好'), entryAt('e2', 'user', '今天天气怎么样？'), entryAt('e3', 'assistant', '今天上午有雨。', { toolCalls: [{ name: 'bash', arguments: '{"command":"weather"}' }] }), entryAt('e4', 'tool_result', '小雨', { toolName: 'bash', truncated: true })], hasBefore: true, hasAfter: true }
       throw new Error(`Unexpected assistant call: ${command}`)
     }
-    // A Work opened as the assistant carries a small mark in the list and the top bar.
+    // An old assistant:true Pi Work remains an ordinary Work, not the resident identity.
     extraListed = [{ ...otherWork, id: 'helper', displayName: 'Helper Work', assistant: true }]
     await app.refreshWorksQuietly(); await settle()
     const helperRow = find(container, item => String(item.props.class ?? '').includes('alu-instance-row') && text(item).includes('Helper Work'))
-    assert.ok(find(helperRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag') && text(item) === '助手'), 'her Work is marked in the list')
+    assert.ok(!!helperRow, 'the old Pi Work stays in the ordinary list')
     const plainRow = all(container, item => String(item.props.class ?? '').split(' ').includes('alu-instance-row')).find(row => row !== helperRow)
     assertSameReference(find(plainRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag')), undefined, 'other Works carry no mark')
     const original = JSON.parse(JSON.stringify(app.selectedWork))
     app.applyWorkSnapshot({ ...original, assistant: true }); await settle()
-    assert.ok(find(container, item => String(item.props.class ?? '').includes('alu-nav-assistant-tag')), 'and in the top bar')
+    assert.equal(!!find(container, item => item.props['aria-label'] === '助手设置'), false, 'the legacy role does not turn a Pi conversation into the resident')
     app.applyWorkSnapshot(original); extraListed = []; await app.refreshWorksQuietly(); await settle()
 
     // An older Main has no assistant, so there is no entry; Main with her has one.
@@ -1468,7 +1468,6 @@ try {
     assert.equal(editor().value, '她说话简短，先给结论。', 'switching sections keeps the draft')
     await click(page(), '关闭')
     assertSameReference(page(), undefined, 'closing asks nothing: the draft is kept')
-    assert.ok(text(entry()).includes('有改动还没有保存'), 'the sidebar says a draft is waiting')
     await click(container, '助手')
     assert.equal(editor().value, '她说话简短，先给结论。', 'reopening shows the draft')
 
@@ -3263,15 +3262,20 @@ try {
       { id: 'explain', name: '说明', text: '/compact explain this', mode: 'send' },
       { id: 'insert-resume', name: '填入恢复', text: '/resume', mode: 'insert' },
     ]))
-    const her = { ...otherWork, id: 'resident-assistant', displayName: '小满', name: '小满', assistant: true, runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
+    const her = { ...otherWork, id: 'resident-assistant', displayName: 'alu', name: '早晨的对话', assistant: true, runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
     const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
     extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
     const savedAssistant = assistantNative, savedTools = toolsNative, savedModelVisibility = modelVisibilityNative
     modelVisibilityNative = () => ({ models: [{ provider: 'openai', id: 'gpt-mini', name: 'Memory model', reasoning: true, speedTiers: ['standard', 'fast'] }], total: 1, truncated: false, hidden: [] })
+    let finishName
+    let nameReply = '小满'
     assistantNative = (command, args) => {
       if (command === 'assistant_preview') return { text: '她会记得这段对话。', loadedAt: '2026-11-13T10:00:00Z' }
-      if (command === 'assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'standard' }
-      if (command === 'set_assistant_settings') return { extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'fast' }
+      if (command === 'assistant_settings') return { displayName: her.displayName, extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'standard' }
+      if (command === 'set_assistant_settings' && args.settings.displayName !== undefined) return new Promise(resolve => {
+        finishName = () => { her.displayName = nameReply; resolve({ displayName: nameReply, extractionSpeed: 'standard' }) }
+      })
+      if (command === 'set_assistant_settings') return { displayName: '小满', extractionModel: { provider: 'openai', id: 'gpt-mini' }, extractionSpeed: 'fast' }
       return savedAssistant(command, args)
     }
     toolsNative = () => ({ tools: [{ name: 'read', description: '读取文件里的文字和图片。', active: true, source: { kind: 'built-in' } }, { name: 'local_schedule', description: 'Read a local schedule.', active: true, source: { kind: 'extension', package: 'local' } }], total: 2, truncated: false })
@@ -3286,9 +3290,42 @@ try {
     }
     const dialog = label => find(assistantView, item => item.props.role === 'dialog' && item.props['aria-label'] === label)
     const rowNames = () => all(assistantView, item => String(item.props.class).split(' ').includes('alu-instance-name')).map(visibleText)
-    assert.deepEqual(rowNames().slice(0, 4), ['助手小满', '她的子 Work', 'Work', '普通子 Work'], 'pinning her keeps each parent and its children together')
-    await click(assistantView, '助手')
+    assert.deepEqual(rowNames().slice(0, 3), ['她的子 Work', 'Work', '普通子 Work'], 'only ordinary Works and her child are counted in the list')
+    await click(assistantView, '打开alu的对话')
+    assert.equal(assistantApp.selectedWorkId, 'resident-assistant')
+    await click(assistantView, '助手设置')
     await click(assistantView, '设置')
+    const nameInput = () => find(assistantView, item => item.props.id === 'assistant-name-input')
+    const editName = async name => { nameInput().props.onInput({ target: { value: name } }); await settle() }
+    await editName('小满')
+    find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { displayName: '小满' })
+    await editName('下一版名字')
+    finishName(); await settle()
+    assert.equal(nameInput().props.value, '下一版名字', 'typing while the save is pending keeps the newer draft')
+    assert.equal(assistantApp.selectedWork.displayName, '小满')
+    assert.equal(assistantApp.selectedWork.name, '早晨的对话')
+    assert.equal(assistantApp.selectedWork.executor.piSessionId, her.executor.piSessionId)
+    assert.equal(text(find(assistantView, item => item.props.id === 'assistant-title')), '小满')
+    assert.ok(!!button(assistantView, '打开小满的对话'), 'the identity navigation uses the same saved name')
+    assert.ok(!!find(assistantView, item => item.props.role === 'status' && text(item).includes('名字已保存')))
+    // The save belongs to Main where it began, even if another connection is being viewed.
+    nameReply = '远处的小满'
+    await editName('远处的小满')
+    find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    await editName('回家后继续写')
+    await assistantApp.switchHost('spare'); await settle()
+    finishName(); await settle()
+    assert.equal(assistantApp.works.some(work => work.displayName === '远处的小满'), false, 'the late save never renames a Work on the other Main')
+    await assistantApp.switchHost('host'); await settle()
+    assistantApp.selectWork(her.id); await settle()
+    await click(assistantView, '助手设置'); await click(assistantView, '设置')
+    assert.equal(nameInput().props.value, '回家后继续写', 'the original Main keeps the new draft across switching connections')
+    assert.equal(assistantApp.selectedWork.displayName, '远处的小满')
+    nameReply = '小满'
+    await editName('小满')
+    find(assistantView, item => item.type === 'form' && !!find(item, child => child.props.id === 'assistant-name-input')).props.onSubmit({ preventDefault() {} }); await settle()
+    finishName(); await settle()
     await click(assistantView, '整理记忆的速度')
     await click(assistantView, 'Fast')
     assert.deepEqual(calls.findLast(call => call.command === 'set_assistant_settings').args.settings, { extractionSpeed: 'fast' }, 'memory speed changes independently, leaving its model and chat speed alone')
@@ -3355,7 +3392,7 @@ try {
     for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '压缩']) {
       assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
     }
-    assert.ok(paletteLabels().includes('Rename Session'), 'the owner can still rename the assistant')
+    assert.ok(paletteLabels().includes('Rename Session'), 'session naming stays separate from the global identity label')
     // Seen in the real Desktop trial: state and resources had become two identical entries.
     assert.equal(paletteLabels().filter(label => label === '助手状态').length, 1)
     await click(dialog('命令中心'), '刷新助手（Reload）重新读入人设、手写设定、记忆和工具扩展，对话接着原来的')
@@ -3388,7 +3425,7 @@ try {
     assert.equal(assistantApp.currentDraft, '还没发完的话', 'restart keeps the local draft')
     assert.equal(text(assistantView).includes('正在重启小满'), false, 'the progress notice leaves once she is back')
     assert.equal(assistantApp.selectedWork.displayName, '小满', 'restart preserves the chosen name')
-    assert.deepEqual(rowNames().slice(0, 2), ['助手小满', 'Work'])
+    assert.deepEqual(rowNames().slice(0, 1), ['Work'])
     assistantApp.selectWork('work'); await settle()
     assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候', '说明', '填入恢复'], 'the same device buttons still belong to ordinary Pi Works')
     await click(assistantView, '打开命令中心')
@@ -3424,7 +3461,7 @@ try {
     assert.equal(assistantApp.works.some(item => item.id === legacy.id), false, 'Stop retires the Pi assistant like any Pi Work')
     retiredWorks.delete(legacy.id)
     extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
-    console.log('PASS: resident assistant keeps her conversation and restarts; custom insert/text buttons remain; old Pi assistants retain Session, tool switches, shell and ordinary Stop')
+    console.log('PASS: resident identity opens her conversation; global rename keeps Session and later drafts across connections; restart, custom quick buttons and legacy Pi controls remain')
   }
 
   // #671: registered assistant commands use the existing runner and shortcuts;

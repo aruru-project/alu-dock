@@ -3,13 +3,12 @@ import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Server, Settings, Sparkles, X } from '@lucide/vue'
 import { isTauri } from '../lib/bridge'
-import { childNeedsStop, workPresence } from '../lib/uiBoundaries'
+import { childNeedsStop, isResidentAssistant, workPresence } from '../lib/uiBoundaries'
+import WorkPresenceIndicator from './WorkPresenceIndicator.vue'
 import OperationResults from './OperationResults.vue'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
-import { useAssistantMemoryStore } from '../stores/assistant-memory'
-import { useAssistantSearchStore } from '../stores/assistant-search'
 import { useHostStore } from '../stores/host'
 import { useObservationStore } from '../stores/observation'
 import { useOperationsStore } from '../stores/operations'
@@ -23,8 +22,12 @@ const workActions = useWorkActionsStore()
 const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions)
 const { workMachineTag, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant } = workActions
 const assistant = useAssistantStore()
-const assistantMemory = useAssistantMemoryStore()
-const assistantSearch = useAssistantSearchStore()
+const resident = computed(() => app.works.find(isResidentAssistant))
+const ordinaryCount = computed(() => Object.values(groupedWorks.value).reduce((total, works) => total + works.length, 0))
+function openResident() {
+  if (resident.value) selectWork(resident.value.id)
+  else openAssistant()
+}
 const { directoryOpen } = storeToRefs(useSurfacesStore())
 const host = useHostStore()
 const { pairingInProgress } = storeToRefs(host)
@@ -48,6 +51,14 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <button class="alu-sidebar-refresh" :class="{ spinning: app.loading }" :title="app.loading ? '正在刷新工作列表' : '刷新工作列表'" :aria-label="app.loading ? '正在刷新工作列表' : '刷新工作列表'" :disabled="app.loading" @click="refreshWorkDrawer">↻</button>
       <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
     </div>
+    <div v-if="resident || (app.connectionContext && assistant.available)" class="alu-assistant-identity" :class="{ 'is-selected': resident && resident.id === selected?.id }">
+      <button class="alu-assistant-icon" tabindex="-1" aria-hidden="true" @click="openResident"><Sparkles :size="22" /></button>
+      <div class="alu-assistant-heading">
+        <button class="alu-assistant-name" :aria-label="resident ? `打开${resident.displayName}的对话` : '助手'" :aria-current="resident && resident.id === selected?.id ? 'page' : undefined" @click="openResident">{{ resident?.displayName || 'alu' }}</button>
+        <WorkPresenceIndicator v-if="resident" :work="resident" />
+      </div>
+      <button class="alu-assistant-model" tabindex="-1" @click="openResident"><template v-if="resident?.executor.model">{{ resident.executor.model.provider }}/<wbr><span>{{ resident.executor.model.id }}</span></template><template v-else>未选择模型</template></button>
+    </div>
     <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="pairingInProgress" @click="openDirectory">＋ 新建工作</button></div>
     <div class="alu-instance-list">
       <div v-if="app.error && app.works.length" class="alu-sidebar-refresh-error" role="alert">
@@ -59,17 +70,16 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <section v-for="group in (['current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group">
         <div class="alu-instance-group-title">{{ group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作' }}<span>{{ groupedWorks[group].length }}</span></div>
         <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
-          <button class="alu-instance-link" @click="selectWork(work.id)">
-            <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
-            <span class="alu-instance-copy"><span class="alu-instance-name"><span v-if="work.assistant" class="alu-instance-assistant-tag">助手</span>{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
-            <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
+          <WorkPresenceIndicator :work="work" />
+          <button class="alu-instance-link" :aria-label="`${work.displayName}，${workPresence(work).label}`" @click="selectWork(work.id)">
+            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
           </button>
           <button v-if="childNeedsStop(work)" class="alu-instance-action" :disabled="!isTauri || workMutating" @click="selectWork(work.id); stopSelectedWork()">停止</button>
           <button v-else-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && workMutating)" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
           <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
         </div>
       </section>
-      <template v-if="!app.works.length">
+      <template v-if="!ordinaryCount">
         <div v-if="app.loading" class="alu-sidebar-empty" role="status">正在读取工作列表…</div>
         <div v-else-if="app.error" class="alu-sidebar-offline" role="alert">
           <strong>无法读取工作列表</strong>
@@ -82,11 +92,6 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     <button class="alu-sidebar-settings-entry" aria-label="App 设置" @click="openAppSettings">
       <span class="alu-sidebar-settings-icon"><Settings :size="17" /></span>
       <span><strong>App 设置</strong><small>{{ appSettingsSummary }}</small></span>
-      <span aria-hidden="true">›</span>
-    </button>
-    <button v-if="app.connectionContext && assistant.available" class="alu-sidebar-settings-entry" aria-label="助手" @click="openAssistant()">
-      <span class="alu-sidebar-settings-icon"><Sparkles :size="17" /></span>
-      <span><strong>助手</strong><small>{{ assistant.hasDrafts || assistantMemory.hasDrafts || assistantMemory.hasSettingsDrafts || assistantSearch.hasDrafts ? '有改动还没有保存' : '人设、记忆和过去的对话' }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
     <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings()">
@@ -104,6 +109,14 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 </template>
 
 <style scoped>
+.alu-assistant-identity { position: relative; display: grid; flex: none; grid-template-columns: 40px minmax(0, 1fr); column-gap: 12px; padding: 10px 16px 12px; }
+.alu-assistant-identity.is-selected { background: var(--alu-nav-bg); }
+.alu-assistant-identity.is-selected::before { content: ''; position: absolute; top: 14px; bottom: 14px; left: 0; width: 2px; background: var(--alu-highlight); border-radius: 0 2px 2px 0; }
+.alu-assistant-icon { grid-row: 1 / 3; display: grid; place-items: center; color: var(--alu-accent); }
+.alu-assistant-heading { display: flex; min-width: 0; align-items: center; }
+.alu-assistant-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; min-width: 0; padding: 2px 0; color: var(--alu-text); font-size: 14px; font-weight: 650; line-height: 1.5; text-align: left; overflow-wrap: anywhere; }
+.alu-assistant-model { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; grid-column: 2; min-width: 0; padding: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.5; text-align: left; overflow-wrap: anywhere; }
+.alu-assistant-model span { color: var(--alu-model-name); }
 .alu-sidebar-actions {
   padding: 10px 12px;
   border-bottom: 1px solid var(--alu-border);
@@ -152,44 +165,16 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   margin: 2px 0;
   border: 1px solid transparent;
   border-radius: 9px;
-  overflow: hidden;
+  display: flex;
+  align-items: center;
+  padding-left: 4px;
 }
 .alu-instance-row.is-child { margin-left: 18px; }
 .alu-instance-row:hover { background: var(--alu-hover); }
 .alu-instance-row.is-selected { background: var(--alu-highlight-bg); border-color: var(--alu-highlight-border); }
-.alu-instance-link { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 9px 8px; padding-right: 48px; }
-.alu-instance-state { width: 7px; height: 7px; border-radius: 50%; background: var(--alu-text-faint); flex-shrink: 0; }
-/* idle 仅保留对齐占位；running 绿呼吸，其余待处理或异常状态保留语义色。 */
-.alu-instance-state.is-running { background: var(--alu-running); box-shadow: 0 0 6px var(--alu-running-glow); animation: aluInstancePulse 1.6s ease-in-out infinite; }
-.alu-instance-state.is-idle { visibility: hidden; }
-.alu-instance-state.is-waiting { background: var(--alu-waiting); box-shadow: 0 0 6px var(--alu-waiting-glow); }
-.alu-instance-state.is-compacting { background: var(--alu-warning); animation: aluInstancePulse 1.6s ease-in-out infinite; }
-.alu-instance-state.is-stopping { background: var(--alu-warning); }
-.alu-instance-state.is-failed,
-.alu-instance-state.is-error {
-  background: var(--alu-danger);
-}
-.alu-instance-state.is-lost { background: var(--alu-accent-dim); }
-@media (prefers-reduced-motion: reduce) {
-  .alu-instance-state.is-running,
-  .alu-instance-state.is-compacting {
-    animation: none;
-  }
-}
+.alu-instance-link { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; padding: 9px 8px 9px 0; }
 .alu-instance-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-.alu-instance-name { color: var(--alu-text); font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.alu-instance-assistant-tag {
-  display: inline-block;
-  margin-right: 6px;
-  padding: 0 5px;
-  border: 1px solid var(--alu-accent-border);
-  border-radius: 5px;
-  color: var(--alu-accent);
-  font-size: var(--alu-micro-size);
-  font-weight: 600;
-  line-height: 1.5;
-  vertical-align: 1px;
-}
+.alu-instance-name { color: var(--alu-text); font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
 .alu-instance-machine-tag {
   display: block;
   max-width: 100%;
@@ -209,11 +194,10 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 /* 模型名总是完整显示：provider 说明走哪家的钱，同一家的模型常常只差尾号。provider 保持灰色，模型名用冰蓝和目录区分。 */
 .alu-instance-model { color: var(--alu-text-muted); font-size: var(--alu-meta-size); overflow-wrap: anywhere; }
 .alu-instance-model-id { color: var(--alu-model-name); }
-.alu-instance-meta { color: var(--alu-text-faint); font-size: var(--alu-meta-size); }
 .alu-instance-action {
-  position: absolute;
-  right: 7px;
-  bottom: 7px;
+  flex: none;
+  align-self: flex-end;
+  margin: 0 5px 7px 0;
   color: var(--alu-accent);
   font-size: var(--alu-micro-size);
   padding: 2px 4px;
@@ -244,7 +228,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-sidebar.open { transform: translateX(0); }
 .alu-sidebar-overlay { position: fixed; z-index: 49; inset: 0; padding: 0; pointer-events: none; opacity: 0; border: 0; background: var(--alu-scrim); transition: opacity .25s ease; }
 .alu-sidebar-overlay.open { pointer-events: auto; opacity: 1; }
-.alu-sidebar-head { display: flex; min-height: 70px; flex: 0 0 auto; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--alu-border); }
+.alu-sidebar-head { display: flex; min-height: 70px; flex: 0 0 auto; align-items: center; gap: 6px; padding: 14px 16px; border-bottom: 1px solid var(--alu-border); }
 .alu-sidebar-avatar { width: 40px; height: 40px; flex: 0 0 auto; object-fit: cover; border: 2px solid var(--alu-avatar-ring); border-radius: 50%; }
 .alu-sidebar-title { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .alu-instance-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; }

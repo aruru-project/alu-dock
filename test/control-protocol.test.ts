@@ -112,7 +112,7 @@ test("Protocol V2 clients accept additive Host response and event fields", () =>
   assert.equal(status.instance.hostId, "machine-1");
   assert.throws(() => parseStatusResult({
     instance: { ...validSnapshot(), displayName: "<unsafe>\nlabel" },
-  }), /canonical safe display name/u);
+  }), { code: "invalid_response" });
 
   const machines = parseMachinesResult({
     machines: [{

@@ -349,7 +349,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     const parents = app.works.filter(work => !work.parentId).sort((left, right) => Number(isResidentAssistant(right)) - Number(isResidentAssistant(left)))
     for (const parent of parents) {
       const group = groups[workGroup(parent)]
-      group.push(parent, ...app.works.filter(work => work.parentId === parent.id))
+      if (!isResidentAssistant(parent)) group.push(parent)
+      group.push(...app.works.filter(work => work.parentId === parent.id))
     }
     // A failed cleanup must stay visible even after its parent retired.
     const parentIds = new Set(app.works.filter(work => !work.parentId).map(work => work.id))

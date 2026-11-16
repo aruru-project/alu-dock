@@ -386,7 +386,7 @@ export class DockHost {
         for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId, true);
       });
       this.state = "running";
-      this.registry.startAssistant();
+      this.registry.startAssistant(this.assistant ? async () => (await this.assistant!.request({ op: "settings_get" }, { owner: true })).displayName : undefined);
     } catch (error) {
       await this.instanceManager.stop().catch(() => {});
       await this.remoteAccess?.stop().catch(() => {});
@@ -1373,7 +1373,11 @@ export class DockHost {
       case "assistant.settings.get": return ask({ op: "settings_get" });
       case "assistant.settings.set": {
         const { operationId, ...settings } = request.params;
-        return this.operationLedger.run(operationId, request.type, request.params, () => ask({ op: "settings_set", ...settings }));
+        return this.operationLedger.run(operationId, request.type, request.params, async () => {
+          const saved = await assistant.request({ op: "settings_set", ...settings }, { owner: true });
+          if (settings.displayName !== undefined && saved.displayName !== undefined) this.registry.setAssistantDisplayName(saved.displayName);
+          return saved;
+        });
       }
       case "assistant.reorganize": {
         const { operationId, extractionModel } = request.params;

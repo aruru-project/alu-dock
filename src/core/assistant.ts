@@ -9,6 +9,9 @@
  */
 
 import { MODEL_SPEED_TIERS, type ModelSpeedTier } from "./model-speed.js";
+import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "./instance-display-name.js";
+
+export const DEFAULT_ASSISTANT_DISPLAY_NAME = "alu";
 
 /** The two texts the owner and the assistant edit: who she is, and what the owner told her by hand. */
 export const ASSISTANT_DOCUMENTS = ["persona", "notes"] as const;
@@ -122,6 +125,8 @@ export interface AssistantHandoffSettings {
   prompt: string;
 }
 export interface AssistantSettings {
+  /** Main's global identity label, independent of persona and session titles. Absent on older Hosts. */
+  displayName?: string;
   /** The model that turns her conversations into memories; without it nothing is extracted. */
   extractionModel?: AssistantModelRef;
   /** Background memory requests use their own speed; Main returns standard when not configured. */
@@ -130,6 +135,8 @@ export interface AssistantSettings {
   handoff?: AssistantHandoffSettings;
 }
 export interface AssistantSettingsEdit {
+  /** Omitted preserves her identity label. */
+  displayName?: string;
   /** Omitted leaves it unchanged; null stops making memories. */
   extractionModel?: AssistantModelRef | null;
   /** Omitted preserves the background speed, independently of her chat Work. */
@@ -549,9 +556,18 @@ function parseHandoffSettings(input: unknown, field: string, closed: boolean): A
   return { startTokens, keepRecentTokens, prompt };
 }
 
+function assistantDisplayName(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) fail("请填写助手的名字；这次没有保存。");
+  const name = (value as string).trim();
+  if (name.length > MAX_INSTANCE_DISPLAY_NAME_CHARS) fail(`名字最多 ${MAX_INSTANCE_DISPLAY_NAME_CHARS} 个字，请缩短后保存。`);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) fail("名字中不能使用换行或控制字符，请删去后保存。");
+  return name;
+}
+
 function parseSettingsSet(value: Record<string, unknown>, field: string): AssistantSettingsEdit {
-  if (value.extractionModel === undefined && value.extractionSpeed === undefined && value.handoff === undefined) fail(`${field} changes nothing`);
+  if (value.displayName === undefined && value.extractionModel === undefined && value.extractionSpeed === undefined && value.handoff === undefined) fail(`${field} changes nothing`);
   return {
+    ...(value.displayName === undefined ? {} : { displayName: assistantDisplayName(value.displayName) }),
     ...(value.extractionModel === undefined ? {} : { extractionModel: value.extractionModel === null ? null : modelRef(value.extractionModel, `${field}.extractionModel`, true) }),
     ...(value.extractionSpeed === undefined ? {} : { extractionSpeed: oneOf(value.extractionSpeed, MODEL_SPEED_TIERS, `${field}.extractionSpeed`) }),
     ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, true) }),
@@ -697,7 +713,7 @@ export function parseAssistantRequest(input: unknown, field = "request"): Assist
         only(value, ["op"], field);
         return { op: "settings_get" };
       case "settings_set":
-        only(value, ["op", "extractionModel", "extractionSpeed", "handoff"], field);
+        only(value, ["op", "displayName", "extractionModel", "extractionSpeed", "handoff"], field);
         return { op: "settings_set", ...parseSettingsSet(value, field) };
       case "reorganize":
         only(value, ["op", "extractionModel"], field);
@@ -885,6 +901,7 @@ export function parseAssistantSettings(input: unknown, field = "assistant settin
   return answer(() => {
     const value = record(input, field);
     return {
+      ...(value.displayName === undefined ? {} : { displayName: assistantDisplayName(value.displayName) }),
       ...(value.extractionModel === undefined ? {} : { extractionModel: modelRef(value.extractionModel, `${field}.extractionModel`, false) }),
       extractionSpeed: value.extractionSpeed === undefined ? "standard" : oneOf(value.extractionSpeed, MODEL_SPEED_TIERS, `${field}.extractionSpeed`),
       ...(value.handoff === undefined ? {} : { handoff: parseHandoffSettings(value.handoff, `${field}.handoff`, false) }),

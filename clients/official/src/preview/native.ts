@@ -76,6 +76,8 @@ function sampleData() {
     ],
   }
   const assistantWork = previewWork('早上的闲聊', '/home/alu/.aludock/assistant', 'idle', 'active')
+  assistantWork.name = '早上的闲聊'
+  assistantWork.displayName = 'alu'
   assistantWork.assistant = true
   assistantWork.executor.kind = 'dock-assistant'
   const previewBootstrap: BootstrapPayload = {
@@ -210,7 +212,7 @@ function sampleData() {
     ...(item.revision > 1 ? [{ at: item.updatedAt, author: item.author, action: item.state === 'retired' ? 'merged' as const : item.state === 'forgotten' ? 'forgotten' as const : 'rewritten' as const, ...(item.state === 'active' ? { text: item.text } : {}) }] : []),
     { at: item.createdAt, author: item.revision > 1 && item.author !== 'owner' ? 'extraction' as const : item.author, action: 'added' as const, text: item.text },
   ]]))
-  const assistantSettings: AssistantSettings = { extractionSpeed: 'standard', extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' }, handoff: { startTokens: null, keepRecentTokens: null, prompt: '预览示例：为助手写一份交接记录，保留尚未办完的事、主人的要求和待回答的问题。' } }
+  const assistantSettings: AssistantSettings = { displayName: 'alu', extractionSpeed: 'standard', extractionModel: { provider: 'openai-codex', id: 'gpt-5.6-mini' }, handoff: { startTokens: null, keepRecentTokens: null, prompt: '预览示例：为助手写一份交接记录，保留尚未办完的事、主人的要求和待回答的问题。' } }
   // Her timeline: what the two of them were doing, one line per stretch of a conversation, newest first.
   const line = (id: string, fromMinutes: number, toMinutes: number, text: string, fields: Partial<AssistantEpisode> = {}): AssistantEpisode => ({
     id, session: assistantSession, entryId: 'a1', fromAt: ago(fromMinutes), toAt: ago(toMinutes), text, state: 'active', author: 'extraction', createdAt: ago(toMinutes), updatedAt: ago(toMinutes), revision: 1, ...fields,
@@ -253,7 +255,7 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     }
     case 'work_catalog': {
       const { connectionId, selectionGeneration, host, works, total, hiddenStopped } = preview.previewBootstrap
-      return { connectionId, selectionGeneration, hostEpoch: host.hostEpoch, instances: works, total, hiddenStopped }
+      return structuredClone({ connectionId, selectionGeneration, hostEpoch: host.hostEpoch, instances: works, total, hiddenStopped })
     }
     case 'command_catalog': await delay(100); return preview.previewCommands
     case 'list_models': await delay(100); return { ...preview.previewModels, instance: workFor(args.instanceId) }
@@ -381,6 +383,8 @@ async function answer(command: string, args: Record<string, unknown>): Promise<u
     case 'set_assistant_settings': {
       await delay(200)
       Object.assign(preview.assistantSettings, args.settings)
+      const resident = preview.previewBootstrap.works.find(work => work.executor.kind === 'dock-assistant')
+      if (resident && preview.assistantSettings.displayName) resident.displayName = preview.assistantSettings.displayName
       if (preview.assistantSettings.extractionModel === null) delete preview.assistantSettings.extractionModel
       return structuredClone(preview.assistantSettings)
     }

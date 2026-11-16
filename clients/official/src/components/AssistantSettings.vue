@@ -10,6 +10,7 @@ import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
 import { useWorkActionsStore } from '../stores/work-actions'
 import AluSelect from './AluSelect.vue'
+import AssistantIdentity from './AssistantIdentity.vue'
 
 // Main owns the saved settings; the assistant Work reports its own rolling hand-over status.
 const assistant = useAssistantStore()
@@ -83,6 +84,7 @@ function choose(value: string) {
 </script>
 
 <template>
+  <AssistantIdentity />
   <section class="assistant-setting" aria-labelledby="assistant-extraction-model">
     <h4 id="assistant-extraction-model">整理记忆的模型</h4>
     <p class="assistant-setting-text">一段对话停下一阵后，她会用这个模型把值得记住的事记下来；空闲时再对照原话，把记下的整理一遍。没选模型就不整理。</p>

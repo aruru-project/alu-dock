@@ -1388,7 +1388,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryUpdateParams(rest, "params")) } };
     }
     case "assistant.settings.set":
-      exact(params, ["operationId", "extractionModel", "extractionSpeed", "handoff"], "invalid_request");
+      exact(params, ["operationId", "displayName", "extractionModel", "extractionSpeed", "handoff"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
     case "assistant.reorganize":
       exact(params, ["operationId", "extractionModel"], "invalid_request");
@@ -3220,8 +3220,8 @@ function extensionKey(input: unknown, field: string): string {
 
 function instanceDisplayName(input: unknown, field: string): string {
   const value = string(input, field, MAX_INSTANCE_DISPLAY_NAME_CHARS);
-  if (!/^[\p{L}\p{M}\p{N}_-]+(?: [\p{L}\p{M}\p{N}_-]+)*$/u.test(value)) {
-    throw validation("invalid_response", `${field} must be a canonical safe display name`);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    throw validation("invalid_response", `${field} must be terminal-safe`);
   }
   return value;
 }

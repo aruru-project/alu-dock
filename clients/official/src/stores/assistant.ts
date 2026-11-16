@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { computed, reactive, ref, watch } from 'vue'
 import { utf8Bytes } from '../lib/assistant'
-import { getAssistantDocument, getAssistantInfo, getAssistantPreview, setAssistantDocument } from '../lib/bridge'
+import { getAssistantDocument, getAssistantInfo, getAssistantPreview, getAssistantSettings, setAssistantDocument, setAssistantSettings } from '../lib/bridge'
 import { currentConnectionCall } from '../lib/hostResult'
-import { replyLost } from '../lib/operationBinding'
+import { onceAfterLostReply, replyLost } from '../lib/operationBinding'
 import type { AssistantDocument, AssistantDocumentName, AssistantInfo, AssistantPreview, ConnectionContext } from '../lib/types'
 import { errorCode, userErrorMessage } from '../lib/userError'
 import { useAppStore } from './app'
@@ -41,7 +41,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   const app = useAppStore()
   const infos = ref(new Map<string, InfoEntry>())
   const current = computed(() => infos.value.get(app.activeConnectionId ?? ''))
-  /** Main offers the assistant: the sidebar entry and the New Work shortcut show. */
+  /** Main offers her settings even while the resident Work is temporarily unavailable. */
   const available = computed(() => current.value?.state === 'ready' || current.value?.state === 'unavailable')
   const info = computed(() => current.value?.info)
   let infoEpoch = 0
@@ -77,6 +77,65 @@ export const useAssistantStore = defineStore('assistant', () => {
     if (open && state !== 'ready' && state !== 'unsupported' && state !== 'loading') void loadInfo()
   })
 
+  // ── Global display name; separate from her persona and conversation title ──
+  interface IdentityEditor {
+    current: string | null; draft: string | null; read: boolean; loading: boolean; error: string; revision: number
+    save: { state: 'pending' | 'saved' | 'failed'; message: string } | null
+  }
+  const identities = reactive(new Map<string, IdentityEditor>())
+  function identityFor(connectionId: string): IdentityEditor {
+    if (!identities.has(connectionId)) identities.set(connectionId, { current: null, draft: null, read: false, loading: false, error: '', revision: 0, save: null })
+    return identities.get(connectionId)!
+  }
+  const identity = computed(() => identityFor(app.activeConnectionId ?? ''))
+  const identityValue = computed(() => identity.value.draft ?? identity.value.current ?? '')
+  const identityOnce = onceAfterLostReply()
+  async function loadIdentity() {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    if (!context) return
+    const editor = identityFor(context.connectionId)
+    if (editor.save?.state === 'pending') return
+    const revision = ++editor.revision
+    editor.loading = true
+    editor.error = ''
+    try {
+      const settings = await getAssistantSettings(context)
+      if (editor.revision !== revision) return
+      editor.current = settings.displayName ?? null
+      editor.read = true
+      identityOnce.known([context.connectionId, 'display name'])
+    } catch (cause) {
+      if (editor.revision === revision) editor.error = userErrorMessage(cause, '暂时读不到名字。请重试。')
+    } finally {
+      if (editor.revision === revision) editor.loading = false
+    }
+  }
+  function editIdentity(name: string) {
+    const editor = identity.value
+    editor.draft = name
+    if (editor.save?.state === 'saved') editor.save = null
+  }
+  async function saveIdentity() {
+    const context = app.connectionContext ? { ...app.connectionContext } : null
+    if (!context) return
+    const editor = identityFor(context.connectionId)
+    const name = (editor.draft ?? editor.current ?? '').trim()
+    if (!name || editor.save?.state === 'pending') return
+    ++editor.revision
+    editor.loading = false
+    const draft = editor.draft
+    editor.save = { state: 'pending', message: '正在保存名字…' }
+    try {
+      const saved = await identityOnce([context.connectionId, 'display name'], name, operationId => setAssistantSettings({ displayName: name }, operationId, context))
+      editor.current = saved.displayName ?? editor.current
+      if (editor.draft === draft) editor.draft = null
+      editor.save = { state: 'saved', message: '名字已保存，所有客户端共用这个名字。对话、人设和记忆保持不变。' }
+      if (app.contextMatches(context)) await app.refreshWorksQuietly()
+    } catch (cause) {
+      editor.save = { state: 'failed', message: userErrorMessage(cause, '名字没有保存成功，草稿还在。请重试。') }
+    }
+  }
+
   // ── Persona and notes ──
   const editors = reactive(new Map<string, AssistantDocumentEditor>())
   const editorKey = (connectionId: string, document: AssistantDocumentName) => JSON.stringify([connectionId, document])
@@ -90,12 +149,6 @@ export const useAssistantStore = defineStore('assistant', () => {
   function editor(document: AssistantDocumentName): Readonly<AssistantDocumentEditor> {
     return editors.get(editorKey(app.activeConnectionId ?? '', document)) ?? untouched
   }
-  /** Unsaved text in either document on this connection; the sidebar says so. */
-  const hasDrafts = computed(() => (['persona', 'notes'] as const).some((document) => {
-    const entry = editors.get(editorKey(app.activeConnectionId ?? '', document))
-    return !!entry && entry.draft !== null
-  }))
-
   /** Reads the Host's version. An unchanged editor shows it; a draft keeps its base and learns of a newer version. */
   async function loadDocument(document: AssistantDocumentName) {
     const context = app.connectionContext
@@ -210,7 +263,8 @@ export const useAssistantStore = defineStore('assistant', () => {
 
   return {
     infos, available, info, current, loadInfo,
-    editor, hasDrafts, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
+    identity, identityValue, loadIdentity, editIdentity, saveIdentity,
+    editor, loadDocument, editDocument, discardDocument, keepDraftOverLatest, saveDocument,
     preview, loadPreview,
   }
 })

@@ -376,7 +376,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ]
     );
 
-    // Settings: without a model nothing is made into memories, and the conversation waits.
+    // Settings are Main's shared facts; the display name is independent of session naming.
+    assert_eq!(
+        client.assistant_settings().await?.display_name.as_deref(),
+        Some("alu")
+    );
+    // Without a model nothing is made into memories, and the conversation waits.
     assert!(
         client
             .assistant_settings()
@@ -400,6 +405,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chosen = client
         .set_assistant_settings(
             &aludock_client_core::AssistantSettingsEdit {
+                display_name: Some("小满 · 星".into()),
                 extraction_model: Some(Some(model.clone())),
                 ..Default::default()
             },
@@ -407,6 +413,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     assert_eq!(chosen.extraction_model.as_ref(), Some(&model));
+    assert_eq!(chosen.display_name.as_deref(), Some("小满 · 星"));
+    assert_eq!(
+        client.assistant_settings().await?.display_name.as_deref(),
+        Some("小满 · 星")
+    );
     assert_eq!(
         client.assistant_settings().await?.extraction_model.as_ref(),
         Some(&model)
