@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
@@ -127,4 +127,27 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   await client.reloadSession(assistant.id);
   assert.ok(!(await client.tools(assistant.id)).tools.some(tool => ["local_schedule", "web_search"].includes(tool.name)));
   assert.ok(!Object.keys((await client.status(assistant.id)).extensionStatus).some(key => key.startsWith("扩展/")));
+
+  // Local configuration must stay usable when Main's memory service is temporarily unavailable,
+  // both on Reload and when the resident Worker starts again. No CLI-wide readiness barrier.
+  await team.stopAssistantService();
+  await writeFile(configFile, JSON.stringify([settings[1]]));
+  await client.reloadSession(assistant.id);
+  assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "local_schedule"));
+  await client.stop(assistant.id);
+  assert.equal((await client.status(assistant.id)).lifecycle, "active");
+  assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "local_schedule"));
+
+  // With no file, a failed readiness check must keep the running tools, not assume an empty old
+  // database and load default web. Starting without either source still keeps ordinary chat alive.
+  await rm(configFile);
+  await client.reloadSession(assistant.id);
+  assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "local_schedule"));
+  assert.ok(!(await client.tools(assistant.id)).tools.some(tool => tool.name === "web_search"));
+  await client.stop(assistant.id);
+  assert.equal((await client.status(assistant.id)).lifecycle, "active");
+  assert.ok(!(await client.tools(assistant.id)).tools.some(tool => tool.name === "web_search"));
+  await client.prompt(assistant.id, "继续聊天。", "auto", "memory-service-offline");
+  (await team.providers.coordinator.request(4)).text("可以，继续聊。");
+  await waitFor(async () => (await client.status(assistant.id)).execution === "idle", "The assistant could not chat while the memory service was offline");
 });

@@ -108,6 +108,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
       if (assistantService !== undefined) await team.assistantWork();
       return team.client;
     },
+    /** Simulate a temporary memory-service outage without stopping the Host or Workers. */
+    async stopAssistantService(): Promise<void> { await assistantService?.stop(); },
     async assistantWork() {
       await waitFor(async () => (await team.client!.list()).some((work) => work.assistant && work.lifecycle === "active"), "Main did not open its resident assistant");
       return (await team.client!.list()).find((work) => work.assistant && work.lifecycle === "active")!;

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 
 import { Agent, type AgentEvent as LoopEvent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
@@ -38,6 +39,7 @@ import {
   type ClearedAgentQueue,
   type ThinkingLevel,
 } from "../core/agent-worker.js";
+import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
 import { compareToolDtos, type CommandDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
@@ -312,6 +314,21 @@ class AssistantAgent implements WorkerAgent {
   get persistedName(): string | undefined { return this.session.getSessionName(); }
 
   async loadExtensions(): Promise<void> {
+    try {
+      let missing = false;
+      try { await lstat(join(this.cwd, ASSISTANT_EXTENSIONS_FILE)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        missing = true;
+      }
+      // An existing file is independent of the memory service. Only absence needs confirmation:
+      // Main may still be migrating the former SQLite settings before its service becomes ready.
+      if (missing) await this.port.call({ op: "info" });
+    } catch {
+      this.tell("暂时无法确认助手扩展配置，现有工具没有改变。请检查 Main 的配置文件和助手服务日志后 Reload。", "warning");
+      return;
+    }
+    // Re-read after the service is ready; only a still-missing file means shipped defaults.
     this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools)];
     this.agent.state.tools = this.tools;
   }
