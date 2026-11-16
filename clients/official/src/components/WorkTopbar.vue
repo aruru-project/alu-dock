@@ -51,6 +51,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
         <span v-if="!app.needsPairing && !resident" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
         <span v-if="!app.needsPairing && !resident" class="alu-nav-sep">/</span>
         <Sparkles v-if="!app.needsPairing && resident" :size="16" class="alu-nav-assistant-mark" aria-hidden="true" />
+        <span v-if="!app.needsPairing && selected?.assistant && !resident" class="alu-nav-assistant-tag" title="助手">助手</span>
         <span class="alu-nav-session">{{ app.needsPairing ? 'AluDock' : resident ? selected?.displayName : selected?.name || selected?.displayName || '选择 Work' }}</span>
         <span v-if="selected?.gitBranch && !resident" class="alu-nav-git-branch"> {{ selected.gitBranch }}</span>
         <span class="alu-navbar-breadcrumb-arrow" aria-hidden="true">▾</span>
@@ -197,6 +198,7 @@ const cacheHitRate = computed(() => formatCacheHitRate(selected.value?.metrics?.
 }
 .alu-nav-git-branch[hidden] { display: none; }
 .alu-nav-assistant-mark { flex: none; color: var(--alu-accent); }
+.alu-nav-assistant-tag { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--alu-accent-border); border-radius: 6px; color: var(--alu-accent); font-size: var(--alu-meta-size); font-weight: 600; line-height: 1; }
 .alu-navbar-breadcrumb-arrow { color: var(--alu-text-faint); font-size: var(--alu-micro-size); }
 .alu-navbar-right {
   display: flex;

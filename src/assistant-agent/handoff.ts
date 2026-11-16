@@ -169,8 +169,7 @@ export class Handoff {
 
   private showStatus(): void {
     if (this.stopped) return;
-    this.deps.status(this.inUse ? "正在整理对话。"
-      : this.settingsError ? "暂未读到整理设置，稍后会重试。"
+    this.deps.status(this.settingsError ? "暂未读到整理设置，稍后会重试。"
       : this.failures > 0 ? "整理未完成，对话保留，稍后会重试。"
       : undefined);
   }

@@ -3308,7 +3308,9 @@ try {
     assert.equal(assistantApp.selectedWork.executor.piSessionId, her.executor.piSessionId)
     assert.equal(text(find(assistantView, item => item.props.id === 'assistant-title')), '小满')
     assert.ok(!!button(assistantView, '打开小满的对话'), 'the identity navigation uses the same saved name')
-    assert.ok(!!find(assistantView, item => item.props.role === 'status' && text(item).includes('名字已保存')))
+    assert.ok(!!find(assistantView, item => item.props.role === 'status' && text(item).includes('新的修改未保存')), 'the newer draft is not described as saved')
+    await editName('小满')
+    assert.equal(!!find(assistantView, item => item.props['aria-label'] === '有未保存的改动'), false, 'restoring the saved name clears its draft marker')
     // The save belongs to Main where it began, even if another connection is being viewed.
     nameReply = '远处的小满'
     await editName('远处的小满')

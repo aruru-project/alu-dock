@@ -112,8 +112,8 @@ export const useAssistantStore = defineStore('assistant', () => {
   }
   function editIdentity(name: string) {
     const editor = identity.value
-    editor.draft = name
-    if (editor.save?.state === 'saved') editor.save = null
+    editor.draft = editor.save?.state === 'pending' || name.trim() !== editor.current ? name : null
+    if (editor.save?.state !== 'pending') editor.save = null
   }
   async function saveIdentity() {
     const context = app.connectionContext ? { ...app.connectionContext } : null
@@ -129,7 +129,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       const saved = await identityOnce([context.connectionId, 'display name'], name, operationId => setAssistantSettings({ displayName: name }, operationId, context))
       editor.current = saved.displayName ?? editor.current
       if (editor.draft === draft) editor.draft = null
-      editor.save = { state: 'saved', message: '名字已保存，所有客户端共用这个名字。' }
+      editor.save = { state: 'saved', message: editor.draft !== null ? '提交的名字已保存，还有新的修改未保存。' : '名字已保存，所有客户端共用这个名字。' }
       if (app.contextMatches(context)) await app.refreshWorksQuietly()
     } catch (cause) {
       editor.save = { state: 'failed', message: userErrorMessage(cause, '名字没有保存成功，草稿还在。请重试。') }

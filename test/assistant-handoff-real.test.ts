@@ -66,7 +66,8 @@ test("saved hand-over settings guide background writing while she answers, and s
   // The record is being written: the model is asked for it and has not answered.
   const writing = await coordinator.request(2);
   assert.equal(writing.body.messages?.find((message) => message.role === "system" || message.role === "developer")?.content, handoff.prompt, "The entire saved instruction replaces the factory role and writing rules");
-  await waitFor(async () => (await client.status(alu.id)).extensionStatus["滚动整理"] === "正在整理对话。", "The Work did not show the brief writing activity");
+  // #671: routine background work is available on demand, not presented as a chat warning.
+  assert.equal((await client.status(alu.id)).extensionStatus["滚动整理"], undefined);
   const details = await runtimeDetails(client, alu.id);
   assert.ok(details.includes("正在后台整理") && details.includes("55000 token") && details.includes("1200 token"), "Requested details show the effective hand-over settings");
   assert.ok(given(writing).includes("交接记录") && given(writing).includes("周末去爬山，到时候记得提醒我带水壶。"), "The older part of the conversation is given to the model to write the record from");
