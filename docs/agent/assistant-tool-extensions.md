@@ -35,7 +35,7 @@
 
 官方客户端不再提供通用插件 JSON 编辑面板，`assistant.settings` 也不再读写 `extensions`。这是配置入口的收敛；扩展若需要日常业务设置，应设计名称、含义和校验清楚的界面。
 
-加载结果可在命令中心的**她能用的工具**、命令列表和 **`/assistant-status`（查看助手运行详情）**中查看。正常加载不占聊天警告栏；加载问题显示一条短提醒，详细原因按需查看，工厂的原始异常留在本机日志。修正文件后 Reload。
+加载结果可在命令中心的**她能用的工具**、命令列表和 **`/assistant-status`（查看助手运行详情）**中查看。正常加载不占聊天警告栏；加载问题显示一条短提醒，可按需查看扩展标识和处理说明。宿主不保留工厂、工具、命令或关闭处理抛出的原始异常，日志也只记录安全的失败类别、扩展标识和处理建议。修正文件后 Reload。
 
 ## 最小扩展
 
@@ -111,7 +111,7 @@ export default async function (context) {
 - 名称只用字母、数字、下划线和短横线。工具名冲突时该扩展不注册，原工具不被替换。
 - `parameters` 是 `type: "object"` 的 JSON Schema；说明和参数定义提供给模型。
 - `execute(params, { callId, signal, onUpdate? })` 返回 Promise。网络调用应把 `signal` 传给底层请求。
-- 结果 `{ content, details?, isError? }`：文字为 `{type:"text",text}`，图片为 `{type:"image",data,mimeType}`，`data` 是 Base64；`details` 是 JSON 值。最终结果会留在会话里。失败可抛错，或返回 `isError: true`。
+- 结果 `{ content, details?, isError? }`：文字为 `{type:"text",text}`，图片为 `{type:"image",data,mimeType}`，`data` 是 Base64；`details` 是 JSON 值。最终结果会留在会话里。未处理的异常由宿主替换为安全说明，不把异常原文或 `cause` 交给模型；取消保留中止语义。需要让助手理解业务失败时，返回明确可公开的 `content` 并设置 `isError: true`。结果、进度和 `details` 仍由扩展作者确保可公开。
 - `onUpdate(result)` 使用相同结果形状，报告运行中的进度，不替代最终返回结果。
 
 需要确认的工具可以这样写：
@@ -138,7 +138,7 @@ async execute(params, { signal }) {
 - `command.confirm(title, message)` 使用本条命令的取消信号。返回 `false` 或收到取消时，扩展应停止，不继续执行需要确认的操作。
 - 超过一秒会显示执行提示。命令中心可中止；有确认问题时可点**回答问题**进入原确认框，关闭命令面板本身不会中止命令。
 
-命令不能覆盖助手内置命令、平台本地操作或已经注册的同名命令，例如 `assistant-status`、`dock-tools`、`reload`、`model`。平台名称共用 `src/shared/local-control-command-names.json`。冲突只拒绝那条命令并说明换名，保留扩展原有工具和其他有效命令；修正后 Reload，不留旧入口。
+命令不能覆盖助手内置命令、平台本地操作或已经注册的同名命令，例如 `assistant-status`、`dock-tools`、`reload`、`model`，以及 TUI 的 `help`、`status`、`quit`、`abort`、`detach`。各入口已占用的名称共用 `src/shared/local-control-command-names.json`；仅完整名称冲突，`new-echo` 这样的不同名称仍可使用。冲突只拒绝那条命令并说明换名，保留扩展原有工具和其他有效命令；修正后 Reload，不留旧入口。
 
 未知斜杠前缀仍按普通消息处理。命令只收文字参数，附带文件时会明确拒绝，不丢弃附件后偷偷执行。
 
