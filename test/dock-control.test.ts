@@ -2279,6 +2279,42 @@ test("a runtime-driven post-compaction continuation starts while every client is
   await replay.done;
 });
 
+test("a slow status save does not report a Work idle before its run finishes", { timeout: 10_000 }, async (context) => {
+  const catalog = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(catalog);
+  let releaseCatalog = () => {};
+  context.after(async () => { releaseCatalog(); await cleanupHarness(harness); });
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "compaction-event-order");
+  const runtime = harness.sessions.get(created.id)!;
+  const run = runtime.prompt("runtime-owned continuation");
+  const initial = await client.read(created.id, undefined, "event_log");
+  assert.equal(initial.instance.execution, "running");
+  assert.equal(initial.instance.activeCommandId, undefined);
+
+  const gate = catalog.gateAt(catalog.calls.length + 1);
+  releaseCatalog = gate.release;
+  runtime.isCompacting = true;
+  runtime.emit({ type: "compaction_start", reason: "threshold" });
+  await gate.entered;
+  runtime.isCompacting = false;
+  runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+  // The Worker advances while catalog publication is blocked. Re-reading its
+  // current state when applying compaction_end would wrongly publish idle.
+  runtime.settle("actually finished after compaction");
+  await run;
+  assert.equal(runtime.isStreaming, false);
+  gate.release();
+
+  const observed = await client.read(created.id, undefined, "event_log");
+  const completed = observed.page.events.find((event) => event.type === "instance.state_changed" && event.data.reason === "compaction_completed");
+  assert.ok(completed?.type === "instance.state_changed");
+  assert.equal(completed.data.execution, "running");
+  assert.equal(completed.data.compacting, false);
+  assert.equal(observed.instance.execution, "idle");
+  assert.ok(observed.page.events.some((event) => event.type === "run.settled" && event.sequence > completed.sequence));
+});
+
 test("stop preempts a manual compaction even before its start event is projected", async (context) => {
   const catalog = new ScriptedCatalogCommitPort();
   const stopIntentGate = catalog.gateAt(2);

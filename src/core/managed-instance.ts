@@ -191,6 +191,12 @@ import { classifyControlRequest, type ResourceContentResult, type SessionTreeRes
 import type { ObservationNotification } from "./instance-observation.js";
 import type { WorkMessage } from "./dock-tools.js";
 
+/** Worker facts captured synchronously with an event, before admission/commit queues can yield. */
+interface AgentEventReceipt {
+  event: AgentEvent;
+  streamingAtCompactionEnd?: boolean;
+}
+
 interface AgentEventTransition {
   kind: string;
   durable: boolean;
@@ -377,7 +383,7 @@ export class ManagedInstance {
   private catalogPort: InstanceCatalogMutationPort | undefined;
   private committedSnapshotValue: InstanceSnapshot | undefined;
   private catalogAdmissionOperationId: string | undefined;
-  private readonly admissionBufferedEvents: AgentEvent[] = [];
+  private readonly admissionBufferedEvents: AgentEventReceipt[] = [];
   private modelConfigurationActive = false;
   private deferredModelObservation: AgentModelStateObservation | undefined;
   private admissionBufferOverflow = false;
@@ -3026,17 +3032,23 @@ export class ManagedInstance {
         boundary.resolve();
       }
     }
+    // WorkerConnection applies this event's state before notifying us. Keep the
+    // matching fact, not whatever state a later catalog commit happens to see.
+    const received: AgentEventReceipt = {
+      event,
+      ...(event.type === "compaction_end" ? { streamingAtCompactionEnd: this.agentState().isStreaming } : {}),
+    };
     if (this.catalogAdmissionOperationId !== undefined) {
       if (this.admissionBufferedEvents.length >= 1_000) {
         this.admissionBufferedEvents.shift();
         this.admissionBufferOverflow = true;
       }
-      this.admissionBufferedEvents.push(event);
+      this.admissionBufferedEvents.push(received);
       return;
     }
     if (!this.catalogPort) {
       try {
-        this.handleAgentEvent(event);
+        this.handleAgentEvent(received);
         if (event.type === "conversation_checkpoint") this.installConversationCheckpoint(event);
         if (refreshesMetrics(event)) this.refreshMetrics();
         if (refreshesHistory(event)) {
@@ -3047,16 +3059,17 @@ export class ManagedInstance {
       } catch (error) { this.appendProjectionError(event, error); }
       return;
     }
-    const task = this.enqueueCatalogAgentEvent(event);
+    const task = this.enqueueCatalogAgentEvent(received);
     if (event.type === "conversation_checkpoint" || refreshesHistory(event)) this.trackHistoryRefresh(task);
     void task.catch(() => {});
     if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
   }
 
-  private enqueueCatalogAgentEvent(event: AgentEvent): Promise<void> {
+  private enqueueCatalogAgentEvent(received: AgentEventReceipt): Promise<void> {
+    const { event } = received;
     return this.enqueueTransition(async () => {
       try {
-        await this.handleCatalogAgentEvent(event);
+        await this.handleCatalogAgentEvent(received);
         if (event.type === "conversation_checkpoint") {
           this.installConversationCheckpoint(event);
         } else if (refreshesHistory(event)) {
@@ -3079,13 +3092,14 @@ export class ManagedInstance {
     const events = this.admissionBufferedEvents.splice(0);
     const overflow = this.admissionBufferOverflow;
     this.admissionBufferOverflow = false;
-    const tasks = events.map((event) => {
-      const task = this.enqueueCatalogAgentEvent(event);
+    const tasks = events.map((received) => {
+      const { event } = received;
+      const task = this.enqueueCatalogAgentEvent(received);
       if (refreshesHistory(event)) this.trackHistoryRefresh(task);
       return task;
     });
     if (overflow) {
-      tasks.push(this.enqueueCatalogAgentEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" }));
+      tasks.push(this.enqueueCatalogAgentEvent({ event: { type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" } }));
       const refresh = this.enqueueTransition(async () => { await this.refreshHistory(); this.refreshMetrics(); });
       this.trackHistoryRefresh(refresh);
       tasks.push(refresh);
@@ -3123,7 +3137,8 @@ export class ManagedInstance {
     });
   }
 
-  private async handleCatalogAgentEvent(event: AgentEvent): Promise<void> {
+  private async handleCatalogAgentEvent(received: AgentEventReceipt): Promise<void> {
+    const { event } = received;
     this.catalogPort?.assertWritable();
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
@@ -3134,7 +3149,7 @@ export class ManagedInstance {
       const needsPendingCommit = consumed !== undefined
         && (consumed.queued.phase === "fresh_in_flight" || consumed.queued.phase === "effect_unknown");
       if (!needsPendingCommit || consumed === undefined) {
-        this.handleAgentEvent(event);
+        this.handleAgentEvent(received);
         return;
       }
       await this.commitCatalogTransition(this.agentEventCatalogContext(event, "queue.consumed"), () => {
@@ -3156,9 +3171,9 @@ export class ManagedInstance {
       this.scheduleCompactionQueueDrain(false);
       return;
     }
-    const transition = this.agentEventTransition(event);
+    const transition = this.agentEventTransition(received);
     if (transition === undefined) {
-      this.handleAgentEvent(event);
+      this.handleAgentEvent(received);
       return;
     }
     transition.before?.();
@@ -3177,7 +3192,8 @@ export class ManagedInstance {
     transition.settle?.();
   }
 
-  private handleAgentEvent(event: AgentEvent): void {
+  private handleAgentEvent(received: AgentEventReceipt): void {
+    const { event } = received;
     if (this.state.lifecycle === "stopped") return;
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
@@ -3195,7 +3211,7 @@ export class ManagedInstance {
       this.handleWorkerQueueConsumed(event);
       return;
     }
-    const transition = this.agentEventTransition(event);
+    const transition = this.agentEventTransition(received);
     if (transition === undefined) return;
     transition.before?.();
     transition.mutate();
@@ -3211,7 +3227,7 @@ export class ManagedInstance {
    * wraps it in a commit while the in-memory path runs it directly. Never
    * fork per-mode copies of this logic again.
    */
-  private agentEventTransition(event: AgentEvent): AgentEventTransition | undefined {
+  private agentEventTransition({ event, streamingAtCompactionEnd }: AgentEventReceipt): AgentEventTransition | undefined {
     switch (event.type) {
       case "dock_model_state_observed": {
         const observation = event as AgentModelStateObservation;
@@ -3500,7 +3516,9 @@ export class ManagedInstance {
           durable: true,
           operationId,
           mutate: () => {
-            if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+            // A runtime-started run has no Dock commandId, and threshold compaction
+            // can finish between its tool turns without an overflow retry/new start.
+            if (!streamingAtCompactionEnd && this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
             this.state.compacting = false;
             this.touch();
           },

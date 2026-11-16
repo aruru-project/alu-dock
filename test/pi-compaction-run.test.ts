@@ -9,7 +9,8 @@ import type { DockEvent } from "../src/core/managed-instance.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
-// Regression: SDK 1.3 compacts between tool steps in the same run. A Work message
+// 2026-11-17 regression: an active Work showed idle after within-run compaction.
+// SDK 1.3 compacts between tool steps in the same run. A Work message
 // starts a run without a Dock command ID; compaction ending must not mark it idle.
 // Only the local HTTP model replies are scripted: Pi, read/bash and both Workers are real.
 test("a Work keeps running through automatic compaction, accepts messages and wakes its watcher only when finished", { timeout: 60_000 }, async (context) => {
