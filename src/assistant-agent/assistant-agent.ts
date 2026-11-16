@@ -146,9 +146,10 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
   const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
   // Her model calls use Pi's proxy and network settings, as every Work's do.
   configurePiNetwork(settings);
-  const modelSpeed = new ModelSpeedRuntime();
-  const models = host.models
-    ? await ModelRuntime.create({ owner: mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) })
+  const modelOwner = host.models ? mainModelOwner(host.models, ({ speedSupport }) => modelSpeed.configure(speedSupport)) : undefined;
+  const modelSpeed = new ModelSpeedRuntime(modelOwner ? () => modelOwner.readConfiguration() : undefined);
+  const models = modelOwner
+    ? await ModelRuntime.create({ owner: modelOwner })
     : await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
   const sessionDir = init.sessionDir === undefined ? undefined : resolve(init.sessionDir);
   const session = init.sessionFile === undefined
@@ -404,9 +405,12 @@ class AssistantAgent implements WorkerAgent {
         })).sort(compareToolDtos);
         return { tools, total: tools.length, truncated: false };
       }
-      case "settings.get": return [this.modelSpeed.setting(this.model)];
+      case "settings.get":
+        await this.modelSpeed.refresh();
+        return [this.modelSpeed.setting(this.model)];
       case "settings.update":
         if (request.params.update.key !== "modelSpeed") throw this.notHers("助手在这里可以调整模型速度；其他设置请到助手设置中修改。");
+        await this.modelSpeed.refresh();
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
       case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);

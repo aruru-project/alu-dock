@@ -640,6 +640,7 @@ export class PiAgentAdapter {
   }
 
   async listModels(): Promise<AgentModelListBody> {
+    await this.modelSpeed.refresh();
     const binding = this.requireActive();
     return {
       ...projectPiModelList(await binding.services.modelRuntime.getAvailable(), model => this.modelSpeed.supported(model)),
@@ -674,12 +675,14 @@ export class PiAgentAdapter {
   }
 
   async getSettings(): Promise<SettingDto[]> {
+    await this.modelSpeed.refresh();
     const { session, services } = this.requireActive();
     return [...projectPiSettings(services.settingsManager), this.modelSpeed.setting(session.model)];
   }
 
   async updateSetting(update: SettingUpdate): Promise<SettingDto> {
     if (update.key === "modelSpeed") {
+      await this.modelSpeed.refresh();
       this.modelSpeed.update(update.value);
       return this.modelSpeed.setting(this.active?.session.model);
     }

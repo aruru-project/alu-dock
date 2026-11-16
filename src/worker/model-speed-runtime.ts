@@ -11,9 +11,23 @@ const SERVICE_TIERS = { standard: "default", fast: "priority", ultrafast: "ultra
 export class ModelSpeedRuntime {
   private tier: ModelSpeedTier = "standard";
   private support: ModelSpeedSupport = DEFAULT_MODEL_SPEED_SUPPORT;
+  private refreshing: Promise<void> | undefined;
+
+  constructor(private readonly readConfiguration?: () => Promise<unknown>) {}
 
   configure(support: ModelSpeedSupport | undefined): void {
-    this.support = support ?? DEFAULT_MODEL_SPEED_SUPPORT;
+    if (support !== undefined) this.support = support;
+  }
+
+  /** Re-read Main's support facts at the speed controls, not before ordinary model requests.
+   * The owner callback adopts the snapshot without refreshing/replacing the Agent's model runtime.
+   * If Main is unavailable, keep the last successful facts and still return other settings. */
+  async refresh(): Promise<void> {
+    if (!this.readConfiguration) return;
+    this.refreshing ??= this.readConfiguration()
+      .then(() => {}, () => {})
+      .finally(() => { this.refreshing = undefined; });
+    await this.refreshing;
   }
 
   update(value: unknown): void {

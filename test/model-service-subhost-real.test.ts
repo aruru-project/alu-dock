@@ -87,6 +87,25 @@ test("a SubHost's Work sends its own requests with Main's models and credentials
     listed.text("FROM_THE_LAPTOP");
     await waitFor(async () => (await client.status(work.id)).execution === "idle", "The SubHost Work did not finish its turn");
     assert.ok(JSON.stringify(await client.history(work.id)).includes("FROM_THE_LAPTOP"));
+
+    // Field regression: a running SubHost Work learns new speed support from the same Main
+    // snapshot as local Pi and the assistant, without replacing its Work or conversation.
+    assert.deepEqual((await client.settings(work.id)).settings.find(item => item.key === "modelSpeed")?.allowedValues, ["standard"]);
+    await writeFile(join(root, "model-speed-support.json"), JSON.stringify({
+      providers: { upstream: { fast: ["fixture"], ultrafast: ["fixture"] } }, aliases: { coordinator: "upstream" },
+    }));
+    assert.deepEqual((await client.settings(work.id)).settings.find(item => item.key === "modelSpeed")?.allowedValues, ["standard", "fast", "ultrafast"]);
+    await client.updateSetting(work.id, { key: "modelSpeed", value: { tier: "fast", scope: "work" } });
+    await client.prompt(work.id, "Continue with Fast.");
+    const fast = await provider.request(2);
+    assert.equal((fast.body as { service_tier?: string }).service_tier, "priority");
+    fast.text("FAST_FROM_THE_LAPTOP");
+    await waitFor(async () => (await client.status(work.id)).execution === "idle", "The SubHost Work did not finish its fast turn");
+    const current = await client.status(work.id);
+    assert.equal(current.id, work.id);
+    assert.equal(current.runtimeGeneration, work.runtimeGeneration);
+    assert.equal(current.executor.piSessionId, work.executor.piSessionId);
+    assert.deepEqual(current.executor.model, work.executor.model);
   } finally {
     client.closeActiveConnections();
     await upstream.stop().catch(() => {}); await main.stop().catch(() => {}); await subHost.stop().catch(() => {});
