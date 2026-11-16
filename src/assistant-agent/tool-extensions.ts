@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -9,6 +9,7 @@ import { parseCommandsResult } from "../control/protocol.js";
 import { compareCommandDtos, type CommandDto, type SourceDto } from "../core/config-projection.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import { validateUiCapabilityArgs } from "../worker/worker-protocol.js";
+import type { AgentSkillDeclaration } from "../worker/agent-skills.js";
 
 /** Public assistant extension API. A plain .mjs module needs no imports or Pi SDK. */
 export interface AssistantToolResult {
@@ -54,6 +55,8 @@ export interface AssistantExtensionCommand {
 export interface AssistantExtension {
   tools?: AssistantExtensionTool[];
   commands?: AssistantExtensionCommand[];
+  /** Skill files/directories relative to this module; built-in factories use absolute paths. */
+  skills?: string[];
   dispose?(): void | Promise<void>;
 }
 export type AssistantExtensionFactory = (context: AssistantExtensionContext) => Promise<AssistantExtension>;
@@ -62,6 +65,7 @@ export type AssistantBuiltinExtensions = Readonly<Record<string, AssistantExtens
 /** Trusted in-process code, not a sandbox. No discovery, downloads, or runtime/session hooks. */
 export class AssistantToolExtensions {
   readonly sources = new Map<string, SourceDto>();
+  readonly skillDeclarations: AgentSkillDeclaration[] = [];
   private loaded: Array<{ id: string; extension: AssistantExtension }> = [];
   private statuses = new Map<string, string>();
   private lifetime = new AbortController();
@@ -87,6 +91,7 @@ export class AssistantToolExtensions {
     this.statuses.clear();
     this.sources.clear();
     this.commands.clear();
+    this.skillDeclarations.length = 0;
     let settings;
     try { settings = await readAssistantExtensions(this.cwd); }
     catch (error) {
@@ -116,11 +121,11 @@ export class AssistantToolExtensions {
         const dataDir = join(this.cwd, ".assistant-extensions", setting.id);
         await mkdir(dataDir, { recursive: true, mode: 0o700 });
         extension = await factory({ cwd: this.cwd, dataDir, config: structuredClone(setting.config), notify: this.ui.notify, confirm: this.ui.confirm });
-        if (!extension || (extension.tools === undefined && extension.commands === undefined)
+        if (!extension || (extension.tools === undefined && extension.commands === undefined && extension.skills === undefined)
           || (extension.tools !== undefined && !Array.isArray(extension.tools))
           || (extension.commands !== undefined && !Array.isArray(extension.commands))
           || (extension.dispose !== undefined && typeof extension.dispose !== "function")) {
-          throw new Error("扩展需要返回 tools 或 commands 数组，以及可选的 dispose 函数");
+          throw new Error("扩展需要返回 tools、commands 或 skills 数组，以及可选的 dispose 函数");
         }
         const extensionTools = extension.tools ?? [];
         const extensionCommands = extension.commands ?? [];
@@ -170,6 +175,12 @@ export class AssistantToolExtensions {
           });
         }
         this.loaded.push({ id: setting.id, extension });
+        // Manuals are independent of tool/command registration: malformed or missing skills only
+        // produce resource diagnostics, and cannot roll back working tools or commands.
+        this.skillDeclarations.push(
+          { paths: extension.skills, source, ...(setting.module.startsWith("builtin:") ? {} : { baseDir: dirname(setting.module) }) },
+          { paths: setting.skills, baseDir: this.cwd, source: { ...source, path: join(this.cwd, ASSISTANT_EXTENSIONS_FILE) } },
+        );
       } catch (error) {
         if (typeof extension?.dispose === "function") {
           try { await extension.dispose(); } catch { /* The load error remains the useful diagnosis. */ }

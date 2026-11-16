@@ -12,6 +12,9 @@ export interface AssistantExtensionSettings {
   module: string;
   enabled: boolean;
   config: JsonObject;
+  /** Optional manual paths, relative to extensions.json. Validated separately so a bad manual
+   * never prevents an otherwise working extension from loading. */
+  skills?: unknown;
 }
 
 export const ASSISTANT_EXTENSIONS_FILE = "extensions.json";
@@ -45,14 +48,14 @@ function parseAssistantExtensions(input: unknown): AssistantExtensionSettings[] 
   return input.map((raw: unknown) => {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Expected an extension object");
     const item = raw as Record<string, unknown>;
-    if (Object.keys(item).some(key => !["id", "module", "enabled", "config"].includes(key))) throw new Error("Unknown extension field");
+    if (Object.keys(item).some(key => !["id", "module", "enabled", "config", "skills"].includes(key))) throw new Error("Unknown extension field");
     const { id, module, enabled } = item;
     if (typeof id !== "string" || id.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u.test(id) || ids.has(id)) throw new Error("Invalid or duplicate extension id");
     ids.add(id);
     if (typeof module !== "string" || module.length > 16_384
       || (!/^builtin:[a-zA-Z0-9_-]+$/u.test(module) && !((isAbsolute(module) || win32.isAbsolute(module)) && /\.(mjs|js)$/u.test(module)))) throw new Error("Invalid extension module");
     if (typeof enabled !== "boolean") throw new Error("Expected enabled boolean");
-    return { id, module, enabled, config: cloneBoundedJsonObject(item.config) };
+    return { id, module, enabled, config: cloneBoundedJsonObject(item.config), ...(item.skills === undefined ? {} : { skills: item.skills }) };
   });
 }
 

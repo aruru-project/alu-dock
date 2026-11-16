@@ -40,13 +40,15 @@ import {
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
-import { compareCommandDtos, compareToolDtos, type CommandDto } from "../core/config-projection.js";
+import { compareCommandDtos, compareToolDtos, type CommandDto, type ResourceDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { projectJsonObject, type JsonObject } from "../core/json-value.js";
 import { localMinute } from "../core/local-time.js";
 import { mainModelOwner } from "../model-service/owner.js";
 import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
+import { AgentSkills, bundledDockSkillPath } from "../worker/agent-skills.js";
+import { projectResources, resolveResourceFile } from "../worker/resource-files.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import { appendDockAttachmentContext } from "../pi/dock-attachment-context.js";
 import {
@@ -157,6 +159,7 @@ export async function createAssistantAgent(init: AssistantWorkerInit, host: Work
   const her = new AssistantAgent(cwd, host, { call: assistant }, models, settings, session, attachmentContextKey, builtins, modelSpeed);
   await her.chooseStartingModel(init.workerConfig?.model, init.sessionFile === undefined);
   await her.loadExtensions();
+  her.refreshSkills();
   return her;
 }
 
@@ -173,6 +176,7 @@ class AssistantAgent implements WorkerAgent {
   private tools: AgentTool[];
   private readonly builtInTools: AgentTool[];
   private readonly extensions: AssistantToolExtensions;
+  private readonly skills: AgentSkills;
   private readonly workTools: AgentTool[];
   private model: Model<Api> | undefined;
   private thinkingLevel: ThinkingLevel = "off";
@@ -229,6 +233,7 @@ class AssistantAgent implements WorkerAgent {
     builtins: AssistantBuiltinExtensions,
     private readonly modelSpeed: ModelSpeedRuntime,
   ) {
+    this.skills = new AgentSkills(cwd);
     this.extensions = new AssistantToolExtensions(cwd, builtins, {
       notify: (message, level, operationId) => this.tell(message, level, operationId),
       confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message, optionsMeta: { signalAborted: signal.aborted } }, signal) === true,
@@ -333,6 +338,16 @@ class AssistantAgent implements WorkerAgent {
     this.agent.state.tools = this.tools;
   }
 
+  refreshSkills(): void {
+    const changed = this.skills.refresh(this.extensions.skillDeclarations, this.host.attachments === undefined ? [] : [
+      { path: bundledDockSkillPath("dock-attachments"), source: { kind: "built-in" } },
+    ]);
+    if (changed) this.contextReady = false;
+  }
+
+  /** The same current list authorizes resource.content. Other local context snapshots may join it. */
+  private getDocumentResources(): ResourceDto[] { return [...this.skills.resources]; }
+
   // ---- What the Host asks -------------------------------------------------------------------
 
   subscribe(listener: (event: AgentEvent) => void): () => void {
@@ -394,8 +409,7 @@ class AssistantAgent implements WorkerAgent {
         if (request.params.update.key !== "modelSpeed") throw this.notHers("助手在这里可以调整模型速度；其他设置请到助手设置中修改。");
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
-      // She has none of these: clients open her Work and show them empty.
-      case "resource.get": return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
+      case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);
       // Commands run directly for her owner; no model turn is involved.
       case "command.catalog": {
         const commands = [DOCK_TOOLS_SWITCH, ...this.extensions.commandCatalog]
@@ -439,6 +453,7 @@ class AssistantAgent implements WorkerAgent {
     this.opening.refresh();
     await this.models.refresh({ allowNetwork: false });
     await this.loadExtensions();
+    this.refreshSkills();
     await this.dropForgotten().catch(() => {});
     this.contextReady = false;
     const sessionFile = this.session.getSessionFile();
@@ -501,7 +516,7 @@ class AssistantAgent implements WorkerAgent {
       }
       case "wait_for_idle": await this.running; return null;
       case "resolve_file_source": {
-        if (control.kind !== "published") throw new Error("The assistant has no project resources");
+        if (control.kind !== "published") return resolveResourceFile(this.getDocumentResources(), control.ref);
         const { dto: file, source } = this.publishedFiles.resolve(control.ref);
         return { kind: "published", file, source };
       }
@@ -1012,9 +1027,12 @@ class AssistantAgent implements WorkerAgent {
 
   /** Her opening leads what the model is given; the conversation follows as the session holds it. */
   private async leadWithOpening(): Promise<void> {
+    // A new reply sees new manuals without a prerequisite Reload or a file watcher. Unchanged
+    // metadata keeps the same leading context; full manuals enter only through the read tool.
+    this.refreshSkills();
     const { text, changed } = await this.opening.text();
     if (!changed && this.contextReady) return;
-    const opening = createInitialSystemMessage(text, this.tools.map(toToolDeclaration));
+    const opening = createInitialSystemMessage(text + this.skills.prompt, this.tools.map(toToolDeclaration));
     const conversation = this.session.buildSessionContext().messages.filter((message) => message.role !== "system");
     this.agent.state.messages = opening === undefined ? conversation : [opening, ...conversation];
     this.contextReady = true;

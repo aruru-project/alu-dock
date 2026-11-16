@@ -2,11 +2,12 @@ import { piSystemPromptResolver } from "./system-template-provider.js";
 import { resolvePiStartingModel } from "./pi-starting-model.js";
 import { workerToolSelection } from "./worker-tool-policy.js";
 import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
+import { bundledDockSkillPath } from "../worker/agent-skills.js";
+import { capJsonItems, documentResource, MAX_PROJECTION_ITEMS, projectResources, resolveResourceFile } from "../worker/resource-files.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, join, relative, resolve } from "node:path";
 
 import {
   type AgentSession,
@@ -31,8 +32,6 @@ import {
   type UserBashEventResult,
 } from "@earendil-works/pi-coding-agent";
 
-import { ResourceContentError } from "../core/resource-content.js";
-import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { CHILD_DOCK_TOOL_NAMES, dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
 import { dockAttachmentsExtension } from "./dock-attachments-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachment-access.js";
@@ -105,8 +104,6 @@ import {
   MAX_COMMAND_COMPLETION_TEXT_CHARS,
   MAX_COMMAND_CONTENT_PAGE_CHARS,
   compareCommandDtos,
-  compareDiagnosticDtos,
-  compareResourceDtos,
   compareSourceDtos,
   compareToolDtos,
 } from "../core/config-projection.js";
@@ -583,9 +580,7 @@ export class PiAgentAdapter {
           const { dto: file, source } = this.options.publishedFiles.resolve(request.ref);
           return { kind: "published", file, source };
         }
-        const resource = this.getDocumentResources().find((item) => item.contentRef === request.ref);
-        if (!resource?.path) throw new ResourceContentError("这份资源已不在当前列表中。请返回项目状态重新选择。");
-        return { kind: "resource", path: resource.path };
+        return resolveResourceFile(this.getDocumentResources(), request.ref);
       }
       case "wait_for_idle": await this.waitForIdle(); return null;
       case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
@@ -721,29 +716,14 @@ export class PiAgentAdapter {
       ...prompts.diagnostics.map(projectDiagnostic),
       ...(modelError ? [{ severity: "error" as const, message: safeRequiredText(modelError, 2_048, "Model configuration error omitted"), source: "models.json" }] : []),
     ];
-    const sortedResources = resources.sort(compareResourceDtos);
-    const sortedDiagnostics = diagnostics.sort(compareDiagnosticDtos);
-    const projectedResources = capJsonItems(sortedResources, 350_000);
-    const projectedDiagnostics = capJsonItems(sortedDiagnostics, 250_000);
-    return {
-      resources: projectedResources,
-      diagnostics: projectedDiagnostics,
-      resourceTotal: sortedResources.length,
-      resourcesTruncated: projectedResources.length < sortedResources.length,
-      diagnosticTotal: sortedDiagnostics.length,
-      diagnosticsTruncated: projectedDiagnostics.length < sortedDiagnostics.length,
-    };
+    return projectResources(resources, diagnostics);
   }
 
   private getDocumentResources(): ResourceDto[] {
     const loader = this.requireActive().services.resourceLoader;
     const resources: ResourceDto[] = [];
     const add = (kind: ResourceDto["kind"], name: string, filePath: string | undefined, source?: SourceDto) => {
-      const path = exactOptionalText(filePath, MAX_SOURCE_FILE_PATH_CHARS);
-      resources.push({
-        kind, name: boundedString(name, 256, kind), ...(source ? { source } : {}),
-        ...(path ? { path, contentRef: createHash("sha256").update(`${kind}\u0000${path}`).digest("hex") } : {}),
-      });
+      resources.push(documentResource(kind, boundedString(name, 256, kind), filePath, source));
     };
     for (const skill of loader.getSkills().skills) add("skill", skill.name, skill.filePath, projectSource(skill.sourceInfo, "skill"));
     for (const prompt of loader.getPrompts().prompts) add("prompt", prompt.name, prompt.filePath, projectSource(prompt.sourceInfo, "prompt"));
@@ -1601,7 +1581,6 @@ export class PiAgentAdapter {
   }
 }
 
-const MAX_PROJECTION_ITEMS = 2_000;
 const MAX_TOOL_PROJECTION_BYTES = 600_000;
 
 function exactOptionalText(value: unknown, limit: number): string | undefined {
@@ -2042,18 +2021,6 @@ function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {
   };
 }
 
-function capJsonItems<T>(items: T[], maxBytes: number): T[] {
-  const result: T[] = [];
-  let bytes = 2;
-  for (const item of items.slice(0, MAX_PROJECTION_ITEMS)) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (result.length === 0 ? 0 : 1);
-    if (bytes + itemBytes > maxBytes) break;
-    result.push(item);
-    bytes += itemBytes;
-  }
-  return result;
-}
-
 function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
   return {
     severity: diagnostic.type === "error" ? "error" : "warning",
@@ -2143,7 +2110,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionsOverride: ownCanonicalShowImage,
         appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE, ...(options.child ? [ALU_DOCK_CHILD_GUIDANCE] : [])],
         ...(options.dockAttachmentPort === undefined ? {} : {
-          additionalSkillPaths: [dockAttachmentSkillPath()],
+          additionalSkillPaths: [bundledDockSkillPath("dock-attachments")],
         }),
       },
     });
@@ -2209,19 +2176,6 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     ...(options.dockAttachmentPort === undefined ? {} : { dockAttachmentPort: options.dockAttachmentPort }),
     ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });
-}
-
-function dockAttachmentSkillPath(): string {
-  return bundledDockSkillPath("dock-attachments");
-}
-
-function bundledDockSkillPath(name: string): string {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    resolve(moduleDirectory, `../../skills/${name}/SKILL.md`),
-    resolve(moduleDirectory, `../../../skills/${name}/SKILL.md`),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
 function compactionFailureReason(message: string): "nothing_to_compact" | "already_compacted" | "cancelled" | "failed" {
