@@ -11,6 +11,12 @@ import { waitFor } from "./support/plan-goal-provider.js";
 // both as a direct command and a model tool, without switching her chatting model or logging in again.
 test("assistant commands and tools query a different account using Main's existing model authentication", { timeout: 60_000 }, async context => {
   const secret = "MAIN_ONLY_ACCOUNT_CREDENTIAL_671";
+  let stderr = "";
+  const write = process.stderr.write.bind(process.stderr);
+  context.mock.method(process.stderr, "write", (...args: Parameters<typeof process.stderr.write>) => {
+    stderr += args[0].toString();
+    return write(...args);
+  });
   const team = await startNativeTeam(context, ["chat", "account"], {
     prefix: "alu-assistant-extension-models-", assistant: true, modelService: true,
     serviceEnvironment: { ACCOUNT_SERVICE_KEY: secret },
@@ -32,20 +38,25 @@ test("assistant commands and tools query a different account using Main's existi
   assert.ok(address && typeof address !== "string");
   const module = join(team.root, "account-extension.mjs");
   await writeFile(module, `export default async function(context) {
-    async function query(signal) {
+    async function query(signal, outcome) {
       await context.models.refresh({ allowNetwork: false, signal });
       const model = context.models.getModel("account", "fixture");
       if (!model) throw new Error("The configured account model is missing");
       const auth = await context.models.getAuth(model, { signal });
       if (!auth?.auth.apiKey) throw new Error("Sign in on Main first");
+      if (outcome === "wait") {
+        context.notify("Synthetic account tool waiting");
+        await new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error(auth.auth.apiKey)), { once: true }));
+      }
+      if (outcome === "fail") throw Object.assign(new Error(auth.auth.apiKey, { cause: new Error(auth.auth.apiKey) }), { privateDetail: auth.auth.apiKey });
       const response = await fetch(context.config.url, { headers: { Authorization: "Bearer " + auth.auth.apiKey }, signal });
       if (!response.ok) throw new Error("Account lookup failed");
       return JSON.stringify(await response.json());
     }
     return {
       commands: [{ name: "account-usage", description: "Read account allowance", execute: (_args, call) => query(call.signal) }],
-      tools: [{ name: "account_usage", description: "Read account allowance", parameters: { type: "object", properties: {}, additionalProperties: false },
-        execute: async (_args, call) => ({ content: [{ type: "text", text: await query(call.signal) }] }) }]
+      tools: [{ name: "account_usage", description: "Read account allowance", parameters: { type: "object", properties: { outcome: { type: "string" } }, additionalProperties: false },
+        execute: async (args, call) => ({ content: [{ type: "text", text: await query(call.signal, args.outcome) }] }) }]
     };
   }`);
   await writeFile(join(team.cwd, "extensions.json"), JSON.stringify([
@@ -77,9 +88,34 @@ test("assistant commands and tools query a different account using Main's existi
   assert.equal(queries, 2);
   assert.equal((await client.list()).length, 1, "This account query does not create another Work");
   assert.equal((await client.status(assistant.id)).executor.model?.provider, "chat");
-  // This new credential access is for trusted extension code, never automatic model/UI output.
+  // PR review 2026-11-16: a credential-bearing extension exception became the next model's
+  // tool result and was saved in the conversation. The real tool boundary must replace it.
+  await client.prompt(assistant.id, "测试本机工具失败。", "auto", "account-tool-failure");
+  const failed = await team.providers.chat.request(2);
+  failed.tools({ id: "failed-account", name: "account_usage", arguments: { outcome: "fail" } });
+  const recovered = await team.providers.chat.request(3);
+  const failedResult = (recovered.body.messages as Array<{ role: string; tool_call_id?: string; content?: unknown }>).find(message => message.role === "tool" && message.tool_call_id === "failed-account");
+  assert.ok(failedResult?.content, "The assistant must get an actionable failure result rather than lose the tool response");
+  recovered.text("工具查询失败，可以检查扩展设置后重试。");
+  await waitFor(async () => (await client.status(assistant.id)).execution === "idle", "The assistant did not finish after the tool failure");
+
+  // Stopping a pending tool is cancellation, not an ordinary failure or a new model request.
+  const beforeCancelLogs = stderr;
+  await client.prompt(assistant.id, "等待本机工具。", "auto", "account-tool-cancel");
+  const pending = await team.providers.chat.request(4);
+  pending.tools({ id: "pending-account", name: "account_usage", arguments: { outcome: "wait" } });
+  await waitFor(() => notifications.includes("Synthetic account tool waiting"), "The cancellable tool did not start");
+  await client.abortRestoreQueue(assistant.id);
+  assert.equal((await client.status(assistant.id)).execution, "idle");
+  assert.equal(team.providers.chat.requests.length, 5, "Cancel must not request another model turn");
+  assert.equal(stderr, beforeCancelLogs, "Cancellation must not be logged as an extension failure");
+  await client.reloadSession(assistant.id);
+  assert.equal(team.providers.chat.requests.length, 5, "Reload must not resume the cancelled tool turn");
+  assert.equal(queries, 2, "Failed and cancelled tool calls do not issue account requests");
+  assert.equal(team.providers.account.requests.length, 0, "Account authentication does not perform inference");
+  // This credential access is for trusted extension code, never automatic model/UI/log output.
   const session = (await client.status(assistant.id)).executor.sessionFile!;
-  for (const value of [notifications, await client.tools(assistant.id), first.body, after.body, await readFile(session, "utf8")]) {
-    assert.ok(!JSON.stringify(value).includes(secret), "Credentials must stay out of notices, tool schemas and conversation");
+  for (const value of [notifications, await client.tools(assistant.id), recovered.body, await readFile(session, "utf8"), stderr]) {
+    assert.ok(!JSON.stringify(value).includes(secret), "Credentials must stay out of model requests, notices, saved conversation and logs");
   }
 });

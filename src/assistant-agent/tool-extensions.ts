@@ -199,11 +199,20 @@ export class AssistantToolExtensions {
             name: tool.name, label: tool.name, description: tool.description,
             parameters: tool.parameters as AgentTool["parameters"],
             execute: async (callId, params, signal, onUpdate) => {
-              const result = await tool.execute(params as JsonObject, {
-                callId, signal: signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal,
-                ...(onUpdate === undefined ? {} : { onUpdate: (partial: AssistantToolResult) => onUpdate({ ...partial, details: partial.details }) }),
-              });
-              return { ...result, details: result.details };
+              const callSignal = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
+              try {
+                const result = await tool.execute(params as JsonObject, {
+                  callId, signal: callSignal,
+                  ...(onUpdate === undefined ? {} : { onUpdate: (partial: AssistantToolResult) => onUpdate({ ...partial, details: partial.details }) }),
+                });
+                return { ...result, details: result.details };
+              } catch {
+                // The Agent turns exceptions into model-visible tool results. Never hand it the
+                // original error (or cause), even when an extension rejects during cancellation.
+                if (callSignal.aborted) throw new DOMException("工具调用已中止。", "AbortError");
+                console.error(`Assistant extension ${setting.id} tool_failed ${tool.name}: Check the extension settings and implementation, then retry.`);
+                throw new Error(`扩展 ${setting.id} 的工具 ${tool.name} 执行失败。请检查扩展设置和实现后重试。`);
+              }
             },
           });
         }
@@ -222,10 +231,11 @@ export class AssistantToolExtensions {
         if (typeof extension?.dispose === "function") {
           try { await extension.dispose(); } catch { /* The load error remains the useful diagnosis. */ }
         }
-        // Factory errors may quote private config. Details stay in local Worker diagnostics.
-        console.error(`Assistant extension ${setting.id} failed to load:`, error);
+        // Unknown exceptions may contain credentials anywhere, including nested/custom properties.
+        // Log only loader-owned facts; neither UI nor local diagnostics receive the exception.
+        console.error(`Assistant extension ${setting.id} load_failed: Check extensions.json and the extension module, then Reload.`);
         this.status(setting.id, error instanceof RegistrationConflict ? error.message
-          : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload；详情见本机日志。`);
+          : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload。`);
       }
     }
     return tools;
@@ -260,14 +270,13 @@ export class AssistantToolExtensions {
       signal.throwIfAborted();
       if (result !== undefined && typeof result !== "string") throw new Error("Command execute must return text or nothing");
       notify(result || `命令 /${name} 已完成。`);
-    } catch (error) {
+    } catch {
       if (signal.aborted) {
         notify(`命令 /${name} 已中止。`, "warning");
         return;
       }
-      // Extension exceptions can contain credentials; keep the original in local diagnostics only.
-      console.error(`Assistant command /${name} failed:`, error);
-      const message = `命令 /${name} 执行失败。请检查扩展设置和本机日志后重试。`;
+      console.error(`Assistant extension ${registered.dto.source.package} command_failed /${name}: Check the extension settings and implementation, then retry.`);
+      const message = `命令 /${name} 执行失败。请检查扩展设置和实现后重试。`;
       notify(message, "error");
       throw new Error(message);
     } finally {
@@ -290,9 +299,9 @@ export class AssistantToolExtensions {
     const errors: string[] = [];
     for (const { id, extension } of this.loaded.splice(0)) {
       try { await extension.dispose?.(); }
-      catch (error) {
-        console.error(`Assistant extension ${id} failed to dispose:`, error);
-        const message = `扩展 ${id} 没有正常关闭。可重新启动助手，详情见本机日志。`;
+      catch {
+        console.error(`Assistant extension ${id} dispose_failed: Check the extension cleanup implementation, then restart the assistant.`);
+        const message = `扩展 ${id} 没有正常关闭。请检查扩展的关闭处理后重新启动助手。`;
         errors.push(message);
         this.ui.notify(message, "warning");
       }
