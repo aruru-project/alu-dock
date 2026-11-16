@@ -240,7 +240,7 @@ class AssistantAgent implements WorkerAgent {
       notify: (message, level, operationId) => this.tell(message, level, operationId),
       confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message, optionsMeta: { signalAborted: signal.aborted } }, signal) === true,
       status: (key, text) => { void host.call("ui.setStatus", { key, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
-    });
+    }, models);
     this.conversation = new PiSessionConversation({ attachmentContextKey, publishedFiles: this.publishedFiles });
     this.shown = new RecentConversation(session);
     this.handoff = new Handoff({

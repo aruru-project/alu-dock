@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { Models } from "@earendil-works/pi-ai";
 import { ASSISTANT_EXTENSIONS_FILE, readAssistantExtensions } from "../assistant/extensions-config.js";
 import { parseCommandsResult } from "../control/protocol.js";
 import { compareCommandDtos, type CommandDto, type SourceDto } from "../core/config-projection.js";
@@ -29,12 +30,17 @@ export interface AssistantExtensionTool {
   parameters: JsonObject;
   execute(params: JsonObject, context: AssistantToolCallContext): Promise<AssistantToolResult>;
 }
+/** Existing SDK Models methods only: Main keeps credential ownership; no login or configuration mutation. */
+export type AssistantExtensionModels = Pick<Models, "getModels" | "getModel" | "getAvailable" | "checkAuth" | "getAuth" | "refresh">;
 export interface AssistantExtensionContext {
   cwd: string;
   /** Persistent, private directory for this extension id only. Disabling does not delete it. */
   dataDir: string;
   /** A copy of only this extension's saved settings. Never included in model context by the loader. */
   config: JsonObject;
+  /** Main-backed model catalog and effective auth, independent of the chatting model.
+   * Auth is for trusted local code only: never include it in tool results, notices or logs. */
+  readonly models: AssistantExtensionModels;
   notify(message: string, level?: "info" | "warning"): void;
   confirm(title: string, message: string, signal: AbortSignal): Promise<boolean>;
 }
@@ -72,6 +78,7 @@ export class AssistantToolExtensions {
   private lifetime = new AbortController();
   private readonly commands = new Map<string, { command: AssistantExtensionCommand; dto: CommandDto }>();
   private readonly calls = new Set<AbortController>();
+  private readonly models: AssistantExtensionModels;
 
   constructor(
     private readonly cwd: string,
@@ -80,7 +87,18 @@ export class AssistantToolExtensions {
       notify(message: string, level?: "info" | "warning" | "error", operationId?: string): void;
       status(key: string, text?: string): void;
     },
-  ) {}
+    models: AssistantExtensionModels,
+  ) {
+    // Bind the existing public methods, not the runtime object with its private state.
+    this.models = {
+      getModels: models.getModels.bind(models),
+      getModel: models.getModel.bind(models),
+      getAvailable: models.getAvailable.bind(models),
+      checkAuth: models.checkAuth.bind(models),
+      getAuth: models.getAuth.bind(models),
+      refresh: models.refresh.bind(models),
+    };
+  }
 
   get commandCatalog(): CommandDto[] { return [...this.commands.values()].map(({ dto }) => dto); }
 
@@ -131,7 +149,7 @@ export class AssistantToolExtensions {
         if (typeof factory !== "function") throw new Error("模块需要 default 导出一个扩展工厂函数");
         const dataDir = join(this.cwd, ".assistant-extensions", setting.id);
         await mkdir(dataDir, { recursive: true, mode: 0o700 });
-        extension = await factory({ cwd: this.cwd, dataDir, config: structuredClone(setting.config), notify: this.ui.notify, confirm: this.ui.confirm });
+        extension = await factory({ cwd: this.cwd, dataDir, config: structuredClone(setting.config), models: this.models, notify: this.ui.notify, confirm: this.ui.confirm });
         if (!extension || (extension.tools === undefined && extension.commands === undefined && extension.skills === undefined)
           || (extension.tools !== undefined && !Array.isArray(extension.tools))
           || (extension.commands !== undefined && !Array.isArray(extension.commands))

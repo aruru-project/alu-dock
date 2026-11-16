@@ -82,8 +82,27 @@ export default async function (context) {
 - `context.cwd`：助手工作区。
 - `context.dataDir`：`<cwd>/.assistant-extensions/<id>`，由加载器创建。停用、移除和 Reload 不删除数据；改变标识会使用另一处目录。
 - `context.config`：本项配置的副本，不含其他扩展配置。
+- `context.models`：现有 SDK `Models` 的目录与认证读取子集，使用助手已接入 Main 的模型运行时，与助手当前聊天模型无关。见下节。
 - `context.notify(message, level?)`：通知主人，不新增聊天消息；级别为 `info` 或 `warning`。
 - `context.confirm(title, message, signal)`：沿 Host 的确认界面询问主人，返回 `Promise<boolean>`。只有返回 `true` 才执行需要确认的操作。
+
+### 复用 Main 的模型目录与认证
+
+`context.models` 的方法直接沿用 `@earendil-works/pi-ai` 的公开 `Models` 类型，不把 Worker、会话或模型运行时内部对象交给扩展：
+
+| 方法 | 用途 |
+|---|---|
+| `getModels(providerId?)`、`getModel(providerId, modelId)` | 读取当前已加载的聊天模型目录，按指定通道选择，不要求切换助手的聊天模型。 |
+| `getAvailable(providerId?, options?)` | 读取认证配置可用的模型。 |
+| `checkAuth(providerId, options?)` | 检查认证配置的类型与来源，不为这个检查续期 OAuth。 |
+| `getAuth(providerIdOrModel, options?)` | 取得本次请求的有效认证；按模型获取时也包含对应的静态请求头。认证读取、OAuth 续期仍交给 Main。 |
+| `refresh(options?)` | 按需重新读取 Main 配置与目录；例如 `refresh({ allowNetwork: false, signal })`。普通查询不要求每次先刷新。 |
+
+异步方法的 `options.signal` 可沿用工具或命令的取消信号。`getAuth` 返回 SDK 的 `AuthResult`，认证在 `result.auth` 下；通道没有配置认证时返回 `undefined`，解析或续期失败时拒绝。需要认证的业务请求应当时调用，不保存 token 或自行维护续期。
+
+这是交给**可信本机扩展代码**的能力，不是给模型的新凭据工具。访问令牌可用于对应服务请求，但不要把整个认证结果、请求头或原始异常交给模型、用户结果或日志；只返回业务需要的数据和安全的处理说明。模型目录对象也可能带服务请求头，展示时只挑名称等必要字段。服务地址与认证用途由扩展核对，不能把一个通道的凭据随意转发到另一个地址。
+
+命令和模型工具都可闭包使用同一个 `context.models`。本轮开放目录与认证读取，登录、登出、配置修改和推理调用不在这个扩展接口中；账号操作仍走 Main 原有登录入口，不建立第二套管理机制。供应商额度等业务请求与解释由扩展实现，Dock 核心不添加供应商专属查询。
 
 ### 模型工具
 
