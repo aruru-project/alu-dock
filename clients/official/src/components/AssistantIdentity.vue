@@ -14,7 +14,7 @@ watch(() => app.connectionContext, () => { void assistant.loadIdentity() }, { im
 <template>
   <section v-if="!identity.read || identity.current !== null" class="assistant-identity" aria-labelledby="assistant-display-name">
     <h4 id="assistant-display-name">显示名字</h4>
-    <p class="assistant-note">保存在 Main，所有客户端共用。这里只改显示名字，不改人设，也不创建新的对话或记忆。</p>
+    <p class="assistant-status">这个名字保存在 Main，所有客户端共用。</p>
     <form v-if="identity.current !== null" @submit.prevent="assistant.saveIdentity()">
       <label for="assistant-name-input">名字</label>
       <div class="assistant-identity-field">
@@ -34,5 +34,6 @@ watch(() => app.connectionContext, () => { void assistant.loadIdentity() }, { im
 .assistant-identity label { display: block; margin: 12px 0 6px; color: var(--alu-text-muted); font-size: var(--alu-meta-size); }
 .assistant-identity-field { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .assistant-identity-field input { min-width: 0; flex: 1 1 160px; padding: 9px 10px; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-control-bg); color: var(--alu-text); font: inherit; }
+.assistant-identity-field input:focus { outline: none; box-shadow: var(--alu-focus-ring); }
 .assistant-identity-field .button { min-height: 40px; }
 </style>

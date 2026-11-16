@@ -129,7 +129,7 @@ export const useAssistantStore = defineStore('assistant', () => {
       const saved = await identityOnce([context.connectionId, 'display name'], name, operationId => setAssistantSettings({ displayName: name }, operationId, context))
       editor.current = saved.displayName ?? editor.current
       if (editor.draft === draft) editor.draft = null
-      editor.save = { state: 'saved', message: '名字已保存，所有客户端共用这个名字。对话、人设和记忆保持不变。' }
+      editor.save = { state: 'saved', message: '名字已保存，所有客户端共用这个名字。' }
       if (app.contextMatches(context)) await app.refreshWorksQuietly()
     } catch (cause) {
       editor.save = { state: 'failed', message: userErrorMessage(cause, '名字没有保存成功，草稿还在。请重试。') }
