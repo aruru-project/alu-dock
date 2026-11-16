@@ -216,7 +216,8 @@ const resourceGroups = computed(() => ([
   { kind: 'skill' as const, label: '已加载 Skills' },
   { kind: 'prompt' as const, label: 'Prompts' },
   { kind: 'context' as const, label: 'Project Context' },
-].map((group) => ({ ...group, items: filteredResources.value.filter((resource) => resource.kind === group.kind) }))))
+].map((group) => ({ ...group, items: filteredResources.value.filter((resource) => resource.kind === group.kind) }))
+  .filter(group => !residentAssistant.value || group.kind === 'skill' || group.items.length)))
 const filteredDiagnostics = computed(() => {
   const query = resourceSearch.value.trim().toLowerCase()
   return (resources.value?.diagnostics ?? []).filter((diagnostic) => !query || `${diagnostic.severity} ${diagnostic.message}`.toLowerCase().includes(query))
@@ -640,7 +641,7 @@ function isCurrentModel(model: ModelInfo) {
     <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
 
     <template v-else-if="section === 'commands'">
-      <div v-if="requestedCommandUnavailable" class="alu-dialog-error">助手尚未提供这条命令。更新 Main 后可重新读取命令列表。<button type="button" class="alu-link-button" @click="loadSection('commands', true)">重新读取命令</button></div>
+      <div v-if="requestedCommandUnavailable" class="alu-dialog-error">没有读到助手运行详情命令，请重新读取命令列表。<button type="button" class="alu-link-button" @click="loadSection('commands', true)">重新读取命令</button></div>
       <div v-if="commandAbortError" class="alu-dialog-error">{{ commandAbortError }}<button type="button" class="alu-link-button" :disabled="workActions.aborting" @click="cancelCommand">重试中止</button></div>
       <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>命令正在执行或等待确认。</span><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
       <template v-if="!commandDetailMode">
@@ -763,7 +764,7 @@ function isCurrentModel(model: ModelInfo) {
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
       <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="!residentAssistant && handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
-      <p v-if="residentAssistant" class="alu-project-status-note">下面列出助手实际注册的工具，不能逐个开关。扩展可在助手设置中配置和启停，保存后 Reload 生效。</p>
+      <p v-if="residentAssistant" class="alu-project-status-note">下面列出助手实际注册的工具。扩展由 Main 本机的配置管理，修改后用 Reload 载入；加载问题可通过命令中心查看助手运行详情。</p>
       <div v-if="tools?.truncated" class="alu-project-status-note">{{ residentAssistant ? '工具列表未完整返回。' : '工具列表未完整返回，暂时不能切换工具。' }}</div>
       <div class="ui-dialog-options"><component :is="residentAssistant ? 'div' : 'button'" v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': !residentAssistant && tool.active, 'is-cursor': !residentAssistant && optionCursor === index }" :disabled="residentAssistant ? undefined : !!pending || !!tools?.truncated" @click="!residentAssistant && toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">{{ residentAssistant ? '可用' : 'ACTIVE' }}</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span><span v-if="tool.source" class="ui-dialog-option-meta">{{ tool.source.kind === 'extension' ? `extension / ${tool.source.package ?? '扩展'}` : '内置' }}</span></span></span></component></div>
     </section>
@@ -788,8 +789,8 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="tools" class="alu-project-status-chips"><span v-for="tool in tools.tools.filter(item => item.active)" :key="tool.name" class="alu-project-status-chip">{{ tool.name }}</span><span v-if="!tools?.tools.some(item => item.active)" class="alu-project-status-empty">当前没有启用工具</span></div>
         <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回</div>
       </section>
-      <section v-if="!residentAssistant" class="alu-project-status-section">
-        <h3>Loaded Resources</h3>
+      <section class="alu-project-status-section">
+        <h3>{{ residentAssistant ? 'Skills 与来源' : 'Loaded Resources' }}</h3>
         <div v-if="loadErrors.resources" class="alu-dialog-error">{{ loadErrors.resources }}<button type="button" @click="loadSection('resources', true)">重试读取资源</button></div>
         <div v-else-if="!resources" class="alu-dialog-loading">正在读取资源…</div>
         <template v-if="resources">

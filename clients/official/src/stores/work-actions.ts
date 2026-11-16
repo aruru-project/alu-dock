@@ -439,7 +439,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     assistantStatusError.value = ''
     const assistant = app.works.find(isResidentAssistant)
     if (!assistant) {
-      assistantStatusError.value = '工作列表里还没有助手。请刷新工作列表后重试。'
+      assistantStatusError.value = '助手暂未出现在工作列表中，请稍后重试。'
       return
     }
     if (assistant.lifecycle !== 'active') {

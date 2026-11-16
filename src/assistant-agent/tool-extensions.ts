@@ -95,8 +95,8 @@ export class AssistantToolExtensions {
   async load(reserved: readonly AgentTool[], reservedCommands: readonly CommandDto[] = []): Promise<AgentTool[]> {
     await this.dispose();
     this.lifetime = new AbortController();
-    for (const id of this.statuses.keys()) this.ui.status(`扩展/${id}`);
     this.statuses.clear();
+    this.showStatus();
     this.sources.clear();
     this.commands.clear();
     this.skillDeclarations.length = 0;
@@ -259,8 +259,10 @@ export class AssistantToolExtensions {
   abortCommands(): void { for (const controller of this.calls) controller.abort(); }
 
   /** Only actionable failures are re-published after activate/reload; normal tools stay quiet. */
-  showStatus(): void { for (const [id, text] of this.statuses) this.ui.status(`扩展/${id}`, text); }
-  private status(id: string, text: string): void { this.statuses.set(id, text); this.ui.status(`扩展/${id}`, text); }
+  showStatus(): void {
+    this.ui.status("工具扩展", this.statuses.size ? "有扩展未完全加载，请在命令中心查看助手运行详情。" : undefined);
+  }
+  private status(id: string, text: string): void { this.statuses.set(id, text); this.showStatus(); }
 
   async dispose(): Promise<string[]> {
     this.lifetime.abort();

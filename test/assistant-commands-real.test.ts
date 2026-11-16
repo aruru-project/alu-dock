@@ -135,11 +135,15 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   ]));
   await client.reloadSession(assistant.id);
   assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "safe-echo"]);
-  await waitFor(async () => Object.keys((await client.status(assistant.id)).extensionStatus).includes("扩展/builtin-conflict"), "Missing conflict diagnosis");
-  const status = (await client.status(assistant.id)).extensionStatus;
-  assert.ok(status["扩展/duplicate"]?.includes("/local-echo"));
-  assert.ok(status["扩展/builtin-conflict"]?.includes("/assistant-status"));
-  assert.ok(status["扩展/platform-conflict"]?.includes("/reload") && status["扩展/platform-conflict"]?.includes("/model"), "Each refused platform name is identified for renaming");
+  await waitFor(async () => (await client.status(assistant.id)).extensionStatus["工具扩展"] !== undefined, "Missing extension warning");
+  const conflictFollower = await client.streamEvents(assistant.id, { onEvent: event => { events.push(event); } });
+  try {
+    await client.prompt(assistant.id, "/assistant-status", "auto", "conflict-details");
+    await waitFor(() => notifications("conflict-details").length > 0, "Conflict details did not reach the command console");
+    const report = notifications("conflict-details").map(item => item.message).join("\n");
+    assert.ok(report.includes("/local-echo") && report.includes("/assistant-status"));
+    assert.ok(report.includes("/reload") && report.includes("/model"), "The requested report identifies each refused name for renaming");
+  } finally { conflictFollower.close(); await conflictFollower.done; }
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "kept_local_tool" && tool.source?.package === "platform-conflict"), "The module's original tool remains registered");
   await client.prompt(assistant.id, "/safe-echo", "auto", "kept-command");
   await waitFor(async () => await readFile(keptCommand, "utf8") === "still callable", "A name conflict disposed the module or removed its other command");

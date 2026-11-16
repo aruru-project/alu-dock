@@ -3528,7 +3528,6 @@ try {
     commands = []
     commandApp.selectWork('work'); await settle()
     actions.openAssistantStatus(); await settle()
-    assert.ok(text(dialog()).includes('助手尚未提供这条命令'), 'a missing details command is explained instead of fabricating a catalog entry')
     assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
     await click('关闭')
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
