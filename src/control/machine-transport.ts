@@ -232,7 +232,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
   private nextCandidateOrdinal = 0;
   private revision = 0;
   private listFingerprint = "";
-  private readonly instanceBindings = new Map<string, RemoteInstanceBinding>();
+  private instanceBindings = new Map<string, RemoteInstanceBinding>();
   private readonly snapshotListeners = new Map<string, Set<(snapshot: InstanceSnapshot) => void>>();
   private readonly disconnectListeners = new Set<(instanceIds: readonly string[]) => void>();
   private mainId = "";
@@ -562,7 +562,8 @@ export class MainMachineController implements RemoteInstanceDirectory {
   }
 
   async listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown> {
-    const remote = (await this.options.state.list()).flatMap((machine) => machine.routes.map((route) => route.snapshot));
+    // Publish the same directory that resolves client requests, not a durable batch still being adopted.
+    const remote = this.currentSnapshots();
     const all = [...local, ...remote].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
     const fingerprint = all.map((item) => `${item.id}:${item.updatedAt}:${item.lifecycle}:${item.eventCursor.sequence}`).join("|");
     if (this.listFingerprint && fingerprint !== this.listFingerprint) this.revision += 1;
@@ -1430,10 +1431,12 @@ export class MainMachineController implements RemoteInstanceDirectory {
   private connectionLive(connection: MainConnection | undefined): connection is MainConnection { return connection !== undefined && !connection.closed && !connection.socket.destroyed && Date.now() - connection.lastSeenAt < MACHINE_HEARTBEAT_TIMEOUT_MS; }
 
   private async refreshInstanceBindings(): Promise<void> {
-    this.instanceBindings.clear();
+    const next = new Map<string, RemoteInstanceBinding>();
     for (const machine of await this.options.state.list()) for (const route of machine.routes) {
-      this.instanceBindings.set(route.mainInstanceId, { machineId: machine.id, route: structuredClone(route) });
+      next.set(route.mainInstanceId, { machineId: machine.id, route: structuredClone(route) });
     }
+    // Reads keep the last published directory until the complete replacement is ready.
+    this.instanceBindings = next;
   }
 }
 
