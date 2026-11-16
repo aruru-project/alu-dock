@@ -8,7 +8,7 @@ import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, Agent
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { parseAssistantRequest, type AssistantHostPort } from "../core/assistant.js";
 import { answerModelQuestion, type ModelHostPort } from "../model-service/service-process.js";
-import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError, survivesSessionReplacement } from "../core/agent-worker.js";
+import { AgentMutationEffectUnknownError, AgentStartupTimeoutError, AgentUnavailableBeforeEffectError, survivesSessionReplacement } from "../core/agent-worker.js";
 import { WorkerProcess, type WorkerLaunch, type WorkerProcessTimeouts } from "./worker-process.js";
 import { captureWorkspaceShellEnvironment } from "../platform/workspace-shell-environment.js";
 import {
@@ -126,7 +126,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     try {
       const ready = await Promise.race([
         session.readyPromise,
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Worker startup deadline exceeded")), startup); }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentStartupTimeoutError()), startup); }),
       ]);
       return { session, ...ready };
     } catch (error) {

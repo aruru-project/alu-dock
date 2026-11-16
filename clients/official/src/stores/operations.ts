@@ -110,8 +110,9 @@ export const useOperationsStore = defineStore('operations', () => {
     }
     // A terminal failure is not a UI acknowledgement. Keep it in native state
     // until the corresponding Work/list result entry is explicitly acknowledged.
-    // A lost reply is the same kind of failure: nothing is checked or retried, it
-    // is only told once — inline if its control is on screen, otherwise in the entry.
+    // A still-lost reply is told once — inline if its control is on screen,
+    // otherwise in the entry. Continue has already tried one native observation;
+    // its unknown result offers a manual state read, never automatic replay.
     // Actions whose outcome the conversation shows are the exception: nothing is told.
     // Nor is a failure its control has already shown.
     if (operation.state === 'failed' || operation.state === 'unknown') {
@@ -153,9 +154,16 @@ export const useOperationsStore = defineStore('operations', () => {
         // automatic restoration. Content replacement has already committed.
         if (!applied && (returned || returnedContentErrors.value[operation.operationId])) return
       }
-      // A result reports this operation only. Work state comes from the Host's
-      // list and from the current Work's read and live events; the Work copy in
-      // a result may be older than events already shown, or outlive the Work.
+      if (operation.kind === 'reopen_work' && snapshot && app.activeConnectionId === operation.connectionId) {
+        // Continue targets an unavailable Work. Its native task survives leaving
+        // the page; a late result must still open that same Work when revisited.
+        if (snapshot.eventCursor.hostEpoch !== app.payload?.host.hostEpoch) await app.refreshWorksQuietly()
+        else if (current && current.lifecycle !== 'active' && snapshot.runtimeGeneration > current.runtimeGeneration) observation.acceptWork(snapshot)
+        if (selected.value?.id === operation.instanceId && selected.value.lifecycle === 'active') void observation.load(operation.instanceId, true)
+      }
+      // Except for Continue's unavailable-to-active handoff above, results do not
+      // update Work state: the Host list, read and live events own it. A result's
+      // Work copy may be older than shown events, or outlive the Work.
       if (app.activeConnectionId === operation.connectionId && operation.kind === 'forget_work') app.removeWorkSnapshot(operation.instanceId)
     }
     appliedOperations.value.add(operation.operationId)

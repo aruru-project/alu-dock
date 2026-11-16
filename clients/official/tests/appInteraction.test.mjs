@@ -3048,6 +3048,65 @@ try {
     console.log('PASS: Continue trust: directory shown, cancel and Work switch leave it stopped, both explicit choices reuse the original operation and target')
   }
 
+  // RC67 Continue: native observation can finish after leaving the page. A second
+  // disconnect ends pending and the result offers a read, not another mutation.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    const lost = { ...otherWork, id: 'late-continue', displayName: 'Late Work', lifecycle: 'host_lost', execution: 'unavailable', reopenable: true, ownerHostEpoch: undefined }
+    extraListed = [lost]
+    const pinia = createPinia(), app = useAppStore(pinia), view = element('late-continue-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia); mounted.mount(view); await settle()
+    app.selectWork(lost.id); await settle()
+    let finish, operation
+    const publish = value => { nativeResults.set(value.operationId, value); emit('aludock://operation', value) }
+    reopenNative = args => new Promise(resolve => {
+      operation = { operationId: args.operationId, kind: 'reopen_work', connectionId: 'host', instanceId: args.instanceId, hostEpoch: 'epoch',
+        runtimeGeneration: 1, sessionId: '', editor: null, state: 'pending' }
+      publish(operation); finish = resolve
+    })
+    find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.onClick(); await settle()
+    assert.ok(text(view).includes('你可以离开此页'), 'Continue explains that waiting does not require staying on this page')
+    assert.equal(find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.disabled, true)
+    const continued = atHost({ ...lost, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })
+    extraListed = [continued]; await app.refreshWorksQuietly(); await settle()
+    // Another entrance has already observed recovery, while this native operation
+    // and its original button Promise are both still pending.
+    find(view, item => item.type === 'button' && String(item.props.title).startsWith('打开命令中心')).props.onClick(); await settle()
+    find(view, item => item.type === 'button' && text(item).includes('Stop Work')).props.onClick(); await settle()
+    const stopDialog = find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '停止当前工作？')
+    assert.ok(!!stopDialog, 'an old Continue does not prevent stopping the newly active Work')
+    find(stopDialog, item => item.type === 'button' && text(item) === '取消').props.onClick(); await settle()
+    app.selectWork('other'); await settle()
+    const editor = find(view, item => item.props['aria-label'] === '消息编辑器')
+    assert.ok(!!editor)
+    publish({ ...operation, state: 'succeeded', result: continued }); finish(continued); await settle()
+    assert.equal(app.selectedWork.id, 'other', 'late Continue does not take the page from another Work')
+    assertSameReference(find(view, item => item.props['aria-label'] === '消息编辑器'), editor, 'another Work keeps its editor')
+    app.selectWork(lost.id); await settle()
+    assert.equal(app.selectedWork.lifecycle, 'active', 'returning opens the same continued Work')
+    assert.equal(calls.findLast(call => call.command === 'start_conversation_follow').args.instanceId, lost.id)
+
+    const unknown = { ...lost, id: 'unknown-continue' }
+    extraListed.push(unknown); await app.refreshWorksQuietly(); app.selectWork(unknown.id); await settle()
+    reopenNative = args => {
+      const error = { code: 'effect_unknown', outcomeUnknown: true, operationId: args.operationId }
+      publish({ ...operation, operationId: args.operationId, instanceId: unknown.id, state: 'unknown', error })
+      throw error
+    }
+    await find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.onClick(); await settle()
+    assert.equal(find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary').props.disabled, false, 'another disconnection ends waiting')
+    assert.ok(text(view).includes('不要直接重复继续'))
+    const count = calls.filter(call => call.command === 'reopen_work').length
+    extraListed = [continued, atHost({ ...unknown, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })]
+    await find(view, item => item.type === 'button' && text(item) === '查看当前状态').props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'reopen_work').length, count, 'checking the result does not send Continue again')
+    assert.equal(app.selectedWork.id, unknown.id)
+    assert.equal(app.selectedWork.lifecycle, 'active')
+    extraListed = []; reopenNative = undefined
+    console.log('PASS: Continue survives leaving the page; second disconnection ends waiting and checking current state opens the same Work without replay')
+  }
+
   // #359: quick buttons in the input card. Real App, Pinia, palette and editor; only native IPC is a fixture.
   {
     storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear(); pickedJobs = []

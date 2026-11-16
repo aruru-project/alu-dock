@@ -932,7 +932,7 @@ export class DockHost {
       }
       case "workspace.file.read": await this.streamWorkspaceFile(request, socket); return;
       case "instance.read": {
-        const instance=this.registry.get(request.params.instanceId);
+        const instance=await this.registry.getForObservation(request.params.instanceId);
         if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
         const projection=await instance.getAttachProjection(request.params.since,MAX_HISTORY_ITEMS,request.params.replay);
         this.sendSuccessAndEnd(socket,request.requestId,projection,(projected)=>createBoundedReadResult(projected,request.requestId,streamAudience(request))); return;
@@ -1135,7 +1135,8 @@ export class DockHost {
   }
 
   private async deliverInstanceRecords(request: Extract<ControlRequest,{type:"instance.read"|"instance.follow"}>,socket:Socket,channel:InstanceRecordChannel,setUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
-    const instance=this.registry.get(request.params.instanceId);
+    const instance=await this.registry.getForObservation(request.params.instanceId);
+    if(socket.destroyed)return;
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
     if(request.type==="instance.read") {
@@ -1210,7 +1211,8 @@ export class DockHost {
   }
 
   private async followEventStream(request: Extract<ControlRequest,{type:"instance.follow"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
-    const instance=this.registry.get(request.params.instanceId);
+    const instance=await this.registry.getForObservation(request.params.instanceId);
+    if(socket.destroyed)return;
     this.trackAttachStream(instance.id, socket);
     const cursor=request.params.since;
     if(cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");

@@ -8,7 +8,7 @@ import { subhostMachineName } from '../lib/machines'
 import { replyLost } from '../lib/operationBinding'
 import { isResidentAssistant, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../lib/uiBoundaries'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { ConnectionContext, MachineDto, Work } from '../lib/types'
+import type { MachineDto, Work } from '../lib/types'
 import { useAppStore } from './app'
 import { useHostStore } from './host'
 import { useObservationStore } from './observation'
@@ -26,7 +26,12 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   const compactionErrors = ref<Record<string, { scope: FeedbackScope; message: string }>>({})
 
   const pendingWorkActions = ref(new Set<string>())
-  const workMutating = computed(() => pendingWorkActions.value.has(feedbackIdentity.value))
+  const reopening = computed(() => selected.value?.lifecycle !== 'active' && [...app.nativeOperations.values()].some(operation => operation.kind === 'reopen_work'
+    && operation.state === 'pending' && operation.connectionId === app.activeConnectionId && operation.instanceId === selected.value?.id
+    && operation.hostEpoch === app.payload?.host.hostEpoch && operation.runtimeGeneration === selected.value?.runtimeGeneration))
+  const reopenIdentity = computed(() => JSON.stringify([feedbackIdentity.value, 'reopen', selected.value?.runtimeGeneration]))
+  const workMutating = computed(() => pendingWorkActions.value.has(feedbackIdentity.value)
+    || (selected.value?.lifecycle !== 'active' && (pendingWorkActions.value.has(reopenIdentity.value) || reopening.value)))
   const pendingAborts = ref(new Set<string>())
   const aborting = computed(() => pendingAborts.value.has(feedbackIdentity.value))
   const feedbackIdentity = computed(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration,
@@ -47,7 +52,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   function reportAction(scope: FeedbackScope, message: string | null, tone: FeedbackTone = 'error') {
     if (feedbackMatches(scope)) feedback.value = { scope, message, tone }
   }
-  // A lost reply is reported once like any failure; the conversation and Work state show what happened.
+  // A still-lost reply is reported once like any failure. Continue first observes
+  // once in native code; if that read also fails, its result offers an explicit state read.
   // The message shows above the composer; once it is on screen there, the Work result
   // entry does not say it again. A stopped Work has no composer: its entry says it.
   function reportFailure(scope: FeedbackScope, cause: unknown) {
@@ -188,11 +194,20 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     const work = selected.value
     if (!isTauri || !work || !work.reopenable || workMutating.value) return
     const capturedHost = requireConnectionContext(app)
-    const previousGeneration = work.runtimeGeneration
     const feedbackScope = captureFeedback(false)
-    pendingWorkActions.value.add(feedbackScope.identity)
+    const pendingIdentity = reopenIdentity.value
+    pendingWorkActions.value.add(pendingIdentity)
     reportAction(feedbackScope, null)
     try {
+      const unresolved = [...app.nativeOperations.values()].some(operation => operation.kind === 'reopen_work'
+        && operation.state === 'unknown' && operation.connectionId === capturedHost.connectionId && operation.instanceId === work.id
+        && operation.hostEpoch === app.payload?.host.hostEpoch && operation.runtimeGeneration === work.runtimeGeneration)
+      if (unresolved) {
+        if (await checkContinuedWork(work.id)) return
+        if (!feedbackMatches(feedbackScope) || !await page.askConfirm('上次继续还没有确认结果',
+          '暂时没有读到这个 Work 已恢复。它可能仍在启动，也可能没有成功。仍要请求继续同一个 Work 吗？不会另建 Work。')) return
+        if (!feedbackMatches(feedbackScope)) return
+      }
       const target = app.captureOperationTarget(capturedHost, work.id)
       let continuation: CreateWorkContinuation | undefined
       for (;;) {
@@ -219,19 +234,22 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       }
     } catch (cause) {
       reportFailure(feedbackScope, cause)
-      if (replyLost(cause)) void followReopenedWork(work.id, previousGeneration, capturedHost, feedbackScope)
+      // Native Continue already made one ordered read after losing its reply.
+      // Another disconnection ends that wait; leave the explicit state-read action.
+      if (!replyLost(cause)) void app.refreshWorksQuietly()
     } finally {
-      pendingWorkActions.value.delete(feedbackScope.identity)
+      pendingWorkActions.value.delete(pendingIdentity)
     }
   }
 
-  /** If the lost Continue did take effect, show the continued Work without another message. */
-  async function followReopenedWork(workId: string, previousGeneration: number, context: ConnectionContext, feedbackScope: FeedbackScope) {
-    if (!await app.refreshWorksQuietly() || !app.contextMatches(context) || !feedbackMatches(feedbackScope)) return
+  /** An explicit read after an unresolved Continue. It never sends another Continue. */
+  async function checkContinuedWork(workId: string): Promise<boolean> {
+    const context = requireConnectionContext(app)
+    if (!await app.refreshWorksQuietly() || !app.contextMatches(context)) return false
     const current = app.works.find((work) => work.id === workId)
-    if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) return
-    observation.acceptWork(current, context)
-    void observation.load(workId, true)
+    if (!current || current.lifecycle !== 'active') return false
+    if (selected.value?.id === workId) void observation.load(workId, true)
+    return true
   }
 
   async function forgetSelectedWork() {
@@ -465,7 +483,7 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
 
   return {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
-    abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction,
+    abortCurrentRun, stopSelectedWork, reopenSelectedWork, checkContinuedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
     hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, openAssistantStatus, assistantStatusError, acceptCreatedWork,
   }

@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { NativeOperation } from '../lib/operationBinding'
-import { userErrorMessage } from '../lib/userError'
+import { continueErrorMessage, userErrorMessage } from '../lib/userError'
 import { isResidentAssistant } from '../lib/uiBoundaries'
 import { useAppStore } from '../stores/app'
+import { useWorkActionsStore } from '../stores/work-actions'
 
 const props = defineProps<{
   operations: readonly NativeOperation[]
   acknowledge: (operation: NativeOperation) => Promise<void>
 }>()
 const app = useAppStore()
+const workActions = useWorkActionsStore()
 const pending = ref(new Set<string>())
 const errors = ref<Record<string, string>>({})
 const labels: Record<string, string> = {
@@ -29,6 +31,16 @@ function label(operation: NativeOperation) {
   return labels[operation.kind] ?? '操作'
 }
 function outcome(operation: NativeOperation) { return operation.state === 'succeeded' ? '已完成' : operation.state === 'unknown' ? '没收到结果' : '没有完成' }
+async function checkContinuedWork(operation: NativeOperation) {
+  if (pending.value.has(operation.operationId)) return
+  pending.value.add(operation.operationId)
+  delete errors.value[operation.operationId]
+  try {
+    if (await workActions.checkContinuedWork(operation.instanceId)) await props.acknowledge(operation)
+    else errors.value[operation.operationId] = '还没有读到这个 Work 已恢复的状态。可以检查连接和这台机器的 Dock 日志，稍后再查看；此次没有重新发送继续请求。'
+  } catch { errors.value[operation.operationId] = '状态没有读到，请检查连接后再次查看。此次没有重新发送继续请求。' }
+  finally { pending.value.delete(operation.operationId) }
+}
 async function acknowledge(operation: NativeOperation) {
   if (pending.value.has(operation.operationId)) return
   pending.value.add(operation.operationId)
@@ -45,8 +57,9 @@ async function acknowledge(operation: NativeOperation) {
     <article v-for="operation in operations" :key="operation.operationId">
       <strong>{{ label(operation) }}{{ outcome(operation) }}</strong>
       <p v-if="operation.state === 'succeeded'">操作已完成，本机保存或确认尚未完成。请检查本机存储后重试；{{ operation.kind === 'submit_message' ? '会保存已发送内容的清理结果，不会再次发送。' : '会保存尚未接纳的返回内容，不会再次执行操作。' }}</p>
-      <p v-else>{{ userErrorMessage(operation.error, '操作没有完成。请检查当前状态后，从原入口重新操作。') }}</p>
+      <p v-else>{{ operation.kind === 'reopen_work' ? continueErrorMessage(operation.error) : userErrorMessage(operation.error, '操作没有完成。请检查当前状态后，从原入口重新操作。') }}</p>
       <p v-if="errors[operation.operationId]" role="alert">{{ errors[operation.operationId] }}</p>
+      <button v-if="operation.kind === 'reopen_work' && operation.state === 'unknown'" type="button" class="button secondary" :disabled="pending.has(operation.operationId)" @click="checkContinuedWork(operation)">{{ pending.has(operation.operationId) ? '正在查看…' : '查看当前状态' }}</button>
       <button type="button" class="button secondary" :disabled="pending.has(operation.operationId)" @click="acknowledge(operation)">{{ pending.has(operation.operationId) ? '正在关闭…' : operation.state === 'succeeded' ? '重试关闭' : '知道了' }}</button>
     </article>
   </details>

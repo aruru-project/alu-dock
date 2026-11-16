@@ -460,11 +460,10 @@ pub(crate) async fn reopen_work(
                 project_trust_decision.as_deref(),
                 Some(operation_id.clone()),
             )?;
-            let result = client
-                .reopen_instance(&instance_id, continuation, Some(operation_id.as_str()))
+            client
+                .continue_instance(&instance_id, continuation, &operation_id)
                 .await
-                .map_err(CommandError::from)?;
-            Ok(result.instance)
+                .map_err(CommandError::from)
         })
         .await
         .map_err(CommandError::from)?

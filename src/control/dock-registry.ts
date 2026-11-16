@@ -10,6 +10,8 @@ import {
   type CatalogStore,
   validateInstanceKey,
 } from "../core/catalog.js";
+import { AgentModelNotFoundError, AgentStartupTimeoutError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
+import { ResourceContentError } from "../core/resource-content.js";
 import type { ObservationDeliverySink } from "../core/instance-observation.js";
 import {
   type DockChildSelection,
@@ -170,7 +172,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private readonly childStarts = new WeakMap<ManagedInstance, Set<Promise<unknown>>>();
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
-  private readonly reopenInFlight = new Map<string, string>();
+  private readonly reopenInFlight = new Map<string, Promise<unknown>>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private readonly keyEnsureTails = new Map<string, Promise<void>>();
   private readonly speedChangeTails = new Map<string, Promise<void>>();
@@ -536,12 +538,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.assertCatalogReady();
     this.catalog.assertWritable();
     if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
-    this.reopenInFlight.set(input.instanceId, input.operationId);
-    try {
-      return await this.performReopen(input);
-    } finally {
-      if (this.reopenInFlight.get(input.instanceId) === input.operationId) this.reopenInFlight.delete(input.instanceId);
-    }
+    return this.trackReopen(input.instanceId, () => this.performReopen(input));
+  }
+
+  private async trackReopen<T>(instanceId: string, open: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(open);
+    this.reopenInFlight.set(instanceId, pending);
+    try { return await pending; }
+    finally { if (this.reopenInFlight.get(instanceId) === pending) this.reopenInFlight.delete(instanceId); }
+  }
+
+  /** Observation after an admitted reopen reads its committed runtime, not the old
+   * unavailable one. Host-only status/list never wait for Worker startup. */
+  async getForObservation(instanceId: string): Promise<ManagedInstance> {
+    await this.reopenInFlight.get(instanceId);
+    return this.get(instanceId);
   }
 
   private async performReopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
@@ -607,6 +618,23 @@ export class DockRegistry implements LocalDockToolsHostPort {
       ...(record.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration") }),
       ...(record.modelSpeed === undefined ? {} : { modelSpeed: record.modelSpeed }),
       ...(record.assistant ? { assistant: true as const } : {}),
+    }).catch(async (error: unknown) => {
+      // Only producer-owned diagnoses enter the catalog. Extension errors can
+      // contain credentials or configuration; their original stays in local logs.
+      const known = error instanceof AgentModelNotFoundError || error instanceof ResourceContentError || error instanceof AgentStartupTimeoutError;
+      if (!known) {
+        try { process.stderr.write(`Alu Dock: Work ${record.id} failed to reopen: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); }
+        catch { /* A closed log sink must not keep the failed startup occupied. */ }
+      }
+      const message = error instanceof AgentModelNotFoundError
+        ? `模型 ${error.provider}/${error.modelId} 现在不可用。请在 Main 上恢复这个模型的配置或登录，再继续这个 Work；原会话保留。`
+        : known ? (error as Error).message
+          : "Work 没有启动成功。请在 Work 所在机器查看 Dock 日志，检查扩展和配置后继续；原会话保留。";
+      const previous = this.instances.get(record.id);
+      if (previous) await previous.recordReopenFailure(message, operationId);
+      else await this.catalog.forInstance(record.id).commit({ ...record, lastError: message, updatedAt: new Date().toISOString() },
+        { kind: "instance.reopen.failed", effect: "rollback_contained", operationId, instanceId: record.id });
+      throw known ? error : new AgentUnavailableBeforeEffectError(message);
     });
     if (
       candidate.id !== record.id
@@ -727,19 +755,17 @@ export class DockRegistry implements LocalDockToolsHostPort {
     const operationId = randomUUID();
     const sessionFile = record.lifecycle === "stopped" ? record.sessionFile : catalogReopenSessionFile(record);
     const release = sessionFile === undefined ? () => {} : this.claimSessionFile(record.id, operationId, sessionFile);
-    this.reopenInFlight.set(record.id, operationId);
     try {
-      if (sessionFile !== undefined) {
-        if (!this.reopenTargetResolver) throw new InstanceNotReopenableError(record.id);
-        await this.reopenTargetResolver.resolve(sessionFile);
-      }
-      if (!this.assistantRecoveryEnabled) return;
-      await this.openRecord(operationId, record, { canonicalCwd: await canonicalDirectory(workspace), projectTrusted: false }, sessionFile,
-        record.lifecycle === "host_lost" || record.lifecycle === "runtime_error" ? record.lifecycle : undefined);
-    } finally {
-      release();
-      this.reopenInFlight.delete(record.id);
-    }
+      await this.trackReopen(record.id, async () => {
+        if (sessionFile !== undefined) {
+          if (!this.reopenTargetResolver) throw new InstanceNotReopenableError(record.id);
+          await this.reopenTargetResolver.resolve(sessionFile);
+        }
+        if (!this.assistantRecoveryEnabled) return;
+        await this.openRecord(operationId, record, { canonicalCwd: await canonicalDirectory(workspace), projectTrusted: false }, sessionFile,
+          record.lifecycle === "host_lost" || record.lifecycle === "runtime_error" ? record.lifecycle : undefined);
+      });
+    } finally { release(); }
   }
 
   bindDockToolsMutationPort(port: DockToolsMutationPort): void {

@@ -2481,6 +2481,13 @@ export class ManagedInstance {
     return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect);
   }
 
+  async recordReopenFailure(message: string, operationId: string): Promise<void> {
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "instance.reopen.failed", effect: "rollback_contained", operationId, instanceId: this.id },
+      () => { this.state.lastError = safeWireText(message, 2_048); this.touch(); this.appendStateEvent("reopen_failed"); },
+    ));
+  }
+
   recordExtensionError(error: unknown): void {
     if (this.hostDrainActive) return;
     this.appendEvent("extension.error", { error: safeWireText(errorMessage(error), 2_048) });

@@ -81,6 +81,20 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
   return fallback
 }
 
+/** Continue cannot offer the inactive Work's model picker or Reload as a repair. */
+export function continueErrorMessage(cause: unknown) {
+  const code = errorCode(cause)
+  const failure = cause as { outcomeUnknown?: boolean; message?: string } | null
+  if (failure?.outcomeUnknown || code === 'effect_unknown') return '没能确认这个 Work 是否已继续。请先查看当前状态；不要直接重复继续。原 Work 和会话保留。'
+  if (code === 'model_not_found') return '这个模型现在不可用。请在 Main 上恢复这个模型的配置或登录，再继续这个 Work；原会话保留。'
+  // Reopen returns producer-owned startup diagnoses under this code, not an
+  // arbitrary extension exception (those remain in the machine's Dock log).
+  if (code === 'runtime_unavailable' && failure?.message) return failure.message
+  if (code === 'request_failed') return 'Work 没有启动成功。请在 Work 所在机器查看 Dock 日志，检查扩展和配置后继续；原会话保留。'
+  if (code === 'instance_busy') return '这个 Work 还在处理前一次操作。请查看当前状态，不需要另建 Work。'
+  return userErrorMessage(cause, '这个 Work 还没有恢复。请查看当前状态和下方详情，处理后继续同一个 Work。')
+}
+
 export function userErrorPresentation(
   cause: unknown,
   fallback?: string,

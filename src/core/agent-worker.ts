@@ -196,6 +196,14 @@ export class AgentUnavailableBeforeEffectError extends Error {
   constructor(message: string) { super(message); this.name = "AgentUnavailableBeforeEffectError"; }
 }
 
+/** A startup deadline is a known failure; the supervisor releases the process before reporting it. */
+export class AgentStartupTimeoutError extends AgentUnavailableBeforeEffectError {
+  constructor() {
+    super("Work 启动超时，已停止本次启动。请在 Work 所在机器检查启动扩展和配置，处理后继续这个 Work；原会话保留。");
+    this.name = "AgentStartupTimeoutError";
+  }
+}
+
 /** Worker acknowledged an effectful call before transport/runtime loss. */
 export class AgentMutationEffectUnknownError extends Error {
   constructor(message: string, cause?: unknown) { super(message); this.name = "AgentMutationEffectUnknownError"; this.cause = cause; }

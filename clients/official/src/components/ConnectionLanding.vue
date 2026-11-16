@@ -113,7 +113,7 @@ async function copyDiagnostic(text: string) {
       <section class="alu-work-state-card" aria-labelledby="alu-work-state-title">
         <div class="alu-work-state-status"><span class="alu-work-state-signal" aria-hidden="true" /><span>{{ inactiveState(selected).label }}</span></div>
         <h1 id="alu-work-state-title">{{ selected.displayName }}</h1>
-        <p class="alu-work-state-message">{{ inactiveState(selected).message }}</p>
+        <p class="alu-work-state-message" role="status">{{ workMutating ? '正在继续这个 Work，并等待它的实际状态。你可以离开此页；原 Work 和会话保留。' : inactiveState(selected).message }}</p>
         <dl class="alu-work-state-meta"><div><dt>Workspace</dt><dd>{{ selected.cwd }}</dd></div></dl>
         <details v-if="selected.lastError" class="alu-diagnostic alu-work-state-diagnostic">
           <summary>查看详情</summary>
