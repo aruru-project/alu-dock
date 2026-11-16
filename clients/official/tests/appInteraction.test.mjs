@@ -3446,6 +3446,9 @@ try {
     const extensionOption = find(dialog(), item => item.type === 'button' && text(item).includes('扩展刷新回显'))
     assert.ok(!!extensionOption, 'the real extension is listed beside the local refresh control')
     assert.ok(text(dialog()).includes('刷新状态'), 'the local refresh action stays available')
+    // Exact no-argument quick text has local priority too: only the local row can pin /refresh.
+    assert.equal(all(dialog(), item => item.props['aria-label'] === '把 /refresh 做成快捷按钮').length, 1)
+    assert.ok(text(dialog()).includes('在此运行'), 'the colliding extension points to its source-aware runner instead of making a misleading text shortcut')
     assert.equal(text(dialog()).includes('内置刷新'), false, 'the duplicate remote built-in still uses the client control')
     extensionOption.props.onClick(); await settle()
     find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()

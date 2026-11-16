@@ -170,10 +170,11 @@ let speedSaveRevision = 0
 watch(() => panel.speedTarget, () => { speedSaveRevision++; speedPending.value = false }, { flush: 'sync' })
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands.value, commandSearch.value))
-const catalogCommands = computed(() => {
-  const localNames = new Set(localControlCommands.map((command) => command.name))
-  return catalog.commands.filter((item) => !localNames.has(item.name) || (residentAssistant.value && item.source.kind === 'extension'))
-})
+const localCommandNames = new Set(localControlCommands.map((command) => command.name))
+function assistantLocalNameCollision(command: CommandInfo) {
+  return residentAssistant.value && command.source.kind === 'extension' && localCommandNames.has(command.name)
+}
+const catalogCommands = computed(() => catalog.commands.filter((item) => !localCommandNames.has(item.name) || assistantLocalNameCollision(item)))
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
 /** Every quick button, including those the row has no room for. */
 const filteredQuickButtons = computed(() => filterCommandPaletteItems(
@@ -674,7 +675,8 @@ function isCurrentModel(model: ModelInfo) {
                 <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}<span v-if="item.argumentHint" class="cmd-palette-item-argument"> {{ item.argumentHint }}</span></span><span class="cmd-palette-item-hint">{{ residentAssistant && item.source.kind === 'built-in' ? '内置' : catalogSourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
               </button>
               <button v-if="item.contentAvailable" type="button" class="cmd-palette-content-btn" :aria-label="`查看 /${item.name} 的 Prompt 内容`" @click="openCommandContent(item)">内容</button>
-              <button type="button" class="cmd-palette-pin" :aria-label="`把 /${item.name} 做成快捷按钮`" title="做成快捷按钮" @click="pinCommand(item.name, true)"><Pin :size="13" /></button>
+              <button v-if="!assistantLocalNameCollision(item)" type="button" class="cmd-palette-pin" :aria-label="`把 /${item.name} 做成快捷按钮`" title="做成快捷按钮" @click="pinCommand(item.name, true)"><Pin :size="13" /></button>
+              <span v-else class="cmd-palette-item-hint" title="同名的无参快捷按钮会执行客户端操作，请在命令中心运行此扩展。">在此运行</span>
             </div>
           </template>
           <div v-if="!filteredQuickButtons.length && !filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ catalog.state === 'idle' || catalog.state === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
