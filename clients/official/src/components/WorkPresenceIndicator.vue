@@ -1,26 +1,38 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import type { Work } from '../lib/types'
 import { workPresence } from '../lib/uiBoundaries'
 
-const props = defineProps<{ work: Work }>()
+const props = defineProps<{ work: Work; identity?: boolean }>()
 const presence = computed(() => workPresence(props.work))
 const expanded = ref(false)
+const note = ref<HTMLElement | null>(null)
+async function toggle() {
+  expanded.value = !expanded.value
+  if (expanded.value && !props.identity) {
+    await nextTick()
+    note.value?.scrollIntoView({ block: 'nearest' })
+  }
+}
+function leaveIdentity(event: FocusEvent) {
+  if (props.identity && !(event.currentTarget as HTMLElement).contains(event.relatedTarget as Node | null)) expanded.value = false
+}
 const symbol = computed(() => ({ idle: '', running: '', waiting: '?', compacting: '↻', stopping: '−', stopped: '■', lost: '×', error: '!', failed: '!' })[presence.value.tone])
 </script>
 
 <template>
-  <div class="work-presence" @keydown.esc.stop="expanded = false" @focusout="expanded = false">
-    <button type="button" class="work-presence-trigger" :aria-label="`${work.displayName}：${presence.label}，查看状态`" :aria-expanded="expanded" @click="expanded = !expanded">
+  <div class="work-presence" :class="{ 'is-identity': identity }" @keydown.esc.stop="expanded = false" @focusout="leaveIdentity">
+    <button type="button" class="work-presence-trigger" :aria-label="`${work.displayName}：${presence.label}，查看状态`" :aria-expanded="expanded" @click="toggle">
       <span class="work-presence-mark" :class="`is-${presence.tone}`" aria-hidden="true">{{ symbol }}</span>
     </button>
-    <div v-if="expanded" class="work-presence-note" role="status">{{ work.displayName }} · {{ presence.label }}<template v-if="work.executor.model"><br />{{ work.executor.model.provider }}/{{ work.executor.model.id }}</template></div>
+    <div v-if="expanded" ref="note" class="work-presence-note" role="status" tabindex="0">{{ work.displayName }} · {{ presence.label }}<template v-if="work.executor.model"><br />{{ work.executor.model.provider }}/{{ work.executor.model.id }}</template></div>
   </div>
 </template>
 
 <style scoped>
-.work-presence { flex: none; width: 24px; height: 28px; }
-.work-presence-trigger { display: grid; width: 24px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 6px; color: var(--alu-text-muted); background: transparent; }
+.work-presence { display: contents; }
+.work-presence.is-identity { display: block; flex: none; width: 24px; height: 28px; }
+.work-presence-trigger { display: grid; flex: none; width: 24px; height: 28px; padding: 0; place-items: center; border: 0; border-radius: 6px; color: var(--alu-text-muted); background: transparent; }
 .work-presence-trigger:hover, .work-presence-trigger:focus-visible { background: var(--alu-hover); }
 .work-presence-mark { display: grid; width: 8px; height: 8px; border-radius: 50%; background: var(--alu-text-faint); place-items: center; font-size: 11px; font-weight: 800; line-height: 1; }
 .work-presence-mark.is-idle { background: transparent; border: 2px solid var(--alu-success); opacity: .65; }
@@ -30,6 +42,10 @@ const symbol = computed(() => ({ idle: '', running: '', waiting: '?', compacting
 .work-presence-mark.is-compacting, .work-presence-mark.is-stopping { color: var(--alu-warning); }
 .work-presence-mark.is-lost { color: var(--alu-text-muted); }
 .work-presence-mark.is-error, .work-presence-mark.is-failed { color: var(--alu-danger); }
-.work-presence-note { position: absolute; z-index: 2; top: 100%; left: 8px; right: 8px; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-bg); color: var(--alu-text); box-shadow: var(--alu-sidebar-shadow); font-size: var(--alu-meta-size); line-height: 1.5; overflow-wrap: anywhere; max-height: min(300px, 50vh); overflow-y: auto; }
+.work-presence-note { min-width: 0; padding: 8px 10px; border: 1px solid var(--alu-border); border-radius: 8px; background: var(--alu-bg); color: var(--alu-text); font-size: var(--alu-meta-size); line-height: 1.5; overflow-wrap: anywhere; }
+/* Ordinary Work details occupy the next row, so the list can scroll their entire text into view. */
+.work-presence:not(.is-identity) .work-presence-note { flex-basis: 100%; order: 1; margin: 0 6px 8px 0; }
+/* The fixed identity has no scrolling list of its own; keep its existing bounded reading panel. */
+.work-presence.is-identity .work-presence-note { position: absolute; z-index: 2; top: 100%; left: 8px; right: 8px; max-height: min(300px, 50vh); overflow-y: auto; box-shadow: var(--alu-sidebar-shadow); }
 @media (prefers-reduced-motion: reduce) { .work-presence-mark.is-running { animation: none; } }
 </style>

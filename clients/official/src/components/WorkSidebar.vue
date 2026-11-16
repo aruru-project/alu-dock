@@ -55,7 +55,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       <button class="alu-assistant-icon" tabindex="-1" aria-hidden="true" @click="openResident"><Sparkles :size="22" /></button>
       <div class="alu-assistant-heading">
         <button class="alu-assistant-name" :aria-label="resident ? `打开${resident.displayName}的对话` : '助手'" :aria-current="resident && resident.id === selected?.id ? 'page' : undefined" @click="openResident">{{ resident?.displayName || 'alu' }}</button>
-        <WorkPresenceIndicator v-if="resident" :work="resident" />
+        <WorkPresenceIndicator v-if="resident" :work="resident" identity />
       </div>
       <button class="alu-assistant-model" tabindex="-1" @click="openResident"><template v-if="resident?.executor.model">{{ resident.executor.model.provider }}/<wbr><span>{{ resident.executor.model.id }}</span></template><template v-else>未选择模型</template></button>
     </div>
@@ -72,7 +72,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
         <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
           <WorkPresenceIndicator :work="work" />
           <button class="alu-instance-link" :aria-label="`${work.displayName}，${workPresence(work).label}`" @click="selectWork(work.id)">
-            <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
+            <span class="alu-instance-copy"><span class="alu-instance-name"><span v-if="work.assistant" class="alu-instance-assistant-tag">助手</span>{{ work.displayName }}</span><span v-if="work.parentId && !app.works.some(parent => parent.id === work.parentId)" class="alu-instance-note">父 Work 已不在列表中，仍可查看或停止这个子 Work</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span><span class="alu-instance-model"><template v-if="work.executor.model">{{ work.executor.model.provider }}/<wbr><span class="alu-instance-model-id">{{ work.executor.model.id }}</span></template><template v-else>未选择模型</template></span></span>
           </button>
           <button v-if="childNeedsStop(work)" class="alu-instance-action" :disabled="!isTauri || workMutating" @click="selectWork(work.id); stopSelectedWork()">停止</button>
           <button v-else-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || (work.id === selected?.id && workMutating)" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
@@ -166,6 +166,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
   border: 1px solid transparent;
   border-radius: 9px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   padding-left: 4px;
 }
@@ -175,6 +176,18 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-instance-link { display: flex; align-items: center; flex: 1; gap: 9px; min-width: 0; padding: 9px 8px 9px 0; }
 .alu-instance-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .alu-instance-name { color: var(--alu-text); font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+.alu-instance-assistant-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--alu-accent-border);
+  border-radius: 5px;
+  color: var(--alu-accent);
+  font-size: var(--alu-micro-size);
+  font-weight: 600;
+  line-height: 1.5;
+  vertical-align: 1px;
+}
 .alu-instance-machine-tag {
   display: block;
   max-width: 100%;

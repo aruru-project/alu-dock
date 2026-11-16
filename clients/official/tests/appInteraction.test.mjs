@@ -1434,6 +1434,7 @@ try {
     await app.refreshWorksQuietly(); await settle()
     const helperRow = find(container, item => String(item.props.class ?? '').includes('alu-instance-row') && text(item).includes('Helper Work'))
     assert.ok(!!helperRow, 'the old Pi Work stays in the ordinary list')
+    assert.ok(!!find(helperRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag') && text(item) === '助手'), 'the old Pi Work keeps its existing assistant identity mark')
     const plainRow = all(container, item => String(item.props.class ?? '').split(' ').includes('alu-instance-row')).find(row => row !== helperRow)
     assertSameReference(find(plainRow, item => String(item.props.class ?? '').includes('alu-instance-assistant-tag')), undefined, 'other Works carry no mark')
     const original = JSON.parse(JSON.stringify(app.selectedWork))
