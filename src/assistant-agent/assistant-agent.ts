@@ -246,7 +246,7 @@ class AssistantAgent implements WorkerAgent {
       branch: () => this.session.getBranch(),
       contextWindow: () => this.model?.contextWindow ?? 0,
       settings: async () => (await port.call({ op: "settings_get" })).handoff,
-      status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, text }).catch(() => {}); },
+      status: (text) => { void this.host.call("ui.setStatus", { key: HANDOFF_STATUS_KEY, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
       rememberResult: (text) => this.saveState(HANDOFF_STATE_TYPE, text),
       complete: (system, prompt, maxTokens, signal) => this.complete(system, prompt, maxTokens, signal),
       forgotten: () => this.forgottenEntries(),
