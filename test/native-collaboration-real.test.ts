@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -279,6 +280,81 @@ test("the resident assistant discovers another Work's child and reads its own co
   assert.equal((await client.status(child.id)).lifecycle, "active");
 });
 
+// #671 review: inspect dropped live tool frames, so the assistant could not see progress that
+// the user's Work page already showed. Both tools below are Pi's real built-ins, not tool fixtures.
+test("the resident assistant reads a child's tool progress before it returns and sees each saved call and result once", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["coordinator", "reviewer", "chat"], { prefix: "alu-resident-progress-", assistant: true, mainDockTools: true });
+  const client = await team.startHost();
+  const alu = await team.assistantWork();
+  await client.setModel(alu.id, "chat", "fixture");
+  const parent = await trustOnce((trust) => client.create(team.cwd, "Coordinator", "progress-parent", trust));
+  const child = await client.create(team.cwd, "Reviewer", "progress-child", undefined, undefined,
+    { model: { provider: "reviewer", id: "fixture" } }, { parentId: parent.id, allowedTools: ["read", "bash"] });
+  const readPath = join(team.cwd, "completed.txt"), script = join(team.cwd, "progress.cjs");
+  const nextStage = join(team.cwd, "next-stage"), release = join(team.cwd, "release");
+  team.onCleanup = () => writeFileSync(release, "");
+  await writeFile(readPath, "COMPLETED_READ_EVIDENCE");
+  await writeFile(script, `
+const fs = require("node:fs");
+console.log("LIVE_PROGRESS_FIRST");
+let advanced = false;
+const timer = setInterval(() => {
+  if (!advanced && fs.existsSync(${JSON.stringify(nextStage)})) {
+    advanced = true;
+    console.log("LIVE_PROGRESS_LATEST");
+  }
+  if (fs.existsSync(${JSON.stringify(release)})) {
+    console.error("LIVE_FAILURE_RESULT");
+    clearInterval(timer);
+    process.exitCode = 7;
+  }
+}, 20);
+`);
+  await client.prompt(child.id, "Read completed.txt, then run progress.cjs.", "auto", "progress-task");
+  (await team.providers.reviewer.request(0)).tools(
+    { id: "completed-read", name: "read", arguments: { path: readPath } },
+    { id: "running-bash", name: "bash", arguments: { command: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)}`, timeout: 30 } },
+  );
+  const hasProgress = async (text: string) => (await client.read(child.id, undefined, "conversation_bootstrap")).page.events
+    .some((event) => event.type === "tool.output_updated" && event.data.toolCallId === "running-bash" && event.data.text.includes(text));
+  await waitFor(() => hasProgress("LIVE_PROGRESS_FIRST"), "The real bash tool did not publish its first progress");
+  await writeFile(nextStage, "");
+  await waitFor(() => hasProgress("LIVE_PROGRESS_LATEST"), "The real bash tool did not publish its latest progress");
+  const bootstrap = await client.read(child.id, undefined, "conversation_bootstrap");
+  assert.ok(bootstrap.page.events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "completed-read"), "The earlier tool also still has live frames");
+  assert.ok(!bootstrap.page.events.some((event) => event.type === "tool.completed" && event.data.toolCallId === "running-bash"), "The inspected tool has not returned");
+  assert.equal(team.providers.reviewer.requests.length, 1);
+
+  await client.prompt(alu.id, "Check the reviewer's current tool progress.", "auto", "inspect-progress");
+  (await team.providers.chat.request(0)).tools({ id: "live-inspect", name: "dock_inspect", arguments: { target: "Reviewer", types: ["other"], limit: 1 } });
+  const partial = await team.providers.chat.request(1);
+  const progressText = partial.body.messages!.at(-1)!.content;
+  assert.equal(typeof progressText, "string");
+  assert.ok((progressText as string).includes("LIVE_PROGRESS_LATEST"), "The assistant sees the output before the tool returns");
+  assert.ok((progressText as string).includes("running"), "Progress is not presented as a successful final result");
+  const cursor = /continuation cursor: ([^\n]+)/u.exec(progressText as string)?.[1];
+  assert.ok(cursor, "The earlier calls and completed tool remain available through pagination");
+  partial.tools({ id: "earlier-evidence", name: "dock_inspect", arguments: { target: "Reviewer", types: ["other"], limit: 20, cursor } });
+  const earlier = await team.providers.chat.request(2);
+  const whole = `${progressText}\n${earlier.body.messages!.at(-1)!.content}`;
+  for (const marker of ["LIVE_PROGRESS_FIRST", "LIVE_PROGRESS_LATEST", "COMPLETED_READ_EVIDENCE", "tool call · read · completed-read", "tool call · bash · running-bash"]) {
+    assert.equal(whole.split(marker).length - 1, 1, `${marker} occurs once across live and saved pages`);
+  }
+  const ordinary = await team.registry!.invokeDockTool(parent.id, { type: "inspect", target: child.id, types: ["other"], limit: 20 });
+  assert.ok(!JSON.stringify(ordinary).includes("LIVE_PROGRESS"), "Ordinary Works keep their original conversation-only view");
+
+  await writeFile(release, "");
+  const childReply = await team.providers.reviewer.request(1);
+  earlier.tools({ id: "finished-evidence", name: "dock_inspect", arguments: { target: "Reviewer", types: ["other"], limit: 20 } });
+  const finished = await team.providers.chat.request(3);
+  const finalText = finished.body.messages!.at(-1)!.content as string;
+  for (const marker of ["LIVE_PROGRESS_FIRST", "LIVE_PROGRESS_LATEST", "LIVE_FAILURE_RESULT", "COMPLETED_READ_EVIDENCE"]) assert.equal(finalText.split(marker).length - 1, 1);
+  assert.ok(finalText.includes("tool result · bash · running-bash · error"), "The saved error replaces running progress");
+  finished.text("I saw the current progress and then the failure.");
+  childReply.text("The tool failed with exit code 7.");
+  await waitFor(async () => (await client.status(alu.id)).execution === "idle", "The assistant did not settle");
+});
+
 // Card #671: the assistant's chat model/low thinking must not silently become an engineering default.
 test("the resident assistant delegates with explicit choices or Pi's engineering model and high thinking, not her chat settings", { timeout: 60_000 }, async (context) => {
   const team = await startNativeTeam(context, ["coordinator", "reviewer", "implementer", "chat"], { prefix: "alu-resident-spawn-", assistant: true, mainDockTools: true, thinkingLevel: "low" });
@@ -432,8 +508,8 @@ test("a top-level Work's child Works end with it and do not come back after a Ho
   await waitFor(() => exited(orphaned.pid), "The crashed parent's child process survived");
   await waitFor(async () => !(await client.list()).some((work) => work.id === orphaned.id), "The crashed parent's child stayed listed");
 
-  // Continuing the parent lets it delegate again.
-  await trustOnce((trust) => client.reopen(other.id, "reopen-other", undefined, trust));
+  // Continuing this Work in the same directory retains its trust_once and lets it delegate again.
+  await client.reopen(other.id, "reopen-other");
   const restarted = await startChild(other.id, "Restarted", "implementer");
   const restartedSession = await converse(restarted.id, implementer, "RESTARTED_HISTORY");
 
