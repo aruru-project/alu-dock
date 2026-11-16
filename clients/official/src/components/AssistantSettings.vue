@@ -8,14 +8,15 @@ import { modelSpeedOptions } from '../lib/settingLabels'
 import type { ModelSpeedTier } from '../lib/types'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
+import { useWorkActionsStore } from '../stores/work-actions'
 import AluSelect from './AluSelect.vue'
-import AssistantExtensions from './AssistantExtensions.vue'
 
 // Main owns the saved settings; the assistant Work reports its own rolling hand-over status.
 const assistant = useAssistantStore()
 const memory = useAssistantMemoryStore()
+const actions = useWorkActionsStore()
 const { settings, restart } = memory
-const { extraction, models, handoff, handoffValues, handoffWork } = storeToRefs(memory)
+const { extraction, models, handoff, handoffValues, speedChoice } = storeToRefs(memory)
 const handoffSaving = computed(() => handoff.value.save?.state === 'pending')
 function editTokens(field: 'startTokens' | 'keepRecentTokens', event: Event) {
   const value = (event.target as HTMLInputElement).value
@@ -25,9 +26,10 @@ function editTokens(field: 'startTokens' | 'keepRecentTokens', event: Event) {
 const NO_MODEL = ''
 const NOT_READ = '\u0000'
 const saving = computed(() => settings.save?.state === 'pending')
-const chosenSpeed = computed(() => saving.value && settings.save?.speed ? settings.save.speed : settings.current?.extractionSpeed)
+const speedSaving = computed(() => speedChoice.value?.state === 'pending')
+const chosenSpeed = computed(() => speedSaving.value ? speedChoice.value!.tier : settings.current?.extractionSpeed)
 function chooseSpeed(value: string) {
-  if (value === chosenSpeed.value && settings.save?.state !== 'failed') return
+  if (value === chosenSpeed.value && speedChoice.value?.state !== 'failed') return
   void memory.chooseSpeed(value as ModelSpeedTier)
 }
 /** A choice being saved shows as chosen; otherwise what Main has. */
@@ -81,37 +83,6 @@ function choose(value: string) {
 </script>
 
 <template>
-  <AssistantExtensions />
-  <section class="assistant-setting" aria-labelledby="assistant-handoff-settings">
-    <h4 id="assistant-handoff-settings">滚动整理对话</h4>
-    <p class="assistant-setting-text">较早的对话会在后台写成交接记录，最近的原话继续保留。原始对话不会删除。整理沿用当前聊天模型，不影响整理记忆的模型。</p>
-    <template v-if="handoffValues && handoff.current">
-      <label class="assistant-handoff-field">开始整理（token）
-        <input type="number" aria-label="开始整理的 token 数" placeholder="自动" :value="handoffValues.startTokens ?? ''" @input="editTokens('startTokens', $event)" />
-      </label>
-      <label class="assistant-handoff-field">保留最近原话（约 token）
-        <input type="number" aria-label="保留最近原话的 token 数" placeholder="自动" :value="handoffValues.keepRecentTokens ?? ''" @input="editTokens('keepRecentTokens', $event)" />
-      </label>
-      <p class="assistant-setting-text">留空由助手按当前模型自动计算；原话按整轮保留，实际数量会有差异。手填保留量超过当前整理预算时，运行时采用较小的量，保存值不变；实际采用值和原因显示在下面的状态中。</p>
-      <button type="button" class="button secondary assistant-handoff-auto" @click="memory.editHandoff({ startTokens: null, keepRecentTokens: null })">恢复自动值</button>
-      <label class="assistant-handoff-field">交接记录提示词
-        <textarea aria-label="交接记录提示词" rows="11" :value="handoffValues.prompt" @input="memory.editHandoff({ prompt: ($event.target as HTMLTextAreaElement).value })" />
-      </label>
-      <p class="assistant-setting-text">这是完整的写作要求。原对话和上一份交接记录由助手另行提供，不必填占位符。保存后下一次整理用新设置，已经开始的那次照原设置完成。</p>
-      <button type="button" class="button primary assistant-handoff-save" :disabled="handoffSaving" @click="memory.saveHandoff()">{{ handoffSaving ? '正在保存…' : '保存滚动整理设置' }}</button>
-    </template>
-    <p v-else-if="settings.current" class="assistant-note">这台 Dock 尚不支持滚动整理设置。请更新 Main 后再编辑。</p>
-    <p v-else class="assistant-status">{{ settings.loading ? '正在读取滚动整理设置…' : '暂时没有读到滚动整理设置，请重试读取助手设置。' }}</p>
-    <p v-if="handoff.save" class="assistant-setting-saved" :class="{ 'is-error': handoff.save.state === 'failed', 'is-pending': handoffSaving }" :role="handoff.save.state === 'failed' ? 'alert' : 'status'">{{ handoff.save.message }}</p>
-    <div class="assistant-setting-head">
-      <h4>最近的对话整理状态</h4>
-      <button type="button" class="button secondary" aria-label="刷新对话整理状态" :disabled="memory.handoffStatus.loading" @click="memory.refreshHandoffStatus()"><RefreshCw :size="14" :class="{ spinning: memory.handoffStatus.loading }" />{{ memory.handoffStatus.loading ? '正在读取…' : '刷新' }}</button>
-    </div>
-    <p v-if="memory.handoffStatus.error" class="assistant-note is-warning" role="status">{{ memory.handoffStatus.error }}</p>
-    <p class="assistant-note" role="status">{{ handoffWork?.extensionStatus['滚动整理'] ?? '暂未读到助手的整理状态，可以刷新再看。' }}</p>
-    <p class="assistant-setting-text">这里显示最近读到的助手 Work 状态和实际采用值；打开助手对话时会随它更新，也可点刷新读取最新状态。首次未读到设置时暂不整理，完整对话保留；之后读取失败则沿用上次有效配置，并在状态中说明。</p>
-  </section>
-
   <section class="assistant-setting" aria-labelledby="assistant-extraction-model">
     <h4 id="assistant-extraction-model">整理记忆的模型</h4>
     <p class="assistant-setting-text">一段对话停下一阵后，她会用这个模型把值得记住的事记下来；空闲时再对照原话，把记下的整理一遍。没选模型就不整理。</p>
@@ -121,10 +92,11 @@ function choose(value: string) {
     </div>
     <template v-if="settings.current?.extractionSpeed !== undefined && memorySpeedAvailable">
       <label class="assistant-handoff-field">整理记忆的速度
-        <AluSelect :value="chosenSpeed ?? 'standard'" :options="memorySpeedOptions" label="整理记忆的速度" :disabled="saving" @select="chooseSpeed" />
+        <AluSelect :value="chosenSpeed ?? 'standard'" :options="memorySpeedOptions" label="整理记忆的速度" :disabled="speedSaving" @select="chooseSpeed" />
       </label>
-      <p class="assistant-setting-text">只用于后台记忆整理，不随聊天速度自动提高档位。标准不请求加速；Fast / Ultrafast 可能增加费用，实际支持与速度由所选模型服务决定。从下一次整理请求生效。</p>
+      <p class="assistant-setting-text">仅用于记忆整理，与聊天速度分开；加速可能增加费用。</p>
     </template>
+    <p v-if="speedChoice" class="assistant-setting-saved" :class="{ 'is-error': speedChoice.state === 'failed', 'is-pending': speedSaving }" :role="speedChoice.state === 'failed' ? 'alert' : 'status'">{{ speedChoice.message }}</p>
     <p v-if="models?.state === 'failed'" class="assistant-note">读不到 Main 的模型列表。改过模型或登录后，点右侧的刷新。</p>
     <p v-else-if="models?.state === 'loading' && !modelList.length" class="assistant-status" role="status">正在读取 Main 的模型…</p>
     <div v-if="settings.error" class="assistant-error" role="alert"><span>{{ settings.error }}</span><button type="button" class="button secondary" :disabled="settings.loading" @click="memory.loadSettings()">重试</button></div>
@@ -163,6 +135,36 @@ function choose(value: string) {
     <p v-else-if="refreshing" class="assistant-status" role="status">正在读取整理状态…</p>
     <p v-else class="assistant-note" role="status">暂时读不到整理状态。请点刷新再试。</p>
   </section>
+
+  <section class="assistant-setting" aria-labelledby="assistant-handoff-settings">
+    <h4 id="assistant-handoff-settings">滚动整理对话</h4>
+    <p class="assistant-setting-text">对话变长时，用聊天模型整理较早的内容，保留最近的原话。原始记录不会删除。</p>
+    <details v-if="handoffValues && handoff.current" class="assistant-handoff-options">
+      <summary>整理参数与提示词<span v-if="handoff.draft" class="assistant-handoff-dirty">未保存</span></summary>
+      <div class="assistant-handoff-form">
+        <div class="assistant-handoff-numbers">
+          <label class="assistant-handoff-field">开始整理（token）
+            <input type="number" aria-label="开始整理的 token 数" placeholder="自动" :value="handoffValues.startTokens ?? ''" @input="editTokens('startTokens', $event)" />
+          </label>
+          <label class="assistant-handoff-field">保留最近原话（约 token）
+            <input type="number" aria-label="保留最近原话的 token 数" placeholder="自动" :value="handoffValues.keepRecentTokens ?? ''" @input="editTokens('keepRecentTokens', $event)" />
+          </label>
+        </div>
+        <p class="assistant-setting-text">留空使用自动值。原话按整轮保留，实际数量会随当前模型容量调整。</p>
+        <button type="button" class="alu-link-button assistant-handoff-auto" @click="memory.editHandoff({ startTokens: null, keepRecentTokens: null })">恢复自动值</button>
+        <label class="assistant-handoff-field">交接记录提示词
+          <textarea aria-label="交接记录提示词" rows="6" :value="handoffValues.prompt" @input="memory.editHandoff({ prompt: ($event.target as HTMLTextAreaElement).value })" />
+        </label>
+        <p class="assistant-setting-text">填写整理要求即可，原对话会自动提供。修改从下一次整理生效。</p>
+        <button type="button" class="button primary assistant-handoff-save" :disabled="handoffSaving" @click="memory.saveHandoff()">{{ handoffSaving ? '正在保存…' : '保存整理设置' }}</button>
+      </div>
+    </details>
+    <p v-else-if="settings.current" class="assistant-note">这台 Dock 尚不支持滚动整理设置。请更新 Main 后再编辑。</p>
+    <p v-else class="assistant-status">{{ settings.loading ? '正在读取整理设置…' : '暂时没有读到整理设置，请重试读取助手设置。' }}</p>
+    <p v-if="handoff.save" class="assistant-setting-saved" :class="{ 'is-error': handoff.save.state === 'failed', 'is-pending': handoffSaving }" :role="handoff.save.state === 'failed' ? 'alert' : 'status'">{{ handoff.save.message }}</p>
+    <button type="button" class="alu-link-button assistant-handoff-auto" @click="actions.openAssistantStatus()">查看运行详情</button>
+    <p v-if="actions.assistantStatusError" class="assistant-error" role="alert">{{ actions.assistantStatusError }}</p>
+  </section>
 </template>
 
 <style scoped>
@@ -171,9 +173,15 @@ function choose(value: string) {
 .assistant-setting-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .assistant-setting-text { max-width: 640px; margin: 0; color: var(--alu-text-muted); font-size: var(--alu-meta-size); line-height: 1.7; }
 .assistant-setting-row { display: flex; align-items: center; gap: 8px; max-width: 520px; }
-.assistant-handoff-field { display: grid; gap: 6px; font-size: var(--alu-meta-size); color: var(--alu-text-muted); }
-.assistant-handoff-field input { max-width: 240px; }
-.assistant-handoff-field textarea { width: 100%; box-sizing: border-box; resize: vertical; line-height: 1.6; }
+.assistant-handoff-options { min-width: 0; }
+.assistant-handoff-options > summary { padding: 5px 0; cursor: pointer; color: var(--alu-accent); font-size: var(--alu-meta-size); line-height: 1.6; }
+.assistant-handoff-dirty { margin-left: 8px; color: var(--alu-warning-text); font-size: var(--alu-micro-size); }
+.assistant-handoff-form { display: grid; min-width: 0; gap: 10px; padding-top: 10px; }
+.assistant-handoff-numbers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; max-width: 520px; }
+.assistant-handoff-field { display: grid; min-width: 0; gap: 6px; font-size: var(--alu-meta-size); color: var(--alu-text-muted); }
+.assistant-handoff-field input, .assistant-handoff-field textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--alu-border-light); border-radius: 8px; background: var(--alu-bg); color: var(--alu-text); font: var(--alu-ui-size)/1.65 var(--font-reading); }
+.assistant-handoff-field input:focus, .assistant-handoff-field textarea:focus { outline: none; box-shadow: var(--alu-focus-ring); }
+.assistant-handoff-field textarea { min-height: 144px; resize: vertical; }
 .assistant-handoff-auto, .assistant-handoff-save { justify-self: start; }
 .assistant-setting-refresh { display: grid; width: 36px; height: 36px; flex: 0 0 auto; cursor: pointer; border: 1px solid var(--alu-border-light); border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
 .assistant-setting-refresh:hover:not(:disabled) { background: var(--alu-hover); color: var(--alu-text); }
@@ -194,5 +202,6 @@ function choose(value: string) {
 @media (max-width: 640px) {
   .assistant-setting { padding: 12px; }
   .assistant-setting-facts div { grid-template-columns: 72px minmax(0, 1fr); }
+  .assistant-handoff-numbers { grid-template-columns: 1fr; gap: 10px; }
 }
 </style>

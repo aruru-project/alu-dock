@@ -86,7 +86,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
     </button>
     <button v-if="app.connectionContext && assistant.available" class="alu-sidebar-settings-entry" aria-label="助手" @click="openAssistant()">
       <span class="alu-sidebar-settings-icon"><Sparkles :size="17" /></span>
-      <span><strong>助手</strong><small>{{ assistant.hasDrafts || assistantMemory.hasDrafts || assistantSearch.hasDrafts ? '有改动还没有保存' : '人设、记忆和过去的对话' }}</small></span>
+      <span><strong>助手</strong><small>{{ assistant.hasDrafts || assistantMemory.hasDrafts || assistantMemory.hasSettingsDrafts || assistantSearch.hasDrafts ? '有改动还没有保存' : '人设、记忆和过去的对话' }}</small></span>
       <span aria-hidden="true">›</span>
     </button>
     <button v-if="app.connectionContext" class="alu-sidebar-settings-entry" aria-label="Host 设置" @click="openMachineSettings()">

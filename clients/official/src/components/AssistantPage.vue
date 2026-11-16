@@ -3,6 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { BookUser, Brain, Eye, NotebookPen, RefreshCw, Search, Settings2, Sparkles, X } from '@lucide/vue'
 import { assistantTime, memoryResidentLabel } from '../lib/assistant'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import { useAppStore } from '../stores/app'
 import { useAssistantStore } from '../stores/assistant'
 import { useAssistantMemoryStore } from '../stores/assistant-memory'
@@ -22,7 +23,7 @@ const search = useAssistantSearchStore()
 const { preview, info } = storeToRefs(assistant)
 const surfaces = useSurfacesStore()
 const { assistantSection: section } = storeToRefs(surfaces)
-const assistantWork = computed(() => app.works.find(work => work.assistant))
+const assistantWork = computed(() => app.works.find(isResidentAssistant))
 function openConversation() {
   if (!assistantWork.value) return
   app.selectWork(assistantWork.value.id)
@@ -56,7 +57,6 @@ watch([section, () => app.connectionContext?.connectionId, () => app.connectionC
   } else if (current === 'settings') {
     void memory.loadSettings()
     void memory.loadModels()
-    void memory.refreshHandoffStatus()
   }
 }, { immediate: true })
 
@@ -87,7 +87,7 @@ onUnmounted(surfaces.onAssistantBack(() => {
     <nav class="assistant-nav" aria-label="助手分区">
       <button v-for="item in sections" :key="item.id" type="button" class="assistant-nav-item" :class="{ 'is-active': section === item.id }" :aria-current="section === item.id ? 'page' : undefined" @click="section = item.id">
         <component :is="item.icon" :size="16" /><span>{{ item.label }}</span>
-        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts) || (item.id === 'search' && search.hasDrafts)" class="assistant-nav-dot" aria-label="有未保存的改动" />
+        <span v-if="((item.id === 'persona' || item.id === 'notes') && assistant.editor(item.id).draft !== null) || (item.id === 'memories' && memory.hasDrafts) || (item.id === 'search' && search.hasDrafts) || (item.id === 'settings' && memory.hasSettingsDrafts)" class="assistant-nav-dot" aria-label="有未保存的改动" />
       </button>
     </nav>
 

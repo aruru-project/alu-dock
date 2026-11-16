@@ -1800,9 +1800,9 @@ try {
     ]
     // Main does a change once per operation; the same operation sent again gets its answer again.
     const answered = new Map()
-    let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings
+    let model, loseNextReply = false, startedOver = 0, troubled = false, memoriesPaged = false, holdMemoryPage, holdSettings, delaySettings, holdSettingsRead
     let handoff = { startTokens: null, keepRecentTokens: null, prompt: 'Main 提供的完整交接要求。' }
-    let extensions = [{ id: 'local', module: '/home/owner/tools.mjs', enabled: true, config: {} }]
+    let extractionSpeed = 'standard', refuseNextSpeed = false
     const fallback = assistantNative, previousModels = modelVisibilityNative
     assistantNative = async (command, args) => {
       if (command === 'assistant_info') return { workspacePath: '/home/alu/.aludock/assistant', maxDocumentBytes: 262144, maxMemoryChars: 20, maxEpisodeChars: 300, extraction: !model ? { state: 'off', waitingSessions: 1 }
@@ -1838,16 +1838,20 @@ try {
         if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
         return structuredClone(changed)
       }
-      if (command === 'assistant_settings') return { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
+      if (command === 'assistant_settings') {
+        const result = { ...(model ? { extractionModel: model } : {}), extractionSpeed, handoff: structuredClone(handoff) }
+        return holdSettingsRead ? new Promise(resolve => holdSettingsRead(() => resolve(result))) : result
+      }
       if (command === 'set_assistant_settings' || command === 'reorganize_assistant') {
         const done = () => {
           if (answered.has(args.operationId)) return structuredClone(answered.get(args.operationId))
           const edit = command === 'reorganize_assistant' ? args : args.settings
+          if (edit.extractionSpeed && refuseNextSpeed) { refuseNextSpeed = false; throw { code: 'busy', message: '速度设置暂时无法保存，请稍后重试。' } }
           if ('extractionModel' in edit) model = edit.extractionModel ?? undefined
+          if (edit.extractionSpeed) extractionSpeed = edit.extractionSpeed
           if (edit.handoff) handoff = structuredClone(edit.handoff)
-          if (edit.extensions) extensions = structuredClone(edit.extensions)
           if (command === 'reorganize_assistant') startedOver++
-          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), handoff: structuredClone(handoff), extensions: structuredClone(extensions) }
+          const result = command === 'reorganize_assistant' ? { extractionModel: model, retiredMemories: 2, removedLines: 3 } : { ...(model ? { extractionModel: model } : {}), extractionSpeed, handoff: structuredClone(handoff) }
           answered.set(args.operationId, structuredClone(result))
           if (loseNextReply) { loseNextReply = false; throw { code: 'effect_unknown', outcomeUnknown: true, message: 'connection closed', operationId: args.operationId } }
           return result
@@ -1860,7 +1864,7 @@ try {
       return fallback(command, args)
     }
     modelVisibilityNative = async () => ({
-      models: [{ provider: 'openai', id: 'gpt-mini', name: 'GPT mini', reasoning: false }, { provider: 'openai', id: 'gpt-nano', name: 'GPT nano', reasoning: false }, { provider: 'openai', id: 'set-aside', name: 'Set aside', reasoning: false }],
+      models: [{ provider: 'openai', id: 'gpt-mini', name: 'GPT mini', reasoning: false, speedTiers: ['standard', 'fast', 'ultrafast'] }, { provider: 'openai', id: 'gpt-nano', name: 'GPT nano', reasoning: false, speedTiers: ['standard', 'fast', 'ultrafast'] }, { provider: 'openai', id: 'set-aside', name: 'Set aside', reasoning: false }],
       total: 3, truncated: false, hidden: [{ provider: 'openai', id: 'set-aside' }],
     })
 
@@ -2034,29 +2038,35 @@ try {
     await type('开始整理的 token 数', '55000')
     await type('保留最近原话的 token 数', '12000')
     await type('交接记录提示词', '请以小满的口吻交接，只写尚待完成的事。')
-    await click(page(), '保存滚动整理设置')
+    await click(page(), '保存整理设置')
     assert.deepEqual(sent('set_assistant_settings').settings, { handoff: { startTokens: 55000, keepRecentTokens: 12000, prompt: '请以小满的口吻交接，只写尚待完成的事。' } })
     assert.deepEqual(model, { provider: 'openai', id: 'gpt-mini' }, 'editing the hand-over does not change the memory model')
     await click(page(), '恢复自动值')
-    await click(page(), '保存滚动整理设置')
+    await click(page(), '保存整理设置')
     assert.deepEqual(sent('set_assistant_settings').settings.handoff, { startTokens: null, keepRecentTokens: null, prompt: '请以小满的口吻交接，只写尚待完成的事。' })
-    // #670: edit only one extension's JSON and switch, through the real settings controls and bridge.
-    assert.equal(labelled('扩展模块 1').props.value, '/home/owner/tools.mjs')
-    await type('扩展 JSON 配置 1', '{"token":"PRIVATE_UI_CONFIG"}')
-    labelled('启用扩展 1').props.onChange({ target: { checked: false } }); await settle()
-    await click(page(), '保存扩展设置')
-    assert.deepEqual(sent('set_assistant_settings').settings, { extensions: [{ id: 'local', module: '/home/owner/tools.mjs', enabled: false, config: { token: 'PRIVATE_UI_CONFIG' } }] })
-    assert.ok(text(page()).includes('Reload'))
-    assert.equal(extensions[0].enabled, false)
-    labelled('启用扩展 1').props.onChange({ target: { checked: true } }); await settle()
-    await click(page(), '保存扩展设置')
-    assert.equal(sent('set_assistant_settings').settings.extensions[0].enabled, true)
-    await click(page(), '添加扩展')
-    await type('扩展标识 2', 'other')
-    await type('扩展模块 2', '/home/owner/other.mjs')
-    await type('扩展 JSON 配置 2', '{}')
-    await click(page(), '保存扩展设置')
-    assert.equal(sent('set_assistant_settings').settings.extensions[1].module, '/home/owner/other.mjs')
+    // #671 / RC6 review: a late settings read replaced a hand-over saved while the read was in flight.
+    {
+      let finishRead
+      holdSettingsRead = release => { finishRead = release }
+      await click(page(), '关闭'); await click(container, '助手')
+      holdSettingsRead = undefined
+      assert.equal(typeof finishRead, 'function')
+      await type('交接记录提示词', '保存的新交接要求。')
+      await click(page(), '保存整理设置')
+      finishRead(); await settle()
+      assert.equal(labelled('交接记录提示词').props.value, '保存的新交接要求。', 'an older read does not replace the confirmed hand-over')
+      const handoffSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-handoff-settings')
+      await type('交接记录提示词', '保存期间仍在编辑。')
+      assert.equal(text(handoffSection()).includes('已保存，下一次整理生效'), false, 'a new draft is not labelled saved')
+      let finishSave
+      holdSettings = release => { finishSave = release }
+      await click(page(), '保存整理设置')
+      await type('交接记录提示词', '这份后写的草稿要留下。')
+      holdSettings = undefined; finishSave(); await settle()
+      assert.equal(labelled('交接记录提示词').props.value, '这份后写的草稿要留下。')
+      assert.ok(text(handoffSection()).includes('新的修改未保存'))
+      await click(page(), '保存整理设置')
+    }
     // How making memories goes: the parts it could not read, why the last try failed and when it tries again.
     const extractionSection = () => find(page(), item => item.props['aria-labelledby'] === 'assistant-extraction-status')
     troubled = true
@@ -2143,6 +2153,18 @@ try {
         assert.ok(text(page()).includes('已开始从头整理'))
       }
       holdSettings = undefined
+      // #671 / RC7: the new speed action lost its failure when its Host was not being viewed.
+      let finishSpeed
+      delaySettings = release => { finishSpeed = release }
+      refuseNextSpeed = true
+      await click(page(), '整理记忆的速度')
+      await click(find(page(), item => item.props.role === 'listbox'), 'Fast')
+      await app.switchHost('spare'); await settle()
+      delaySettings = undefined; finishSpeed(); await settle()
+      assert.equal(text(page() ?? element('none')).includes('速度设置暂时无法保存'), false, 'the other Host does not receive this outcome')
+      await app.switchHost('host'); await settle(); app.selectWork('work'); await settle()
+      if (!page()) await click(container, '助手')
+      assert.ok(text(page()).includes('速度设置暂时无法保存'), 'the speed outcome remains available on its original Host')
       failCatalog = catalogFailed
       Object.assign(context, contextBefore)
       app.catalog = { ...app.catalog, selectionGeneration: contextBefore.selectionGeneration }
