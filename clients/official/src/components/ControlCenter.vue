@@ -67,6 +67,16 @@ const extensionUi = useExtensionUiStore()
 const commandQuestion = computed(() => extensionUi.isCurrent(props.work) && !!(extensionUi.activeRequest || extensionUi.activeSummary))
 const commandCancellable = computed(() => commandConsole.hasActiveOperation || commandQuestion.value)
 const commandAbortError = ref('')
+const commandOutput = ref<HTMLElement | null>(null)
+let followingCommandOutput = true
+function rememberCommandScroll() {
+  const output = commandOutput.value
+  if (output) followingCommandOutput = output.scrollHeight - output.scrollTop - output.clientHeight <= 4
+}
+function showLatestCommandOutput() {
+  if (isResidentAssistant(props.work) && followingCommandOutput && commandOutput.value) commandOutput.value.scrollTop = commandOutput.value.scrollHeight
+}
+watch(() => commandConsole.entries.length, () => { void nextTick(showLatestCommandOutput) })
 async function cancelCommand() {
   commandAbortError.value = ''
   const work = props.work
@@ -372,7 +382,8 @@ function openCommandRunner(command: CommandInfo) {
   commandArguments.value = ''
   argumentCompletions.value = []
   commandDetailMode.value = 'runner'
-  void nextTick(() => commandArgsInput.value?.focus())
+  followingCommandOutput = true
+  void nextTick(() => { commandArgsInput.value?.focus(); showLatestCommandOutput() })
 }
 
 function backToCatalog() {
@@ -489,6 +500,7 @@ async function executeCatalogCommand(command: CommandInfo, argumentsText: string
 async function runSelectedCommand() {
   const command = selectedCommand.value
   if (!command) return
+  followingCommandOutput = true
   if (await executeCatalogCommand(command, commandArguments.value)) commandArguments.value = ''
 }
 
@@ -691,7 +703,7 @@ function isCurrentModel(model: ModelInfo) {
           <button v-for="(item, index) in argumentCompletions" :key="`${item.value}:${index}`" type="button" class="cmd-center-completion" @click="chooseArgumentCompletion(item)"><strong>{{ item.label }}</strong><span v-if="item.description">{{ item.description }}</span></button>
           <div v-if="argumentCompletionsLoading && !argumentCompletions.length" class="cmd-center-completion-loading">正在读取参数候选…</div>
         </div>
-        <div class="cmd-center-output" role="log" aria-live="polite">
+        <div ref="commandOutput" class="cmd-center-output" role="log" aria-live="polite" @scroll="rememberCommandScroll">
           <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : entry.level === 'warning' ? '△' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
           <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果只显示在这里。</div>
         </div>
@@ -774,7 +786,7 @@ function isCurrentModel(model: ModelInfo) {
     <section v-else-if="section === 'resources'" class="alu-project-status">
       <section class="alu-project-status-identity">
         <span class="alu-project-status-signal" :class="`is-${presence.tone}`" />
-        <div class="alu-project-status-identity-copy"><strong>{{ work.name || work.key || '未命名 Work' }}</strong><span>{{ work.cwd || '—' }}</span></div>
+        <div class="alu-project-status-identity-copy"><strong>{{ residentAssistant ? work.displayName : work.name || work.key || '未命名 Work' }}</strong><span>{{ work.cwd || '—' }}</span></div>
         <div class="alu-project-status-badges"><span class="alu-project-status-badge" :class="{ 'is-running': presence.tone === 'running' }">{{ presence.label }}</span><span v-if="work.gitBranch" class="alu-project-status-badge is-branch"> {{ work.gitBranch }}</span></div>
       </section>
       <section class="alu-project-status-section">
@@ -790,7 +802,7 @@ function isCurrentModel(model: ModelInfo) {
         <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回</div>
       </section>
       <section class="alu-project-status-section">
-        <h3>{{ residentAssistant ? 'Skills 与来源' : 'Loaded Resources' }}</h3>
+        <h3>{{ residentAssistant ? '已发现 Skills' : 'Loaded Resources' }}</h3>
         <div v-if="loadErrors.resources" class="alu-dialog-error">{{ loadErrors.resources }}<button type="button" @click="loadSection('resources', true)">重试读取资源</button></div>
         <div v-else-if="!resources" class="alu-dialog-loading">正在读取资源…</div>
         <template v-if="resources">
@@ -1116,8 +1128,8 @@ function isCurrentModel(model: ModelInfo) {
   overflow-wrap: anywhere;
 }
 .cmd-center-output {
-  min-height: 240px;
-  flex: 1 1 auto;
+  min-height: 0;
+  flex: 1 1 240px;
   overflow-y: auto;
   margin: 0 14px 12px;
   padding: 7px 0;
