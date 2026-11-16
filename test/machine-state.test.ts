@@ -13,10 +13,11 @@ import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { MainMachineState, readMachineJoinFile, SubHostMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, writeMachine } from "../src/control/machine-transport.js";
-import type { ControlRequest } from "../src/control/protocol.js";
+import { createHelloAck, defaultHostIdentity, type ControlRequest } from "../src/control/protocol.js";
 
 async function enabledListener(root: string, port: number): Promise<MachineSettingsState> {
   const state = new MachineSettingsState(join(root, "listener"));
@@ -302,6 +303,135 @@ test("an inventory larger than the old machine line crosses real TLS in ordered 
   const reconciled = controller.currentSnapshots();
   assert.equal(reconciled.length, snapshots.length);
   assert.equal(reconciled.at(-1)?.cwd, snapshots.at(-1)?.cwd);
+});
+
+// 2026-11-17: the conversation capability regression obtained a Main list ID,
+// then its routed read intermittently failed with not_found during inventory.
+// Keep the real public Client/Main/TLS route; delay only the stored directory read.
+test("Main lists remote Work only when its ID can be read, including during the next inventory", { timeout: 15_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-publication-"));
+  const mainState = new MainMachineState(join(root, "main"));
+  const subState = new SubHostMachineState(join(root, "sub"));
+  await subState.prepare(await mainState.createJoin(), "Publication SubHost");
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address !== "string");
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+  const registry = new DockRegistry(async () => { throw new Error("This directory test must not create a Worker"); });
+  const controller = new MainMachineController({ state: mainState, settingsState: await enabledListener(root, address.port),
+    bindAddress: "127.0.0.1", mainHostEpoch: registry.hostEpoch, localSnapshots: () => [] });
+  const host = new DockHost({ socketPath: join(root, "main.sock"), registry, remoteInstances: controller });
+  const client = new DockClient({ socketPath: host.socketPath, timeoutMs: 2_000 });
+  let nativeSnapshots = [snapshot("native-first")];
+  let routedHello = false;
+  const upstream = new SubHostMachineConnection({ state: subState, address: "127.0.0.1", port: address.port,
+    hostEpoch: "subhost-epoch", snapshots: () => nativeSnapshots, acceptProtocolSocket: (socket) => {
+      const decoder = new JsonLineDecoder();
+      socket.on("error", () => {});
+      socket.on("data", (bytes) => {
+        for (const line of decoder.push(bytes)) {
+          const value = JSON.parse(line);
+          if (value.kind === "hello") {
+            routedHello = true;
+            socket.write(encodeJsonLine(createHelloAck(value.requestId, defaultHostIdentity("subhost-epoch", "2026-01-01T00:00:00.000Z"))));
+          } else if (value.kind === "request") {
+            const instance = nativeSnapshots.find((item) => item.id === value.params.instanceId);
+            assert.equal(value.type, "instance.read");
+            assert.ok(instance, "Main must route the listed ID to the corresponding native Work");
+            socket.end(encodeJsonLine({ kind: "response", version: 2, hostEpoch: "subhost-epoch", requestId: value.requestId, ok: true,
+              result: { instance, page: { events: [], earliest: instance.eventCursor, latest: instance.eventCursor,
+                truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyRevision: 1,
+                historyTruncated: false, pendingMessages: [] } }));
+          }
+        }
+      });
+    } });
+
+  const gates: Array<{ nativeId: string; entered: boolean; released: Promise<void>; release(): void }> = [];
+  const holdDirectoryRead = (nativeId: string) => {
+    let release!: () => void;
+    const gate = { nativeId, entered: false, released: new Promise<void>((resolve) => { release = resolve; }), release: () => release() };
+    gates.push(gate);
+    return gate;
+  };
+  const storedList = mainState.list.bind(mainState);
+  mainState.list = async () => {
+    const records = await storedList();
+    // Match stored content, not a private caller or an assumed read count. All
+    // route allocation, persistence and publication still run in production code.
+    const gate = gates.find((item) => !item.entered && records.some((machine) => machine.routes.some((route) => route.nativeInstanceId === item.nativeId)));
+    if (gate) { gate.entered = true; await gate.released; }
+    return records;
+  };
+  const until = async (predicate: () => boolean, message: string) => {
+    for (let attempt = 0; attempt < 300 && !predicate(); attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(predicate(), message);
+  };
+  context.after(async () => {
+    for (const gate of gates) gate.release();
+    // A public directory lookup waits behind any in-flight inventory. Drain it
+    // before closing its connection or deleting the storage, also on assertion failure.
+    await controller.getByKey("publication-test-cleanup");
+    client.closeActiveConnections();
+    await upstream.stop();
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  await host.start();
+  const initialGate = holdDirectoryRead("native-first");
+  await upstream.start();
+  await until(() => initialGate.entered, "initial inventory did not reach the stored directory read");
+  const initialDuring = (await client.list()).map((item) => item.displayName);
+  initialGate.release();
+  await until(() => upstream.connected(), "initial inventory did not finish");
+  const initial = await client.list();
+  assert.equal(initial.length, 1);
+  const first = initial[0]!;
+  const initialRead = await client.read(first.id);
+  assert.equal(initialRead.instance.id, first.id);
+  assert.equal(initialRead.instance.cwd, "/tmp/native-first");
+
+  const replacementGate = holdDirectoryRead("native-second");
+  nativeSnapshots = [{ ...snapshot("native-first"), displayName: "First updated" }, snapshot("native-second")];
+  await until(() => replacementGate.entered, "replacement inventory did not reach the stored directory read");
+  const replacementDuring = await client.list();
+  routedHello = false;
+  let readSettled = false;
+  const reading = client.read(first.id).then(
+    (result) => { readSettled = true; return { instance: result.instance, error: undefined }; },
+    (error: unknown) => { readSettled = true; return { instance: undefined, error: error instanceof ControlClientError ? error.code : String(error) }; },
+  );
+  await until(() => routedHello || readSettled, "the listed Work read did not reach the SubHost or return a result");
+  const routedWhileWaiting = routedHello;
+  // Main's existing TLS input processing waits for inventory. Receiving hello
+  // proves routing during the wait; release storage to finish that SAME read.
+  replacementGate.release();
+  const replacementRead = await reading;
+  await client.getByKey("publication-test-drain");
+  const replacement = await client.list();
+  assert.deepEqual(replacement.map((item) => item.displayName).sort(), ["First updated", "native-second"]);
+  assert.equal(replacement.find((item) => item.displayName === "First updated")?.id, first.id);
+  for (const listed of replacement) {
+    const read = await client.read(listed.id);
+    assert.equal(read.instance.id, listed.id);
+    assert.equal(read.instance.cwd, listed.displayName === "First updated" ? "/tmp/native-first" : "/tmp/native-second");
+  }
+  // Compare the observations after releasing both gates so a failing regression
+  // also exercises cleanup without leaving a delayed inventory writing to rm'd files.
+  assert.deepEqual({
+    initialDuring,
+    replacementDuring: replacementDuring.map((item) => ({ id: item.id === first.id ? "first" : "new", name: item.displayName })).sort((a, b) => a.name.localeCompare(b.name)),
+    routedWhileWaiting,
+    replacementRead: { sameId: replacementRead.instance?.id === first.id, cwd: replacementRead.instance?.cwd, error: replacementRead.error },
+  }, {
+    initialDuring: [],
+    replacementDuring: [{ id: "first", name: "native-first" }],
+    routedWhileWaiting: true,
+    replacementRead: { sameId: true, cwd: "/tmp/native-first", error: undefined },
+  });
 });
 
 test("SubHost stays connected and publishes startup recovery results together", async (context) => {
