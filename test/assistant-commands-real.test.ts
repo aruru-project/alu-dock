@@ -106,21 +106,43 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   assert.ok(!(await client.commands(ordinary.id)).commands.some(command => command.name === "local-echo"));
   await client.stop(ordinary.id);
 
-  // Extension/extension and built-in/extension conflicts leave the first owner callable and explain
-  // the conflicting name. This refusal implements the owner's explicit no-replacement requirement.
+  // #671 owner decision: platform local controls and registered commands keep their names.
+  // Only the colliding command is refused; adding it must not unload existing tools or other commands.
   const conflict = join(team.root, "conflicting.mjs");
-  await writeFile(conflict, `export default async function({ config }) { return { commands: [{ name: config.name,
-    description: "Must not replace the original", execute() { return "wrong replacement"; } }] }; }`);
+  const keptCommand = join(team.root, "kept-command.txt");
+  await writeFile(keptCommand, "pending");
+  await writeFile(conflict, `import { writeFile } from "node:fs/promises";
+    export default async function({ config }) {
+      let disposed = false;
+      return {
+        tools: config.keep ? [{ name: "kept_local_tool", description: "Existing tool remains available",
+          parameters: { type: "object", properties: {} },
+          async execute() { if (disposed) throw new Error("Extension was disposed"); return { content: [{ type: "text", text: "still available" }] }; }
+        }] : [],
+        commands: [
+          ...(config.names ?? [config.name]).map(name => ({ name, description: "Must not replace the original", execute() { return "wrong replacement"; } })),
+          ...(config.keep ? [{ name: "safe-echo", description: "Valid command beside conflicting names",
+            async execute() { if (disposed) throw new Error("Extension was disposed"); await writeFile(${JSON.stringify(keptCommand)}, "still callable"); return "kept"; }
+          }] : []),
+        ],
+        dispose() { disposed = true; },
+      };
+    }`);
   await writeFile(configFile, JSON.stringify([...settings,
     { id: "duplicate", module: conflict, enabled: true, config: { name: "local-echo" } },
     { id: "builtin-conflict", module: conflict, enabled: true, config: { name: "assistant-status" } },
+    { id: "platform-conflict", module: conflict, enabled: true, config: { names: ["reload", "model"], keep: true } },
   ]));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "safe-echo"]);
   await waitFor(async () => Object.keys((await client.status(assistant.id)).extensionStatus).includes("扩展/builtin-conflict"), "Missing conflict diagnosis");
   const status = (await client.status(assistant.id)).extensionStatus;
   assert.ok(status["扩展/duplicate"]?.includes("/local-echo"));
   assert.ok(status["扩展/builtin-conflict"]?.includes("/assistant-status"));
+  assert.ok(status["扩展/platform-conflict"]?.includes("/reload") && status["扩展/platform-conflict"]?.includes("/model"), "Each refused platform name is identified for renaming");
+  assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "kept_local_tool" && tool.source?.package === "platform-conflict"), "The module's original tool remains registered");
+  await client.prompt(assistant.id, "/safe-echo", "auto", "kept-command");
+  await waitFor(async () => await readFile(keptCommand, "utf8") === "still callable", "A name conflict disposed the module or removed its other command");
   assert.equal((await client.status(assistant.id)).extensionStatus["Dock tools"], "on");
   await client.prompt(assistant.id, "/dock-tools off", "auto", "builtin-still-works");
   await waitFor(async () => (await client.status(assistant.id)).extensionStatus["Dock tools"] === undefined, "The built-in command was replaced");

@@ -3405,7 +3405,7 @@ try {
     console.log('PASS: resident assistant keeps her conversation and restarts; custom insert/text buttons remain; old Pi assistants retain Session, tool switches, shell and ordinary Stop')
   }
 
-  // #671: assistant commands remain callable when their names match client controls;
+  // #671: registered assistant commands use the existing runner and shortcuts;
   // idle chat can still cancel a command, and requested details open in her visible command center.
   {
     mounted?.unmount(); await settle()
@@ -3414,8 +3414,7 @@ try {
     const savedCatalog = catalogNative, savedAbort = abortNative
     extraListed = [her]
     let commands = [
-      { referenceId: 'builtin-refresh', name: 'refresh', source: { kind: 'built-in' }, description: '内置刷新' },
-      { referenceId: 'extension-refresh', name: 'refresh', source: { kind: 'extension', package: 'local' }, description: '扩展刷新回显' },
+      { referenceId: 'extension-echo', name: 'local-echo', source: { kind: 'extension', package: 'local' }, description: '扩展回显' },
       { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情' },
     ]
     catalogNative = () => ({ commands: structuredClone(commands), total: commands.length, truncated: false })
@@ -3438,23 +3437,20 @@ try {
     let running
     runCatalogNative = args => {
       running = args
-      notify(args.operationId, '扩展刷新回显结果')
+      notify(args.operationId, '扩展回显结果')
       event('command.handled', { operationId: args.operationId })
       return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
     }
     await click('打开命令中心')
-    const extensionOption = find(dialog(), item => item.type === 'button' && text(item).includes('扩展刷新回显'))
-    assert.ok(!!extensionOption, 'the real extension is listed beside the local refresh control')
+    const extensionOption = find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显'))
+    assert.ok(!!extensionOption, 'the registered extension is listed beside existing local controls')
     assert.ok(text(dialog()).includes('刷新状态'), 'the local refresh action stays available')
-    // Exact no-argument quick text has local priority too: only the local row can pin /refresh.
-    assert.equal(all(dialog(), item => item.props['aria-label'] === '把 /refresh 做成快捷按钮').length, 1)
-    assert.ok(text(dialog()).includes('在此运行'), 'the colliding extension points to its source-aware runner instead of making a misleading text shortcut')
-    assert.equal(text(dialog()).includes('内置刷新'), false, 'the duplicate remote built-in still uses the client control')
+    assert.ok(!!button('把 /refresh 做成快捷按钮') && !!button('把 /local-echo 做成快捷按钮'), 'local and extension commands keep their original pin controls')
     extensionOption.props.onClick(); await settle()
     find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
-    assert.equal(running.name, 'refresh')
+    assert.equal(running.name, 'local-echo')
     assert.equal(running.instanceId, her.id)
-    assert.ok(text(dialog()).includes('扩展刷新回显结果'), 'selected extension executes through the catalog, not the local refresh action')
+    assert.ok(text(dialog()).includes('扩展回显结果'), 'the selected extension executes through the catalog')
     assert.equal(commandApp.selectedWork.execution, 'idle')
     await click('关闭')
     commandApp.setCurrentDraft('/refresh'); await settle()
@@ -3464,10 +3460,8 @@ try {
     assert.equal(calls.filter(call => call.command === 'run_catalog_command').length, beforeLocal, 'an exact no-argument typed local command keeps local priority')
     assert.ok(calls.filter(call => call.command === 'bootstrap').length > beforeRefresh, 'typed refresh performs the existing local refresh')
     snapshot(); await settle()
-    commandApp.setCurrentDraft('/refresh'); await settle()
-    const extensionSuggestion = find(view, item => item.props.role === 'option' && text(item).includes('扩展刷新回显'))
-    assert.ok(!!extensionSuggestion); extensionSuggestion.props.onClick(); await settle()
-    assert.ok(text(dialog()).includes('扩展刷新回显'), 'choosing the extension suggestion opens its runner instead of replacing it with the local action')
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
 
     runCatalogNative = args => {
       running = args
@@ -3509,14 +3503,14 @@ try {
     assert.ok(text(output).includes(details), 'complete detail text appears in the command notification area')
     assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
     await click('关闭')
-    commands = [{ referenceId: 'extension-status', name: 'assistant-status', source: { kind: 'extension', package: 'old-plugin' }, description: '另一条扩展命令' }]
+    commands = []
     commandApp.selectWork('work'); await settle()
     actions.openAssistantStatus(); await settle()
-    assert.ok(text(dialog()).includes('助手尚未提供这条命令'), 'an extension with the same name cannot impersonate the built-in details command')
+    assert.ok(text(dialog()).includes('助手尚未提供这条命令'), 'a missing details command is explained instead of fabricating a catalog entry')
     assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
     await click('关闭')
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
-    console.log('PASS: assistant command source selection, typed local priority, idle confirmation cancellation and visible full runtime details')
+    console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
   }
 
   // #665 review: the color theme survives a reload, works without this device's settings,

@@ -10,6 +10,7 @@ import { compareCommandDtos, type CommandDto, type SourceDto } from "../core/con
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 import { validateUiCapabilityArgs } from "../worker/worker-protocol.js";
 import type { AgentSkillDeclaration } from "../worker/agent-skills.js";
+import controlCommandNames from "../shared/local-control-command-names.json" with { type: "json" };
 
 /** Public assistant extension API. A plain .mjs module needs no imports or Pi SDK. */
 export interface AssistantToolResult {
@@ -85,7 +86,7 @@ export class AssistantToolExtensions {
 
   /** Requested details include successful loads without putting them back in the chat status bar. */
   details(): string {
-    const loaded = this.loaded.map(({ id, extension }) => `${id}：已加载，${extension.tools?.length ?? 0} 个工具、${extension.commands?.length ?? 0} 个命令。`);
+    const loaded = this.loaded.map(({ id, extension }) => `${id}：已加载，${extension.tools?.length ?? 0} 个工具、${this.commandCatalog.filter(command => command.source.package === id).length} 个命令。`);
     const failures = [...this.statuses].map(([id, text]) => `${id}：${text}`);
     return [...loaded, ...failures].join("\n") || "没有已加载的工具扩展。";
   }
@@ -106,7 +107,10 @@ export class AssistantToolExtensions {
       return [];
     }
     const names = new Set(reserved.map(tool => tool.name));
-    const commandOwners = new Map(reservedCommands.map(command => [command.name, "内置命令"]));
+    const commandOwners = new Map<string, string>([
+      ...Object.values(controlCommandNames).map(name => [name, "客户端内置操作"] as const),
+      ...reservedCommands.map(command => [command.name, "内置命令"] as const),
+    ]);
     const tools: AgentTool[] = [];
     for (const setting of settings) {
       if (!setting.enabled) continue;
@@ -146,25 +150,29 @@ export class AssistantToolExtensions {
           if (names.has(tool.name) || ownNames.has(tool.name)) throw new RegistrationConflict(`工具名 ${tool.name} 已被占用，请改名后 Reload；原工具没有被替换。`);
           ownNames.add(tool.name);
         }
-        const ownCommands = new Map<string, CommandDto>();
+        const ownCommands = new Map<string, { command: AssistantExtensionCommand; dto: CommandDto }>();
+        const commandProblems: string[] = [];
         for (const command of extensionCommands) {
           if (!command || typeof command.name !== "string" || !/^[a-zA-Z0-9_-]+$/u.test(command.name)
             || typeof command.description !== "string" || !command.description.trim() || typeof command.execute !== "function") {
             throw new Error("命令需要不带斜杠的 name、description 和 execute 函数");
           }
           const owner = commandOwners.get(command.name) ?? (ownCommands.has(command.name) ? "本扩展的另一条命令" : undefined);
-          if (owner !== undefined) throw new RegistrationConflict(`命令 /${command.name} 已由「${owner}」提供，请改名后 Reload；原命令没有被替换。`);
-          ownCommands.set(command.name, {
+          if (owner !== undefined) {
+            commandProblems.push(`命令 /${command.name} 已由「${owner}」提供，这条命令未注册。请改名后 Reload；本扩展的工具和其它有效命令保持可用。`);
+            continue;
+          }
+          ownCommands.set(command.name, { command, dto: {
             name: command.name, description: command.description, source, argumentCompletions: false,
             ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
-          });
+          } });
         }
         // Use the public result parser's limits before publishing any part of this extension.
-        const catalog = [...reservedCommands, ...this.commandCatalog, ...ownCommands.values()].sort(compareCommandDtos);
+        const catalog = [...reservedCommands, ...this.commandCatalog, ...[...ownCommands.values()].map(({ dto }) => dto)].sort(compareCommandDtos);
         parseCommandsResult({ commands: catalog, total: catalog.length, truncated: false });
-        for (const command of extensionCommands) {
-          this.commands.set(command.name, { command, dto: ownCommands.get(command.name)! });
-          commandOwners.set(command.name, `扩展 ${setting.id}`);
+        for (const registered of ownCommands.values()) {
+          this.commands.set(registered.command.name, registered);
+          commandOwners.set(registered.command.name, `扩展 ${setting.id}`);
         }
         for (const tool of extensionTools) {
           names.add(tool.name);
@@ -182,6 +190,7 @@ export class AssistantToolExtensions {
           });
         }
         this.loaded.push({ id: setting.id, extension });
+        if (commandProblems.length) this.status(setting.id, commandProblems.join("\n"));
         // Manuals are independent of tool/command registration: malformed or missing skills only
         // produce resource diagnostics, and cannot roll back working tools or commands.
         this.skillDeclarations.push(

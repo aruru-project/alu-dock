@@ -1,0 +1,18 @@
+{
+  "session_new": "new",
+  "stop": "stop",
+  "reload": "reload",
+  "resume": "resume",
+  "tree": "tree",
+  "model": "model",
+  "thinking": "thinking",
+  "speed": "speed",
+  "name": "name",
+  "compact": "compact",
+  "dequeue": "dequeue",
+  "refresh": "refresh",
+  "tools": "tools",
+  "settings": "settings",
+  "state": "state",
+  "resources": "resources"
+}
