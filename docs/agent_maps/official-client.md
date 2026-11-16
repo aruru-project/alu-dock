@@ -52,7 +52,7 @@ App / 区域组件 → 按领域划分的 Pinia store → typed bridge
 
 `AssistantSettings.vue` 保留原记忆设置，把新增滚动整理参数/提示词收进可展开区域。`stores/assistant-memory.ts` 按连接保留其草稿，读取不能覆盖这期间确认的新保存；新编辑不沿用旧的“已保存”提示。记忆速度只写 `extractionSpeed`，结果留在原连接，不改记忆模型或聊天速度。`ModelSpeedSetting.vue` 的 Work 速度表单使用可滚动正文和底部动作；`control-panel.ts` 分开支持信息、远端选择和草稿，读取失败可重试，不因速度探测重置整个面板。
 
-通用插件 JSON 组件和 store 已移除，配置只从 Main 工作区 `extensions.json` 加载。实际工具、命令、Skill 分别沿原 `tool.list`、`command.catalog`、`resource.get/content` 显示。命令即使在聊天 idle 时也能中止；待答问题有“回答问题”入口，错误不重复显示。`openAssistantStatus` 先定位真实助手并选择实际内置目录项 `/assistant-status`，用户在可见面板运行查看全文。助手的短警告可换行，原 Pi 扩展状态呈现不变。API与迁移见[助手扩展](../agent/assistant-tool-extensions.md)。
+通用插件 JSON 组件和 store 已移除，配置只从 Main 工作区 `extensions.json` 加载。实际工具、命令、Skill 分别沿原 `tool.list`、`command.catalog`、`resource.get/content` 显示。命令即使在聊天 idle 时也能中止；待答问题有“回答问题”入口。同一命令的通知、拒绝和后台失败由命令中心统一接纳，实时、读取和回放不再往聊天复制；未被命令中心接管的错误仍显示在原入口。命令结果随原连接、Work 和运行实例保留，暂时切走或 SubHost 离线不清除；明确移除、换代或页面卸载才释放。交给 Agent/Queue 只结束忙碌显示，不当作成功；迟到回执仍归原操作，当前参数按目标和编辑版本决定是否清空。中止失败由发起面板接住，面板已离开则留在原 Work 的操作结果。`openAssistantStatus` 先定位真实助手并选择实际内置目录项 `/assistant-status`，用户在可见面板运行查看全文。助手的短警告可换行，原 Pi 扩展状态呈现不变。API与迁移见[助手扩展](../agent/assistant-tool-extensions.md)。
 
 这些入口通过 `appInteraction.test.mjs` 验证行为，并用真实浏览器检查三主题、窄屏/矮窗、输入、失败反馈、状态展开及命令结果滚动；样例预览、测试桥和原生壳的验证范围分别说明。
 

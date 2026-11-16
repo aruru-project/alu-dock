@@ -188,6 +188,8 @@ Worker-backed read/follow 若在本 Work 的 Reopen 已接纳之后到达，Regi
 
 Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行及手动/自动压缩期间 projection read 继续可用。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行。手动压缩先等待已进入的读取，调用 Worker 后只释放启动阶段的 projection reservation，exclusive effect lease 仍保留到压缩完成；Model/Thinking 设置也通过这条 FIFO，并持有自身 reservation 直到设置与 catalog 提交结束。不存在第二条兼容队列或特定 query 旁路。
 
+Worker 的单次只读 query 超过既有读取期限时，Host 返回 `query_timeout` 并释放这次读取，不停止 Worker，也不拒绝其它在途操作。迟到答复（包括已在传输中的分段结果）完成校验后整体丢弃，不采用其中的结果或状态；随后仍可再次读取、中止或停止 Work。真正的 IPC/发送故障、进程退出，以及有副作用的请求或私有控制超时，继续按原生命周期规则处理；查询超时不冒充 Worker 失联。
+
 Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。Projection reservation 与 command slot 分工不同，复用同一 scheduler 和 generation authority，不另建锁。Abort/Stop 保留对压缩的中止能力，不因同时设置 Model/Thinking 而等待压缩自然完成；压缩后的 Queue drain 等已经接纳的设置完成再发送。
 
 每次 instance query/stream 在开始时取得不可混用的 observation binding：
