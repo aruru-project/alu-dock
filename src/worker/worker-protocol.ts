@@ -38,6 +38,7 @@ import {
   parseSessionsResult,
   parseSettingDto,
   parseSettingDtos,
+  parseSettingsChangedData,
   parseSessionTreeResult,
   parseToolListBody,
 } from "../control/protocol.js";
@@ -355,9 +356,16 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
     "session_info_changed", "thinking_level_changed", "auto_retry_start", "auto_retry_end",
     "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
     "dock_session_replaced", "dock_runtime_error", "dock_runtime_lost",
-    "dock_extension_error", "dock_git_branch_changed", "dock_conversation_frame", "dock_queue_consumed",
+    "dock_extension_error", "dock_git_branch_changed", "dock_conversation_frame", "dock_queue_consumed", "settings.changed",
   ] as const, "Worker runtime event type");
   switch (type) {
+    case "settings.changed": {
+      exactKeys(event, ["type", "data"], "Worker settings event");
+      const data = parseSettingsChangedData(event.data);
+      assertNoUnknownFields(event.data, data, "Worker settings event data");
+      event.data = data;
+      return;
+    }
     case "agent_start":
       exactKeys(event, ["type", "operationId"], "Worker agent-start event"); optionalString(event.operationId, 128); return;
     case "turn_start": case "summarization_retry_finished":

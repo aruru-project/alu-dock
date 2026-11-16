@@ -160,6 +160,9 @@ export const useControlPanelStore = defineStore('control-panel', () => {
     if (event.eventType === 'settings.changed' && data.key === 'modelSpeed' && 'value' in data) {
       speedValueRevision++
       if (speedSetting.value) speedSetting.value = { ...speedSetting.value, value: data.value as SettingValue }
+      // The setting's support can change independently of its saved value. Read the full facts
+      // through the existing query; unchanged support emits no further notification.
+      void refreshSpeed()
     }
     if (event.eventType === 'settings.changed' && settings.value && typeof data.key === 'string') {
       const setting = settings.value.settings.find((item) => item.key === data.key)

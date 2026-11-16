@@ -3253,11 +3253,18 @@ try {
     assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'a remote speed change does not overwrite the tier being edited')
     assert.ok(text(button(dialog('模型速度'), '速度作用范围')).includes('当前及子 Work'), 'a remote speed change does not overwrite the scope being edited')
     assert.ok(text(dialog('模型速度')).includes('已选：Fast'), 'the latest remote selection remains visible beside the draft')
+    // PR review P1: a settings read now returns known support immediately. Its later support
+    // notification must refresh this open panel, even when the saved selection is unchanged.
     speed.allowedValues = ['standard', 'fast']
+    observation({ kind: 'event', event: { ...nextCursor(), occurredAt: 'now', eventType: 'settings.changed', data: { key: 'modelSpeed', value: structuredClone(speed.value) } } }); await settle()
+    assert.ok(text(dialog('模型速度')).includes('当前模型列出的档位：标准、Fast。'), 'background support arrives without reopening the panel')
+    assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'support notification keeps the unsaved tier')
+    assert.ok(text(button(dialog('模型速度'), '速度作用范围')).includes('当前及子 Work'), 'support notification keeps the unsaved scope')
+    speed.allowedValues = ['standard', 'ultrafast']
     const newModel = { ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'next' } } }
     speedApp.applyWorkSnapshot(newModel); await settle()
     assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'changing the model keeps the speed draft')
-    assert.ok(text(dialog('模型速度')).includes('当前模型列出的档位：标准、Fast。'), 'model support updates independently')
+    assert.ok(text(dialog('模型速度')).includes('当前模型列出的档位：标准、Ultrafast。'), 'model support updates independently')
     await click(dialog('模型速度'), '关闭')
 
     await click(view, '打开命令中心')

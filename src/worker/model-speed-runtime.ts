@@ -1,5 +1,7 @@
 import type { SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { isDeepStrictEqual } from "node:util";
 
+import type { SettingsChangedData } from "../core/instance-dto.js";
 import { SETTING_DEFINITIONS, type SettingDto } from "../core/config-projection.js";
 import { DEFAULT_MODEL_SPEED_SUPPORT, parseModelSpeedSelection, supportedModelSpeeds, type ModelSpeedSupport, type ModelSpeedTier } from "../core/model-speed.js";
 
@@ -12,22 +14,32 @@ export class ModelSpeedRuntime {
   private tier: ModelSpeedTier = "standard";
   private support: ModelSpeedSupport = DEFAULT_MODEL_SPEED_SUPPORT;
   private refreshing: Promise<void> | undefined;
+  private readonly supportListeners = new Set<(data: SettingsChangedData) => void>();
 
   constructor(private readonly readConfiguration?: () => Promise<unknown>) {}
 
   configure(support: ModelSpeedSupport | undefined): void {
-    if (support !== undefined) this.support = support;
+    if (support === undefined || isDeepStrictEqual(support, this.support)) return;
+    this.support = support;
+    const { reloadRequired, hostRestartRequired } = SETTING_DEFINITIONS.modelSpeed;
+    for (const listener of this.supportListeners) listener({
+      key: "modelSpeed", value: { tier: this.tier, scope: "work" }, reloadRequired, hostRestartRequired,
+    });
   }
 
-  /** Re-read Main's support facts at the speed controls, not before ordinary model requests.
-   * The owner callback adopts the snapshot without refreshing/replacing the Agent's model runtime.
-   * If Main is unavailable, keep the last successful facts and still return other settings. */
-  async refresh(): Promise<void> {
+  onSupportChanged(listener: (data: SettingsChangedData) => void): () => void {
+    this.supportListeners.add(listener);
+    return () => { this.supportListeners.delete(listener); };
+  }
+
+  /** Optional support reads must not hold a Worker query open while Main recovers (PR review P1).
+   * Return the last good facts now; changed facts notify open clients through settings.changed.
+   * Re-reading identical support does not notify again. Ordinary model requests do not refresh. */
+  refresh(): void {
     if (!this.readConfiguration) return;
     this.refreshing ??= this.readConfiguration()
       .then(() => {}, () => {})
       .finally(() => { this.refreshing = undefined; });
-    await this.refreshing;
   }
 
   update(value: unknown): void {

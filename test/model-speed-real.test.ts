@@ -36,6 +36,19 @@ test("Work speed can be shared with children, overridden individually and extend
   const { coordinator, worker } = team.providers;
   const tier = (request: { body: unknown }) => (request.body as { service_tier?: string }).service_tier;
   const setting = async (id: string) => (await client.settings(id)).settings.find(item => item.key === "modelSpeed")!;
+  const supportNotices: string[] = [];
+  const followers = await Promise.all([parent, assistant].map(item => client.streamEvents(item.id, { onEvent: event => {
+    if (event.type === "settings.changed" && event.data.key === "modelSpeed") supportNotices.push(item.id);
+  } })));
+  context.after(async () => { for (const follower of followers) follower.close(); await Promise.all(followers.map(follower => follower.done.catch(() => {}))); });
+  const expectSupport = async (id: string, expected: string[]) => {
+    const before = supportNotices.length;
+    const initial = await setting(id);
+    if (JSON.stringify(initial.allowedValues) !== JSON.stringify(expected)) {
+      await waitFor(() => supportNotices.slice(before).includes(id), "Updated support did not notify the open client");
+    }
+    assert.deepEqual((await setting(id)).allowedValues, expected);
+  };
   const idle = (id: string) => waitFor(async () => (await client.status(id)).execution === "idle", "Work did not settle");
 
   // Field regression: adding Main's provider alias must reach already-open Works, not just
@@ -45,9 +58,10 @@ test("Work speed can be shared with children, overridden individually and extend
   Object.assign(support.aliases, { coordinator: "upstream", worker: "upstream" });
   await writeFile(supportFile, JSON.stringify(support));
   assert.deepEqual((await catalogReader.read()).models.find(model => model.provider === "worker")?.speedTiers, ["standard", "fast"]);
+  await client.models(parent.id); // Also starts an optional support refresh.
+  await expectSupport(parent.id, ["standard", "fast"]);
+  await expectSupport(assistant.id, ["standard", "fast"]);
   assert.deepEqual((await client.models(parent.id)).models.find(model => model.provider === "coordinator")?.speedTiers, ["standard", "fast"]);
-  assert.deepEqual((await setting(parent.id)).allowedValues, ["standard", "fast"]);
-  assert.deepEqual((await setting(assistant.id)).allowedValues, ["standard", "fast"]);
   assert.equal((await setting(parent.id)).value, null, "Refreshing support does not select a speed");
 
   // The Agent tool and client share the same Host settings action.
@@ -71,8 +85,8 @@ test("Work speed can be shared with children, overridden individually and extend
   // Extend support again while Pi is answering. No Work/session replacement is needed.
   support.providers.upstream.ultrafast.push("fixture");
   await writeFile(supportFile, JSON.stringify(support));
-  assert.deepEqual((await setting(parent.id)).allowedValues, ["standard", "fast", "ultrafast"]);
-  assert.deepEqual((await setting(assistant.id)).allowedValues, ["standard", "fast", "ultrafast"]);
+  await expectSupport(parent.id, ["standard", "fast", "ultrafast"]);
+  await expectSupport(assistant.id, ["standard", "fast", "ultrafast"]);
   await client.updateSetting(child.instance.id, { key: "modelSpeed", value: { tier: "fast", scope: "work" } });
   await client.updateSetting(parent.id, { key: "modelSpeed", value: { tier: "ultrafast", scope: "all" } });
   second.tools({ id: "read-2", name: "read", arguments: { path: memo } });

@@ -32,6 +32,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   thinkingLevel?: string;
   /** Run Main's model service, as the installed Host does; its Workers then hold no providers. */
   modelService?: boolean;
+  /** Entry seam for a supervised model-service restart that has not become ready yet. */
+  modelServiceEntry?: string;
   /** Pi settings merged over the defaults below. */
   settings?: Record<string, unknown>;
   /** The providers' apiKey in models.json; `${NAME}` reads an environment variable. */
@@ -58,7 +60,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     npm_config_cache: join(home, ".npm"), NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
     ...options.environment,
   });
-  const modelService = options.modelService ? new ModelServiceProcess({ agentDir, stateDirectory: root, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
+  const modelService = options.modelService ? new ModelServiceProcess({ agentDir, stateDirectory: root, entry: options.modelServiceEntry, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
   const createAssistantService = (entry?: string, readyWaitMs?: number) => options.assistant
     ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: cwd, agentDir, environment, entry, readyWaitMs,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })

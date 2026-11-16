@@ -3195,6 +3195,12 @@ export class ManagedInstance {
   private handleAgentEvent(received: AgentEventReceipt): void {
     const { event } = received;
     if (this.state.lifecycle === "stopped") return;
+    if (event.type === "settings.changed") {
+      const data = event.data as SettingsChangedData;
+      // Support changed in the Worker; the user's saved scope/selection still belongs to Host.
+      this.appendEvent("settings.changed", data.key === "modelSpeed" ? { ...data, value: this.modelSpeedValue ?? null } : data);
+      return;
+    }
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
       return;

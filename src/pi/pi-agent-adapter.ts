@@ -290,10 +290,14 @@ export class PiAgentAdapter {
   private extensionCommandOperationId: string | undefined;
   private readonly conversationReader: PiSessionConversation;
   private readonly modelSpeed: ModelSpeedRuntime;
+  private readonly unsubscribeSpeedSupport: () => void;
   private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
     this.modelSpeed = options.modelSpeed ?? new ModelSpeedRuntime();
+    this.unsubscribeSpeedSupport = this.modelSpeed.onSupportChanged(data => {
+      if (this.active && !this.disposed) this.publish({ type: "settings.changed", data });
+    });
     this.conversationReader = new PiSessionConversation({ attachmentContextKey: options.attachmentContextKey, publishedFiles: options.publishedFiles });
     if (options.planGoalPort) options.planGoalPort.prompt = async (text, mayStart, stopped) => {
       let started = false;
@@ -640,7 +644,7 @@ export class PiAgentAdapter {
   }
 
   async listModels(): Promise<AgentModelListBody> {
-    await this.modelSpeed.refresh();
+    this.modelSpeed.refresh();
     const binding = this.requireActive();
     return {
       ...projectPiModelList(await binding.services.modelRuntime.getAvailable(), model => this.modelSpeed.supported(model)),
@@ -675,14 +679,14 @@ export class PiAgentAdapter {
   }
 
   async getSettings(): Promise<SettingDto[]> {
-    await this.modelSpeed.refresh();
+    this.modelSpeed.refresh();
     const { session, services } = this.requireActive();
     return [...projectPiSettings(services.settingsManager), this.modelSpeed.setting(session.model)];
   }
 
   async updateSetting(update: SettingUpdate): Promise<SettingDto> {
     if (update.key === "modelSpeed") {
-      await this.modelSpeed.refresh();
+      this.modelSpeed.refresh();
       this.modelSpeed.update(update.value);
       return this.modelSpeed.setting(this.active?.session.model);
     }
@@ -1266,6 +1270,7 @@ export class PiAgentAdapter {
       };
       try { this.clearQueue(); } catch (error) { captureCleanupError("clearQueue", error); }
       this.disposed = true;
+      this.unsubscribeSpeedSupport();
       try {
         await this.abort().catch((error: unknown) => { captureCleanupError("abort", error); });
         await this.mutationTail.catch(() => {});

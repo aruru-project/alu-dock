@@ -91,9 +91,16 @@ test("a SubHost's Work sends its own requests with Main's models and credentials
     // Field regression: a running SubHost Work learns new speed support from the same Main
     // snapshot as local Pi and the assistant, without replacing its Work or conversation.
     assert.deepEqual((await client.settings(work.id)).settings.find(item => item.key === "modelSpeed")?.allowedValues, ["standard"]);
+    let supportChanged = false;
+    const follower = await client.streamEvents(work.id, { onEvent: event => {
+      if (event.type === "settings.changed" && event.data.key === "modelSpeed") supportChanged = true;
+    } });
+    context.after(async () => { follower.close(); await follower.done.catch(() => {}); });
     await writeFile(join(root, "model-speed-support.json"), JSON.stringify({
       providers: { upstream: { fast: ["fixture"], ultrafast: ["fixture"] } }, aliases: { coordinator: "upstream" },
     }));
+    await client.settings(work.id);
+    await waitFor(() => supportChanged, "Updated support did not notify the SubHost Work's open client");
     assert.deepEqual((await client.settings(work.id)).settings.find(item => item.key === "modelSpeed")?.allowedValues, ["standard", "fast", "ultrafast"]);
     await client.updateSetting(work.id, { key: "modelSpeed", value: { tier: "fast", scope: "work" } });
     await client.prompt(work.id, "Continue with Fast.");

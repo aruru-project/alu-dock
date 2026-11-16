@@ -223,6 +223,7 @@ class AssistantAgent implements WorkerAgent {
   private lastUsageTokens: number | undefined;
   private onDisk = false;
   private disposed: Promise<AgentCleanupResult> | undefined;
+  private readonly unsubscribeSpeedSupport: () => void;
 
   constructor(
     private readonly cwd: string,
@@ -235,6 +236,7 @@ class AssistantAgent implements WorkerAgent {
     builtins: AssistantBuiltinExtensions,
     private readonly modelSpeed: ModelSpeedRuntime,
   ) {
+    this.unsubscribeSpeedSupport = modelSpeed.onSupportChanged(data => this.publish({ type: "settings.changed", data }));
     this.skills = new AgentSkills(cwd);
     this.extensions = new AssistantToolExtensions(cwd, builtins, {
       notify: (message, level, operationId) => this.tell(message, level, operationId),
@@ -407,11 +409,11 @@ class AssistantAgent implements WorkerAgent {
         return { tools, total: tools.length, truncated: false };
       }
       case "settings.get":
-        await this.modelSpeed.refresh();
+        this.modelSpeed.refresh();
         return [this.modelSpeed.setting(this.model)];
       case "settings.update":
         if (request.params.update.key !== "modelSpeed") throw this.notHers("助手在这里可以调整模型速度；其他设置请到助手设置中修改。");
-        await this.modelSpeed.refresh();
+        this.modelSpeed.refresh();
         this.modelSpeed.update(request.params.update.value);
         return this.modelSpeed.setting(this.model);
       case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);
@@ -537,6 +539,7 @@ class AssistantAgent implements WorkerAgent {
   dispose(): Promise<AgentCleanupResult> {
     this.disposed ??= (async () => {
       const cleanupErrors: string[] = [];
+      this.unsubscribeSpeedSupport();
       this.reminders.stop();
       this.handoff.stop();
       try { await this.abort(); } catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
