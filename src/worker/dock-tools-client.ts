@@ -98,11 +98,12 @@ export interface ModelFacts {
 export interface RenderContext {
   facts?: ModelFacts;
   thinkingAsked?: string;
+  assistantDelegation?: boolean;
 }
 
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult, context: RenderContext = {}): string {
-  if (result.type === "models") return renderChildModels(result, context.facts ?? { describe: () => undefined });
+  if (result.type === "models") return renderChildModels(result, context.facts ?? { describe: () => undefined }, context.assistantDelegation === true);
   if (result.type === "speed") {
     const value = result.setting.value as import("../core/model-speed.js").ModelSpeedSelection | null;
     return `Selected speed: ${value === null ? "follow parent (standard for an independent Work)" : `${value.tier}; scope: ${value.scope}`}. Supported by the current model's configured list: ${(result.setting.allowedValues ?? []).join(", ")}. Changes apply to subsequent requests, not requests already sent.`;
@@ -204,10 +205,10 @@ export function renderChildWait(result: ChildWaitResult): string {
 }
 
 /** Your own model first, then the models the user picked, with what each supports. */
-function renderChildModels(list: ChildModelList, facts: ModelFacts): string {
+function renderChildModels(list: ChildModelList, facts: ModelFacts, assistantDelegation: boolean): string {
   const key = (model: { provider: string; id: string }) => `${model.provider}/${model.id}`;
   const lines: string[] = [];
-  if (facts.current) lines.push(`Your model, which child Works use unless you are asked for another: ${describeModel(facts.current)}`);
+  if (facts.current) lines.push(`${assistantDelegation ? "Your current chat model (not the child Work default)" : "Your model, which child Works use unless you are asked for another"}: ${describeModel(facts.current)}`);
   const listed = list.models.filter((model) => !facts.current || key(model) !== key(facts.current));
   const available = listed.flatMap((model) => { const described = facts.describe(model); return described ? [described] : []; });
   const unavailable = listed.filter((model) => !facts.describe(model)).map(key);
@@ -218,7 +219,9 @@ function renderChildModels(list: ChildModelList, facts: ModelFacts): string {
   if (unavailable.length > 0) lines.push("", `Listed but not available on this machine now: ${unavailable.join(", ")}.`);
   if (list.problem) lines.push("", `The user's list of models for child Works could not be used: ${list.problem}. Tell the user if they expect one.`);
   else if (list.models.length === 0) lines.push("", "The user has not listed models for child Works.");
-  lines.push("", "Set model only when the user or the project's instructions ask for one; this list gives its exact name. A model the user names that is not listed also works.");
+  lines.push("", assistantDelegation
+    ? "Choose an available model and thinking level suited to the task, respecting the user's explicit choices. Omitted model uses the target's normal Pi default, not your chat model. Models not listed also work when available."
+    : "Set model only when the user or the project's instructions ask for one; this list gives its exact name. A model the user names that is not listed also works.");
   return lines.join("\n");
 }
 

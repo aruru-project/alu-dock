@@ -245,6 +245,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
         });
       },
       sourceAuthorized: (instanceId) => this.dockToolsEnabled(instanceId),
+      isResidentAssistant: (instanceId) => this.isResidentAssistant(instanceId),
     });
     this.workMessages = new WorkMessages({
       live: () => this.instances.values(),
@@ -731,6 +732,15 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.dockToolsMutationPort ??= port;
   }
 
+  /** Main's catalog chooses the one resident; an assistant flag on a Pi Work grants nothing. */
+  isResidentAssistant(instanceId: string): boolean {
+    if (this.assistantWorkspace === undefined) return false;
+    const resident = this.catalog.current().instances.find((record) => record.assistant && record.parentId === undefined);
+    if (resident?.id !== instanceId) return false;
+    const snapshot = this.instances.get(instanceId)?.snapshot();
+    return snapshot?.lifecycle === "active" && snapshot.parentId === undefined && snapshot.executor.kind === "dock-assistant";
+  }
+
   dockToolsEnabled(sourceInstanceId: string): boolean {
     this.assertCatalogReady();
     return this.catalogRecord(sourceInstanceId).dockToolsEnabled ?? true;
@@ -791,7 +801,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
     }
     // The list belongs to this Host's machine, where the source's child Works run.
     if (request.type === "models") return { type: "models", ...await mutations.childModels() };
-    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) });
+    if (request.type === "spawn") return spawnDockWorker(source, request, { create: (input) => mutations.create(input), send: (input) => mutations.send(input) }, this.isResidentAssistant(sourceInstanceId));
     if (request.type === "interrupt" || request.type === "stop") {
       if (child) {
         // The parent takes back the work it handed out, so nothing is owed for it any more.

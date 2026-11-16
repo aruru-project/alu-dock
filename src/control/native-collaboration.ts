@@ -1,4 +1,4 @@
-import { dockMessageText } from "../core/dock-tools.js";
+import { ASSISTANT_CHILD_THINKING_LEVEL, dockMessageText } from "../core/dock-tools.js";
 import type { DockToolsMutationPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/instance-dto.js";
 import { systemToolOperation } from "./system-tools.js";
@@ -52,14 +52,17 @@ export async function spawnDockWorker(
   source: InstanceSnapshot,
   request: Extract<DockToolsRequest, { type: "spawn" }>,
   port: Pick<DockToolsMutationPort, "create" | "send">,
+  /** Supplied only by the Host's resident-assistant identity check, never by the request. */
+  residentAssistant = false,
 ): Promise<Extract<DockToolsResult, { type: "spawn" }>> {
-  // User decision 2026-11-04: a child Work keeps its parent's thinking level, on another model too.
-  // A model without that level starts at the nearest one it has, as Pi does when a Work changes model.
-  const thinkingLevel = request.thinkingLevel ?? source.executor.thinkingLevel;
+  // Ordinary Works keep the 2026-11-04 inheritance policy. The resident assistant's omitted
+  // model goes through the target's normal Pi default; her chat settings are not engineering defaults.
+  // Pi still clamps the requested thinking level to what the selected model supports.
+  const thinkingLevel = request.thinkingLevel ?? (residentAssistant ? ASSISTANT_CHILD_THINKING_LEVEL : source.executor.thinkingLevel);
   const created = await port.create({
     type: "create", operationId: childCreationOperation(request.operationId),
     cwd: request.cwd ?? source.cwd, name: request.name,
-    model: request.model ?? source.executor.model,
+    model: request.model ?? (residentAssistant ? undefined : source.executor.model),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     child: {
       parentId: source.id,

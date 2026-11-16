@@ -715,7 +715,7 @@ class AssistantAgent implements WorkerAgent {
         describe: (ref) => { const model = this.models.getModel(ref.provider, ref.id); return model ? describe(model) : undefined; },
       }),
     };
-    return topLevelDockTools({ conversationCopy: false, waitInTurn: false, usageGuide: false })
+    return topLevelDockTools({ delegation: "assistant", conversationCopy: false, waitInTurn: false, usageGuide: false })
       .map((tool) => ({
         name: tool.name, label: tool.label, description: tool.description, parameters: tool.parameters,
         execute: async (_id: string, params: unknown, signal?: AbortSignal) => {

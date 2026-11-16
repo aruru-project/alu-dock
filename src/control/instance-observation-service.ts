@@ -48,12 +48,17 @@ interface InstanceObservationQueryPort {
   readConversationContent(instanceId: string, contentRef: string, cursor: string | undefined): Promise<ConversationContentPageDto>;
   subscribe(instanceId: string, listener: (snapshot: InstanceSnapshot) => void): (() => void) | undefined;
   sourceAuthorized(instanceId: string): boolean;
+  /** Host-owned Main resident identity; ordinary Works and remote assistant markers do not qualify. */
+  isResidentAssistant?(instanceId: string): boolean;
 }
 
 const HISTORY_SCAN_PAGE_ITEMS = 20;
 const MAX_HISTORY_SCAN_PAGES_PER_CALL = 10;
 const MAX_OBSERVATION_CURSORS = 128;
 const MAX_OBSERVED_ERROR_CHARS = 2_000;
+
+/** Tool argument chunks stay text: the observation does not parse or reinterpret their JSON. */
+type ObservationContentBlock = ContentBlockDto | { type: "evidence"; text: string };
 
 interface InternalObservationMessage {
   type: ObservationMessageType;
@@ -68,6 +73,7 @@ interface ObservationCursorState {
   /** The target's conversation revision; another one means it switched session or branch. */
   revision: string;
   typesKey: string;
+  includeTools: boolean;
   /** Messages read and not returned yet, oldest first. */
   pending: InternalObservationMessage[];
   /** Saved entries fetched and not read yet, oldest first. */
@@ -103,7 +109,7 @@ export class InstanceObservationService {
         return { type: "cancel", cancelledWatchIds: this.cancelLocked(sourceInstanceId, request.watchId) };
       }
       if (request.type === "list") return this.list(sourceInstanceId, request.includeHistory === true);
-      const target = this.resolveTarget(sourceInstanceId, request.target);
+      const target = this.resolveTarget(sourceInstanceId, request.target, request.type === "inspect" ? "read" : "control");
       if (request.type === "inspect") return { type: "inspect", result: await this.inspect(sourceInstanceId, target, request) };
       return this.watchLocked(sourceInstanceId, target);
     });
@@ -160,7 +166,7 @@ export class InstanceObservationService {
   }
 
   private list(sourceInstanceId: string, includeHistory: boolean): ObservationResult {
-    const all = this.visibleTargets(sourceInstanceId);
+    const all = this.visibleTargets(sourceInstanceId, "read");
     const selected = includeHistory
       ? all
       : all.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
@@ -186,6 +192,7 @@ export class InstanceObservationService {
     const limit = normalizeLimit(request.limit);
     const types = normalizeTypes(request.types);
     const typesKey = types.join(",");
+    const includeTools = this.port.isResidentAssistant?.(sourceInstanceId) === true;
     const observedAt = this.now();
 
     let status = observationStatus(target);
@@ -195,7 +202,7 @@ export class InstanceObservationService {
       if (!saved || saved.sourceInstanceId !== sourceInstanceId || saved.targetInstanceId !== target.id) {
         throw new Error("Observation cursor is stale or belongs to another source or target");
       }
-      if (saved.runtimeGeneration !== target.runtimeGeneration || saved.typesKey !== typesKey) {
+      if (saved.runtimeGeneration !== target.runtimeGeneration || saved.typesKey !== typesKey || saved.includeTools !== includeTools) {
         throw new Error("Observation cursor no longer matches the target generation or message filters");
       }
       const boundary = await this.port.readConversationHistory(target.id, undefined, 1);
@@ -218,6 +225,7 @@ export class InstanceObservationService {
         runtimeGeneration: saved.instance.runtimeGeneration,
         revision: saved.revision,
         typesKey,
+        includeTools,
         pending: projectUnsavedEvents(live.liveEvents, types),
         entries: saved.entries,
         ...(saved.nextCursor === undefined ? {} : { historyCursor: saved.nextCursor }),
@@ -246,7 +254,7 @@ export class InstanceObservationService {
     while (state.pending.length < requested) {
       const entry = state.entries.pop();
       if (entry !== undefined) {
-        state.pending.unshift(...await this.readEntry(state.targetInstanceId, entry, types));
+        state.pending.unshift(...await this.readEntry(state.targetInstanceId, entry, types, state.includeTools));
         continue;
       }
       if (!state.hasEarlier || pages >= MAX_HISTORY_SCAN_PAGES_PER_CALL) return;
@@ -268,19 +276,25 @@ export class InstanceObservationService {
     targetInstanceId: string,
     item: ConversationHistoryEntryDto,
     types: readonly ObservationMessageType[],
+    includeTools = false,
   ): Promise<InternalObservationMessage[]> {
     const { entry } = item;
     const allowed = new Set(types);
     const type = recordDefaultType(entry);
-    if (!isConversationMessage(entry) || (!allowed.has(type) && !allowed.has("other"))) return [];
-    const blocks = item.contentComplete ? entry.content : await this.readWholeContent(targetInstanceId, item.contentRef);
-    return projectBlocks(type, blocks, entry.timestamp, allowed);
+    if (!isConversationMessage(entry, includeTools) || (!allowed.has(type) && !allowed.has("other"))) return [];
+    const blocks = item.contentComplete ? entry.content : await this.readWholeContent(targetInstanceId, item.contentRef, includeTools);
+    const messages = projectBlocks(type, blocks, entry.timestamp, allowed, includeTools);
+    if (includeTools && entry.kind === "bash_execution" && allowed.has("other")) {
+      const heading = `[bash execution${entry.exitCode === undefined ? "" : ` · exit=${entry.exitCode}`}${entry.cancelled ? " · cancelled" : ""}]\n${cleanText(entry.command ?? "")}`;
+      return [{ type: "other", text: [heading, ...messages.map((message) => message.text)].join("\n"), ...(entry.timestamp === undefined ? {} : { timestamp: entry.timestamp }) }];
+    }
+    return messages;
   }
 
-  /** The blocks a message shows, its text whole; thinking and tool blocks are not shown. */
-  private async readWholeContent(targetInstanceId: string, contentRef: string): Promise<ContentBlockDto[]> {
-    const blocks: ContentBlockDto[] = [];
-    const texts = new Map<number, { type: "text"; text: string }>();
+  /** The existing content continuation supplies whole text and, for the resident only, tool evidence. */
+  private async readWholeContent(targetInstanceId: string, contentRef: string, includeTools: boolean): Promise<ObservationContentBlock[]> {
+    const blocks: ObservationContentBlock[] = [];
+    const texts = new Map<number, { type: "text" | "evidence"; text: string }>();
     let cursor: string | undefined;
     do {
       const page = await this.port.readConversationContent(targetInstanceId, contentRef, cursor);
@@ -293,6 +307,15 @@ export class InstanceObservationService {
             texts.set(chunk.blockIndex, created);
             blocks.push(created);
           }
+        } else if (includeTools && (chunk.type === "tool_call" || chunk.type === "tool_result")) {
+          let block = texts.get(chunk.blockIndex);
+          if (!block) {
+            block = { type: "evidence", text: toolEvidenceHeading(chunk) + "\n" };
+            texts.set(chunk.blockIndex, block);
+            blocks.push(block);
+          }
+          block.text += chunk.type === "tool_call" ? chunk.argumentsJson : chunk.text;
+          if (chunk.type === "tool_result" && chunk.nestedCalls) block.text += `\nNested tool calls: ${JSON.stringify(chunk.nestedCalls)}`;
         } else if (chunk.type === "image_ref" || (chunk.type === "image" && chunk.offset === 0)) {
           blocks.push({ type: "image", mimeType: chunk.mimeType });
         } else if (chunk.type === "omitted") {
@@ -438,9 +461,9 @@ export class InstanceObservationService {
     return [...cancelled];
   }
 
-  resolveTarget(sourceInstanceId: string, selector: string): InstanceSnapshot {
+  resolveTarget(sourceInstanceId: string, selector: string, access: "read" | "control" = "control"): InstanceSnapshot {
     if (selector === sourceInstanceId) throw new Error("An instance cannot observe itself");
-    const candidates = this.visibleTargets(sourceInstanceId);
+    const candidates = this.visibleTargets(sourceInstanceId, access);
     const exactId = candidates.find((item) => item.id === selector);
     if (exactId) return this.assertNotSelf(sourceInstanceId, exactId);
     const live = candidates.filter((item) => item.lifecycle === "active" || item.lifecycle === "stopping");
@@ -454,9 +477,10 @@ export class InstanceObservationService {
     return this.assertNotSelf(sourceInstanceId, [...matches.values()][0]!);
   }
 
-  private visibleTargets(sourceInstanceId: string): InstanceSnapshot[] {
+  private visibleTargets(sourceInstanceId: string, access: "read" | "control"): InstanceSnapshot[] {
     const source = this.port.getSnapshot(sourceInstanceId);
-    return this.port.listSnapshots().filter((target) => dockTargetVisible(source, target));
+    const residentRead = access === "read" && source.parentId === undefined && this.port.isResidentAssistant?.(sourceInstanceId) === true;
+    return this.port.listSnapshots().filter((target) => residentRead ? target.id !== source.id : dockTargetVisible(source, target));
   }
 
   private assertNotSelf(sourceInstanceId: string, target: InstanceSnapshot): InstanceSnapshot {
@@ -561,10 +585,10 @@ function normalizeTypes(value: readonly ObservationMessageType[] | undefined): O
   return types.sort();
 }
 
-function isConversationMessage(entry: HistoryEntryDto): boolean {
-  return entry.visibility === "conversation"
-    && (entry.kind === "message" || entry.kind === "custom_message")
-    && entry.source !== "tool";
+function isConversationMessage(entry: HistoryEntryDto, includeTools: boolean): boolean {
+  return entry.visibility === "conversation" && entry.excludeFromContext !== true
+    && (entry.kind === "message" || entry.kind === "custom_message" || (includeTools && entry.kind === "bash_execution"))
+    && (includeTools || entry.source !== "tool");
 }
 
 function recordDefaultType(entry: HistoryEntryDto): ObservationMessageType {
@@ -575,13 +599,14 @@ function recordDefaultType(entry: HistoryEntryDto): ObservationMessageType {
 
 function projectBlocks(
   defaultType: ObservationMessageType,
-  blocks: readonly ContentBlockDto[],
+  blocks: readonly ObservationContentBlock[],
   timestamp: string | undefined,
   allowed: ReadonlySet<ObservationMessageType>,
+  includeTools: boolean,
 ): InternalObservationMessage[] {
   const messages: InternalObservationMessage[] = [];
   for (const block of blocks) {
-    if (block.type === "thinking" || block.type === "tool_call" || block.type === "tool_result") continue;
+    if (block.type === "thinking" || (!includeTools && (block.type === "tool_call" || block.type === "tool_result" || block.type === "evidence"))) continue;
     const type = block.type === "text" ? defaultType : "other";
     if (!allowed.has(type)) continue;
     const text = blockText(block);
@@ -593,8 +618,14 @@ function projectBlocks(
   return messages;
 }
 
-function blockText(block: ContentBlockDto): string {
-  if (block.type === "text") return cleanText(block.text);
+function toolEvidenceHeading(block: { type: "tool_call" | "tool_result"; toolName: string; toolCallId: string; isError?: boolean }): string {
+  return `[tool ${block.type === "tool_call" ? "call" : "result"} · ${cleanText(block.toolName)} · ${cleanText(block.toolCallId)}${block.type === "tool_result" ? block.isError ? " · error" : " · success" : ""}]`;
+}
+
+function blockText(block: ObservationContentBlock): string {
+  if (block.type === "text" || block.type === "evidence") return cleanText(block.text);
+  if (block.type === "tool_call") return `${toolEvidenceHeading(block)}\n${cleanText(JSON.stringify(block.args))}`;
+  if (block.type === "tool_result") return `${toolEvidenceHeading(block)}\n${cleanText(block.text)}${block.nestedCalls ? `\nNested tool calls: ${cleanText(JSON.stringify(block.nestedCalls))}` : ""}`;
   if (block.type === "image") return `[image: ${cleanText(block.mimeType)}]`;
   if (block.type === "omitted") return `[${block.kind} omitted: ${cleanText(block.description)}]`;
   return "";

@@ -11,6 +11,9 @@ import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
 import { ChildModelsStore } from "../../src/control/child-models.js";
+import { MainMachineState } from "../../src/control/machine-state.js";
+import { MainMachineController } from "../../src/control/machine-transport.js";
+import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "../../src/control/main-machine-dock-tools.js";
 import { ProjectTrustCoordinator } from "../../src/control/project-trust.js";
 import { createAssistantInstance } from "../../src/assistant-agent/create-assistant-instance.js";
 import { createPiInstance, resolvePiReopenTarget } from "../../src/pi/create-pi-instance.js";
@@ -39,6 +42,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   environment?: Record<string, string>;
   /** Run Main's assistant service, so Works can be opened as the assistant (card #295). */
   assistant?: boolean;
+  /** Use Main's global Dock tools path, as the installed Host does. */
+  mainDockTools?: boolean;
   /** Real attachment storage, isolated under the team's temporary directory. */
   attachments?: boolean;
   /** Shorter waits for her memory passes. */
@@ -78,7 +83,12 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
       assistantService = createAssistantService();
       await assistantService?.start();
       const runningAssistant = assistantService;
-      const registry = new DockRegistry(async ({ child, assistant, ...input }) => {
+      let authority!: MainMachineDockToolsAuthority, controller!: MainMachineController;
+      const dockToolsHostPort = options.mainDockTools ? new MainMachineDockToolsPort({
+        local: () => registry, authority: () => authority,
+        mainHostId: async () => (await controller.machines()).find((machine) => machine.kind === "main")!.hostId,
+      }) : undefined;
+      const registry: DockRegistry = new DockRegistry(async ({ child, assistant, ...input }) => {
         const shared = {
           ...input, agentDir, sessionDir,
           onWorkerSpawn: (pid: number) => workerPids.push(pid),
@@ -100,9 +110,22 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
           defaultDecision: () => "ask", remember: () => assert.fail("trust_once must not persist project trust") }),
         ...(attachmentService === undefined ? {} : { attachmentHostPort: attachmentService }),
         ...(assistantService === undefined ? {} : { assistantWorkspace: cwd }),
+        ...(dockToolsHostPort === undefined ? {} : { dockToolsHostPort }),
       });
       team.registry = registry;
-      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
+      if (options.mainDockTools) {
+        controller = new MainMachineController({
+          state: new MainMachineState(join(root, "machines"), "Main"),
+          mainHostEpoch: registry.hostEpoch, localSnapshots: () => registry.list(),
+        });
+        authority = new MainMachineDockToolsAuthority({
+          controller: () => controller, instances: () => team.host!.instanceDirectory(),
+          localClient: new DockClient({ socketPath: join(root, "dock.sock") }),
+          deliverLocalNotification: (id, notification) => registry.get(id).deliverObservation(notification),
+          isResidentAssistant: (id) => registry.isResidentAssistant(id),
+        });
+      }
+      team.host = new DockHost({ socketPath: join(root, "dock.sock"), registry, initialize: () => registry.initializeCatalog(), ...(options.mainDockTools ? { remoteInstances: controller } : {}), childModels: new ChildModelsStore(root), ...(assistantService === undefined ? {} : { assistant: assistantService }), ...(attachmentService === undefined ? {} : { attachmentService }) });
       await team.host.start();
       team.client = new DockClient({ socketPath: join(root, "dock.sock"), timeoutMs: 5_000, longMutationTimeoutMs: 10_000 });
       if (assistantService !== undefined) await team.assistantWork();

@@ -31,6 +31,8 @@ export class MainMachineDockToolsAuthority {
     instances: () => InstanceManager;
     localClient: DockClient;
     deliverLocalNotification: (sourceMainId: string, notification: ObservationNotification) => Promise<void>;
+    /** Main Registry's resident identity, not a remote snapshot's assistant marker. */
+    isResidentAssistant?: (sourceMainId: string) => boolean;
   }) {
     const snapshots = (): InstanceSnapshot[] => options.instances().snapshots();
     const get = (instanceId: string): InstanceSnapshot => {
@@ -50,6 +52,7 @@ export class MainMachineDockToolsAuthority {
       readConversationContent: (instanceId, contentRef, cursor) => options.localClient.conversationContent(instanceId, contentRef, cursor, {}),
       subscribe: (instanceId, listener) => options.instances().subscribeSnapshot(instanceId, listener),
       sourceAuthorized: (instanceId) => this.authorizedSources.has(instanceId) && (() => { try { return get(instanceId).lifecycle === "active"; } catch { return false; } })(),
+      isResidentAssistant: (instanceId) => options.isResidentAssistant?.(instanceId) === true,
     });
     options.controller().onInstancesDisconnected((instanceIds) => { void this.forgetInstances(instanceIds); });
   }
@@ -73,7 +76,7 @@ export class MainMachineDockToolsAuthority {
     if (request.type === "spawn") return spawnDockWorker(source, request, {
       create: (input) => createDockSystem(this.options.localClient, input, sourceMachineId),
       send,
-    });
+    }, this.options.isResidentAssistant?.(sourceMainId) === true);
     if (request.type === "speed") {
       const target = request.target === undefined ? source : requireHumanTarget(snapshots.filter(item => dockTargetVisible(source, item)), request.target);
       const setting = request.selection === undefined

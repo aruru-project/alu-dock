@@ -440,6 +440,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
         instances: () => host.instanceDirectory(),
         localClient: new DockClient({ socketPath }),
         deliverLocalNotification: (sourceMainId, notification) => registry.get(sourceMainId).deliverObservation(notification),
+        isResidentAssistant: (sourceMainId) => registry.isResidentAssistant(sourceMainId),
       });
     }
     host = new DockHost({
