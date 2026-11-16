@@ -3103,6 +3103,7 @@ try {
     assert.equal(calls.filter(call => call.command === 'reopen_work').length, count, 'checking the result does not send Continue again')
     assert.equal(app.selectedWork.id, unknown.id)
     assert.equal(app.selectedWork.lifecycle, 'active')
+    assert.equal(!!find(view, item => item.props.class === 'alu-composer-error'), false, 'confirmed recovery must not keep presenting the lost Continue as a new failure')
     extraListed = []; reopenNative = undefined
     console.log('PASS: Continue survives leaving the page; second disconnection ends waiting and checking current state opens the same Work without replay')
   }

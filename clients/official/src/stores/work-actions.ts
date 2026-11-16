@@ -233,10 +233,13 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
         }
       }
     } catch (cause) {
-      reportFailure(feedbackScope, cause)
       // Native Continue already made one ordered read after losing its reply.
-      // Another disconnection ends that wait; leave the explicit state-read action.
-      if (!replyLost(cause)) void app.refreshWorksQuietly()
+      // The unknown result owns its state-read action; do not leave another error
+      // above the editor after that read confirms the Work has recovered.
+      if (!replyLost(cause)) {
+        reportFailure(feedbackScope, cause)
+        void app.refreshWorksQuietly()
+      }
     } finally {
       pendingWorkActions.value.delete(pendingIdentity)
     }
