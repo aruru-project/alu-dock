@@ -4,8 +4,8 @@ import { getResources, getSettings, listModels, listTools } from '../lib/bridge'
 import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import type { ControlSection } from '../lib/localCommands'
 import { createSignal } from '../lib/signal'
-import { userErrorMessage as errorMessage } from '../lib/userError'
-import type { ModelsResult, ProjectedEvent, ResourcesResult, SettingsResult, SettingValue, ToolsResult } from '../lib/types'
+import { errorCode, userErrorMessage as errorMessage } from '../lib/userError'
+import type { ModelsResult, ProjectedEvent, ResourcesResult, SettingsResult, SettingInfo, SettingValue, ToolsResult } from '../lib/types'
 import { useAppStore } from './app'
 import { useCommandCatalogStore } from './command-catalog'
 import { useCommandConsoleStore } from './command-console'
@@ -25,9 +25,16 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   const tools = ref<ToolsResult | null>(null)
   const resources = ref<ResourcesResult | null>(null)
   const settings = ref<SettingsResult | null>(null)
-  const speedAvailable = ref(false)
+  const speedSetting = ref<SettingInfo | null>(null)
+  const speedSupport = ref<'unknown' | 'supported' | 'unsupported'>('unknown')
+  const speedAvailable = computed(() => selected.value?.lifecycle === 'active' && speedSupport.value !== 'unsupported')
+  const speedLoading = ref(false)
+  const speedError = ref('')
   let speedRead = 0
-  const supportsSpeed = (result: SettingsResult) => result.settings.some(item => item.key === 'modelSpeed' && item.allowedValues?.some(tier => tier !== 'standard'))
+  let speedValueRevision = 0
+  const speedTarget = computed(() => JSON.stringify([app.activeConnectionId, app.connectionContext?.selectionGeneration,
+    selected.value?.id, selected.value?.ownerHostEpoch, selected.value?.runtimeGeneration]))
+  const speedIdentity = computed(() => JSON.stringify([speedTarget.value, selected.value?.executor.model?.provider, selected.value?.executor.model?.id]))
   const loading = ref(new Set<ControlSection>())
   const loadErrors = ref<Partial<Record<ControlSection, string>>>({})
   const writeFailed = createSignal<[message: string]>()
@@ -39,28 +46,57 @@ export const useControlPanelStore = defineStore('control-panel', () => {
     () => selected.value?.id,
     () => selected.value?.ownerHostEpoch,
     () => selected.value?.runtimeGeneration,
-    () => selected.value?.executor.model?.provider,
-    () => selected.value?.executor.model?.id,
-    () => selected.value?.lifecycle,
   ], () => {
     const context = app.connectionContext
     const work = selected.value
     if (context && work) commandConsole.bindContext(context.connectionId, context.selectionGeneration, work)
-    reset()
-    void refreshSpeedAvailability()
-    if (surfaces.commandOpen) void loadSection(surfaces.controlSection, true)
   }, { immediate: true })
 
-  // Visibility only: this read never gates chatting, changing models or any Host operation.
-  async function refreshSpeedAvailability() {
+  watch([speedTarget, () => selected.value?.executor.model?.provider, () => selected.value?.executor.model?.id, () => selected.value?.lifecycle], (_value, previous) => {
+    if (!previous || previous[0] !== speedTarget.value) {
+      speedSetting.value = null
+      speedSupport.value = 'unknown'
+      speedError.value = ''
+    } else if (previous[1] !== selected.value?.executor.model?.provider || previous[2] !== selected.value?.executor.model?.id) {
+      // A different model has not yet reported its support. Keep known values, not an old rejection.
+      speedSupport.value = 'unknown'
+    }
+    void refreshSpeed()
+  }, { immediate: true })
+
+  function acceptSpeedSetting(setting: SettingInfo | null) {
+    speedSetting.value = setting
+    speedSupport.value = setting?.allowedValues?.some(tier => tier !== 'standard') ? 'supported' : 'unsupported'
+  }
+
+  // Only the optional speed control is refreshed. Model changes do not reset an open Pi panel.
+  async function refreshSpeed(): Promise<boolean> {
     const read = ++speedRead
-    speedAvailable.value = false
+    const identity = speedIdentity.value
+    const valueRevision = speedValueRevision
     const work = selected.value
-    if (!app.connectionContext || work?.lifecycle !== 'active') return
+    speedLoading.value = false
+    if (!app.connectionContext || work?.lifecycle !== 'active') return false
+    const current = () => read === speedRead && identity === speedIdentity.value
+    speedLoading.value = true
+    speedError.value = ''
     try {
       const result = await currentConnectionCall(app, context => getSettings(work.id, context))
-      if (read === speedRead) speedAvailable.value = supportsSpeed(result)
-    } catch { /* An old/unavailable Host does not advertise the optional control. */ }
+      if (!current()) return false
+      const setting = result.settings.find(item => item.key === 'modelSpeed') ?? null
+      // A live speed change received during this read is newer than its copied value.
+      if (setting && speedSetting.value && valueRevision !== speedValueRevision) setting.value = speedSetting.value.value
+      acceptSpeedSetting(setting)
+      return true
+    } catch (cause) {
+      if (current()) {
+        if (errorCode(cause) === 'capability_missing') acceptSpeedSetting(null)
+        else speedError.value = errorMessage(cause)
+      }
+      return false
+    } finally {
+      if (current()) speedLoading.value = false
+    }
   }
 
   /** Drops earlier results; the open panel reads again. */
@@ -75,6 +111,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   }
 
   async function loadSection(section: ControlSection, force = false): Promise<boolean> {
+    if (section === 'speed') return refreshSpeed()
     if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session', 'quick-buttons'].includes(section)) return true
     const work = selected.value
     if (!work) return false
@@ -91,6 +128,8 @@ export const useControlPanelStore = defineStore('control-panel', () => {
             : settings.value
     if (dataExists && !force) return true
     const epoch = loadEpoch
+    const speedScope = speedIdentity.value
+    const speedVersion = speedRead
     const workId = work.id
     const current = () => epoch === loadEpoch && selected.value?.id === workId
     loading.value.add(section)
@@ -119,7 +158,7 @@ export const useControlPanelStore = defineStore('control-panel', () => {
         const result = await currentConnectionCall(app, (context) => getSettings(workId, context))
         if (!current()) return false
         settings.value = result
-        speedAvailable.value = supportsSpeed(result)
+        if (speedScope === speedIdentity.value && speedVersion === speedRead) acceptSpeedSetting(result.settings.find(item => item.key === 'modelSpeed') ?? null)
       }
       return true
     } catch (cause) {
@@ -132,6 +171,10 @@ export const useControlPanelStore = defineStore('control-panel', () => {
 
   function applyConfigEvent(event: ProjectedEvent) {
     const data = event.data
+    if (event.eventType === 'settings.changed' && data.key === 'modelSpeed' && 'value' in data) {
+      speedValueRevision++
+      if (speedSetting.value) speedSetting.value = { ...speedSetting.value, value: data.value as SettingValue }
+    }
     if (event.eventType === 'settings.changed' && settings.value && typeof data.key === 'string') {
       const setting = settings.value.settings.find((item) => item.key === data.key)
       if (setting && 'value' in data) {
@@ -152,5 +195,5 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   }
   onScopeDispose(observation.onConfigChanged(applyConfigEvent))
 
-  return { models, tools, resources, settings, speedAvailable, loading, loadErrors, reset, loadSection, onWriteFailed: writeFailed.on }
+  return { models, tools, resources, settings, speedSetting, speedAvailable, speedTarget, speedIdentity, speedLoading, speedError, refreshSpeed, acceptSpeedSetting, loading, loadErrors, reset, loadSection, onWriteFailed: writeFailed.on }
 })

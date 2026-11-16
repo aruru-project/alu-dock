@@ -52,9 +52,7 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '连接中断，没收到结果。请稍后再试。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
-    // The trust question is answered where the flow shows it; a caller without
-    // that UI (Reopen, see #304) must not tell the user to refresh.
-    if (code === 'project_trust_required') return '这项操作需要先确认信任对应的目录，这个客户端还不能在这里确认。请在电脑上的 Alu Dock 终端里完成。'
+    if (code === 'project_trust_required') return '这项操作需要你确认是否信任项目目录。请从原入口重试，并在信任提示里选择或取消。'
     if (code === 'interaction_expired' || code === 'interaction_not_found') return '这个问题已经在其他窗口回答，或已经结束，不需要再处理。'
     if (code === 'invalid_tree_target') return '这个节点已不在当前 Session 中。请重新打开 Session Tree 后再选择。'
     // Directory picker (`workspace.list`) outcomes; the Host phrases them for its log, not the user.

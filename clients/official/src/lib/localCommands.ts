@@ -32,19 +32,19 @@ export const localControlCommands: readonly LocalControlCommand[] = [
 ]
 
 /** Her conversation stays one continuous conversation; these Pi-only panels do not apply. */
-export function controlSectionAvailable(section: ControlSection, assistant = false): boolean {
-  return !assistant || !['sessions', 'tree', 'new-session', 'compact-session', 'settings'].includes(section)
+export function controlSectionAvailable(section: ControlSection, residentAssistant = false): boolean {
+  return !residentAssistant || !['sessions', 'tree', 'new-session', 'compact-session', 'settings'].includes(section)
 }
 
-export function controlCommandAvailable(name: string, assistant = false): boolean {
-  if (!assistant) return true
+export function controlCommandAvailable(name: string, residentAssistant = false): boolean {
+  if (!residentAssistant) return true
   if (name === 'fork' || name === 'clone' || name === 'resources') return false
   const section = localControlCommand(name)?.section
-  return !section || controlSectionAvailable(section, assistant)
+  return !section || controlSectionAvailable(section, residentAssistant)
 }
 
-export function workControlCommands(assistant = false, displayName = '助手'): readonly LocalControlCommand[] {
-  if (!assistant) return localControlCommands
+export function workControlCommands(residentAssistant = false, displayName = '助手'): readonly LocalControlCommand[] {
+  if (!residentAssistant) return localControlCommands
   return localControlCommands.filter(command => controlCommandAvailable(command.name, true)).map(command => {
     if (command.name === 'stop') return { ...command, label: `重启${displayName || '助手'}`, description: '打断当前回复、停止她的子 Work；对话和记忆保留' }
     if (command.name === 'reload') return { ...command, label: '刷新助手（Reload）', description: '重新读入人设、手写设定、记忆和工具扩展，对话接着原来的' }
@@ -54,9 +54,9 @@ export function workControlCommands(assistant = false, displayName = '助手'): 
   })
 }
 
-export function filterLocalControlCommands(query: string, assistant = false): LocalControlCommand[] {
+export function filterLocalControlCommands(query: string, residentAssistant = false): LocalControlCommand[] {
   const normalized = query.toLowerCase()
-  const commands = workControlCommands(assistant)
+  const commands = workControlCommands(residentAssistant)
   if (!normalized) return [...commands]
   return commands
     .flatMap((command, index) => {

@@ -19,11 +19,13 @@ import { useSavedSessionPages } from '../lib/savedSessions'
 import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 import SavedSessionList from './SavedSessionList.vue'
 import type { CompactionPromptTemplatesResult, SessionReloadResult, SavedSession, SessionTree, Work } from '../lib/types'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import { useAppStore } from '../stores/app'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
 const props = defineProps<{ work: Work; mode: SessionMode; compactionPending: boolean }>()
 const app = useAppStore()
+const residentAssistant = computed(() => isResidentAssistant(props.work))
 const emit = defineEmits<{
   finished: []
   compact: [customInstructions?: string]
@@ -404,7 +406,7 @@ async function reload() {
     const result = await currentSessionCall(scope, () => reloadSession(app.captureOperation(scope, scope.instanceId), operationId()), (reply) => reply.instance.runtimeGeneration)
     reloadScope.value = scope
     reloadSummary.value = result
-    status.value = props.work.assistant ? '助手已刷新，对话接着原来的。扩展的加载结果可在助手设置里查看。' : `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
+    status.value = residentAssistant.value ? '助手已刷新，对话接着原来的。扩展的加载结果可在助手设置里查看。' : `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`
     emit('finished')
   }
   catch (cause) { if (!handOverLostReply(cause, 'reload_session')) mutationFailure(cause, 'sessions') } finally { pending.value = '' }
@@ -522,8 +524,8 @@ function time(value?: string | null) { return treeNodeTime(value) }
     </section>
 
     <section v-else-if="mode === 'reload-session'" class="alu-session-action-state alu-confirm-state">
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : work.assistant ? '刷新助手（Reload）' : '确认' }}</button></div>
-      <div v-if="reloadSummary" class="reload-summary"><strong v-if="!work.assistant">{{ reloadSummary.resourceTotal }} 个资源 · {{ reloadSummary.diagnosticTotal }} 条诊断</strong><span v-for="diagnostic in reloadSummary.diagnostics" :key="diagnostic.message" :data-severity="diagnostic.severity">{{ diagnostic.message }}</span></div>
+      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="!!pending" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : residentAssistant ? '刷新助手（Reload）' : '确认' }}</button></div>
+      <div v-if="reloadSummary" class="reload-summary"><strong v-if="!residentAssistant">{{ reloadSummary.resourceTotal }} 个资源 · {{ reloadSummary.diagnosticTotal }} 条诊断</strong><span v-for="diagnostic in reloadSummary.diagnostics" :key="diagnostic.message" :data-severity="diagnostic.severity">{{ diagnostic.message }}</span></div>
     </section>
 
     <section v-else class="alu-tree-select">

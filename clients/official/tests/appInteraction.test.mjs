@@ -108,6 +108,11 @@ const invoke = async (command, args = {}) => {
     if (toolsNative) return toolsNative()
     throw { code: 'connection_failed', message: '工具暂时没有读到，请重试。' }
   }
+  if (command === 'set_active_tools') return { tools: [{ name: 'read', description: '读取文件', active: false }], total: 1, truncated: false }
+  if (command === 'workspace_entries') return { instanceId: args.instanceId, path: args.path, revision: '1', entries: [], total: 0, truncated: false, hostEpoch: 'epoch' }
+  if (command === 'clear_workspace_file_state') return
+  if (command === 'run_shell_command') return { receipt: { operationId: args.operationId, instanceId: args.instanceId, startedAt: '2026-11-13T10:00:00Z' }, instance: atHost(work) }
+  if (command === 'new_session') throw { code: 'busy', message: '这次没有新建 Session，请稍后重试。' }
   if (command === 'get_resources') return { resources: [{ kind: 'skill', name: 'Available skill' }], diagnostics: [], resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
   if (command === 'get_settings') return settingsNative ? settingsNative(args) : { settings: [] }
   if (command === 'update_setting') return updateSettingNative(args)
@@ -2961,6 +2966,65 @@ try {
   }
   console.log('PASS: Continue opens the Work from the Host answer without waiting for the list')
 
+  // Reopen's missing trust UI (#304): answer on the original Work, or cancel without reopening it.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear()
+    const lost = { ...otherWork, id: 'trust-work', displayName: 'Trust Work', cwd: '/original', lifecycle: 'host_lost', execution: 'unavailable', reopenable: true, ownerHostEpoch: undefined }
+    extraListed = [lost]
+    const pinia = createPinia(), trustApp = useAppStore(pinia), view = element('trust-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(view); await settle()
+    trustApp.selectWork(lost.id); await settle()
+    const dialog = () => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '继续 Work 前确认信任')
+    const button = label => find(dialog(), item => item.type === 'button' && text(item) === label)
+    const start = async () => {
+      const entry = find(view, item => item.type === 'button' && item.props.class === 'alu-work-state-primary')
+      assert.ok(!!entry); entry.props.onClick(); await settle()
+      assert.ok(!!dialog(), 'Continue opens its trust choice instead of sending the user to a terminal')
+      assert.ok(text(dialog()).includes('/canonical/project'), 'the directory to be trusted comes from the challenge')
+    }
+    reopenNative = args => { throw { code: 'project_trust_required', operationId: args.operationId, details: { operationId: args.operationId, challengeId: 'reopen-challenge', cwd: '/canonical/project' } } }
+    await start()
+    const firstCount = calls.filter(call => call.command === 'reopen_work').length
+    button('取消').props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'reopen_work').length, firstCount, 'cancelling sends no trust decision')
+    assert.equal(trustApp.selectedWork.lifecycle, 'host_lost')
+    for (const dismiss of [
+      () => { for (const handler of windowEvents.get('keydown') ?? []) handler({ key: 'Escape', isComposing: false, preventDefault() {}, stopPropagation() {} }) },
+      firePopstate,
+    ]) {
+      await start()
+      const count = calls.filter(call => call.command === 'reopen_work').length
+      dismiss(); await settle()
+      assert.equal(!!dialog(), false, 'Escape and Back cancel the trust choice')
+      assert.equal(calls.filter(call => call.command === 'reopen_work').length, count)
+    }
+    await start()
+    const staleCount = calls.filter(call => call.command === 'reopen_work').length
+    const staleChoice = button('仅本次信任')
+    trustApp.selectWork('other'); await settle()
+    assert.equal(!!dialog(), false, 'switching Work dismisses the old trust question')
+    staleChoice.props.onClick(); await settle()
+    assert.equal(calls.filter(call => call.command === 'reopen_work').length, staleCount, 'an old choice cannot authorize a different page')
+    for (const [label, decision] of [['仅本次信任', 'trust_once'], ['信任并继续', 'trust_and_remember']]) {
+      const target = { ...lost, id: `trust-${decision}` }
+      extraListed.push(target); await trustApp.refreshWorksQuietly(); trustApp.selectWork(target.id); await settle()
+      await start()
+      const original = calls.findLast(call => call.command === 'reopen_work').args
+      reopenNative = args => atHost({ ...target, lifecycle: 'active', execution: 'idle', reopenable: false, ownerHostEpoch: 'epoch', runtimeGeneration: 2 })
+      button(label).props.onClick(); await settle()
+      const continued = calls.findLast(call => call.command === 'reopen_work').args
+      assert.deepEqual([continued.instanceId, continued.operationId, continued.trustChallengeId, continued.projectTrustDecision], [target.id, original.operationId, 'reopen-challenge', decision])
+      assert.deepEqual([continued.connectionId, continued.selectionGeneration, continued.expectedHostEpoch, continued.expectedRuntimeGeneration], [original.connectionId, original.selectionGeneration, original.expectedHostEpoch, original.expectedRuntimeGeneration], 'trust continues the frozen original target')
+      assert.equal(trustApp.selectedWork.lifecycle, 'active')
+      assert.equal(!!dialog(), false)
+      reopenNative = args => { throw { code: 'project_trust_required', operationId: args.operationId, details: { operationId: args.operationId, challengeId: 'reopen-challenge', cwd: '/canonical/project' } } }
+    }
+    extraListed = []; reopenNative = undefined
+    console.log('PASS: Continue trust: directory shown, cancel and Work switch leave it stopped, both explicit choices reuse the original operation and target')
+  }
+
   // #359: quick buttons in the input card. Real App, Pinia, palette and editor; only native IPC is a fixture.
   {
     storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear(); pickedJobs = []
@@ -3085,6 +3149,84 @@ try {
     console.log('PASS: quick buttons: defaults run local controls; pinned command takes an argument; send keeps draft/attachments; restart keeps buttons; insert fills without sending; overflow runs from palette; order decides the row')
   }
 
+  // RC6/7 speed controls: edits survive remote settings/model updates; replies stay with their Work.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear()
+    const speed = { key: 'modelSpeed', value: null, source: 'effective', writable: true, valueType: 'object', allowedValues: ['standard', 'fast', 'ultrafast'], reloadRequired: false, hostRestartRequired: false }
+    settingsNative = () => ({ settings: [structuredClone(speed), { ...speed, key: 'compactionReserveTokens', valueType: 'integer', value: 1000, allowedValues: undefined }] })
+    const pinia = createPinia(), speedApp = useAppStore(pinia), view = element('speed-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(view); await settle(); speedApp.selectWork('work'); await settle(); contentSnapshot(); await settle()
+    const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
+    const button = (root, label) => find(root, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
+    const click = async (root, label) => { const target = button(root, label); assert.ok(!!target, `button exists: ${label}`); target.props.onClick(); await settle() }
+    const dialog = label => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === label)
+    await click(view, '设置模型速度')
+    await click(dialog('模型速度'), '模型速度档位'); await click(dialog('模型速度'), 'Ultrafast')
+    await click(dialog('模型速度'), '速度作用范围'); await click(dialog('模型速度'), '当前及子 Work')
+    speed.value = { tier: 'fast', scope: 'work' }
+    observation({ kind: 'event', event: { ...nextCursor(), occurredAt: 'now', eventType: 'settings.changed', data: { key: 'modelSpeed', value: structuredClone(speed.value) } } }); await settle()
+    assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'a remote speed change does not overwrite the tier being edited')
+    assert.ok(text(button(dialog('模型速度'), '速度作用范围')).includes('当前及子 Work'), 'a remote speed change does not overwrite the scope being edited')
+    assert.ok(text(dialog('模型速度')).includes('已选：Fast'), 'the latest remote selection remains visible beside the draft')
+    speed.allowedValues = ['standard', 'fast']
+    const newModel = { ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'next' } } }
+    speedApp.applyWorkSnapshot(newModel); await settle()
+    assert.ok(text(button(dialog('模型速度'), '模型速度档位')).includes('Ultrafast'), 'changing the model keeps the speed draft')
+    assert.ok(text(dialog('模型速度')).includes('当前模型列出的档位：标准、Fast。'), 'model support updates independently')
+    await click(dialog('模型速度'), '关闭')
+
+    await click(view, '打开命令中心')
+    const settingsEntry = find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Settings'))
+    settingsEntry.props.onClick(); await settle()
+    find(dialog('设置'), item => item.type === 'button' && text(item).includes('Compaction 预留 Token')).props.onClick(); await settle()
+    const editor = find(dialog('设置'), item => item.type === 'input')
+    editor.props['onUpdate:modelValue']('4321'); await settle()
+    speedApp.applyWorkSnapshot({ ...newModel, executor: { ...newModel.executor, model: { provider: 'fixture', id: 'third' } } }); await settle()
+    assertSameReference(find(dialog('设置'), item => item.type === 'input'), editor, 'speed probing leaves the existing settings editor mounted')
+    assert.equal(editor.value, '4321')
+    await click(dialog('设置'), '关闭')
+
+    settingsNative = () => { throw { code: 'connection_failed' } }
+    speedApp.applyWorkSnapshot({ ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'temporary-failure' } } }); await settle()
+    assert.ok(!!button(view, '设置模型速度'), 'a temporary read failure keeps the known speed entry')
+    await click(view, '设置模型速度')
+    assert.ok(!!button(dialog('模型速度'), '重试'), 'speed read failure offers retry in place')
+    settingsNative = () => ({ settings: [structuredClone(speed)] })
+    await click(dialog('模型速度'), '重试')
+    assert.ok(!!button(dialog('模型速度'), '模型速度档位'))
+    await click(dialog('模型速度'), '关闭')
+
+    let finishSave
+    updateSettingNative = args => new Promise(resolve => { finishSave = () => resolve({ setting: { ...speed, value: args.update.value }, instance: atHost(work), reloadRequired: false, hostRestartRequired: false }) })
+    await click(view, '设置模型速度')
+    await click(dialog('模型速度'), '模型速度档位'); await click(dialog('模型速度'), 'Ultrafast')
+    await click(dialog('模型速度'), '保存速度设置')
+    speed.value = { tier: 'standard', scope: 'work' }
+    speedApp.selectWork('other'); await settle()
+    await click(view, '设置模型速度')
+    finishSave(); await settle()
+    assert.ok(!!dialog('模型速度'), 'an old save reply does not close another Work speed page')
+    assert.ok(text(dialog('模型速度')).includes('已选：标准'), 'an old save reply does not change another Work speed')
+    await click(dialog('模型速度'), '关闭')
+
+    settingsNative = () => { throw { code: 'connection_failed' } }
+    speedApp.selectWork('work'); await settle()
+    assert.ok(!!button(view, '设置模型速度'), 'unknown support remains reachable for a retry')
+    await click(view, '设置模型速度')
+    assert.ok(!!button(dialog('模型速度'), '重试'))
+    settingsNative = () => ({ settings: [] })
+    await click(dialog('模型速度'), '重试')
+    await click(dialog('模型速度'), '关闭')
+    assert.equal(!!button(view, '设置模型速度'), false, 'a successful read without modelSpeed hides the entry')
+    settingsNative = () => { throw { code: 'connection_failed' } }
+    speedApp.applyWorkSnapshot({ ...speedApp.selectedWork, executor: { ...speedApp.selectedWork.executor, model: { provider: 'fixture', id: 'unknown-support' } } }); await settle()
+    assert.ok(!!button(view, '设置模型速度'), 'another model is unknown, not still unsupported because the previous model was')
+    settingsNative = undefined; updateSettingNative = undefined
+    console.log('PASS: speed drafts, current selection and model support update separately; read failures retry locally; slow saves stay with their Work')
+  }
+
   // #670: the owner chose one permanent assistant: open her existing conversation, keep her
   // first with her children, and offer restart rather than the Pi-only conversation controls.
   {
@@ -3095,8 +3237,10 @@ try {
       { id: 'fork', name: '自选 Fork', text: '/fork old-entry', mode: 'insert' },
       { id: 'compact', name: '压缩', text: '/compact', mode: 'send' },
       { id: 'hello', name: '问候', text: '早上好', mode: 'insert' },
+      { id: 'explain', name: '说明', text: '/compact explain this', mode: 'send' },
+      { id: 'insert-resume', name: '填入恢复', text: '/resume', mode: 'insert' },
     ]))
-    const her = { ...otherWork, id: 'resident-assistant', displayName: '小满', name: '小满', assistant: true, runtimeGeneration: 1 }
+    const her = { ...otherWork, id: 'resident-assistant', displayName: '小满', name: '小满', assistant: true, runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
     const child = { ...otherWork, id: 'her-child', displayName: '她的子 Work', parentId: her.id }
     extraListed = [her, child, { ...otherWork, id: 'ordinary-child', displayName: '普通子 Work', parentId: 'work' }]
     const savedAssistant = assistantNative, savedTools = toolsNative, savedModelVisibility = modelVisibilityNative
@@ -3167,7 +3311,17 @@ try {
     assert.equal(!!button(assistantView, '设置模型速度'), false, 'a model without acceleration tiers does not show the speed entry')
     settingsNative = undefined; updateSettingNative = undefined
     const quickNames = () => all(assistantView, item => item.type === 'button' && String(item.props.class).includes('alu-quick-btn')).map(text)
-    assert.deepEqual(quickNames(), ['问候'], 'saved Pi-only buttons stay out of her input row')
+    assert.deepEqual(quickNames(), ['自选 Fork', '问候', '说明', '填入恢复'], 'only exactly executed Pi controls are hidden; custom text and insert buttons remain')
+    const beforeInsert = calls.filter(call => call.command === 'submit_message').length
+    await click(assistantView, '填入恢复')
+    assert.equal(assistantApp.currentDraft, '/resume')
+    assert.equal(calls.filter(call => call.command === 'submit_message').length, beforeInsert, 'insert only edits the draft')
+    const savedSubmit = submitNative
+    submitNative = () => ({ receipt: { queued: false } })
+    await click(assistantView, '说明')
+    assert.equal(calls.findLast(call => call.command === 'submit_message').args.message, '/compact explain this', 'arguments keep ordinary text submission semantics')
+    assert.equal(assistantApp.currentDraft, '/resume', 'ordinary quick text does not claim the draft')
+    submitNative = savedSubmit
     const composer = () => find(assistantView, item => item.type === 'textarea' && item.props.placeholder === '输入消息…')
     composer().props['onUpdate:modelValue']('/res'); await settle()
     const suggestions = all(assistantView, item => item.props.role === 'option').map(text).join(' ')
@@ -3175,7 +3329,7 @@ try {
     composer().props['onUpdate:modelValue']('还没发完的话'); await settle()
     await click(assistantView, '打开命令中心')
     const paletteLabels = () => all(dialog('命令中心'), item => String(item.props.class).split(' ').includes('cmd-palette-item-label')).map(text)
-    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '自选 Fork', '压缩']) {
+    for (const label of ['New Session', 'Resume Session', 'Session Tree', 'Compact Context', 'Settings', '恢复', '压缩']) {
       assert.equal(paletteLabels().includes(label), false, `${label} does not belong in her controls`)
     }
     assert.ok(paletteLabels().includes('Rename Session'), 'the owner can still rename the assistant')
@@ -3213,11 +3367,41 @@ try {
     assert.equal(assistantApp.selectedWork.displayName, '小满', 'restart preserves the chosen name')
     assert.deepEqual(rowNames().slice(0, 2), ['助手小满', 'Work'])
     assistantApp.selectWork('work'); await settle()
-    assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候'], 'the same device buttons still belong to ordinary Pi Works')
+    assert.deepEqual(quickNames(), ['恢复', '自选 Fork', '压缩', '问候', '说明', '填入恢复'], 'the same device buttons still belong to ordinary Pi Works')
     await click(assistantView, '打开命令中心')
     assert.ok(paletteLabels().includes('New Session'), 'ordinary Pi conversation controls stay available')
+    await click(dialog('命令中心'), '关闭')
+    // Old Hosts create assistant:true Pi Works. The identity label does not change their runtime.
+    const legacy = { ...assistantApp.selectedWork, assistant: true, executor: { ...assistantApp.selectedWork.executor, kind: 'pi-sdk' } }
+    assistantApp.applyWorkSnapshot(legacy); await settle()
+    await click(assistantView, '打开命令中心')
+    assert.ok(paletteLabels().includes('New Session'), 'an old Pi assistant still has its Session controls')
+    assert.ok(paletteLabels().includes('Stop Work'), 'an old Pi assistant stops instead of waiting for Main to restart it')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('New Session')).props.onClick(); await settle()
+    assert.ok(!!dialog('New Session'))
+    assert.equal(calls.findLast(call => call.command === 'new_session').args.instanceId, legacy.id)
+    await click(dialog('New Session'), '关闭')
+    await click(assistantView, '打开命令中心')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Active Tools')).props.onClick(); await settle()
+    const toggle = find(dialog('Active Tools'), item => item.type === 'button' && text(item).includes('读取文件里的文字和图片。'))
+    assert.ok(!!toggle, 'the Pi assistant retains tool switches'); toggle.props.onClick(); await settle()
+    assert.deepEqual(calls.findLast(call => call.command === 'set_active_tools').args.names, ['local_schedule'])
+    await click(assistantView, '打开工作区')
+    const shell = find(assistantView, item => item.type === 'textarea' && item.props['aria-label'] === 'shell 命令')
+    assert.ok(!!shell, 'the Pi assistant retains its shell input')
+    shell.props['onUpdate:modelValue']('pwd'); await settle()
+    find(assistantView, item => item.type === 'form' && item.props.class === 'workspace-command-input').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(calls.findLast(call => call.command === 'run_shell_command').args.instanceId, legacy.id)
+    await click(assistantView, '关闭工作区')
+    await click(assistantView, '打开命令中心')
+    find(dialog('命令中心'), item => item.type === 'button' && text(item).startsWith('Stop Work')).props.onClick(); await settle()
+    assert.ok(!!dialog('停止当前工作？'))
+    stopNative = args => { retiredWorks.add(legacy.id); return { receipt: { operationId: args.operationId, alreadyStopped: false }, instance: atHost({ ...legacy, lifecycle: 'stopped', execution: 'unavailable' }) } }
+    await click(dialog('停止当前工作？'), '确认')
+    assert.equal(assistantApp.works.some(item => item.id === legacy.id), false, 'Stop retires the Pi assistant like any Pi Work')
+    retiredWorks.delete(legacy.id)
     extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
-    console.log('PASS: permanent assistant: pinned with her children, existing conversation opened from settings, Pi-only controls hidden, real tools read-only, restart keeps her selected and preserves the draft')
+    console.log('PASS: resident assistant keeps her conversation and restarts; custom insert/text buttons remain; old Pi assistants retain Session, tool switches, shell and ordinary Stop')
   }
 
   // #665 review: the color theme survives a reload, works without this device's settings,

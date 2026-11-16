@@ -6,6 +6,7 @@ import { FileText, Monitor, Plus, RefreshCw, Settings, Waypoints, WifiOff } from
 import { openDesktopHostLog, openDesktopTui } from '../lib/bridge'
 import { copyPlainText } from '../lib/clipboard'
 import type { Work } from '../lib/types'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import dockIconUrl from '../../../../assets/icon.svg'
 import { useAppStore } from '../stores/app'
 import { useHostStore } from '../stores/host'
@@ -24,7 +25,7 @@ const workActions = useWorkActionsStore()
 const { workMutating } = storeToRefs(workActions)
 const { reopenSelectedWork } = workActions
 function inactiveState(work: Work) {
-  if (work.assistant) {
+  if (isResidentAssistant(work)) {
     if (work.lifecycle === 'stopping' || work.lifecycle === 'stopped') return { label: `正在重启${work.displayName || '助手'}`, message: 'Main 会重新启动她，对话和记忆保留。可以刷新状态查看进展。', action: '' }
     return { label: `暂时连不上${work.displayName || '助手'}`, message: '对话和记忆还在。可以刷新状态查看她是否已回来。', action: `重新启动${work.displayName || '助手'}` }
   }

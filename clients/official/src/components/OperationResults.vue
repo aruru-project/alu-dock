@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import type { NativeOperation } from '../lib/operationBinding'
 import { userErrorMessage } from '../lib/userError'
+import { isResidentAssistant } from '../lib/uiBoundaries'
 import { useAppStore } from '../stores/app'
 
 const props = defineProps<{
@@ -21,8 +22,8 @@ const labels: Record<string, string> = {
 }
 function label(operation: NativeOperation) {
   const work = operation.connectionId === app.activeConnectionId ? app.works.find(work => work.id === operation.instanceId) : undefined
-  if (work?.assistant) {
-    if (operation.kind === 'stop_work') return `重启${work.displayName || '助手'}`
+  if (isResidentAssistant(work)) {
+    if (operation.kind === 'stop_work') return `重启${work?.displayName || '助手'}`
     if (operation.kind === 'reload_session') return '刷新助手（Reload）'
   }
   return labels[operation.kind] ?? '操作'
