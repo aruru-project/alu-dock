@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import type { DockEvent } from "../src/core/instance-dto.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
+import { isolatedProcessEnvironment } from "./support/isolated-process-environment.js";
 
 // #671: the owner runs an extension directly, through the same catalog, submit and UI paths as Pi
 // commands. Only the loopback provider is fake; the extension, Host and independent Workers are real.
@@ -95,7 +98,7 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   await client.prompt(assistant.id, "/local-echo fail", "auto", "local-failed");
   await waitFor(() => events.some(event => event.type === "instance.error" && event.data.operationId === "local-failed"), "The command failure did not reach the client");
   assert.ok(notifications("local-failed").some(item => item.level === "error"));
-  // Same credential boundary as tool factories: exception contents stay in local diagnostics.
+  // Same credential boundary as tool factories: exception contents are not owner output.
   assert.ok(!JSON.stringify(events).includes("PRIVATE_COMMAND_ERROR"));
   assert.equal(team.providers.coordinator.requests.length, 0, "User commands do not request model inference");
   follower.close();
@@ -108,6 +111,11 @@ test("the owner runs an assistant extension command, sees its result, and Reload
 
   // #671 owner decision: platform local controls and registered commands keep their names.
   // Only the colliding command is refused; adding it must not unload existing tools or other commands.
+  // PR review 2026-11-16: TUI-only names used to register successfully but get intercepted on input.
+  // Literal inventory from the actual official Client and Work TUI controls, not the reserved table.
+  const localControls = ["new", "stop", "reload", "resume", "tree", "model", "thinking", "speed", "name", "compact",
+    "dequeue", "refresh", "tools", "settings", "state", "resources", "abort", "abort-shell", "attachments", "clone",
+    "config", "context-changes", "detach", "exit", "follow", "fork", "help", "install", "login", "quit", "status", "steer"];
   const conflict = join(team.root, "conflicting.mjs");
   const keptCommand = join(team.root, "kept-command.txt");
   await writeFile(keptCommand, "pending");
@@ -121,8 +129,8 @@ test("the owner runs an assistant extension command, sees its result, and Reload
         }] : [],
         commands: [
           ...(config.names ?? [config.name]).map(name => ({ name, description: "Must not replace the original", execute() { return "wrong replacement"; } })),
-          ...(config.keep ? [{ name: "safe-echo", description: "Valid command beside conflicting names",
-            async execute() { if (disposed) throw new Error("Extension was disposed"); await writeFile(${JSON.stringify(keptCommand)}, "still callable"); return "kept"; }
+          ...(config.keep ? [{ name: "new-echo", description: "Valid command beside conflicting names",
+            async execute() { if (disposed) throw new Error("Extension was disposed"); await writeFile(${JSON.stringify(keptCommand)}, "still callable"); return "prefix command completed"; }
           }] : []),
         ],
         dispose() { disposed = true; },
@@ -131,10 +139,10 @@ test("the owner runs an assistant extension command, sees its result, and Reload
   await writeFile(configFile, JSON.stringify([...settings,
     { id: "duplicate", module: conflict, enabled: true, config: { name: "local-echo" } },
     { id: "builtin-conflict", module: conflict, enabled: true, config: { name: "assistant-status" } },
-    { id: "platform-conflict", module: conflict, enabled: true, config: { names: ["reload", "model"], keep: true } },
+    { id: "platform-conflict", module: conflict, enabled: true, config: { names: localControls, keep: true } },
   ]));
   await client.reloadSession(assistant.id);
-  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "safe-echo"]);
+  assert.deepEqual((await client.commands(assistant.id)).commands.map(command => command.name), ["assistant-status", "dock-tools", "local-echo", "new-echo"]);
   await waitFor(async () => (await client.status(assistant.id)).extensionStatus["工具扩展"] !== undefined, "Missing extension warning");
   const conflictFollower = await client.streamEvents(assistant.id, { onEvent: event => { events.push(event); } });
   try {
@@ -142,11 +150,26 @@ test("the owner runs an assistant extension command, sees its result, and Reload
     await waitFor(() => notifications("conflict-details").length > 0, "Conflict details did not reach the command console");
     const report = notifications("conflict-details").map(item => item.message).join("\n");
     assert.ok(report.includes("/local-echo") && report.includes("/assistant-status"));
-    assert.ok(report.includes("/reload") && report.includes("/model"), "The requested report identifies each refused name for renaming");
+    for (const name of localControls) assert.ok(report.includes(`/${name}`), `The requested report identifies /${name} for renaming`);
   } finally { conflictFollower.close(); await conflictFollower.done; }
   assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "kept_local_tool" && tool.source?.package === "platform-conflict"), "The module's original tool remains registered");
-  await client.prompt(assistant.id, "/safe-echo", "auto", "kept-command");
-  await waitFor(async () => await readFile(keptCommand, "utf8") === "still callable", "A name conflict disposed the module or removed its other command");
+  // Use the real terminal input, not direct command.submit: /new-echo must reach the Worker,
+  // while /new, /help, /status and /follow retain their local behavior.
+  const home = join(team.root, "tui-home");
+  await mkdir(home);
+  const pty = await promisify(execFile)("python3", [join(process.cwd(), "test/fixtures/pty-tui-driver.py"),
+    process.execPath, join(process.cwd(), "dist/src/cli.js"), "--socket", team.host!.socketPath, "attach", assistant.id], {
+    cwd: team.cwd, timeout: 30_000, maxBuffer: 4 * 1024 * 1024,
+    env: isolatedProcessEnvironment(home, { ALU_DOCK_PTY_ACTION: "assistant-commands", npm_config_cache: join(home, ".npm"), TMPDIR: team.root, TEMP: team.root, TMP: team.root }),
+  });
+  const terminal = JSON.parse(pty.stdout);
+  const output = Buffer.from(terminal.output, "base64").toString();
+  assert.equal(terminal.timedOut, false, output.slice(-4_000));
+  assert.equal(terminal.status, 0, output.slice(-4_000));
+  assert.ok(terminal.resizedBytes > 0, "The real terminal must redraw after resize");
+  assert.match(output, /prefix command completed/);
+  assert.equal(await readFile(keptCommand, "utf8"), "still callable", "A name conflict must not dispose the module or remove its other command");
+  assert.equal((await client.status(assistant.id)).lifecycle, "active", "Detaching must leave the assistant running");
   assert.equal((await client.status(assistant.id)).extensionStatus["Dock tools"], "on");
   await client.prompt(assistant.id, "/dock-tools off", "auto", "builtin-still-works");
   await waitFor(async () => (await client.status(assistant.id)).extensionStatus["Dock tools"] === undefined, "The built-in command was replaced");

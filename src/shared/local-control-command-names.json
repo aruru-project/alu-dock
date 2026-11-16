@@ -14,5 +14,21 @@
   "tools": "tools",
   "settings": "settings",
   "state": "state",
-  "resources": "resources"
+  "resources": "resources",
+  "abort": "abort",
+  "abort_shell": "abort-shell",
+  "attachments": "attachments",
+  "clone": "clone",
+  "config": "config",
+  "context_changes": "context-changes",
+  "detach": "detach",
+  "exit": "exit",
+  "follow": "follow",
+  "fork": "fork",
+  "help": "help",
+  "install": "install",
+  "login": "login",
+  "quit": "quit",
+  "status": "status",
+  "steer": "steer"
 }

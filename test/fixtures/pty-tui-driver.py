@@ -892,6 +892,24 @@ def main() -> int:
                     time.sleep(0.15)
                     while read_available(fd, output, 0.01) > 0:
                         pass
+            elif action == "assistant-commands":
+                # PR review: a registered /new-echo was swallowed by /new's prefix check.
+                for command, marker in (
+                    (b"/help\r", b"CONVERSATION"),
+                    (b"/status\r", b"Status:"),
+                    (b"/new invalid\r", b"Usage: /new"),
+                    (b"/follow\r", b"Usage: /follow MESSAGE"),
+                    (b"/new-echo\r", b"prefix command completed"),
+                ):
+                    position = len(output)
+                    os.write(fd, command)
+                    deadline = time.monotonic() + 5
+                    while not output_ready(output, position, marker) and time.monotonic() < deadline:
+                        if read_available(fd, output, 0.04) < 0:
+                            break
+                    if not output_ready(output, position, marker):
+                        raise TimeoutError("assistant command did not finish: " + command.decode().strip())
+                os.write(fd, b"/detach\r")
             elif action == "tool-fold":
                 fold_deadline = time.monotonic() + 3
                 while "✓ read".encode("utf-8") not in output and time.monotonic() < fold_deadline:
@@ -1029,7 +1047,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-machine-connections", "hub-create-subhost-join", "hub-new-subhost", "hub-saved-subhost", "hub-expired-subhost-main", "hub-remote-settings", "hub-attachment-settings", "hub-pi-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
+            if action not in ("assistant-commands", "hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-machine-connections", "hub-create-subhost-join", "hub-new-subhost", "hub-saved-subhost", "hub-expired-subhost-main", "hub-remote-settings", "hub-attachment-settings", "hub-pi-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8
@@ -1047,6 +1065,10 @@ def main() -> int:
             os.kill(pid, signal.SIGKILL)
             _, wait_status = os.waitpid(pid, 0)
             status = os.waitstatus_to_exitcode(wait_status)
+        if action == "assistant-commands":
+            attrs = termios.tcgetattr(fd)
+            if not (attrs[3] & termios.ICANON and attrs[3] & termios.ECHO):
+                raise AssertionError("assistant command detach did not restore terminal mode")
     except TimeoutError as error:
         timed_out = True
         output.extend(f"\nPTY driver: {error}\n".encode("utf-8"))
