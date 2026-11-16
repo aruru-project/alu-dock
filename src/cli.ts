@@ -333,16 +333,21 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   let subHostModels: SubHostModelPort | undefined;
   const { createAssistantInstance } = await import("./assistant-agent/create-assistant-instance.js");
   // A Work opened as the personal assistant runs her own Agent; every other Work runs Pi.
-  const createManagedInstance: InstanceFactory = ({ child, assistant, ...input }) => {
+  const createManagedInstance: InstanceFactory = async ({ child, assistant, ...input }) => {
     const shared = {
       ...input,
       ...(modelService ?? subHostModels ? { modelHostPort: (modelService ?? subHostModels)! } : {}),
       ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
       ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
     };
-    return assistant
-      ? createAssistantInstance({ ...shared, ...(workerAssistantPort === undefined ? {} : { assistantHostPort: workerAssistantPort }) })
-      : createPiInstance({ ...shared, ...(child === undefined ? {} : { child }) });
+    if (assistant) {
+      // Main migrates the old extension settings before its service is ready. Wait here so the
+      // Worker cannot mistake an unfinished upgrade for a fresh install with only bundled web.
+      // info waits for the current service, including recovery after a failed first start.
+      await workerAssistantPort?.request({ op: "info" }, {});
+      return createAssistantInstance({ ...shared, ...(workerAssistantPort === undefined ? {} : { assistantHostPort: workerAssistantPort }) });
+    }
+    return createPiInstance({ ...shared, ...(child === undefined ? {} : { child }) });
   };
   if (windowsLifecycle?.stopRequested) return;
 

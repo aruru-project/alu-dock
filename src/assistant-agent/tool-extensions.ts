@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { AssistantExtensionSettings } from "../core/assistant.js";
+import { ASSISTANT_EXTENSIONS_FILE, readAssistantExtensions } from "../assistant/extensions-config.js";
 import type { SourceDto } from "../core/config-projection.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
 
@@ -55,16 +55,22 @@ export class AssistantToolExtensions {
   ) {}
 
   /** Only called at startup or an idle Reload; the built-in tools are never replaced. */
-  async load(settings: readonly AssistantExtensionSettings[], reserved: readonly AgentTool[]): Promise<AgentTool[]> {
+  async load(reserved: readonly AgentTool[]): Promise<AgentTool[]> {
     await this.dispose();
     this.lifetime = new AbortController();
     for (const id of this.statuses.keys()) this.ui.status(`扩展/${id}`);
     this.statuses.clear();
     this.sources.clear();
+    let settings;
+    try { settings = await readAssistantExtensions(this.cwd); }
+    catch (error) {
+      this.status("配置", (error as Error).message);
+      return [];
+    }
     const names = new Set(reserved.map(tool => tool.name));
     const tools: AgentTool[] = [];
     for (const setting of settings) {
-      if (!setting.enabled) { this.status(setting.id, "已停用"); continue; }
+      if (!setting.enabled) continue;
       let extension: AssistantExtension | undefined;
       try {
         let factory: AssistantExtensionFactory | undefined;
@@ -109,18 +115,19 @@ export class AssistantToolExtensions {
           });
         }
         this.loaded.push({ id: setting.id, extension });
-        this.status(setting.id, `已加载，${extension.tools.length} 个工具`);
       } catch (error) {
         if (typeof extension?.dispose === "function") {
           try { await extension.dispose(); } catch { /* The load error remains the useful diagnosis. */ }
         }
-        this.status(setting.id, `加载失败：${error instanceof Error ? error.message : String(error)}。请修正后 Reload。`);
+        // Factory errors may quote private config. Details stay in local Worker diagnostics.
+        console.error(`Assistant extension ${setting.id} failed to load:`, error);
+        this.status(setting.id, `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload；详情见本机日志。`);
       }
     }
     return tools;
   }
 
-  /** Re-publish after activate/reload, using the existing Work extension status surface. */
+  /** Only actionable failures are re-published after activate/reload; normal tools stay quiet. */
   showStatus(): void { for (const [id, text] of this.statuses) this.ui.status(`扩展/${id}`, text); }
   private status(id: string, text: string): void { this.statuses.set(id, text); this.ui.status(`扩展/${id}`, text); }
 
@@ -130,9 +137,10 @@ export class AssistantToolExtensions {
     for (const { id, extension } of this.loaded.splice(0)) {
       try { await extension.dispose?.(); }
       catch (error) {
-        const message = `扩展 ${id} 清理失败：${error instanceof Error ? error.message : String(error)}`;
+        console.error(`Assistant extension ${id} failed to dispose:`, error);
+        const message = `扩展 ${id} 没有正常关闭。可重新启动助手，详情见本机日志。`;
         errors.push(message);
-        this.ui.notify(`${message}。可重新启动助手。`, "warning");
+        this.ui.notify(message, "warning");
       }
     }
     return errors;

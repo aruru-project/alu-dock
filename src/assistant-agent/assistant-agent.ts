@@ -312,14 +312,8 @@ class AssistantAgent implements WorkerAgent {
   get persistedName(): string | undefined { return this.session.getSessionName(); }
 
   async loadExtensions(): Promise<void> {
-    try {
-      const { extensions = [] } = await this.port.call({ op: "settings_get" });
-      this.tools = [...this.builtInTools, ...await this.extensions.load(extensions, this.builtInTools)];
-      this.agent.state.tools = this.tools;
-    } catch {
-      // A settings outage must not take away chat or the tools that already worked.
-      this.tell("暂时读不到助手扩展设置，现有工具没有改变。请稍后 Reload 重试。", "warning");
-    }
+    this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools)];
+    this.agent.state.tools = this.tools;
   }
 
   // ---- What the Host asks -------------------------------------------------------------------

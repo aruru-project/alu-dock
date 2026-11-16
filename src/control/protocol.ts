@@ -1388,7 +1388,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantMemoryUpdateParams(rest, "params")) } };
     }
     case "assistant.settings.set":
-      exact(params, ["operationId", "extractionModel", "extractionSpeed", "handoff", "extensions"], "invalid_request");
+      exact(params, ["operationId", "extractionModel", "extractionSpeed", "handoff"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), ...assistantParams(() => parseAssistantSettingsSetParams(params, "params")) } };
     case "assistant.reorganize":
       exact(params, ["operationId", "extractionModel"], "invalid_request");

@@ -55,7 +55,7 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
   });
   const modelService = options.modelService ? new ModelServiceProcess({ agentDir, stateDirectory: root, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
   const createAssistantService = () => options.assistant
-    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: join(root, "assistant-workspace"), agentDir, environment,
+    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: cwd, agentDir, environment,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
     : undefined;
   let assistantService: AssistantServiceProcess | undefined;

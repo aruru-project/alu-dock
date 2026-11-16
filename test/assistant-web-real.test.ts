@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 
 import { startNativeTeam } from "./support/native-team.js";
@@ -33,10 +35,11 @@ test("the shipped assistant web extension searches, reads a page and retrieves i
   const team = await startNativeTeam(context, ["coordinator"], { prefix: "alu-web-extension-", assistant: true });
   const client = await team.startHost();
   const assistant = await team.assistantWork();
-  await client.setAssistantSettings({ extensions: [{ id: "web", module: "builtin:web", enabled: true, config: {
+  assert.ok((await client.tools(assistant.id)).tools.some(tool => tool.name === "web_search"), "A missing local file keeps the shipped web extension");
+  await writeFile(join(team.cwd, "extensions.json"), JSON.stringify([{ id: "web", module: "builtin:web", enabled: true, config: {
     provider: "searxng", searxngBaseUrl: base, webSearch: { allowedProviders: ["searxng"] },
     ssrf: { allowRanges: ["127.0.0.1/32"] }, proxy: "", allowBrowserCookies: false,
-  } }] });
+  } }]));
   await client.reloadSession(assistant.id);
   const tools = await client.tools(assistant.id);
   for (const name of ["web_search", "fetch_content", "get_search_content"]) {

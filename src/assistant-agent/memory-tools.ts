@@ -220,7 +220,7 @@ export function memoryTools({ port, session, recorder, models, attachmentContext
             settings = await port.call({ op: "settings_set", extractionModel: chosen });
           } else settings = await port.call({ op: "settings_get" });
           const { extraction } = await port.call({ op: "info" });
-          // This tool owns only memory extraction. Other settings can contain extension credentials.
+          // This tool owns only memory extraction, not the hand-over writing settings.
           const memorySettings = {
             ...(settings.extractionModel === undefined ? {} : { extractionModel: settings.extractionModel }),
             extractionSpeed: settings.extractionSpeed ?? "standard",

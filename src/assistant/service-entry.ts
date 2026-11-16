@@ -9,6 +9,7 @@ import { ModelSpeedRuntime } from "../worker/model-speed-runtime.js";
 import { configurePiNetwork } from "../pi/configure-pi-network.js";
 import { ASSISTANT_DATABASE_FILE } from "./backup.js";
 import { AssistantDocuments } from "./documents.js";
+import { migrateAssistantExtensions } from "./extensions-config.js";
 import { AssistantExtraction, DEFAULT_EXTRACTION_TIMING, type ExtractionTiming } from "./extraction.js";
 import { AssistantMemories } from "./memories.js";
 import { MainModelAccess } from "./model-access.js";
@@ -35,6 +36,8 @@ async function main(): Promise<void> {
   const databasePath = join(directory, ASSISTANT_DATABASE_FILE);
   // The writing connection creates the database before any reader opens it.
   const store = new AssistantStore(databasePath);
+  const extensionsBackup = await migrateAssistantExtensions(workspace, store.connection);
+  if (extensionsBackup !== undefined) process.stderr.write(`Alu Dock: 已保留现有 extensions.json，旧助手扩展配置备份在 ${extensionsBackup}。\n`);
   const readers = new AssistantReaders({ databasePath });
   const memories = new AssistantMemories(store.connection);
   const timeline = new AssistantTimeline(store.connection);
