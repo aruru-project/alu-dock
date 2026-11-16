@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { ConversationBootstrap, ProjectedEvent } from '../lib/types'
 import { useAppStore } from './app'
@@ -12,8 +12,11 @@ export interface CommandConsoleEntry {
 }
 
 interface CommandOperation {
+  connectionId: string
+  connectionHostEpoch: string
   contextKey: string
-  completed: boolean
+  /** Whether the command itself is still active; handoff is not an outcome. */
+  active: boolean
   succeeded: boolean
   sequence: number
 }
@@ -34,25 +37,54 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   const operations = ref<Record<string, CommandOperation>>({})
   const entries = computed(() => output.value.filter(entry => operations.value[entry.operationId]?.contextKey === contextKey.value))
   let entrySequence = 0
+  onScopeDispose(() => { operations.value = {}; output.value = [] })
 
-  const hasActiveOperation = computed(() => Object.values(operations.value).some(operation => operation.contextKey === contextKey.value && !operation.completed))
+  // Null payloads mean a connection is being changed/read, not that its Works
+  // were deleted. Only an accepted list/runtime/Host identity retires output.
+  watch(() => {
+    const payload = app.payload
+    return payload ? JSON.stringify([payload.connectionId, payload.host.hostEpoch,
+      payload.works.map(work => scopeKey(payload.connectionId, work.id, work.ownerHostEpoch ?? '', work.runtimeGeneration))]) : ''
+  }, () => {
+    const payload = app.payload
+    if (!payload) return
+    const current = new Set(payload.works.map(work => scopeKey(payload.connectionId, work.id, work.ownerHostEpoch ?? '', work.runtimeGeneration)))
+    retire(operation => operation.connectionId === payload.connectionId
+      && (operation.connectionHostEpoch !== payload.host.hostEpoch || !current.has(operation.contextKey)))
+  }, { flush: 'sync' })
+  watch(() => app.catalog?.hosts.map(host => host.hostId), hosts => {
+    if (hosts) retire(operation => operation.connectionId !== 'local' && !hosts.includes(operation.connectionId))
+  }, { flush: 'sync' })
+
+  function retire(obsolete: (operation: CommandOperation) => boolean) {
+    let removed = false
+    for (const [id, operation] of Object.entries(operations.value)) {
+      if (!obsolete(operation)) continue
+      delete operations.value[id]
+      removed = true
+    }
+    if (removed) output.value = output.value.filter(entry => operations.value[entry.operationId])
+  }
+
+  const hasActiveOperation = computed(() => Object.values(operations.value).some(operation => operation.contextKey === contextKey.value && operation.active))
 
   function isActive(operationId: string) {
     const operation = operations.value[operationId]
-    return !!operation && operation.contextKey === contextKey.value && !operation.completed
+    return !!operation && operation.contextKey === contextKey.value && operation.active
   }
 
   function beginOperation(operationId: string, name: string, argumentsText: string) {
     const argumentsValue = argumentsText.trim()
-    operations.value[operationId] = { contextKey: contextKey.value, completed: false, succeeded: false, sequence: -1 }
+    operations.value[operationId] = { connectionId: app.activeConnectionId ?? '', connectionHostEpoch: app.payload?.host.hostEpoch ?? '',
+      contextKey: contextKey.value, active: true, succeeded: false, sequence: -1 }
     append({ kind: 'command', text: `/${name}${argumentsValue ? ` ${argumentsValue}` : ''}`, operationId })
   }
 
   function receiveReceipt(operationId: string, receipt: CommandReceipt) {
     const operation = operations.value[operationId]
-    if (!operation || operation.completed || receipt.operationId !== operationId) return
+    if (!operation || !operation.active || receipt.operationId !== operationId) return
     if (receipt.kind === 'extension_command') return
-    operation.completed = true
+    operation.active = false
     append({
       kind: 'status',
       text: receipt.queued ? '已加入 Queue。' : '已交给 Agent，后续内容显示在主要对话。',
@@ -61,9 +93,17 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   }
 
   function failOperation(operationId: string, message: string): boolean {
+    // A lost call reply cannot undo an observed success. A real failure event,
+    // however, is still reported after a prompt/Queue handoff or run.started.
+    if (operations.value[operationId]?.succeeded) return false
+    return reportFailure(operationId, message)
+  }
+
+  function reportFailure(operationId: string, message: string): boolean {
     const operation = operations.value[operationId]
-    if (!operation || operation.completed || operation.succeeded) return false
-    operation.completed = true
+    if (!operation) return false
+    operation.active = false
+    operation.succeeded = false
     append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
     return true
   }
@@ -87,15 +127,15 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     switch (event.eventType) {
       case 'command.handled':
         operation.succeeded = true
-        operation.completed = true
+        operation.active = false
         break
       case 'command.rejected':
       case 'instance.error':
-        if (ownsOutput) failOperation(operationId, stringValue(event.data.error) || stringValue(event.data.reason) || '命令执行失败。')
+        if (ownsOutput) reportFailure(operationId, stringValue(event.data.error) || stringValue(event.data.reason) || '命令执行失败。')
         break
       case 'run.started':
-        if (!operation.completed) {
-          operation.completed = true
+        if (operation.active) {
+          operation.active = false
           append({ kind: 'status', text: '命令已启动 Agent；后续内容显示在主要对话。', operationId })
         }
         break

@@ -10,7 +10,7 @@ import {
   setThinking,
   updateSetting,
 } from '../lib/bridge'
-import { currentConnectionCall } from '../lib/hostResult'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { dockToolsState } from '../lib/dockTools'
@@ -135,6 +135,8 @@ const settingDraft = ref('')
 const selectedCommandReferenceId = ref('')
 const commandDetailMode = ref<'runner' | 'content' | ''>('')
 const commandArguments = ref('')
+let commandDraftRevision = 0
+watch([commandArguments, selectedCommandReferenceId, commandDetailMode], () => { commandDraftRevision++ }, { flush: 'sync' })
 const argumentCompletions = ref<CommandArgumentCompletion[]>([])
 const argumentCompletionsLoading = ref(false)
 const commandContentText = ref('')
@@ -148,6 +150,7 @@ const commandSearchInput = ref<HTMLInputElement | null>(null)
 const commandArgsInput = ref<HTMLInputElement | null>(null)
 const selectedResource = ref<ResourceInfo | null>(null)
 const pending = ref('')
+let commandTargetRevision = 0
 /** What a slow Model, Thinking, tool or setting change is doing while its controls are disabled. */
 const pendingChange = computed(() => {
   const [kind, ...rest] = pending.value.split(':')
@@ -267,6 +270,8 @@ watch([
   () => props.work.ownerHostEpoch,
   () => props.work.runtimeGeneration,
 ], () => {
+  commandTargetRevision++
+  if (pending.value.startsWith('command:')) pending.value = ''
   panel.reset()
   selectedResource.value = null
   selectedCommandReferenceId.value = ''
@@ -481,21 +486,25 @@ async function openCommandContent(command: CommandInfo) {
 async function executeCatalogCommand(command: CommandInfo, argumentsText: string): Promise<boolean> {
   if (pending.value) return false
   const operationId = crypto.randomUUID()
+  const targetRevision = commandTargetRevision
+  const section = props.section
   pending.value = `command:${command.name}`
   error.value = ''
   commandConsole.beginOperation(operationId, command.name, argumentsText)
   if (command.name === 'dock-tools') dockToolsOperationId.value = operationId
   try {
-    const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, app.captureOperationTarget(context, props.work.id)))
+    const target = app.captureOperationTarget(requireConnectionContext(app), props.work.id)
+    const result = await runCatalogCommand(target.instanceId, command.name, argumentsText, operationId, target)
     commandConsole.receiveReceipt(operationId, result.receipt)
     return true
   } catch (cause) {
     if (commandConsole.operationSucceeded(operationId)) return true
-    commandConsole.failOperation(operationId, errorMessage(cause))
-    if (panelMounted) app.failureShown(cause)
+    const recorded = commandConsole.failOperation(operationId, errorMessage(cause))
+    if (recorded && panelMounted && targetRevision === commandTargetRevision && props.section === section
+      && commandConsole.entries.some(entry => entry.operationId === operationId && entry.level === 'error')) app.failureShown(cause)
     return false
   } finally {
-    pending.value = ''
+    if (targetRevision === commandTargetRevision) pending.value = ''
   }
 }
 
@@ -503,7 +512,9 @@ async function runSelectedCommand() {
   const command = selectedCommand.value
   if (!command) return
   followingCommandOutput = true
-  if (await executeCatalogCommand(command, commandArguments.value)) commandArguments.value = ''
+  const revision = commandDraftRevision
+  if (await executeCatalogCommand(command, commandArguments.value)
+    && panelMounted && revision === commandDraftRevision) commandArguments.value = ''
 }
 
 async function toggleDockTools() {

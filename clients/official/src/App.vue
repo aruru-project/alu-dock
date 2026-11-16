@@ -20,6 +20,7 @@ import { useAssistantMemoryStore } from './stores/assistant-memory'
 import { useAssistantSearchStore } from './stores/assistant-search'
 import { useAttachmentsStore } from './stores/attachments'
 import { useControlPanelStore } from './stores/control-panel'
+import { useCommandConsoleStore } from './stores/command-console'
 import { useConversationStore } from './stores/conversation'
 import { useDeliveriesStore } from './stores/deliveries'
 import { useHostStore } from './stores/host'
@@ -44,6 +45,7 @@ const operations = useOperationsStore()
 const input = useInputStore()
 const workActions = useWorkActionsStore()
 const controlPanel = useControlPanelStore()
+const commandConsole = useCommandConsoleStore()
 const conversation = useConversationStore()
 const modelLists = useModelListsStore()
 // Asks Main once per connection whether it keeps the assistant; her drafts live here too.
@@ -78,7 +80,7 @@ onMounted(async () => {
 })
 // The page's stores stop their listeners and timers with the page; a later page starts from fresh state.
 onUnmounted(() => {
-  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, conversation, deliveries, host, observation, platform, surfaces, modelLists, assistantSearch, assistantMemory, assistant]) {
+  for (const store of [turnSpeed, input, operations, attachments, workActions, controlPanel, commandConsole, conversation, deliveries, host, observation, platform, surfaces, modelLists, assistantSearch, assistantMemory, assistant]) {
     store.$dispose()
     if (pinia) delete pinia.state.value[store.$id]
   }

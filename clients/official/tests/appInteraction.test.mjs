@@ -3612,6 +3612,49 @@ try {
     assert.ok(text(dialog()).includes('扩展回显结果'), 'the selected extension executes through the catalog')
     assert.equal(text(dialog()).includes('回执连接断开'), false, 'a command already confirmed by its event does not turn into a failure when the reply is lost')
     assert.equal(commandApp.selectedWork.execution, 'idle')
+    // P3 re-review: an accepted Queue handoff can still fail later, without a run settlement.
+    let queuedCommand
+    runCatalogNative = args => {
+      queuedCommand = args
+      return { receipt: { operationId: args.operationId, kind: 'prompt', queued: true, delivery: 'follow_up' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.ok(text(dialog()).includes('已加入 Queue。'))
+    const queueFailure = event('instance.error', { operationId: queuedCommand.operationId, source: 'command_background', error: '排队消息没有交给 Agent，请重新发送。' })
+    await settle()
+    assert.ok(text(dialog()).includes('排队消息没有交给 Agent'), 'a failed Queue handoff is still reported after the command receipt')
+    await click('关闭')
+    snapshot([queueFailure]); await settle()
+    assert.equal(text(view).includes('排队消息没有交给 Agent'), false, 'the replay keeps this reported failure in its command result')
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.equal(all(dialog(), item => item.props.class === 'cmd-center-entry-text').filter(item => text(item).includes('排队消息没有交给 Agent')).length, 1)
+
+    // A mutation's successful receipt belongs to its original Host even if it was not followed there.
+    let resolveCrossHost, crossHostCommand
+    runCatalogNative = args => new Promise(resolve => { crossHostCommand = args; resolveCrossHost = resolve })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    await commandApp.switchHost('spare'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    commandApp.setCurrentDraft('另一台 Host 上新写的消息'); await settle()
+    resolveCrossHost({ receipt: { operationId: crossHostCommand.operationId, kind: 'prompt', queued: false, delivery: 'prompt' }, instance: atHost(her) }); await settle()
+    assert.equal(commandApp.currentDraft, '另一台 Host 上新写的消息')
+    await commandApp.switchHost('host'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.ok(text(dialog()).includes('已交给 Agent，后续内容显示在主要对话。'), 'the late receipt is accepted without observing command.handled')
+    assert.equal(text(dialog()).includes('当前连接已切换'), false, 'switching Host does not turn an actual command success into a failure')
+
+    // Editing the parameters while the request is pending makes a new draft, even in the same panel.
+    let resolveEdited, editedCommand
+    const parameters = () => find(dialog(), item => item.type === 'input' && item.props.class === 'cmd-center-args')
+    parameters().props['onUpdate:modelValue']('第一次参数'); await settle()
+    runCatalogNative = args => new Promise(resolve => { editedCommand = args; resolveEdited = resolve })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    parameters().props['onUpdate:modelValue']('后来写的参数'); await settle()
+    resolveEdited({ receipt: { operationId: editedCommand.operationId, kind: 'prompt', queued: false, delivery: 'prompt' }, instance: atHost(her) }); await settle()
+    assert.equal(parameters().value, '后来写的参数', 'a late successful command only clears the parameters it submitted')
     // #671 browser acceptance: the extension notice and Host failure repeated the same error twice.
     const failedEvents = []
     runCatalogNative = args => {
@@ -3751,6 +3794,28 @@ try {
     assert.ok(text(output).includes(details), 'complete detail text appears in the command notification area')
     assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
     await click('关闭')
+
+    // P3 re-review: a new runtime retires old command results; its late failure stays natively available.
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    let rejectRetired, retiredCommand
+    runCatalogNative = args => new Promise((_resolve, reject) => { retiredCommand = args; rejectRetired = reject })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const restarted = { ...her, runtimeGeneration: 2 }
+    extraListed = [restarted]
+    snapshot([], restarted); await settle()
+    const retiredFailure = { operationId: retiredCommand.operationId, kind: 'run_catalog_command', connectionId: retiredCommand.connectionId, instanceId: her.id,
+      hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: her.executor.piSessionId, editor: null, state: 'failed',
+      error: { code: 'busy', outcomeUnknown: false, message: '重启前的命令失败，请检查后重试。' } }
+    nativeResults.set(retiredFailure.operationId, retiredFailure); emit('aludock://operation', retiredFailure)
+    rejectRetired({ ...retiredFailure.error, operationId: retiredFailure.operationId }); await settle()
+    assert.equal(nativeResults.has(retiredFailure.operationId), true, 'a retired command cannot acknowledge a failure it no longer displays')
+    assert.equal(text(dialog()).includes('重启前的命令失败'), false, 'the new runtime does not receive the retired command result')
+    await click('关闭')
+    assert.ok(text(view).includes('重启前的命令失败'), 'the old command failure is available through the Work operation results')
+    const retiredResults = find(view, item => item.props['aria-label'] === '当前 Work 操作结果')
+    find(retiredResults, item => item.type === 'details').open = true
+    await find(retiredResults, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
     commands = []
     commandApp.selectWork('work'); await settle()
     actions.openAssistantStatus(); await settle()
@@ -3766,6 +3831,7 @@ try {
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
     console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
     console.log('PASS: command failures stay with their command center across close, Work switch, late reply and replay; unclaimed and Host errors remain visible')
+    console.log('PASS: failed Queue handoff remains visible after its receipt and replay; cross-Host success stays successful and keeps later parameters; a retired command leaves its late failure in Work results')
   }
 
   // #665 review: the color theme survives a reload, works without this device's settings,
