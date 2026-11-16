@@ -81,10 +81,12 @@ async function cancelCommand() {
   commandAbortError.value = ''
   const work = props.work
   const context = app.connectionContext
-  await workActions.abortCurrentRun()
-  if (panelMounted && context && app.contextMatches(context) && props.work.id === work.id && props.work.runtimeGeneration === work.runtimeGeneration) {
-    commandAbortError.value = workActions.actionError ?? ''
-  }
+  await workActions.abortCurrentRun(cause => {
+    if (!panelMounted || !context || !app.contextMatches(context) || props.section !== 'commands'
+      || props.work.id !== work.id || props.work.runtimeGeneration !== work.runtimeGeneration) return false
+    commandAbortError.value = errorMessage(cause)
+    return true
+  })
 }
 const presence = computed(() => workPresence(props.work))
 const residentAssistant = computed(() => isResidentAssistant(props.work))

@@ -48,7 +48,7 @@ const label = computed(() => `${aborting.value ? '正在中止当前回复' : '�
 </script>
 
 <template>
-  <button v-if="running" type="button" class="alu-stop-run" :class="{ 'is-pending': aborting }" :title="label" :aria-label="label" :disabled="!isTauri || aborting" @click="abortCurrentRun">
+  <button v-if="running" type="button" class="alu-stop-run" :class="{ 'is-pending': aborting }" :title="label" :aria-label="label" :disabled="!isTauri || aborting" @click="abortCurrentRun()">
     <span class="alu-stop-run-icon" aria-hidden="true" />
     <span>{{ aborting ? '中止中' : '中止' }}</span>
     <span v-if="elapsed" class="alu-stop-run-time" aria-hidden="true">{{ elapsed }}</span>

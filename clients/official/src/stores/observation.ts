@@ -102,8 +102,7 @@ export const useObservationStore = defineStore('observation', () => {
     if (payload.event.eventType === 'resources.reloaded') commandCatalog.invalidate()
     if (reduced.configChanged) configChanged.emit(payload.event)
     extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event, !replayed)
-    const commandRoute = commandConsole.handleDockEvent(payload.event)
-    if (payload.event.eventType === 'extension.notification' && commandRoute.matched) return
+    if (commandConsole.handleDockEvent(payload.connectionId, current.cursor, payload.event)) return
     if (render) display.event(payload.event, current.instance, reduced.conversationChanged)
   }
   function matches(payload: ConnectionContext & { instanceId: string; subscriptionId: string }) {
@@ -143,12 +142,14 @@ export const useObservationStore = defineStore('observation', () => {
     }
     if (update.kind === 'content' && update.token && update.change) {
       if (payload.revision < revision) return
-      revision = payload.revision; display.content(update.token, update.change)
+      revision = payload.revision
+      display.content(update.token, update.change.kind === 'checkpoint_begin'
+        ? { ...update.change, bootstrap: conversationBootstrap(payload.connectionId, update.change.bootstrap) } : update.change)
       return
     }
     if (update.kind === 'event' && update.replayToken && update.event) {
       if (display.matchesToken(update.replayToken)) {
-        const restored = display.replay(update.event)
+        const restored = (!!facts.value && commandConsole.handleDockEvent(payload.connectionId, facts.value.cursor, update.event)) || display.replay(update.event)
         applyEvent({ ...payload, event: update.event }, !restored, true)
       }
       return
@@ -160,13 +161,16 @@ export const useObservationStore = defineStore('observation', () => {
     if ((update.kind === 'read' || update.kind === 'snapshot' || update.kind === 'replacement_snapshot') && update.bootstrap) {
       read({ ...payload, bootstrap: update.bootstrap }, sameContent, update.canLoadEarlier)
       if (update.kind === 'read') refreshOnEntry = false
-      if (update.contentToken) display.content(update.contentToken, { kind: 'checkpoint_begin', bootstrap: update.bootstrap, replay: true })
+      if (update.contentToken) display.content(update.contentToken, { kind: 'checkpoint_begin', bootstrap: conversationBootstrap(payload.connectionId, update.bootstrap), replay: true })
     } else if (update.kind === 'snapshot' && update.target) replace(update.target)
     for (const event of update.events ?? (update.event ? [update.event] : [])) applyEvent({ ...payload, event })
     if (update.state !== undefined) {
       status.value = update.state; connected.value = update.state === 'connected'; error.value = update.message ?? null
       if (update.state !== 'connecting') loading.value = false
     }
+  }
+  function conversationBootstrap(connectionId: string, next: ConversationBootstrap): ConversationBootstrap {
+    return { ...next, activeEvents: next.activeEvents.filter(event => !commandConsole.handleDockEvent(connectionId, next.cursor, event)) }
   }
   function sameDomain(current: NonNullable<typeof facts.value>, next: ConversationBootstrap) {
     return current.instance.id === next.instance.id && current.instance.runtimeGeneration === next.instance.runtimeGeneration
@@ -176,7 +180,7 @@ export const useObservationStore = defineStore('observation', () => {
     const current = facts.value
     if (!current || !sameDomain(current, next)) return
     const latest = current.cursor.sequence <= next.cursor.sequence
-    display.readCut(next.cursor.sequence, latest ? next : undefined)
+    display.readCut(next.cursor.sequence, latest ? conversationBootstrap(payload.connectionId, next) : undefined)
     if (latest) {
       facts.value = { instance: next.instance, cursor: { ...next.cursor }, queue: [...next.queue] }
       acceptWork(next.instance, payload, false)
@@ -193,7 +197,7 @@ export const useObservationStore = defineStore('observation', () => {
     facts.value = { instance: next.instance, cursor: { ...next.cursor }, queue: [...next.queue] }
     acceptWork(next.instance, payload, false)
     void extensionUi.bootstrap(payload, payload.subscriptionId, next)
-    display.read(next, same, earlier)
+    display.read(conversationBootstrap(payload.connectionId, next), same, earlier)
     loading.value = false
   }
   function replace(snapshot: Work, replaced = false) {

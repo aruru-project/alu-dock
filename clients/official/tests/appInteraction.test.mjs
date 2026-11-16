@@ -3569,24 +3569,29 @@ try {
     mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
     mounted.mount(view); await settle()
     commandApp.selectWork(her.id); await settle()
-    const snapshot = () => {
-      observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: atHost(her), cursor: atHost(her).eventCursor, records: [], activeEvents: [], queue: [],
-        extensionUi: { status: {}, toolsExpanded: false, sharedQuestions: true, events: [] } }, contentToken: 'assistant-commands', state: 'connected' })
-      observation({ kind: 'content', token: 'assistant-commands', change: { kind: 'checkpoint_end' } })
+    const snapshot = (activeEvents = [], target = her) => {
+      observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: atHost(target), cursor: atHost(target).eventCursor, records: [], activeEvents, queue: [],
+        extensionUi: { status: {}, toolsExpanded: false, sharedQuestions: true, events: [] } }, contentToken: `commands-${target.id}`, state: 'connected' })
+      observation({ kind: 'content', token: `commands-${target.id}`, change: { kind: 'checkpoint_end' } })
     }
     snapshot(); await settle()
     const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
     const button = label => find(view, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
     const click = async label => { const target = button(label); assert.ok(!!target, `button exists: ${label}`); target.props.onClick(); await settle() }
     const dialog = () => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
-    const event = (eventType, data) => observation({ kind: 'event', event: { ...nextCursor(her.id), occurredAt: 'now', eventType, data } })
+    const event = (eventType, data, target = her) => {
+      const cut = nextCursor(target.id, target.runtimeGeneration)
+      const value = { sequence: cut.sequence, runtimeGeneration: cut.runtimeGeneration, occurredAt: 'now', eventType, data }
+      observation({ kind: 'event', event: value })
+      return value
+    }
     const notify = (operationId, message) => event('extension.notification', { operationId, message, level: 'info' })
     let running
     runCatalogNative = args => {
       running = args
       notify(args.operationId, '扩展回显结果')
       event('command.handled', { operationId: args.operationId })
-      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+      throw { code: 'connection_failed', message: '回执连接断开，请重试。', operationId: args.operationId }
     }
     await click('打开命令中心')
     const extensionOption = find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显'))
@@ -3598,16 +3603,62 @@ try {
     assert.equal(running.name, 'local-echo')
     assert.equal(running.instanceId, her.id)
     assert.ok(text(dialog()).includes('扩展回显结果'), 'the selected extension executes through the catalog')
+    assert.equal(text(dialog()).includes('回执连接断开'), false, 'a command already confirmed by its event does not turn into a failure when the reply is lost')
     assert.equal(commandApp.selectedWork.execution, 'idle')
     // #671 browser acceptance: the extension notice and Host failure repeated the same error twice.
+    const failedEvents = []
     runCatalogNative = args => {
-      event('extension.notification', { operationId: args.operationId, level: 'error', message: '本机命令失败，请重试。' })
-      event('instance.error', { operationId: args.operationId, source: 'command_background', error: '本机命令失败，请重试。' })
+      failedEvents.push(event('extension.notification', { operationId: args.operationId, level: 'error', message: '本机命令失败，请重试。' }))
+      failedEvents.push(event('instance.error', { operationId: args.operationId, source: 'command_background', error: '本机命令失败，请重试。' }))
       return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
     }
     find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
-    assert.equal(all(dialog(), item => item.props.class === 'cmd-center-entry-text').map(text).filter(value => value === '本机命令失败，请重试。').length, 1)
+    const commandErrors = () => all(dialog(), item => item.props.class === 'cmd-center-entry-text').map(text).filter(value => value === '本机命令失败，请重试。')
+    assert.equal(commandErrors().length, 1)
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(commandErrors().length, 2, 'a second command with identical error text keeps its own result')
     await click('关闭')
+    // Final PR P3: the command center owned this failure; closing it must not reveal a second copy in chat.
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'closing the command center does not leave its failure in the conversation')
+    snapshot(failedEvents); await settle()
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'a refreshed read keeps command-owned failures out of chat')
+
+    // Closing the panel, or visiting another Work, does not transfer the original command's output.
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    let rejectCommand, lateCommand
+    runCatalogNative = args => new Promise((_resolve, reject) => { lateCommand = args; rejectCommand = reject })
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    await click('关闭')
+    commandApp.selectWork('work'); await settle(); snapshot([], work); await settle()
+    rejectCommand({ operationId: lateCommand.operationId, code: 'busy', message: '离开后命令失败，请重试。' }); await settle()
+    assert.equal(text(view).includes('离开后命令失败'), false, 'the late reply does not report A in B')
+    const unrelated = event('instance.error', { operationId: lateCommand.operationId, source: 'command_background', error: '本机命令失败，请重试。' }, work)
+    await settle()
+    assert.ok(text(view).includes('本机命令失败，请重试。'), 'the same operation ID in another Work is not claimed')
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    // Native post-cut replay arrives after control facts already cover these events.
+    observation({ kind: 'content', token: `commands-${her.id}`, change: { kind: 'checkpoint_begin', bootstrap: { ...bootstrap, instance: atHost(her), cursor: atHost(her).eventCursor, records: [], activeEvents: [] }, replay: true } })
+    for (const replayed of failedEvents) observation({ kind: 'event', replayToken: `commands-${her.id}`, event: replayed })
+    observation({ kind: 'content', token: `commands-${her.id}`, change: { kind: 'checkpoint_end' } }); await settle()
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'returning to A does not replay its command failures into chat')
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    assert.equal(commandErrors().length, 2, 'replay does not append the old command results again')
+    assert.ok(text(dialog()).includes('离开后命令失败'), 'the late command reply remains in its original Work command center')
+    await click('关闭')
+    event('instance.error', { operationId: 'not-started-here', source: 'command_background', error: '其他命令失败，请重试。' })
+    event('instance.error', { operationId: lateCommand.operationId, source: 'host', error: 'Host 请求失败，请重试。' })
+    event('instance.error', { error: 'Host 状态读取失败，请重试。' })
+    await settle()
+    for (const message of ['其他命令失败', 'Host 请求失败', 'Host 状态读取失败']) assert.ok(text(view).includes(message), `${message} keeps its conversation error`)
+    await commandApp.switchHost('spare'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+    event('instance.error', { operationId: lateCommand.operationId, source: 'command_background', error: '另一台 Host 的命令失败，请重试。' }); await settle()
+    assert.ok(text(view).includes('另一台 Host 的命令失败'), 'an identical Work and operation ID on another Host is not claimed')
+    await commandApp.switchHost('host'); await settle()
+    commandApp.selectWork(her.id); await settle(); snapshot(failedEvents); await settle()
+    assert.equal(text(view).includes('本机命令失败，请重试。'), false, 'returning to the original Host retains its command ownership')
     commandApp.setCurrentDraft('/refresh'); await settle()
     const beforeLocal = calls.filter(call => call.command === 'run_catalog_command').length
     const beforeRefresh = calls.filter(call => call.command === 'bootstrap').length
@@ -3632,9 +3683,38 @@ try {
     assert.ok(text(teleport).includes('确认扩展操作'))
     await click('打开命令中心')
     find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    abortNative = () => { throw { code: 'busy', message: '输入框先前的中止失败，请重试。' } }
+    await actions.abortCurrentRun(); await settle()
     abortNative = () => { throw { code: 'connection_failed', message: '连接中断。请重试。' } }
     await click('中止命令')
     assert.ok(text(dialog()).includes('连接中断'), 'cancellation failure is visible in the command center')
+    // Final PR P3: cancellation used to copy the input error into the panel without giving it ownership.
+    assert.equal(all(view, item => String(item.props.class).includes('alu-composer-error')).some(item => text(item).includes('连接中断')), false, 'command cancellation reports its failure only in the panel')
+    assert.ok(all(view, item => String(item.props.class).includes('alu-composer-error')).some(item => text(item).includes('输入框先前的中止失败')), 'claiming this failure does not clear an unrelated input error')
+    for (const leave of ['close', 'switch-work']) {
+      let rejectAbort, abortArgs
+      abortNative = args => new Promise((_resolve, reject) => { abortArgs = args; rejectAbort = reject })
+      await click(leave === 'close' ? '重试中止' : '中止命令')
+      await click('关闭')
+      if (leave === 'switch-work') { commandApp.selectWork('work'); await settle(); snapshot([], work); await settle() }
+      const failure = { operationId: abortArgs.operationId, kind: 'abort_run', connectionId: abortArgs.connectionId, instanceId: her.id,
+        hostEpoch: 'epoch', runtimeGeneration: 1, sessionId: her.executor.piSessionId, editor: null, state: 'failed',
+        error: { code: 'busy', outcomeUnknown: false, message: '迟到的命令中止失败，请重试。' } }
+      nativeResults.set(failure.operationId, failure); emit('aludock://operation', failure)
+      rejectAbort({ ...failure.error, operationId: failure.operationId }); await settle()
+      assert.equal(nativeResults.has(failure.operationId), true, 'closing before failure leaves the native result available')
+      if (leave === 'switch-work') {
+        assert.equal(text(view).includes('迟到的命令中止失败'), false, 'the abort error does not enter a different Work')
+        commandApp.selectWork(her.id); await settle(); snapshot(); await settle()
+      }
+      const results = find(view, item => item.props['aria-label'] === '当前 Work 操作结果')
+      assert.ok(!!results && text(results).includes('迟到的命令中止失败'), 'the original Work keeps the late abort failure in its results')
+      assert.equal(all(view, item => String(item.props.class).includes('alu-composer-error')).some(item => text(item).includes('迟到的命令中止失败')), false)
+      find(results, item => item.type === 'details').open = true
+      await find(results, item => item.type === 'button' && text(item) === '知道了').props.onClick(); await settle()
+      await click('打开命令中心')
+      find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
+    }
     abortNative = args => {
       assert.equal(args.instanceId, her.id)
       event('interaction.resolved', { interactionId: 'command-confirm', method: 'confirm' })
@@ -3642,7 +3722,7 @@ try {
       event('command.handled', { operationId: running.operationId })
       return { receipt: { instanceId: her.id, restored: [], inFlight: [] }, instance: atHost(her) }
     }
-    await click('重试中止')
+    await click('中止命令')
     assert.ok(text(dialog()).includes('命令已中止。'))
     assert.equal(!!find(teleport, item => item.props.role === 'dialog'), false, 'aborting dismisses the waiting confirmation')
     assert.equal(!!button('中止命令'), false, 'completed commands no longer show as running')
@@ -3669,8 +3749,16 @@ try {
     actions.openAssistantStatus(); await settle()
     assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
     await click('关闭')
+    // A fresh page has no command owner; cached errors must remain readable there.
+    mounted.unmount(); await settle()
+    const rebuiltPinia = createPinia()
+    mounted = renderer.createApp({ render: () => h(App) }).use(rebuiltPinia); mounted.mount(view); await settle()
+    const rebuiltApp = useAppStore(rebuiltPinia)
+    rebuiltApp.selectWork('work'); await settle(); snapshot([unrelated], work); await settle()
+    assert.ok(text(view).includes('本机命令失败，请重试。'), 'a page without the command center owner still shows the cached error')
     extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
     console.log('PASS: assistant command runner and pins, typed local priority, idle confirmation cancellation and visible full runtime details')
+    console.log('PASS: command failures stay with their command center across close, Work switch, late reply and replay; unclaimed and Host errors remain visible')
   }
 
   // #665 review: the color theme survives a reload, works without this device's settings,

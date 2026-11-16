@@ -75,14 +75,14 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   })
 
   /** One Host step stops the reply and returns the waiting Queue to the editor. */
-  async function abortCurrentRun() {
+  async function abortCurrentRun(presentFailure?: (cause: unknown) => boolean) {
     const work = selected.value
     // Extension commands can be running or waiting for confirmation while chat is idle.
     if (!work || work.lifecycle !== 'active' || aborting.value) return
     const feedbackScope = captureFeedback()
     const capturedHost = requireConnectionContext(app)
     pendingAborts.value.add(feedbackScope.identity)
-    reportAction(feedbackScope, null)
+    if (!presentFailure) reportAction(feedbackScope, null)
     try {
       const result = await abortRun(work.id, app.captureOperationTarget(capturedHost, work.id))
       if (!app.contextMatches(capturedHost)) return
@@ -94,7 +94,11 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
         reportAction(feedbackScope, `已中止，${returned} 条排队消息已放回输入框。`, 'notice')
       }
     } catch (cause) {
-      reportFailure(feedbackScope, cause)
+      if (presentFailure) {
+        // A panel owns only its own request's failure. If it has gone away, the
+        // native operation result remains available for that Work instead.
+        if (feedbackMatches(feedbackScope) && presentFailure(cause)) app.failureShown(cause)
+      } else reportFailure(feedbackScope, cause)
     } finally {
       pendingAborts.value.delete(feedbackScope.identity)
     }

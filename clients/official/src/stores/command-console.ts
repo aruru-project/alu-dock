@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { ProjectedEvent, Work } from '../lib/types'
+import type { ConversationBootstrap, ProjectedEvent } from '../lib/types'
+import { useAppStore } from './app'
 
 export interface CommandConsoleEntry {
   id: string
@@ -11,8 +12,10 @@ export interface CommandConsoleEntry {
 }
 
 interface CommandOperation {
-  operationId: string
+  contextKey: string
   completed: boolean
+  succeeded: boolean
+  sequence: number
 }
 
 export interface CommandReceipt {
@@ -22,48 +25,27 @@ export interface CommandReceipt {
 }
 
 export const useCommandConsoleStore = defineStore('command-console', () => {
-  const contextKey = ref('')
-  const entries = ref<CommandConsoleEntry[]>([])
+  const app = useAppStore()
+  // Results belong to the Work/runtime that started them, not the open panel or
+  // current visit. Switching away and back must not send their replay into chat.
+  const contextKey = computed(() => scopeKey(app.activeConnectionId ?? '', app.selectedWork?.id ?? '',
+    app.selectedWork?.ownerHostEpoch ?? '', app.selectedWork?.runtimeGeneration ?? 0))
+  const output = ref<CommandConsoleEntry[]>([])
   const operations = ref<Record<string, CommandOperation>>({})
+  const entries = computed(() => output.value.filter(entry => operations.value[entry.operationId]?.contextKey === contextKey.value))
   let entrySequence = 0
-  const knownOperationIds: string[] = []
-  const successfulOperationIds = new Set<string>()
 
-  const hasActiveOperation = computed(() => Object.values(operations.value).some(operation => !operation.completed))
+  const hasActiveOperation = computed(() => Object.values(operations.value).some(operation => operation.contextKey === contextKey.value && !operation.completed))
 
   function isActive(operationId: string) {
     const operation = operations.value[operationId]
-    return !!operation && !operation.completed
-  }
-
-  function bindContext(connectionId: string, selectionGeneration: number, work: Work) {
-    const next = JSON.stringify([
-      connectionId,
-      selectionGeneration,
-      work.id,
-      work.ownerHostEpoch ?? '',
-      work.runtimeGeneration,
-    ])
-    if (next === contextKey.value) return
-    contextKey.value = next
-    entries.value = []
-    operations.value = {}
-    knownOperationIds.splice(0)
-    successfulOperationIds.clear()
+    return !!operation && operation.contextKey === contextKey.value && !operation.completed
   }
 
   function beginOperation(operationId: string, name: string, argumentsText: string) {
     const argumentsValue = argumentsText.trim()
-    rememberOperation(operationId)
-    operations.value = {
-      ...operations.value,
-      [operationId]: { operationId, completed: false },
-    }
-    append({
-      kind: 'command',
-      text: `/${name}${argumentsValue ? ` ${argumentsValue}` : ''}`,
-      operationId,
-    })
+    operations.value[operationId] = { contextKey: contextKey.value, completed: false, succeeded: false, sequence: -1 }
+    append({ kind: 'command', text: `/${name}${argumentsValue ? ` ${argumentsValue}` : ''}`, operationId })
   }
 
   function receiveReceipt(operationId: string, receipt: CommandReceipt) {
@@ -79,40 +61,37 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   }
 
   function failOperation(operationId: string, message: string): boolean {
-    if (successfulOperationIds.has(operationId)) return false
     const operation = operations.value[operationId]
-    if (!operation || operation.completed) return false
+    if (!operation || operation.completed || operation.succeeded) return false
     operation.completed = true
-    // An extension may already have reported this failure before the Host closes the operation.
-    if (!entries.value.some(entry => entry.operationId === operationId && entry.level === 'error' && entry.text === message)) {
-      append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
-    }
+    append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
     return true
   }
 
   function operationSucceeded(operationId: string) {
-    return successfulOperationIds.has(operationId)
+    return operations.value[operationId]?.succeeded === true
   }
 
-  function handleDockEvent(event: ProjectedEvent): { matched: boolean; commandOrigin: boolean } {
+  /** True only for output owned here. All other events keep their ordinary display path. */
+  function handleDockEvent(connectionId: string, cursor: ConversationBootstrap['cursor'], event: ProjectedEvent): boolean {
     const operationId = typeof event.data.operationId === 'string' ? event.data.operationId : ''
     const operation = operationId ? operations.value[operationId] : undefined
-    if (!operation) {
-      if (operationId && event.eventType === 'command.handled' && knownOperationIds.includes(operationId)) {
-        successfulOperationIds.add(operationId)
-        return { matched: true, commandOrigin: true }
-      }
-      return { matched: false, commandOrigin: !!operationId }
-    }
+    if (!operation || operation.contextKey !== scopeKey(connectionId, cursor.instanceId, cursor.hostEpoch, event.runtimeGeneration)) return false
+    const ownsOutput = event.eventType === 'extension.notification' || event.eventType === 'command.rejected'
+      || (event.eventType === 'instance.error' && event.data.source === 'command_background')
+    // A cached view can replay events already displayed here, even after its
+    // control facts have advanced. It still belongs here, but is not appended again.
+    if (event.sequence <= operation.sequence) return ownsOutput
+    operation.sequence = event.sequence
 
     switch (event.eventType) {
       case 'command.handled':
-        successfulOperationIds.add(operationId)
+        operation.succeeded = true
         operation.completed = true
         break
       case 'command.rejected':
       case 'instance.error':
-        failOperation(operationId, stringValue(event.data.error) || stringValue(event.data.reason) || '命令执行失败。')
+        if (ownsOutput) failOperation(operationId, stringValue(event.data.error) || stringValue(event.data.reason) || '命令执行失败。')
         break
       case 'run.started':
         if (!operation.completed) {
@@ -129,35 +108,24 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
         })
         break
     }
-    return { matched: true, commandOrigin: true }
-  }
-
-  function rememberOperation(operationId: string) {
-    knownOperationIds.push(operationId)
-    while (knownOperationIds.length > 128) {
-      const removed = knownOperationIds.shift()
-      if (removed) successfulOperationIds.delete(removed)
-    }
+    return ownsOutput
   }
 
   function append(entry: Omit<CommandConsoleEntry, 'id'>) {
     if (!entry.text) return
+    // notify(error), a thrown command failure and its receipt can describe the
+    // same error. Only coalesce within this one command; other commands stay visible.
+    if (entry.level === 'error' && output.value.some(old => old.operationId === entry.operationId && old.level === 'error' && old.text === entry.text)) return
     entrySequence += 1
-    entries.value = [...entries.value, { ...entry, id: `${entry.operationId}:${entrySequence}` }]
+    output.value.push({ ...entry, id: `${entry.operationId}:${entrySequence}` })
   }
 
-  return {
-    entries,
-    hasActiveOperation,
-    isActive,
-    bindContext,
-    beginOperation,
-    receiveReceipt,
-    failOperation,
-    operationSucceeded,
-    handleDockEvent,
-  }
+  return { entries, hasActiveOperation, isActive, beginOperation, receiveReceipt, failOperation, operationSucceeded, handleDockEvent }
 })
+
+function scopeKey(connectionId: string, workId: string, hostEpoch: string, runtimeGeneration: number) {
+  return JSON.stringify([connectionId, workId, hostEpoch, runtimeGeneration])
+}
 
 function stringValue(value: unknown) {
   return typeof value === 'string' ? value : ''

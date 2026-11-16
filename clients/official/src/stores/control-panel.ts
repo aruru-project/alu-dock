@@ -8,7 +8,6 @@ import { errorCode, userErrorMessage as errorMessage } from '../lib/userError'
 import type { ModelsResult, ProjectedEvent, ResourcesResult, SettingsResult, SettingInfo, SettingValue, ToolsResult } from '../lib/types'
 import { useAppStore } from './app'
 import { useCommandCatalogStore } from './command-catalog'
-import { useCommandConsoleStore } from './command-console'
 import { useObservationStore } from './observation'
 import { useSurfacesStore } from './surfaces'
 
@@ -17,7 +16,6 @@ import { useSurfacesStore } from './surfaces'
 export const useControlPanelStore = defineStore('control-panel', () => {
   const app = useAppStore()
   const catalog = useCommandCatalogStore()
-  const commandConsole = useCommandConsoleStore()
   const observation = useObservationStore()
   const surfaces = useSurfacesStore()
   const selected = computed(() => app.selectedWork)
@@ -39,18 +37,6 @@ export const useControlPanelStore = defineStore('control-panel', () => {
   const loadErrors = ref<Partial<Record<ControlSection, string>>>({})
   const writeFailed = createSignal<[message: string]>()
   let loadEpoch = 0
-
-  watch([
-    () => app.activeConnectionId,
-    () => app.connectionContext?.selectionGeneration,
-    () => selected.value?.id,
-    () => selected.value?.ownerHostEpoch,
-    () => selected.value?.runtimeGeneration,
-  ], () => {
-    const context = app.connectionContext
-    const work = selected.value
-    if (context && work) commandConsole.bindContext(context.connectionId, context.selectionGeneration, work)
-  }, { immediate: true })
 
   watch([speedTarget, () => selected.value?.executor.model?.provider, () => selected.value?.executor.model?.id, () => selected.value?.lifecycle], (_value, previous) => {
     if (!previous || previous[0] !== speedTarget.value) {
