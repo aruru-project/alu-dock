@@ -5,10 +5,12 @@ import { pathToFileURL } from "node:url";
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { ASSISTANT_EXTENSIONS_FILE, readAssistantExtensions } from "../assistant/extensions-config.js";
-import type { SourceDto } from "../core/config-projection.js";
+import { parseCommandsResult } from "../control/protocol.js";
+import { compareCommandDtos, type CommandDto, type SourceDto } from "../core/config-projection.js";
 import type { JsonObject, JsonValue } from "../core/json-value.js";
+import { validateUiCapabilityArgs } from "../worker/worker-protocol.js";
 
-/** Public assistant tool API. A plain .mjs module needs no imports or Pi SDK. */
+/** Public assistant extension API. A plain .mjs module needs no imports or Pi SDK. */
 export interface AssistantToolResult {
   content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
   details?: JsonValue;
@@ -34,8 +36,24 @@ export interface AssistantExtensionContext {
   notify(message: string, level?: "info" | "warning"): void;
   confirm(title: string, message: string, signal: AbortSignal): Promise<boolean>;
 }
+export interface AssistantCommandContext {
+  /** Aborted when the owner stops the command, reloads extensions, or closes the Worker. */
+  signal: AbortSignal;
+  /** While execute is running, notifications belong to this command in the existing command console. */
+  notify(message: string, level?: "info" | "warning" | "error"): void;
+  confirm(title: string, message: string): Promise<boolean>;
+}
+export interface AssistantExtensionCommand {
+  /** Invocation name without the leading slash. */
+  name: string;
+  description: string;
+  argumentHint?: string;
+  /** Free-form arguments, not shell-parsed. Returned text is shown to the owner, not sent to a model. */
+  execute(args: string, context: AssistantCommandContext): string | void | Promise<string | void>;
+}
 export interface AssistantExtension {
-  tools: AssistantExtensionTool[];
+  tools?: AssistantExtensionTool[];
+  commands?: AssistantExtensionCommand[];
   dispose?(): void | Promise<void>;
 }
 export type AssistantExtensionFactory = (context: AssistantExtensionContext) => Promise<AssistantExtension>;
@@ -47,20 +65,28 @@ export class AssistantToolExtensions {
   private loaded: Array<{ id: string; extension: AssistantExtension }> = [];
   private statuses = new Map<string, string>();
   private lifetime = new AbortController();
+  private readonly commands = new Map<string, { command: AssistantExtensionCommand; dto: CommandDto }>();
+  private readonly calls = new Set<AbortController>();
 
   constructor(
     private readonly cwd: string,
     private readonly builtins: AssistantBuiltinExtensions,
-    private readonly ui: Pick<AssistantExtensionContext, "notify" | "confirm"> & { status(key: string, text?: string): void },
+    private readonly ui: Pick<AssistantExtensionContext, "confirm"> & {
+      notify(message: string, level?: "info" | "warning" | "error", operationId?: string): void;
+      status(key: string, text?: string): void;
+    },
   ) {}
 
-  /** Only called at startup or an idle Reload; the built-in tools are never replaced. */
-  async load(reserved: readonly AgentTool[]): Promise<AgentTool[]> {
+  get commandCatalog(): CommandDto[] { return [...this.commands.values()].map(({ dto }) => dto); }
+
+  /** Only called at startup or an idle Reload; the built-in tools and commands are never replaced. */
+  async load(reserved: readonly AgentTool[], reservedCommands: readonly CommandDto[] = []): Promise<AgentTool[]> {
     await this.dispose();
     this.lifetime = new AbortController();
     for (const id of this.statuses.keys()) this.ui.status(`扩展/${id}`);
     this.statuses.clear();
     this.sources.clear();
+    this.commands.clear();
     let settings;
     try { settings = await readAssistantExtensions(this.cwd); }
     catch (error) {
@@ -68,6 +94,7 @@ export class AssistantToolExtensions {
       return [];
     }
     const names = new Set(reserved.map(tool => tool.name));
+    const commandOwners = new Map(reservedCommands.map(command => [command.name, "内置命令"]));
     const tools: AgentTool[] = [];
     for (const setting of settings) {
       if (!setting.enabled) continue;
@@ -89,19 +116,47 @@ export class AssistantToolExtensions {
         const dataDir = join(this.cwd, ".assistant-extensions", setting.id);
         await mkdir(dataDir, { recursive: true, mode: 0o700 });
         extension = await factory({ cwd: this.cwd, dataDir, config: structuredClone(setting.config), notify: this.ui.notify, confirm: this.ui.confirm });
-        if (!extension || !Array.isArray(extension.tools) || (extension.dispose !== undefined && typeof extension.dispose !== "function")) throw new Error("扩展需要返回 tools 数组和可选的 dispose 函数");
+        if (!extension || (extension.tools === undefined && extension.commands === undefined)
+          || (extension.tools !== undefined && !Array.isArray(extension.tools))
+          || (extension.commands !== undefined && !Array.isArray(extension.commands))
+          || (extension.dispose !== undefined && typeof extension.dispose !== "function")) {
+          throw new Error("扩展需要返回 tools 或 commands 数组，以及可选的 dispose 函数");
+        }
+        const extensionTools = extension.tools ?? [];
+        const extensionCommands = extension.commands ?? [];
+        const source: SourceDto = { kind: "extension", package: setting.id, path: setting.module };
         const ownNames = new Set<string>();
-        for (const tool of extension.tools) {
+        for (const tool of extensionTools) {
           if (!tool || typeof tool.name !== "string" || !/^[a-zA-Z0-9_-]+$/u.test(tool.name) || typeof tool.description !== "string" || !tool.description.trim()
             || !tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters) || tool.parameters.type !== "object" || typeof tool.execute !== "function") {
             throw new Error("工具需要 name、description、object JSON Schema parameters 和 execute 函数");
           }
-          if (names.has(tool.name) || ownNames.has(tool.name)) throw new Error(`工具名 ${tool.name} 已被占用，请改名；原工具没有被替换`);
+          if (names.has(tool.name) || ownNames.has(tool.name)) throw new RegistrationConflict(`工具名 ${tool.name} 已被占用，请改名后 Reload；原工具没有被替换。`);
           ownNames.add(tool.name);
         }
-        for (const tool of extension.tools) {
+        const ownCommands = new Map<string, CommandDto>();
+        for (const command of extensionCommands) {
+          if (!command || typeof command.name !== "string" || !/^[a-zA-Z0-9_-]+$/u.test(command.name)
+            || typeof command.description !== "string" || !command.description.trim() || typeof command.execute !== "function") {
+            throw new Error("命令需要不带斜杠的 name、description 和 execute 函数");
+          }
+          const owner = commandOwners.get(command.name) ?? (ownCommands.has(command.name) ? "本扩展的另一条命令" : undefined);
+          if (owner !== undefined) throw new RegistrationConflict(`命令 /${command.name} 已由「${owner}」提供，请改名后 Reload；原命令没有被替换。`);
+          ownCommands.set(command.name, {
+            name: command.name, description: command.description, source, argumentCompletions: false,
+            ...(command.argumentHint === undefined ? {} : { argumentHint: command.argumentHint }),
+          });
+        }
+        // Use the public result parser's limits before publishing any part of this extension.
+        const catalog = [...reservedCommands, ...this.commandCatalog, ...ownCommands.values()].sort(compareCommandDtos);
+        parseCommandsResult({ commands: catalog, total: catalog.length, truncated: false });
+        for (const command of extensionCommands) {
+          this.commands.set(command.name, { command, dto: ownCommands.get(command.name)! });
+          commandOwners.set(command.name, `扩展 ${setting.id}`);
+        }
+        for (const tool of extensionTools) {
           names.add(tool.name);
-          this.sources.set(tool.name, { kind: "extension", package: setting.id, path: setting.module });
+          this.sources.set(tool.name, source);
           tools.push({
             name: tool.name, label: tool.name, description: tool.description,
             parameters: tool.parameters as AgentTool["parameters"],
@@ -121,11 +176,60 @@ export class AssistantToolExtensions {
         }
         // Factory errors may quote private config. Details stay in local Worker diagnostics.
         console.error(`Assistant extension ${setting.id} failed to load:`, error);
-        this.status(setting.id, `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload；详情见本机日志。`);
+        this.status(setting.id, error instanceof RegistrationConflict ? error.message
+          : `加载失败。请检查 Main 上的 ${join(this.cwd, ASSISTANT_EXTENSIONS_FILE)} 和扩展文件后 Reload；详情见本机日志。`);
       }
     }
     return tools;
   }
+
+  /** Only registered names take over input. An unknown /prefix remains an ordinary message. */
+  matchCommand(message: string): { name: string; args: string } | undefined {
+    const match = /^\s*\/([^\s/]+)(?:\s+([\s\S]*))?$/u.exec(message);
+    return match && this.commands.has(match[1]!) ? { name: match[1]!, args: match[2] ?? "" } : undefined;
+  }
+
+  async executeCommand(name: string, args: string, operationId: string): Promise<void> {
+    const registered = this.commands.get(name);
+    if (!registered) throw new Error(`命令 /${name} 已不在当前扩展中，请重新打开命令列表。`);
+    const lifetime = this.lifetime.signal;
+    const controller = new AbortController();
+    this.calls.add(controller);
+    const signal = AbortSignal.any([controller.signal, lifetime]);
+    let active = true;
+    const notify: AssistantCommandContext["notify"] = (message, level = "info") => {
+      if (lifetime.aborted) return;
+      // Report malformed output as a command failure instead of silently losing its notification.
+      validateUiCapabilityArgs("ui.notify", { message, level });
+      this.ui.notify(message, level, active ? operationId : undefined);
+    };
+    const progress = setTimeout(() => notify(`正在执行 /${name}，可以用中止取消。`), 1_000).unref();
+    try {
+      const result = await registered.command.execute(args, {
+        signal, notify,
+        confirm: (title, message) => this.ui.confirm(title, message, signal),
+      });
+      signal.throwIfAborted();
+      if (result !== undefined && typeof result !== "string") throw new Error("Command execute must return text or nothing");
+      notify(result || `命令 /${name} 已完成。`);
+    } catch (error) {
+      if (signal.aborted) {
+        notify(`命令 /${name} 已中止。`, "warning");
+        return;
+      }
+      // Extension exceptions can contain credentials; keep the original in local diagnostics only.
+      console.error(`Assistant command /${name} failed:`, error);
+      const message = `命令 /${name} 执行失败。请检查扩展设置和本机日志后重试。`;
+      notify(message, "error");
+      throw new Error(message);
+    } finally {
+      active = false;
+      clearTimeout(progress);
+      this.calls.delete(controller);
+    }
+  }
+
+  abortCommands(): void { for (const controller of this.calls) controller.abort(); }
 
   /** Only actionable failures are re-published after activate/reload; normal tools stay quiet. */
   showStatus(): void { for (const [id, text] of this.statuses) this.ui.status(`扩展/${id}`, text); }
@@ -146,3 +250,6 @@ export class AssistantToolExtensions {
     return errors;
   }
 }
+
+/** Only loader-owned, non-secret diagnoses may be displayed verbatim. */
+class RegistrationConflict extends Error {}

@@ -40,7 +40,7 @@ import {
   type ThinkingLevel,
 } from "../core/agent-worker.js";
 import { ASSISTANT_EXTENSIONS_FILE } from "../assistant/extensions-config.js";
-import { compareToolDtos, type CommandDto } from "../core/config-projection.js";
+import { compareCommandDtos, compareToolDtos, type CommandDto } from "../core/config-projection.js";
 import { isDockMessageText, MAX_DOCK_TOOL_MESSAGE_CHARS, type DockToolsRequest, type WorkMessage } from "../core/dock-tools.js";
 import type { ObservationNotification } from "../core/instance-observation.js";
 import { projectJsonObject, type JsonObject } from "../core/json-value.js";
@@ -230,8 +230,8 @@ class AssistantAgent implements WorkerAgent {
     private readonly modelSpeed: ModelSpeedRuntime,
   ) {
     this.extensions = new AssistantToolExtensions(cwd, builtins, {
-      notify: (message, level) => this.tell(message, level),
-      confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message }, signal) === true,
+      notify: (message, level, operationId) => this.tell(message, level, operationId),
+      confirm: async (title, message, signal) => await host.call("ui.confirm", { title, message, optionsMeta: { signalAborted: signal.aborted } }, signal) === true,
       status: (key, text) => { void host.call("ui.setStatus", { key, ...(text === undefined ? {} : { text }) }).catch(() => {}); },
     });
     this.conversation = new PiSessionConversation({ attachmentContextKey, publishedFiles: this.publishedFiles });
@@ -329,7 +329,7 @@ class AssistantAgent implements WorkerAgent {
       return;
     }
     // Re-read after the service is ready; only a still-missing file means shipped defaults.
-    this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools)];
+    this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools, [DOCK_TOOLS_SWITCH])];
     this.agent.state.tools = this.tools;
   }
 
@@ -353,7 +353,7 @@ class AssistantAgent implements WorkerAgent {
       isCompacting: false,
       modelState: this.modelState(),
       metrics: this.metrics(),
-      extensionCommands: [DOCK_TOOLS_COMMAND],
+      extensionCommands: [DOCK_TOOLS_COMMAND, ...this.extensions.commandCatalog.map(command => command.name)].sort(),
     };
   }
 
@@ -396,9 +396,10 @@ class AssistantAgent implements WorkerAgent {
         return this.modelSpeed.setting(this.model);
       // She has none of these: clients open her Work and show them empty.
       case "resource.get": return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false };
-      // The one command she takes: her owner's switch for her Dock tools, as every Work has it.
+      // Commands run directly for her owner; no model turn is involved.
       case "command.catalog": {
-        const commands = [DOCK_TOOLS_SWITCH].filter((command) => command.name.startsWith(request.params.prefix ?? ""));
+        const commands = [DOCK_TOOLS_SWITCH, ...this.extensions.commandCatalog]
+          .filter((command) => command.name.startsWith(request.params.prefix ?? "")).sort(compareCommandDtos);
         return { commands, total: commands.length, truncated: false };
       }
       case "session.list": return { sessions: [], total: 0, truncated: false };
@@ -452,16 +453,16 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** Her owner's switch for collaboration. Reading files and attachments stays available. */
-  private async switchDockTools(action: string): Promise<void> {
+  private async switchDockTools(action: string, operationId: string): Promise<void> {
     if (!isDockToolsAction(action)) {
-      this.tell("用法：/dock-tools on、/dock-tools off 或 /dock-tools status。", "warning");
+      this.tell("用法：/dock-tools on、/dock-tools off 或 /dock-tools status。", "warning", operationId);
       return;
     }
     const enabled = action === "status" ? this.host.dockToolsEnabled() : await this.host.configureDockTools(action === "on");
     this.showDockTools();
     this.tell(enabled
       ? "助手的 Dock tools 开着：她可以派 Work 干活、联系别的 Work。"
-      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work；仍能聊天、用记忆、读取文件和附件。要恢复派活，用 /dock-tools on。");
+      : "助手的 Dock tools 关着：她不能派 Work，也看不到别的 Work；仍能聊天、用记忆、读取文件和附件。要恢复派活，用 /dock-tools on。", "info", operationId);
   }
 
   /** Session replacement clears client status; restore all of her current facts together. */
@@ -477,8 +478,8 @@ class AssistantAgent implements WorkerAgent {
   }
 
   /** Says something to the owner outside the conversation, in whichever client is open. */
-  private tell(message: string, level: "info" | "warning" = "info"): void {
-    void this.host.call("ui.notify", { message, level }).catch(() => {});
+  private tell(message: string, level: "info" | "warning" | "error" = "info", operationId?: string): void {
+    void this.host.call("ui.notify", { message, level, ...(operationId === undefined ? {} : { operationId }) }).catch(() => {});
   }
 
   /** What this kind of Work does not have: the owner is told why, and the request fails. */
@@ -537,9 +538,16 @@ class AssistantAgent implements WorkerAgent {
   ): Promise<null> {
     const { operationId, message, images, delivery: requested } = params;
     const dockTools = DOCK_TOOLS_INPUT.exec(message);
-    if (dockTools) {
+    const command = this.extensions.matchCommand(message);
+    if (dockTools || command) {
+      // These handlers accept free text only, so attached files must not be silently discarded.
+      if ((images?.length ?? 0) > 0 || (params.attachments?.length ?? 0) > 0) {
+        preflight({ success: false });
+        throw this.notHers("这条命令只接收文字参数，附件没有发送。请移除附件后再执行命令，或用普通消息发送文件。");
+      }
       preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
-      await this.switchDockTools(dockTools[1]?.trim() || "status");
+      if (dockTools) await this.switchDockTools(dockTools[1]?.trim() || "status", operationId);
+      else await this.extensions.executeCommand(command!.name, command!.args, operationId);
       return null;
     }
     if (this.model === undefined) {
@@ -776,6 +784,7 @@ class AssistantAgent implements WorkerAgent {
   }
 
   private async abort(): Promise<void> {
+    this.extensions.abortCommands();
     if (this.running === undefined) return;
     this.stopRequested = true;
     this.retryWait?.abort();
