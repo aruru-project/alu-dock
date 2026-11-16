@@ -192,7 +192,6 @@ export class DockRegistry implements LocalDockToolsHostPort {
   private assistantRecoveryEnabled = false;
   private assistantDisplayName = DEFAULT_ASSISTANT_DISPLAY_NAME;
   private assistantNameRevision = 0;
-  private readAssistantName: (() => Promise<string | undefined>) | undefined;
   private assistantRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private assistantRecovery: Promise<void> | undefined;
   private assistantRecoveryDelay = 1_000;
@@ -645,7 +644,6 @@ export class DockRegistry implements LocalDockToolsHostPort {
 
   /** Stop retires ordinary Works; her stopped record remains, so reopening keeps her identity. */
   private bindInstanceCatalog(instance: ManagedInstance): void {
-    if (this.assistantWorkspace !== undefined) instance.setAssistantDisplayName(this.assistantDisplayName);
     const port = this.catalog.forInstance(instance.id);
     instance.bindCatalogPort(instance.snapshot().assistant && this.assistantWorkspace !== undefined
       ? { ...port, retire: (context) => port.commit(instance.catalogRecord(), context) }
@@ -653,11 +651,17 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   /** Called by a running Host, not by a client or an Agent. No model is called just to keep her open. */
-  startAssistant(readName?: () => Promise<string | undefined>): void {
+  startAssistant(): void {
     if (this.assistantWorkspace === undefined) return;
-    this.readAssistantName = readName;
     this.assistantRecoveryEnabled = true;
     this.scheduleAssistantRecovery(0);
+  }
+
+  /** A ready memory service can update the label independently of starting the chat Worker. */
+  async refreshAssistantDisplayName(readName: () => Promise<string | undefined>): Promise<void> {
+    const revision = this.assistantNameRevision;
+    const name = await readName();
+    if (name !== undefined && revision === this.assistantNameRevision) this.setAssistantDisplayName(name);
   }
 
   /** Publish Main's saved identity without changing the Work, session title, or conversation. */
@@ -704,9 +708,6 @@ export class DockRegistry implements LocalDockToolsHostPort {
     this.assertCatalogReady();
     this.catalog.assertWritable();
     const workspace = this.assistantWorkspace!;
-    const revision = this.assistantNameRevision;
-    const name = await this.readAssistantName?.();
-    if (name !== undefined && revision === this.assistantNameRevision) this.setAssistantDisplayName(name);
     await mkdir(workspace, { recursive: true });
     if (!this.assistantRecoveryEnabled) return;
     const record = this.catalog.current().instances.find((work) => work.assistant);
@@ -852,6 +853,7 @@ export class DockRegistry implements LocalDockToolsHostPort {
   }
 
   private trackInstanceForObservation(instance: ManagedInstance): void {
+    if (this.assistantWorkspace !== undefined) instance.setAssistantDisplayName(this.assistantDisplayName);
     this.instanceObservationSubscriptions.get(instance.id)?.();
     this.instanceObservationSinkDetachments.get(instance.id)?.();
     // Through the Host's Dock tools port: a SubHost Work's watches live on Main.

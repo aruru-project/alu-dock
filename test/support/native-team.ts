@@ -59,8 +59,8 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     ...options.environment,
   });
   const modelService = options.modelService ? new ModelServiceProcess({ agentDir, stateDirectory: root, environment: { ...environment, ...options.serviceEnvironment } }) : undefined;
-  const createAssistantService = () => options.assistant
-    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: cwd, agentDir, environment,
+  const createAssistantService = (entry?: string, readyWaitMs?: number) => options.assistant
+    ? new AssistantServiceProcess({ directory: join(root, "assistant"), workspacePath: cwd, agentDir, environment, entry, readyWaitMs,
       ...(modelService === undefined ? {} : { models: modelService }), ...(options.assistantTiming === undefined ? {} : { timing: options.assistantTiming }) })
     : undefined;
   let assistantService: AssistantServiceProcess | undefined;
@@ -75,13 +75,15 @@ export async function startNativeTeam<Name extends string>(context: TestContext,
     /** Runs after a child Work's Worker process started, before Dock lists the child Work. */
     holdNextChild: undefined as (() => Promise<void>) | undefined,
     onCleanup: undefined as (() => void) | undefined,
-    async startHost(): Promise<DockClient> {
+    async startHost(assistantProcess: { entry?: string; readyWaitMs?: number; background?: boolean } = {}): Promise<DockClient> {
       await modelService?.start();
       // A restarted Main gets a new service process, so persistence is read from disk rather than
       // from the previous Host's service. SupervisedService instances have one explicit lifecycle.
       await assistantService?.stop();
-      assistantService = createAssistantService();
-      await assistantService?.start();
+      assistantService = createAssistantService(assistantProcess.entry, assistantProcess.readyWaitMs);
+      const startingAssistant = assistantService?.start();
+      if (assistantProcess.background) void startingAssistant?.catch(() => {});
+      else await startingAssistant;
       const runningAssistant = assistantService;
       let authority!: MainMachineDockToolsAuthority, controller!: MainMachineController;
       const dockToolsHostPort = options.mainDockTools ? new MainMachineDockToolsPort({

@@ -46,7 +46,7 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   oldStore.connection.prepare("INSERT INTO meta(key, value) VALUES ('tool_extensions', ?)").run(JSON.stringify(settings));
   oldStore.close();
 
-  const client = await team.startHost();
+  let client = await team.startHost();
   const assistant = await team.assistantWork();
   async function extensionDetails(operationId: string): Promise<string> {
     let details: string | undefined;
@@ -141,6 +141,7 @@ test("Main migrates its private tools once, keeps their configuration and data, 
 
   // Local configuration must stay usable when Main's memory service is temporarily unavailable,
   // both on Reload and when the resident Worker starts again. No CLI-wide readiness barrier.
+  await client.setAssistantSettings({ displayName: "重启后的小满" });
   await team.stopAssistantService();
   await writeFile(configFile, JSON.stringify([settings[1]]));
   await client.reloadSession(assistant.id);
@@ -161,4 +162,34 @@ test("Main migrates its private tools once, keeps their configuration and data, 
   await client.prompt(assistant.id, "继续聊天。", "auto", "memory-service-offline");
   (await team.providers.coordinator.request(4)).text("可以，继续聊。");
   await waitFor(async () => (await client.status(assistant.id)).execution === "idle", "The assistant could not chat while the memory service was offline");
+  assert.equal((await client.status(assistant.id)).displayName, "重启后的小满", "An unavailable memory service keeps the known name");
+
+  // #671 regression: a global name read once became a prerequisite for creating/reopening the
+  // chat Worker. Cold Main startup must also work before the memory process can become ready.
+  // This gate blocks only the real service's startup, not its request handling or settings data.
+  await team.host!.stop();
+  client.closeActiveConnections();
+  const ready = join(team.root, "memory-can-start");
+  const entry = join(team.root, "delayed-memory-service.mjs");
+  await writeFile(entry, `import { existsSync } from "node:fs";
+    if (!existsSync(${JSON.stringify(ready)})) process.exit(1);
+    await import(${JSON.stringify(new URL("../src/assistant/service-entry.js", import.meta.url).href)});`);
+  await writeFile(configFile, JSON.stringify([settings[1]]));
+  client = await team.startHost({ entry, readyWaitMs: 20, background: true });
+  const cold = await team.assistantWork();
+  assert.equal(cold.id, assistant.id);
+  assert.equal(cold.displayName, "alu", "A cold Main can show the default until memory is available");
+  assert.ok((await client.tools(cold.id)).tools.some(tool => tool.name === "local_schedule"));
+  await client.prompt(cold.id, "记忆还没恢复，也继续聊。", "auto", "cold-memory-offline");
+  (await team.providers.coordinator.request(5)).text("我在，继续聊。");
+  await waitFor(() => team.registry!.getSnapshot(cold.id).execution === "idle", "Cold Main could not chat before memory became ready");
+  const beforeMemory = team.registry!.getSnapshot(cold.id);
+
+  // The existing supervisor retries; no settings request, list refresh or client action starts
+  // recovery. Its ready notification must restore the saved name on the same live conversation.
+  await writeFile(ready, "ready");
+  await waitFor(() => team.registry!.getSnapshot(cold.id).displayName === "重启后的小满", "Service readiness did not restore the global name");
+  const recovered = team.registry!.getSnapshot(cold.id);
+  assert.equal(recovered.executor.piSessionId, beforeMemory.executor.piSessionId);
+  assert.equal(recovered.runtimeGeneration, beforeMemory.runtimeGeneration);
 });

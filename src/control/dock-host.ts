@@ -169,7 +169,7 @@ export interface DockHostOptions {
   /** Main edits that list for every machine; a SubHost leaves it out. */
   childModelsEditor?: ChildModelsEditor;
   /** Main's assistant service, for clients to read and edit her persona and notes and search her conversations (card #295). */
-  assistant?: AssistantHostPort;
+  assistant?: AssistantHostPort & { onReady?(listener: () => void): () => void };
   listen?: boolean;
 }
 
@@ -203,7 +203,9 @@ export class DockHost {
   private readonly modelVisibility: ModelVisibilityPort | undefined;
   private readonly childModels: ChildModelsSource | undefined;
   private readonly childModelsEditor: ChildModelsEditor | undefined;
-  private readonly assistant: AssistantHostPort | undefined;
+  private readonly assistant: DockHostOptions["assistant"];
+  private unsubscribeAssistantReady: (() => void) | undefined;
+  private assistantNameRead: AbortController | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -386,7 +388,8 @@ export class DockHost {
         for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId, true);
       });
       this.state = "running";
-      this.registry.startAssistant(this.assistant ? async () => (await this.assistant!.request({ op: "settings_get" }, { owner: true })).displayName : undefined);
+      this.registry.startAssistant();
+      this.startAssistantNameUpdates();
     } catch (error) {
       await this.instanceManager.stop().catch(() => {});
       await this.remoteAccess?.stop().catch(() => {});
@@ -403,15 +406,41 @@ export class DockHost {
       this.unsubscribeRuntimeReopened = undefined;
       this.unsubscribeCatalogRemoval?.();
       this.unsubscribeCatalogRemoval = undefined;
+      this.stopAssistantNameUpdates();
       if (this.state === "starting") this.state = "new";
       this.startPromise = undefined;
       throw error;
     }
   }
 
+  /** Her identity follows memory-service readiness, never gates the independent chat Worker. */
+  private startAssistantNameUpdates(): void {
+    const assistant = this.assistant;
+    if (!assistant) return;
+    const refresh = () => {
+      if (this.state !== "running") return;
+      this.assistantNameRead?.abort();
+      const controller = this.assistantNameRead = new AbortController();
+      void this.registry.refreshAssistantDisplayName(async () => {
+        const settings = await assistant.request({ op: "settings_get" }, { owner: true }, controller.signal);
+        return this.state === "running" && !controller.signal.aborted ? settings.displayName : undefined;
+      }).catch(() => { /* Keep the known name; the next ready notification retries after recovery. */ });
+    };
+    if (assistant.onReady) this.unsubscribeAssistantReady = assistant.onReady(refresh);
+    else refresh();
+  }
+
+  private stopAssistantNameUpdates(): void {
+    this.unsubscribeAssistantReady?.();
+    this.unsubscribeAssistantReady = undefined;
+    this.assistantNameRead?.abort();
+    this.assistantNameRead = undefined;
+  }
+
   private async performStop(): Promise<void> {
     try {
       if (this.startPromise) await this.startPromise.catch(() => {});
+      this.stopAssistantNameUpdates();
       await this.registry.stopAssistantRecovery();
 
       const server = this.server;

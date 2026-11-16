@@ -70,6 +70,7 @@ export class AssistantServiceProcess implements AssistantHostPort {
 
   start(): Promise<void> { return this.service.start(); }
   stop(): Promise<void> { return this.service.stop(); }
+  onReady(listener: () => void): () => void { return this.service.onReady(listener); }
 
   async request<R extends AssistantRequest>(request: R, source: AssistantSource, signal?: AbortSignal): Promise<AssistantResultFor<R>> {
     let answer: unknown;
