@@ -71,7 +71,8 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   /** One Host step stops the reply and returns the waiting Queue to the editor. */
   async function abortCurrentRun() {
     const work = selected.value
-    if (!work || work.execution !== 'running' || aborting.value) return
+    // Extension commands can be running or waiting for confirmation while chat is idle.
+    if (!work || work.lifecycle !== 'active' || aborting.value) return
     const feedbackScope = captureFeedback()
     const capturedHost = requireConnectionContext(app)
     pendingAborts.value.add(feedbackScope.identity)
@@ -430,6 +431,25 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     page.openAssistant()
   }
 
+  const assistantStatusError = ref('')
+  watch(() => app.activeConnectionId, () => { assistantStatusError.value = '' })
+
+  /** An explicit owner click navigates to her command center before any command is sent. */
+  function openAssistantStatus() {
+    assistantStatusError.value = ''
+    const assistant = app.works.find(isResidentAssistant)
+    if (!assistant) {
+      assistantStatusError.value = '工作列表里还没有助手。请刷新工作列表后重试。'
+      return
+    }
+    if (assistant.lifecycle !== 'active') {
+      assistantStatusError.value = '助手目前没有运行。请从工作列表打开她，选择继续后重试。'
+      return
+    }
+    app.selectWork(assistant.id)
+    page.openControlCenter('commands', { name: 'assistant-status', source: { kind: 'built-in' } })
+  }
+
   function acceptCreatedWork(work: Work) {
     page.directoryBusy = false
     const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
@@ -446,6 +466,6 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
     aborting, workMutating, actionError, actionNotice, selectedCompactionPending, currentCompactionError,
     abortCurrentRun, stopSelectedWork, reopenSelectedWork, forgetSelectedWork, setCompactionError, startCompaction,
     shellStarting, shellAborting, shellError, runShell, abortShell,
-    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, acceptCreatedWork,
+    hostMachines, machineListError, newWorkMachinesLoading, newWorkCompact, groupedWorks, workMachineTag, selectWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant, openAssistantStatus, assistantStatusError, acceptCreatedWork,
   }
 })

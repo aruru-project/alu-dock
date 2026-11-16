@@ -29,6 +29,8 @@ import { useControlPanelStore } from '../stores/control-panel'
 import { useInputStore } from '../stores/input'
 import { useQuickButtonsStore } from '../stores/quick-buttons'
 import { useWorkActionsStore } from '../stores/work-actions'
+import { useSurfacesStore } from '../stores/surfaces'
+import { useExtensionUiStore } from '../stores/extension-ui'
 import type {
   CommandArgumentCompletion,
   CommandInfo,
@@ -58,7 +60,22 @@ function showFailure(cause: unknown) {
 }
 const quickButtons = useQuickButtonsStore()
 const { runQuickButton, quickButtonDisabled, quickButtonVisible } = useInputStore()
-const { openMachineSettings } = useWorkActionsStore()
+const workActions = useWorkActionsStore()
+const { openMachineSettings } = workActions
+const surfaces = useSurfacesStore()
+const extensionUi = useExtensionUiStore()
+const commandCancellable = computed(() => commandConsole.hasActiveOperation
+  || (extensionUi.isCurrent(props.work) && !!(extensionUi.activeRequest || extensionUi.activeSummary)))
+const commandAbortError = ref('')
+async function cancelCommand() {
+  commandAbortError.value = ''
+  const work = props.work
+  const context = app.connectionContext
+  await workActions.abortCurrentRun()
+  if (panelMounted && context && app.contextMatches(context) && props.work.id === work.id && props.work.runtimeGeneration === work.runtimeGeneration) {
+    commandAbortError.value = workActions.actionError ?? ''
+  }
+}
 const presence = computed(() => workPresence(props.work))
 const residentAssistant = computed(() => isResidentAssistant(props.work))
 const emit = defineEmits<{
@@ -155,7 +172,7 @@ const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-s
 const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands.value, commandSearch.value))
 const catalogCommands = computed(() => {
   const localNames = new Set(localControlCommands.map((command) => command.name))
-  return catalog.commands.filter((item) => !localNames.has(item.name))
+  return catalog.commands.filter((item) => !localNames.has(item.name) || (residentAssistant.value && item.source.kind === 'extension'))
 })
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
 /** Every quick button, including those the row has no room for. */
@@ -244,6 +261,7 @@ watch([
   argumentCompletions.value = []
   commandContentText.value = ''
   dockToolsOperationId.value = ''
+  commandAbortError.value = ''
   error.value = ''
   void loadSection(props.section)
 }, { immediate: true })
@@ -255,6 +273,21 @@ watch(() => props.section, (section) => {
   void loadSection(section)
   if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
 })
+
+const requestedCommandUnavailable = computed(() => {
+  const requested = surfaces.requestedCommand
+  return props.section === 'commands' && requested?.workId === props.work.id
+    && (catalog.state === 'ready' || catalog.state === 'truncated')
+    && !catalog.commands.some(item => item.name === requested.name && item.source.kind === requested.source)
+})
+watch([() => surfaces.requestedCommand, () => catalog.state, () => props.work.id, () => props.section], () => {
+  const requested = surfaces.requestedCommand
+  if (props.section !== 'commands' || requested?.workId !== props.work.id || !['ready', 'truncated'].includes(catalog.state)) return
+  const command = catalog.commands.find(item => item.name === requested.name && item.source.kind === requested.source)
+  if (!command) return
+  openCommandRunner(command)
+  surfaces.requestedCommand = null
+}, { immediate: true })
 
 async function closeResource() {
   const contentRef = selectedResource.value?.contentRef
@@ -607,6 +640,9 @@ function isCurrentModel(model: ModelInfo) {
     <div v-if="!['commands', 'dock-tools', 'resources'].includes(section) && loading.has(section)" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
 
     <template v-else-if="section === 'commands'">
+      <div v-if="requestedCommandUnavailable" class="alu-dialog-error">助手尚未提供这条命令。更新 Main 后可重新读取命令列表。<button type="button" class="alu-link-button" @click="loadSection('commands', true)">重新读取命令</button></div>
+      <div v-if="commandAbortError" class="alu-dialog-error">{{ commandAbortError }}<button type="button" class="alu-link-button" :disabled="workActions.aborting" @click="cancelCommand">重试中止</button></div>
+      <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>命令正在执行或等待确认。</span><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
       <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>
@@ -647,7 +683,7 @@ function isCurrentModel(model: ModelInfo) {
       </template>
 
       <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
-        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
+        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ residentAssistant && selectedCommand.source.kind === 'built-in' ? '内置' : catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
         <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="!!pending">{{ pending ? '运行中…' : '运行' }}</button></form>
         <div v-if="argumentCompletionsLoading || argumentCompletions.length" class="cmd-center-completions" role="listbox" aria-label="参数候选">
@@ -1107,6 +1143,8 @@ function isCurrentModel(model: ModelInfo) {
 .cmd-center-entry.is-error { color: var(--alu-danger-text); }
 .cmd-center-entry.is-error .cmd-center-entry-marker { color: var(--alu-danger); }
 .cmd-center-footer { min-height: 31px; }
+.cmd-center-cancel-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cmd-center-cancel-row button { flex-shrink: 0; }
 .dock-tools-popover-surface > .control-center-port { overflow-y: auto; }
 .dock-tools-panel { display: grid; gap: 14px; padding: 16px; }
 .dock-tools-header { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto 28px; align-items: center; gap: 10px; }

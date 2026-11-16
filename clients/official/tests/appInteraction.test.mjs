@@ -40,7 +40,7 @@ storage.set('aludock.uiState', JSON.stringify({ schemaVersion: 4, activeConnecti
   selectedWorkId: 'work', drafts: { work: 'F5 draft preserved', other: 'other draft' }, editorRevisions: { work: 'before-f5' }, attachmentRevisions: {}, attachments: {}, recentWorkspaces: {}, detailMode: true,
 } } }))
 let startPairingNative, cancelPairingNative, downloadNative
-let abortNative, compactNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, toolsNative, extensionBinding, allowExtension = false
+let abortNative, compactNative, stopNative, modelNative, dequeueNative, submitNative, respondNative, sharedRespondNative, catalogNative, runCatalogNative, toolsNative, extensionBinding, allowExtension = false
 let binding, failCatalog = false, revision = 0, frames = 0, beforeBatchFrame = 0, immediateAck = false, releaseHistory, saveResult = 'cancelled', restoredImageCount = 0
 let savedHosts = ['host', 'spare'], hostCatalogRevision = 1, failHostRemoval = false, failFollowStart = false, failAck = false
 let bootstrapNative, hostCatalogNative, deliveryListNative
@@ -103,7 +103,8 @@ const invoke = async (command, args = {}) => {
   }
   if (command === 'set_extension_widget_viewport' || command === 'set_shared_widget_viewport') return
   if (command === 'respond_shared_interaction') return sharedRespondNative(args)
-  if (command === 'command_catalog') return catalogNative ? catalogNative() : { commands: [], diagnostics: [], total: 0, truncated: false }
+  if (command === 'command_catalog') return catalogNative ? catalogNative(args) : { commands: [], diagnostics: [], total: 0, truncated: false }
+  if (command === 'run_catalog_command') return runCatalogNative(args)
   if (command === 'list_tools') {
     if (toolsNative) return toolsNative()
     throw { code: 'connection_failed', message: '工具暂时没有读到，请重试。' }
@@ -288,7 +289,7 @@ const text = item => item.text + item.children.map(text).join('')
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setTimeout(resolve, 2)); await nextTick() }
 let mounted
 try {
-  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
+  await writeFile(join(directory, 'entry.ts'), `export { default as App } from '${root}src/App.vue'; export { useAppStore } from '${root}src/stores/app'; export { default as InputRegion } from '${root}src/components/InputRegion.vue'; export { default as ConversationView } from '${root}src/components/ConversationView.vue'; export { useConversationContent } from '${root}src/lib/conversationContent'; ${['observation', 'operations', 'work-actions'].map(name => `export * from '${root}src/stores/${name}';`).join(' ')}`)
   await build({ root, configFile: false, logLevel: 'silent', build: { outDir: directory, emptyOutDir: false, minify: false,
     lib: { entry: join(directory, 'entry.ts'), formats: ['es'], fileName: () => 'app.mjs' }, rolldownOptions: { external: ['vue', 'pinia'] } },
     plugins: [{ name: 'native-boundary', enforce: 'pre', resolveId(id) {
@@ -3402,6 +3403,117 @@ try {
     retiredWorks.delete(legacy.id)
     extraListed = []; stopNative = undefined; assistantNative = savedAssistant; toolsNative = savedTools; modelVisibilityNative = savedModelVisibility
     console.log('PASS: resident assistant keeps her conversation and restarts; custom insert/text buttons remain; old Pi assistants retain Session, tool switches, shell and ordinary Stop')
+  }
+
+  // #671: assistant commands remain callable when their names match client controls;
+  // idle chat can still cancel a command, and requested details open in her visible command center.
+  {
+    mounted?.unmount(); await settle()
+    storage.clear(); nativeResults.clear(); consumeFailures.clear(); nativeJobs.clear()
+    const her = { ...otherWork, id: 'command-assistant', displayName: '助手', assistant: true, execution: 'idle', runtimeGeneration: 1, executor: { ...otherWork.executor, kind: 'dock-assistant' } }
+    const savedCatalog = catalogNative, savedAbort = abortNative
+    extraListed = [her]
+    let commands = [
+      { referenceId: 'builtin-refresh', name: 'refresh', source: { kind: 'built-in' }, description: '内置刷新' },
+      { referenceId: 'extension-refresh', name: 'refresh', source: { kind: 'extension', package: 'local' }, description: '扩展刷新回显' },
+      { referenceId: 'assistant-status', name: 'assistant-status', source: { kind: 'built-in' }, description: '查看助手运行详情' },
+    ]
+    catalogNative = () => ({ commands: structuredClone(commands), total: commands.length, truncated: false })
+    const pinia = createPinia(), commandApp = useAppStore(pinia), actions = compiled.useWorkActionsStore(pinia), view = element('assistant-commands-app')
+    mounted = renderer.createApp({ render: () => h(App) }).use(pinia)
+    mounted.mount(view); await settle()
+    commandApp.selectWork(her.id); await settle()
+    const snapshot = () => {
+      observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: atHost(her), cursor: atHost(her).eventCursor, records: [], activeEvents: [], queue: [],
+        extensionUi: { status: {}, toolsExpanded: false, sharedQuestions: true, events: [] } }, contentToken: 'assistant-commands', state: 'connected' })
+      observation({ kind: 'content', token: 'assistant-commands', change: { kind: 'checkpoint_end' } })
+    }
+    snapshot(); await settle()
+    const visibleText = item => item.type === '#comment' ? '' : item.text + item.children.map(visibleText).join('')
+    const button = label => find(view, item => item.type === 'button' && (item.props['aria-label'] === label || visibleText(item) === label))
+    const click = async label => { const target = button(label); assert.ok(!!target, `button exists: ${label}`); target.props.onClick(); await settle() }
+    const dialog = () => find(view, item => item.props.role === 'dialog' && item.props['aria-label'] === '命令中心')
+    const event = (eventType, data) => observation({ kind: 'event', event: { ...nextCursor(her.id), occurredAt: 'now', eventType, data } })
+    const notify = (operationId, message) => event('extension.notification', { operationId, message, level: 'info' })
+    let running
+    runCatalogNative = args => {
+      running = args
+      notify(args.operationId, '扩展刷新回显结果')
+      event('command.handled', { operationId: args.operationId })
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    await click('打开命令中心')
+    const extensionOption = find(dialog(), item => item.type === 'button' && text(item).includes('扩展刷新回显'))
+    assert.ok(!!extensionOption, 'the real extension is listed beside the local refresh control')
+    assert.ok(text(dialog()).includes('刷新状态'), 'the local refresh action stays available')
+    assert.equal(text(dialog()).includes('内置刷新'), false, 'the duplicate remote built-in still uses the client control')
+    extensionOption.props.onClick(); await settle()
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(running.name, 'refresh')
+    assert.equal(running.instanceId, her.id)
+    assert.ok(text(dialog()).includes('扩展刷新回显结果'), 'selected extension executes through the catalog, not the local refresh action')
+    assert.equal(commandApp.selectedWork.execution, 'idle')
+    await click('关闭')
+    commandApp.setCurrentDraft('/refresh'); await settle()
+    const beforeLocal = calls.filter(call => call.command === 'run_catalog_command').length
+    const beforeRefresh = calls.filter(call => call.command === 'bootstrap').length
+    find(view, item => item.type === 'form' && item.props.class === 'alu-input-wrap').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(calls.filter(call => call.command === 'run_catalog_command').length, beforeLocal, 'an exact no-argument typed local command keeps local priority')
+    assert.ok(calls.filter(call => call.command === 'bootstrap').length > beforeRefresh, 'typed refresh performs the existing local refresh')
+    snapshot(); await settle()
+    commandApp.setCurrentDraft('/refresh'); await settle()
+    const extensionSuggestion = find(view, item => item.props.role === 'option' && text(item).includes('扩展刷新回显'))
+    assert.ok(!!extensionSuggestion); extensionSuggestion.props.onClick(); await settle()
+    assert.ok(text(dialog()).includes('扩展刷新回显'), 'choosing the extension suggestion opens its runner instead of replacing it with the local action')
+
+    runCatalogNative = args => {
+      running = args
+      event('interaction.requested', { interactionId: 'command-confirm', method: 'confirm', title: '确认扩展操作', message: '等待主人确认。', issuedAt: 'now' })
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(commandApp.selectedWork.execution, 'idle')
+    assert.equal(!!button('中止命令'), true, 'the command has a visible cancel action even though chat is idle')
+    abortNative = () => { throw { code: 'connection_failed', message: '连接中断。请重试。' } }
+    await click('中止命令')
+    assert.ok(text(dialog()).includes('连接中断'), 'cancellation failure is visible in the command center')
+    abortNative = args => {
+      assert.equal(args.instanceId, her.id)
+      event('interaction.resolved', { interactionId: 'command-confirm', method: 'confirm' })
+      notify(running.operationId, '命令已中止。')
+      event('command.handled', { operationId: running.operationId })
+      return { receipt: { instanceId: her.id, restored: [], inFlight: [] }, instance: atHost(her) }
+    }
+    await click('重试中止')
+    assert.ok(text(dialog()).includes('命令已中止。'))
+    assert.equal(!!find(teleport, item => item.props.role === 'dialog'), false, 'aborting dismisses the waiting confirmation')
+    assert.equal(!!button('中止命令'), false, 'completed commands no longer show as running')
+    await click('关闭')
+
+    commandApp.selectWork('work'); await settle()
+    actions.openAssistantStatus(); await settle()
+    assert.equal(commandApp.selectedWorkId, her.id, 'the detail action navigates from another Work to the actual resident assistant')
+    assert.ok(!!dialog() && text(dialog()).includes('/assistant-status'), 'the real built-in catalog entry is selected before running')
+    snapshot(); await settle()
+    const details = '滚动整理\n最近一次完成：2026-11-16 10:00\n当前采用：100000 token 开始整理，保留最近原话约 20000 token。\n\n工具扩展\nlocal：已加载，1 个工具、1 个命令。'
+    runCatalogNative = args => {
+      notify(args.operationId, details)
+      event('command.handled', { operationId: args.operationId })
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    const output = find(dialog(), item => item.props.role === 'log')
+    assert.ok(text(output).includes(details), 'complete detail text appears in the command notification area')
+    assert.equal(all(view, item => String(item.props.class).split(' ').includes('extension-status-item')).some(item => text(item).includes('100000 token')), false, 'details do not become persistent chat status')
+    await click('关闭')
+    commands = [{ referenceId: 'extension-status', name: 'assistant-status', source: { kind: 'extension', package: 'old-plugin' }, description: '另一条扩展命令' }]
+    commandApp.selectWork('work'); await settle()
+    actions.openAssistantStatus(); await settle()
+    assert.ok(text(dialog()).includes('助手尚未提供这条命令'), 'an extension with the same name cannot impersonate the built-in details command')
+    assert.ok(!!button('重新读取命令'), 'a missing command offers a usable retry in the visible panel')
+    await click('关闭')
+    extraListed = []; catalogNative = savedCatalog; runCatalogNative = undefined; abortNative = savedAbort
+    console.log('PASS: assistant command source selection, typed local priority, idle confirmation cancellation and visible full runtime details')
   }
 
   // #665 review: the color theme survives a reload, works without this device's settings,

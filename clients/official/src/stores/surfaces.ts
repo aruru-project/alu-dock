@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, nextTick, onScopeDispose, ref, shallowReactive, watch } from 'vue'
 import { controlSectionAvailable, type ControlSection } from '../lib/localCommands'
 import { isResidentAssistant } from '../lib/uiBoundaries'
+import type { CommandInfo } from '../lib/types'
 import { useAppStore } from './app'
 import { useExtensionUiStore } from './extension-ui'
 export type ImagePreview =
@@ -36,6 +37,8 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   const directoryOpen = ref(false)
   const commandOpen = ref(false)
   const controlSection = ref<ControlSection>('commands')
+  /** Navigation intent only; the command center resolves it against the real catalog. */
+  const requestedCommand = ref<{ workId: string; name: string; source: CommandInfo['source']['kind'] } | null>(null)
   const controlTitleOverride = ref('')
   const controlBodyOverride = ref('')
   const controlSizeOverride = ref<'default' | 'wide' | 'tree' | ''>('')
@@ -386,9 +389,10 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     return ['ui-dialog-box', size === 'tree' ? 'ui-dialog-size-tree' : size === 'wide' ? 'ui-dialog-size-wide' : '']
   }
 
-  function openControlCenter(section: ControlSection) {
+  function openControlCenter(section: ControlSection, command?: Pick<CommandInfo, 'name' | 'source'>) {
     if (!app.selectedWork || !controlSectionAvailable(section, isResidentAssistant(app.selectedWork))) return
     rememberModalTrigger()
+    requestedCommand.value = command ? { workId: app.selectedWork.id, name: command.name, source: command.source.kind } : null
     controlTitleOverride.value = ''
     controlBodyOverride.value = ''
     controlSizeOverride.value = ''
@@ -397,6 +401,7 @@ export const useSurfacesStore = defineStore('surfaces', () => {
     directoryOpen.value = false
     appSettingsOpen.value = false
     hostSettingsOpen.value = false
+    assistantOpen.value = false
     app.workDrawerOpen = false
   }
 
@@ -493,5 +498,5 @@ export const useSurfacesStore = defineStore('surfaces', () => {
   }
 
   function returnFocusTo(element: HTMLElement | null) { modalTrigger = element }
-  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
+  return { composerExpanded, composerComposing, directoryBusy, directoryOpen, commandOpen, controlSection, requestedCommand, controlTitleOverride, controlBodyOverride, controlSizeOverride, confirmDialog, projectTrustDialog, askProjectTrust, settleProjectTrust, appSettingsOpen, hostSettingsOpen, machineSettingsOpen, machineSettingsSection, machineSettingsDirty, assistantOpen, assistantSection, imagePreview, messageTextView, imageSaving, imageSaveStatus, deliveryOpen, workspaceBrowserOpen, dockToolsTrigger, dockToolsPopoverStyle, modalOpen, dockToolsOpen, askConfirm, settleConfirm, rememberModalTrigger, closeModal, handleModalKeydown, handleModalWheel, controlDialogTitle, controlDialogBody, setControlDialogTitle, controlDialogClasses, openControlCenter, openDockTools, pulseCommandPalette, openMessageText, showImagePreview, returnFocusTo, listenWindow, openWorkspaceBrowser, bindSurface, closeControl, closeDirectory, openDirectory, openHostSettings, openAppSettings, openMachineSettings, openAssistant, onAssistantBack, openDeliveryTray, closeWorkPanels, retirePreview, moveAttachmentPreview }
 })

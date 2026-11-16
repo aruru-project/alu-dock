@@ -83,6 +83,13 @@ export class AssistantToolExtensions {
 
   get commandCatalog(): CommandDto[] { return [...this.commands.values()].map(({ dto }) => dto); }
 
+  /** Requested details include successful loads without putting them back in the chat status bar. */
+  details(): string {
+    const loaded = this.loaded.map(({ id, extension }) => `${id}：已加载，${extension.tools?.length ?? 0} 个工具、${extension.commands?.length ?? 0} 个命令。`);
+    const failures = [...this.statuses].map(([id, text]) => `${id}：${text}`);
+    return [...loaded, ...failures].join("\n") || "没有已加载的工具扩展。";
+  }
+
   /** Only called at startup or an idle Reload; the built-in tools and commands are never replaced. */
   async load(reserved: readonly AgentTool[], reservedCommands: readonly CommandDto[] = []): Promise<AgentTool[]> {
     await this.dispose();

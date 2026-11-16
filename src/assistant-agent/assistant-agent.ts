@@ -124,12 +124,13 @@ interface QueuedInput {
   text: string;
 }
 
-/** `/dock-tools`, alone or with what to do. */
-const DOCK_TOOLS_INPUT = new RegExp(`^\\s*/${DOCK_TOOLS_COMMAND}(?:\\s+(.*))?$`, "su");
-const DOCK_TOOLS_SWITCH: CommandDto = {
+/** The catalog and the extension loader share the same built-in command owners. */
+const BUILTIN_COMMANDS: readonly CommandDto[] = [{
   name: DOCK_TOOLS_COMMAND, source: { kind: "built-in" }, description: "开启、关闭或查看助手的 Dock tools（派 Work、联系别的 Work）",
   argumentHint: "on|off|status", argumentCompletions: false,
-};
+}, {
+  name: "assistant-status", source: { kind: "built-in" }, description: "查看助手运行详情", argumentCompletions: false,
+}];
 const NO_OTHER_SESSION = "常驻助手的对话是一条连续的线，不另开会话、不切换或分叉。你可以直接继续说；要载入刚改过的人设和记忆，请用 Reload，重启也会保留这段对话。";
 
 /**
@@ -335,7 +336,7 @@ class AssistantAgent implements WorkerAgent {
       return;
     }
     // Re-read after the service is ready; only a still-missing file means shipped defaults.
-    this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools, [DOCK_TOOLS_SWITCH])];
+    this.tools = [...this.builtInTools, ...await this.extensions.load(this.builtInTools, BUILTIN_COMMANDS)];
     this.agent.state.tools = this.tools;
   }
 
@@ -369,7 +370,7 @@ class AssistantAgent implements WorkerAgent {
       isCompacting: false,
       modelState: this.modelState(),
       metrics: this.metrics(),
-      extensionCommands: [DOCK_TOOLS_COMMAND, ...this.extensions.commandCatalog.map(command => command.name)].sort(),
+      extensionCommands: [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog].map(command => command.name).sort(),
     };
   }
 
@@ -416,7 +417,7 @@ class AssistantAgent implements WorkerAgent {
       case "resource.get": return projectResources(this.getDocumentResources(), this.skills.diagnostics);
       // Commands run directly for her owner; no model turn is involved.
       case "command.catalog": {
-        const commands = [DOCK_TOOLS_SWITCH, ...this.extensions.commandCatalog]
+        const commands = [...BUILTIN_COMMANDS, ...this.extensions.commandCatalog]
           .filter((command) => command.name.startsWith(request.params.prefix ?? "")).sort(compareCommandDtos);
         return { commands, total: commands.length, truncated: false };
       }
@@ -556,16 +557,18 @@ class AssistantAgent implements WorkerAgent {
     preflight: (result: AgentCommandPreflightResult) => void,
   ): Promise<null> {
     const { operationId, message, images, delivery: requested } = params;
-    const dockTools = DOCK_TOOLS_INPUT.exec(message);
+    const input = /^\s*\/([^\s/]+)(?:\s+([\s\S]*))?$/u.exec(message);
+    const builtin = input && BUILTIN_COMMANDS.find(command => command.name === input[1]);
     const command = this.extensions.matchCommand(message);
-    if (dockTools || command) {
+    if (builtin || command) {
       // These handlers accept free text only, so attached files must not be silently discarded.
       if ((images?.length ?? 0) > 0 || (params.attachments?.length ?? 0) > 0) {
         preflight({ success: false });
         throw this.notHers("这条命令只接收文字参数，附件没有发送。请移除附件后再执行命令，或用普通消息发送文件。");
       }
       preflight({ success: true, inputKind: "extension_command", delivery: "prompt", custody: "runtime" });
-      if (dockTools) await this.switchDockTools(dockTools[1]?.trim() || "status", operationId);
+      if (builtin?.name === DOCK_TOOLS_COMMAND) await this.switchDockTools(input![2]?.trim() || "status", operationId);
+      else if (builtin) this.tell(`滚动整理\n${this.handoff.details()}\n\n工具扩展\n${this.extensions.details()}`, "info", operationId);
       else await this.extensions.executeCommand(command!.name, command!.args, operationId);
       return null;
     }

@@ -150,7 +150,7 @@ export const useInputStore = defineStore('input', () => {
       sourceLabel: '客户端操作',
     }))
     const localNames = new Set(localControlCommands.map((command) => command.name))
-    const catalog = filterCatalogCommands(commandCatalogStore.commands.filter((command) => !localNames.has(command.name)), query).map((command) => ({
+    const catalog = filterCatalogCommands(commandCatalogStore.commands.filter((command) => !localNames.has(command.name) || (isResidentAssistant(selected.value) && command.source.kind === 'extension')), query).map((command) => ({
       kind: 'catalog' as const,
       name: command.name,
       description: command.description,
@@ -208,6 +208,10 @@ export const useInputStore = defineStore('input', () => {
   function completeSuggest(item?: ComposerCommandSuggestion) {
     const picked = item ?? suggestItems.value[suggestIndex.value]
     if (!picked) return
+    if (picked.kind === 'catalog' && isResidentAssistant(selected.value) && picked.command.source.kind === 'extension') {
+      surfaces.openControlCenter('commands', picked.command)
+      return
+    }
     draft.value = picked.kind === 'argument'
       ? applySlashArgumentCompletion(picked.commandName, picked.value)
       : applySlashCompletion(picked.name)

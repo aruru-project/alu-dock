@@ -25,15 +25,11 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   const contextKey = ref('')
   const entries = ref<CommandConsoleEntry[]>([])
   const operations = ref<Record<string, CommandOperation>>({})
-  const activeOperationId = ref('')
   let entrySequence = 0
   const knownOperationIds: string[] = []
   const successfulOperationIds = new Set<string>()
 
-  const hasActiveOperation = computed(() => {
-    const operation = operations.value[activeOperationId.value]
-    return !!operation && !operation.completed
-  })
+  const hasActiveOperation = computed(() => Object.values(operations.value).some(operation => !operation.completed))
 
   function isActive(operationId: string) {
     const operation = operations.value[operationId]
@@ -52,7 +48,6 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     contextKey.value = next
     entries.value = []
     operations.value = {}
-    activeOperationId.value = ''
     knownOperationIds.splice(0)
     successfulOperationIds.clear()
   }
@@ -64,7 +59,6 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
       ...operations.value,
       [operationId]: { operationId, completed: false },
     }
-    activeOperationId.value = operationId
     append({
       kind: 'command',
       text: `/${name}${argumentsValue ? ` ${argumentsValue}` : ''}`,
@@ -82,7 +76,6 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
       text: receipt.queued ? '已加入 Queue。' : '已交给 Agent，后续内容显示在主要对话。',
       operationId,
     })
-    finish(operationId)
   }
 
   function failOperation(operationId: string, message: string): boolean {
@@ -91,7 +84,6 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     if (!operation || operation.completed) return false
     operation.completed = true
     append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
-    finish(operationId)
     return true
   }
 
@@ -113,10 +105,7 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     switch (event.eventType) {
       case 'command.handled':
         successfulOperationIds.add(operationId)
-        if (!operation.completed) {
-          operation.completed = true
-          finish(operationId)
-        }
+        operation.completed = true
         break
       case 'command.rejected':
       case 'instance.error':
@@ -126,7 +115,6 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
         if (!operation.completed) {
           operation.completed = true
           append({ kind: 'status', text: '命令已启动 Agent；后续内容显示在主要对话。', operationId })
-          finish(operationId)
         }
         break
       case 'extension.notification':
@@ -153,10 +141,6 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     if (!entry.text) return
     entrySequence += 1
     entries.value = [...entries.value, { ...entry, id: `${entry.operationId}:${entrySequence}` }]
-  }
-
-  function finish(operationId: string) {
-    if (activeOperationId.value === operationId) activeOperationId.value = ''
   }
 
   return {
