@@ -64,8 +64,8 @@ const workActions = useWorkActionsStore()
 const { openMachineSettings } = workActions
 const surfaces = useSurfacesStore()
 const extensionUi = useExtensionUiStore()
-const commandCancellable = computed(() => commandConsole.hasActiveOperation
-  || (extensionUi.isCurrent(props.work) && !!(extensionUi.activeRequest || extensionUi.activeSummary)))
+const commandQuestion = computed(() => extensionUi.isCurrent(props.work) && !!(extensionUi.activeRequest || extensionUi.activeSummary))
+const commandCancellable = computed(() => commandConsole.hasActiveOperation || commandQuestion.value)
 const commandAbortError = ref('')
 async function cancelCommand() {
   commandAbortError.value = ''
@@ -643,7 +643,7 @@ function isCurrentModel(model: ModelInfo) {
     <template v-else-if="section === 'commands'">
       <div v-if="requestedCommandUnavailable" class="alu-dialog-error">没有读到助手运行详情命令，请重新读取命令列表。<button type="button" class="alu-link-button" @click="loadSection('commands', true)">重新读取命令</button></div>
       <div v-if="commandAbortError" class="alu-dialog-error">{{ commandAbortError }}<button type="button" class="alu-link-button" :disabled="workActions.aborting" @click="cancelCommand">重试中止</button></div>
-      <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>命令正在执行或等待确认。</span><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
+      <div v-if="commandCancellable" class="cmd-palette-footer cmd-center-cancel-row" role="status"><span>{{ commandQuestion ? '有问题等待你回答。' : '命令正在执行。' }}</span><button v-if="commandQuestion" type="button" class="button secondary" @click="$emit('close')">回答问题</button><button type="button" class="button secondary" :disabled="workActions.aborting" @click="cancelCommand">{{ workActions.aborting ? '中止中…' : '中止命令' }}</button></div>
       <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>
@@ -1144,7 +1144,7 @@ function isCurrentModel(model: ModelInfo) {
 .cmd-center-entry.is-error { color: var(--alu-danger-text); }
 .cmd-center-entry.is-error .cmd-center-entry-marker { color: var(--alu-danger); }
 .cmd-center-footer { min-height: 31px; }
-.cmd-center-cancel-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cmd-center-cancel-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
 .cmd-center-cancel-row button { flex-shrink: 0; }
 .dock-tools-popover-surface > .control-center-port { overflow-y: auto; }
 .dock-tools-panel { display: grid; gap: 14px; padding: 16px; }

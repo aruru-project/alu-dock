@@ -83,7 +83,10 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     const operation = operations.value[operationId]
     if (!operation || operation.completed) return false
     operation.completed = true
-    append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
+    // An extension may already have reported this failure before the Host closes the operation.
+    if (!entries.value.some(entry => entry.operationId === operationId && entry.level === 'error' && entry.text === message)) {
+      append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
+    }
     return true
   }
 

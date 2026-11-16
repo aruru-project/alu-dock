@@ -3511,6 +3511,14 @@ try {
     assert.equal(running.instanceId, her.id)
     assert.ok(text(dialog()).includes('扩展回显结果'), 'the selected extension executes through the catalog')
     assert.equal(commandApp.selectedWork.execution, 'idle')
+    // #671 browser acceptance: the extension notice and Host failure repeated the same error twice.
+    runCatalogNative = args => {
+      event('extension.notification', { operationId: args.operationId, level: 'error', message: '本机命令失败，请重试。' })
+      event('instance.error', { operationId: args.operationId, source: 'command_background', error: '本机命令失败，请重试。' })
+      return { receipt: { operationId: args.operationId, kind: 'extension_command', queued: false, delivery: 'prompt' }, instance: atHost(her) }
+    }
+    find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
+    assert.equal(all(dialog(), item => item.props.class === 'cmd-center-entry-text').map(text).filter(value => value === '本机命令失败，请重试。').length, 1)
     await click('关闭')
     commandApp.setCurrentDraft('/refresh'); await settle()
     const beforeLocal = calls.filter(call => call.command === 'run_catalog_command').length
@@ -3530,6 +3538,12 @@ try {
     find(dialog(), item => item.type === 'form').props.onSubmit({ preventDefault() {} }); await settle()
     assert.equal(commandApp.selectedWork.execution, 'idle')
     assert.equal(!!button('中止命令'), true, 'the command has a visible cancel action even though chat is idle')
+    // #671 browser acceptance: the command modal covered its own confirmation without a way to open it.
+    await click('回答问题')
+    assert.equal(!!dialog(), false, 'answering leaves the command overlay and exposes the existing question')
+    assert.ok(text(teleport).includes('确认扩展操作'))
+    await click('打开命令中心')
+    find(dialog(), item => item.type === 'button' && text(item).includes('扩展回显')).props.onClick(); await settle()
     abortNative = () => { throw { code: 'connection_failed', message: '连接中断。请重试。' } }
     await click('中止命令')
     assert.ok(text(dialog()).includes('连接中断'), 'cancellation failure is visible in the command center')
