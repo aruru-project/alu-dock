@@ -73,6 +73,35 @@ test("legacy collaboration policy migrates once, including old false, and new op
   assert.equal(legacy?.runStartedAt, undefined);
 });
 
+test("catalog keeps Work trust unknown for legacy records and restores the old decision after an interrupted switch", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  await store.commit(projection(1, [record("switching", {
+    projectTrusted: true,
+    replacement: {
+      operationId: "switch-project", kind: "switch", previousSessionFile: join(tmpdir(), "switching.jsonl"),
+      requestedSessionFile: join(tmpdir(), "target.jsonl"),
+      requestedProjectTrust: { canonicalCwd: join(tmpdir(), "target-project"), projectTrusted: false },
+      startedAt: "2026-07-15T00:00:00.000Z",
+    },
+  }), record("denied", { projectTrusted: false }), record("legacy")]), { kind: "session.switch.intent", effect: "pre_effect" });
+  const loaded = (await store.load())!;
+  assert.deepEqual(loaded.instances.map((item) => item.projectTrusted), [true, false, undefined]);
+  assert.deepEqual(loaded.instances[0]!.replacement?.requestedProjectTrust,
+    { canonicalCwd: join(tmpdir(), "target-project"), projectTrusted: false });
+  const recovered = reconcileCatalogProjection(loaded, "new-host").projection.instances.find((item) => item.id === "switching")!;
+  assert.equal(recovered.cwd, join(tmpdir(), "switching"));
+  assert.equal(recovered.projectTrusted, true);
+  assert.equal(recovered.recoverySessionFile, join(tmpdir(), "switching.jsonl"));
+  assert.equal(recovered.replacement, undefined);
+
+  // Permission decisions must stay boolean, rather than treating a malformed value as consent.
+  const malformed = JSON.parse(await readFile(path, "utf8"));
+  malformed.instances[0].projectTrusted = "true";
+  await writeFile(path, JSON.stringify(malformed), { mode: 0o600 });
+  await assert.rejects(store.load(), CatalogCorruptError);
+});
+
 test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   const { path } = await temporaryCatalog();
   const store = new FileCatalogStore(path);

@@ -189,7 +189,8 @@ export interface PiAgentAdapterOptions {
   planGoalPort?: PlanGoalPort;
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
-  setProjectTrust?: (cwd: string, trusted: boolean) => void;
+  /** Stage the target's decision for construction; return a rollback for cancellation/failure. */
+  setProjectTrust?: (cwd: string, trusted: boolean) => () => void;
   commitReplacement?: (change: { operationId: string; kind: ReplacementKind; previousSessionFile?: string; sessionFile?: string }) => Promise<void>;
   commitRuntimeError?: (failure: { operationId: string; kind: ReplacementKind; error: unknown; recoverySessionFile?: string }) => Promise<void>;
   isSessionFileDurable?: (path: string) => boolean;
@@ -1142,14 +1143,21 @@ export class PiAgentAdapter {
     path: string,
     trust: { canonicalCwd: string; projectTrusted: boolean },
   ): Promise<{ cancelled: boolean }> {
-    return this.serialize(() => {
-      this.options.setProjectTrust?.(trust.canonicalCwd, trust.projectTrusted);
-      return this.replace(
-        operationId,
-        "switch",
-        () => this.options.runtime.switchSession(path),
-        trust.canonicalCwd,
-      );
+    return this.serialize(async () => {
+      const rollbackTrust = this.options.setProjectTrust?.(trust.canonicalCwd, trust.projectTrusted);
+      let committed = false;
+      try {
+        const result = await this.replace(
+          operationId,
+          "switch",
+          () => this.options.runtime.switchSession(path),
+          trust.canonicalCwd,
+        );
+        committed = !result.cancelled;
+        return result;
+      } finally {
+        if (!committed) rollbackTrust?.();
+      }
     });
   }
 
@@ -2185,7 +2193,14 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     extensionUiBroker: options.extensionUiBroker,
     uiContext,
     uiContextFactory: createUiContext,
-    setProjectTrust: (cwd, trusted) => trustByCwd.set(cwd, trusted),
+    setProjectTrust: (cwd, trusted) => {
+      const previous = trustByCwd.get(cwd);
+      trustByCwd.set(cwd, trusted);
+      return () => {
+        if (previous === undefined) trustByCwd.delete(cwd);
+        else trustByCwd.set(cwd, previous);
+      };
+    },
     configureNetwork: configurePiNetwork,
     initialProcessCwd: options.cwd,
     attachmentContextKey,

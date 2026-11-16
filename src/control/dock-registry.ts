@@ -562,12 +562,21 @@ export class DockRegistry implements LocalDockToolsHostPort {
     sessionFile: string,
   ): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     const target = await this.reopenTargetResolver!.resolve(sessionFile);
-    const trust = record.assistant && this.assistantWorkspace !== undefined
-      ? { canonicalCwd: await canonicalDirectory(this.assistantWorkspace), projectTrusted: false }
-      : await this.resolveProjectTrust({
-        operationType: "instance.reopen", operationId: input.operationId, cwd: target.cwd, name: sessionFile,
-        trustChallengeId: input.trustChallengeId, projectTrustDecision: input.projectTrustDecision,
-      });
+    let trust: ProjectTrustResolution;
+    if (record.assistant && this.assistantWorkspace !== undefined) {
+      trust = { canonicalCwd: await canonicalDirectory(this.assistantWorkspace), projectTrusted: false };
+    } else {
+      const canonicalCwd = await canonicalDirectory(target.cwd);
+      // Compare to the saved scope verbatim: resolving the old path again could move
+      // this Work's permission to a different project after a symlink is retargeted.
+      trust = record.projectTrusted !== undefined && canonicalCwd === record.cwd
+        && input.trustChallengeId === undefined && input.projectTrustDecision === undefined
+        ? { canonicalCwd, projectTrusted: record.projectTrusted }
+        : await this.resolveProjectTrust({
+          operationType: "instance.reopen", operationId: input.operationId, cwd: canonicalCwd, name: sessionFile,
+          trustChallengeId: input.trustChallengeId, projectTrustDecision: input.projectTrustDecision,
+        });
+    }
     return { instance: await this.openRecord(input.operationId, record, trust, sessionFile, previousLifecycle), previousLifecycle };
   }
 

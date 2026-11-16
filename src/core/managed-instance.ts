@@ -274,6 +274,7 @@ interface WorkingCheckpoint {
   key: string | undefined;
   name: string | undefined;
   cwd: string;
+  projectTrusted: boolean | undefined;
   executor: ExecutorIdentity;
   runtimeGeneration: number;
   agentStartCount: number;
@@ -395,7 +396,7 @@ export class ManagedInstance {
   get modelSpeed(): ModelSpeedSelection | undefined { return this.modelSpeedValue && { ...this.modelSpeedValue }; }
   readonly parentId: string | undefined;
   readonly assistant: boolean;
-  // Runtime-only: trust_once must never become a persisted permission grant.
+  // Retained only for this Work and its canonical cwd, never written to Pi's directory trust store.
   private projectTrustedValue: boolean | undefined;
   private readonly deliverables = new InstanceDeliverables();
   private executionChangedAtValue!: string;
@@ -589,6 +590,7 @@ export class ManagedInstance {
       ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
       ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
       cwd: snapshot.cwd,
+      ...(this.projectTrustedValue === undefined ? {} : { projectTrusted: this.projectTrustedValue }),
       lifecycle: snapshot.lifecycle,
       execution: snapshot.execution,
       lastRun: snapshot.lastRun,
@@ -1195,13 +1197,11 @@ export class ManagedInstance {
     sessionFile: string,
     trust: AgentProjectTrust,
   ): Promise<AgentReplacementResult> {
-    return this.replaceRuntime("switching session", operationId, "switch", { requestedSessionFile: sessionFile }, async () => {
-      const result = await this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
-        context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
-      });
-      if (!result.cancelled) this.projectTrustedValue = trust.projectTrusted;
-      return result;
-    });
+    return this.replaceRuntime("switching session", operationId, "switch", {
+      requestedSessionFile: sessionFile, requestedProjectTrust: trust,
+    }, () => this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
+      context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
+    }));
   }
 
   async forkSession(operationId: string, entryId: string): Promise<AgentForkResult> {
@@ -2682,6 +2682,7 @@ export class ManagedInstance {
       key: this.keyValue,
       name: this.nameValue,
       cwd: this.cwdValue,
+      projectTrusted: this.projectTrustedValue,
       executor: cloneJson(this.executorIdentity),
       runtimeGeneration: this.runtimeGenerationValue,
       agentStartCount: this.agentStartCount,
@@ -2710,6 +2711,7 @@ export class ManagedInstance {
     this.keyValue = checkpoint.key;
     this.nameValue = checkpoint.name;
     this.cwdValue = checkpoint.cwd;
+    this.projectTrustedValue = checkpoint.projectTrusted;
     Object.assign(this.executorIdentity, checkpoint.executor);
     for (const key of Object.keys(this.executorIdentity) as Array<keyof ExecutorIdentity>) {
       if (!(key in checkpoint.executor)) delete this.executorIdentity[key];
@@ -2848,7 +2850,7 @@ export class ManagedInstance {
     action: string,
     operationId: string,
     kind: "new" | "switch" | "fork" | "clone" | "reload",
-    target: { requestedSessionFile?: string; requestedEntryId?: string },
+    target: Pick<NonNullable<CatalogInstanceRecord["replacement"]>, "requestedSessionFile" | "requestedEntryId" | "requestedProjectTrust">,
     replace: () => Promise<T>,
     validateTarget?: () => void | Promise<void>,
   ): Promise<T> {
@@ -2875,6 +2877,7 @@ export class ManagedInstance {
             kind,
             ...(previousRecoverySessionFile === undefined ? {} : { previousSessionFile: previousRecoverySessionFile }),
             ...(target.requestedSessionFile === undefined ? {} : { requestedSessionFile: target.requestedSessionFile }),
+            ...(target.requestedProjectTrust === undefined ? {} : { requestedProjectTrust: { ...target.requestedProjectTrust } }),
             ...(target.requestedEntryId === undefined ? {} : { requestedEntryId: target.requestedEntryId }),
             startedAt,
           };
@@ -3220,11 +3223,20 @@ export class ManagedInstance {
           : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
         const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
         const modelState = event.modelState as AgentModelState | undefined;
+        const operationId = this.resolveAgentEventOperationId(event);
+        const requestedTrust = this.replacementIntent?.operationId === operationId
+          ? this.replacementIntent?.requestedProjectTrust : undefined;
         return {
           kind: "session.replaced",
           durable: true,
-          operationId: this.resolveAgentEventOperationId(event),
+          operationId,
           mutate: () => {
+            // Publish the target cwd and its Host-approved decision in the same catalog commit.
+            if (requestedTrust && requestedTrust.canonicalCwd === cwd) {
+              this.projectTrustedValue = requestedTrust.projectTrusted;
+            } else if (cwd !== undefined && cwd !== this.cwdValue) {
+              this.projectTrustedValue = undefined;
+            }
             this.runtimeGenerationValue += 1;
             this.replacementIntent = undefined;
             this.recoverySessionFile = undefined;

@@ -168,7 +168,7 @@ export function parseCatalogProjection(input: unknown): CatalogProjection {
 function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecord {
   const value = object(input, field);
   exact(value, [
-    "id", "creationOperationId", "parentId", "assistant", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
+    "id", "creationOperationId", "parentId", "assistant", "key", "name", "cwd", "projectTrusted", "lifecycle", "execution", "lastRun",
     "observationGrant", "dockToolsEnabled", "collaborationVersion", "workerConfig", "modelSpeed", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
@@ -177,7 +177,9 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const modelValue = value.model === undefined ? undefined : object(value.model, `${field}.model`);
   if (modelValue) exact(modelValue, ["provider", "id"], `${field}.model`);
   const replacementValue = value.replacement === undefined ? undefined : object(value.replacement, `${field}.replacement`);
-  if (replacementValue) exact(replacementValue, ["operationId", "kind", "previousSessionFile", "requestedSessionFile", "requestedEntryId", "startedAt"], `${field}.replacement`);
+  if (replacementValue) exact(replacementValue, ["operationId", "kind", "previousSessionFile", "requestedSessionFile", "requestedProjectTrust", "requestedEntryId", "startedAt"], `${field}.replacement`);
+  const requestedTrust = replacementValue?.requestedProjectTrust === undefined ? undefined : object(replacementValue.requestedProjectTrust, `${field}.replacement.requestedProjectTrust`);
+  if (requestedTrust) exact(requestedTrust, ["canonicalCwd", "projectTrusted"], `${field}.replacement.requestedProjectTrust`);
   const lastKnownValue = value.lastKnown === undefined ? undefined : object(value.lastKnown, `${field}.lastKnown`);
   if (lastKnownValue) exact(lastKnownValue, ["lifecycle", "execution", "activeCommandId", "pendingCount"], `${field}.lastKnown`);
   const interruptionValue = value.interruption === undefined ? undefined : object(value.interruption, `${field}.interruption`);
@@ -195,6 +197,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     ...(value.key === undefined ? {} : { key: text(value.key, `${field}.key`, 128) }),
     ...(value.name === undefined ? {} : { name: text(value.name, `${field}.name`, 256) }),
     cwd: text(value.cwd, `${field}.cwd`, 16_384),
+    ...(value.projectTrusted === undefined ? {} : { projectTrusted: boolean(value.projectTrusted, `${field}.projectTrusted`) }),
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]),
     execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]),
     lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]),
@@ -226,6 +229,10 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
       ...(replacementValue.previousSessionFile === undefined ? {} : { previousSessionFile: text(replacementValue.previousSessionFile, `${field}.replacement.previousSessionFile`, 16_384) }),
       ...(replacementValue.requestedSessionFile === undefined ? {} : { requestedSessionFile: text(replacementValue.requestedSessionFile, `${field}.replacement.requestedSessionFile`, 16_384) }),
       ...(replacementValue.requestedEntryId === undefined ? {} : { requestedEntryId: text(replacementValue.requestedEntryId, `${field}.replacement.requestedEntryId`, 128) }),
+      ...(requestedTrust === undefined ? {} : { requestedProjectTrust: {
+        canonicalCwd: text(requestedTrust.canonicalCwd, `${field}.replacement.requestedProjectTrust.canonicalCwd`, 16_384),
+        projectTrusted: boolean(requestedTrust.projectTrusted, `${field}.replacement.requestedProjectTrust.projectTrusted`),
+      } }),
       startedAt: timestamp(replacementValue.startedAt, `${field}.replacement.startedAt`),
     } }),
     ...(value.recoverySessionFile === undefined ? {} : { recoverySessionFile: text(value.recoverySessionFile, `${field}.recoverySessionFile`, 16_384) }),
