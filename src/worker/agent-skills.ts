@@ -16,6 +16,8 @@ export interface AgentSkillDeclaration {
   /** Module directory for factory declarations; config file directory for configured declarations.
    * Built-in factories have no local module path and must return absolute paths. */
   baseDir?: string;
+  /** Optional conventional directory when paths is absent. Missing directories are normal. */
+  defaultDirectory?: string;
   source: SourceDto;
 }
 
@@ -64,12 +66,20 @@ export class AgentSkills {
     }
     sources.push(...supplied);
     for (const declaration of declarations) {
-      if (declaration.paths === undefined) continue;
-      if (!Array.isArray(declaration.paths)) {
+      let paths = declaration.paths;
+      if (paths === undefined) {
+        if (!declaration.defaultDirectory) continue;
+        try { lstatSync(declaration.defaultDirectory); paths = [declaration.defaultDirectory]; }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") diagnostics.push(warning("无法查看技能目录，请检查读取权限后重试。", declaration.defaultDirectory));
+          continue;
+        }
+      }
+      if (!Array.isArray(paths)) {
         diagnostics.push(warning("技能声明需要 skills 路径数组；工具和命令仍可使用。", declaration.source.path));
         continue;
       }
-      for (const path of declaration.paths) {
+      for (const path of paths) {
         if (typeof path !== "string" || !path.trim() || path.includes("\0") || (!isAbsolute(path) && declaration.baseDir === undefined)) {
           diagnostics.push(warning("技能路径无效；本机扩展使用相对模块的路径，随包扩展使用绝对路径。工具和命令仍可使用。", declaration.source.path));
           continue;

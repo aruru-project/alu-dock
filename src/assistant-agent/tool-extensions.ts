@@ -194,7 +194,10 @@ export class AssistantToolExtensions {
         // Manuals are independent of tool/command registration: malformed or missing skills only
         // produce resource diagnostics, and cannot roll back working tools or commands.
         this.skillDeclarations.push(
-          { paths: extension.skills, source, ...(setting.module.startsWith("builtin:") ? {} : { baseDir: dirname(setting.module) }) },
+          { paths: extension.skills, source, ...(setting.module.startsWith("builtin:") ? {} : {
+            baseDir: dirname(setting.module),
+            ...(setting.skills === undefined ? { defaultDirectory: join(dirname(setting.module), "skills") } : {}),
+          }) },
           { paths: setting.skills, baseDir: this.cwd, source: { ...source, path: join(this.cwd, ASSISTANT_EXTENSIONS_FILE) } },
         );
       } catch (error) {
