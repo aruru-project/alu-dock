@@ -23,6 +23,10 @@ assert.doesNotMatch(parsingFailure.message, /expected value|client_error|更改/
 const unrelatedFailure = userErrorPresentation({ code: 'host_unreachable', message: 'raw transport detail' })
 assert.equal(unrelatedFailure.diagnostic, undefined)
 
+// PR review P1: a slow read ends only that read, not the Work or the Host connection.
+assert.equal(userErrorMessage({ code: 'query_timeout', message: 'private worker detail' }), '这次读取超时，Work 没有因此停止。请稍后重试。')
+assert.equal(userErrorMessage({ code: 'request_failed', message: 'private worker detail' }), '操作没有完成。请刷新状态后重试。')
+
 // Card 361: a typed directory path that does not exist, and a chosen model that is gone, say what to do next.
 assert.match(userErrorMessage({ code: 'workspace_not_found', message: '/x no longer exists.' }), /目录不存在.*路径/u)
 assert.match(userErrorMessage({ code: 'model_not_found', message: 'Pi model not found or unavailable: a/b' }), /模型.*不可用.*换一个/u)

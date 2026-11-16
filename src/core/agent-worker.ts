@@ -191,6 +191,14 @@ export class AgentQueueEffectUnknownError extends Error {
   }
 }
 
+/** One read exceeded its deadline; this alone does not end the Worker's work. */
+export class AgentQueryTimeoutError extends Error {
+  constructor() {
+    super("这次读取超时，Work 没有因此停止。请稍后重试。");
+    this.name = "AgentQueryTimeoutError";
+  }
+}
+
 /** Worker transport failed before the child acknowledged effectful custody. */
 export class AgentUnavailableBeforeEffectError extends Error {
   constructor(message: string) { super(message); this.name = "AgentUnavailableBeforeEffectError"; }

@@ -56,7 +56,7 @@ import {
 } from "../core/managed-instance.js";
 import { InvalidHistoryCursorError } from "../core/instance-event-journal.js";
 import type { JsonObject } from "../core/json-value.js";
-import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
+import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentQueryTimeoutError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
 import { ResourceContentError } from "../core/resource-content.js";
 import { DeliverableUnavailableError } from "../core/instance-deliverables.js";
@@ -1791,6 +1791,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof RuntimeEffectUnknownError || error instanceof MachineMutationEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
   }
+  if (error instanceof AgentQueryTimeoutError) return { code: "query_timeout", message: error.message, retryable: true };
   if (error instanceof AgentUnavailableBeforeEffectError) {
     return { code: "runtime_unavailable", message: error.message };
   }

@@ -5,15 +5,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { DockClient } from "../src/control/dock-client.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import type { DockEvent } from "../src/core/instance-dto.js";
 import { exited, startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
 // PR review P1, 2026-11-16: automatic settings.get killed a healthy Worker after Main's
 // model service was SIGKILLed and the supervised replacement had not become ready.
+// The follow-up review reproduced the same Worker loss from model.list's required auth-state read.
 // Keep production Worker/service deadlines. Only the model HTTP peer and restart entry are fixtures.
-test("Reading speed settings during Main recovery keeps the running Work alive and pushes refreshed support to its open client", { timeout: 60_000 }, async context => {
+test("During Main recovery settings stay readable, model reads time out without stopping Work, and the same Work can retry", { timeout: 60_000 }, async context => {
   const team = await startNativeTeam(context, ["local"], {
     prefix: "alu-speed-restart-", modelService: true, assistant: true,
     modelServiceEntry: fileURLToPath(new URL("./fixtures/restarting-model-service.js", import.meta.url)),
@@ -38,7 +39,6 @@ test("Reading speed settings during Main recovery keeps the running Work alive a
   first.tools({ id: "waiting-bash", name: "bash", arguments: {
     command: "echo TOOL_RUNNING; while [ ! -f release ]; do date +%s%N > heartbeat; sleep 0.2; done; echo TOOL_COMPLETED", timeout: 120,
   } });
-  const release = () => writeFile(join(team.cwd, "release"), "done");
   await waitFor(() => existsSync(join(team.cwd, "heartbeat")), "The real Pi bash tool did not start");
   const pids = [...team.workerPids];
   process.kill(team.modelService!.pid!, "SIGKILL");
@@ -49,8 +49,17 @@ test("Reading speed settings during Main recovery keeps the running Work alive a
   for (const reading of readings) assert.deepEqual(reading.allowedValues, ["standard", "fast"]);
   assert.deepEqual(readings[0]!.value, { tier: "fast", scope: "all" });
   await client.updateSetting(work.id, { key: "modelSpeed", value: { tier: "fast", scope: "all" } });
-  // Stay beyond the existing 15-second Worker and model-service readiness deadlines.
-  await new Promise(resolve => setTimeout(resolve, 16_000));
+  // Model availability still asks Main. Its existing 15-second query deadline ends this read,
+  // not the normal Worker or the bash tool it is running. Do not substitute cached model results.
+  const queryStarted = Date.now();
+  const modelReads = await Promise.allSettled([work, assistant].map(item => client.models(item.id)));
+  context.diagnostic(`Model reads settled after ${Date.now() - queryStarted}ms: ${modelReads.map(result => result.status === "rejected" ? String(result.reason) : "succeeded").join("; ")}`);
+  for (const result of modelReads) {
+    assert.equal(result.status, "rejected");
+    if (result.status !== "rejected") continue;
+    assert.ok(result.reason instanceof ControlClientError);
+    assert.equal(result.reason.code, "query_timeout");
+  }
   const heartbeat = await readFile(join(team.cwd, "heartbeat"), "utf8");
   await waitFor(async () => await readFile(join(team.cwd, "heartbeat"), "utf8") !== heartbeat, "Reading settings stopped the real tool");
   for (const pid of pids) assert.equal(exited(pid), false, "The original Worker must remain alive");
@@ -62,6 +71,9 @@ test("Reading speed settings during Main recovery keeps the running Work alive a
     assert.deepEqual(current.executor.model, original.executor.model);
   }
   assert.equal((await client.status(work.id)).execution, "running");
+  await client.abort(work.id);
+  await waitFor(async () => (await client.status(work.id)).execution === "idle", "The user could not stop the current reply after a read timed out");
+  for (const pid of pids) assert.equal(exited(pid), false, "Stopping a reply retains its Worker");
   // A new support read after recovery must reach this same follower, not require closing/reopening UI.
   support.providers.local.ultrafast.push("fixture");
   await writeFile(supportFile, JSON.stringify(support));
@@ -81,9 +93,16 @@ test("Reading speed settings during Main recovery keeps the running Work alive a
     assert.deepEqual((await setting(item.id)).allowedValues, ["standard", "fast", "ultrafast"]);
   }
   assert.deepEqual((await setting(work.id)).value, { tier: "fast", scope: "all" });
-  await release();
+  for (const item of [work, assistant]) {
+    const available = await client.models(item.id);
+    assert.ok(available.models.some(model => model.provider === "local" && model.id === "fixture"));
+    assert.equal(available.instance.lifecycle, "active");
+    assert.equal(available.instance.executor.piSessionId, item.executor.piSessionId);
+  }
+  await client.prompt(work.id, "Continue after the model service recovered.");
   const continuation = await team.providers.local.request(1);
   assert.equal((continuation.body as { service_tier: string }).service_tier, "priority");
-  continuation.text("The local tool completed normally.");
-  await waitFor(async () => (await client.status(work.id)).execution === "idle", "The same Work did not finish its tool step");
+  continuation.text("The same Work can continue normally.");
+  await waitFor(async () => (await client.status(work.id)).execution === "idle", "The same Work did not finish its next reply");
+  assert.equal((await client.stop(work.id)).instance.lifecycle, "stopped");
 });

@@ -82,6 +82,8 @@ export function humanControlErrorText(error: ControlClientError): string {
     case "workspace_too_large":
     case "workspace_unavailable":
       return "That directory cannot be opened here. Choose another directory and try again.";
+    case "query_timeout":
+      return "This read timed out. The work was not stopped by this read. Try again in a moment.";
     case "connection_error":
     case "connection_closed":
     case "timeout":

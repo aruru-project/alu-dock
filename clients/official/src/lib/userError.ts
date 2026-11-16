@@ -51,6 +51,7 @@ export function userErrorMessage(cause: unknown, fallback = '操作没有完成�
     if (code === 'protocol_error') return '收到的数据无法识别。请刷新当前内容后重试。'
     if (code === 'client_error') return '客户端无法完成数据处理。请刷新当前内容后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '连接中断，没收到结果。请稍后再试。'
+    if (code === 'query_timeout') return '这次读取超时，Work 没有因此停止。请稍后重试。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
     if (code === 'project_trust_required') return '这项操作需要你确认是否信任项目目录。请从原入口重试，并在信任提示里选择或取消。'
     if (code === 'interaction_expired' || code === 'interaction_not_found') return '这个问题已经在其他窗口回答，或已经结束，不需要再处理。'
