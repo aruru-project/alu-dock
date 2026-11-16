@@ -27,8 +27,8 @@ Client / Agent-facing Dock capability
 
 - 一个存活的 Instance 同一时刻最多有一个有效 Worker generation；一个 Worker generation 只属于一个 Instance。
 - Worker 是 Instance 当前的执行载体，不是 Instance identity。Worker 意外丢失不代表用户结束 Work；可恢复的 Instance 可以安装新的 Worker generation。
-- 显式 Stop 永久退役该 Instance identity。Stop 与 Host loss、Worker fault、runtime error 不同；被 Stop 的 identity 不得 Reopen。
-- 当前唯一 Worker adapter 是 Pi。Pi runtime 和当前 Pi session 属于 Worker；Pi session 不构成 Instance identity。切换 Pi session 不创建新的 Instance，从保存的 Pi session 创建 Work 也不恢复一个已经 Stop 的 Instance。
+- 普通 Work 的显式 Stop 永久退役该 Instance identity，不得 Reopen；Host loss、Worker fault、runtime error 保留恢复身份。Main 唯一常驻助手的 Stop 是重启：保留同一身份和对话，细节见 [control](control.md#个人助手assistantv1)。
+- 当前有 Pi 与独立助手两种 Worker adapter。Pi runtime 和当前 Pi session 属于 Pi Worker；Pi session 不构成 Instance identity。切换 Pi session 不创建新的 Instance，从保存的 Pi session 创建 Work 也不恢复一个已经 Stop 的 Instance。
 - 客户端只能使用 Main-authoritative `instanceId`。name、cwd、key、Agent session ID、native instance ID、Machine location 和文件路径都不能代替它。
 
 Instance identity 在存活期间不因客户端、临时断线、Worker generation 或本机/SubHost location 改变。
@@ -184,6 +184,8 @@ Worker 接受副作用前失联与接受后失联仍是不同结果。Scheduler 
 
 ## Query 与 stream observation
 
+Worker-backed read/follow 若在本 Work 的 Reopen 已接纳之后到达，Registry 等这次在途启动提交或失败，再走原观察入口；不先返回旧的不可用 Worker。Host 自己持有的 status/list 不等待启动。原生 Continue 丢回复后利用这一次有序读取确认实际结果，不重送 mutation；再次断线就结束等待并保留未知结果。启动超时回收进程、释放占用；已知文件/模型错误给出处理方向，其他扩展异常原文留本机日志，已有 Work 记录保留安全的最近失败说明。
+
 Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行及手动/自动压缩期间 projection read 继续可用。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行。手动压缩先等待已进入的读取，调用 Worker 后只释放启动阶段的 projection reservation，exclusive effect lease 仍保留到压缩完成；Model/Thinking 设置也通过这条 FIFO，并持有自身 reservation 直到设置与 catalog 提交结束。不存在第二条兼容队列或特定 query 旁路。
 
 Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。Projection reservation 与 command slot 分工不同，复用同一 scheduler 和 generation authority，不另建锁。Abort/Stop 保留对压缩的中止能力，不因同时设置 Model/Thinking 而等待压缩自然完成；压缩后的 Queue drain 等已经接纳的设置完成再发送。
@@ -226,7 +228,7 @@ Host 不根据某个 Pi Promise、SDK method、setting key、extension command �
 
 ## Stop
 
-Stop 是正常、完整地结束 Dock Work identity，不等于 Abort，也不等于 supervisor hard kill。拥有物理控制能力的 Local/online endpoint 同时负责结束 Worker；离线 RemoteInstance 使用前述不可达条件下的 identity retirement 语义。
+下述 Stop 路径针对普通 Work；常驻助手在监管下接续同一身份。普通 Work 的 Stop 是正常、完整地结束 identity，不等于 Abort，也不等于 supervisor hard kill。拥有物理控制能力的 Local/online endpoint 同时负责结束 Worker；离线 RemoteInstance 使用前述不可达条件下的 identity retirement 语义。
 
 Local/online 正常路径：
 
@@ -248,7 +250,7 @@ scheduler terminal admission
 
 ## 持久化、generation 与唯一提交
 
-- Catalog 保存 Work identity、lifecycle intent、location 所需事实和 recovery material；不保存 Agent runtime 私有对象。
+- Catalog 保存 Work identity、lifecycle intent、location 所需事实和 recovery material；不保存 Agent runtime 私有对象。这个 Work 已作出的项目信任决定也随 canonical cwd 保存，`true` 和 `false` 都保留；同 Work、同实际目录恢复时复用，不写成目录的永久信任。旧记录没有决定或目标目录变化时重新询问。Session switch 的新目录、会话和决定同次提交，取消/失败保留旧值。
 - 每个 LocalInstance 的 durable transition 与 Worker event projection只有一个提交顺序。Command scheduler 决定谁可产生 effect，不取代 catalog/event 单写者。
 - 每个 active Instance 同时只有一个有效 runtime generation。旧 generation 的 event、response、query result、Extension UI 和 delayed completion不得提交到新 generation。
 - explicit Stop、Worker fault、Host drain 和 runtime replacement 分别记录各自的 intent，按对应的终止或恢复语义处理。

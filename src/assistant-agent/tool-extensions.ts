@@ -63,7 +63,7 @@ export interface AssistantExtension {
 export type AssistantExtensionFactory = (context: AssistantExtensionContext) => Promise<AssistantExtension>;
 export type AssistantBuiltinExtensions = Readonly<Record<string, AssistantExtensionFactory>>;
 
-/** Trusted in-process code, not a sandbox. No discovery, downloads, or runtime/session hooks. */
+/** Trusted in-process code, not a sandbox. No module discovery, downloads, or runtime/session hooks. */
 export class AssistantToolExtensions {
   readonly sources = new Map<string, SourceDto>();
   readonly skillDeclarations: AgentSkillDeclaration[] = [];
