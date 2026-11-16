@@ -366,10 +366,10 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
   }
 
   const groupedWorks = computed(() => {
-    const groups: Record<'current' | 'continue' | 'history', Work[]> = { current: [], continue: [], history: [] }
-    const parents = app.works.filter(work => !work.parentId).sort((left, right) => Number(isResidentAssistant(right)) - Number(isResidentAssistant(left)))
+    const groups: Record<'assistant' | 'current' | 'continue' | 'history', Work[]> = { assistant: [], current: [], continue: [], history: [] }
+    const parents = app.works.filter(work => !work.parentId)
     for (const parent of parents) {
-      const group = groups[workGroup(parent)]
+      const group = groups[isResidentAssistant(parent) ? 'assistant' : workGroup(parent)]
       if (!isResidentAssistant(parent)) group.push(parent)
       group.push(...app.works.filter(work => work.parentId === parent.id))
     }

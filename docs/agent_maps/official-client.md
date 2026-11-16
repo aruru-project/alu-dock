@@ -48,7 +48,7 @@ App / 区域组件 → 按领域划分的 Pinia store → typed bridge
 
 ### 助手身份、设置和扩展入口
 
-唯一常驻助手在侧栏 header 下、新建工作上方，不计入普通列表。`WorkPresenceIndicator.vue` 用可点击的状态标记提供完整名字、模型和状态；普通 Work 的详情展开在行内，计入列表滚动高度。`AssistantIdentity.vue` 经 `stores/assistant.ts` 编辑 Main 的 `displayName`，按连接保存草稿与结果，保存中继续输入不会被旧答复清掉。
+唯一常驻助手在侧栏 header 下、新建工作上方，不计入普通列表。她的直接子 Work 在下方滚动区以「当前全局名字的子工作」单独分组、单独计数，不混入普通 Work 树；完成但未停止的孩子继续留在原组，停止后移除，标题跟随 Main 的名字。普通 Work 及其孩子保持原父子排列；父节点缺失时，遗留孩子仍在普通列表提供查看和停止入口。`WorkPresenceIndicator.vue` 用可点击的状态标记提供完整名字、模型和状态；普通 Work 的详情展开在行内，计入列表滚动高度。`AssistantIdentity.vue` 经 `stores/assistant.ts` 编辑 Main 的 `displayName`，按连接保存草稿与结果，保存中继续输入不会被旧答复清掉。
 
 `AssistantSettings.vue` 保留原记忆设置，把新增滚动整理参数/提示词收进可展开区域。`stores/assistant-memory.ts` 按连接保留其草稿，读取不能覆盖这期间确认的新保存；新编辑不沿用旧的“已保存”提示。记忆速度只写 `extractionSpeed`，结果留在原连接，不改记忆模型或聊天速度。`ModelSpeedSetting.vue` 的 Work 速度表单使用可滚动正文和底部动作；`control-panel.ts` 分开支持信息、远端选择和草稿，读取失败可重试，不因速度探测重置整个面板。
 

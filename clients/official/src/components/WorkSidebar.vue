@@ -23,7 +23,11 @@ const { machineListError, groupedWorks, workMutating } = storeToRefs(workActions
 const { workMachineTag, selectWork, stopSelectedWork, reopenFromList, forgetFromList, refreshWorkDrawer, openDirectory, openMachineSettings, openAssistant } = workActions
 const assistant = useAssistantStore()
 const resident = computed(() => app.works.find(isResidentAssistant))
-const ordinaryCount = computed(() => Object.values(groupedWorks.value).reduce((total, works) => total + works.length, 0))
+const listedWorkCount = computed(() => Object.values(groupedWorks.value).reduce((total, works) => total + works.length, 0))
+function groupTitle(group: keyof typeof groupedWorks.value) {
+  return group === 'assistant' ? `${resident.value?.displayName || '助手'}的子工作`
+    : group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作'
+}
 function openResident() {
   if (resident.value) selectWork(resident.value.id)
   else openAssistant()
@@ -67,8 +71,8 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
       </div>
       <OperationResults v-if="listResults.length && !directoryOpen" :operations="listResults" :acknowledge="consumeNativeOperation" />
       <div v-if="machineListError" class="alu-sidebar-error">{{ machineListError }}</div>
-      <section v-for="group in (['current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group">
-        <div class="alu-instance-group-title">{{ group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作' }}<span>{{ groupedWorks[group].length }}</span></div>
+      <section v-for="group in (['assistant', 'current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group" :aria-label="groupTitle(group)">
+        <div class="alu-instance-group-title">{{ groupTitle(group) }}<span>{{ groupedWorks[group].length }}</span></div>
         <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id, 'is-child': !!work.parentId }">
           <WorkPresenceIndicator :work="work" />
           <button class="alu-instance-link" :aria-label="`${work.displayName}，${workPresence(work).label}`" @click="selectWork(work.id)">
@@ -79,7 +83,7 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
           <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
         </div>
       </section>
-      <template v-if="!ordinaryCount">
+      <template v-if="!listedWorkCount">
         <div v-if="app.loading" class="alu-sidebar-empty" role="status">正在读取工作列表…</div>
         <div v-else-if="app.error" class="alu-sidebar-offline" role="alert">
           <strong>无法读取工作列表</strong>
@@ -152,14 +156,15 @@ const { label: connectionLabel } = storeToRefs(useObservationStore())
 .alu-instance-group-title {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
+  overflow-wrap: anywhere;
   padding: 5px 7px;
   color: var(--alu-text-faint);
   font-size: var(--alu-meta-size);
   font-weight: 800;
   letter-spacing: 0.14em;
-  text-transform: uppercase;
 }
-.alu-instance-group-title span { letter-spacing: 0; }
+.alu-instance-group-title span { flex: none; letter-spacing: 0; }
 .alu-instance-row {
   position: relative;
   margin: 2px 0;
