@@ -70,11 +70,6 @@ export const useConversationStore = defineStore('conversation', () => {
 
   watch(() => extensionUi.toolsResetRevision, () => { toolExpansionOverrides.value = {} })
 
-  function showAgentActivity(workId: string) {
-    conversationContent.showPendingTurn(workId)
-    conversationViewport.scrollToBottom()
-  }
-
   const restoringAnchorId = conversationViewport.restoringAnchorId
   /** Expanding or collapsing a turn keeps the row the reader is on where it is. */
   function holdReadingPosition(change: () => void) {
@@ -284,5 +279,5 @@ export const useConversationStore = defineStore('conversation', () => {
     const resource = imageResources.value[imageKey]
     if (resource?.state === 'ready') setImageResource(imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
   }
-  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyHydrationActiveEntries, historyHydrationErrors, historyError, setReadInterest: conversationSession.setInterest, requestFullRecords, showAgentActivity, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
+  return { readingError, output, outputAwayFromBottom, conversationState, conversation, conversationSwitching, streamingPartIds, historyTruncated, contentSeeding, historyLoading, historyHydrating, historyHydrationActiveEntries, historyHydrationErrors, historyError, setReadInterest: conversationSession.setInterest, requestFullRecords, holdReadingPosition, restoringAnchorId, handleOutputScroll, handleOutputMediaLoad, scrollOutputToBottom, imageResource, requestConversationImage, markConversationImageFailed, openImagePreview, toolDetailOpen, rememberToolDetail, loadEarlierHistory, retryConversationHydration, failPreview }
 })

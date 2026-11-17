@@ -331,7 +331,7 @@ export const useInputStore = defineStore('input', () => {
       const operation = app.captureOperation(capturedHost, work.id, capturedAttachments.map(item => item.fileId))
       const result = await submitMessage(work.id, captured, capturedAttachments.map(item => item.fileId), operation)
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
-        if (!result.receipt.queued) conversation.showAgentActivity(work.id)
+        if (!result.receipt.queued) conversation.scrollOutputToBottom(true)
       }
       return true
     } catch (cause) {
@@ -417,7 +417,7 @@ export const useInputStore = defineStore('input', () => {
     try {
       const result = await submitText(work.id, text, work.executor.piSessionId, app.captureOperationTarget(capturedHost, work.id))
       if (app.contextMatches(capturedHost) && selected.value?.id === work.id && submitViewRevision === viewRevision) {
-        if (!result.receipt.queued) conversation.showAgentActivity(work.id)
+        if (!result.receipt.queued) conversation.scrollOutputToBottom(true)
       }
       return true
     } catch (cause) {

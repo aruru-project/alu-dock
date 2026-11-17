@@ -896,8 +896,11 @@ try {
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
     observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
     compact.props['onUpdate:modelValue']('original send waiting for compaction')
-    const originalEditor = app.captureSubmitDraft('host', 'work', [])
-    const preparingSend = { ...base, operationId: 'preprompt-send', kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: originalEditor, state: 'pending' }
+    let originalArgs, resolveOriginalSend
+    submitNative = args => { originalArgs = args; return new Promise(resolve => { resolveOriginalSend = resolve }) }
+    const originalSending = find(container, item => item.type === 'form' && String(item.props.class).includes('alu-input-wrap')).props.onSubmit({ preventDefault() {} })
+    await settle()
+    const preparingSend = { ...base, operationId: originalArgs.operationId, kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: originalArgs.operationEditor, state: 'pending' }
     nativeResults.set(preparingSend.operationId, preparingSend); emit('aludock://operation', preparingSend)
     compact.props['onUpdate:modelValue']('editor at abort')
     // A lost compaction reply leaves no refresh-to-confirm action, and Abort stays usable.
@@ -924,15 +927,18 @@ try {
     nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt)
     resolveAbort(result); await pendingAbort; await settle()
     assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'returned messages precede the editor text')
-    const originalAccepted = { ...preparingSend, state: 'succeeded', result: { receipt: { queued: false, delivery: 'prompt' }, instance: result.instance } }
-    nativeResults.set(originalAccepted.operationId, originalAccepted); emit('aludock://operation', originalAccepted); await settle()
-    assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'a late original send receipt cannot erase the new draft or returned Queue')
     assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues, 'Abort needs no separate Queue retrieval')
     assert.equal(app.selectedWork.execution, 'running', 'an acknowledgement does not invent an idle runtime')
     assert.equal(text(container).includes('中止请求已送达'), true, 'the control reports requested cancellation while preparation remains active')
     assert.equal(text(container).includes('2 条排队消息已放回输入框'), true)
     observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'run.settled', data: { result: 'aborted' } } }); await settle()
     assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves only when the run actually settles')
+    // Follow can deliver settlement before the original send's successful reply.
+    const originalAccepted = { ...preparingSend, state: 'succeeded', result: { receipt: { queued: false, delivery: 'prompt' }, instance: result.instance } }
+    nativeResults.set(originalAccepted.operationId, originalAccepted); emit('aludock://operation', originalAccepted)
+    resolveOriginalSend(originalAccepted.result); await originalSending; await settle()
+    assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'a late original send receipt cannot erase the new draft or returned Queue')
+    assertSameReference(find(container, item => String(item.props.class).includes('alu-agent-activity-spinner')), undefined, 'a late send acknowledgement does not restart a settled turn')
     emit('aludock://operation', { ...unconfirmedCompaction, state: 'succeeded', error: undefined, result: { instance: result.instance } })
     compact.props['onUpdate:modelValue']('later input')
     remoteSequence += 10

@@ -126,8 +126,6 @@ export function useConversationContent(options: ConversationContentOptions) {
         if (live && liveState === current) {
           drainEvents(current)
           live.reconcileRun(latest.instance)
-          // Also remove a local send placeholder, which is outside live's key.
-          if (latest.instance.execution !== 'running') publishedStructure = ''
           publishLive()
           options.layoutChanged()
         }
@@ -253,15 +251,6 @@ export function useConversationContent(options: ConversationContentOptions) {
     if (!replaying || !state.value) return false
     applyConversationEvent(state.value, event, conversationEventChanged(event))
     return true
-  }
-
-  /** A sent message shows its turn as running before run.started arrives. The
-   * next structural publish replaces this local placeholder with the real turn. */
-  function showPendingTurn(workId: string) {
-    if (items.value.some((item) => item.kind === 'turn' && item.status === 'running')) return
-    const turnId = `local-turn-${workId}`
-    items.value = [...items.value, { id: turnId, kind: 'turn', turnId, status: 'running', startedAt: new Date().toISOString() }]
-    options.layoutChanged()
   }
 
   function applyContent(change: ConversationContentChange) {
@@ -403,7 +392,7 @@ export function useConversationContent(options: ConversationContentOptions) {
   return {
     state, items, streamingPartIds, seeding, preparingView, historyTruncated, historyLoading, historyError,
     hydrationActiveEntries, hydrationErrors, historyHydrating,
-    applyConversationEvent, applyReplayEvent, acceptReadCut, showPendingTurn,
+    applyConversationEvent, applyReplayEvent, acceptReadCut,
     publish, clear, applyContent, bindingFailed, dispose,
   }
 }
