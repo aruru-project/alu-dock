@@ -4,10 +4,121 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DockClient } from "../src/control/dock-client.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
+
+// 2026-11-17 regression: switching a large conversation to a smaller model made
+// the first message silently wait for SDK pre-prompt compaction, then time out.
+// Hold only the real summarization HTTP reply, never manufacture compaction events.
+test("the first message after switching to a smaller model shows compaction and starts once without a false timeout", { timeout: 60_000 }, async (context) => {
+  const team = await startNativeTeam(context, ["preprompt"], {
+    prefix: "alu-preprompt-compaction-", thinkingLevel: "off",
+    settings: { compaction: { enabled: true, reserveTokens: 1_024, keepRecentTokens: 1 } },
+  });
+  const provider = team.providers.preprompt;
+  const modelsPath = join(team.agentDir, "models.json");
+  const models = JSON.parse(await readFile(modelsPath, "utf8"));
+  const model = models.providers.preprompt.models[0];
+  model.contextWindow = 128_000;
+  models.providers.preprompt.models.push({ ...model, id: "small", name: "Small window", contextWindow: 12_000 });
+  await writeFile(modelsPath, JSON.stringify(models));
+  const client = await team.startHost();
+  const work = await trustOnce((trust) => client.create(team.cwd, "Large conversation", "preprompt", trust));
+  assert.equal(team.workerPids.length, 1);
+  assert.notEqual(team.workerPids[0], process.pid, "Pi runs in an independent Worker");
+
+  // Build context through the real user entry, not a fake session/event stream.
+  await client.prompt(work.id, "Saved local context.\n".repeat(4_000), "auto", "large-window-message");
+  (await provider.request(0)).text("The earlier context has been read.");
+  await waitFor(async () => (await client.status(work.id)).execution === "idle", "The large-window turn did not finish");
+  const switched = await client.setModel(work.id, "preprompt", "small", "switch-to-small-window");
+  assert.equal(switched.instance.executor.model?.id, "small");
+  assert.equal(provider.requests.length, 1, "Switching models does not itself send a model request");
+
+  const events: DockEvent[] = [];
+  const began = Date.now();
+  let compactionStartedAt: number | undefined;
+  const recordEvent = (event: DockEvent) => {
+    events.push(event);
+    if (event.type === "compaction.started") compactionStartedAt ??= Date.now();
+    if (["compaction.started", "compaction.completed", "run.started", "run.settled", "message.submitted"].includes(event.type)) {
+      context.diagnostic(JSON.stringify({ elapsedMs: Date.now() - began, type: event.type,
+        ...(event.type === "message.submitted" ? { operationId: event.data.operationId } : { data: event.data }) }));
+    }
+  };
+  const follow = await client.streamEvents(work.id, { onEvent: recordEvent, conversationBootstrap: true, requireTuiProjection: true });
+  context.after(() => follow.close());
+  const submitter = new DockClient({ socketPath: join(team.root, "dock.sock"), timeoutMs: 1_000, longMutationTimeoutMs: 10_000 });
+  context.after(() => submitter.closeActiveConnections());
+  const message = "FIRST_AFTER_SWITCH: continue from the saved context.";
+  const operationId = "first-message-after-switch";
+  let receiptState = "pending";
+  const submitted = submitter.prompt(work.id, message, "auto", operationId).then(
+    (result) => { receiptState = "accepted"; context.diagnostic(JSON.stringify({ phase: "submission-result", elapsedMs: Date.now() - began, receipt: receiptState })); return result; },
+    (error: unknown) => { receiptState = error instanceof ControlClientError ? error.code : String(error); context.diagnostic(JSON.stringify({ phase: "submission-result", elapsedMs: Date.now() - began, receipt: receiptState })); return undefined; },
+  );
+  const summary = await provider.request(1);
+  assert.equal(summary.toolNames.length, 0, "The SDK asks for a summary before sending the new prompt");
+  assert.match(JSON.stringify(summary.body.messages?.[0]), /context summarization assistant/);
+  const summaryEntered = Date.now();
+  // Stay beyond the ordinary query deadline, but below the long mutation wait.
+  // This uses only DockClient's existing test options, not production time limits.
+  await new Promise((resolve) => setTimeout(resolve, 1_250));
+  const heldStatus = await client.status(work.id);
+  const heldListed = (await client.list()).find((item) => item.id === work.id)!;
+  // STORY requires feedback within one second; the summary transport proves Pi is busy.
+  const liveStarted = compactionStartedAt !== undefined && compactionStartedAt - summaryEntered <= 1_000;
+  const heldReceiptState = receiptState;
+  const prematureRun = events.some((event) => event.type === "run.started");
+  // A fresh observer must learn about the same ongoing work, without the sender.
+  follow.close(); await follow.done;
+  const reconnect = await client.streamEvents(work.id, { onEvent: recordEvent, conversationBootstrap: true, requireTuiProjection: true });
+  context.after(() => reconnect.close());
+  const held = {
+    status: { execution: heldStatus.execution, compacting: heldStatus.compacting },
+    list: { execution: heldListed.execution, compacting: heldListed.compacting },
+    reconnect: { execution: reconnect.initial.instance.execution, compacting: reconnect.initial.instance.compacting },
+    liveStarted, receipt: heldReceiptState, prematureRun,
+  };
+  context.diagnostic(JSON.stringify({ phase: "summary-held", heldMs: Date.now() - summaryEntered, ...held }));
+
+  // Collect the full old-implementation outcome before asserting visibility: its
+  // timed-out message actually starts only now, despite the client's failure.
+  let nextRequest = 1;
+  for (;;) {
+    const request = await provider.request(nextRequest++);
+    if (request.toolNames.length > 0) {
+      assert.equal(request.body.messages?.filter((item) => item.role === "user" && JSON.stringify(item.content).includes(message)).length, 1);
+      await waitFor(() => events.some((event) => event.type === "run.started" && event.data.operationId === operationId), "The original message never started after releasing compaction");
+      const running = await client.status(work.id);
+      assert.equal(running.execution, "running");
+      assert.equal(running.compacting, false);
+      context.diagnostic(JSON.stringify({ phase: "same-message-running", elapsedMs: Date.now() - began, receipt: receiptState }));
+      request.text("FIRST_AFTER_SWITCH_FINISHED");
+      break;
+    }
+    request.text("## Goal\nContinue from the saved context.\n## Progress\nEarlier context has been read.");
+  }
+  const receipt = await submitted;
+  await waitFor(async () => (await client.status(work.id)).execution === "idle" && events.some((event) => event.type === "run.settled"), "The original message did not finish after compaction");
+  const history = (await client.history(work.id)).entries;
+  const userMessages = history.filter((entry) => entry.source === "user" && entry.content.some((block) => block.type === "text" && block.text === message));
+  const replies = history.filter((entry) => entry.source === "assistant" && entry.content.some((block) => block.type === "text" && block.text === "FIRST_AFTER_SWITCH_FINISHED"));
+  context.diagnostic(JSON.stringify({ phase: "finished", receipt: receiptState, userMessages: userMessages.length, replies: replies.length }));
+  assert.equal(userMessages.length, 1, "The first message is saved once without resubmission");
+  assert.equal(replies.length, 1);
+  assert.ok(history.some((entry) => entry.kind === "compaction_summary" && (entry.tokensBefore ?? 0) > 12_000));
+  assert.ok(events.some((event) => event.type === "compaction.completed" && !event.data.aborted && event.data.error === undefined));
+  assert.equal(events.filter((event) => event.type === "run.started" && event.data.operationId === operationId).length, 1);
+  assert.deepEqual({ ...held, receipt: heldReceiptState === "pending" || heldReceiptState === "accepted" ? "waiting-or-accepted" : heldReceiptState }, {
+    status: { execution: "running", compacting: true }, list: { execution: "running", compacting: true },
+    reconnect: { execution: "running", compacting: true }, liveStarted: true, receipt: "waiting-or-accepted", prematureRun: false,
+  }, "Every observer sees compaction while the original submission waits without a false failure");
+  assert.equal(receipt?.receipt.operationId, operationId);
+  assert.equal(receipt?.receipt.queued, false);
+});
 
 // 2026-11-17 regression: an active Work showed idle after within-run compaction.
 // SDK 1.3 compacts between tool steps in the same run. A Work message
