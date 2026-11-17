@@ -164,7 +164,8 @@ export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventE
       break
     case 'compaction.completed':
       instance.compacting = false
-      if (!data.willRetry) instance.execution = 'idle'
+      // Ending compaction does not end an Agent run or its preparation.
+      // Host state_changed/settled owns execution, including between these frames.
       if (typeof data.error === 'string') instance.lastError = data.error
       break
     case 'model.changed': {

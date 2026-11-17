@@ -88,7 +88,9 @@ export const useWorkActionsStore = defineStore('work-actions', () => {
       if (!app.contextMatches(capturedHost)) return
       const returned = result.receipt.restored.length
       const kept = result.receipt.inFlight.length
-      if (kept) {
+      if (result.instance.execution === 'running') {
+        reportAction(feedbackScope, `中止请求已送达。${returned ? `${returned} 条排队消息已放回输入框。` : ''}${kept ? `另有 ${kept} 条已经交给 Agent，会留在对话里。` : ''}`, 'notice')
+      } else if (kept) {
         reportAction(feedbackScope, `已中止。${returned ? `${returned} 条排队消息已放回输入框；` : ''}另有 ${kept} 条已经交给 Agent，会留在对话里。`, 'notice')
       } else if (returned) {
         reportAction(feedbackScope, `已中止，${returned} 条排队消息已放回输入框。`, 'notice')

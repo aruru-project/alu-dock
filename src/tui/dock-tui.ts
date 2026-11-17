@@ -873,6 +873,7 @@ export async function runDockTui(
       }
       runActivity = activityFromSnapshot(instance);
       activity.setActivity(runActivity);
+      if (result.instance.execution === "running") showStatus("Stop requested");
     } catch (error) {
       showError(error);
     } finally {

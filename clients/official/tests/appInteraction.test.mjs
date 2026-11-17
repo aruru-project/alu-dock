@@ -877,6 +877,9 @@ try {
     for (const eventType of ['compaction.started', 'compaction.completed']) {
       observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType, data: { reason: 'manual', aborted: false, willRetry: false } } })
     }
+    // The real Host follows the completion notice with its authoritative state.
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'instance.state_changed',
+      data: { reason: 'compaction_completed', lifecycle: 'active', execution: 'idle', compacting: false, lastRun: 'succeeded', pending: { steering: 0, followUp: 0, total: 0 } } } })
     await settle()
     remoteSequence += 10
   }
@@ -886,10 +889,16 @@ try {
   {
     assert.equal(app.selectedWork.execution === 'running', false)
     assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'an idle Work shows no abort control')
-    const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', pending: { steering: 0, followUp: 2, total: 2 } }
+    // 2026-11-17: a reconnect during pre-prompt auto-compaction has only the
+    // current snapshot, not the earlier compaction.started conversation notice.
+    const abortWork = { ...JSON.parse(JSON.stringify(app.selectedWork)), execution: 'running', compacting: true, pending: { steering: 0, followUp: 2, total: 2 } }
     const restored = [{ ...queueItem('abort-1'), text: 'queued a' }, { ...queueItem('abort-2'), text: 'queued b' }]
     observation({ kind: 'snapshot', bootstrap: { ...bootstrap, instance: abortWork, cursor: { ...cursor, runtimeGeneration: 2, sequence: remoteSequence }, records: [], activeEvents: [], queue: restored }, contentToken: 'abort-queue', state: 'connected' })
     observation({ kind: 'content', token: 'abort-queue', change: { kind: 'checkpoint_end' } })
+    compact.props['onUpdate:modelValue']('original send waiting for compaction')
+    const originalEditor = app.captureSubmitDraft('host', 'work', [])
+    const preparingSend = { ...base, operationId: 'preprompt-send', kind: 'submit_message', runtimeGeneration: 2, sessionId: 'new', editor: originalEditor, state: 'pending' }
+    nativeResults.set(preparingSend.operationId, preparingSend); emit('aludock://operation', preparingSend)
     compact.props['onUpdate:modelValue']('editor at abort')
     // A lost compaction reply leaves no refresh-to-confirm action, and Abort stays usable.
     const unconfirmedCompaction = { ...base, operationId: 'unconfirmed-compaction', kind: 'compact_session', runtimeGeneration: 2, sessionId: '', editor: null, state: 'unknown', error: { message: '压缩结果尚未确认。', outcomeUnknown: true } }
@@ -897,7 +906,8 @@ try {
     await settle()
     assertSameReference(find(container, item => item.type === 'button' && /刷新.*确认/.test(text(item))), undefined, 'no refresh-to-confirm action')
     const abortButton = find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run'))
-    assert.equal(abortButton.props.disabled, false, 'a lost reply elsewhere does not disable Abort')
+    assert.equal(abortButton.props.disabled, false, 'a pending send or lost reply elsewhere does not disable Abort')
+    assert.equal(text(abortButton).includes('压缩中'), true, 'the current compaction is visible after reconnect without its earlier start event')
     const dequeues = calls.filter(call => call.command === 'dequeue_messages').length
     let resolveAbort, abortArgs
     abortNative = args => { abortArgs = args; return new Promise(resolve => { resolveAbort = resolve }) }
@@ -906,15 +916,23 @@ try {
     // The Host publishes what Abort did on the Work's live events, then replies.
     observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'queue.cleared',
       data: { reason: 'dequeued', queueItemIds: restored.map(item => item.queueItemId), steering: 0, followUp: 2, total: 2 } } })
-    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'run.settled', data: { result: 'aborted' } } })
-    const result = { instance: atHost({ ...abortWork, execution: 'idle', pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored, inFlight: [] } }
+    // Pi can record cancellation while a preparation extension still finishes.
+    // A successful stop request must not pretend that this ongoing step is idle.
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'compaction.completed', data: { reason: 'threshold', aborted: true, willRetry: false } } })
+    const result = { instance: atHost({ ...abortWork, execution: 'running', compacting: false, pending: { steering: 0, followUp: 0, total: 0 } }), receipt: { instanceId: 'work', restored, inFlight: [] } }
     const receipt = { ...base, operationId: abortArgs.operationId, kind: 'abort_run', runtimeGeneration: 2, sessionId: '', editor: null, state: 'succeeded', result }
     nativeResults.set(receipt.operationId, receipt); emit('aludock://operation', receipt)
     resolveAbort(result); await pendingAbort; await settle()
     assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'returned messages precede the editor text')
+    const originalAccepted = { ...preparingSend, state: 'succeeded', result: { receipt: { queued: false, delivery: 'prompt' }, instance: result.instance } }
+    nativeResults.set(originalAccepted.operationId, originalAccepted); emit('aludock://operation', originalAccepted); await settle()
+    assert.equal(app.currentDraft, 'queued a\n\nqueued b\n\neditor at abort', 'a late original send receipt cannot erase the new draft or returned Queue')
     assert.equal(calls.filter(call => call.command === 'dequeue_messages').length, dequeues, 'Abort needs no separate Queue retrieval')
-    assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves with the run')
-    assert.ok(text(container).includes('已中止，2 条排队消息已放回输入框'))
+    assert.equal(app.selectedWork.execution, 'running', 'an acknowledgement does not invent an idle runtime')
+    assert.equal(text(container).includes('中止请求已送达'), true, 'the control reports requested cancellation while preparation remains active')
+    assert.equal(text(container).includes('2 条排队消息已放回输入框'), true)
+    observation({ kind: 'event', event: { instanceId: 'work', runtimeGeneration: 2, sequence: ++remoteSequence, occurredAt: 'now', eventType: 'run.settled', data: { result: 'aborted' } } }); await settle()
+    assertSameReference(find(container, item => item.type === 'button' && String(item.props.class).includes('alu-stop-run')), undefined, 'the abort control leaves only when the run actually settles')
     emit('aludock://operation', { ...unconfirmedCompaction, state: 'succeeded', error: undefined, result: { instance: result.instance } })
     compact.props['onUpdate:modelValue']('later input')
     remoteSequence += 10
