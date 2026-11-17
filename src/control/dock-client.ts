@@ -196,7 +196,8 @@ type Parser<T>=(input:unknown)=>T;
 const MAX_PENDING_STREAM_EVENTS=1_000;
 const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
   "instance.create", "instance.ensure", "instance.adopt", "instance.reopen", "instance.stop",
-  "command.abort", "command.abort_restore_queue", "session.switch", "session.new", "session.compact", "session.reload",
+  // A first prompt can prepare/compact its context before the Agent reports input custody.
+  "command.submit", "command.abort", "command.abort_restore_queue", "session.switch", "session.new", "session.compact", "session.reload",
   "session.navigate", "session.fork", "session.clone",
 ]);
 
