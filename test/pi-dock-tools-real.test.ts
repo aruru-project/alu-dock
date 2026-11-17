@@ -348,7 +348,21 @@ test("real Pi Workers discover, delegate and exchange findings through SubHost a
   const spawned = childStdout.split("\n").filter(line => line.startsWith("{")).map(line => JSON.parse(line) as { kind: string; parentId?: string; pid?: number });
   const childPid = spawned.find(record => record.kind === "worker_started" && record.parentId === ready.nativeInstanceId)?.pid;
   assert.equal(typeof childPid, "number", "Child ownership is stored using the SubHost's native parent identity");
-  await client.stop(remote.id, "routed-parent-stop");
+  // Main can learn that the parent is gone before SubHost finishes its children.
+  // Hold only this fixture child to reproduce the lost Stop receipt (2026-11-18).
+  const holdChild = process.platform !== "win32";
+  if (holdChild) process.kill(childPid!, "SIGSTOP");
+  const stopping = client.stop(remote.id, "routed-parent-stop");
+  void stopping.catch(() => {});
+  if (holdChild) {
+    try {
+      await waitFor(async () => !(await client.list()).some(work => work.id === remote.id), "Parent did not leave the Main directory during child cleanup");
+    } finally { if (!exited(childPid!)) process.kill(childPid!, "SIGCONT"); }
+  }
+  const stopped = await stopping;
+  assert.equal(stopped.receipt.operationId, "routed-parent-stop");
+  assert.equal(stopped.instance.id, remote.id);
+  assert.equal(stopped.instance.lifecycle, "stopped");
   await waitFor(() => [Number(ready.workerPid), childPid!].every(exited), "Routed parent stop must terminate both real SubHost Worker processes");
   await waitFor(async () => !(await client.list()).some(work => work.id === reviewer.id), "Retired SubHost child remained in Main's inventory");
   assert.equal((await client.status(sentinel.id)).lifecycle, "active");

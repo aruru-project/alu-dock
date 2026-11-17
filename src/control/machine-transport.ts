@@ -157,6 +157,8 @@ interface MainStream {
   inputTail: Promise<void>;
   queuedInputBytes: number;
   routeRetired?: boolean;
+  /** Forget, unlike Stop, returns no snapshot. Keep its target generation at dispatch. */
+  forgetGeneration?: number;
   transfer?: { count: number; chunks: string[]; requestId: string };
 }
 
@@ -690,6 +692,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       connection,
       requestId: request.requestId,
       requestType: request.type,
+      ...(request.type === "instance.forget" && route ? { forgetGeneration: route.snapshot.runtimeGeneration } : {}),
       route: identity ?? {
         hostId: machine.id,
         mainInstanceId: "",
@@ -1175,32 +1178,37 @@ export class MainMachineController implements RemoteInstanceDirectory {
     if (!raw || typeof raw !== "object") return;
     const envelope = raw as Record<string, unknown>;
     if (envelope.kind !== "response" || envelope.ok !== true) return;
-    let stopGeneration: number | undefined;
-    let mappedStopped: InstanceSnapshot | undefined;
+    let retiredGeneration: number;
+    let nativeStopped: InstanceSnapshot | undefined;
     if (stream.requestType === "instance.stop") {
       const result = envelope.result;
       if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Successful online stop response is missing its instance snapshot");
-      const nativeStopped = parseInstanceSnapshot((result as Record<string, unknown>).instance, "online stop response instance");
+      nativeStopped = parseInstanceSnapshot((result as Record<string, unknown>).instance, "online stop response instance");
       if (nativeStopped.id !== stream.route.nativeInstanceId || nativeStopped.lifecycle !== "stopped") throw new Error("Successful online stop response has an invalid instance snapshot");
-      stopGeneration = nativeStopped.runtimeGeneration;
-      mappedStopped = snapshotForMain(nativeStopped, stream.route.hostId, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey, this.parentIdsForMachine(stream.route.hostId));
+      retiredGeneration = nativeStopped.runtimeGeneration;
     } else {
       const forgotten = parseForgetResult(envelope.result);
-      if (forgotten.receipt.forgottenId !== stream.route.nativeInstanceId) throw new Error("Successful online forget response has an invalid native identity");
+      if (forgotten.receipt.forgottenId !== stream.route.nativeInstanceId || stream.forgetGeneration === undefined) throw new Error("Successful online forget response has an invalid target");
+      retiredGeneration = stream.forgetGeneration;
     }
-    await this.serializeAuthority(async () => {
+    const removed = await this.serializeAuthority(async () => {
       if (!this.currentConnection(stream.connection)) return;
-      const stored = (await this.options.state.get(stream.machineId))?.routes.find((route) => route.mainInstanceId === stream.route.mainInstanceId);
-      if (!stored) throw new Error("Successful routed retirement has no current Main route");
-      const retired = await this.options.state.retireRoute(stream.route.mainInstanceId, stopGeneration ?? stored.snapshot.runtimeGeneration);
-      if (!retired || retired.nativeInstanceId !== stream.route.nativeInstanceId) throw new Error("Successful routed retirement did not match its native identity");
+      const row = await this.options.state.retireRoute(stream.machineId, stream.route.nativeInstanceId, retiredGeneration);
       stream.routeRetired = true;
-      this.instanceBindings.delete(stream.route.mainInstanceId);
-      this.revision += 1;
+      if (row) {
+        this.instanceBindings.delete(row.mainInstanceId);
+        this.revision += 1;
+      }
+      return row;
     });
-    if (!stream.routeRetired) return;
-    if (mappedStopped) for (const listener of this.snapshotListeners.get(stream.route.mainInstanceId) ?? []) listener(structuredClone(mappedStopped));
-    for (const listener of this.disconnectListeners) listener([stream.route.mainInstanceId]);
+    // Inventory already notified listeners if it removed this Work first.
+    // The successful reply still goes to the original stream's Main identity.
+    if (!removed) return;
+    if (nativeStopped && removed.mainInstanceId === stream.route.mainInstanceId) {
+      const stopped = snapshotForMain(nativeStopped, stream.machineId, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey, this.parentIdsForMachine(stream.machineId));
+      for (const listener of this.snapshotListeners.get(stream.route.mainInstanceId) ?? []) listener(structuredClone(stopped));
+    }
+    for (const listener of this.disconnectListeners) listener([removed.mainInstanceId]);
   }
 
   private async assignRouteFromResponse(stream: MainStream, raw: unknown): Promise<void> {

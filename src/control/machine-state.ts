@@ -197,24 +197,19 @@ export class MainMachineState {
     });
   }
 
-  async retireRoute(mainInstanceId: string, authoritativeRuntimeGeneration: number): Promise<MachineRouteRecord | undefined> {
-    if (!Number.isSafeInteger(authoritativeRuntimeGeneration) || authoritativeRuntimeGeneration < 0) throw new Error("Retired route runtime generation is invalid");
-    for (const machine of await this.list()) {
-      const removed = await this.mutateRoute(machine.id, (candidate) => {
-        const index = candidate.routes.findIndex((route) => route.mainInstanceId === mainInstanceId);
-        if (index < 0) return undefined;
-        const [route] = candidate.routes.splice(index, 1);
-        if (route) {
-          const retirement = candidate.retiredRoutes.find((item) => item.nativeInstanceId === route.nativeInstanceId);
-          const runtimeGeneration = Math.max(authoritativeRuntimeGeneration, route.snapshot.runtimeGeneration);
-          if (retirement) retirement.runtimeGeneration = Math.max(retirement.runtimeGeneration, runtimeGeneration);
-          else candidate.retiredRoutes.push({ nativeInstanceId: route.nativeInstanceId, runtimeGeneration });
-        }
-        return route;
-      });
-      if (removed) return removed;
-    }
-    return undefined;
+  async retireRoute(machineId: string, nativeInstanceId: string, runtimeGeneration: number): Promise<MachineRouteRecord | undefined> {
+    if (!Number.isSafeInteger(runtimeGeneration) || runtimeGeneration < 0) throw new Error("Retired route runtime generation is invalid");
+    return this.mutateRoute(machineId, (candidate) => {
+      const index = candidate.routes.findIndex(route => route.nativeInstanceId === nativeInstanceId);
+      // A newer generation already supersedes this retirement. A late reply
+      // belongs to its original caller, not to the currently listed Work.
+      if (index >= 0 && candidate.routes[index]!.snapshot.runtimeGeneration > runtimeGeneration) return undefined;
+      const retirement = candidate.retiredRoutes.find(item => item.nativeInstanceId === nativeInstanceId);
+      if (retirement) retirement.runtimeGeneration = Math.max(retirement.runtimeGeneration, runtimeGeneration);
+      else candidate.retiredRoutes.push({ nativeInstanceId, runtimeGeneration });
+      // Persist even if inventory removed the row before the reply arrived.
+      return index < 0 ? undefined : candidate.routes.splice(index, 1)[0];
+    });
   }
 
   async removeRoute(mainInstanceId: string): Promise<MachineRouteRecord | undefined> {

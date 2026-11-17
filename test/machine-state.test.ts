@@ -640,14 +640,27 @@ test("online-stop response generation tombstone survives reload, suppresses that
   };
   const internals = controller as unknown as {
     connections: Map<string, unknown>;
+    reconcileInventoryFromConnection(candidate: unknown, values: InstanceSnapshot[]): Promise<void>;
     retireSuccessfulRouteMutation(candidate: unknown, response: unknown): Promise<void>;
   };
   internals.connections.set(machineId, connection);
+  // A stale announcement can temporarily publish the same native Work under
+  // another Main ID. Drop that row, but don't deliver the first ID's Stop as its own.
+  await internals.reconcileInventoryFromConnection(connection, []);
+  await internals.reconcileInventoryFromConnection(connection, [nativeGeneration]);
+  const staleId = (await state.get(machineId))!.routes[0]!.mainInstanceId;
+  assert.notEqual(staleId, oldMainId);
+  const observed: InstanceSnapshot[] = [];
+  const disconnected: string[] = [];
+  assert.ok(controller.subscribeSnapshot(staleId, snapshot => observed.push(snapshot)));
+  controller.onInstancesDisconnected(ids => disconnected.push(...ids));
   await internals.retireSuccessfulRouteMutation(stream, {
     kind: "response",
     ok: true,
     result: { instance: stoppedSnapshotAtGeneration(nativeId, 4) },
   });
+  assert.equal(observed.some(snapshot => snapshot.lifecycle === "stopped"), false);
+  assert.deepEqual(disconnected, [staleId]);
 
   const reloaded = new MainMachineState(root);
   await reloaded.initialize();
@@ -671,6 +684,14 @@ test("online-stop response generation tombstone survives reload, suppresses that
   assert.equal(reopened?.routes.length, 1);
   assert.notEqual(reopened?.routes[0]?.mainInstanceId, oldMainId);
   assert.equal(reopened?.routes[0]?.snapshot.runtimeGeneration, 5);
+
+  // A second, already-in-flight Stop reply for generation 4 still belongs to
+  // its original caller, even after the new Main identity has appeared.
+  const late = reloadedController as unknown as Pick<typeof internals, "retireSuccessfulRouteMutation">;
+  await late.retireSuccessfulRouteMutation({ ...stream, connection: reloadedConnection, routeRetired: false }, {
+    kind: "response", ok: true, result: { instance: stoppedSnapshotAtGeneration(nativeId, 4) },
+  });
+  assert.deepEqual((await reloaded.get(machineId))?.routes, reopened.routes);
 });
 
 test("successful routed forget retires its Main route before success and stale inventory cannot restore it", async (context) => {
@@ -696,7 +717,7 @@ test("successful routed forget retires its Main route before success and stale i
   const connection = { machine: currentMachine, socket, hostEpoch: "subhost-epoch", streams: new Map<string, unknown>(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   let emittedAfterRetirement = false;
   const stream = {
-    streamId: "forget", machineId, connection, requestId: "forget", requestType: "instance.forget",
+    streamId: "forget", machineId, connection, requestId: "forget", requestType: "instance.forget", forgetGeneration: native.runtimeGeneration,
     route: { mainInstanceId, nativeInstanceId, mainHostEpoch: "main-epoch", nativeHostEpoch: "subhost-epoch" },
     emit: async () => { emittedAfterRetirement = (await state.get(machineId))?.routes.length === 0; },
     ended: () => {}, helloSeen: true, acceptingInput: true, inputTail: Promise.resolve(), queuedInputBytes: 0,
