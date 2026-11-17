@@ -2315,6 +2315,85 @@ test("a slow status save does not report a Work idle before its run finishes", {
   assert.ok(observed.page.events.some((event) => event.type === "run.settled" && event.sequence > completed.sequence));
 });
 
+// Pre-prompt visibility fix: a pending input must not claim or hide an older autonomous run.
+test("an older run's compaction and finish stay visible while the next message is still being prepared", { timeout: 20_000 }, async (context) => {
+  const catalog = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(catalog);
+  let releaseInput = (): void => {};
+  // The deliberately broken implementation can fail before releasing the gate.
+  // Release it before Host cleanup, or the red run itself waits indefinitely.
+  context.after(async () => { releaseInput(); await cleanupHarness(harness); });
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pending-input-old-run");
+  const runtime = harness.sessions.get(created.id)!;
+  const oldRun = runtime.prompt("autonomous old run");
+  const input = runtime.blockNextPromptBeforePreflight();
+  releaseInput = input.release;
+  const submitted = client.prompt(created.id, "next message", "auto", "new-input-waiting");
+  void submitted.catch(() => {});
+  await input.entered;
+  runtime.emit({ type: "queue_update", steering: [], followUp: [] });
+  runtime.isCompacting = true;
+  runtime.emit({ type: "compaction_start", reason: "threshold" });
+  const during = await client.read(created.id, undefined, "event_log");
+  assert.equal(during.instance.compacting, true);
+  const started = during.page.events.find((event) => event.type === "compaction.started");
+  assert.ok(started?.type === "compaction.started");
+  assert.equal(started.data.operationId, undefined);
+  runtime.isCompacting = false;
+  runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+  runtime.settle("old run finished");
+  await oldRun;
+  const finished = await client.read(created.id, undefined, "event_log");
+  assert.equal(finished.instance.execution, "idle");
+  const settled = finished.page.events.findLast((event) => event.type === "run.settled");
+  assert.ok(settled?.type === "run.settled");
+  assert.notEqual(settled.data.operationId, "new-input-waiting");
+  assert.ok(started.sequence < settled.sequence);
+  input.release();
+  assert.equal((await submitted).receipt.delivery, "prompt");
+  const current = await client.read(created.id, undefined, "event_log");
+  assert.equal(current.instance.activeCommandId, "new-input-waiting");
+  assert.equal(current.instance.execution, "running");
+  const freshStart = current.page.events.findLast((event) => event.type === "run.started");
+  assert.ok(freshStart && freshStart.sequence > settled.sequence);
+  runtime.settle("next message finished");
+  await harness.registry.get(created.id).waitForIdle();
+});
+
+// Pi _startRun clears busy and rejects when _prepareRun throws, without agent_settled.
+// This Worker-boundary peer supplies that sequence; real SDK summary HTTP errors
+// are tested separately because Pi normally catches them and continues the prompt.
+test("a message rejected after preparation leaves the Work available for the next message", { timeout: 20_000 }, async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "failed-preparation");
+  const runtime = harness.sessions.get(created.id)!;
+  const normalPrompt = runtime.prompt.bind(runtime);
+  runtime.prompt = async (text, options, operationId) => {
+    if (text !== "prepare then fail") return normalPrompt(text, options, operationId);
+    runtime.isStreaming = true;
+    runtime.isCompacting = true;
+    runtime.emit({ type: "compaction_start", reason: "threshold" });
+    runtime.isCompacting = false;
+    runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+    runtime.isStreaming = false;
+    options?.preflightResult?.(false);
+    throw new Error("Fixture preparation failed");
+  };
+  await assert.rejects(client.prompt(created.id, "prepare then fail", "auto", "failed-prepare"));
+  const failed = await client.read(created.id, undefined, "event_log");
+  assert.equal(failed.instance.execution, "idle");
+  assert.equal(failed.instance.compacting, false);
+  assert.equal(failed.instance.activeCommandId, undefined);
+  assert.ok(failed.page.events.some(event => event.type === "command.rejected" && event.data.operationId === "failed-prepare"));
+  assert.equal(failed.page.events.some(event => (event.type === "command.accepted" || event.type === "message.submitted") && event.data.operationId === "failed-prepare"), false);
+  assert.equal((await client.prompt(created.id, "try again", "auto", "after-prepare-error")).receipt.delivery, "prompt");
+  runtime.settle("next message finished");
+  await harness.registry.get(created.id).waitForIdle();
+});
+
 test("stop preempts a manual compaction even before its start event is projected", async (context) => {
   const catalog = new ScriptedCatalogCommitPort();
   const stopIntentGate = catalog.gateAt(2);

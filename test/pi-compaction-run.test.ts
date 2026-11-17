@@ -1,23 +1,38 @@
 import assert from "node:assert/strict";
 import { existsSync, writeFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
 import { startNativeTeam, trustOnce } from "./support/native-team.js";
 import { waitFor } from "./support/plan-goal-provider.js";
 
-// 2026-11-17 regression: switching a large conversation to a smaller model made
-// the first message silently wait for SDK pre-prompt compaction, then time out.
-// Hold only the real summarization HTTP reply, never manufacture compaction events.
-test("the first message after switching to a smaller model shows compaction and starts once without a false timeout", { timeout: 60_000 }, async (context) => {
+async function smallerWindowWork(context: TestContext, holdPreparation = false) {
   const team = await startNativeTeam(context, ["preprompt"], {
     prefix: "alu-preprompt-compaction-", thinkingLevel: "off",
     settings: { compaction: { enabled: true, reserveTokens: 1_024, keepRecentTokens: 1 } },
   });
   const provider = team.providers.preprompt;
+  const preparationEntered = join(team.cwd, "preparation-entered");
+  const releasePreparation = join(team.cwd, "release-preparation");
+  if (holdPreparation) {
+    const extensions = join(team.agentDir, "extensions");
+    await mkdir(extensions);
+    await writeFile(join(extensions, "hold-preparation.ts"), `
+import { existsSync, writeFileSync } from "node:fs";
+export default function(pi) {
+  let starts = 0;
+  pi.on("before_agent_start", async () => {
+    if (++starts !== 2) return;
+    writeFileSync(${JSON.stringify(preparationEntered)}, "entered");
+    while (!existsSync(${JSON.stringify(releasePreparation)})) await new Promise(resolve => setTimeout(resolve, 10));
+  });
+}
+`);
+    team.onCleanup = () => writeFileSync(releasePreparation, "");
+  }
   const modelsPath = join(team.agentDir, "models.json");
   const models = JSON.parse(await readFile(modelsPath, "utf8"));
   const model = models.providers.preprompt.models[0];
@@ -36,7 +51,14 @@ test("the first message after switching to a smaller model shows compaction and 
   const switched = await client.setModel(work.id, "preprompt", "small", "switch-to-small-window");
   assert.equal(switched.instance.executor.model?.id, "small");
   assert.equal(provider.requests.length, 1, "Switching models does not itself send a model request");
+  return { team, provider, client, work, preparationEntered, releasePreparation };
+}
 
+// 2026-11-17 regression: switching a large conversation to a smaller model made
+// the first message silently wait for SDK pre-prompt compaction, then time out.
+// Hold only the real summarization HTTP reply, never manufacture compaction events.
+test("the first message after switching to a smaller model shows compaction and starts once without a false timeout", { timeout: 60_000 }, async (context) => {
+  const { team, provider, client, work } = await smallerWindowWork(context);
   const events: DockEvent[] = [];
   const began = Date.now();
   let compactionStartedAt: number | undefined;
@@ -83,6 +105,15 @@ test("the first message after switching to a smaller model shows compaction and 
     liveStarted, receipt: heldReceiptState, prematureRun,
   };
   context.diagnostic(JSON.stringify({ phase: "summary-held", heldMs: Date.now() - summaryEntered, ...held }));
+  const laterMessage = "QUEUED_DURING_PREPARATION";
+  const later = await client.prompt(work.id, laterMessage, "auto", "queued-during-preparation");
+  assert.equal(later.receipt.queued, true);
+  assert.equal(later.receipt.delivery, "steer");
+  const waiting = await client.read(work.id);
+  const queuedItem = waiting.pendingMessages.find((item) => item.operationId === "queued-during-preparation");
+  assert.equal(queuedItem?.text, laterMessage);
+  assert.equal((await client.setThinking(work.id, "off", "thinking-during-preprompt")).instance.compacting, true);
+  assert.equal(events.some((event) => event.type === "command.accepted" && event.data.operationId === operationId), false);
 
   // Collect the full old-implementation outcome before asserting visibility: its
   // timed-out message actually starts only now, despite the client's failure.
@@ -102,7 +133,14 @@ test("the first message after switching to a smaller model shows compaction and 
     request.text("## Goal\nContinue from the saved context.\n## Progress\nEarlier context has been read.");
   }
   const receipt = await submitted;
+  const queuedReply = await provider.request(nextRequest);
+  assert.equal(queuedReply.body.messages?.filter((item) => item.role === "user" && JSON.stringify(item.content).includes(laterMessage)).length, 1);
+  queuedReply.text("QUEUED_MESSAGE_FINISHED");
   await waitFor(async () => (await client.status(work.id)).execution === "idle" && events.some((event) => event.type === "run.settled"), "The original message did not finish after compaction");
+  const consumed = events.filter((event) => event.type === "message.submitted" && event.data.operationId === "queued-during-preparation");
+  assert.equal(consumed.length, 1);
+  assert.equal(consumed[0]?.type === "message.submitted" ? consumed[0].data.queueItemId : undefined, queuedItem?.queueItemId);
+  assert.equal((await client.read(work.id)).pendingMessages.length, 0);
   const history = (await client.history(work.id)).entries;
   const userMessages = history.filter((entry) => entry.source === "user" && entry.content.some((block) => block.type === "text" && block.text === message));
   const replies = history.filter((entry) => entry.source === "assistant" && entry.content.some((block) => block.type === "text" && block.text === "FIRST_AFTER_SWITCH_FINISHED"));
@@ -118,6 +156,76 @@ test("the first message after switching to a smaller model shows compaction and 
   }, "Every observer sees compaction while the original submission waits without a false failure");
   assert.equal(receipt?.receipt.operationId, operationId);
   assert.equal(receipt?.receipt.queued, false);
+});
+
+// Same incident: Escape must reach real SDK pre-prompt compaction, not wait for its input receipt.
+test("Escape stops the first message's automatic preparation without starting a model reply", { timeout: 20_000 }, async (context) => {
+  const { provider, client, work, preparationEntered, releasePreparation } = await smallerWindowWork(context, true);
+  const events: DockEvent[] = [];
+  const follow = await client.streamEvents(work.id, { onEvent: (event) => events.push(event) });
+  context.after(() => follow.close());
+  const message = "CANCEL_BEFORE_REPLY";
+  const submitted = client.prompt(work.id, message, "auto", "cancel-preprompt").catch((error: unknown) => error);
+  await provider.request(1);
+  await waitFor(async () => (await client.status(work.id)).compacting, "Pre-prompt compaction stayed hidden");
+  assert.equal(events.some((event) => event.type === "command.accepted"), false, "Compaction does not stand in for Pi's input receipt");
+  const queued = await client.prompt(work.id, "RETURN_THIS_WAITING_MESSAGE", "auto", "return-preprompt-queue");
+  assert.equal(queued.receipt.queued, true);
+  const began = Date.now();
+  const stopped = await client.abortRestoreQueue(work.id, "escape-preprompt");
+  assert.deepEqual(stopped.receipt.restored.map((item) => ({ operationId: item.operationId, text: item.text })), [
+    { operationId: "return-preprompt-queue", text: "RETURN_THIS_WAITING_MESSAGE" },
+  ]);
+  assert.equal(stopped.instance.pending.total, 0);
+  assert.equal(stopped.instance.execution, "running", "The cancelled but unfinished preparation remains visible");
+  assert.ok(Date.now() - began < 1_000, "Escape must not wait for the held summary transport");
+  await waitFor(() => existsSync(preparationEntered), "The cancelled run did not reach the held preparation extension");
+  assert.equal(events.some((event) => event.type === "command.accepted" && event.data.operationId === "cancel-preprompt"), false);
+  assert.equal((await client.abort(work.id, "abort-still-preparing")).instance.execution, "running");
+  await writeFile(releasePreparation, "");
+  const receipt = await submitted;
+  assert.ok(!(receipt instanceof Error));
+  context.diagnostic(JSON.stringify({ phase: "aborted-preprompt", elapsedMs: Date.now() - began, requests: provider.requests.length, restored: stopped.receipt.restored.length }));
+  await waitFor(async () => (await client.status(work.id)).execution === "idle", "Cancelled preparation left a false running status");
+  assert.equal((await client.status(work.id)).compacting, false);
+  assert.equal(provider.requests.length, 2, "Cancelling preparation does not send a model reply");
+  assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.aborted));
+  assert.equal(events.filter((event) => event.type === "message.submitted" && event.data.operationId === "cancel-preprompt").length, 1);
+  assert.ok(events.some((event) => event.type === "run.settled" && event.data.operationId === "cancel-preprompt" && event.data.result === "aborted"));
+});
+
+// The same first-message path must also leave a real failed run, not a stale running snapshot.
+test("a failed first reply after pre-prompt compaction stops once and remains failed", { timeout: 20_000 }, async (context) => {
+  const { provider, client, work } = await smallerWindowWork(context);
+  const events: DockEvent[] = [];
+  const follow = await client.streamEvents(work.id, { onEvent: (event) => events.push(event) });
+  context.after(() => follow.close());
+  const submitted = client.prompt(work.id, "FAIL_FIRST_AFTER_SWITCH", "auto", "failed-preprompt");
+  const summary = await provider.request(1);
+  await waitFor(async () => (await client.status(work.id)).compacting, "Pre-prompt compaction stayed hidden");
+  summary.fail(400, "Local summary failure");
+  // Pi natively continues the original prompt after an automatic summary error.
+  // Dock must expose that error, not silently retry the summary or replay the input.
+  const reply = await provider.request(2);
+  assert.ok(reply.toolNames.length > 0);
+  assert.equal((await submitted).receipt.operationId, "failed-preprompt");
+  reply.fail(400, "Local reply failure");
+  await waitFor(async () => provider.requests.length > 3 || (await client.status(work.id)).execution === "failed", "The failed reply neither settled nor entered native post-run compaction");
+  if (provider.requests.length > 3) {
+    const postRunSummary = await provider.request(3);
+    assert.equal(postRunSummary.toolNames.length, 0);
+    postRunSummary.fail(400, "Local post-run summary failure");
+  }
+  await waitFor(async () => (await client.status(work.id)).execution === "failed", "The failed reply left a running Work");
+  const snapshot = await client.status(work.id);
+  assert.equal(snapshot.compacting, false);
+  assert.equal(snapshot.activeCommandId, undefined);
+  assert.equal(snapshot.lastRun, "failed");
+  assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.error !== undefined));
+  assert.equal(events.filter((event) => event.type === "message.submitted" && event.data.operationId === "failed-preprompt").length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(provider.requests.filter((request) => request.toolNames.length > 0).length, 2, "Only the original large-window message and the first small-window message reach chat");
+  context.diagnostic(JSON.stringify({ phase: "summary-error-native-continuation-then-reply-error", requests: provider.requests.length, execution: snapshot.execution }));
 });
 
 // 2026-11-17 regression: an active Work showed idle after within-run compaction.

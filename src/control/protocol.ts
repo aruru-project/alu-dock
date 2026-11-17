@@ -2007,13 +2007,12 @@ export function parseReopenResult(input: unknown): ReopenResult {
 export function parseAbortResult(input: unknown): AbortResult {
   const value = object(input, "abort result"); exact(value, ["instance"]);
   const instance = parseInstanceSnapshot(value.instance, "instance");
-  if (instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
+  // Abort acknowledges the runtime's cancellation request. Uninterruptible
+  // preparation may still be finishing; its real snapshot remains running.
   return { instance };
 }
 export function parseAbortRestoreQueueResult(input: unknown): AbortRestoreQueueResult {
-  const result = parseQueueDequeueResult(input);
-  if (result.instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
-  return result;
+  return parseQueueDequeueResult(input);
 }
 /** Worker-produced receipt body; the Host only adds the instance snapshot. */
 export function parseBashRunReceipt(input: unknown, field = "receipt"): BashRunReceipt {

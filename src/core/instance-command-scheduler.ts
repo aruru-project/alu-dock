@@ -11,7 +11,7 @@ export type InstanceCommandRequest =
   | { class: "terminal" }
   | { class: "exclusive"; kind: ExclusiveCommandKind; admission: ExclusiveAdmission }
   | { class: "model-settings" }
-  | { class: "input" }
+  | { class: "input"; deferToHost?: boolean }
   | { class: "interrupt"; kind?: InterruptCommandKind }
   | { class: "control"; kind: ControlCommandKind };
 
@@ -21,6 +21,7 @@ export interface InstanceCommandFacts {
   runtimeGeneration: number;
   executionRunning: boolean;
   runtimeStreaming: boolean;
+  runtimePreparing: boolean;
   compactionActive: boolean;
   pendingQueueMessages: number;
   inFlightQueueMessages: number;
@@ -137,7 +138,7 @@ export class InstanceCommandScheduler {
     const modelSettings = this.find("model-settings");
 
     if (request.class === "model-settings") {
-      if (modelSettings || input || interrupt || queue
+      if (modelSettings || (input && !facts.compactionActive) || interrupt || queue
         || (exclusive?.request.class === "exclusive" && exclusive.request.kind !== "compaction")) {
         return { kind: "reject", reason: "busy" };
       }
@@ -162,12 +163,16 @@ export class InstanceCommandScheduler {
     if (request.class === "control") {
       if (request.kind === "immediate") return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
       if (exclusive || modelSettings || interrupt || queue) return { kind: "reject", reason: "busy" };
-      if (input) return { kind: "reject", reason: "input_admission" };
+      if (input && !facts.compactionActive) return { kind: "reject", reason: "input_admission" };
       return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
     }
 
     if (request.class === "input") {
-      if (input || modelSettings || interrupt || queue) return { kind: "reject", reason: input ? "input_admission" : "busy" };
+      // One short Host-custody decision may run beside the original submission
+      // waiting for compaction. It must not replace that input's pending receipt.
+      const canDefer = request.deferToHost === true && facts.compactionActive
+        && ![...this.active.values()].some((command) => command.request.class === "input" && command.request.deferToHost === true);
+      if ((input && !canDefer) || modelSettings || interrupt || queue) return { kind: "reject", reason: input ? "input_admission" : "busy" };
       if (exclusive?.request.class === "exclusive" && exclusive.request.kind !== "compaction") {
         return { kind: "reject", reason: "busy" };
       }
@@ -188,7 +193,9 @@ export class InstanceCommandScheduler {
     if (modelSettings && !facts.compactionActive) {
       return { kind: "wait", lease: this.activate(request, facts.runtimeGeneration), forCompletion: modelSettings.completion };
     }
-    if (input) return { kind: "reject", reason: "input_admission" };
+    // A real runtime preparation/compaction is already cancellable even when
+    // input delivery has not been reported. Do not make Escape wait for it.
+    if (input && !facts.runtimePreparing && !facts.compactionActive) return { kind: "reject", reason: "input_admission" };
     return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
   }
 

@@ -390,6 +390,8 @@ export class ManagedInstance {
   private receiptBoundaryOperationId: string | undefined;
   private sessionNameOperationId: string | undefined;
   private readonly receiptBoundaryTasks: Promise<void>[] = [];
+  /** Input delivery can finish during an interrupt; neither receipt may close the other's boundary. */
+  private readonly inputReceiptBoundaries = new Set<Promise<void>[]>();
   private replacementIntent: CatalogInstanceRecord["replacement"];
   private durableSessionFileValue: string | undefined;
   private recoverySessionFile: string | undefined;
@@ -505,6 +507,7 @@ export class ManagedInstance {
       runtimeGeneration: this.runtimeGenerationValue,
       executionRunning: this.state.execution === "running",
       runtimeStreaming: this.agentState().isStreaming,
+      runtimePreparing: this.agentState().isPreparing === true,
       compactionActive: this.compactionActive,
       pendingQueueMessages: this.pendingQueueMessages.length,
       inFlightQueueMessages: this.inFlightQueueMessages.length,
@@ -1370,7 +1373,7 @@ export class ManagedInstance {
     attachments?: readonly AttachmentDto[],
   ): Promise<CommandReceipt> {
     const inputLease = this.requireCommandStart(
-      this.commandScheduler.admit({ class: "input" }),
+      this.commandScheduler.admit({ class: "input", deferToHost: this.runtimeCompactionInProgress() }),
       "submitting input",
     );
     let inputImages: ImagePathDto[];
@@ -1400,7 +1403,13 @@ export class ManagedInstance {
     const agentSettlesBeforeCommand = this.agentSettledCount;
     const parentRunning = this.state.execution === "running" || this.agentState().isStreaming;
 
-    this.catalogAdmissionOperationId = commandId;
+    // A later message may take short Host custody while the original submission
+    // waits for Pi. It has its own lease and receipt, not the original's event barrier.
+    const ownsAdmission = this.catalogAdmissionOperationId === undefined;
+    const clearAdmission = (): void => {
+      if (this.catalogAdmissionOperationId === commandId) this.catalogAdmissionOperationId = undefined;
+    };
+    if (ownsAdmission) this.catalogAdmissionOperationId = commandId;
     try {
       const admissionCommit = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.admission", effect: "pre_effect", operationId: commandId, instanceId: this.id },
@@ -1408,7 +1417,7 @@ export class ManagedInstance {
       ));
       if (this.catalogPort) await admissionCommit;
     } catch (error) {
-      this.catalogAdmissionOperationId = undefined;
+      clearAdmission();
       inputLease.release();
       throw error;
     }
@@ -1422,18 +1431,30 @@ export class ManagedInstance {
       rejectReceipt = reject;
     });
 
-    const release = (): void => inputLease.release();
+    const release = (): void => {
+      inputLease.release();
+      if (preflightStatus === "accepted") this.scheduleCompactionQueueDrain(false);
+    };
 
     let preflightTransition: Promise<void> | undefined;
     const rejectBeforeRun = async (error: unknown, reason: string): Promise<void> => {
       if (preflightStatus === "accepted" || (preflightStatus === "rejected" && receiptSettled)) return;
       preflightStatus = "rejected";
       const messageText = safeWireText(errorMessage(error), 2_048);
+      const rejectedState = this.agentState();
+      const runtimeBusyAtRejection = rejectedState.isStreaming || rejectedState.isCompacting;
       try {
         const transition = this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.rejected", effect: "post_effect", operationId: commandId, instanceId: this.id },
           () => {
-            this.catalogAdmissionOperationId = undefined;
+            clearAdmission();
+            // Preparation can publish compaction before there is an accepted run.
+            // If it then rejects without agent_settled, retire only that progress;
+            // a different accepted run (or still-busy runtime) keeps its state.
+            if (ownsAdmission && !runtimeBusyAtRejection && this.state.lifecycle === "active"
+              && this.state.execution === "running" && !this.state.compacting && this.state.activeCommandId === undefined) {
+              this.state.execution = this.state.lastRun === "failed" ? "failed" : "idle";
+            }
             this.state.lastError = messageText;
             this.touch();
           },
@@ -1442,7 +1463,7 @@ export class ManagedInstance {
             this.appendStateEvent("command_rejected");
           },
         ));
-        this.catalogAdmissionOperationId = undefined;
+        clearAdmission();
         const bufferedEvents = this.flushAdmissionAgentEvents();
         await Promise.all([transition, bufferedEvents]);
       } catch (commitError) {
@@ -1492,7 +1513,7 @@ export class ManagedInstance {
             resolveReceipt(receipt);
           }
         }, async (error: unknown) => {
-          this.catalogAdmissionOperationId = undefined;
+          clearAdmission();
           await this.flushAdmissionAgentEvents().catch(() => {});
           if (!receiptSettled) {
             receiptSettled = true;
@@ -1512,7 +1533,7 @@ export class ManagedInstance {
         let receiptQueued = actualDelivery !== "prompt";
         let receiptDelivery = actualDelivery;
         const handledAt = this.timestamp();
-        this.catalogAdmissionOperationId = undefined;
+        clearAdmission();
         const precedingAgentEvents = this.flushAdmissionAgentEvents();
         const handledTransition = this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
@@ -1553,15 +1574,8 @@ export class ManagedInstance {
         });
         return;
       }
-      let precedingAgentEvents = Promise.resolve();
-      if (!actuallyQueued) {
-        // Events buffered while asynchronous input hooks were running belong
-        // to the run that just settled. Commit them before assigning the fresh
-        // prompt's operation ID so the old settlement cannot clear the new run.
-        this.catalogAdmissionOperationId = undefined;
-        precedingAgentEvents = this.flushAdmissionAgentEvents();
-      }
-
+      // Independent old-run events have already kept their producer position.
+      // The remaining suffix needs this input's receipt/Queue identity first.
       const acceptedAt = this.timestamp();
       const pendingMessage: PendingQueueMessage | undefined = actuallyQueued
         ? {
@@ -1587,7 +1601,7 @@ export class ManagedInstance {
       const acceptedTransition = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
         () => {
-          this.catalogAdmissionOperationId = undefined;
+          clearAdmission();
           this.state.lastError = undefined;
           if (actualInputKind === "prompt" && !actuallyQueued) {
             this.state.execution = "running";
@@ -1606,17 +1620,17 @@ export class ManagedInstance {
           this.appendStateEvent(actualInputKind === "extension_command" ? "extension_command_accepted" : "command_accepted", acceptedAt);
         },
       ));
-      preflightTransition = Promise.all([precedingAgentEvents, acceptedTransition]).then(() => {});
-      this.catalogAdmissionOperationId = undefined;
-      this.receiptBoundaryOperationId = commandId;
+      preflightTransition = acceptedTransition;
+      clearAdmission();
+      const receiptTasks: Promise<void>[] = [];
+      this.inputReceiptBoundaries.add(receiptTasks);
       const bufferedEvents = this.flushAdmissionAgentEvents();
       preflightTransition = Promise.all([preflightTransition, bufferedEvents]).then(async () => {
         // Pi may emit queue/agent_start synchronously immediately after the
         // callback returns. Include those ordered transitions in the receipt boundary.
         await Promise.resolve();
-        const followupTasks = this.receiptBoundaryTasks.splice(0);
-        this.receiptBoundaryOperationId = undefined;
-        try { await Promise.all(followupTasks); }
+        this.inputReceiptBoundaries.delete(receiptTasks);
+        try { await Promise.all(receiptTasks); }
         catch (error) {
           if (!receiptSettled) {
             receiptSettled = true;
@@ -1639,8 +1653,7 @@ export class ManagedInstance {
         }
         release();
       }, (error: unknown) => {
-        this.receiptBoundaryOperationId = undefined;
-        this.receiptBoundaryTasks.length = 0;
+        this.inputReceiptBoundaries.delete(receiptTasks);
         if (!receiptSettled) {
           receiptSettled = true;
           rejectReceipt(error);
@@ -1739,7 +1752,7 @@ export class ManagedInstance {
           error = new QueueCapacityError();
         }
         if (error instanceof AgentMutationEffectUnknownError) {
-          this.catalogAdmissionOperationId = undefined;
+          clearAdmission();
           await this.flushAdmissionAgentEvents().catch(() => {});
           if (!receiptSettled) { receiptSettled = true; rejectReceipt(new RuntimeEffectUnknownError(commandId, error)); }
           release();
@@ -1845,7 +1858,7 @@ export class ManagedInstance {
       { kind: "command.accepted", effect: "pre_effect", operationId, instanceId: this.id },
       () => {
         this.assertActive();
-        this.catalogAdmissionOperationId = undefined;
+        if (this.catalogAdmissionOperationId === operationId) this.catalogAdmissionOperationId = undefined;
         this.state.lastError = undefined;
         if (pendingMessage.delivery === "steer") this.state.pendingSteering += 1;
         else this.state.pendingFollowUp += 1;
@@ -1870,7 +1883,7 @@ export class ManagedInstance {
         this.appendStateEvent(reason, acceptedAt);
       },
     ));
-    this.catalogAdmissionOperationId = undefined;
+    if (this.catalogAdmissionOperationId === operationId) this.catalogAdmissionOperationId = undefined;
     await this.flushAdmissionAgentEvents();
     if (!this.runtimeCompactionInProgress() && !this.manualCompactionAdmissionActive()) {
       this.scheduleCompactionQueueDrain(false);
@@ -1892,6 +1905,7 @@ export class ManagedInstance {
       // The Agent hands back control with agent_settled; its transition resumes this drain.
       || this.hostQueueAwaitsSettleGeneration === this.runtimeGenerationValue
       || this.runtimeCompactionInProgress()
+      || this.commandScheduler.activeCommand("input") !== undefined
       || this.manualCompactionAdmissionActive()
       || this.commandScheduler.activeCommand("control", "queue") !== undefined
       || this.commandScheduler.activeCommand("interrupt", "restore_queue") !== undefined
@@ -3038,7 +3052,18 @@ export class ManagedInstance {
       event,
       ...(event.type === "compaction_end" ? { streamingAtCompactionEnd: this.agentState().isStreaming } : {}),
     };
-    if (this.catalogAdmissionOperationId !== undefined) {
+    // Only facts that need the pending input's receipt/Queue identity wait for
+    // admission. Once one waits, keep its entire suffix in producer order.
+    const pendingInput = this.catalogAdmissionOperationId;
+    const frame = event.type === "dock_conversation_frame" ? event.frame as ConversationFrame : undefined;
+    // queue_update is a runtime count/text snapshot: its hashes can be linked
+    // when preflight arrives. Only consumption and the input's run/message need
+    // the receipt first; an old run's queue changes must not hide compaction.
+    const needsInputIdentity = pendingInput !== undefined && (
+      ((event.type === "agent_start" || event.type === "agent_settled" || event.type === "dock_queue_consumed") && event.operationId === pendingInput)
+      || (frame?.type === "message.submitted" && frame.data.operationId === pendingInput)
+    );
+    if (pendingInput !== undefined && (this.admissionBufferedEvents.length > 0 || needsInputIdentity)) {
       if (this.admissionBufferedEvents.length >= 1_000) {
         this.admissionBufferedEvents.shift();
         this.admissionBufferOverflow = true;
@@ -3063,6 +3088,7 @@ export class ManagedInstance {
     if (event.type === "conversation_checkpoint" || refreshesHistory(event)) this.trackHistoryRefresh(task);
     void task.catch(() => {});
     if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
+    for (const boundary of this.inputReceiptBoundaries) boundary.push(task);
   }
 
   private enqueueCatalogAgentEvent(received: AgentEventReceipt): Promise<void> {
@@ -3089,6 +3115,7 @@ export class ManagedInstance {
   }
 
   private flushAdmissionAgentEvents(): Promise<void> {
+    if (this.catalogAdmissionOperationId !== undefined) return Promise.resolve();
     const events = this.admissionBufferedEvents.splice(0);
     const overflow = this.admissionBufferOverflow;
     this.admissionBufferOverflow = false;
@@ -3558,8 +3585,12 @@ export class ManagedInstance {
 
   private resolveAgentEventOperationId(event: AgentEvent): string | undefined {
     const carriedOperationId = optionalRuntimeString(event.operationId, 128);
+    // Compaction is independently observable, including before Pi reports input
+    // delivery. An unrelated pending submission/interrupt is not its cause.
+    if (event.type === "compaction_start" || event.type === "compaction_end") {
+      return carriedOperationId ?? this.compactionOperationId ?? this.compactionRequestOperationId ?? this.state.activeCommandId;
+    }
     return carriedOperationId
-      ?? this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
       ?? this.compactionOperationId
       ?? this.compactionRequestOperationId
