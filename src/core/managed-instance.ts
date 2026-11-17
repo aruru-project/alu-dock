@@ -1433,7 +1433,9 @@ export class ManagedInstance {
 
     const release = (): void => {
       inputLease.release();
-      if (preflightStatus === "accepted") this.scheduleCompactionQueueDrain(false);
+      // A definite rejection also releases preparation. Unlike a run, it may
+      // have no agent_settled event to resume messages already held by the Host.
+      if (preflightStatus !== "pending") this.scheduleCompactionQueueDrain(false);
     };
 
     let preflightTransition: Promise<void> | undefined;
@@ -2184,6 +2186,9 @@ export class ManagedInstance {
       kind: "queue",
     }), "restoring queued messages");
     try {
+      // The control lease blocks later inputs. Include a Host hand-off already
+      // underway before taking the Queue snapshot, without waiting for summary.
+      await this.commandScheduler.hostInputAdmissionCompletion();
       await this.transitionTail;
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
@@ -2296,6 +2301,7 @@ export class ManagedInstance {
     let resumeHostQueue = restoreQueue;
     try {
       if (decision.kind === "wait") await decision.forCompletion;
+      if (restoreQueue) await this.commandScheduler.hostInputAdmissionCompletion();
       await this.transitionTail;
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();

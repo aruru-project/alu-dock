@@ -25,6 +25,7 @@ import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 import { ptyUserEnvironment } from "./support/pty-user-environment.js";
+import { waitFor } from "./support/plan-goal-provider.js";
 
 interface Harness {
   directory: string;
@@ -2365,33 +2366,115 @@ test("an older run's compaction and finish stay visible while the next message i
 // This Worker-boundary peer supplies that sequence; real SDK summary HTTP errors
 // are tested separately because Pi normally catches them and continues the prompt.
 test("a message rejected after preparation leaves the Work available for the next message", { timeout: 20_000 }, async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "failed-preparation");
-  const runtime = harness.sessions.get(created.id)!;
-  const normalPrompt = runtime.prompt.bind(runtime);
-  runtime.prompt = async (text, options, operationId) => {
-    if (text !== "prepare then fail") return normalPrompt(text, options, operationId);
-    runtime.isStreaming = true;
+  for (const withWaitingMessage of [false, true]) {
+    const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+    let releasePreparation!: () => void, preparationEntered!: () => void;
+    const gate = new Promise<void>(resolve => { releasePreparation = resolve; });
+    const entered = new Promise<void>(resolve => { preparationEntered = resolve; });
+    context.after(async () => { releasePreparation(); await cleanupHarness(harness); });
+    const client = new DockClient({ socketPath: harness.socketPath });
+    const created = await client.create(harness.directory, "failed-preparation");
+    const runtime = harness.sessions.get(created.id)!;
+    const normalPrompt = runtime.prompt.bind(runtime);
+    runtime.prompt = async (text, options, operationId) => {
+      if (text !== "prepare then fail") return normalPrompt(text, options, operationId);
+      runtime.isStreaming = true;
+      runtime.isCompacting = true;
+      runtime.emit({ type: "compaction_start", reason: "threshold" });
+      preparationEntered();
+      await gate;
+      runtime.isCompacting = false;
+      runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
+      runtime.isStreaming = false;
+      options?.preflightResult?.(false);
+      throw new Error("Fixture preparation failed");
+    };
+    const rejected = assert.rejects(client.prompt(created.id, "prepare then fail", "auto", "failed-prepare"));
+    await entered;
+    let queueItemId: string | undefined;
+    if (withWaitingMessage) {
+      assert.equal((await client.prompt(created.id, "try again", "auto", "after-prepare-error")).receipt.queued, true);
+      queueItemId = (await client.read(created.id)).pendingMessages.find(item => item.operationId === "after-prepare-error")?.queueItemId;
+      assert.ok(queueItemId);
+    }
+    releasePreparation();
+    await rejected;
+    if (withWaitingMessage) {
+      await waitFor(async () => (await client.status(created.id)).activeCommandId === "after-prepare-error", "The accepted waiting message did not resume after preparation failed");
+    }
+    const failed = await client.read(created.id, undefined, "event_log");
+    assert.equal(failed.instance.compacting, false);
+    assert.ok(failed.page.events.some(event => event.type === "command.rejected" && event.data.operationId === "failed-prepare"));
+    assert.equal(failed.page.events.some(event => (event.type === "command.accepted" || event.type === "message.submitted") && event.data.operationId === "failed-prepare"), false);
+    if (withWaitingMessage) {
+      const consumed = failed.page.events.filter(event => event.type === "message.submitted" && event.data.operationId === "after-prepare-error");
+      assert.equal(consumed.length, 1);
+      assert.equal(consumed[0]?.type === "message.submitted" ? consumed[0].data.queueItemId : undefined, queueItemId);
+      assert.equal(failed.pendingMessages.length, 0);
+    } else {
+      assert.equal(failed.instance.execution, "idle");
+      assert.equal(failed.instance.activeCommandId, undefined);
+      assert.equal((await client.prompt(created.id, "try again", "auto", "after-prepare-error")).receipt.delivery, "prompt");
+    }
+    runtime.settle("next message finished");
+    await harness.registry.get(created.id).waitForIdle();
+  }
+});
+
+test("taking the Queue back includes a message whose Host hand-off was already underway", { timeout: 20_000 }, async (context) => {
+  for (const abort of [true, false]) {
+    const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+    let releaseInput!: () => void, inputEntered!: () => void, releaseAbort!: () => void;
+    const inputGate = new Promise<void>(resolve => { releaseInput = resolve; });
+    const entered = new Promise<void>(resolve => { inputEntered = resolve; });
+    const abortGate = new Promise<void>(resolve => { releaseAbort = resolve; });
+    context.after(async () => { releaseInput(); releaseAbort(); await cleanupHarness(harness); });
+    const client = new DockClient({ socketPath: harness.socketPath });
+    const created = await client.create(harness.directory, "queue-handoff-before-stop");
+    const runtime = harness.sessions.get(created.id)!;
+    const oldRun = runtime.prompt("original run");
     runtime.isCompacting = true;
     runtime.emit({ type: "compaction_start", reason: "threshold" });
-    runtime.isCompacting = false;
-    runtime.emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false });
-    runtime.isStreaming = false;
-    options?.preflightResult?.(false);
-    throw new Error("Fixture preparation failed");
-  };
-  await assert.rejects(client.prompt(created.id, "prepare then fail", "auto", "failed-prepare"));
-  const failed = await client.read(created.id, undefined, "event_log");
-  assert.equal(failed.instance.execution, "idle");
-  assert.equal(failed.instance.compacting, false);
-  assert.equal(failed.instance.activeCommandId, undefined);
-  assert.ok(failed.page.events.some(event => event.type === "command.rejected" && event.data.operationId === "failed-prepare"));
-  assert.equal(failed.page.events.some(event => (event.type === "command.accepted" || event.type === "message.submitted") && event.data.operationId === "failed-prepare"), false);
-  assert.equal((await client.prompt(created.id, "try again", "auto", "after-prepare-error")).receipt.delivery, "prompt");
-  runtime.settle("next message finished");
-  await harness.registry.get(created.id).waitForIdle();
+    const invoke = runtime.invoke.bind(runtime);
+    runtime.invoke = async (request, options) => {
+      if (request.type === "command.submit" && options?.context?.type === "defer_to_host") {
+        inputEntered(); await inputGate;
+      }
+      const result = await invoke(request, options);
+      if (request.type === "command.abort_restore_queue") {
+        runtime.settle("original run cancelled", "aborted");
+        await abortGate;
+      }
+      return result;
+    };
+    const queued = client.prompt(created.id, "waiting message", "auto", "waiting-before-restore");
+    void queued.catch(() => {});
+    await entered;
+    const managed = harness.registry.get(created.id);
+    // Invoke the public Host instance control directly to fix dispatch order;
+    // only the Worker transport round trips are held by the peer above.
+    const taking = abort ? managed.abortRestoreQueue("take-back") : managed.dequeue("take-back");
+    void taking.catch(() => {});
+    await new Promise<void>(resolve => setImmediate(resolve));
+    releaseInput();
+    assert.equal((await queued).receipt.queued, true);
+    releaseAbort();
+    const result = await taking;
+    assert.deepEqual(result.restored.map(item => ({ operationId: item.operationId, text: item.text })), [
+      { operationId: "waiting-before-restore", text: "waiting message" },
+    ]);
+    const after = await client.read(created.id);
+    assert.equal(after.pendingMessages.length, 0);
+    assert.equal(after.instance.pending.total, 0);
+    if (runtime.isCompacting) {
+      runtime.isCompacting = false;
+      runtime.emit({ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false });
+    }
+    runtime.settle("original run cancelled", "aborted");
+    await oldRun;
+    await managed.waitForIdle();
+    assert.equal(runtime.promptMessages.filter(text => text === "waiting message").length, 0);
+  }
 });
 
 test("stop preempts a manual compaction even before its start event is projected", async (context) => {

@@ -214,6 +214,11 @@ export class InstanceCommandScheduler {
     return { kind: "reserve", reservation: this.reserveProjection() };
   }
 
+  /** Only the short Host-custody decision, never the original runtime preparation. */
+  hostInputAdmissionCompletion(): Promise<void> | undefined {
+    return [...this.active.values()].find(command => command.request.class === "input" && command.request.deferToHost === true)?.completion;
+  }
+
   activeCommand(commandClass: InstanceCommandRequest["class"], kind?: CommandKind): ActiveCommandView | undefined {
     const command = this.find(commandClass, kind);
     return command ? this.view(command) : undefined;
