@@ -189,10 +189,13 @@ test("a child Work that stops without giving its parent the result is reported t
   asked.tools({ id: "files-done", name: "dock_send", arguments: { message: "FILES: sum.js", done: true } });
   const more = await reviewer.request(2);
   assert.equal(sent(more, "[来自父 Work「Coordinator」]\\nPARENT_MORE").length, 1, "The second message reaches the reviewer after its final result");
+  // Let the parent consume the first result before the child finishes the
+  // second question. Its context already contains the earlier stop notice.
+  parentWaits.text("Waiting for the files.");
+  await coordinator.request(5);
   more.text("The tests look fine.");
   await waitFor(async () => (await client.status(child.id)).execution === "idle", "The reviewer did not settle");
-  parentWaits.text("Waiting for the files.");
-  const secondNotice = await coordinatorSees(5, "[子 Work「Reviewer」异常停止]");
+  const secondNotice = await coordinatorSees(5, "> The tests look fine.");
   assert.ok(coordinator.requests.some((request) => sent(request, "[来自子 Work「Reviewer」· 已完成]\\nFILES").length === 1), "The final result for the first question arrives as such");
   assert.ok(JSON.stringify(secondNotice.body.messages).includes("> The tests look fine."), "The notice quotes what the reviewer said on the second message");
   secondNotice.text("I will look at the tests myself.");
