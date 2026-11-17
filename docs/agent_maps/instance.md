@@ -48,7 +48,7 @@ Main 与 SubHost 的临时断线不会自动改变存活 RemoteInstance 的 iden
 
 Stop 永久退役 Main-authoritative Instance identity；离线时以 Main 身份退役完成，不等待远端物理进程确认：
 
-- SubHost 在线时，RemoteInstance 把 Stop 转发给 owner LocalInstance；owner 正常关闭 Worker，Main 随后退役该 Instance。
+- SubHost 在线时，由 owner 执行 Stop。父 Work 可能先从清单消失，子 Work 清理完才返回成功。Main 按这次请求绑定的机器和原生身份、以及成功回执中的运行代数持久记录退役；不要求目录项仍在。回执仍发给原调用者，更新一代的 Work 不受影响。
 - SubHost 离线时，Main 无法控制物理 Worker。RemoteInstance 直接永久退役 Main Instance identity 并结束控制关系，不建立 pending Stop，也不自动重试。
 - 已退役 identity 不能因旧 inventory 或重连恢复。若相同 native Worker 以后再次申报，它只能成为新的 Main Instance，而不是复活旧 identity。
 
@@ -179,6 +179,8 @@ scheduler reserve operation
 ```
 
 Scheduler 不根据较早的 `isStreaming` 自行决定 prompt/steer/followUp，也不读取 Pi 私有 Queue 或 extension command 文本规则。普通 prompt 的 preflight 在 Pi input hook 决定实际 delivery 时产生；registered extension command 在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前产生；compaction 期间不能交给 Pi 的普通 input 则明确报告 Host custody。这个 preflight 是 Worker→Host 的事实通知，不为每条输入增加一次批准往返。
+
+发送前的自动压缩可以早于首条消息的 preflight。Host 立即公开压缩状态；需要输入或 Queue 身份的事件按原顺序等实际接纳。压缩期间后续普通消息可由 Host Queue 保管。取回 Queue（含中止并取回）会纳入已经开始交给 Host 的那条消息，等待这次交接完成，不等待首条消息的摘要。如果首条准备失败而没有 `agent_settled`，Host 撤下已结束的准备状态，并继续交付已接纳的排队消息。
 
 Worker 接受副作用前失联与接受后失联仍是不同结果。Scheduler 不能自动重放 effect-unknown mutation。
 
