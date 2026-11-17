@@ -1667,6 +1667,9 @@ export class ManagedInstance {
     const shouldDeferToHost = deferToHost
       || this.runtimeCompactionInProgress()
       || this.hostQueueCustodyActive();
+    // The choice can change while the admission is saved. Controls must see
+    // the context actually sent to the Worker, not just the earlier snapshot.
+    if (shouldDeferToHost) inputLease.markHostInputAdmission();
     let runtimePromise: Promise<void>;
     try {
       runtimePromise = this.invokeAgent<void>("command.submit", {
@@ -2186,8 +2189,9 @@ export class ManagedInstance {
       kind: "queue",
     }), "restoring queued messages");
     try {
-      // The control lease blocks later inputs. Include a Host hand-off already
-      // underway before taking the Queue snapshot, without waiting for summary.
+      // Finish earlier admission writes so their actual delivery context is
+      // known, then include only the short Host hand-off, never SDK preparation.
+      await this.transitionTail;
       await this.commandScheduler.hostInputAdmissionCompletion();
       await this.transitionTail;
       this.assertCommandCurrent(lease);
@@ -2301,8 +2305,11 @@ export class ManagedInstance {
     let resumeHostQueue = restoreQueue;
     try {
       if (decision.kind === "wait") await decision.forCompletion;
-      if (restoreQueue) await this.commandScheduler.hostInputAdmissionCompletion();
       await this.transitionTail;
+      if (restoreQueue) {
+        await this.commandScheduler.hostInputAdmissionCompletion();
+        await this.transitionTail;
+      }
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
       this.assertActive();

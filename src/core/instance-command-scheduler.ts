@@ -60,6 +60,11 @@ export class InstanceCommandLease {
     return "kind" in this.command.request ? this.command.request.kind : undefined;
   }
 
+  markHostInputAdmission(): void {
+    if (this.released || !this.scheduler.current(this.command) || this.command.request.class !== "input") return;
+    this.command.request.deferToHost = true;
+  }
+
   markEffectStarted(): void {
     if (this.released || this.started || !this.scheduler.current(this.command)) return;
     this.started = true;

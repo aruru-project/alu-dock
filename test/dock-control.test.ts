@@ -2423,18 +2423,26 @@ test("a message rejected after preparation leaves the Work available for the nex
 
 test("taking the Queue back includes a message whose Host hand-off was already underway", { timeout: 20_000 }, async (context) => {
   for (const abort of [true, false]) {
-    const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+    const catalog = new ScriptedCatalogCommitPort();
+    const harness = await createTransactionHarness(catalog);
     let releaseInput!: () => void, inputEntered!: () => void, releaseAbort!: () => void;
+    let releaseAdmission = (): void => {};
     const inputGate = new Promise<void>(resolve => { releaseInput = resolve; });
     const entered = new Promise<void>(resolve => { inputEntered = resolve; });
     const abortGate = new Promise<void>(resolve => { releaseAbort = resolve; });
-    context.after(async () => { releaseInput(); releaseAbort(); await cleanupHarness(harness); });
+    context.after(async () => { releaseAdmission(); releaseInput(); releaseAbort(); await cleanupHarness(harness); });
     const client = new DockClient({ socketPath: harness.socketPath });
     const created = await client.create(harness.directory, "queue-handoff-before-stop");
     const runtime = harness.sessions.get(created.id)!;
     const oldRun = runtime.prompt("original run");
-    runtime.isCompacting = true;
-    runtime.emit({ type: "compaction_start", reason: "threshold" });
+    await client.read(created.id);
+    // On Abort, compaction starts only after this input acquired its lease.
+    const admission = abort ? catalog.gateAt(catalog.calls.length + 1) : undefined;
+    if (admission) releaseAdmission = admission.release;
+    else {
+      runtime.isCompacting = true;
+      runtime.emit({ type: "compaction_start", reason: "threshold" });
+    }
     const invoke = runtime.invoke.bind(runtime);
     runtime.invoke = async (request, options) => {
       if (request.type === "command.submit" && options?.context?.type === "defer_to_host") {
@@ -2449,7 +2457,14 @@ test("taking the Queue back includes a message whose Host hand-off was already u
     };
     const queued = client.prompt(created.id, "waiting message", "auto", "waiting-before-restore");
     void queued.catch(() => {});
+    if (admission) {
+      await admission.entered;
+      runtime.isCompacting = true;
+      runtime.emit({ type: "compaction_start", reason: "threshold" });
+      releaseAdmission();
+    }
     await entered;
+    await client.read(created.id);
     const managed = harness.registry.get(created.id);
     // Invoke the public Host instance control directly to fix dispatch order;
     // only the Worker transport round trips are held by the peer above.
